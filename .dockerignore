@@ -1,0 +1,96 @@
+# Docker build context exclusions for the PowerFramework .NET 10 decomposition.
+#
+# The per-service Dockerfiles are multi-stage (mcr.microsoft.com/dotnet/sdk:10.0 ->
+# mcr.microsoft.com/dotnet/aspnet:10.0). Nothing in the read-only PowerBuilder legacy tree is
+# needed to build or run a .NET service, and it is large (hundreds of MB of compiled libraries and
+# native DLLs), so it is excluded from every build context.
+
+# ---------------------------------------------------------------------------
+# Read-only PowerBuilder legacy tree (behavioural oracle - never built, never shipped)
+# ---------------------------------------------------------------------------
+ws_objects/
+oldversion/
+pack/
+packuse/
+samples/
+sciter_control/
+res/
+res.pbr
+tests/blink/
+tests/sciter/
+tests/webview/
+*.pbl
+*.pbt
+*.pbw
+*.pbg
+*.pbr
+*.pbd
+*.dll
+*.sra
+*.srw
+*.sru
+*.srf
+*.srs
+*.srd
+*.srm
+*.srj
+logfile.md
+pfw.i18n.xml
+
+# ---------------------------------------------------------------------------
+# .NET build output and local tooling state
+# ---------------------------------------------------------------------------
+**/bin/
+**/obj/
+**/out/
+**/TestResults/
+**/coverage*.xml
+**/*.user
+**/*.suo
+**/.vs/
+**/.vscode/
+**/.idea/
+artifacts/
+
+# ---------------------------------------------------------------------------
+# Node / Playwright end-to-end suite (not part of any service image)
+# ---------------------------------------------------------------------------
+**/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/blob-report/
+tests/e2e/.cache/
+
+# ---------------------------------------------------------------------------
+# Characterization recordings (paired oracle captures - data, not build input)
+# ---------------------------------------------------------------------------
+characterization/recordings/
+
+# ---------------------------------------------------------------------------
+# VCS, CI and agent scratch
+# ---------------------------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.github/
+blitzy/
+
+# ---------------------------------------------------------------------------
+# Secrets must never enter a build context. Only .env.example is tracked.
+# ---------------------------------------------------------------------------
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.pfx
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+**/*.log
+**/*.bak
+**/*.dmp
+**/Dockerfile*
+**/docker-compose*.yml
+**/.dockerignore

@@ -1,0 +1,52 @@
+<Project>
+
+  <!--
+    Repository-wide MSBuild defaults for the PowerFramework .NET 10 decomposition.
+
+    Inherited by every project under shared/** and services/** (application and test projects
+    alike). Authored during environment setup so that a clean checkout restores, builds and tests
+    reproducibly with the toolchain installed on this machine:
+
+        .NET SDK   10.0.302  (pinned in global.json, rollForward=latestFeature)
+        Runtimes   Microsoft.NETCore.App 10.0.10 / Microsoft.AspNetCore.App 10.0.10
+
+    The settings below are mandatory quality gates - do not relax them per project:
+      * Nullable reference types enabled everywhere.
+      * Warnings are errors everywhere, test projects included.
+      * Package versions are managed centrally in Directory.Packages.props, so every
+        PackageReference in every project must be VERSIONLESS.
+
+    Deliberately NOT set here:
+      * InvariantGlobalization - the migration ports a localization surface (en / zh-Hans /
+        zh-Hant) plus culture-sensitive date and number formatting parity, so ICU must stay live.
+      * Analyzer/naming suppressions - legacy SCREAMING_SNAKE constant identifiers are preserved
+        verbatim, and their suppressions belong in .editorconfig scoped to the files that carry
+        them, not globally.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!-- Central Package Management: the two mandatory security pins live in exactly one place so
+       that no service can drift onto a vulnerable transitive version. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <!-- Deterministic, reproducible output. -->
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <Product>PowerFramework</Product>
+    <Company>PowerFramework</Company>
+    <Copyright>Copyright (c) 2013 - 2022 金千枝(深圳)软件技术有限公司. BSD-2-Clause. See LICENSE and NOTICE.</Copyright>
+  </PropertyGroup>
+
+</Project>
