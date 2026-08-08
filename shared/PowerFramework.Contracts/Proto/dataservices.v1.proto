@@ -1,0 +1,3303 @@
+// ==============================================================================================
+//  dataservices.v1.proto - C-03 DataWindowService AND C-04 ColumnExpressionService
+//  --------------------------------------------------------------------------------------------
+//  The DataServices half of the published cross-service boundary. It imports common.v1.proto and
+//  is imported by nobody; persistence.v1.proto is an independent sibling and this file neither
+//  references it nor is referenced by it.
+//
+//  IT CARRIES NO BEHAVIOUR (C-A). Not one line here executes. PowerFramework.Contracts is the
+//  boundary DEFINITION, not a shared-code back door, and this file holds that discipline in the
+//  one place it is easiest to lose: it declares the shapes that cross the wire between Gateway and
+//  DataServices, and it does NOT declare DataServices' internal layout. Where a legacy structure
+//  appears here it appears because it IS the contract - the seven column-expression structures are
+//  the worked example, and Section 9 states why each of them has to travel - never because
+//  DataServices happens to use it internally. No engine cache internals, no parser state, no
+//  scheduling detail and no message that exists solely so two services can share code.
+//
+//  EVERY CONTRACT HERE IS NET NEW, NOT A PORT
+//  --------------------------------------------------------------------------------------------
+//  The legacy PowerFramework is a LIBRARY: no process of its own, no listening socket, no route
+//  table, no serialization layer. The source branch contains zero .proto files, so nothing below
+//  translates an existing wire format - there was none to translate. What is faithful to the
+//  legacy here is its VALUES and its SEMANTICS, never a schema. Every behavioural assertion in a
+//  comment below carries a :L locator into the read-only oracle so it can be adjudicated without a
+//  search (C-C: those files are read for values and semantics only, and are never edited,
+//  reformatted, moved, or proposed for change).
+//
+//  WHY TWO SERVICES IN ONE FILE, WHICH IS A DECISION AND NOT A CONVENIENCE (C-K)
+//  --------------------------------------------------------------------------------------------
+//  C-04 is kept a SEPARATE SERVICE from C-03 so that THE EXPANSION ENGINE CAN VERSION
+//  INDEPENDENTLY. The column-expression engine is the most intricate object in the in-scope estate
+//  (n_cst_dwsvc_columnexp.sru is 2,435 lines, the largest), it is the one most likely to need a
+//  contract revision, and it has its own authoritative legacy specification in
+//  docs/n_cst_dwsvc_columnexp.md. Folding it into C-03 would tie every future revision of the
+//  expression grammar to a revision of the event chain, and vice versa.
+//
+//  They share ONE FILE because they share a package, a namespace, a service boundary and a large
+//  vocabulary - DwObjectRef, SequencingToken, StructuredError, Severity and the event identities
+//  are used by both. Two files would either duplicate that vocabulary or need a third file to hold
+//  it, and a third file would be a shared-code back door of exactly the kind C-A forbids. Two
+//  services in one file keeps them independently versionable while keeping the vocabulary
+//  single-sourced. `service` boundaries, not file boundaries, are what versioning follows.
+//
+//  RULES POSITION
+//  --------------------------------------------------------------------------------------------
+//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
+//  file and none is invented here. The enterprise-standard baseline applies in their place, and
+//  the binding constraints are the refactor plan's own non-rule inventory. Those that govern this
+//  file are cited inline at the point each is discharged: C-A (boundary definition, not a
+//  shared-code back door), C-B (replicate behaviour and defects, never improve), C-C (the legacy
+//  tree is read-only and is the behavioural oracle), C-D (the four deferred services are not
+//  implemented, even partially), C-K (document every technology and boundary decision), C-F (no
+//  secret in any form) and C-G (do not hand-write security surface).
+//
+//  C-F SELF-AUDIT: no key, credential, token, password, connection string, certificate or
+//  secret-shaped placeholder appears anywhere in this file, in any field, default, example or
+//  comment. The one field that could carry data lifted from a failing statement is
+//  common.v1.DbError.sqlsyntax, which that file already defines as REDACTED; nothing here widens
+//  it.
+//  C-G SELF-AUDIT: no auth, token, credential, identity or principal message is defined here.
+//  Authentication on this edge is DataServices' stock JwtBearer configuration validating against
+//  Security's published JWKS - framework code. Hand-writing a security surface here would
+//  duplicate that framework behaviour and enlarge the attack surface, so the boundary carries no
+//  security vocabulary of its own at all.
+//  C-D SELF-AUDIT: see Section 8, which states the headless/rendering split, enumerates exactly
+//  what is deliberately absent, and names where the absent half lives.
+// ==============================================================================================
+
+syntax = "proto3";
+
+package dataservices.v1;
+
+// Matches the scheme the sibling PowerFramework.Contracts.csproj and docs/CONTRACTS.md section 2.3
+// both declare: PowerFramework.Contracts.{Security, DataServices, Persistence}.V1 for the service
+// definitions, PowerFramework.Contracts.Common.V1 for the shared messages.
+option csharp_namespace = "PowerFramework.Contracts.DataServices.V1";
+
+// THE IMPORT IS A BARE FILE NAME, AND THAT IS THE .csproj's CONTRACT, NOT A STYLE CHOICE (C-K).
+// The sibling PowerFramework.Contracts.csproj compiles this folder with a single Protobuf item
+// whose ProtoRoot is set EXPLICITLY to "Proto", and imports are resolved relative to that root:
+//
+//     <Protobuf Include="Proto/**/*.proto" ProtoRoot="Proto" GrpcServices="Both" />
+//
+// So it is "common.v1.proto" and never "Proto/common.v1.proto". Were ProtoRoot absent, Grpc.Tools'
+// _Protobuf_SetProtoRoot target would default the root to the project directory and every import
+// would need the Proto/ prefix instead; the mismatch surfaces as a confusing protoc "file not
+// found" that looks like a missing file rather than a wrong prefix. The .csproj comment states the
+// same rule at its Protobuf item, so the two agree and neither needs correcting. Verified by
+// building, not by inspection.
+//
+// GrpcServices="Both" is load-bearing for this file specifically: DataServices implements the
+// generated SERVER bases for both services below (Grpc/DataWindowService.cs,
+// Grpc/ColumnExpressionService.cs) while Gateway consumes the generated CLIENT stubs
+// (Clients/DataServicesClient.cs). Either "Server" or "Client" alone would break half the
+// consumers.
+import "common.v1.proto";
+
+// ==============================================================================================
+//  SECTION 1 - THE SCALAR RULE IS INHERITED, NOT RESTATED
+//  --------------------------------------------------------------------------------------------
+//  common.v1.proto SECTION 1 states the scalar and width rule for ALL THREE .proto files in this
+//  folder, and it is NORMATIVE here. It is referenced rather than repeated precisely so the three
+//  files cannot drift: a divergence on how a legacy scalar crosses the wire would be invisible at
+//  compile time and fatal to parity.
+//
+//  Read it there. The consequences that bite hardest in this file, so a reader knows they were
+//  considered rather than overlooked:
+//
+//    * `any` travels as common.v1.AnyValue, a discriminated union - NEVER a bare string. This file
+//      needs it for the `any`-returning macro invocation of Section 12.
+//    * `dec`/`decimal(n)` travels as common.v1.DecimalValue, NEVER as double. Section 10 has the
+//      one place a genuine `double` is correct, and says why it is not an exception to this rule.
+//    * `date`, `time` and `datetime` are THREE DISTINCT messages and there is no
+//      google.protobuf.Timestamp anywhere. The item-change coercion path of Section 5 dispatches on
+//      which of the three a column is, so collapsing them would destroy the information the
+//      behaviour depends on.
+//    * `long` -> int64 and `integer` -> int32, and a wire type may be WIDER than its legacy
+//      counterpart but never narrower.
+//
+//  The ENUM SCOPING RULING of common.v1.proto SECTION 2 is normative here too, and this file
+//  applies it throughout: legacy SCREAMING_SNAKE constant spellings are preserved EXACTLY - they
+//  appear in serialized payloads, log records and characterization recordings, so renaming one does
+//  not restyle a symbol, it silently invalidates every stored comparison that mentions it - and a
+//  set that would occupy generic names in the package scope is NESTED inside a thin wrapper message
+//  to create a scope, never renamed. Every legacy constant set below (EID_*, PREVENT_*, PY_LIKE_*,
+//  FILTER_*, SORT_*, CLC_*, VAR_*, COL_TYPE_*, EVT_*) is nested for that reason. Sets with no
+//  legacy spelling to preserve - the item-change alphabet, which is literal digits in a CHOOSE CASE,
+//  and the coercion prefixes, which are string literals - take the idiomatic enum-name-prefixed
+//  form instead, which is collision-safe by construction. That is the same principled exception
+//  common.v1.proto makes for DwBuffer and ItemStatus.
+//
+//  NOTHING FROM common.v1 IS REDEFINED HERE. RetCode, DwBuffer, ItemStatus, DbError and
+//  ConflictDetail are USED by qualified name and are declared nowhere in this file. Duplicating any
+//  of them would fork the single-source-of-truth agreement that common.v1.RetCode.Value holds with
+//  shared/PowerFramework.Shared.Kernel/RetCode.cs - an agreement with no compile-time edge, which
+//  is exactly why it must not be given a second copy to drift from.
+// ==============================================================================================
+
+// ==============================================================================================
+//  SECTION 2 - THE SHARED WIRE VOCABULARY
+//  --------------------------------------------------------------------------------------------
+//  Used by both services. Each type here exists because BOTH C-03 and C-04 need it, or because a
+//  single legacy value cannot cross without it; nothing is here for symmetry.
+// ==============================================================================================
+
+// DwObjectRef - the legacy `dwobject` as a REFERENCE, because a `dwobject` is a live runtime object
+// and cannot be serialized.
+//
+// Twenty of the twenty-two events in Section 5 take a `dwobject dwo` parameter, and the handlers
+// read exactly four things from it: `dwo.Name` [se_cst_dw.sru:L278], `dwo.ID` [:L190, :L219],
+// `dwo.ColType` [:L231] and the indexed buffer accessor `dwo.Primary[row]` [:L189, :L198]. The first
+// three are carried here. The fourth is a VALUE, not a property of the object, so it travels as a
+// common.v1.AnyValue on the message that needs it - see ItemChangeEvent in Section 5, where both the
+// snapshot and the current reading are carried explicitly because the legacy compares them.
+//
+// WHY BOTH NAME AND ID (the same reasoning common.v1.ColumnValue records): the legacy addresses a
+// column by name in expressions and by ordinal in the buffer and status APIs, and the two are not
+// interchangeable at a boundary. ID IS ONE-BASED, like every legacy ordinal.
+message DwObjectRef {
+  // `dwo.Name` - the DataWindow object's name. For a column this is the column name used in
+  // expressions and in Describe() property paths.
+  string name = 1;
+
+  // `dwo.ID` - the object's numeric identifier, ONE-BASED. The legacy reads it as `Long(dwo.ID)`
+  // and passes it straight to SetItem/GetItemStatus [se_cst_dw.sru:L190, :L219, :L220].
+  int64 id = 2;
+
+  // `dwo.ColType` VERBATIM - the full declared column type string as the DataWindow reports it, for
+  // example "char(50)" or "decimal(2)". Carried unabbreviated because the legacy uses the whole
+  // string elsewhere (the dormant byte-length check at [se_cst_dw.sru:L280-L290] parses the length
+  // out of "char(" + digits + ")") even though the coercion switch reads only its first five
+  // characters.
+  string col_type = 3;
+
+  // The first five characters of col_type, CLASSIFIED. Redundant with col_type by construction and
+  // carried anyway, because it is the actual dispatch key of the item-change default arm and a
+  // consumer that re-derived it would have to reimplement the ordering trap documented on the enum.
+  ColTypePrefix col_type_prefix = 4;
+
+  // THE COERCION ALPHABET, verbatim from the CHOOSE CASE at [se_cst_dw.sru:L231-L244], which
+  // dispatches on `Left(dwo.ColType,5)`.
+  //
+  // THE ORDERING IS A TRAP AND IT IS PRESERVED (C-B). "datet" is tested BEFORE "date"
+  // [:L238 before :L240]. Both are five characters or fewer, and "datet" is what `Left(...,5)`
+  // returns for a `datetime` column while "date" is what it returns for a `date` column, so the two
+  // arms are genuinely distinct - but a reimplementation that tested a `StartsWith("date")` first
+  // would swallow every datetime column into the date arm and silently drop the time of day. That
+  // is why the classification travels rather than being re-derived at the far end.
+  //
+  // These names are idiomatically prefixed rather than legacy-spelled because there IS no legacy
+  // identifier to preserve: the legacy cases are bare string literals, not constants.
+  enum ColTypePrefix {
+    // Not classified, or a column type outside the fixed set. THE LEGACY'S OWN BEHAVIOUR FOR THIS
+    // CASE IS TO DO NOTHING (C-B): the CHOOSE CASE at [:L231-L244] has no `case else`, so a column
+    // whose type matches none of the arms is simply not written - the value is left as the runtime
+    // left it. That is a silent no-op, and it is preserved rather than turned into an error.
+    COL_TYPE_PREFIX_UNSPECIFIED = 0;
+    COL_TYPE_PREFIX_CHAR = 1;        // "char"  -> SetItem(..., data)        [:L232-L233]
+    COL_TYPE_PREFIX_CHAR_PAREN = 2;  // "char(" -> SetItem(..., data)        [:L232-L233]
+    COL_TYPE_PREFIX_DECIM = 3;       // "decim" -> SetItem(..., Dec(data))   [:L234-L235]
+    COL_TYPE_PREFIX_REAL = 4;        // "real"  -> SetItem(..., Dec(data))   [:L234-L235]
+    COL_TYPE_PREFIX_NUMBE = 5;       // "numbe" -> SetItem(..., Dec(data))   [:L234-L235]
+    COL_TYPE_PREFIX_LONG = 6;        // "long"  -> SetItem(..., Long(data))  [:L236-L237]
+    COL_TYPE_PREFIX_ULONG = 7;       // "ulong" -> SetItem(..., Long(data))  [:L236-L237]
+    // "datet" -> SetItem(..., DateTime(data)) [:L238-L239]. TESTED BEFORE COL_TYPE_PREFIX_DATE.
+    COL_TYPE_PREFIX_DATET = 8;
+    COL_TYPE_PREFIX_DATE = 9;        // "date"  -> SetItem(..., Date(data))  [:L240-L241]
+    COL_TYPE_PREFIX_TIME = 10;       // "time"  -> SetItem(..., Time(data))  [:L242-L243]
+  }
+}
+
+// SequencingToken - a monotonic ordinal on every message that crosses the event chain.
+//
+// ===================== THE TOKEN IS FOR DETECTION ONLY. IT IS NOT A REORDER KEY. ================
+// This is the single most misreadable thing in this file, because the intuitive reading is the
+// wrong one, so it is stated before the fields rather than after them.
+//
+// Within a group assigned the SYNCHRONOUS discipline (ORDERING_DISCIPLINE_SYNCHRONOUS below), AN
+// OUT-OF-ORDER ARRIVAL IS A HARD ERROR THAT FAILS THE SESSION. It is NEVER an invitation to buffer
+// and re-sort. A consumer that re-sorted them would reconstruct an order the server never sent and
+// produce a result the legacy could not have produced - and it would do so silently, because every
+// individual message would still be well formed.
+//
+// The reason is mechanical rather than stylistic. In the item-change group one event's behaviour is
+// a FUNCTION OF THE PREVIOUS EVENT'S RETURN VALUE: the validation-error handler reads AND CLEARS the
+// code stashed by the preceding item-change event [se_cst_dw.sru:L331-L332] and pre-sets its own
+// result when that code was 1 or 3 [:L338-L340]. A re-sorted chain reads a stash that was written by
+// the wrong predecessor, or by none. Reordering there is not undesirable, it is SEMANTICALLY
+// IMPOSSIBLE.
+//
+// Within a group assigned the SEQUENCED discipline the token does carry reorder authority, because
+// those events hold no cross-event state. Both disciplines are assigned per capability area in
+// Section 5, with the evidence for each.
+// ==============================================================================================
+message SequencingToken {
+  // Strictly increasing within one stream, starting at 1. 0 means "not supplied", which is a fault
+  // on the event chain - every message on that stream carries a token.
+  int64 sequence = 1;
+
+  // Which discipline the emitting capability area is under. Carried ON the token, not inferred from
+  // the event identity, so that a consumer's ordering check is driven by data it already has rather
+  // than by a table it has to keep in step with Section 5.
+  OrderingDiscipline discipline = 2;
+}
+
+// The two ordering patterns, assigned per capability area in Section 5.
+enum OrderingDiscipline {
+  ORDERING_DISCIPLINE_UNSPECIFIED = 0;
+  // Pattern (b). Strictly synchronous request/response within one session on one stream; NO
+  // reordering is permitted and an out-of-order arrival fails the session.
+  ORDERING_DISCIPLINE_SYNCHRONOUS = 1;
+  // Pattern (a). A monotonic token a consumer MAY use to detect and reorder out-of-order delivery,
+  // because these events carry no cross-event state.
+  ORDERING_DISCIPLINE_SEQUENCED = 2;
+}
+
+// Veto - the broker's prevention protocol, which is TRI-VALUED.
+//
+// ============== THE SOURCE COMMENTS SAY BINARY. THEY ARE WRONG, AND THIS IS WHY (C-B) ===========
+// Every topic constant in se_cst_dw.sru carries an inline comment reading `0:continue,1:prevent`
+// [:L46, :L51, :L56, :L59, :L62, :L65, :L68, :L71] - eight sites, all agreeing, all suggesting a
+// BOOLEAN convention. A reader who took the shape from those comments would model a bool and be
+// wrong, which is precisely why the shape is taken from the BROKER'S OWN PROTOCOL instead:
+// PREVENT_ONCE = 1 and PREVENT_DEEP = 2 are declared at
+// ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L111-L112, set at :L1295 and :L1297,
+// discriminated at dispatch time at :L956, and selected by a `deep` flag on the prevention entry
+// point at :L1276-L1300.
+//
+// The comments are not a defect to correct - they are accurate about what a handler on THOSE
+// PARTICULAR topics is expected to return. They are simply not a statement about what the broker
+// can carry. The contradiction is recorded here so the next reader does not have to rediscover it.
+//
+// FLATTENING THIS TO A BOOLEAN WOULD SILENTLY CONVERT A DEEP PREVENTION INTO A SHALLOW ONE: the
+// dispatch chain would resume after the vetoing handler and the events the caller intended to stop
+// would fire. The wire therefore carries all three states with the legacy numeric values preserved.
+// ==============================================================================================
+message Veto {
+  enum Result {
+    // Neither prevention was set - dispatch continues. There is no legacy identifier for this state
+    // because in the legacy it is the ABSENCE of a prevention rather than a value; the name is
+    // ours, the semantics are the legacy's.
+    CONTINUE = 0;
+    PREVENT_ONCE = 1;  // Stop this dispatch.            [n_cst_eventful.sru:L111]
+    PREVENT_DEEP = 2;  // Stop the chain to full depth.  [n_cst_eventful.sru:L112]
+  }
+}
+
+// BrokerTopic - the event-broker subscription identity, DECOMPOSED.
+//
+// ============ ONE LEGACY STRING FUSES THREE INDEPENDENT ENCODINGS, AND THAT IS WHY ==============
+// ============ THIS EVENT MODEL DOES NOT SURVIVE NAIVE SERIALIZATION (C-K)          ==============
+//
+// 1. ORDERING, baked into the spelling. Two of the twelve topics carry a leading digit:
+//    EVT_ITEMCHANGED is "0-itemchanged" [se_cst_dw.sru:L54] and EVT_EDITCHANGED is "1-editchanged"
+//    [:L57]. The broker keeps its subscription registry in ASCENDING LEXICAL ORDER OF THE
+//    SUBSCRIPTION NAME - the insertion scan at n_cst_eventful.sru:L407-L422 places a new
+//    subscription before the first existing entry whose name compares greater, breaking ties by
+//    priority, and maintains first/last name bounds at :L439-L440. Because ASCII digits sort before
+//    letters, those two occupy a deterministic position relative to each other and to every
+//    unprefixed topic. THE DISPATCH ORDER IS A FUNCTION OF THE STRING'S SPELLING.
+//
+// 2. LIFETIME, as a trailing namespace. `.^persistent` is appended to the same string at
+//    ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L596, and note the guard immediately above it
+//    at :L594 - the suffix is appended ONLY when the caller supplied no namespace of their own
+//    (`if Pos(name,".") > 0 then` return the name untouched). At :L544 the BARE form
+//    `of_Off(".^persistent")` is passed with no logical name at all, which shows the same suffix
+//    ALSO acts as a whole-namespace selector. This third encoding is the one most easily missed.
+//
+// 3. CAPTURE MODE AND EXPLICIT PRIORITY, in the general case. The broker's own parser at
+//    n_cst_eventful.sru:L339-L381 consumes, in order: a leading `-` meaning prepend within equal
+//    priority; `%` and `*` selecting which handled-state of an event to capture; `@` and `!`
+//    selecting lowest and highest dispatch priority; then an optional numeric priority terminated by
+//    `:`; then the logical name; then an optional `.`-delimited namespace. The symbol constants are
+//    at :L91-L98 and the priority and capture constants at :L100-L106.
+//
+// TRANSMIT THE FUSED STRING AS-IS and the ordering becomes invisible - a consumer cannot tell that
+// "0-itemchanged" is dispatched before "1-editchanged" for a reason, and will read the "0-" as
+// decoration. PARSE IT AT THE FAR END and the contract has acquired an undocumented grammar that
+// every consumer must reimplement identically or diverge.
+//
+// So the wire carries the parts as SEPARATE FIELDS. The fused legacy spelling is reconstituted ONLY
+// AT A COMPATIBILITY EDGE - the one place that must hand a string to legacy-shaped code - and NEVER
+// travels as the identity.
+// ==============================================================================================
+message BrokerTopic {
+  // The ORDERING PREFIX as a number, extracted from the spelling. 0 for the ten topics that carry
+  // none; 0 for "0-itemchanged" and 1 for "1-editchanged". Because unprefixed and zero-prefixed
+  // topics both report 0 here, `has_sequence_prefix` below distinguishes them - the distinction is
+  // real, since a lexical sort places "0-itemchanged" before "clicked" but the absence of a prefix
+  // is not the same statement as a prefix of zero.
+  int32 sequence = 1;
+
+  // Whether the legacy spelling actually carried a leading ordering prefix. False for the ten
+  // unprefixed topics.
+  bool has_sequence_prefix = 2;
+
+  // THE LOGICAL NAME, with the ordering prefix and the lifetime namespace REMOVED. This is the
+  // authoritative identity: "itemchanged", not "0-itemchanged.^persistent". Free-form, because a
+  // subscription name is not restricted to the twelve the framework declares.
+  string name = 3;
+
+  // Classification of `name` against the twelve framework topics. `name` REMAINS AUTHORITATIVE: this
+  // field is a convenience for consumers that switch on identity, it is EVT_UNSPECIFIED for any
+  // application-defined topic, and where the two ever disagree a consumer trusts `name`.
+  WellKnownName well_known = 4;
+
+  Lifetime lifetime = 5;
+
+  // Capture mode, from the `%` and `*` symbols of the broker's parser [n_cst_eventful.sru:L339-L381,
+  // constants :L100-L106]. Carried as its own field on exactly the same principle as the ordering
+  // prefix: it is an independent encoding that happens to share the string.
+  CaptureMode capture = 6;
+
+  // Explicit dispatch priority. `has_priority` is what distinguishes "priority zero was requested"
+  // from "no priority was requested", which the numeric field alone cannot express - the broker
+  // treats an absent priority differently from a supplied one, and the `@` and `!` symbols select
+  // the extremes rather than a number.
+  int32 priority = 7;
+  bool has_priority = 8;
+  PriorityKeyword priority_keyword = 9;
+
+  // Prepend within equal priority - the leading `-` of the broker's parser.
+  bool prepend_within_priority = 10;
+
+  // THE TWELVE FRAMEWORK TOPICS, verbatim from se_cst_dw.sru:L47-L76. The EVT_* identifiers are the
+  // legacy spellings and are preserved; the string literal each one holds is given in its comment,
+  // because THAT is what a legacy call site and a characterization recording contain.
+  enum WellKnownName {
+    // Not one of the twelve - an application-defined topic. `name` carries it.
+    EVT_UNSPECIFIED = 0;
+    EVT_ROWFOCUSCHANGING = 1;   // "rowfocuschanging"  [:L47]
+    EVT_ROWFOCUSCHANGED = 2;    // "rowfocuschanged"   [:L49]
+    EVT_ITEMFOCUSCHANGED = 3;   // "itemfocuschanged"  [:L52]
+    // "0-itemchanged" [:L54] - ORDERING PREFIX 0 IS PART OF THE LEGACY SPELLING.
+    EVT_ITEMCHANGED = 4;
+    // "1-editchanged" [:L57] - ORDERING PREFIX 1 IS PART OF THE LEGACY SPELLING.
+    EVT_EDITCHANGED = 5;
+    EVT_CLICKED = 6;            // "clicked"           [:L60]
+    EVT_DOUBLECLICKED = 7;      // "doubleclicked"     [:L63]
+    EVT_LBUTTONUP = 8;          // "lbuttonup"         [:L66]
+    EVT_RBUTTONDOWN = 9;        // "rbuttondown"       [:L69]
+    EVT_RBUTTONUP = 10;         // "rbuttonup"         [:L72]
+    EVT_GETFOCUS = 11;          // "getfocus"          [:L74]
+    EVT_LOSEFOCUS = 12;         // "losefocus"         [:L76]
+  }
+
+  // The lifetime namespace - encoding 2 above.
+  enum Lifetime {
+    LIFETIME_UNSPECIFIED = 0;
+    // No lifetime namespace. The subscription dies with its subscriber, which is the legacy default.
+    LIFETIME_TRANSIENT = 1;
+    // The `.^persistent` namespace [n_cst_threading.sru:L596].
+    LIFETIME_PERSISTENT = 2;
+    // The BARE `.^persistent` form [n_cst_threading.sru:L544] - a whole-namespace selector carrying
+    // no logical name, used to unsubscribe every persistent subscription at once. `name` is empty
+    // when this is set, and that emptiness is meaningful rather than missing.
+    LIFETIME_PERSISTENT_NAMESPACE_ALL = 3;
+  }
+
+  // Which handled-state of an event a subscription captures - the `%` and `*` symbols.
+  enum CaptureMode {
+    CAPTURE_MODE_UNSPECIFIED = 0;
+    CAPTURE_MODE_DEFAULT = 1;
+    CAPTURE_MODE_HANDLED = 2;
+    CAPTURE_MODE_UNHANDLED = 3;
+  }
+
+  // The `@` and `!` priority extremes, which are keywords rather than numbers and so cannot be
+  // expressed by the numeric `priority` field.
+  enum PriorityKeyword {
+    PRIORITY_KEYWORD_UNSPECIFIED = 0;
+    PRIORITY_KEYWORD_LOWEST = 1;   // `@`
+    PRIORITY_KEYWORD_HIGHEST = 2;  // `!`
+  }
+}
+
+// Severity - the PowerBuilder `Icon` domain, as the legacy dialogs use it.
+//
+// Carried because a structured error replaces a dialog and the dialog's severity is observable
+// output. The legacy validation-error path raises its message with the stop-sign severity
+// [se_cst_dw.sru:L357], and preserving that is the difference between reproducing the legacy's error
+// ergonomics and merely reporting that something failed. Only the DELIVERY CHANNEL changes here -
+// text, category, substitution arguments, severity and caret position are all preserved.
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_NONE = 1;         // None!
+  SEVERITY_INFORMATION = 2;  // Information!
+  SEVERITY_QUESTION = 3;     // Question!
+  SEVERITY_EXCLAMATION = 4;  // Exclamation!
+  SEVERITY_STOP_SIGN = 5;    // StopSign!  - [se_cst_dw.sru:L357]
+}
+
+// StructuredError - a legacy dialog, re-expressed as a machine-readable result.
+//
+// Every MessageBox and MessageBoxEx reachable from in-scope logic becomes one of these. ONLY THE
+// DELIVERY CHANNEL CHANGES; the text, the localization category, the Sprintf substitution arguments
+// and the severity are preserved, and for an expression parse failure the caret position is
+// preserved too (Section 11).
+//
+// THE `localized` FLAG EXISTS TO CARRY A LEGACY INCONSISTENCY WITHOUT REPAIRING IT (C-B). Some
+// in-scope messages route through the localization category CAT_DWSVC and some do not, and which is
+// which is not a pattern - it is an accident of where the code was written. The two on C-03's
+// validation-error path DO [se_cst_dw.sru:L355, :L357], while all 28 in the column-expression engine
+// do NOT (Section 11). The flag lets a consumer tell translatable text from untranslatable text
+// WITHOUT ANY MESSAGE CHANGING. Routing the untranslated ones through localization would change
+// observable output, which is exactly the silent correction the mandate forbids.
+message StructuredError {
+  // The message text as the legacy would have shown it, AFTER any localization the legacy itself
+  // performed and AFTER Sprintf substitution. This is observable output and is reproduced verbatim -
+  // including where it is hardcoded Chinese.
+  string text = 1;
+
+  // Whether `text` was produced through the localization layer. See the note above: this REPORTS a
+  // legacy inconsistency, it does not resolve one.
+  bool localized = 2;
+
+  // The localization category, when localized. The in-scope value is CAT_DWSVC, defined by the
+  // localization library as an offset from I18N_CAT_CUSTOM; it is carried as its numeric value
+  // rather than an enum because the category space is open and belongs to
+  // PowerFramework.Shared.Localization, not to this boundary.
+  int64 category = 3;
+
+  // The Sprintf substitution arguments, in order, BEFORE substitution. Carried alongside the
+  // substituted `text` so a consumer can re-render the message in another locale or another format
+  // without parsing the rendered string back apart.
+  repeated string format_args = 4;
+
+  Severity severity = 5;
+
+  // The dialog title, where the legacy supplied one. The validation-error path localizes a title
+  // separately from its body [se_cst_dw.sru:L357], so title and text are two fields, not one.
+  string title = 6;
+
+  // The framework return code the operation produced, when it produced one. Consumers must branch on
+  // the specific value and never on a two-way success test: common.v1.RetCode documents the tri-state
+  // hole in full - PREVENT reads as a success, and CANCELLED and null are NEITHER succeeded nor
+  // failed.
+  common.v1.RetCode.Value ret_code = 7;
+}
+
+// ==============================================================================================
+//  SECTION 3 - C-03 : THE VALIDATION SESSION AND THE ITEM-CHANGE ALPHABET
+//  --------------------------------------------------------------------------------------------
+//  The session exists because FOUR PIECES OF MUTABLE STATE LIVE BETWEEN EVENTS, and a stateless
+//  request boundary has nowhere to put them. All four are declared at se_cst_dw.sru:L89-L96.
+// ==============================================================================================
+
+// ValidationSessionState - the four cross-event fields, materialized.
+//
+// [se_cst_dw.sru:L89-L96] declares exactly four private fields that the event chain reads and writes
+// BETWEEN events:
+//
+//     long    _nDisabledEvent            [:L89]  the event-gate bitmask
+//     boolean _bDoItemChange             [:L92]  "currently inside OnDoItemChange"
+//     boolean _bDwnItemValidationError   [:L94]  "currently inside OnDwnItemValidationError"
+//     long    _nItemChangeRetCode        [:L96]  THE STASH - see below
+//
+// THE FOURTH FIELD IS THE CONSEQUENTIAL ONE, and the legacy's own comment at [:L95] says what it is
+// for: the ItemChanged return value used when the ItemError event is triggered BY ItemChanged. The
+// validation-error handler does not merely read it - it reads AND CLEARS it [:L331-L332] and then
+// PRE-SETS ITS OWN RESULT when the stashed value was 1 or 3 [:L338-L340]. One event's behaviour is a
+// function of the previous event's return value, which is why the item-change group is strictly
+// synchronous (Section 5) and why these four fields cannot be re-derived per request.
+//
+// The two boolean flags are RE-ENTRANCY GUARDS, not bookkeeping, and each has an observable effect:
+//   * _bDwnItemValidationError makes the validation-error handler RETURN 1 IMMEDIATELY on re-entry
+//     [:L327], and it is cleared on the empty-data path before returning 3 [:L361-L362].
+//   * _bDoItemChange gates the DEFERRED ACCEPT on kill-focus: [:L387-L393] queues the accept ONLY
+//     when the flag is clear.
+//
+// This message is state a CORRELATED SESSION genuinely needs on the wire, not DataServices' internal
+// layout (C-A): every field is read or written by an event the consumer itself sends, and a consumer
+// that could not observe them could not tell a re-entrant no-op from a real result.
+message ValidationSessionState {
+  // `_nDisabledEvent` - the event-gate bitmask. Composed from EventGate.Bit values.
+  int64 disabled_event_mask = 1;
+
+  // `_bDoItemChange` - execution is currently inside the item-change handler.
+  bool in_item_change = 2;
+
+  // `_bDwnItemValidationError` - execution is currently inside the validation-error handler.
+  bool in_item_validation_error = 3;
+
+  // `_nItemChangeRetCode` - THE STASH. The item-change result held for the validation-error event to
+  // consume. Modelled with the item-change alphabet rather than as a bare integer because that is
+  // what it holds, and read-and-clear is the only legal way to consume it.
+  ItemChangeResult item_change_ret_code = 4;
+
+  // Whether a deferred accept-text continuation is PENDING on this session.
+  //
+  // WHY THIS FIELD EXISTS AT ALL (C-K). The legacy achieves the deferral with `Post` [:L389], which
+  // hands the call to the WIN32 MESSAGE QUEUE so it runs after the current event returns. A headless
+  // Linux container has no message pump, so the deferral becomes an explicitly queued continuation
+  // owned by the session - and a queued continuation, unlike a posted message, has to be
+  // representable or a consumer cannot tell that work is still outstanding.
+  //
+  // The legacy continuation is `_of_postaccepttext` [:L537-L558]: it re-checks that focus has moved
+  // away and, if the accept fails, moves focus back. That re-check is why the deferral cannot simply
+  // be executed inline - it is deliberately observed AFTER the event completes.
+  bool deferred_accept_pending = 5;
+}
+
+// ItemChangeResult - THE FOUR-VALUE ALPHABET, WHICH IS ITS OWN DOMAIN AND IS NEVER RetCode (C-B).
+//
+// ================ MODELLING THIS ONTO RetCode WOULD BE A CATEGORY ERROR =========================
+// The values are {0, 1, 2, 3} [se_cst_dw.sru:L211-L251] and they share nothing but digits with the
+// return-code algebra. There, 1 is PREVENT and -1 is FAILED. Here, 1 triggers the validation-error
+// event and 2 means "the buffer has already been written, do not re-apply the edit text". Two
+// alphabets, one set of digits.
+//
+// ALL FOUR VALUES ARE DISTINCT ON THE WIRE AND MUST STAY THAT WAY. Nothing below is merged, aliased
+// or collapsed - see the case-1 note, which is exactly the temptation to resist.
+//
+// ---- THE CASE-1 QUESTION, WHICH THIS FILE DELIBERATELY DOES NOT SETTLE --------------------------
+// The refactor plan describes `case 1` as "falling through" to `case 2`. THE SOURCE SHOWS SOMETHING
+// MORE SPECIFIC: an EMPTY `case 1` arm at [:L212] immediately followed by `case 2` at [:L213] - and
+// PowerScript CHOOSE CASE DOES NOT FALL THROUGH the way a C `switch` does. On that reading the empty
+// arm is a deliberate no-op whose purpose is to stop 1 from reaching `case else`, and a result of 1
+// returns unchanged with no restore and no coercion, consistent with the source comment at [:L210]
+// that returning 1 triggers OnDwnItemValidationError.
+//
+// The two readings differ OBSERVABLY - whether a restore happens before the validation-error event
+// fires - and settling that belongs to DataServices, adjudicated against the behavioural oracle. IT
+// IS NOT THIS FILE'S TO SETTLE, and it does not need to be: THE WIRE ALPHABET IS {0,1,2,3} UNDER
+// EITHER READING. What this file must not do is let the fall-through reading tempt it into merging or
+// aliasing 1 and 2, which would destroy information the wire has to carry whichever reading wins.
+//
+// The names below are therefore drawn from what BOTH readings agree the value does, and the disputed
+// part is confined to this comment. They are idiomatically prefixed because there is no legacy
+// identifier to preserve - the legacy cases are literal digits in a CHOOSE CASE.
+enum ItemChangeResult {
+  // 0 - falls to `case else` [:L226-L250]: the default arm coerces the edit text by the column-type
+  // prefix (DwObjectRef.ColTypePrefix), fires the changed event [:L247], and then FORCIBLY REWRITES
+  // THE RESULT TO 2 [:L250] so the runtime will not re-apply the edit text over the buffer. Note
+  // that `case else` also catches any value outside {1,2,3}, not only 0.
+  ITEM_CHANGE_RESULT_DEFAULT = 0;
+
+  // 1 - the EMPTY arm at [:L212]. Both readings agree on the consequence a consumer observes:
+  // RETURNING 1 TRIGGERS OnDwnItemValidationError [:L210 comment], and the validation-error handler
+  // then pre-sets its own result to 1 from the stash [:L338-L340]. The readings differ only on
+  // whether a value-and-status restore happens first.
+  ITEM_CHANGE_RESULT_TRIGGER_VALIDATION_ERROR = 1;
+
+  // 2 - restore the original value and item status [:L219-L220], BUT ONLY IF THE EARLIER EQUALITY
+  // TEST HELD [:L216] - the buffer may already have been changed by the handler and must not be
+  // overwritten. Also the value the default arm rewrites to, meaning "do not re-apply the edit text".
+  ITEM_CHANGE_RESULT_RESTORE_AND_REJECT_TEXT = 2;
+
+  // 3 - keep the value, do not move focus, and REWRITE THE RESULT TO 1 [:L223-L225]. The rewrite is
+  // observable, so 3 is what a handler RETURNS while 1 is what the event YIELDS. The distinction also
+  // survives into the validation-error handler, which restores for results 1 and 3 only when the
+  // stashed code was NOT 3 [:L369] - so a 3 that became a 1 is still distinguishable there.
+  ITEM_CHANGE_RESULT_KEEP_VALUE_NO_FOCUS_MOVE = 3;
+}
+
+message OpenValidationSessionRequest {
+  // The DataWindow this session is bound to. A session is scoped to one DataWindow: the four state
+  // fields are instance fields of one control in the legacy, so sharing a session across DataWindows
+  // would make the stash readable by the wrong chain.
+  string datawindow_handle = 1;
+
+  // The initial gate mask, if the caller wants events disabled from the outset. Composed from
+  // EventGate.Bit. Zero disables nothing, matching a freshly constructed control.
+  int64 initial_disabled_event_mask = 2;
+}
+
+message OpenValidationSessionResponse {
+  // The correlation identifier every EventChain message must carry.
+  string session_id = 1;
+
+  // The session's state as opened.
+  ValidationSessionState state = 2;
+
+  common.v1.RetCode.Value ret_code = 3;
+}
+
+message CloseValidationSessionRequest {
+  string session_id = 1;
+}
+
+// CLOSURE IS IDEMPOTENT, and that is a contract obligation rather than an implementation nicety.
+// In the legacy the state simply dies with the control; a server-held session needs a defined end,
+// and a caller that cannot safely retry a close would leak sessions on any transport hiccup. This
+// response is therefore THE SAME whether the session was open or already gone, and `was_open`
+// reports which it was without changing `ret_code`.
+message CloseValidationSessionResponse {
+  common.v1.RetCode.Value ret_code = 1;
+
+  // False when the session had already been closed or had expired. Informational only - a false
+  // value is NOT an error.
+  bool was_open = 2;
+
+  // The state at the moment of closure, when the session was still open. Carried so a caller can
+  // observe an outstanding deferred continuation or a still-set re-entrancy guard rather than
+  // discarding that fact.
+  ValidationSessionState final_state = 3;
+}
+
+// ==============================================================================================
+//  SECTION 4 - C-03 : Retrieve, AS A SERVER STREAM OF BUFFER-SHAPED CHUNKS
+//  --------------------------------------------------------------------------------------------
+//  THE STREAMING SHAPE HAS A LEGACY ANALOGUE AND IS NOT AN INVENTION (C-K).
+//  ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru declares
+//
+//      event type long ondatareceived(ref n_cst_thread_task_sqlbase_ds data, long rowcount)
+//
+//  - progressive delivery WITH A PER-DELIVERY ROW COUNT, the carrier passed by reference and the
+//  count passed alongside it. RetrieveChunk reproduces both halves of that shape. Streaming also
+//  keeps a large result set off a single message, but the fidelity argument is the primary one.
+//
+//  WHY A FLAT ROWSET WOULD NOT DO, stated here because it is the obvious simplification and it is
+//  wrong: the legacy result carrier derives from a `datastore`, so it IS a DataWindow complete with
+//  buffers and per-item statuses, and the original-value shadow the update contract compares against
+//  is part of that state rather than something recomputable from the current row.
+// ==============================================================================================
+
+// DataWindowRow - one row, buffer-tagged and status-tagged.
+message DataWindowRow {
+  // Which buffer the row sits in. common.v1.DwBuffer records that THE FILTER BUFFER'S ROW ORDER IS
+  // INVERTED relative to the source, so `row` does not count the same way across buffers.
+  common.v1.DwBuffer buffer = 1;
+
+  // ONE-BASED row ordinal within that buffer.
+  int64 row = 2;
+
+  // THE ROW'S OWN status, read the legacy way with column index 0 - the convention common.v1
+  // documents on ItemStatus, and the one the legacy uses at [se_cst_dw.sru:L190] and
+  // [:L335]: GetItemStatus(row, Long(dwo.ID), Primary!) for a column, GetItemStatus(row, 0, buffer)
+  // for the row.
+  common.v1.ItemStatus item_status = 3;
+
+  // The row's CURRENT column values. Each common.v1.ColumnValue carries the column name, the
+  // one-based ordinal and, where it is meaningful, that column's own status.
+  repeated common.v1.ColumnValue columns = 4;
+
+  // The ORIGINAL values of the columns marked for the concurrency comparison.
+  //
+  // POPULATED ON THE UPDATE PATH AND NORMALLY EMPTY ON RETRIEVE. It is declared on this message
+  // rather than on a separate update-only row type because a row is one thing whichever direction it
+  // travels, and a second row shape would drift. common.v1.ConflictDetail records why both values
+  // must be able to travel: the one updatable DataWindow in the repository declares `updatewhere=1`
+  // and marks ALL SIX columns `updatewhereclause=yes`, so the generated WHERE clause carries the key
+  // column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. A payload carrying only current values
+  // could not express what the failed statement compared.
+  repeated common.v1.ColumnValue original_values = 5;
+}
+
+message RetrieveRequest {
+  string datawindow_handle = 1;
+
+  // Optional retrieval arguments, positional and ONE-BASED, matching the legacy `Retrieve(args...)`
+  // shape. Each is an AnyValue so a null argument stays distinguishable from a zero or an empty
+  // string - common.v1.AnyValue records why that distinction is load-bearing.
+  repeated common.v1.AnyValue arguments = 2;
+
+  // Which buffers to stream. Empty means the primary buffer only, which is the legacy default: a
+  // freshly retrieved DataWindow has nothing in Delete! and nothing in Filter! until a filter or a
+  // delete has run.
+  repeated common.v1.DwBuffer buffers = 3;
+
+  // Requested rows per chunk. 0 means "the server chooses".
+  //
+  // NOTE THE ASYMMETRY WITH C-05, DELIBERATELY (C-K). Persistence's QueryService preserves a legacy
+  // guard whereby a chunk size at or below 1000 yields E_INVALID_ARGUMENT
+  // [n_cst_thread_task_sqlquery.sru:L410]. THAT GUARD IS NOT REPRODUCED HERE, because it is not this
+  // interface's guard - it belongs to the SQL task layer, which sits behind Persistence. Copying it
+  // onto this contract would invent a validation the legacy does not perform at this boundary, which
+  // C-B forbids as firmly as it forbids removing one.
+  int32 chunk_size = 4;
+}
+
+message RetrieveChunk {
+  // The rows in this delivery.
+  repeated DataWindowRow rows = 1;
+
+  // THE PER-DELIVERY ROW COUNT, mirroring `ondatareceived`'s second parameter. Redundant with
+  // rows.size() by construction and carried anyway, because the legacy event carries it as its own
+  // argument and a handler is entitled to read it without walking the carrier.
+  int64 row_count = 2;
+
+  // ONE-BASED chunk ordinal, so a consumer can detect a gap.
+  int64 chunk_index = 3;
+
+  // Set on the last chunk. A stream that ends without it was truncated.
+  bool final = 4;
+
+  // Rows retrieved so far, across all chunks delivered on this stream.
+  int64 cumulative_row_count = 5;
+
+  // The buffer these rows came from, when a single chunk carries one buffer's rows. Each row also
+  // carries its own buffer tag, so this is a convenience for the common single-buffer case and may
+  // be DW_BUFFER_UNSPECIFIED in a mixed chunk.
+  common.v1.DwBuffer buffer = 6;
+
+  // Present only on a failure that the legacy would have surfaced through its error event. A chunk
+  // carrying an error carries no rows.
+  common.v1.DbError error = 7;
+}
+
+
+// ==============================================================================================
+//  SECTION 5 - C-03 : ALL 22 EVENTS, AND THE ORDERING DISCIPLINE THAT GOVERNS THEM
+//  --------------------------------------------------------------------------------------------
+//  se_cst_dw.sru declares exactly 22 events at :L11-L32. The split is precisely 9 SEMANTIC against
+//  13 RAW `pbm_dwn*`, and both halves are carried in full.
+//
+//  EACH RAW EVENT DELEGATES TO A SEMANTIC ONE AND THEN TO THE BROKER, AND BOTH DELEGATIONS ARE
+//  VETOABLE. `ondwnrbuttondown` returns 1 if the semantic handler returns 1 and otherwise consults
+//  the broker [:L115-L117]; `ondwnrbuttonup` consults only the broker [:L120-L121]. The contract
+//  therefore carries all 22 as DISTINCT identities and does NOT collapse a raw event into the
+//  semantic one it delegates to - collapsing them would erase the two-stage veto, and a consumer
+//  could no longer tell which edge stopped the dispatch.
+//
+//  WHY THE STREAM IS BIDIRECTIONAL. Nine of the events are the FRAMEWORK ASKING THE APPLICATION a
+//  question - what should happen on this item change, what filter should this drop-down use, what
+//  does this macro evaluate to. In the legacy the application is in the same process. Across this
+//  boundary DataServices holds the DataWindow logic while its client holds the application, so the
+//  chain must run in BOTH directions on ONE stream: the client reports events inbound and answers
+//  handler invocations outbound, on the same ordered conversation. Two unary calls could not do it,
+//  because the outbound question arrives while the inbound call is still open.
+// ==============================================================================================
+
+// EventId - the 22 events, NUMBERED IN SOURCE DECLARATION ORDER (:L11 through :L32).
+//
+// THE DECLARATION ORDER IS CONTRACT, NOT INCIDENT, so the wire numbering follows it exactly rather
+// than grouping semantic events apart from raw ones. Reading the numbers in ascending order
+// reproduces the source's own declaration sequence, which makes a drift between this file and the
+// oracle detectable by inspection instead of by search.
+enum EventId {
+  EVENT_ID_UNSPECIFIED = 0;
+
+  // ---- SEMANTIC (9) and RAW (13), interleaved exactly as declared ----
+  EVENT_ID_ONINITCONTEXTMENU = 1;          // semantic  [:L11]
+  EVENT_ID_ONCONTEXTMENU = 2;              // semantic  [:L12]
+  EVENT_ID_ONDDSGETFILTER = 3;             // semantic  [:L13]  ref out-parameter
+  EVENT_ID_ONCOLUMNEXPINVOKEMETHOD = 4;    // semantic  [:L14]  `any` return over string[]
+  EVENT_ID_ONDWNRBUTTONDOWN = 5;           // raw       [:L15]
+  EVENT_ID_ONDWNRBUTTONUP = 6;             // raw       [:L16]
+  EVENT_ID_ONDWNROWCHANGE = 7;             // raw       [:L17]
+  EVENT_ID_ONDWNROWCHANGING = 8;           // raw       [:L18]
+  EVENT_ID_ONDWNLBUTTONDBLCLK = 9;         // raw       [:L19]
+  EVENT_ID_ONDWNLBUTTONCLK = 10;           // raw       [:L20]
+  EVENT_ID_ONDWNCHANGING = 11;             // raw       [:L21]
+  EVENT_ID_ONDWNITEMCHANGEFOCUS = 12;      // raw       [:L22]
+  EVENT_ID_ONDWNITEMCHANGE = 13;           // raw       [:L23]
+  EVENT_ID_ONDOITEMCHANGE = 14;            // semantic  [:L24]
+  EVENT_ID_ONITEMCHANGED = 15;             // semantic  [:L25]
+  EVENT_ID_ONDOITEMCHANGED = 16;           // semantic  [:L26]
+  EVENT_ID_ONDWNITEMVALIDATIONERROR = 17;  // raw       [:L27]
+  EVENT_ID_ONDDSFILTERED = 18;             // semantic  [:L28]
+  EVENT_ID_ONDWNKILLFOCUS = 19;            // raw       [:L29]
+  EVENT_ID_ONDWNLBUTTONUP = 20;            // raw       [:L30]
+  EVENT_ID_ONDWNSETFOCUS = 21;             // raw       [:L31]
+  EVENT_ID_ONCOLUMNEXPTRACE = 22;          // semantic  [:L32]
+}
+
+// ---------------------------------------------------------------------------------------------
+//  THE NINE SEMANTIC EVENT PAYLOADS
+// ---------------------------------------------------------------------------------------------
+
+// `oninitcontextmenu(long row, dwobject dwo) -> long` [:L11]
+//
+// ORDERING: SYNCHRONOUS, paired with OnContextMenu. Initialization must COMPLETE before the menu
+// identifier the second event receives can be meaningful - the application adds and configures items
+// here, and the id that comes back names one of them.
+message InitContextMenuEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+}
+
+// `oncontextmenu(long row, dwobject dwo, long mid) -> long` [:L12]
+//
+// ORDERING: SYNCHRONOUS, the second half of the context-menu pair.
+message ContextMenuEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // The selected menu identifier. THE EVENT DECLARES IT `long` [:L12] and it is carried as int64 to
+  // match, even though the context-menu service's own MID_* constants are declared `unsignedlong`
+  // (MID_RESERVED = 10000 upward). The signature is the contract at this boundary, and int64 holds
+  // every value the ulong constants take, so the widening rule of common.v1 Section 1 applies
+  // cleanly. Identifiers at or above 10000 are the framework's own reserved built-ins.
+  int64 mid = 3;
+}
+
+// `onddsgetfilter(long row, dwobject dwo, string data, ref string filter)` [:L13]
+//
+// ============ THE `ref` OUT-PARAMETER IS WHY DROP-DOWN SEARCH MUST BE SYNCHRONOUS ==============
+// This event has NO RETURN TYPE. Its result is produced by MUTATING A REFERENCE PARAMETER, and a
+// `ref` out-parameter HAS NO ASYNCHRONOUS REPRESENTATION: the caller blocks on the produced filter
+// because the filter is the only thing the call exists to obtain. There is no version of this event
+// that can be fired and forgotten.
+//
+// On the wire the produced value comes back on EventResult.produced_filter, which uses explicit
+// presence so that "the handler set the filter to an empty string" stays distinguishable from "the
+// handler did not touch it" - a distinction a `ref` parameter makes naturally and a plain string
+// field would destroy.
+// ==============================================================================================
+message DdsGetFilterEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // The text the user has typed so far, verbatim and UNESCAPED.
+  //
+  // A DEFECT TRAVELS WITH THIS FIELD AND IS DOCUMENTED RATHER THAN FIXED (C-B). The legacy
+  // interpolates this value straight into a DataWindow filter expression without escaping
+  // [n_cst_dwsvc_dropdownsearch.sru:L319, :L323]. The observable generated expression is preserved,
+  // and the exposure is recorded as a known legacy defect - see DropDownSearchState in Section 8,
+  // which carries the constructed expression itself.
+  string data = 3;
+}
+
+// `oncolumnexpinvokemethod(long row, dwobject dwo, string name, string args[]) -> any` [:L14]
+//
+// UNTYPED IN BOTH DIRECTIONS: a string array in, an `any` out. This is C-03's declaration of the
+// macro-invocation callback; C-04 carries the same protocol on its own dedicated stream
+// (Section 12), because the expression engine is the thing that actually needs it and it must be
+// reachable without opening an event chain.
+//
+// ORDERING: SYNCHRONOUS. The calculation cannot proceed without the returned value.
+message ColumnExpInvokeMethodEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // The macro function name. `FUNC_INVOKE` ("Invoke") is the reserved dispatch sentinel - see
+  // Section 10.
+  string name = 3;
+
+  // THE ARGUMENTS ARRIVE AS STRINGS AND THE HANDLER COERCES THEM, and they are ONE-BASED in the
+  // legacy. The authoritative specification's worked handler is
+  // `return Round(Double(args[1]), Long(args[2]))` [docs/n_cst_dwsvc_columnexp.md:L126], which shows
+  // both facts in one line: the handler applies Double() and Long() itself, and it indexes from 1.
+  //
+  // On the wire this list is ZERO-BASED, because a protobuf repeated field is. A consumer bridging to
+  // legacy-shaped code must therefore shift by one - stated explicitly because one-based-to-zero-based
+  // translation is the most dangerous mechanical hazard in this refactor, and a silent off-by-one here
+  // is indistinguishable from a behavioural regression.
+  repeated string args = 4;
+}
+
+// `ondoitemchange(long row, dwobject dwo, string data) -> long` [:L24]
+//
+// Returns the FOUR-VALUE ALPHABET of Section 3, never a RetCode.
+//
+// A DORMANT VALIDATION PATH IS CARRIED INERT (C-B). The legacy body [:L256-L293] contains a
+// COMMENTED-OUT byte-length check with its own dialog [:L280-L290], which would have rejected input
+// longer than a `char(n)` column's declared width with a two-byte-per-Chinese-character message and
+// returned 2. It is commented out in the oracle, so THE LEGACY DOES NOT PERFORM IT. It is recorded
+// here and is NOT revived: reviving it would add a validation the legacy does not perform, which is
+// the same class of change as removing one.
+message DoItemChangeEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // The edit text. NOT YET WRITTEN TO THE BUFFER when this event fires - the legacy's own comment
+  // says so [:L259]. That is the whole point of the event: it validates a value before the value
+  // exists in the buffer, which is why the snapshot fields on ItemChangeEvent matter.
+  string data = 3;
+}
+
+// `onitemchanged(long row, dwobject dwo)` [:L25] - void. Notification that the change was applied.
+message ItemChangedEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+}
+
+// `ondoitemchanged(long row, dwobject dwo)` [:L26] - void.
+//
+// ITS INTERNAL ORDER IS CONTRACT [:L295-L320]. Three steps fire in strict sequence:
+//   1. the column-expression service's changed handler, IF THAT SERVICE IS ENABLED  [:L313-L315]
+//   2. the broker trigger, IF THE TOPIC HAS A SUBSCRIBER                            [:L316-L318]
+//   3. the semantic changed event                                                   [:L319]
+// Both conditions are PART OF THE SEQUENCE rather than incidental steps within it, which is why
+// EventResult carries an OrderedDispatchReport: a consumer observing only two of the three must be
+// able to tell that the third was CONDITIONALLY skipped rather than skipped in error.
+//
+// Step 1 is also the mechanism behind the event-gate coupling documented on EventGate: because the
+// column-expression handler is invoked from inside this path, and the item-change gate bit
+// short-circuits this path, disabling item change also stops every bound column expression from
+// recalculating.
+message DoItemChangedEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+}
+
+// `onddsfiltered(long row, dwobject dwo, long rowcount, long filteredcount)` [:L28] - void.
+//
+// ORDERING: SYNCHRONOUS, the second half of the drop-down search pair.
+//
+// BOTH COUNTS ARE HEADLESS DATA and both ship (C-D): they are the search result's shape, not its
+// appearance.
+message DdsFilteredEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // Rows remaining after the filter.
+  int64 row_count = 3;
+
+  // Rows removed by the filter.
+  int64 filtered_count = 4;
+}
+
+// `oncolumnexptrace(long row, dwobject dwo, string stack, string expr, string value)` [:L32] - void.
+//
+// ORDERING: SEQUENCED. Pure diagnostics, fire-and-forget.
+//
+// The same record is carried on C-04's TraceChannel (Section 12), which is where the trace is
+// actually consumed; it appears on C-03 too because the legacy declares it on se_cst_dw, and dropping
+// it here would make the 22-event surface incomplete.
+message ColumnExpTraceEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // THE CALL STACK, `>`-DELIMITED. The legacy flattens the recursion stack that `n_vector
+  // _vecCalcStack` builds into a single delimited string [n_cst_dwsvc_columnexp.sru:L753-L755]. The
+  // flattened form is what the legacy event carries, so it is what travels; TraceRecord in Section 12
+  // additionally carries the frames unflattened, for the reason stated there.
+  string stack = 3;
+
+  // The expression as evaluated.
+  string expr = 4;
+
+  // The resulting value, RENDERED AS THE LEGACY RENDERS IT.
+  //
+  // ONE FORMATTING DEFECT IS OBSERVABLE AND PRESERVED (C-B): the legacy reports the literal text
+  // `(null)` when the value is empty AND EITHER `emptystringisnull` is set for that expression OR the
+  // column is not a string column [:L758]. So `(null)` here can mean a genuine null, or an empty
+  // string on a column configured to treat empty as null, or an empty string on a non-string column -
+  // three states rendered identically. Consumers must not parse this field to recover null-ness.
+  string value = 5;
+}
+
+// ---------------------------------------------------------------------------------------------
+//  THE THIRTEEN RAW pbm_dwn* EVENT PAYLOADS, IN DECLARATION ORDER
+//  --------------------------------------------------------------------------------------------
+//  Several share a parameter shape. They are STILL DISTINCT MESSAGE TYPES, deliberately: identity is
+//  what the two-stage veto is attributed to, and a shared payload type would let a consumer answer
+//  the wrong event with a well-formed message. Each also carries its own documented ordering
+//  discipline and its own gate interaction, which a shared type could not.
+// ---------------------------------------------------------------------------------------------
+
+// `ondwnrbuttondown` [:L15]. Handler [:L115-L117]: semantic RButtonDown edge, THEN broker
+// EVT_RBUTTONDOWN edge. ORDERING: SEQUENCED.
+message DwnRButtonDownEvent {
+  // POINTER POSITION IN THE DATAWINDOW'S OWN LOGICAL UNITS, exactly as the runtime supplies it to the
+  // event. THIS IS NOT A C-D VIOLATION and the distinction matters: these are INPUT COORDINATES that
+  // arrive with the event and that in-scope logic consumes as data, not geometry this contract
+  // computes, converts or renders. No DPI conversion, no font metric, no window rectangle and no
+  // window handle appears anywhere in this file - those are the deferred half. See Section 8.
+  int32 xpos = 1;
+  int32 ypos = 2;
+  int64 row = 3;
+  DwObjectRef dwo = 4;
+}
+
+// `ondwnrbuttonup` [:L16]. Handler [:L120-L121]: BROKER EDGE ONLY - there is no semantic RButtonUp
+// event, which is why the two edges must be separately representable. ORDERING: SEQUENCED.
+message DwnRButtonUpEvent {
+  int32 xpos = 1;
+  int32 ypos = 2;
+  int64 row = 3;
+  DwObjectRef dwo = 4;
+}
+
+// `ondwnrowchange` [:L17]. Handler [:L124-L128]: GATED on EID_ROWFOCUSCHANGE, then semantic
+// RowFocusChanged, then broker EVT_ROWFOCUSCHANGED. ORDERING: SEQUENCED.
+//
+// Note the gate's early-out returns 0 [:L124] - a gated event is reported as CONTINUE, not as an
+// error and not as a prevention.
+message DwnRowChangeEvent {
+  int64 current_row = 1;
+}
+
+// `ondwnrowchanging` [:L18]. Handler [:L130-L134]: GATED on EID_ROWFOCUSCHANGE, then semantic
+// RowFocusChanging, then broker EVT_ROWFOCUSCHANGING. ORDERING: SEQUENCED.
+message DwnRowChangingEvent {
+  int64 current_row = 1;
+  int64 new_row = 2;
+}
+
+// `ondwnlbuttondblclk` [:L19]. Handler [:L136-L143]: semantic DoubleClicked, then - ONLY IF THE
+// CONTROL IS STILL VALID [:L138] - the broker. ORDERING: SEQUENCED.
+//
+// The IsValid guard is not defensive noise: a double-click handler may destroy the control, and the
+// legacy checks before touching it again. EventResult.broker_had_subscriber reports whether the broker
+// edge ran at all, which is how that skip stays observable.
+message DwnLButtonDblClkEvent {
+  int32 xpos = 1;
+  int32 ypos = 2;
+  int64 row = 3;
+  DwObjectRef dwo = 4;
+}
+
+// `ondwnlbuttonclk` [:L20]. Handler [:L145-L162]: semantic Clicked, then the broker if still valid,
+// then a FOCUS-FREE ROW SWITCH - if the DataWindow is processing and the current row differs, it sets
+// the row and returns 1 if the set did not take [:L152-L159]. ORDERING: SEQUENCED.
+message DwnLButtonClkEvent {
+  int32 xpos = 1;
+  int32 ypos = 2;
+  int64 row = 3;
+  DwObjectRef dwo = 4;
+}
+
+// `ondwnchanging` [:L21]. Handler [:L164-L174] in strict order: semantic EditChanged; then the broker
+// EVT_EDITCHANGED trigger ONLY IF THE TOPIC HAS A SUBSCRIBER [:L166-L168]; then, IF DROP-DOWN SEARCH
+// IS ENABLED, that service's OnEditChanged [:L169-L171]. ORDERING: SEQUENCED.
+//
+// EVT_EDITCHANGED is one of the two topics whose legacy spelling carries an ordering prefix
+// ("1-editchanged"), which is why BrokerTopic decomposes it.
+message DwnChangingEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+  string data = 3;
+}
+
+// `ondwnitemchangefocus` [:L22]. Handler [:L176-L180]: GATED on EID_ITEMFOCUSCHANGE, then semantic
+// ItemFocusChanged, then broker EVT_ITEMFOCUSCHANGED. ORDERING: SEQUENCED.
+message DwnItemChangeFocusEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+}
+
+// `ondwnitemchange` [:L23] - THE MOST INTRICATE EVENT IN THE IN-SCOPE SET [:L182-L254].
+//
+// ORDERING: SYNCHRONOUS. It fires a NESTED event from inside itself [:L207] and it writes the stash
+// the validation-error event later consumes [:L195], so nothing in its group may be reordered.
+//
+// THE OBSERVABLE SEQUENCE, in source order, because every step is contract:
+//   1. Early-out on the EID_ITEMCHANGE gate bit, returning 0                         [:L187]
+//   2. SNAPSHOT the original value and the row's item status                         [:L189-L190]
+//   3. Save and set the re-entrancy flag, fire OnDoItemChange, STASH ITS RESULT,
+//      restore the flag                                                              [:L192-L196]
+//   4. Equality test WITH AN EXPLICIT NULL-AND-NULL ARM - two nulls compare EQUAL
+//      here, which a naive equality would not reproduce                              [:L198-L202]
+//   5. If unequal, re-read the value and fire the NESTED changing event               [:L204-L208]
+//   6. Dispatch on the stashed result - the four-value alphabet of Section 3          [:L211-L251]
+message DwnItemChangeEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+  string data = 3;
+
+  // THE SNAPSHOT taken at step 2 - `dwo.Primary[row]` before the handler runs [:L189]. Carried
+  // because step 4's equality test compares it against the CURRENT reading, and steps at
+  // ITEM_CHANGE_RESULT_RESTORE_AND_REJECT_TEXT restore from it [:L219]. A consumer cannot reconstruct
+  // it after the fact, so it has to travel.
+  common.v1.AnyValue original_value = 4;
+
+  // The row's item status at the same instant [:L190], restored alongside the value [:L220].
+  common.v1.ItemStatus original_status = 5;
+
+  // The CURRENT reading of the same cell, for step 4's comparison. Separate from original_value
+  // because THE TWO ARE COMPARED: collapsing them would make the comparison unexpressible.
+  common.v1.AnyValue current_value = 6;
+}
+
+// `ondwnitemvalidationerror` [:L27] - the stash's CONSUMER [:L322-L385].
+//
+// ORDERING: SYNCHRONOUS. Its result is a function of the preceding item-change event's return value.
+//
+// THE OBSERVABLE SEQUENCE, because every branch is contract:
+//   1. RE-ENTRANCY: return 1 IMMEDIATELY if already inside                            [:L327]
+//   2. CONSUME AND CLEAR the stash                                                    [:L331-L332]
+//   3. Snapshot value and status again                                                [:L334-L335]
+//   4. PRE-SET the result to 1 when the stashed code was 1 or 3                        [:L338-L340]
+//   5. Otherwise fire the ItemError event, coercing a NULL RETURN TO 0                 [:L342-L345]
+//   6. On a zero result WITH NON-EMPTY DATA: read the column's ValidationMsg [:L350],
+//      STRIP THE OUTER TWO CHARACTERS [:L351-L353], fall back to a LOCALIZED string
+//      when the message is empty or a single question mark [:L354-L356], surface a
+//      localized stop-sign error [:L357], and set the result to 1                      [:L358]
+//   7. On a zero result WITH EMPTY DATA: clear the guard and RETURN 3 - the legacy
+//      comment says it refuses to record an empty value and defers the complaint to
+//      save time                                                                      [:L359-L363]
+//   8. Restore value and status for results 1 and 3 ONLY WHEN THE ROW STILL EXISTS AND
+//      THE STASHED CODE WAS NOT 3, and only if the value has not moved                 [:L366-L380]
+//
+// STEP 8's ROW-EXISTENCE GUARD IS DEFENSIVE AND MUST SURVIVE. The legacy comment at [:L368] explains
+// it: the dialog's own queued message may have DELETED THE ROW while the dialog was up. An
+// implementation that dropped the `row <= RowCount()` test would write to a row that no longer
+// exists.
+//
+// The two localized strings on this path [:L355, :L357] are the ONLY localization calls in this
+// object, and they are the deliberate contrast with C-04's 28 unlocalized parse messages
+// (Section 11).
+message DwnItemValidationErrorEvent {
+  int64 row = 1;
+  DwObjectRef dwo = 2;
+
+  // The offending edit text. EMPTINESS IS A BRANCH, NOT AN EDGE CASE: empty data takes step 7 and
+  // yields 3, non-empty data takes step 6 and yields 1.
+  string data = 3;
+
+  // The stash as it stood when this event fired, BEFORE step 2 cleared it. Carried because steps 4
+  // and 8 both read it, and because after step 2 it is gone - a consumer that wanted to know what
+  // drove the pre-set could not ask afterwards.
+  ItemChangeResult stashed_item_change_ret_code = 4;
+
+  // The column's `ValidationMsg` property, AFTER the outer-two-character strip of step 6 and AFTER
+  // the empty-or-"?" fallback. Both transformations are observable output, so the field carries the
+  // final text rather than the raw property.
+  string validation_message = 5;
+
+  common.v1.AnyValue original_value = 6;
+  common.v1.ItemStatus original_status = 7;
+}
+
+// `ondwnkillfocus` [:L29]. Handler [:L387-L393]: QUEUE THE DEFERRED ACCEPT ONLY IF THE ITEM-CHANGE
+// FLAG IS CLEAR [:L388-L390], then the broker EVT_LOSEFOCUS trigger, then return the semantic
+// LoseFocus result.
+//
+// ORDERING: it belongs to BOTH groups and that is not a contradiction. As the tail of the item-change
+// chain it is SYNCHRONOUS, because the deferred accept must not be queued while an item change is in
+// flight. As pure focus notification it is SEQUENCED. `SequencingToken.discipline` states which role
+// a given occurrence is playing, which is why the discipline travels on the token rather than being
+// looked up from the event id.
+message DwnKillFocusEvent {
+  // No parameters in the legacy - the event takes none. The message exists so the event has an
+  // identity on the stream and so the fields below can report what the handler did.
+
+  // Whether the deferred accept-text continuation was queued. FALSE MEANS THE ITEM-CHANGE FLAG WAS
+  // SET, which is a meaningful observation rather than a missing one.
+  bool deferred_accept_queued = 1;
+}
+
+// `ondwnlbuttonup` [:L30]. Handler [:L395-L397]: BROKER EDGE ONLY. ORDERING: SEQUENCED.
+message DwnLButtonUpEvent {
+  int32 xpos = 1;
+  int32 ypos = 2;
+  int64 row = 3;
+  DwObjectRef dwo = 4;
+}
+
+// `ondwnsetfocus` [:L31]. Handler [:L399-L401]: broker EVT_GETFOCUS trigger, then the semantic
+// GetFocus result. ORDERING: SEQUENCED.
+message DwnSetFocusEvent {
+  // No parameters in the legacy.
+}
+
+
+// ==============================================================================================
+//  SECTION 6 - C-03 : THE EventChain ENVELOPE
+//  --------------------------------------------------------------------------------------------
+//  One bidirectional stream carries the whole chain. In one direction the client reports events and
+//  answers handler invocations; in the other DataServices returns dispatch outcomes and ASKS the
+//  client to run the handlers the application owns. Both directions reuse EventNotification and
+//  EventResult, because an event's payload is the same shape whichever way it travels and two
+//  parallel shapes would drift.
+// ==============================================================================================
+
+// EventNotification - one event occurrence, carried in either direction.
+//
+// CLIENT TO SERVER it means "this event occurred; dispatch it". SERVER TO CLIENT it means "run your
+// handler for this event and answer with an EventResult". The second direction is the inverted half
+// and it is what makes the stream bidirectional.
+message EventNotification {
+  // Correlates an invocation with its EventResult. Required on every notification, because a
+  // synchronous group may have a nested event in flight [se_cst_dw.sru:L207] and a bare event id
+  // could not tell the outer occurrence from the inner one.
+  string correlation_id = 1;
+
+  EventId event_id = 2;
+
+  // The DataWindow the event belongs to. Redundant with the session's binding for a session-scoped
+  // event and carried anyway, because the SEQUENCED events do not require a session and still need to
+  // say which DataWindow they came from.
+  string datawindow_handle = 3;
+
+  // EXACTLY ONE ARM IS SET, AND IT MUST AGREE WITH `event_id`. The id is carried separately rather
+  // than being inferred from the arm so that a consumer can switch on identity without unpacking the
+  // union, and so that an unknown future event still has an identity on the wire.
+  //
+  // Field numbers here follow EventId's numbering, which follows the source's declaration order. That
+  // alignment is deliberate: it makes a dropped or invented event visible as a gap.
+  oneof body {
+    InitContextMenuEvent init_context_menu = 11;                 // EventId 1   [:L11]
+    ContextMenuEvent context_menu = 12;                          // EventId 2   [:L12]
+    DdsGetFilterEvent dds_get_filter = 13;                       // EventId 3   [:L13]
+    ColumnExpInvokeMethodEvent column_exp_invoke_method = 14;     // EventId 4   [:L14]
+    DwnRButtonDownEvent dwn_rbutton_down = 15;                    // EventId 5   [:L15]
+    DwnRButtonUpEvent dwn_rbutton_up = 16;                        // EventId 6   [:L16]
+    DwnRowChangeEvent dwn_row_change = 17;                        // EventId 7   [:L17]
+    DwnRowChangingEvent dwn_row_changing = 18;                    // EventId 8   [:L18]
+    DwnLButtonDblClkEvent dwn_lbutton_dbl_clk = 19;               // EventId 9   [:L19]
+    DwnLButtonClkEvent dwn_lbutton_clk = 20;                      // EventId 10  [:L20]
+    DwnChangingEvent dwn_changing = 21;                           // EventId 11  [:L21]
+    DwnItemChangeFocusEvent dwn_item_change_focus = 22;           // EventId 12  [:L22]
+    DwnItemChangeEvent dwn_item_change = 23;                      // EventId 13  [:L23]
+    DoItemChangeEvent do_item_change = 24;                        // EventId 14  [:L24]
+    ItemChangedEvent item_changed = 25;                           // EventId 15  [:L25]
+    DoItemChangedEvent do_item_changed = 26;                      // EventId 16  [:L26]
+    DwnItemValidationErrorEvent dwn_item_validation_error = 27;    // EventId 17  [:L27]
+    DdsFilteredEvent dds_filtered = 28;                           // EventId 18  [:L28]
+    DwnKillFocusEvent dwn_kill_focus = 29;                        // EventId 19  [:L29]
+    DwnLButtonUpEvent dwn_lbutton_up = 30;                        // EventId 20  [:L30]
+    DwnSetFocusEvent dwn_set_focus = 31;                          // EventId 21  [:L31]
+    ColumnExpTraceEvent column_exp_trace = 32;                    // EventId 22  [:L32]
+  }
+}
+
+// OrderedDispatchReport - which steps of a conditionally ordered dispatch actually ran.
+//
+// Exists for `ondoitemchanged`, whose three steps are each conditional [:L313-L319], and for the
+// raw events whose broker edge is guarded by an IsValid check [:L138, :L147] or a subscriber check
+// [:L166]. WITHOUT IT A CONSUMER CANNOT DISTINGUISH "the step was conditionally skipped" FROM "the
+// step failed silently", and those are different facts about the same absence.
+message OrderedDispatchReport {
+  // Step 1 of [:L313-L315]: the column-expression service's changed handler. False when that service
+  // is disabled - which is also why C-04 exposes its `#Enabled` state (Section 11).
+  bool column_expression_handler_ran = 1;
+
+  // Step 2 of [:L316-L318]: the broker trigger. False when the topic has no subscriber.
+  bool broker_trigger_ran = 2;
+
+  // Step 3 of [:L319]: the semantic event. The legacy fires this UNCONDITIONALLY on the
+  // `ondoitemchanged` path, so a false here on that path is a genuine anomaly rather than a skip.
+  bool semantic_handler_ran = 3;
+
+  // True when the handler short-circuited on the event gate before any step ran - the early-out at
+  // [:L124], [:L130], [:L176] or [:L187]. A GATED EVENT REPORTS CONTINUE, NOT PREVENTION, because the
+  // legacy returns 0 from those early-outs; this flag is how the two stay distinguishable.
+  bool gated_out = 4;
+
+  // True when the legacy's IsValid guard stopped the broker edge because the control had been
+  // destroyed by the preceding handler [:L138, :L147].
+  bool target_became_invalid = 5;
+}
+
+// EventResult - the outcome of one event occurrence, carried in either direction.
+//
+// SERVER TO CLIENT it is the dispatch outcome of a notification the client sent. CLIENT TO SERVER it
+// is the client's answer to a handler invocation the server sent.
+//
+// THE TWO-STAGE VETO IS THE REASON THIS IS NOT A SINGLE RETURN VALUE. A raw event consults the
+// semantic handler and then the broker, and either edge can stop the dispatch [:L115-L117 for both,
+// :L120-L121 for the broker alone]. Reporting one combined verdict would tell a consumer that the
+// dispatch stopped without telling it which edge stopped it - and since the two edges have different
+// subscribers and different remedies, that difference is the diagnostically useful part.
+//
+// SEVERAL FIELDS ARE EVENT-SPECIFIC, and each says which events it applies to. A flat message is
+// preferred over a per-event result union because the veto fields, the report and the sequencing
+// apply to every event uniformly; a union would duplicate them 22 times.
+message EventResult {
+  // Matches the EventNotification this answers.
+  string correlation_id = 1;
+
+  EventId event_id = 2;
+
+  // The SEMANTIC handler's edge. CONTINUE when the handler allowed the dispatch, or when the event
+  // has no semantic handler (`ondwnrbuttonup` [:L120] and `ondwnlbuttonup` [:L395] consult only the
+  // broker).
+  Veto.Result semantic_veto = 3;
+
+  // The BROKER's edge, from the topic's subscribers. CONTINUE when no subscriber vetoed or when the
+  // edge did not run - `broker` and `dispatch.broker_trigger_ran` together distinguish "ran and
+  // allowed" from "did not run".
+  Veto.Result broker_veto = 4;
+
+  // The topic the broker edge used, DECOMPOSED. Absent when the event has no broker edge.
+  BrokerTopic topic = 5;
+
+  OrderedDispatchReport dispatch = 6;
+
+  // THE RAW NUMERIC THE LEGACY EVENT RETURNED, verbatim.
+  //
+  // Carried IN ADDITION TO the structured veto fields, not instead of them, and the reason is
+  // parity rather than redundancy: a characterization recording compares the number the legacy
+  // handler produced. The structured fields are how a consumer should REASON; this field is what a
+  // recording COMPARES. For a void event it is 0.
+  int64 return_value = 7;
+
+  // APPLIES TO EventId 13, 14 and 17 ONLY (ondwnitemchange, ondoitemchange,
+  // ondwnitemvalidationerror). The four-value alphabet of Section 3.
+  //
+  // NOTE FOR EventId 13 AND 17: this reports the value the event YIELDS, after the legacy's own
+  // rewrites - 3 becomes 1 [:L225] and the default arm becomes 2 [:L250]. `return_value` reports the
+  // same number; the enum reports it typed. What a HANDLER returned before a rewrite is
+  // `DwnItemValidationErrorEvent.stashed_item_change_ret_code` on the next event in the chain.
+  ItemChangeResult item_change_result = 8;
+
+  // APPLIES TO EventId 4 ONLY (oncolumnexpinvokemethod). The `any` return.
+  //
+  // An AnyValue rather than a string, so a macro that returns a decimal, a date or a null stays
+  // distinguishable from one that returns their string renderings - the coercion the expression
+  // engine then performs depends on which it was.
+  common.v1.AnyValue any_result = 9;
+
+  // APPLIES TO EventId 3 ONLY (onddsgetfilter). THE `ref string filter` OUT-PARAMETER.
+  //
+  // EXPLICIT PRESENCE IS LOAD-BEARING HERE. A `ref` parameter distinguishes "the handler assigned an
+  // empty filter", which means match nothing, from "the handler did not touch the parameter", which
+  // means it declined to filter at all. A plain string field would render both as "" and silently
+  // merge two different instructions.
+  optional string produced_filter = 10;
+
+  // Present when the legacy would have surfaced a dialog. Only the delivery channel changes; see
+  // StructuredError.
+  StructuredError error = 11;
+
+  // The session state AFTER this event, for the synchronous group. Carried because the stash and the
+  // re-entrancy guards are mutated BY these events, and a consumer that had to re-read them with a
+  // separate call could not observe the intermediate value the next event will consume.
+  ValidationSessionState state = 12;
+}
+
+message EventChainRequest {
+  // Required for every message in a SYNCHRONOUS group. A SEQUENCED notification may omit it.
+  //
+  // SENDING AN ITEM-CHANGE EVENT WITHOUT A SESSION IS A DEFINED ERROR AND NEVER AN IMPLICIT SESSION
+  // CREATION. An implicit session would silently give each event its own state, and the stash the
+  // validation-error event reads would always be empty - the chain would appear to work and would
+  // produce the wrong branch at [:L338-L340] every time. Failing loudly is the whole point.
+  string session_id = 1;
+
+  SequencingToken token = 2;
+
+  oneof payload {
+    // The client reports an event and asks DataServices to dispatch it.
+    EventNotification notify = 3;
+
+    // The client answers a handler invocation DataServices sent - the inverted half.
+    EventResult result = 4;
+  }
+}
+
+message EventChainResponse {
+  string session_id = 1;
+
+  SequencingToken token = 2;
+
+  oneof payload {
+    // The outcome of a notification the client sent.
+    EventResult result = 3;
+
+    // DataServices asks the client to run the application's handler for this event.
+    EventNotification invoke = 4;
+
+    // A stream-level fault. THE CANONICAL CASE IS AN OUT-OF-ORDER ARRIVAL WITHIN A SYNCHRONOUS
+    // GROUP, which fails the session rather than being reordered - see SequencingToken. The session
+    // is unusable afterwards and must be closed.
+    StructuredError error = 5;
+  }
+}
+
+// ==============================================================================================
+//  SECTION 7 - C-03 : THE EVENT GATE, AND Update
+// ==============================================================================================
+
+// EventGate - the composable disable mask.
+//
+// THE COUPLING ON EID_ITEMCHANGE IS THE REASON THIS BELONGS IN THE CONTRACT DESCRIPTION RATHER THAN
+// IN AN IMPLEMENTATION NOTE (C-B, C-K). The in-source comment at [se_cst_dw.sru:L43] records that
+// disabling item change ALSO SUPPRESSES COLUMN-EXPRESSION CALCULATION. So a consumer that disables
+// item change to quieten a notification will ALSO, silently, stop every bound column expression from
+// recalculating - and it will get stale computed values with no error anywhere.
+//
+// That is legacy behaviour and it is PRESERVED. What is added is that the contract SAYS SO, so the
+// consequence is discoverable before it is observed. It is also why C-03's gate methods have an
+// observable effect on C-04: the mechanism is visible at [:L313-L315], where the column-expression
+// service's changed handler is invoked from inside the item-changed path - a path the gate
+// short-circuits at [:L187].
+message EventGate {
+  // The current mask, a bit-or of Bit values [:L89].
+  int64 mask = 1;
+
+  enum Bit {
+    // No bit. THE LEGACY REJECTS THIS as an argument: both mutators return E_INVALID_ARGUMENT when
+    // the requested event is 0 [:L506, :L530]. It is the protocol zero and never a legacy event.
+    EID_UNSPECIFIED = 0;
+
+    // RowFocusChanging and RowFocusChanged [:L41]. Tested at [:L124] and [:L130].
+    EID_ROWFOCUSCHANGE = 1;
+
+    // ItemFocusChanged [:L42]. Tested at [:L176].
+    EID_ITEMFOCUSCHANGE = 2;
+
+    // ItemChanged [:L43]. Tested at [:L187].
+    //
+    // DISABLING THIS ALSO SUPPRESSES COLUMN-EXPRESSION CALCULATION - the coupling documented above,
+    // recorded in the oracle's own inline comment at [:L43].
+    EID_ITEMCHANGE = 4;
+  }
+}
+
+message GetEventGateRequest {
+  string session_id = 1;
+}
+
+message GetEventGateResponse {
+  EventGate gate = 1;
+
+  // Per-bit query results, mirroring `of_iseventdisabled(readonly long evt) -> boolean` [:L109],
+  // whose whole body is a bare bit test [:L486]. Carried as an explicit list rather than leaving the
+  // consumer to test the mask itself, because the legacy exposes a PREDICATE and a caller may depend
+  // on its answer for a composite argument - BitTest over a multi-bit value is not the same question
+  // as "are all of these bits set".
+  repeated EventGate.Bit disabled_bits = 2;
+
+  common.v1.RetCode.Value ret_code = 3;
+}
+
+message DisableEventRequest {
+  string session_id = 1;
+
+  // A bit-or of EventGate.Bit values. ZERO YIELDS E_INVALID_ARGUMENT [:L506], reproduced exactly.
+  int64 event_mask = 2;
+}
+
+// Response to DisableEvent.
+//
+// ============ THE RETURN-TYPE INCONSISTENCY IS REAL AND IS ANNOTATED, NOT HARMONISED (C-B) =======
+// The legacy declares the two mutators with DIFFERENT return types:
+//
+//     public function long    of_disableevent (readonly long evt)   [:L110, body :L489-L511]
+//     public function integer of_enableevent  (readonly long evt)   [:L111, body :L513-L535]
+//
+// `long` against `integer` - and their bodies are otherwise mirror images, both rejecting 0 with
+// E_INVALID_ARGUMENT and both returning OK on success. PowerBuilder `integer` is 16-bit while `long`
+// is 32-bit, so the enable path is declared with a NARROWER return type than the disable path for no
+// reason the source gives. It is almost certainly an oversight in the original.
+//
+// IT IS NOT REPAIRED HERE, and it is not silently equalized either. Both responses carry
+// common.v1.RetCode.Value, whose values all fit both widths, so the wire is not made lossy by the
+// legacy's inconsistency - and the inconsistency is recorded at both messages so a reader of the
+// generated code does not conclude the oracle was misread. Harmonising it in silence is exactly the
+// improvement C-B forbids; recording it is what C-B requires.
+// ==============================================================================================
+message DisableEventResponse {
+  // From `of_disableevent`, declared `long`. OK on success, E_INVALID_ARGUMENT when event_mask was 0.
+  common.v1.RetCode.Value ret_code = 1;
+
+  // The mask after the bit-or at [:L508].
+  EventGate gate = 2;
+}
+
+message EnableEventRequest {
+  string session_id = 1;
+
+  // A bit-or of EventGate.Bit values. ZERO YIELDS E_INVALID_ARGUMENT [:L530], reproduced exactly.
+  int64 event_mask = 2;
+}
+
+message EnableEventResponse {
+  // From `of_enableevent`, declared `integer` [:L111] - NARROWER THAN ITS DISABLE COUNTERPART in the
+  // legacy, for no reason the source gives. See the block on DisableEventResponse: the difference is
+  // annotated rather than harmonised, and RetCode.Value holds every value either width can carry.
+  common.v1.RetCode.Value ret_code = 1;
+
+  // The mask after the bit-clear at [:L532].
+  EventGate gate = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+//  Update - THE DATAWINDOW-FACING PROJECTION OF THE UPDATE CONTRACT
+// ---------------------------------------------------------------------------------------------
+
+message UpdateRequest {
+  string datawindow_handle = 1;
+
+  // The session, when the update is issued inside a validation chain. Optional: an update may be
+  // issued outside one.
+  string session_id = 2;
+
+  // The rows to submit. EACH ROW MUST CARRY BOTH ITS CURRENT AND ITS ORIGINAL VALUES for every marked
+  // column - see DataWindowRow.original_values and common.v1.ConflictDetail for why the original-value
+  // shadow is not optional under `updatewhere=1`.
+  repeated DataWindowRow rows = 3;
+
+  // `AcceptText` before submitting, matching the legacy update call's first argument.
+  bool accept_text = 4;
+
+  // Reset the modification flags after a successful update.
+  //
+  // THE LEGACY PASSES FALSE, DELIBERATELY, so the CALLER OWNS THE BUFFER STATE AFTERWARDS. The
+  // default here is therefore false, and a consumer that sets it true is asking for behaviour the
+  // legacy does not exhibit. Reproduced as the legacy's value rather than as the value that looks
+  // tidier.
+  bool reset_flags = 5;
+}
+
+// Response to Update.
+//
+// ================= ON CONCURRENCY MISMATCH: gRPC Aborted, AND NO SILENT OVERWRITE ===============
+// A mismatch is NOT reported in this message. It is returned as the gRPC status code ABORTED, with a
+// common.v1.ConflictDetail attached to the status, carrying the CURRENT ROW STATE alongside the
+// original values the caller believed were current.
+//
+// ABORTED, NOT FAILED_PRECONDITION: the operation MAY succeed if the caller re-reads and retries at a
+// higher level, which is precisely what Aborted means and what FailedPrecondition does not. Aborted
+// is also THE CANONICAL gRPC MAPPING TO HTTP 409, which is how Gateway's REST projection surfaces it
+// unchanged.
+//
+// THE CALLER IMPLEMENTS AN EXPLICIT RETRY-OR-SURFACE POLICY. There is no last-writer-wins path
+// anywhere in this system and no field in this contract that would enable one: NO SILENT OVERWRITE,
+// ANYWHERE. The conflict detail exists so that a mismatch is always reported rather than resolved by
+// guessing, and comparing its current values against its original values is what tells a caller WHICH
+// column moved underneath it.
+// ==============================================================================================
+message UpdateResponse {
+  common.v1.RetCode.Value ret_code = 1;
+
+  // Row counts by operation, as the legacy's counts callback reports them.
+  int64 rows_inserted = 2;
+  int64 rows_updated = 3;
+  int64 rows_deleted = 4;
+
+  // A database failure that is NOT a concurrency conflict - a constraint violation, a connection
+  // fault. `sqlsyntax` is REDACTED by common.v1.DbError's own contract; nothing here widens it.
+  //
+  // A CONFLICT DOES NOT ARRIVE HERE. It arrives as the Aborted status above, which is why this field
+  // and that status are not two ways of saying one thing.
+  common.v1.DbError error = 5;
+}
+
+
+// ==============================================================================================
+//  SECTION 8 - C-03 : THE HEADLESS HALVES, AND THE RENDERING HALF THAT IS DELIBERATELY ABSENT
+//  --------------------------------------------------------------------------------------------
+//  ================ THIS SECTION IS WHERE C-D IS EASIEST TO BREACH, SO IT IS STATED IN FULL =======
+//
+//  Three of the five DataWindow services in scope are irreducibly PART PRESENTATIONAL, and each is
+//  SPLIT. The HEADLESS HALF SHIPS, here, on C-03. The RENDERING HALF IS DEFERRED to DesignSystem and
+//  is reached, eventually, through Gateway's reserved /v1/design/** route - a route that returns 501
+//  and has nothing behind it, because DesignSystem is one of the four services this refactor must not
+//  implement even partially and even to stub out.
+//
+//  WHAT SHIPS HERE:
+//    * filter and sort EXPRESSION TEXT
+//    * the drop-down search state, and the row and filtered counts
+//    * the context-menu ITEM MODEL: labels, identifiers, enabled and split flags, and COMPUTED
+//      LOGICAL TEXT WIDTHS
+//
+//  WHAT IS DELIBERATELY ABSENT FROM THIS ENTIRE FILE - enumerated so the gap is auditable rather
+//  than asserted. NO field anywhere in this file carries any of:
+//    * window geometry - the legacy GetWindowRect [n_cst_dwsvc_dropdownsearch.sru:L474,
+//      n_cst_dwsvc_contextmenu.sru:L187], OffsetRect [:L475] and SetWindowPos [:L489] results
+//    * window visibility control - ShowWindow [n_cst_dwsvc_dropdownsearch.sru:L256]
+//    * DPI-to-pixel conversion - PX2MMX(D2PX(...)) [n_cst_dwsvc_contextmenu.sru:L1241, :L1243, :L1409,
+//      :L1411] and PX2MMY(U2PY(10)) [n_cst_dwsvc_columnsort.sru:L359, :L361]
+//    * font metrics or font objects - n_cst_font [n_cst_dwsvc_contextmenu.sru:L1092, :L1098, :L1266,
+//      :L1277]
+//    * pixel coordinates computed by this contract, window handles, or IME state
+//    * a popup-menu object - the `n_cst_popupmenu submenu` field of the legacy `menuitemdata`
+//      structure [n_cst_dwsvc_contextmenu.sru:L18], and the n_cst_popupmenu-typed submenu API
+//      [:L96-L114], are DesignSystem types and do not appear here in any form
+//    * menu-indicator geometry constants - ARROW_BTN_WIDTH [n_cst_dwsvc_contextmenu.sru:L63]
+//
+//  AND, EQUALLY DELIBERATELY, THERE IS NO ANTICIPATION OF THE ABSENT HALF EITHER: no design.v1
+//  message, no reserved field range held open for one, no "for future rendering" placeholder field, no
+//  commented-out declaration awaiting Phase 2. Reserving space would be a partial implementation of a
+//  deferred service by another name, and C-D forbids exactly that. When DesignSystem is built it will
+//  define its own contract; this file will not have pre-empted it.
+//
+//  THE ONE THING THAT LOOKS LIKE GEOMETRY AND IS NOT: the xpos/ypos fields on the five mouse events
+//  in Section 5. Those are INPUT COORDINATES SUPPLIED BY THE RUNTIME to the event, in the
+//  DataWindow's own logical units, consumed by in-scope logic as data. This contract neither computes
+//  nor converts nor renders them. The distinction is between carrying an input a handler receives and
+//  carrying an output a renderer produces, and only the second is the deferred half.
+// ==============================================================================================
+
+// DropDownSearchState - the headless half of the drop-down search service.
+//
+// SHIPS: which columns are searched, whether filtered rows are shown, the CONSTRUCTED FILTER
+// EXPRESSION, and the counts. DEFERRED: the drop-down window's position and visibility, and IME text
+// input.
+message DropDownSearchState {
+  // A bit-or of FilterType values [n_cst_dwsvc_dropdownsearch.sru:L50-L53].
+  //
+  // `unsignedlong` at source, so uint64 here per the scalar rule. THE LEGACY DEFAULT IS
+  // FILTER_DISP + FILTER_DISP_PY = 3, not FILTER_ALL [:L57] - the data column is NOT searched unless
+  // the caller asks. Preserved as the legacy's default rather than the more generous one.
+  uint64 filter_type = 1;
+
+  // `#ShowFilteredRows` [:L58] - show the rows the filter removed.
+  bool show_filtered_rows = 2;
+
+  // The column the filter applies to.
+  string column_name = 3;
+
+  // THE CONSTRUCTED FILTER EXPRESSION, VERBATIM - the headless product of this service and the reason
+  // it can ship at all.
+  //
+  // The legacy builds it at [:L315-L330] as, for the display clause,
+  // `(Lower(<dispCol>) LIKE '%<data>%')` [:L319], optionally OR-ed with the pinyin clause below, and
+  // optionally OR-ed with a data-column clause.
+  //
+  // TWO DEFECTS TRAVEL WITH THIS FIELD AND ARE PRESERVED (C-B):
+  //   1. THE USER'S INPUT IS INTERPOLATED UNESCAPED. A quote in the search text lands inside a quoted
+  //      expression literal. The observable generated expression is preserved byte for byte, and the
+  //      exposure is recorded rather than silently fixed - fixing it would change the generated
+  //      expression, which is the one thing parity measures.
+  //   2. The input is lower-cased and its spaces are replaced by `%` wildcards [:L316-L317] before
+  //      interpolation, so a multi-word search becomes a wildcard chain. That is intended behaviour,
+  //      but it means this field is NOT the user's text and must not be shown back to them as such.
+  string filter_expression = 4;
+
+  // Rows remaining and rows removed, matching `onddsfiltered`'s two count parameters.
+  int64 row_count = 5;
+  int64 filtered_count = 6;
+
+  // `of_hasfilter()` [:L74] - whether a filter is currently applied.
+  bool has_filter = 7;
+
+  // Which columns the search covers [n_cst_dwsvc_dropdownsearch.sru:L50-L53]. A BITMASK, so these are
+  // the named bits rather than a set of mutually exclusive values - `filter_type` above is the mask.
+  enum FilterType {
+    // No column searched. The protocol zero; the legacy has no such constant.
+    FILTER_NONE = 0;
+    FILTER_DISP = 1;     // the Display column                                    [:L50]
+    FILTER_DISP_PY = 2;  // the Display column, by PINYIN FIRST LETTER of the input [:L51]
+    FILTER_DATA = 4;     // the Data column                                        [:L52]
+    // FILTER_DISP + FILTER_DISP_PY + FILTER_DATA [:L53]. A REAL LEGACY CONSTANT and a composite, so
+    // it is a legal distinct enum value (7 collides with none of 0, 1, 2, 4) and needs no
+    // allow_alias. It is included because the legacy declares it and a call site may pass it.
+    FILTER_ALL = 7;
+  }
+}
+
+// PinyinLike - the flags of the `PinyinFirstLetterLike` DataWindow filter function.
+//
+// ============= THESE FLAGS ARE DOCUMENTED, WHICH CORRECTS THE REFACTOR PLAN (C-K) ================
+// The plan states in two places - its native-binding matrix and its open-risk R1 - that the pinyin
+// flag semantics are UNDOCUMENTED. THEY ARE DOCUMENTED, at ws_objects/pfw.shared.pbl.src/enums.sru,
+// under the oracle's own comment `//PinyinFirstLetterLike:[flags]` at :L1146, with all three bits
+// named and commented at :L1147-L1149. This file therefore models them as a NAMED BITMASK rather than
+// as the opaque integer the plan's wording would have licensed.
+//
+// WHAT REMAINS GENUINELY UNKNOWN is narrower and is unaffected by this correction: the PINYIN LOOKUP
+// TABLE ITSELF lives only inside the closed native binary, so bit-exact match results must still be
+// characterized against the behavioural oracle rather than reproduced from a third-party table. The
+// flags are known; the table is not.
+//
+// THE CALL SITE PASSES 7 - all three bits set - at [n_cst_dwsvc_dropdownsearch.sru:L323], and it does
+// so only when the input matches `[a-zA-Z]` [:L322], so a non-Latin search never takes the pinyin
+// path at all.
+message PinyinLike {
+  enum Flag {
+    // No flags. The protocol zero; the legacy passes a value, never an absent one.
+    PY_LIKE_NONE = 0;
+    // Ignore case.                                                              [enums.sru:L1147]
+    PY_LIKE_IGNORE_CASE = 1;
+    // Ignore full-width versus half-width forms.                                [enums.sru:L1148]
+    PY_LIKE_IGNORE_WIDTH = 2;
+    // Fuzzy pronunciation matching, with the oracle's own substitution set l=n, f=h, r=l.
+    //                                                                           [enums.sru:L1149]
+    PY_LIKE_FUZZY_SOUND = 4;
+  }
+}
+
+// ColumnSortState - the headless half of the column-sort service.
+//
+// SHIPS: the sort direction per column and the CONSTRUCTED SORT EXPRESSION. DEFERRED: the sort
+// indicator's geometry, which the legacy computes with PX2MMY(U2PY(10))
+// [n_cst_dwsvc_columnsort.sru:L359, :L361], and the indicator object itself, whose name suffix is
+// ARROWSUFFIX = "_arw" [:L26].
+message ColumnSortState {
+  // Per-column sort state, in the order the sort applies. ORDER IS SIGNIFICANT: a multi-column sort is
+  // ordered, and the legacy's sort expression is position-dependent.
+  repeated ColumnSort columns = 1;
+
+  // THE CONSTRUCTED SORT EXPRESSION, VERBATIM - the DataWindow `Sort` property string, for example
+  // "age A salary A " as the primary fixture declares it. The headless product of this service.
+  string sort_expression = 2;
+
+  message ColumnSort {
+    string column_name = 1;
+    int64 column_id = 2;
+    Direction direction = 3;
+  }
+
+  // [n_cst_dwsvc_columnsort.sru:L37-L39]. SORT_NONE is a genuine legacy constant valued 0, so unlike
+  // most enums in this file the zero here is the oracle's own value and not a protocol sentinel.
+  enum Direction {
+    SORT_NONE = 0;  // [:L37]
+    SORT_ASC = 1;   // [:L38]
+    SORT_DESC = 2;  // [:L39]
+  }
+}
+
+// ContextMenuItem - the headless half of the context-menu service: THE ITEM MODEL.
+//
+// A field-for-field carry of the legacy `menuitemdata` structure
+// [n_cst_dwsvc_contextmenu.sru:L12-L21], LESS TWO FIELDS, both omissions stated rather than silent:
+//
+//   * `n_cst_popupmenu submenu` [:L18] IS OMITTED. It is a live pointer to a DesignSystem type, so it
+//     is both unserializable and out of scope under C-D. `has_submenu` below reports the item's SHAPE
+//     - that it opens a submenu - without carrying the menu. The submenu's own items are conveyed as
+//     nested ContextMenuItem values, which is the headless equivalent.
+//   * `boolean menuowner` [:L20] IS OMITTED. It records whether the service owns the submenu OBJECT's
+//     lifetime, so that it knows whether to destroy it. That is in-process object-ownership
+//     bookkeeping with no meaning across a boundary, and carrying it would be exactly the
+//     DataServices-internal detail C-A excludes.
+message ContextMenuItem {
+  // `text` [:L14] - the label. Observable output, carried verbatim including any localization the
+  // legacy itself applied.
+  string text = 1;
+
+  // `id` [:L17]. `unsignedlong` at source, so uint64 here.
+  //
+  // IDENTIFIERS AT OR ABOVE 10000 ARE RESERVED BY THE FRAMEWORK: MID_RESERVED = 10000 marks the start
+  // [:L37] and the built-ins occupy 10000 through 10007 [:L38-L45] - automatic column width, automatic
+  // width for all columns, check/uncheck/invert-check a whole column, copy a column, paste over a
+  // column, and copy one cell. An application id at or above 10000 collides with a built-in, and the
+  // legacy does not defend against it, so the range is documented here rather than enforced.
+  uint64 id = 2;
+
+  // `enabled` [:L13].
+  bool enabled = 3;
+
+  // `split` [:L19] - the submenu opens as a split button rather than a plain cascade.
+  bool split = 4;
+
+  // `tiptext` [:L16] - the item's tooltip TEXT. Text, not geometry: where and how a tooltip is drawn
+  // is the deferred half.
+  string tiptext = 5;
+
+  // `image` [:L15] - the image resource NAME as the legacy stores it.
+  //
+  // A NAME AND NOTHING MORE: no image bytes, no dimensions, no scaling factor and no DPI variant.
+  // Resolving the name to a picture, and drawing it, is the deferred rendering half.
+  string image = 6;
+
+  // A separator item, produced by `of_addseparator()` [:L73] and `of_insertseparator(...)` [:L89]
+  // rather than by a field of the legacy structure. Carried explicitly because a separator is
+  // otherwise indistinguishable on the wire from an item with an empty label, and those are different
+  // things.
+  bool separator = 7;
+
+  // Whether this item opens a submenu. THE SHAPE, NOT THE MENU - see the omission note above.
+  bool has_submenu = 8;
+
+  // The submenu's items, when has_submenu is set. Recursive, because menus nest.
+  repeated ContextMenuItem submenu_items = 9;
+
+  // THE COMPUTED LOGICAL TEXT WIDTH, in the DataWindow's own resolution-independent logical units.
+  //
+  // THIS IS THE HEADLESS HALF OF A MEASUREMENT AND THE BOUNDARY IS EXACT (C-D). What ships is the
+  // logical width the item's label requires. What does NOT ship, and is not derivable from this
+  // field, is the pixel width - the legacy reaches that by creating a font object
+  // [n_cst_dwsvc_contextmenu.sru:L1092, :L1098, :L1266, :L1277] and converting through
+  // PX2MMX(D2PX(...)) [:L1241, :L1243, :L1409, :L1411]. FONT MEASUREMENT AND DPI CONVERSION ARE THE
+  // DEFERRED HALF; only the logical measure crosses.
+  //
+  // 0 means "not computed", which is the ordinary case for an item a consumer supplies inbound.
+  int64 logical_text_width = 10;
+}
+
+// ContextMenuModel - the whole item list plus the built-in toggles.
+message ContextMenuModel {
+  // The items, in display order.
+  repeated ContextMenuItem items = 1;
+
+  // The five built-in item toggles [n_cst_dwsvc_contextmenu.sru:L49-L53]. EACH DEFAULTS TO TRUE IN THE
+  // LEGACY, which matters because a protobuf bool defaults to FALSE: a consumer that sends an
+  // unpopulated model is asking for every built-in to be hidden, which is NOT the legacy's default
+  // state. Stated here because it is the kind of mismatch that produces a silently different menu.
+  bool col_auto_width = 2;  // #ColAutoWidth [:L49]
+  bool col_check = 3;       // #ColCheck     [:L50]
+  bool col_copy = 4;        // #ColCopy      [:L51]
+  bool col_paste = 5;       // #ColPaste     [:L52]
+  bool item_copy = 6;       // #ItemCopy     [:L53]
+
+  // The row and column the menu was raised on.
+  int64 row = 7;
+  DwObjectRef dwo = 8;
+}
+
+
+// ==============================================================================================
+//  SECTION 9 - C-04 : THE SEVEN STRUCTURES THAT *ARE* THE CONTRACT
+//  --------------------------------------------------------------------------------------------
+//  n_cst_dwsvc_columnexp.sru forward-declares seven structures at :L6-L19 and defines them at
+//  :L22-L83. COLLECTIVELY THEY ARE THE WIRE MODEL: nothing about this contract can be designed
+//  without them, and each is carried because it IS the contract - not because DataServices happens to
+//  use it internally (C-A). Where a field is carried, the comment says what would be LOST without it.
+//
+//  ONE OF THE SEVEN CANNOT CROSS INTACT, and that is stated at the point it applies rather than
+//  buried: see ForeignVarRef.
+// ==============================================================================================
+
+// ColumnExpData - `columnexpdata` [:L22-L42]. NINETEEN FIELDS, in the oracle's own order.
+message ColumnExpData {
+  string name = 1;                 // `string  name`     [:L23]  the bound column's name
+  int64 id = 2;                    // `long    id`       [:L24]  ONE-BASED column ordinal
+  DwObjectRef dwo = 3;             // `dwobject dwo`     [:L25]  a live object at source; a reference here
+  ColType col_type = 4;            // `long    coltype`  [:L26]  see the enum below
+
+  // `string exp` [:L27] - THE SOURCE, UNEXPANDED EXPRESSION TEXT, and the single most important field
+  // in this contract.
+  //
+  // IT IS THE UNEXPANDED TEXT, NOT THE REWRITTEN ONE. The parse routine
+  // `_of_parseexp(ref string exp, ref vardata vars[], ref funcdata fns[])` [:L171, implemented at
+  // :L1211] rewrites its expression argument IN PLACE, substituting static references away, and this
+  // field holds what was there BEFORE that. Section 10 states why transmitting the rewritten text
+  // instead would be irrecoverably lossy.
+  string exp = 5;
+
+  repeated VarData vars = 6;       // `vardata vars[]`   [:L28]
+  repeated FuncData fns = 7;       // `funcdata fns[]`   [:L29]
+
+  // `long relativecolids[]` [:L30] - the columns whose CHANGE triggers recalculation, by ONE-BASED
+  // ordinal.
+  repeated int64 relative_col_ids = 8;
+
+  // `long relativeinputcolids[]` [:L31] - the columns whose MANUAL USER INPUT triggers recalculation.
+  //
+  // NOT A DUPLICATE OF THE FIELD ABOVE, and the distinction is the legacy specification's own: a
+  // relative column recalculates on ANY value change, while a relative INPUT column recalculates ONLY
+  // when the user typed it [docs/n_cst_dwsvc_columnexp.md:L162-L163]. That is the `frominput` flag of
+  // `ondoitemchanged` [:L87] reaching the trigger decision.
+  repeated int64 relative_input_col_ids = 9;
+
+  // `long dupexps[]` [:L32] - THE MECHANISM BEHIND MULTIPLE EXPRESSIONS PER COLUMN, SELECTED BY WHICH
+  // COLUMN CHANGED. It is the legacy specification's fourth named capability
+  // [docs/n_cst_dwsvc_columnexp.md:L8]: one column may bind several expressions, and which one
+  // evaluates depends on which other column was modified. Without this array a consumer could see only
+  // one of a column's expressions and would silently lose the rest.
+  repeated int64 dup_exps = 10;
+
+  // `boolean emptystringisnull` [:L33] - treat an empty result as null.
+  //
+  // It is one of the two conditions behind the trace's `(null)` rendering [:L758], so it is
+  // observable in output and not merely a calculation preference.
+  bool empty_string_is_null = 11;
+
+  bool has_macro = 12;             // `boolean hasmacro`     [:L34]
+  bool always_calc = 13;           // `boolean alwayscalc`   [:L35]
+  bool trigger_event = 14;         // `boolean triggerevent` [:L36]
+  bool recursive = 15;             // `boolean recursive`    [:L37]
+  bool dirty = 16;                 // `boolean dirty`        [:L38]
+  bool empty = 17;                 // `boolean empty`        [:L39]
+  bool cacheable = 18;             // `boolean cacheable`    [:L40]
+
+  // `string computename` [:L41] - the generated compute object's name.
+  //
+  // OBSERVABLE, because the legacy composes it with the suffix `DWOSUFFIX` = "_columnexp" [:L95]. A
+  // consumer inspecting a DataWindow will see objects named that way, so the suffix is part of what
+  // the contract exposes rather than an internal naming choice.
+  string compute_name = 19;
+
+  // `columnexpdata.coltype` holds one of these [n_cst_dwsvc.sru:L26-L32].
+  //
+  // ================ DO NOT CONFLATE THIS WITH THE SEVEN VARIABLE TYPES OF SECTION 10 ==============
+  // Both sets have seven members and they are DIFFERENT DOMAINS. This one has NO BOOLEAN and it MERGES
+  // long with double into a single INTEGER/DECIMAL pair; the variable-type set has a boolean and keeps
+  // long and double apart. They describe different things - a DataWindow COLUMN's declared type versus
+  // a MACRO VARIABLE's declared type - and a consumer that mapped one onto the other would lose a
+  // distinction in each direction.
+  enum ColType {
+    COL_TYPE_UNKNOWN = 0;   // [n_cst_dwsvc.sru:L26]
+    COL_TYPE_STRING = 1;    // [:L27]
+    COL_TYPE_INTEGER = 2;   // [:L28]  covers legacy long AND integer
+    COL_TYPE_DECIMAL = 3;   // [:L29]  covers legacy decimal, real AND double
+    COL_TYPE_DATETIME = 4;  // [:L30]
+    COL_TYPE_DATE = 5;      // [:L31]
+    COL_TYPE_TIME = 6;      // [:L32]
+  }
+}
+
+// ColumnData - `columndata` [:L44-L48]. THE REVERSE DEPENDENCY INDEX.
+//
+// ============ THIS GRAPH MUST BE TRANSMITTED, NOT RECOMPUTED, AND HERE IS WHY (C-K) =============
+// It maps a COLUMN to the expressions and variables that DEPEND ON it, which is the inverse of what
+// the expression text states. It is the graph that makes DIRTY-PROPAGATION work: when a column
+// changes, this is what says which expressions must be recalculated.
+//
+// A CONSUMER CANNOT DERIVE IT FROM THE EXPRESSION TEXT WITHOUT REIMPLEMENTING THE PARSER - and the
+// parser is a hand-written character scanner with a three-phase state machine, two sigils, quote
+// tracking and bracket counting [:L1211-L1500]. Two independent implementations of that would diverge,
+// and the divergence would show up as an expression that quietly failed to recalculate.
+message ColumnData {
+  // `long flag` [:L45] - holds a CalcFlag value.
+  CalcFlag flag = 1;
+
+  // `integer indexes[]` [:L46] - the ONE-BASED indexes into the expression list of every expression
+  // depending on this column.
+  repeated int32 indexes = 2;
+
+  // `integer varindexes[]` [:L47] - the ONE-BASED indexes into the global variable table of every
+  // variable depending on this column.
+  repeated int32 var_indexes = 3;
+
+  // THE CALCULATION CACHE IS TRI-STATE, NOT BOOLEAN [:L113-L115].
+  //
+  // "NOT YET DETERMINED" IS A DISTINCT STATE FROM "DETERMINED NOT TO CALCULATE". Collapsing them would
+  // turn an undetermined column into a suppressed one: the legacy lazily promotes CLC_UNKNOWN to
+  // CLC_NO or CLC_YES on first use [:L218-L221, :L234-L239], so a column that arrived as UNKNOWN and
+  // was read as NO would never be evaluated at all.
+  enum CalcFlag {
+    CLC_UNKNOWN = 0;  // [:L113]  not yet determined
+    CLC_YES = 1;      // [:L114]  this column drives at least one expression
+    CLC_NO = 2;       // [:L115]  determined that it drives none
+  }
+}
+
+// VarData - `vardata` [:L50-L56]. One variable REFERENCE inside an expression.
+message VarData {
+  // `string name` [:L51] - the variable's logical name, without any sigil.
+  string name = 1;
+
+  // `string fullname` [:L52] - THE FULL MATCHED TOKEN FROM THE EXPRESSION TEXT, SIGILS INCLUDED.
+  //
+  // This is not a decorated copy of `name`: it is the exact substring the parser matched,
+  // `Mid(sExp, nMacPos, nPos - nMacPos)` [:L1412], so it carries the `$`, `$$` or `@` prefix
+  // verbatim. It is also THE REPLACEMENT KEY - the legacy substitutes a static reference by
+  // ReplaceAll-ing this exact string out of the expression [:L1435, :L2214] - so a consumer that
+  // altered it would break substitution.
+  string full_name = 2;
+
+  // `integer index` [:L53] - the ONE-BASED index into the global variable table.
+  //
+  // ZERO MEANS "NOT YET BOUND", AND THAT IS A REQUEST, NOT AN ERROR. The legacy resolves a zero index
+  // by name at calculation time and CACHES THE RESULT BACK into the array [:L2189-L2195]; an
+  // unresolvable name is a parse error [:L2191-L2193]. So a producer may legitimately send 0 to mean
+  // "resolve this by name", and a consumer must not treat 0 as a malformed reference.
+  int32 index = 3;
+
+  // `boolean isctx` [:L54] - THE REFERENCE IS CONTEXT-SCOPED.
+  //
+  // WHAT THAT MEANS MECHANICALLY, since the field name alone does not say: a context-scoped reference
+  // resolves against the CALLING context's DataWindow and row rather than against this service's own
+  // global variable table. The legacy branches on it at [:L2180-L2187] - with `ismacro` it calls the
+  // CONTEXT service's variable calculator [:L2182], and without it reads a COLUMN VALUE from the
+  // context row [:L2185].
+  //
+  // THE SIGIL THAT SETS IT IS `@`, declared MACRO_CONTEXT = "@" [:L1253] and matched at [:L1292-L1300].
+  // That sigil is NOT among the five expansion modes of Section 10, because it selects the RESOLUTION
+  // SCOPE rather than the expansion timing, and the two are orthogonal - `@name` and `@$name` are both
+  // context-scoped and differ in `ismacro`.
+  //
+  // ONE LEGACY RESTRICTION TRAVELS WITH IT AND IS PRESERVED (C-B): A CONTEXT-SCOPED FUNCTION MACRO IS
+  // EXPLICITLY UNSUPPORTED. On meeting an opening bracket after a context sigil the parser raises its
+  // own error - "function macros referencing the context are not supported" - and returns
+  // E_INVALID_ARGUMENT [:L1306-L1310]. It is a restriction, not a gap, and it is reported rather than
+  // worked around.
+  bool is_ctx = 4;
+
+  // `boolean ismacro` [:L55] - the reference is a macro rather than a plain value. Set at [:L1289] and
+  // [:L1297].
+  bool is_macro = 5;
+
+  // THE EXPANSION MODE THAT APPLIED TO THIS REFERENCE.
+  //
+  // A CLASSIFICATION OF `full_name`, WHICH REMAINS AUTHORITATIVE - the same relationship
+  // DwObjectRef.col_type_prefix has to col_type. It is carried rather than re-derived for the reason
+  // ColumnData gives: re-deriving it means reimplementing the sigil grammar at every consumer, and two
+  // implementations of that grammar will not agree forever.
+  //
+  // THE MODE IS PER-REFERENCE, WHICH IS WHY IT IS A FIELD OF *THIS* MESSAGE AND NOT OF ColumnExpData.
+  // Section 10 has the proof from the legacy specification.
+  ExpansionMode expansion_mode = 6;
+}
+
+// FuncData - `funcdata` [:L58-L63]. One macro-function reference inside an expression.
+message FuncData {
+  // `string name` [:L59] - the function name. For the dynamic form the parser takes it from offset +2
+  // to skip both sigils [:L1313]; for the direct form from offset +1 [:L1315].
+  string name = 1;
+
+  // `string fullname` [:L60] - the full matched token, and the ReplaceAll key [:L2311].
+  string full_name = 2;
+
+  // `string args[]` [:L61] - THE ARGUMENT EXPRESSIONS AS TEXT, one per argument, in source order and
+  // ZERO-BASED here against ONE-BASED at source.
+  //
+  // THEY ARE EXPRESSIONS, NOT VALUES. The parser extracts them by bracket counting with quote
+  // tracking [:L1319-L1350], so an argument may itself contain a variable reference, a nested call or a
+  // quoted literal - the legacy specification's `$FormatPrice(n2, $精度)`
+  // [docs/n_cst_dwsvc_columnexp.md:L117] passes a STATIC-EXPANDED VARIABLE as an argument, which is
+  // the same per-reference-mode point made from inside an argument list.
+  repeated string args = 3;
+
+  // `boolean builtin` [:L62].
+  //
+  // ============= THE NAME IS MISLEADING AND THE MEANING IS PRESERVED VERBATIM (C-B) ===============
+  // It does NOT mean "a DataWindow built-in function". It is assigned directly from the double-sigil
+  // test - `fnData.builtIn = bDD` [:L1311], where bDD is true when the character after `$` is another
+  // `$` [:L1290] - so IT MEANS "WRITTEN WITH `$$`", i.e. the DYNAMIC macro form. It is what routes
+  // dispatch to the `Invoke` sentinel branch [:L2237, :L2258] instead of the direct branch [:L2286].
+  //
+  // The field is neither renamed nor reinterpreted. A consumer must read it as "dynamic form", and
+  // this comment exists so that reading is available without deducing it from the parser.
+  bool builtin = 4;
+}
+
+// GlobalVarData - `globalvardata` [:L65-L71]. One entry in the global variable table.
+message GlobalVarData {
+  string name = 1;         // `string name`   [:L66]
+  VarType var_type = 2;    // `long vartype`  [:L67]
+
+  // `localvardata local` [:L68] - set when var_type is VAR_LOCAL.
+  LocalVarData local = 3;
+
+  // `foreignvardata foreign` [:L69] - set when var_type is VAR_FOREIGN. SEE ForeignVarRef: this is the
+  // field that cannot cross intact.
+  ForeignVarRef foreign = 4;
+
+  // `foreignvardata links[]` [:L70] - AN ARRAY OF foreignvardata, so THE SAME LIMIT APPLIES TO EVERY
+  // ELEMENT OF IT, not only to `foreign` above. It is easy to miss that `links[]` is a second
+  // pointer-bearing field, so it is called out here explicitly.
+  repeated ForeignVarRef links = 5;
+
+  enum VarType {
+    VAR_LOCAL = 0;    // [:L117]  resolved from this service's own table
+    VAR_FOREIGN = 1;  // [:L118]  resolved through another DataWindow's expression service
+  }
+}
+
+// LocalVarData - `localvardata` [:L73-L78]. A local variable's definition.
+//
+// IT IS RECURSIVE, AND THE WIRE MESSAGE MUST NEST TO MATCH. A variable's VALUE MAY ITSELF BE AN
+// EXPRESSION with its own variable and function references - that is what `of_addvarexp` creates
+// [docs/n_cst_dwsvc_columnexp.md:L26] - and those references may in turn name further expression
+// variables. The legacy resolves the chain by walking `GlobalVars[...].local.vars[...]` [:L1452], so
+// the depth is genuinely unbounded and a flat model would truncate it.
+message LocalVarData {
+  // The variable's expression text, UNEXPANDED, for the same reason as ColumnExpData.exp.
+  string exp = 1;                  // `string exp`         [:L74]
+  repeated VarData vars = 2;       // `vardata vars[]`     [:L75]
+  repeated FuncData fns = 3;       // `funcdata fns[]`     [:L76]
+  bool has_macro = 4;              // `boolean hasmacro`   [:L77]
+
+  // The variable's CURRENT VALUE, when it is a plain typed variable rather than an expression.
+  //
+  // Not a field of the legacy structure: the legacy holds the value inside the expression text itself,
+  // because `of_addvar(name, value)` stores a rendered literal. It is carried separately here so that
+  // A TYPED VALUE STAYS TYPED ACROSS THE WIRE - Section 10 states why collapsing the seven variable
+  // types to their string renderings would make the coercion behaviour unreproducible. `exp` above
+  // remains authoritative for an expression variable; this field is populated for a value variable.
+  VarValue value = 5;
+}
+
+// ForeignVarRef - `foreignvardata` [:L80-L83], AND THE ONE HARD LIMIT OF THIS ENTIRE CONTRACT.
+//
+// ============== `foreignvardata.expsvc` IS AN IN-PROCESS OBJECT POINTER AND CANNOT BE ============
+// ============== SERIALIZED. THE CONTRACT IS THEREFORE NARROWED WITH A DEFINED ERROR. =============
+//
+// THE MECHANISM, verified rather than assumed. The legacy field is declared
+// `n_cst_dwsvc_columnexp expsvc` [:L82] - typed as ANOTHER LIVE INSTANCE OF THIS SAME SERVICE CLASS,
+// belonging to another DataWindow. It is not a handle, not a name and not an identifier: it is a
+// pointer, and it is DEREFERENCED as one, at TWO distinct sites:
+//
+//     if GlobalVars[index].varType = VAR_FOREIGN then
+//         return GlobalVars[index].foreign.expSvc._of_CalcVarExpValue(...)      [:L2384-L2385]
+//
+//     if GlobalVars[nGVarIdx].varType = VAR_FOREIGN then
+//         sVal = GlobalVars[nGVarIdx].foreign.expSvc._of_CalcVarExpValue(...)   [:L2199-L2200]
+//
+// - each A SYNCHRONOUS CALL THROUGH THE STORED POINTER INTO A PRIVATE METHOD OF THE OTHER INSTANCE.
+// The first is the variable-value path and the second is the expression-preprocessing path, so the
+// dereference is reached from both directions rather than from one incidental place. Both
+// `of_addforeignvar(name, se_cst_dw dw)` [:L201, implemented at :L2097] and every element of
+// `globalvardata.links[]` [:L70] depend on that access.
+//
+// THE LEGACY SPECIFICATION ADDS THAT A FOREIGN VARIABLE *REQUIRES* DYNAMIC EXPANSION
+// [docs/n_cst_dwsvc_columnexp.md:L34, comment "must use dynamic expansion"] - because a static
+// substitution would read the foreign value once at bind time and then never see it change. So the
+// narrowing lands exactly on the dynamic-plus-foreign combination, which is the only combination the
+// legacy supports here.
+//
+// THE RESOLUTION, stated in full:
+//   * A cross-DataWindow variable resolves by a SESSION-SCOPED DATAWINDOW HANDLE, allocated and owned
+//     by the expression session (Section 11), never by a pointer.
+//   * It is supported ONLY when both DataWindows are CO-RESIDENT IN THE SAME EXPRESSION SESSION INSIDE
+//     ONE DataServices INSTANCE.
+//   * A reference spanning sessions or service instances is BLOCKED AND RETURNS A DEFINED ERROR that
+//     NAMES THE UNREACHABLE HANDLE. It is NEVER resolved to a substituted value, a default, an empty
+//     string, or a stale reading.
+//
+// WHY A DEFINED ERROR RATHER THAN A BEST EFFORT. Approximating a pointer dereference across a network
+// would produce a result that is WRONG IN A WAY NO TEST WOULD OBVIOUSLY CATCH: the expression would
+// evaluate, return a number of the right type in the right range, and be silently stale. A defined
+// error is worse ergonomics and better engineering. This is a GENUINE, UNAVOIDABLE, REVIEWED NARROWING
+// of the legacy contract - recorded here before implementation rather than discovered during it - and
+// it is the ONLY place in this file where the narrowing principle has to be applied.
+message ForeignVarRef {
+  // `integer index` [:L81] - the ONE-BASED index of the variable WITHIN THE FOREIGN SERVICE's table.
+  int32 index = 1;
+
+  // THE REPLACEMENT FOR `expsvc`: a session-scoped handle naming the foreign DataWindow.
+  //
+  // Opaque, allocated by the expression session, and valid ONLY within that session. It is not a
+  // network address, not a URL and not a process identifier - making it any of those would recreate
+  // the cross-instance reference this narrowing exists to forbid.
+  string foreign_datawindow_handle = 2;
+
+  // Whether the handle is currently resolvable in the session that received this message. FALSE means
+  // the reference is BLOCKED, and the accompanying error names the handle.
+  bool resolvable = 3;
+}
+
+
+// ==============================================================================================
+//  SECTION 10 - C-04 : EXPANSION MODES, THE VARIABLE ENVIRONMENT, AND THE SENTINELS
+//  --------------------------------------------------------------------------------------------
+//  ========== WHY `$` AND `$$` DIFFER, AND WHAT THAT FORCES ONTO THE WIRE (C-K) ====================
+//
+//  THE OBSERVABLE DIFFERENCE IS 5 AGAINST 6, from the authoritative legacy specification's own worked
+//  example. Both halves define an expression variable valued "5" and a numeric variable valued 0, then
+//  bind a sum of the two, then mutate the numeric variable to 1 and recalculate. The specification is
+//  Chinese, so its expressions are QUOTED VERBATIM below and glossed - an anglicized rendering would
+//  not be findable in the oracle, and every quotation in this file has to be diffable against it:
+//
+//    STATIC  "$上月读数 + $本月读数"    -> the result is PERMANENTLY FIXED AT 5. The document says so
+//                                        at [docs/n_cst_dwsvc_columnexp.md:L49], states at :L48 that the
+//                                        result is fixed, notes at :L50 that a later assignment cannot
+//                                        change it, and the mutation-and-recalculate at :L51-L53 still
+//                                        yields 5
+//    DYNAMIC "$$上月读数 + $本月读数"   -> THE IDENTICAL SEQUENCE YIELDS 6 [:L68, :L69]
+//
+//  Glossing the two identifiers, since the difference between them is the whole point: 上月读数 is
+//  "last month's reading", the variable that gets mutated from 0 to 1; 本月读数 is "this month's
+//  reading", the expression variable valued "5". Only the FIRST one's sigil differs between the two
+//  lines, and it is the one that is mutated.
+//
+//  Same inputs, same mutation, different results. The difference is one extra `$`.
+//
+//  MECHANICALLY: the parse routine rewrites the expression IN PLACE and emits the reference arrays -
+//  `_of_parseexp(ref string exp, ref vardata vars[], ref funcdata fns[])` takes ALL THREE parameters by
+//  reference [:L171, implemented at :L1211]. From there:
+//    * A STATIC reference is resolved and substituted into the rewritten text at bind time, by
+//      ReplaceAll-ing its `full_name` out of the expression [:L1435]. THE VARIABLE NAME IS THEN GONE
+//      FROM THE STORED EXPRESSION and no later assignment can reach it.
+//    * A DYNAMIC reference leaves an entry whose `index` points into the live global variable table, so
+//      a mutation propagates on the next calculation [:L2189-L2200].
+//
+//  ============ THE CONTRACT CONSEQUENCE, WHICH IS EXACT AND NON-NEGOTIABLE =======================
+//  THE PAYLOAD MUST TRANSMIT ALL THREE OF:
+//     (i)   the UNEXPANDED source expression text          -> ColumnExpData.exp, LocalVarData.exp
+//     (ii)  the BIND-TIME variable snapshot                -> ExpressionBinding.bind_time_snapshot
+//     (iii) the LIVE variable environment                  -> ExpressionBinding.live_environment
+//  PLUS, PER REFERENCE, WHICH MODE APPLIED                 -> VarData.expansion_mode
+//
+//  TRANSMITTING AN ALREADY-EXPANDED STRING IS THE OBVIOUS DESIGN AND IT IS WRONG IN TWO INDEPENDENT
+//  WAYS, either of which is fatal on its own:
+//    * A STATIC BINDING BECOMES INDISTINGUISHABLE FROM A LITERAL. No consumer can tell that the `5` in
+//      the stored text was ever a variable, or which variable it was, so the binding can never be
+//      re-established, re-documented or audited.
+//    * A DYNAMIC BINDING IS STRIPPED OF ITS RESOLUTION ENVIRONMENT. The reference has nothing left to
+//      resolve against, so the expression can never be correctly recalculated again - and it will
+//      still produce A NUMBER, just the wrong one.
+//  The 5-against-6 example above is the acceptance test for having got this right.
+// ==============================================================================================
+
+// ExpansionMode - the FIVE modes, all documented legacy behaviour.
+//
+// ============= THE MODE IS A PER-REFERENCE PROPERTY, NEVER A PER-EXPRESSION ONE ==================
+// This is PROVEN BY THE SPECIFICATION rather than inferred from it. `"$$上月读数 + $本月读数"`
+// [docs/n_cst_dwsvc_columnexp.md:L68] MIXES A DYNAMIC AND A STATIC REFERENCE INSIDE ONE EXPRESSION, and
+// the consolidated example does the same in pure ASCII with `of_SetExp("n1", "$$bb + $aa")` [:L160] -
+// two independent witnesses, one of them free of any transliteration question. A contract that tagged
+// the expression rather than each reference could not represent either line.
+//
+// It reaches INSIDE ARGUMENT LISTS too: `$FormatPrice(n2, $精度)` [:L117] - 精度 being "precision" -
+// passes a static-expanded variable as an argument to a macro-direct call, so one reference's mode is
+// nested inside another's token.
+//
+// Orthogonal to all five is the CONTEXT SIGIL `@` (MACRO_CONTEXT [:L1253]), which selects the
+// resolution SCOPE rather than the expansion TIMING and is carried by VarData.is_ctx. It is
+// deliberately not a sixth mode here: combining it as a mode would multiply the taxonomy instead of
+// describing it.
+enum ExpansionMode {
+  EXPANSION_MODE_UNSPECIFIED = 0;
+
+  // `$name` - substituted AT BIND TIME; later mutation of the variable does NOT change the result.
+  // [docs/n_cst_dwsvc_columnexp.md section 静态展开 :L37, syntax at :L41]
+  EXPANSION_MODE_STATIC = 1;
+
+  // `$$name` - retained AS A REFERENCE and resolved at CALCULATION time; mutation propagates.
+  // [section 动态展开 :L56, syntax at :L60]
+  EXPANSION_MODE_DYNAMIC = 2;
+
+  // `$$('nameString')` - the VARIABLE NAME IS ITSELF COMPUTED AT RUN TIME, and MAY ITSELF BE A
+  // DATAWINDOW EXPRESSION. The legacy example selects between two variables by comparing two columns:
+  // `of_SetExp("n1","$$(if(n2 > n3 ,'num1','num2'))")` [:L92].
+  // [section 4 :L75-L94, syntax at :L79]
+  EXPANSION_MODE_DYNAMIC_INDIRECT = 3;
+
+  // `$FunctionName(args)` - a macro call whose implementation THE APPLICATION OWNS. Invoked back across
+  // the boundary; see Section 12.
+  // [section 宏函数 1 直接调用 :L108-L128, syntax at :L110]
+  EXPANSION_MODE_MACRO_DIRECT = 4;
+
+  // `$$Invoke('FunctionName', args)` - THE FUNCTION NAME IS ITSELF A VARIABLE. The legacy example
+  // stores the name in a variable and passes it as the first argument, verbatim:
+  // `of_SetExp("n1", "$$Invoke($单价格式化, n2, $精度)")` [:L141], where 单价格式化 is a variable
+  // holding the string "FormatPrice" [set at :L139] and 精度 is "precision".
+  // FUNC_INVOKE ("Invoke") is the reserved sentinel that selects this dispatch [:L121, :L2258].
+  // [section 宏函数 2 动态调用函数 :L130-L151, syntax at :L134]
+  EXPANSION_MODE_MACRO_DYNAMIC = 5;
+}
+
+// VarValue - the macro variable environment, AS A DISCRIMINATED UNION OVER EXACTLY SEVEN TYPES.
+//
+// ================= EXACTLY SEVEN. NOT SIX, NOT EIGHT, AND NEVER A STRINGLY-TYPED MAP =============
+// The seven are read off the SEVEN TYPED `of_addvar` OVERLOADS at [:L153-L159] and the matching seven
+// `of_setvar` overloads at [:L160-L166], in the source's own order:
+//
+//     time [:L153]  string [:L154]  long [:L155]  double [:L156]  datetime [:L157]  date [:L158]
+//     boolean [:L159]
+//
+// COLLAPSING THE ENVIRONMENT TO STRINGS WOULD LOSE EXACTLY THE INFORMATION THE COERCION DEPENDS ON. An
+// expression that adds a `long` variable to a `date` variable behaves differently from one that
+// concatenates their string renderings, and the loss would be invisible until a result was subtly
+// wrong - the worst possible failure mode for a parity migration.
+//
+// WHY THIS IS NOT common.v1.AnyValue, WHICH IS A NARROWING AND THEREFORE ALLOWED (C-K). AnyValue has
+// ELEVEN arms because it models the legacy `any` type, which is genuinely open. THIS environment is
+// NOT open: `of_addvar` has exactly seven overloads, so a caller CANNOT declare a variable of any other
+// type. An eighth arm here would let a consumer declare a variable the legacy has no overload for, and
+// the coercion path would then have nothing to dispatch on. Narrowing to the seven the legacy can
+// actually express is faithful; widening to eleven would invent capability. AnyValue is still used for
+// the `any` MACRO RETURN, which genuinely is open - see MacroResult below.
+//
+// The four canonical carriers (DecimalValue is not among them, deliberately - see the double arm) are
+// reused from common.v1 rather than redeclared, so the canonical text forms stay single-sourced.
+message VarValue {
+  oneof kind {
+    // `of_addvar(name, readonly time value)` [:L153] / `of_setvar` [:L160]
+    common.v1.TimeValue time_value = 1;
+
+    // `of_addvar(name, readonly string value)` [:L154] / [:L161]
+    string string_value = 2;
+
+    // `of_addvar(name, readonly long value)` [:L155] / [:L162]. int64 per the widening rule.
+    int64 long_value = 3;
+
+    // `of_addvar(name, readonly double value)` [:L156] / [:L163].
+    //
+    // A GENUINE `double`, AND THEREFORE GENUINELY A protobuf double - NOT an exception to common.v1's
+    // "decimals are not doubles" rule. That rule forbids carrying a legacy DECIMAL as a double, and it
+    // still holds: THERE IS NO DECIMAL OVERLOAD IN THE SEVEN. The legacy declares this parameter
+    // `double`, so double is the faithful wire type and DecimalValue would be the wrong one.
+    double double_value = 4;
+
+    // `of_addvar(name, readonly datetime value)` [:L157] / [:L164]
+    common.v1.DateTimeValue datetime_value = 5;
+
+    // `of_addvar(name, readonly date value)` [:L158] / [:L165]
+    common.v1.DateValue date_value = 6;
+
+    // `of_addvar(name, readonly boolean value)` [:L159] / [:L166].
+    //
+    // A boolean variable is rendered into an expression as `1=1` or `1=0` rather than as a keyword -
+    // see MacroResult, where the same rendering is observable on the return path.
+    bool bool_value = 7;
+  }
+}
+
+// ExpressionSentinels - the two grammar sentinels, carried so their VALUES are part of the contract.
+//
+// Both are declared as constants in the oracle and both are matched by VALUE at run time, so a
+// consumer that guessed a different spelling would silently fail to dispatch.
+message ExpressionSentinels {
+  // FUNC_VAR = "" - THE EMPTY STRING [:L120].
+  //
+  // An empty function name MODELS A BARE VARIABLE REFERENCE: the reference is recorded as a function
+  // entry whose name is empty rather than as a separate kind of entry. So an empty `FuncData.name` is
+  // MEANINGFUL AND NOT MISSING, and a consumer must not treat it as an incomplete message.
+  string func_var = 1;
+
+  // FUNC_INVOKE = "Invoke" [:L121] - the reserved dynamic-dispatch name, matched at [:L2258].
+  //
+  // A macro literally named "Invoke" is therefore UNREACHABLE by the direct form: the name is taken by
+  // the sentinel. That is a legacy limitation, not a validation, and it is recorded rather than
+  // defended against.
+  string func_invoke = 2;
+
+  // DWOSUFFIX = "_columnexp" [:L95] - appended to generated compute-object names, observable in
+  // ColumnExpData.compute_name.
+  string dwo_suffix = 3;
+
+  // MACRO_FLAG = "$" [:L1252] - the expansion sigil.
+  string macro_flag = 4;
+
+  // MACRO_CONTEXT = "@" [:L1253] - the context-scope sigil that sets VarData.is_ctx.
+  string macro_context = 5;
+}
+
+// MacroResult - the `any` a macro invocation returns, plus HOW THE LEGACY RENDERS IT INTO AN
+// EXPRESSION.
+//
+// ========= THE RENDERING IS OBSERVABLE AND ONE ARM OF IT CONTAINS A TYPO THAT IS PRESERVED ========
+// After the application's handler returns, the legacy switches on `ClassName(aVal)` and renders the
+// value into the expression text [:L2264-L2284 for the dynamic form, :L2288-L2308 for the direct form]:
+//
+//     string                                     -> "'" + value + "'"          [:L2266]
+//     long,integer,unsignedlong,usignedinteger,
+//     double,real,decimal                        -> bare String(value)         [:L2268]
+//     boolean                                    -> "1=1" / "1=0"              [:L2270-L2274]
+//     datetime                                   -> "DateTime('" + value + "')" [:L2276]
+//     date                                       -> "Date('" + value + "')"     [:L2278]
+//     time                                       -> "Time('" + value + "')"     [:L2280]
+//     anything else                              -> ERROR, "invalid return value" [:L2282]
+//
+// A DEFECT TO PRESERVE, NOT CORRECT (C-B): `"usignedinteger"` is MISSPELLED in the oracle - the `n` of
+// "unsigned" is missing - and IT IS MISSPELLED IDENTICALLY AT BOTH SITES [:L2267, :L2291], so it is one
+// mistake copied rather than two independent slips. THE CONSEQUENCE IS OBSERVABLE: a handler that
+// returns a genuine PowerBuilder `unsignedinteger` matches NO arm, falls to `case else`, and IS
+// REJECTED AS AN INVALID RETURN VALUE - even though every other integral type is accepted. Correcting
+// the spelling would make a previously failing macro start working, which is a behaviour change dressed
+// up as a typo fix. The contract therefore documents the rejection rather than removing it.
+message MacroResult {
+  // The value the handler returned. common.v1.AnyValue, because this really is the legacy `any` - open,
+  // unlike the seven-type variable environment above.
+  //
+  // A NULL RETURN IS DISTINCT FROM AN ABSENT ONE: AnyValue's explicit `is_null` arm says the handler
+  // returned null, whereas an unset `kind` says it returned nothing at all. The legacy's own downstream
+  // guard `if sVal = "" then return ""` [:L2201] aborts the whole calculation on an empty rendering, so
+  // the two cases have different consequences and must stay apart.
+  common.v1.AnyValue value = 1;
+
+  // THE RENDERED EXPRESSION FRAGMENT the legacy substituted, verbatim - `'text'`, `1=1`,
+  // `DateTime('...')` and so on per the table above, AND THEN WRAPPED IN PARENTHESES: the legacy
+  // applies `sVal = "(" + sVal + ")"` [:L2310] to the result of BOTH forms, outside the dispatch, so
+  // the fragment that reaches the expression is `('text')` and `(1=1)`. The wrap is not cosmetic - it
+  // is what keeps a returned expression from re-associating with its surrounding operators - so it is
+  // part of what this field carries.
+  //
+  // Carried IN ADDITION TO `value` because it is what a characterization recording compares: the
+  // rendering is where the observable behaviour lives, and two different values can render identically
+  // while two identical values cannot render differently.
+  string rendered = 2;
+
+  // Set when the returned type matched no arm and the legacy rejected it - INCLUDING the
+  // `unsignedinteger` case created by the preserved typo. `error` then carries the legacy's own
+  // "invalid return value" message.
+  bool rejected = 3;
+
+  StructuredError error = 4;
+}
+
+// ExpressionBinding - THE THREE-PART PAYLOAD the `$`/`$$` distinction forces.
+//
+// This message exists to make the three-part requirement STRUCTURAL rather than a convention a
+// consumer has to remember: all three parts are fields of one message, so a payload that omits one is
+// visibly incomplete instead of merely wrong.
+message ExpressionBinding {
+  // PART (i) - the expression as authored, sigils intact, NOTHING SUBSTITUTED.
+  string unexpanded_exp = 1;
+
+  // PART (ii) - THE BIND-TIME SNAPSHOT: the value each STATIC reference resolved to at the moment the
+  // expression was set.
+  //
+  // WITHOUT THIS a static binding is indistinguishable from a literal, because the substitution has
+  // already removed the variable's name from the expression text. Keyed by variable name.
+  map<string, VarValue> bind_time_snapshot = 2;
+
+  // PART (iii) - THE LIVE ENVIRONMENT: the CURRENT value of every variable a DYNAMIC reference resolves
+  // against.
+  //
+  // WITHOUT THIS a dynamic binding has nothing to resolve against and can never be recalculated
+  // correctly again. Keyed by variable name.
+  map<string, VarValue> live_environment = 3;
+
+  // The reference arrays the parser emitted, each entry carrying its OWN expansion mode.
+  repeated VarData vars = 4;
+  repeated FuncData fns = 5;
+
+  // The global variable table entries these references resolve through, including any foreign entries -
+  // whose limit is stated on ForeignVarRef.
+  repeated GlobalVarData global_vars = 6;
+}
+
+
+// ==============================================================================================
+//  SECTION 11 - C-04 : THE METHOD SURFACE, THE SESSION, THE GATES, AND PARSE ERRORS
+//  --------------------------------------------------------------------------------------------
+//  ============ THE CONTRACT COVERS THE SURFACE THE *SOURCE* HAS, NOT THE DOCUMENTED NINE =========
+//  The legacy documentation describes nine methods and CLOSES BY SAYING IT IS INCOMPLETE - its last
+//  line invites the reader to explore further [docs/n_cst_dwsvc_columnexp.md:L166]. The source's
+//  prototype block at [:L124-L209] declares far more, and the wire surface is taken from there.
+//
+//  Two groups the earlier planning summary omitted are included on exactly that principle, because the
+//  SOURCE declares them: the CACHEABLE flag setters [:L196-L197] and the CALCULATE-EMPTY arities
+//  [:L199-L200]. Also present and easily missed: `of_settrace` [:L208] and `of_addforeignvar` [:L201].
+//
+//  ARITY IS COLLAPSED WHERE, AND ONLY WHERE, AN OPTIONAL FIELD EXPRESSES IT EXACTLY. The legacy's
+//  overload families are (value), (value, recalc) and (value, recalc, force); on the wire that is ONE
+//  message with two explicit-presence booleans, which is the same information rather than less: absent
+//  means "the caller used the shorter overload". Where an overload family differs in ITS ADDRESSING
+//  MODE - by index versus by name - BOTH are carried, because they are not the same request: an index
+//  binds to a position and a name binds to a column, and the legacy resolves a name through a lookup
+//  that can fail [:L141 `_of_findexpindex`].
+// ==============================================================================================
+
+// ColumnRef - address an expression or column BY INDEX OR BY NAME, matching the legacy's paired
+// overloads throughout.
+//
+// EXACTLY ONE ARM IS SET. The distinction is not cosmetic: `of_getexp(string colname)` [:L127] and
+// `of_getexp(readonly integer index)` [:L130] are separate functions, and the name form performs a
+// lookup that may fail while the index form does not.
+message ColumnRef {
+  oneof addressing {
+    // ONE-BASED index into the expression list.
+    int32 index = 1;
+    // The column's name.
+    string column_name = 2;
+  }
+}
+
+// The expression session. It scopes the DataWindow handles that replace `foreignvardata.expsvc`, which
+// is the ONLY reason it exists - see ForeignVarRef.
+message OpenExpressionSessionRequest {
+  // The DataWindows to make CO-RESIDENT in this session. Every DataWindow a foreign variable may
+  // reference MUST be listed here, because a foreign reference is resolvable only inside one session.
+  repeated string datawindow_handles = 1;
+}
+
+message OpenExpressionSessionResponse {
+  string session_id = 1;
+
+  // The handles allocated for this session, in the order requested. THESE ARE THE ONLY HANDLES a
+  // foreign reference in this session may name.
+  repeated string datawindow_handles = 2;
+
+  common.v1.RetCode.Value ret_code = 3;
+}
+
+message CloseExpressionSessionRequest {
+  string session_id = 1;
+}
+
+message CloseExpressionSessionResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  bool was_open = 2;
+}
+
+// ---- Expression add / set / get / remove / remove-all ----
+
+// `of_addexp(string colname, string exp)` [:L172]. NOTE ITS RETURN TYPE IS `integer`, not `long`, and
+// it returns THE NEW EXPRESSION'S INDEX rather than a return code - which is why AddExpressionResponse
+// carries an index field distinct from `ret_code`.
+message AddExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string column_name = 3;
+
+  // The expression AS AUTHORED, sigils intact. NEVER a pre-expanded string - Section 10.
+  string exp = 4;
+}
+
+message AddExpressionResponse {
+  // The ONE-BASED index of the expression just added, as `of_addexp` returns it.
+  int32 index = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  // The parse outcome. An expression may be accepted structurally and still report a parse error.
+  ExpressionError error = 3;
+}
+
+// The FOUR `of_setexp` arities [:L174-L177] collapsed: by index or by name, each with and without an
+// explicit recalculate flag.
+message SetExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  ColumnRef target = 3;
+  string exp = 4;
+
+  // Absent means the caller used the two-argument overload [:L176-L177], which does not take the flag.
+  // Present means the three-argument overload [:L174-L175]. THE DIFFERENCE IS OBSERVABLE, so absence is
+  // carried rather than defaulted away.
+  optional bool recalc = 5;
+}
+
+message SetExpressionResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  ExpressionError error = 2;
+}
+
+// The TWO `of_getexp` arities [:L127, :L130].
+message GetExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  ColumnRef target = 3;
+}
+
+message GetExpressionResponse {
+  // THE UNEXPANDED TEXT, matching what `columnexpdata.exp` holds. A getter that returned the rewritten
+  // text would make a round trip lossy: set-then-get would not return what was set.
+  string exp = 1;
+
+  // The full three-part binding, so a caller can inspect the snapshot and the live environment too.
+  ExpressionBinding binding = 2;
+
+  common.v1.RetCode.Value ret_code = 3;
+}
+
+// The TWO `of_remove` arities [:L131-L132], and `of_removeall` [:L125].
+message RemoveExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  ColumnRef target = 3;
+}
+
+message RemoveExpressionResponse {
+  common.v1.RetCode.Value ret_code = 1;
+}
+
+message RemoveAllExpressionsRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+}
+
+message RemoveAllExpressionsResponse {
+  common.v1.RetCode.Value ret_code = 1;
+}
+
+// ---- Variables : add, and set across three arities ----
+
+// `of_addvar` across the SEVEN TYPED OVERLOADS [:L153-L159]. The seven collapse into one message
+// because VarValue's oneof IS the overload set - see the exactly-seven note there.
+message AddVariableRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string name = 3;
+  VarValue value = 4;
+}
+
+message AddVariableResponse {
+  // The ONE-BASED index in the global variable table.
+  int32 index = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  // A DUPLICATE DEFINITION IS AN ERROR IN THE LEGACY, raised at [:L1607] and [:L2122]; it is reported
+  // here rather than silently overwriting.
+  ExpressionError error = 3;
+}
+
+// `of_setvar` across SEVEN TYPES x THREE ARITIES = 21 SETTERS [:L160-L166, :L179-L185, :L188-L194].
+message SetVariableRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string name = 3;
+  VarValue value = 4;
+
+  // Absent = the (value) overload [:L160-L166]. Present = the (value, recalc) overload [:L179-L185].
+  optional bool recalc = 5;
+
+  // Present = the (value, recalc, force) overload [:L188-L194]. FORCE AND RECALC ARE NOT THE SAME
+  // REQUEST: recalc asks for a recalculation, force asks for it EVEN WHERE THE ENGINE WOULD HAVE
+  // DECIDED IT WAS UNNECESSARY, which is what makes the third arity worth having.
+  optional bool force = 6;
+}
+
+message SetVariableResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  ExpressionError error = 2;
+}
+
+// ---- Expression variables : add, set across three arities, get ----
+
+// `of_addvarexp(readonly string name, string exp)` [:L173].
+message AddVariableExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string name = 3;
+  string exp = 4;
+}
+
+message AddVariableExpressionResponse {
+  int32 index = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  ExpressionError error = 3;
+}
+
+// The THREE `of_setvarexp` arities [:L178, :L186, :L187].
+message SetVariableExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string name = 3;
+  string exp = 4;
+  optional bool recalc = 5;
+  optional bool force = 6;
+}
+
+message SetVariableExpressionResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  ExpressionError error = 2;
+}
+
+// `of_getvarexp(string name)` [:L152].
+message GetVariableExpressionRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string name = 3;
+}
+
+message GetVariableExpressionResponse {
+  // Unexpanded, for the same round-trip reason as GetExpressionResponse.
+  string exp = 1;
+  LocalVarData local = 2;
+  common.v1.RetCode.Value ret_code = 3;
+}
+
+// ---- Foreign variables ----
+
+// `of_addforeignvar(readonly string name, readonly se_cst_dw dw)` [:L201, implemented at :L2097].
+//
+// THE LEGACY TAKES A LIVE CONTROL; THIS TAKES A SESSION-SCOPED HANDLE, which is the whole substance of
+// the narrowing on ForeignVarRef. The legacy specification also records that a foreign variable REQUIRES
+// DYNAMIC EXPANSION when referenced [docs/n_cst_dwsvc_columnexp.md:L34].
+message AddForeignVariableRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  string name = 3;
+
+  // MUST be one of the handles this session was opened with. A handle from another session, or from
+  // another DataServices instance, IS BLOCKED WITH A DEFINED ERROR and is never resolved to a value.
+  string foreign_datawindow_handle = 4;
+}
+
+message AddForeignVariableResponse {
+  int32 index = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  // AN UNDEFINED FOREIGN VARIABLE IS A LEGACY ERROR [:L2133], and an unreachable handle is the
+  // narrowing's defined error. Both arrive here.
+  ExpressionError error = 3;
+}
+
+// ---- Relative columns : EIGHT entry points, singular and plural, by index and by name ----
+
+// `of_setrelativecolumn` [:L128 by name, :L137 by index] and `of_setrelativecolumns` [:L135 by index,
+// :L136 by name]; and the input variants `of_setrelativeinputcolumn` [:L129, :L140] and
+// `of_setrelativeinputcolumns` [:L138-L139].
+//
+// SINGULAR AND PLURAL ARE BOTH CARRIED VIA `columns` PLUS `plural`, because the two are not
+// interchangeable: the plural form REPLACES the relative set while the singular form addresses one
+// entry, and collapsing them would silently turn an add into a replace.
+message SetRelativeColumnsRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  ColumnRef target = 3;
+
+  // The relative column names.
+  repeated string relative_columns = 4;
+
+  // True for the plural array overload, false for the singular one.
+  bool plural = 5;
+
+  // FALSE targets `relativecolids[]` - recalculate on ANY change. TRUE targets
+  // `relativeinputcolids[]` - recalculate ONLY ON MANUAL USER INPUT. That is the `frominput`
+  // distinction of [:L87] and [docs/n_cst_dwsvc_columnexp.md:L162-L163], and it is a different
+  // trigger rather than a stricter one.
+  bool input_only = 6;
+}
+
+message SetRelativeColumnsResponse {
+  common.v1.RetCode.Value ret_code = 1;
+}
+
+// ---- Per-expression flags : FOUR flags x TWO addressing modes = EIGHT entry points ----
+
+// `of_setalwayscalc` [:L133-L134], `of_setrecursive` [:L146-L147], `of_settriggerevent` [:L148-L149]
+// and `of_setcacheable` [:L196-L197].
+message SetExpressionFlagRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  ColumnRef target = 3;
+  Flag flag = 4;
+  bool enabled = 5;
+
+  enum Flag {
+    FLAG_UNSPECIFIED = 0;
+    // `alwayscalc` - recalculate regardless of the relative-column set [:L133-L134].
+    FLAG_ALWAYS_CALC = 1;
+    // `recursive` - permit an expression to re-enter its own calculation [:L146-L147]. The engine
+    // guards depth by scanning the recursion stack for a repeated column name [:L684-L686].
+    FLAG_RECURSIVE = 2;
+    // `triggerevent` - fire the changed events on recalculation [:L148-L149].
+    FLAG_TRIGGER_EVENT = 3;
+    // `cacheable` - allow the computed value to be cached [:L196-L197]. Declared in the SOURCE and
+    // absent from the documented nine, which is why it is here.
+    FLAG_CACHEABLE = 4;
+  }
+}
+
+message SetExpressionFlagResponse {
+  common.v1.RetCode.Value ret_code = 1;
+}
+
+// ---- Calculation : calc x4, calc-all x2, calc-empty x2, and the item entry point ----
+
+// `of_calc(row, index)` [:L143], `of_calc(row, colname)` [:L144], `of_calc(row, force)` [:L168] and
+// `of_calc(row)` [:L169].
+message CalcRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+
+  // ONE-BASED row ordinal.
+  int64 row = 3;
+
+  // Absent addresses the WHOLE ROW - the (row) and (row, force) overloads. Present addresses one
+  // expression - the (row, index) and (row, colname) overloads.
+  ColumnRef target = 4;
+
+  // Present only for `of_calc(row, force)` [:L168]. NOTE THE OVERLOAD COLLISION IN THE LEGACY that this
+  // resolves: `of_calc(readonly long row, readonly integer index)` and
+  // `of_calc(readonly long row, readonly boolean force)` are distinguished at source ONLY BY THE SECOND
+  // ARGUMENT'S TYPE. On the wire they are distinguished by WHICH FIELD IS SET, which is unambiguous -
+  // and a request that sets both is malformed rather than merely redundant.
+  optional bool force = 5;
+}
+
+message CalcResponse {
+  common.v1.RetCode.Value ret_code = 1;
+
+  // The computed values, one per expression evaluated.
+  repeated CalcResult results = 2;
+
+  ExpressionError error = 3;
+}
+
+message CalcResult {
+  string column_name = 1;
+  int64 column_id = 2;
+  int64 row = 3;
+
+  // The computed value.
+  common.v1.AnyValue value = 4;
+
+  // The expression AFTER preprocessing - static substitutions applied, dynamic references resolved,
+  // macro results rendered and parenthesized. THE UNEXPANDED SOURCE IS *NOT* REPLACED BY THIS; it
+  // remains on ColumnExpData.exp. Both are carried because they answer different questions: what was
+  // authored, and what was evaluated.
+  string evaluated_exp = 5;
+
+  // Whether the engine actually recalculated, or served a cached value. Observable via the tri-state
+  // cache of ColumnData.CalcFlag.
+  bool from_cache = 6;
+}
+
+// `of_calcall()` [:L145] and `of_calcall(readonly boolean force)` [:L170].
+message CalcAllRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  // Absent = the no-argument overload [:L145].
+  optional bool force = 3;
+}
+
+message CalcAllResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  repeated CalcResult results = 2;
+  ExpressionError error = 3;
+}
+
+// `of_calcempty(readonly long row)` [:L199] and `of_calcempty()` [:L200]. DECLARED IN THE SOURCE and
+// absent from the documented nine.
+message CalcEmptyRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  // Absent = the no-argument overload, which covers every row [:L200].
+  optional int64 row = 3;
+}
+
+message CalcEmptyResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  repeated CalcResult results = 2;
+  ExpressionError error = 3;
+}
+
+// `_of_calcitem(readonly long row, readonly integer index)` [:L142].
+//
+// ============= TWO ANOMALIES HERE, BOTH CARRIED RATHER THAN TIDIED (C-B) ========================
+// 1. IT IS DECLARED PUBLIC DESPITE THE PRIVATE-CONVENTION UNDERSCORE PREFIX. Every other `_of_*` member
+//    in this object is private or protected; this one is `public function boolean _of_calcitem`. Callers
+//    may depend on it, and the name APPEARS IN RECORDINGS, so dropping the underscore would break a name
+//    the oracle uses. The method is therefore exposed with its odd name intact.
+// 2. IT RETURNS `boolean`, NOT `long` - unlike every other calculation entry point, which returns a
+//    RetCode. So it cannot report WHY it failed, only that it did. That is a real expressive limit of
+//    the legacy API and it is reproduced: CalcItemResponse's primary result is a bool.
+//
+// `ret_code` is carried ALONGSIDE the bool for transport-level failures only - a missing session, an
+// out-of-range index - which are conditions the in-process legacy could not have had. It must NOT be
+// used to smuggle a richer calculation verdict than the legacy's boolean, because that would widen the
+// contract.
+message CalcItemRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  int64 row = 3;
+  // ONE-BASED expression index. This entry point takes an INDEX ONLY - there is no by-name overload.
+  int32 index = 4;
+}
+
+message CalcItemResponse {
+  // THE LEGACY'S OWN RETURN: a bare boolean.
+  bool succeeded = 1;
+
+  CalcResult result = 2;
+
+  // Transport-level outcome only. See the note above.
+  common.v1.RetCode.Value ret_code = 3;
+
+  ExpressionError error = 4;
+}
+
+// ---- The two gate properties ----
+
+// `#Enabled` [n_cst_dwsvc.sru:L38] and `#Trace` [:L98].
+//
+// ============ THE `#Enabled` SETTER IS VETOABLE, SO THE RESPONSE CARRIES A RetCode ==============
+// `of_setenabled` [n_cst_dwsvc.sru:L89-L95] has three outcomes and they are NOT two:
+//
+//     if #Enabled = bEnabled then return RetCode.OK              [:L89]  UNCHANGED  -> OK
+//     if Event OnEnable(bEnabled) = 1 then return RetCode.FAILED  [:L90]  VETOED     -> FAILED
+//     #Enabled = bEnabled ... return RetCode.OK                   [:L92-L94] APPLIED -> OK
+//
+// The vetoable middle case is `event type long onenable(boolean enabled)` [n_cst_dwsvc.sru:L10], and A
+// HANDLER RETURNING 1 REFUSES THE CHANGE. A boolean response could not distinguish "refused" from
+// "applied", so the response carries a RetCode - and `changed` below separates the two OK outcomes,
+// which the RetCode alone cannot.
+//
+// WHY `#Enabled` MATTERS TO A CONSUMER BEYOND INTROSPECTION: C-03's item-changed sequence invokes this
+// service ONLY WHEN `#Enabled` IS SET [se_cst_dw.sru:L313-L315], so a consumer that sees no
+// recalculation MUST be able to distinguish "disabled" from "nothing to do". Together with the
+// EID_ITEMCHANGE coupling on EventGate, those are the two independent ways recalculation can be
+// silently off.
+message SetEnabledRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  bool enabled = 3;
+}
+
+message SetEnabledResponse {
+  // OK when unchanged or applied; FAILED when a handler VETOED the change.
+  common.v1.RetCode.Value ret_code = 1;
+
+  // False when the requested state already held - the [:L89] early return. Distinguishes the two OK
+  // outcomes, which `ret_code` cannot.
+  bool changed = 2;
+
+  // The state after the call.
+  bool enabled = 3;
+}
+
+// `of_settrace(readonly boolean trace)` [:L208, implemented at :L2409-L2411].
+//
+// NOT VETOABLE, unlike `#Enabled`: it assigns and returns OK unconditionally [:L2409-L2410]. The
+// asymmetry between the two gate setters is the legacy's and is preserved.
+message SetTraceRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+  bool trace = 3;
+}
+
+message SetTraceResponse {
+  common.v1.RetCode.Value ret_code = 1;
+  bool trace = 2;
+}
+
+// Both gate states together, since a consumer diagnosing a missing recalculation needs both.
+message GetServiceStateRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+}
+
+message GetServiceStateResponse {
+  // `#Enabled` [n_cst_dwsvc.sru:L38].
+  bool enabled = 1;
+
+  // `#Trace` [:L98] - gates trace emission on TraceChannel.
+  bool trace = 2;
+
+  common.v1.RetCode.Value ret_code = 3;
+}
+
+// ---- The three events declared on columnexp ITSELF ----
+
+// [:L86-L88]. THESE BELONG TO C-04, NOT C-03: they are declared on n_cst_dwsvc_columnexp, not on
+// se_cst_dw, and they are additional to se_cst_dw's 22.
+message ColumnExpEvent {
+  oneof body {
+    ItemChanged item_changed = 1;
+    DoItemChanged do_item_changed = 2;
+    VarChanged var_changed = 3;
+  }
+
+  // `onitemchanged(long row, dwobject dwo)` [:L86]. Its body early-outs when `#Enabled` is clear
+  // [:L214] and it suppresses redraw above 200 rows [:L223, :L225] - a threshold that is observable in
+  // timing but not in results, so it is recorded and not carried as a field.
+  message ItemChanged {
+    int64 row = 1;
+    DwObjectRef dwo = 2;
+  }
+
+  // `ondoitemchanged(long row, string colname, long colid, boolean frominput)` [:L87].
+  //
+  // NOTE THE SHAPE DIFFERS FROM C-03's SAME-NAMED EVENT: this one takes the column NAME AND ORDINAL as
+  // separate scalars rather than a dwobject, plus the `frominput` flag. They are different events with
+  // the same name on different objects, and conflating them would lose `frominput`.
+  message DoItemChanged {
+    int64 row = 1;
+    string col_name = 2;
+    int64 col_id = 3;
+
+    // TRUE WHEN THE CHANGE CAME FROM MANUAL USER INPUT. This is what makes
+    // `relativeinputcolids[]` different from `relativecolids[]`: an input-relative expression
+    // recalculates only when this is true. The legacy passes true from the item-changed path [:L224].
+    bool from_input = 4;
+  }
+
+  // `onvarchanged(integer index, boolean forcecalc)` [:L88].
+  message VarChanged {
+    // ONE-BASED index into the global variable table.
+    int32 index = 1;
+
+    // The `force` argument of the three-argument `of_setvar` overloads, arriving here.
+    bool force_calc = 2;
+  }
+}
+
+// ---- Parse and evaluation errors ----
+
+// ExpressionError - a parse or evaluation failure, STRUCTURED.
+//
+// ============ THESE MESSAGES ARE HARDCODED CHINESE AND DO *NOT* ROUTE THROUGH LOCALIZATION ========
+// ============ THAT IS A DEFECT AND IT IS REPRODUCED, NOT HARMONIZED (C-B)                  ========
+//
+// There are 28 live dialog call sites in this object and ZERO commented ones, and the count of
+// localization calls in the entire object is ZERO. That is in DELIBERATE CONTRAST with the equivalent
+// messages elsewhere in the same DataWindow service layer, WHICH DO localize - the two on C-03's
+// validation-error path at [se_cst_dw.sru:L355] and [:L357] route through CAT_DWSVC.
+//
+// Routing these through localization would CHANGE OBSERVABLE OUTPUT TEXT, which is exactly the kind of
+// improvement the mandate forbids. So `error.localized` is FALSE for every error from this engine, and
+// the flag exists so a consumer can tell translatable text from untranslatable text WITHOUT ANY MESSAGE
+// CHANGING.
+//
+// THE CARET POSITION IS CARRIED AS A NUMBER, NOT AS THE LEGACY'S RENDERED MARKER. The legacy builder
+// [:L2402-L2404] renders the message, then a newline, then the expression, then a run of underscores
+// sized by `LenA(Left(syntax,pos)) - 1`, then `^`, then the position in parentheses; its two-argument
+// form delegates with an empty message [:L2406]. Note `LenA` is the BYTE length, so a Chinese character
+// advances the caret by two - which is why a consumer must NOT recompute the marker from a character
+// count. Both forms travel: `rendered_marker` for byte-exact comparison, and `caret_position` so a
+// consumer can render its own marker correctly.
+message ExpressionError {
+  // The legacy message text, verbatim. `localized` on the embedded StructuredError is FALSE for every
+  // error from this engine - see the block above.
+  StructuredError error = 1;
+
+  // The expression the failure occurred in - the builder's `syntax` argument.
+  string expression = 2;
+
+  // The caret position within `expression`, as the legacy computes it. ONE-BASED, and measured in the
+  // legacy's own terms; see the LenA note above before recomputing anything from it.
+  int64 caret_position = 3;
+
+  // The legacy's fully rendered marker string - expression, underscore run, `^`, and the position in
+  // parentheses - for byte-exact characterization comparison.
+  string rendered_marker = 4;
+
+  Category category = 5;
+
+  // The text of a CAUGHT RUNTIME EXCEPTION, where the legacy captured one - the cache-error site at
+  // [:L739] embeds it in its message. Carried separately so a consumer can distinguish an engine
+  // diagnostic from a propagated runtime fault.
+  string caught_exception_text = 6;
+
+  // The categories the 28 sites fall into. Locators are given so each category is adjudicable against
+  // the oracle.
+  enum Category {
+    CATEGORY_UNSPECIFIED = 0;
+    // Compute-object creation failed [:L713].
+    CATEGORY_CACHE_CREATION = 1;
+    // A cache error carrying a caught runtime exception's text [:L739].
+    CATEGORY_CACHE_ERROR = 2;
+    // Cache update failed [:L1671].
+    CATEGORY_CACHE_UPDATE = 3;
+    // A general expression error [:L762].
+    CATEGORY_EXPRESSION = 4;
+    // Parse failure [:L1308, :L1383, :L1390, :L1395, :L1399, :L1417, :L1422, :L1426, :L1431, :L1486,
+    // :L1505]. INCLUDES the context-scoped-function-macro restriction at [:L1308], which is a
+    // deliberate legacy restriction rather than a gap - see VarData.is_ctx.
+    CATEGORY_PARSE = 5;
+    // Preprocessing failure [:L2192, :L2208, :L2232, :L2242, :L2254, :L2282, :L2306, :L2392].
+    CATEGORY_PREPROCESS = 6;
+    // An undefined variable [:L2192] or an undefined foreign variable [:L2133].
+    CATEGORY_UNDEFINED_NAME = 7;
+    // An invalid value - notably a macro return type that matched no arm [:L2282, :L2306], WHICH
+    // INCLUDES the `unsignedinteger` case created by the preserved typo documented on MacroResult.
+    CATEGORY_INVALID_VALUE = 8;
+    // A macro form the engine does not support [:L1882, :L1888].
+    CATEGORY_MACRO_UNSUPPORTED = 9;
+    // A duplicate variable definition [:L1607, :L2122].
+    CATEGORY_DUPLICATE_DEFINITION = 10;
+    // A foreign reference that spans sessions or service instances - THE NARROWING'S DEFINED ERROR. It
+    // has no legacy locator because the legacy cannot produce it: in-process, the pointer always
+    // resolves. See ForeignVarRef.
+    CATEGORY_FOREIGN_REFERENCE_BLOCKED = 11;
+  }
+}
+
+
+// ==============================================================================================
+//  SECTION 12 - C-04 : THE TWO INVERTED STREAMS
+//  --------------------------------------------------------------------------------------------
+//  ============= BOTH INVERT THE ORDINARY DIRECTION OF A gRPC CALL: DataServices, THE ==============
+//  ============= *SERVER*, CALLS BACK INTO ITS *CLIENT*. THAT IS STRUCTURAL, NOT A     ==============
+//  ============= PREFERENCE - A UNIDIRECTIONAL DESIGN CANNOT EXPRESS IT AT ALL (C-K)   ==============
+// ==============================================================================================
+
+// ---- InvokeMethodChannel : macro invocation ----
+//
+// WHY IT IS INVERTED. THE LEGACY EXPECTS THE *APPLICATION* TO IMPLEMENT THE MACRO SWITCH, and the
+// legacy specification says so in its own words: the function is defined in the DataWindow's
+// `OnColumnExpInvokeMethod` event [docs/n_cst_dwsvc_columnexp.md:L106], and its worked handler is a
+// `choose case name` returning the computed value [:L124-L127 for the direct form, :L146-L151 for the
+// dynamic form]. THE ENGINE DOES NOT OWN THE MACRO IMPLEMENTATIONS; IT ASKS FOR THEM.
+//
+// The source confirms the inversion twice over: `#DataWindow.Event OnColumnExpInvokeMethod(...)` is
+// invoked from inside the expression preprocessor at [:L2263] - the DYNAMIC form, taking the function
+// name from the FIRST ARGUMENT and shifting the remainder down by one [:L2259-L2262] - and at [:L2287] -
+// the DIRECT form, taking the name from the function entry's own `name`. Its declared signature is
+// `(long row, dwobject dwo, string name, string args[]) -> any` [se_cst_dw.sru:L14].
+//
+// So across a boundary DataServices MUST CALL BACK INTO ITS CLIENT to obtain a macro result BEFORE the
+// calculation can proceed. It is SYNCHRONOUS WITHIN THE STREAM - the calculation cannot continue without
+// the value - which is why macro invocation is pattern (b), ORDERING_DISCIPLINE_SYNCHRONOUS.
+//
+// A CONSEQUENCE WORTH STATING: A CLIENT THAT DOES NOT SERVICE THIS CHANNEL STALLS ITS OWN
+// CALCULATIONS. There is no fallback macro implementation to fall back to, and inventing one - a
+// default value, a zero, an empty string - would substitute a wrong answer for a missing one.
+
+// Server -> client: "evaluate this macro and answer".
+message InvokeMethodRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+
+  // Correlates the answer. REQUIRED, because a single calculation may invoke several macros and a
+  // nested macro argument may invoke another [:L2216-L2220].
+  string invocation_id = 3;
+
+  // ONE-BASED row ordinal.
+  int64 row = 4;
+
+  // The column the expression is bound to.
+  DwObjectRef dwo = 5;
+
+  // The macro function name. For the DYNAMIC form this is the value the legacy took from `args[1]`
+  // [:L2263], i.e. ALREADY RESOLVED - the client receives the function's actual name, not the sentinel
+  // and not the variable that held it.
+  string name = 6;
+
+  // THE ARGUMENTS AS STRINGS, which the handler coerces itself - `Double(args[1])`, `Long(args[2])`
+  // [docs/n_cst_dwsvc_columnexp.md:L126].
+  //
+  // ONE-BASED AT SOURCE, ZERO-BASED HERE, because a protobuf repeated field is zero-based. AND FOR THE
+  // DYNAMIC FORM THE LIST IS ALREADY SHIFTED: the legacy drops the function name from position 1 and
+  // renumbers the rest [:L2259-L2262], so what arrives here is the ACTUAL arguments in both forms, with
+  // no positional difference between them. That uniformity is deliberate: a client's handler should not
+  // have to know which form invoked it.
+  repeated string args = 7;
+
+  // Which of the two macro forms is being invoked. EXPANSION_MODE_MACRO_DIRECT for the [:L2287] path and
+  // EXPANSION_MODE_MACRO_DYNAMIC for the [:L2263] path. Carried for diagnostics only - `args` is already
+  // normalized, so a handler need not branch on it.
+  ExpansionMode form = 8;
+
+  // The `builtin` flag of the originating FuncData, whose misleading name means "written with `$$`" -
+  // see FuncData.builtin. Carried so a consumer can correlate this invocation with the reference that
+  // produced it.
+  bool builtin = 9;
+}
+
+// Client -> server: the macro's answer, or a refusal.
+message InvokeMethodResponse {
+  string invocation_id = 1;
+
+  // The value, plus the legacy's own rendering of it and the rejection flag. See MacroResult - including
+  // the PRESERVED `unsignedinteger` TYPO that causes an otherwise valid integral return to be rejected.
+  MacroResult result = 2;
+
+  // Set when the client cannot service the invocation at all - no handler for this name. DISTINCT FROM
+  // MacroResult.rejected, which means the handler ran and returned an unusable type. The legacy has no
+  // analogue for this field because in-process there is always a handler, even if it falls through its
+  // `choose case` and returns null; it exists so a client can say "not mine" rather than fabricate a
+  // null that the engine would then treat as a real answer.
+  bool unhandled = 3;
+
+  ExpressionError error = 4;
+}
+
+// ---- TraceChannel : the expression trace ----
+//
+// WHY IT IS INVERTED. The trace is EMITTED BY THE ENGINE, so it flows server to client with no request
+// to answer - the opposite of an ordinary unary call, where the client speaks first. It is
+// FIRE-AND-FORGET and therefore pattern (a), ORDERING_DISCIPLINE_SEQUENCED: pure diagnostics, so a
+// consumer may reorder on the token rather than failing.
+//
+// EMISSION IS GATED ON `#Trace` [:L98, set by `of_settrace` at :L2409-L2411], which is why
+// GetServiceStateResponse exposes that flag: a silent channel and a disabled channel look identical
+// otherwise.
+
+// Client -> server: subscribe to, or unsubscribe from, the trace.
+message TraceChannelRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+
+  // True to begin receiving trace records, false to stop. THIS DOES NOT SET `#Trace`: subscribing to a
+  // channel and enabling the engine's trace are two different acts, and SetTrace is the second. A
+  // subscriber on a service whose `#Trace` is clear receives nothing, correctly.
+  bool subscribe = 3;
+}
+
+// Server -> client: one trace record.
+message TraceRecord {
+  SequencingToken token = 1;
+
+  // ONE-BASED row ordinal.
+  int64 row = 2;
+
+  // The column whose expression was calculated.
+  DwObjectRef dwo = 3;
+
+  // THE CALL STACK, FLATTENED AS THE LEGACY FLATTENS IT: each frame followed by `>`, then the current
+  // column's own name appended last WITHOUT a trailing delimiter [:L753-L757]. So a two-deep stack reads
+  // "outer>inner>current". Carried verbatim because it is what the legacy event passes and therefore
+  // what a recording compares.
+  string stack = 4;
+
+  // The same stack UNFLATTENED, innermost last, matching `stack`'s order.
+  //
+  // CARRIED IN ADDITION rather than instead, and the reason is that the flattened form is AMBIGUOUS: a
+  // column name containing `>` would split into two frames on parsing. The legacy cannot distinguish
+  // them either, so `stack` is preserved unchanged for parity while this field is what a consumer should
+  // actually read.
+  repeated string stack_frames = 5;
+
+  // The expression as evaluated.
+  string expr = 6;
+
+  // The value, RENDERED AS THE LEGACY RENDERS IT - see ColumnExpTraceEvent.value for the `(null)`
+  // conflation, which is reproduced here identically because it is the same call site [:L758].
+  string value = 7;
+
+  // The recursion depth at emission, from `_vecCalcStack.Count()` [:L297]. The stack is created with an
+  // initial reservation of 20 [:L2421-L2422], which is a capacity hint and NOT a depth limit - the
+  // recursion guard is a NAME SCAN, not a depth check: it walks the stack looking for a repeat of the
+  // column's own name [:L684-L686]. A consumer must not infer a maximum depth of 20 from the
+  // reservation.
+  int32 depth = 8;
+}
+
+// ==============================================================================================
+//  SECTION 13 - THE TWO SERVICES
+//  --------------------------------------------------------------------------------------------
+//  Both are generated with GrpcServices="Both", so each yields a SERVER BASE that DataServices
+//  implements and a CLIENT STUB that Gateway consumes. Neither carries an auth, token or identity
+//  method: authentication is each service's stock JwtBearer configuration validating against Security's
+//  published JWKS, which is framework code and must not be duplicated here (C-G).
+// ==============================================================================================
+
+// C-03 - the DataWindow event surface, the retrieval/validation/update triple, and the event gate.
+//
+// EXACTLY EIGHT METHODS, spelled to match docs/CONTRACTS.md section 6.1 so the two cannot diverge.
+service DataWindowService {
+  // SERVER STREAM of buffer-shaped chunks, reproducing the legacy's progressive delivery with a
+  // per-delivery row count - `ondatareceived(ref n_cst_thread_task_sqlbase_ds data, long rowcount)` in
+  // ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru. See Section 4.
+  rpc Retrieve(RetrieveRequest) returns (stream RetrieveChunk);
+
+  // Materializes the four pieces of cross-event mutable state at [se_cst_dw.sru:L89-L96] as an
+  // explicit, correlated session. AN ITEM-CHANGE EVENT WITHOUT A SESSION IS A DEFINED ERROR, never an
+  // implicit creation - see EventChainRequest.session_id.
+  rpc OpenValidationSession(OpenValidationSessionRequest) returns (OpenValidationSessionResponse);
+
+  // Closes a session. IDEMPOTENT - see CloseValidationSessionResponse.
+  rpc CloseValidationSession(CloseValidationSessionRequest) returns (CloseValidationSessionResponse);
+
+  // BIDIRECTIONAL STREAM carrying all 13 raw and all 9 semantic events in one ordered conversation,
+  // with sequencing tokens that are FOR DETECTION ONLY in the synchronous groups - an out-of-order
+  // arrival there is a HARD ERROR that fails the session, never a reorder opportunity. Bidirectional
+  // because nine of the events are the framework asking the APPLICATION a question, and the application
+  // now lives across the boundary. See Sections 5 and 6.
+  rpc EventChain(stream EventChainRequest) returns (stream EventChainResponse);
+
+  // Submits a changeset. ON AN OPTIMISTIC-CONCURRENCY MISMATCH THIS RETURNS gRPC `Aborted` with a
+  // common.v1.ConflictDetail carrying the current row state - the canonical mapping to HTTP 409, which
+  // Gateway's REST projection surfaces unchanged. The caller implements an explicit retry-or-surface
+  // policy; THERE IS NO SILENT OVERWRITE ANYWHERE. See UpdateResponse.
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+
+  // Reads the event-gate bitmask, and the per-bit predicate `of_iseventdisabled` [:L109].
+  rpc GetEventGate(GetEventGateRequest) returns (GetEventGateResponse);
+
+  // `of_disableevent` [:L110], declared `long`. A zero mask yields E_INVALID_ARGUMENT [:L506].
+  //
+  // DISABLING EID_ITEMCHANGE ALSO SUPPRESSES COLUMN-EXPRESSION CALCULATION [:L43] - the coupling
+  // documented on EventGate, and the reason this method has an observable effect on C-04.
+  rpc DisableEvent(DisableEventRequest) returns (DisableEventResponse);
+
+  // `of_enableevent` [:L111], declared `integer` - GENUINELY A DIFFERENT RETURN TYPE FROM ITS DISABLE
+  // COUNTERPART in the legacy, annotated rather than harmonised (C-B). A zero mask yields
+  // E_INVALID_ARGUMENT [:L530]. See DisableEventResponse for the full note.
+  rpc EnableEvent(EnableEventRequest) returns (EnableEventResponse);
+}
+
+// C-04 - the column-expression engine.
+//
+// A SEPARATE SERVICE FROM C-03 SO THE EXPANSION ENGINE CAN VERSION INDEPENDENTLY - see the file header
+// for the full reasoning. The two inverted streams are structurally required, not preferred.
+service ColumnExpressionService {
+  // The session that scopes the DataWindow handles replacing `foreignvardata.expsvc`. This is the ONLY
+  // reason the session exists, and cross-session foreign references are BLOCKED WITH A DEFINED ERROR -
+  // see ForeignVarRef.
+  rpc OpenExpressionSession(OpenExpressionSessionRequest) returns (OpenExpressionSessionResponse);
+  rpc CloseExpressionSession(CloseExpressionSessionRequest) returns (CloseExpressionSessionResponse);
+
+  // Expressions: `of_addexp` [:L172]; `of_setexp` x4 [:L174-L177]; `of_getexp` x2 [:L127, :L130];
+  // `of_remove` x2 [:L131-L132]; `of_removeall` [:L125].
+  rpc AddExpression(AddExpressionRequest) returns (AddExpressionResponse);
+  rpc SetExpression(SetExpressionRequest) returns (SetExpressionResponse);
+  rpc GetExpression(GetExpressionRequest) returns (GetExpressionResponse);
+  rpc RemoveExpression(RemoveExpressionRequest) returns (RemoveExpressionResponse);
+  rpc RemoveAllExpressions(RemoveAllExpressionsRequest) returns (RemoveAllExpressionsResponse);
+
+  // Variables: `of_addvar` across the SEVEN TYPED OVERLOADS [:L153-L159]; `of_setvar` across SEVEN
+  // TYPES x THREE ARITIES [:L160-L166, :L179-L185, :L188-L194].
+  rpc AddVariable(AddVariableRequest) returns (AddVariableResponse);
+  rpc SetVariable(SetVariableRequest) returns (SetVariableResponse);
+
+  // Expression variables: `of_addvarexp` [:L173]; `of_setvarexp` x3 [:L178, :L186, :L187];
+  // `of_getvarexp` [:L152].
+  rpc AddVariableExpression(AddVariableExpressionRequest) returns (AddVariableExpressionResponse);
+  rpc SetVariableExpression(SetVariableExpressionRequest) returns (SetVariableExpressionResponse);
+  rpc GetVariableExpression(GetVariableExpressionRequest) returns (GetVariableExpressionResponse);
+
+  // Foreign variables: `of_addforeignvar` [:L201]. The legacy takes a LIVE CONTROL; this takes a
+  // session-scoped handle, which is the substance of the one narrowing in this contract.
+  rpc AddForeignVariable(AddForeignVariableRequest) returns (AddForeignVariableResponse);
+
+  // Relative columns: EIGHT legacy entry points - singular and plural, by index and by name, for both
+  // the change-triggered and the INPUT-triggered sets [:L128-L129, :L135-L140].
+  rpc SetRelativeColumns(SetRelativeColumnsRequest) returns (SetRelativeColumnsResponse);
+
+  // Per-expression flags: FOUR flags x TWO addressing modes - always-calculate [:L133-L134], recursive
+  // [:L146-L147], trigger-event [:L148-L149] AND CACHEABLE [:L196-L197], the last declared in the
+  // SOURCE and absent from the documented nine.
+  rpc SetExpressionFlag(SetExpressionFlagRequest) returns (SetExpressionFlagResponse);
+
+  // Calculation: `of_calc` x4 [:L143, :L144, :L168, :L169]; `of_calcall` x2 [:L145, :L170];
+  // `of_calcempty` x2 [:L199-L200].
+  rpc Calc(CalcRequest) returns (CalcResponse);
+  rpc CalcAll(CalcAllRequest) returns (CalcAllResponse);
+  rpc CalcEmpty(CalcEmptyRequest) returns (CalcEmptyResponse);
+
+  // `_of_calcitem` [:L142] - PUBLIC DESPITE ITS PRIVATE-CONVENTION UNDERSCORE PREFIX, and returning
+  // `boolean` rather than a RetCode. Both anomalies are preserved; see CalcItemResponse.
+  rpc CalcItem(CalcItemRequest) returns (CalcItemResponse);
+
+  // The gates: `of_setenabled` [n_cst_dwsvc.sru:L89-L95], WHICH IS VETOABLE and therefore returns a
+  // RetCode rather than a boolean; `of_settrace` [:L208], which is not.
+  rpc SetEnabled(SetEnabledRequest) returns (SetEnabledResponse);
+  rpc SetTrace(SetTraceRequest) returns (SetTraceResponse);
+  rpc GetServiceState(GetServiceStateRequest) returns (GetServiceStateResponse);
+
+  // INVERTED STREAM 1 - macro invocation. DataServices asks its CLIENT to evaluate a macro, because THE
+  // LEGACY EXPECTS THE APPLICATION TO IMPLEMENT THE MACRO SWITCH
+  // [docs/n_cst_dwsvc_columnexp.md:L106; source at :L2263 and :L2287]. Synchronous within the stream:
+  // the calculation cannot proceed without the value.
+  rpc InvokeMethodChannel(stream InvokeMethodResponse) returns (stream InvokeMethodRequest);
+
+  // INVERTED STREAM 2 - the expression trace, including the call stack the recursion vector builds
+  // [:L110, :L296-L297, :L318, :L753-L757, emitted at :L758]. Server-initiated and fire-and-forget, so
+  // it carries a sequencing token rather than strict ordering. Gated on `#Trace` [:L98].
+  rpc TraceChannel(stream TraceChannelRequest) returns (stream TraceRecord);
+}
+

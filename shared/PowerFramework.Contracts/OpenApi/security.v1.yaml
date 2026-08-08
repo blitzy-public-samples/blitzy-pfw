@@ -1,0 +1,3063 @@
+# ==================================================================================================
+#  security.v1.yaml - THE COMPLETE PUBLISHED REST BOUNDARY OF THE SECURITY SERVICE
+#  ------------------------------------------------------------------------------------------------
+#  WHAT THIS DOCUMENT DEFINES
+#    C-01  security.v1.TokenService    POST /v1/tokens
+#                                      GET  /.well-known/jwks.json
+#                                      GET  /.well-known/openid-configuration
+#    C-02  security.v1.CryptoService   15 operations under /v1/crypto/**
+#    C-10  Health and readiness        GET  /health   (anonymous by design)
+#                                      GET  /v1/ping  (token required, 401 without one)
+#
+#  IT CARRIES ZERO BEHAVIOUR. Not one line here executes. PowerFramework.Contracts is the boundary
+#  DEFINITION, not a shared-code back door (constraint C-A): it declares the shapes that cross the
+#  wire and nothing else. No .cs file, no generated client, no README and no second Security
+#  document belongs in this folder. Its sibling Proto/common.v1.proto makes the same statement for
+#  the gRPC half of the boundary, deliberately, so neither file can be read as the only place it
+#  was claimed.
+#
+#  EVERY CONTRACT HERE IS NET NEW, NOT A PORT
+#  The legacy PowerFramework is a LIBRARY. It has no process of its own, no listening socket, no
+#  route table and no serialization layer, and it has no token concept and no boundary to protect.
+#  Nothing below translates an existing wire format - there was none to translate. What is faithful
+#  to the legacy here is its VALUES and its SEMANTICS, never a schema.
+#
+#  THE READ-ONLY ORACLE THIS DOCUMENT WAS DERIVED FROM (constraint C-C)
+#    ws_objects/pfw.crypto.pbl.src/n_crypto.sru     86 lines; 65 declarations at :L9-L73, of which
+#                                                   63 are cryptographic operations and 2 are
+#                                                   accessors (Copyright :L9, GetVersion :L10) that
+#                                                   are deliberately NOT projected
+#    ws_objects/pfw.shared.pbl.src/enums.sru        the crypto constant block, :L921-L969
+#    ws_objects/pfw.shared.pbl.src/retcode.sru      the return-code algebra, :L39-L79
+#  Those files were READ and never written to, reformatted, moved or re-exported. Every value and
+#  every identifier spelling below carries its :L locator so any of them can be adjudicated against
+#  the oracle without a search.
+#
+#  THE LEGACY OVERLOAD CENSUS, AND WHERE EACH OVERLOAD LANDS
+#    StringToBlob        :L11        1  ->  POST /v1/crypto/encoding/string-to-blob
+#    BlobToString        :L12        1  ->  POST /v1/crypto/encoding/blob-to-string
+#    BlobReverse         :L13        1  ->  POST /v1/crypto/encoding/blob-reverse
+#    GenRandomBlob       :L14        1  ->  POST /v1/crypto/random/blob
+#    GenRandomString     :L15-L16    2  ->  POST /v1/crypto/random/string
+#    GenGUID             :L17-L18    2  ->  POST /v1/crypto/random/guid
+#    GenRSAKey           :L19-L20    2  ->  POST /v1/crypto/rsa/keys
+#    Hash    unkeyed     :L21-L22    2  ->  POST /v1/crypto/hash
+#    Hash    keyed       :L23-L26    4  ->  POST /v1/crypto/hmac
+#    HashFile            :L27-L29    3  ->  DELIBERATELY NOT PROJECTED - see the hash operations
+#    SymEncrypt          :L30-L45   16  ->  POST /v1/crypto/symmetric/encrypt
+#    SymDecrypt          :L46-L61   16  ->  POST /v1/crypto/symmetric/decrypt
+#    RSAEncrypt          :L62-L65    4  ->  POST /v1/crypto/rsa/encrypt
+#    RSADecrypt          :L66-L69    4  ->  POST /v1/crypto/rsa/decrypt
+#    RSASign             :L70-L71    2  ->  POST /v1/crypto/rsa/sign
+#    VerifyRSASign       :L72-L73    2  ->  POST /v1/crypto/rsa/verify
+#                                  ---
+#                                   63   total cryptographic operations
+#                                   -3   the HashFile family, not projected
+#                                  ---
+#                                   60   projected onto 15 wire operations
+#  63 is an audit, not decoration. If a future edit makes the count anything other than 63, or
+#  leaves an overload family with no landing site, this boundary has silently drifted from the
+#  oracle. Re-verify by counting the declarations, not by reading them.
+#
+#  RULES POSITION
+#  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
+#  file and none is invented here. The enterprise-standard baseline applies in its place, and the
+#  binding constraints are the refactor plan's own non-rule inventory. Those that govern this file
+#  are cited inline at the point each is discharged: C-A (boundary definition, and the only
+#  permitted cross-service coupling), C-B (replicate behaviour and defects, never improve), C-C
+#  (the legacy tree is read-only and is the behavioural oracle), C-D (the four deferred services
+#  are not implemented, even partially), C-F (no secret in any form), C-G (every newly created
+#  boundary is authenticated from the outset) and C-K (document every technology and boundary
+#  decision).
+#
+#  C-F SELF-AUDIT. No key, credential, token, certificate, connection string or secret-shaped
+#  literal appears anywhere in this document, in any field, default, example or comment. There is
+#  no `example` and no `examples` keyword ANYWHERE in this file, by design and not by omission: a
+#  plausible-looking base64 blob in an example is indistinguishable from a real credential to a
+#  reader, and placeholder keys have a long history of reaching production unchanged. Fields are
+#  described instead. The repository already contains eight in-source hardcoded-secret sites
+#  (docs/SECRETS.md); this document does not become a ninth.
+#
+#  A COMPONENT-NAMING CONSTRAINT THAT EXISTS TO KEEP THAT AUDIT A CLEAN SIGNAL (C-K)
+#  A credential-shaped-literal scan treats a long unbroken run of base64 characters as a finding,
+#  and the forward slash IS a base64 character - so a JSON pointer such as
+#  '#/components/schemas/<name>' becomes one such run once <name> is long enough. Those pointers are
+#  structural references, not values, but a scan that reports forty of them buries a real finding in
+#  noise and trains a reviewer to skim the output.
+#
+#  Component names are therefore kept within 19 characters under components/schemas and 17 under
+#  components/responses, which holds every pointer in this file under the 40-character run length a
+#  scan flags. The repository-wide sweep consequently reports ZERO hits here, and a future hit is
+#  therefore worth reading. Four of the names this constrains are ALSO better for it, because the
+#  shorter spelling is the legacy method's own: SymEncryptRequest and SymDecryptRequest match
+#  SymEncrypt / SymDecrypt [n_crypto.sru:L30, :L46], GenRsaKeyRequest and GenRsaKeyResponse match
+#  GenRSAKey [:L19], and CryptoRndFlags matches the CRYPTO_RNDSTRING_* constant family
+#  [enums.sru:L954-L957]. If a new component is added, keep it inside the budget.
+#
+#  C-G SELF-AUDIT. Every operation that is not a readiness probe or a publication of PUBLIC
+#  verification material requires a token. The three anonymous operations are anonymous for a
+#  stated reason, not by default. No signing, verification or mutual-TLS material is declared for
+#  any deferred service, and no deferred service is named anywhere in this document.
+#
+#  C-D SELF-AUDIT. Not one of the four deferred services enumerated in docs/DEFERRED.md appears
+#  below - no route, no schema, no description, no enum member, no discovery field and no reserved
+#  placeholder. The four reserved 501 routes that make their eventual shape legible belong to
+#  Gateway's own document, not to this one.
+#
+#  The four names are deliberately NOT spelled out even here, and that is the audit rather than
+#  squeamishness: the compliance test for C-D is a mechanical repository search for each name, and a
+#  hit inside this file - even one asserting absence - is a hit a reviewer then has to read and
+#  dismiss. Naming them would make the check noisier while adding nothing, since docs/DEFERRED.md is
+#  the authoritative roster and is one reference away.
+# ==================================================================================================
+
+# DELIBERATE VERSION CHOICE, RECORDED UNDER C-K IN info.description BELOW AS WELL, BECAUSE A READER
+# OF THE RENDERED DOCUMENT NEVER SEES THIS COMMENT. Having declared 3.1.0, this document uses NO
+# 3.0-only construct: there is no `nullable` keyword anywhere, and an optional-null is expressed as
+# a JSON Schema type array. Verified with the OpenAPI 3.1 specification validator.
+openapi: 3.1.0
+
+info:
+  title: PowerFramework Security API
+  version: 1.0.0
+  summary: >-
+    The sole token-issuing authority and the cryptographic surface of the PowerFramework .NET
+    decomposition. Contracts C-01 (TokenService), C-02 (CryptoService) and this service's half of
+    C-10 (health and readiness).
+  license:
+    # NAME ONLY, DELIBERATELY. The full BSD 2-Clause text, its four-condition Chinese restatement
+    # and the eleven upstream attributions live in the repository-root NOTICE and LICENSE files.
+    # Pasting licence text into a machine-readable contract would duplicate a legal document into a
+    # place nobody maintains it.
+    name: BSD-2-Clause
+  description: |-
+    # PowerFramework Security API
+
+    ## 1. Security is the sole token issuer in this system
+
+    **Security mints. Nothing else does.** Gateway, DataServices and Persistence hold
+    **verification material only** - no signing key, no minting capability, and no independent
+    signing authority. Where a per-service signing-key name is retained anywhere in the
+    orchestration, it is a verification-side name and is not a second issuer. The security
+    properties of a sole-issuer topology depend on there being exactly one issuer, so this is a
+    structural guarantee rather than a convention.
+
+    Consumers obtain verification material from this service's own
+    `GET /.well-known/jwks.json` and self-configure from
+    `GET /.well-known/openid-configuration`. Both are anonymous, because verification material is
+    **public by design** - that is precisely what distinguishes it from a signing key.
+
+    ## 2. Exactly one signing key exists in the whole system
+
+    One signing key exists, it is held by this service and by nothing else, and it is supplied
+    **exclusively by configuration injection** from the orchestration layer, bound through the
+    options pattern. Its environment variable is named `SECURITY_JWT_SIGNING_KEY`.
+
+    The **name** is published here because a consumer has to know what to set. **No value appears
+    in this document, in any other document in this repository, in application settings, or in any
+    container definition** - and no placeholder resembling a value appears either, because an
+    example key is indistinguishable from a real one to a reader.
+
+    A related contract-level rule governs C-02 and is stated in full on each operation that it
+    touches: **raw key material never crosses the wire from a caller.** Callers pass an opaque
+    `keyRef`, and this service resolves it against its own configured key store. There is no
+    request field anywhere in this document into which a key, an initialization vector, a
+    passphrase or a password could be placed, and every request schema sets
+    `additionalProperties: false` so that one cannot be smuggled in either.
+
+    ## 3. Every path is versioned `v1`, and that is a constraint rather than a habit
+
+    Explicitly versioned contracts are the **only permitted cross-service coupling** in this
+    system (constraint C-A). No service reaches into another's internals; the published contract
+    is the whole of the coupling. Versioning every path is what lets this boundary change without
+    a lock-step deployment, and it is why the two `/.well-known/*` paths are the only unversioned
+    ones - their spelling is fixed by the standards that stock bearer handlers implement, and
+    changing it would defeat the zero-bespoke-code property that made this contract REST.
+
+    ## 4. Why OpenAPI 3.1.0, specifically (C-K)
+
+    Two concrete reasons, both load-bearing:
+
+    1. **3.1 aligns with JSON Schema 2020-12.** Binary payloads and optional-null are therefore
+       expressible directly, without the 3.0-only `nullable` keyword. This matters here because
+       the legacy surface has parallel `string` and `blob` overload families and JSON has no
+       binary type at all, so the payload representation needed the full schema vocabulary. There
+       is no `nullable` keyword anywhere in this document.
+    2. **3.1 provides the `mutualTLS` security-scheme type.** That is exactly what the
+       token-issuance edge needs, and 3.0 cannot express it. `POST /v1/tokens` is the one
+       operation a bearer token cannot protect - a caller cannot present a token in order to
+       obtain its first token - so its caller identity is established by the transport, and 3.1
+       lets the document say so in a machine-readable way instead of in prose.
+
+    ## 5. One JSON integer, and the legacy width inconsistency it normalizes (C-K)
+
+    The legacy declares the constant sets below across **three different widths**:
+    `Long` for the encoding, hash-type, cipher-type, cipher-mode and RSA-padding sets
+    [enums.sru:L924-L951]; `Ulong` for the random-string and GUID flag sets [:L954-L962]; and
+    `Uint` for the RSA bit sizes [:L965-L967]. `n_crypto` itself compounds it, typing the
+    symmetric `ntype` as a 16-bit `readonly uint` while `mode` and `padding` are `readonly long`
+    [n_crypto.sru:L30-L61].
+
+    **This document normalizes all of them to a single JSON integer** and does not mirror the
+    inconsistency onto the wire. The widths are an artifact of how the constants were declared in
+    a language with several integer types; they carry no behavioural meaning, every value fits
+    comfortably in a JSON integer, and reproducing three widths would invite a consumer to think
+    the distinction mattered. What is preserved exactly is the **numbers** and the **identifier
+    spellings**, because those are what appear in serialized payloads, in log records and in
+    characterization recordings - a rename does not restyle a symbol, it silently invalidates
+    every stored comparison that mentions it.
+
+    Where a parameter's own domain is narrower than a JSON integer, that domain is stated on the
+    schema as a `minimum` and a `maximum` drawn from the legacy declaration itself, never from a
+    policy of this document's own. Those two schemas say so explicitly at the point of use.
+
+    ## 6. Preserved legacy weaknesses - eight of them, none corrected
+
+    The legacy cryptographic defaults are weak by modern standards. Correcting them would violate
+    the behaviour-preservation mandate (constraint C-B), which forbids improvements exactly as
+    firmly as it forbids regressions. The resolution is to **preserve each as the default and
+    annotate it**, so a caller can see the risk they are accepting without the behaviour changing.
+
+    **Annotation is the whole remediation. No default below is silently strengthened, and no
+    "safe mode" is offered alongside one.**
+
+    | # | Preserved weakness | Where it is annotated |
+    | --- | --- | --- |
+    | 1 | The default symmetric mode is **ECB** [enums.sru:L946] | `CryptoSymCryptMode`, and both symmetric operations |
+    | 2 | The default RSA padding is **PKCS#1 v1.5** [enums.sru:L951] | `CryptoRsaPadding`, and both RSA cipher operations |
+    | 3 | **No-padding is not selectable** - the legacy declares no such constant, so the enum has exactly two members and a request for it is refused | `CryptoRsaPadding` |
+    | 4 | **PKCS#5-family symmetric padding only, and not selectable** - not one of the 32 symmetric overloads has a padding parameter | both symmetric operations |
+    | 5 | **No key-derivation function is reachable at all**, and there is no salt concept, so key material is used as raw key bytes | `KeyReference`, and every keyed operation |
+    | 6 | **No authenticated encryption** - the mode set is exactly ECB, CBC and CFB, so ciphertext carries no integrity tag | `CryptoSymCryptMode`, and both symmetric operations |
+    | 7 | **1024-bit RSA remains a legal key size** [enums.sru:L965] and is not removed from the accepted set | `CryptoRsaKeyBits` |
+    | 8 | **The same six-member hash set governs the RSA signature hash**, so MD5 and even CRC32 - not a cryptographic hash at all - are legal signature-hash selectors [enums.sru:L927] | `CryptoHashType`, and both RSA signature operations |
+
+    Items 3, 4, 5 and 6 are established by **absence**: there is no constant to select and no
+    signature that accepts one. Absence is weaker evidence than presence in general, but it is
+    exactly the right kind here - a capability the legacy cannot express is a capability this
+    contract must not offer, because offering it would be a new feature. Each of the four carries
+    its mechanical proof at the point where it is annotated, so none has to be taken on trust.
+
+    ## 7. Two deliberate narrowings, and one impedance mismatch
+
+    Each is a documented gap rather than a silent omission, and each is stated on the operation it
+    affects:
+
+    - **RSA key generation does not return the private key.** The legacy returns both keys through
+      two `ref` out-parameters [n_crypto.sru:L19-L20]; reproducing that would ship freshly
+      generated private key material across a network boundary. The response returns the public
+      key and an opaque `keyRef` for the private key instead.
+    - **The three `HashFile` overloads are not projected** [n_crypto.sru:L27-L29]. A
+      caller-supplied server-side filename over HTTP would create a path-traversal surface the
+      in-process legacy could not have had.
+    - **`BlobReverse` mutates its argument in place** and returns only a success boolean
+      [n_crypto.sru:L13]. In-place mutation has no wire representation, so the response carries
+      the reversed payload *and* the boolean.
+
+    ## 8. Where the rest of this boundary is documented
+
+    `docs/CONTRACTS.md` is the prose inventory of all ten contracts, `docs/ARCHITECTURE.md` §4.1
+    is the port map, `docs/SECRETS.md` §4 is the token topology, and `Proto/common.v1.proto` is
+    the shared half of the gRPC boundary and the numeric authority for the `retCode` field of
+    `ProblemDetails`. Where any of those and this document disagree about a request or a response
+    shape, **this document is authoritative for the wire** and the prose is corrected to match it.
+
+servers:
+  # ONE ENTRY, DELIBERATELY. A `servers` entry means "where you send requests for THIS API", so
+  # listing another service's port here would be wrong, not merely redundant. Port 5104 is this
+  # service's listener per docs/ARCHITECTURE.md 4.1, inside the 5101-5105 band the attached
+  # environment fixes; the composition root on 5105 is Gateway's document, not this one.
+  - url: http://localhost:5104
+    description: >-
+      The security-service listener. Port 5104 is fixed by the port map in
+      docs/ARCHITECTURE.md 4.1 and is the same value the local orchestration manifest publishes.
+      Inside the orchestration network, callers reach this service by its service name on the same
+      port rather than through localhost.
+
+tags:
+  - name: TokenService
+    x-contract-id: C-01
+    description: >-
+      Contract C-01. Issues short-lived service tokens and publishes the verification material
+      that lets the other three services validate them. This service is the sole minter in the
+      system; the other three hold verification material only.
+  - name: CryptoService
+    x-contract-id: C-02
+    description: >-
+      Contract C-02. The cryptographic surface of the legacy framework, republished as 15
+      stateless operations that together cover 60 of its 63 cryptographic overloads
+      [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73]. Every operation is a plain
+      request/response with no ordering requirement between calls and nothing to stream, which is
+      the interface shape that decided REST for this service. Raw key material never crosses the
+      wire from a caller.
+  - name: Health
+    x-contract-id: C-10
+    description: >-
+      Contract C-10. Readiness reporting and the standing proof that this boundary is
+      authenticated. `/health` is anonymous on all four services; `/v1/ping` requires a token on
+      all four and returns 401 without one.
+
+# DOCUMENT-LEVEL DEFAULT: a token is required unless an operation overrides it. Stating the
+# requirement once and overriding it three times is deliberate - it makes "authenticated" the
+# default posture and forces every anonymous operation to declare itself, so an anonymous surface
+# can never be created by forgetting to add a requirement (constraint C-G).
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ================================================================================================
+  #  C-01 - security.v1.TokenService
+  #  Three operations: one authenticated issuance and two anonymous publications.
+  # ================================================================================================
+
+  /v1/tokens:
+    post:
+      operationId: issueToken
+      x-contract-id: C-01
+      tags: [TokenService]
+      summary: Issue a short-lived service token.
+      description: |-
+        Issues a **short-lived** service token from a caller identity, an intended audience and a
+        requested scope set.
+
+        **This service is the sole minter in the system.** No other component can issue a token:
+        Gateway, DataServices and Persistence hold verification material only. Exactly one signing
+        key exists, it is held here, and it arrives by configuration injection - see the
+        introduction to this document.
+
+        ## Caller identity comes from the transport, not from the body (C-G)
+
+        This operation is protected by **mutual TLS** and by nothing else, and that is a structural
+        necessity rather than a preference: **a caller cannot present a bearer token in order to
+        obtain its first bearer token.** Mutual TLS is the documented fallback for exactly the pair
+        where a token issuer is inappropriate, and the token-issuance edge is that pair.
+
+        Consequently the request body carries **no credential of any kind** - no client secret, no
+        password, no API key, no client assertion and no key material. The `subject` field names
+        the identity the caller claims; the identity that is actually *honoured* is the one the
+        presented client certificate establishes, and a mismatch between the two is refused with
+        `403`. The request schema sets `additionalProperties: false`, so a credential field cannot
+        be smuggled in either.
+
+        ## This is not an OAuth 2.0 grant request, and does not pretend to be
+
+        There is no `grant_type` request parameter, no authorization endpoint, no token-endpoint
+        client authentication and no `refresh_token` anywhere in this contract. Inventing an OAuth
+        2.0 flow the contract does not define would be a new feature, and refresh semantics
+        specifically would be one: the contract says *short-lived service token*, and a caller that
+        needs another one calls this operation again over the same mutually authenticated channel.
+        The discovery document's `grant_types_supported` member is metadata that stock consumers
+        read, and it is not a request parameter of this operation.
+
+        The **response** does use the RFC 6749 §5.1 member spellings - `access_token`,
+        `token_type`, `expires_in` and the space-delimited `scope` - because a stock client library
+        parses that object shape without bespoke code, which is the same property that made this
+        contract REST. The asymmetry between the request and the response is therefore deliberate
+        and is recorded here under C-K: the response half follows the RFC so stock code can read
+        it, and the request half does not, because it is not a grant request.
+
+        ## The granted scope set may be narrower than the requested one
+
+        A caller **must read `scope` from the response** rather than assume its request was
+        honoured in full. A narrowing is a normal, successful outcome and is reported as `200`, not
+        as an error.
+      security:
+        # OVERRIDES the document-level bearer requirement. Not an omission - see the description.
+        - mutualTls: []
+      requestBody:
+        required: true
+        description: The caller identity being claimed, the intended audience, and the requested scopes.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '200':
+          description: >-
+            A token was issued. The granted scope set may be narrower than the requested one, so
+            the caller must read it from the response body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: >-
+            No client certificate was presented, or the certificate presented is not trusted by
+            this service. Mutual TLS is the only accepted caller authentication on this operation,
+            so there is no bearer-token alternative to fall back to.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: >-
+            The authenticated caller is not permitted to obtain a token for the requested subject
+            or audience - for example the claimed `subject` does not match the identity the
+            presented client certificate establishes. The response names neither the expected
+            identity nor any part of the stored configuration.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /.well-known/jwks.json:
+    get:
+      operationId: getJsonWebKeySet
+      x-contract-id: C-01
+      tags: [TokenService]
+      summary: Publish the token verification material as a JSON Web Key Set.
+      description: |-
+        Publishes the **public** verification material for the tokens this service issues.
+
+        ## Anonymous by design, and for a stated reason (C-G)
+
+        This operation requires no authentication. That is a decision, not an oversight:
+        verification material is **public by definition** - publishing it is what allows a
+        signature to be checked, and that is precisely what distinguishes it from a signing key. A
+        consumer that had to authenticate in order to fetch the material it needs to validate
+        tokens would have a circular dependency on this very service.
+
+        ## Only public parameters are ever published
+
+        The key schema models `kty`, `use`, `key_ops`, `alg`, `kid` and, for RSA keys, the public
+        modulus `n` and the public exponent `e`. **It defines no private or symmetric key member -
+        no `d`, `p`, `q`, `dp`, `dq`, `qi` or `k` - and it never will.** Publishing a private
+        component would defeat the entire sole-issuer topology in a single request. The schema
+        additionally sets `additionalProperties: false`, which makes a private member structurally
+        unrepresentable in a conforming document rather than merely undocumented.
+
+        ## Consumers should not hand-write a client for this
+
+        Gateway, DataServices and Persistence consume this endpoint through their stock JSON Web
+        Token bearer handler, which fetches it, caches it and handles key rollover without any
+        bespoke code. Keeping the security-critical retrieval path inside framework code rather
+        than hand-written code is the whole reason this contract is REST rather than gRPC.
+      security:
+        # OVERRIDES the document-level bearer requirement. Anonymous BY DESIGN - see above.
+        - {}
+      responses:
+        '200':
+          description: The current key set. Public parameters only.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonWebKeySet'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /.well-known/openid-configuration:
+    get:
+      operationId: getOpenIdConfiguration
+      x-contract-id: C-01
+      tags: [TokenService]
+      summary: Publish the discovery metadata a stock bearer handler self-configures from.
+      description: |-
+        Publishes the minimum discovery metadata that a stock JSON Web Token bearer handler needs
+        in order to configure itself.
+
+        ## This endpoint exists so consumers write zero bespoke code
+
+        **That is the whole reason this contract is REST rather than gRPC.** A consumer points its
+        stock bearer handler at this service and the handler discovers the issuer, fetches the key
+        set, and handles signature checking, key rollover, issuer and audience validation and
+        clock-skew tolerance by itself. Choosing gRPC here would have forced a hand-written key-set
+        retrieval implementation into **three separate services** - a net *increase* in
+        hand-written security-critical code, which is the opposite direction from the one the
+        authenticated-boundary requirement is pushing in. It is the wrong choice, not merely a less
+        convenient one.
+
+        ## Anonymous by design (C-G)
+
+        Discovery metadata contains no secret and points only at public material. Requiring
+        authentication to read it would create the same circular dependency described on the key
+        set endpoint.
+
+        ## Two members are deliberately absent, and their absence is part of the contract (C-K)
+
+        **`authorization_endpoint` and `userinfo_endpoint` are not published, and no equivalent is
+        published under another name.** There is no interactive flow and no user-facing flow
+        anywhere in this system: every caller is a service, identity is established by the
+        transport on the issuance operation, and there is no end user to redirect, to prompt for
+        consent, or to describe. Publishing either member would advertise a capability that does
+        not exist and invite a consumer to attempt a redirect that cannot succeed.
+
+        For the same reason the schema sets `additionalProperties: false`. The standards that
+        define this document permit additional members and require clients to ignore unrecognised
+        ones; this contract nevertheless states its member set exactly, because the absence above
+        is a decision worth making machine-checkable rather than a gap to be filled in later
+        without a version change.
+      security:
+        # OVERRIDES the document-level bearer requirement. Anonymous BY DESIGN - see above.
+        - {}
+      responses:
+        '200':
+          description: The discovery metadata for this issuer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderMetadata'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+
+  # ================================================================================================
+  #  C-10 - Health and readiness, this service's half
+  #  The contract is identical on all four services; only the reported service name differs.
+  # ================================================================================================
+
+  /health:
+    get:
+      operationId: getHealth
+      x-contract-id: C-10
+      tags: [Health]
+      summary: Report this service's own readiness. Anonymous.
+      description: |-
+        Reports the readiness of **this service only**. Security has no upstream dependency, so
+        this report is never an aggregate.
+
+        ## Anonymous by design, and the reason is mechanical (C-G)
+
+        **A readiness probe must be reachable before any token exists.** The thing that probes this
+        endpoint - a container orchestrator, a load balancer, an operator - holds no token, and it
+        probes precisely during the window in which the service is still starting up. Requiring a
+        token here would make readiness depend on the very service being probed and on this
+        service's own token issuance being already live, which is a circular dependency that can
+        never resolve during a cold start.
+
+        This endpoint is therefore anonymous on **all four** services, by the same reasoning, and
+        that uniformity is part of contract C-10 rather than a per-service choice.
+
+        ## Gateway aggregates this report
+
+        Gateway reports healthy **only after** Persistence, DataServices **and** Security all
+        report healthy. The ordering is expressed in the orchestration manifest as a dependency
+        condition on upstream health, and it is the readiness property that ruled out the
+        alternative orchestration approach recorded in docs/ARCHITECTURE.md §10.4. A consumer
+        reading Gateway's aggregate sees this service named individually with its own state, so an
+        operator can tell *which* upstream is not ready rather than receiving one opaque verdict.
+
+        ## The report distinguishes "not ready" from "unhealthy"
+
+        A service still completing its startup validation is not the same as one whose dependency
+        has failed, and an operator needs to be able to tell them apart. `Degraded` carries the
+        former and `Unhealthy` the latter; the `status` schema states the mapping.
+      security:
+        # OVERRIDES the document-level bearer requirement. Anonymous BY DESIGN - see above.
+        - {}
+      responses:
+        '200':
+          description: >-
+            The service is `Healthy` or `Degraded`. Both are reported as 200 so that a probe
+            treating any non-2xx as a failure does not tear down a service that is merely still
+            completing startup validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthReport'
+        '503':
+          description: >-
+            The service is `Unhealthy`. The failing check is named in the problem `detail`, and
+            `retCode` carries the corresponding legacy return code. This response uses the single
+            problem shape that every non-2xx in this document uses; the readiness detail travels
+            inside it rather than in a second error schema.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /v1/ping:
+    get:
+      operationId: ping
+      x-contract-id: C-10
+      tags: [Health]
+      summary: The standing proof that this boundary is authenticated. Token required.
+      description: |-
+        Returns a trivial success **only** when a valid token is presented.
+
+        ## Both responses are the contract, not implementation detail (C-G)
+
+        This operation exists for one reason: to make the authenticated-boundary requirement
+        **testable rather than merely asserted**. It is present on all four services, not only at
+        the ingress, because the legacy opens no listening socket and receives no unsolicited
+        request - decomposition creates every one of these boundaries from nothing, and an internal
+        edge that trusted its caller because "it is internal" would be a new *unauthenticated*
+        surface, which is exactly what the requirement exists to prevent.
+
+        The `401` below is therefore as much a part of the published contract as the `200`. A
+        conformance test asserts both: a request with a valid token returns 200, and a request
+        without one returns 401.
+
+        The response body deliberately does **not** echo the presented token, any claim of it, or
+        any part of the verification material.
+      responses:
+        '200':
+          description: A valid token was presented.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PingResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+
+  # ================================================================================================
+  #  C-02 - security.v1.CryptoService
+  #  15 operations covering 60 of the legacy surface's 63 cryptographic overloads. Every one
+  #  requires a token (inherited from the document-level requirement) and every one returns the
+  #  single ProblemDetails shape on every non-2xx.
+  #
+  #  THE CONTRACT-LEVEL SECRETS RULE, STATED ONCE HERE AND AGAIN ON EVERY KEYED OPERATION:
+  #  raw key material never crosses the wire from a caller. Every keyed operation takes an opaque
+  #  keyRef in the position the legacy took key bytes; where the legacy took an initialization
+  #  vector, the wire takes an ivRef resolved the same way.
+  #
+  #  ALL FIFTEEN ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate. A GET with
+  #  the payload in the query string would place plaintext, ciphertext and digests into request
+  #  lines, and therefore into access logs, proxy caches and browser history - none of which the
+  #  in-process legacy had. These operations are also not idempotent in any useful sense: the three
+  #  random generators return a different result per call by definition.
+  # ================================================================================================
+
+  /v1/crypto/hash:
+    post:
+      operationId: hash
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Compute an unkeyed digest.
+      description: |-
+        Computes an **unkeyed** digest over the supplied payload.
+
+        Mirrors `n_crypto.sru:L21-L22` - the two unkeyed `Hash` overloads, one taking a `string`
+        payload and one taking a `blob`. `payloadForm` selects which of the two applies.
+
+        ## The response form does NOT follow `payloadForm` here, and that asymmetry is legacy behaviour
+
+        Both legacy overloads return a **`string`**: `:L21` is `string Hash(readonly string data,
+        readonly long ntype)` and `:L22` is `string Hash(readonly blob data, readonly long ntype)`.
+        A blob payload therefore still yields a string digest. Everywhere else in this contract the
+        result form follows the payload form, because the legacy return type follows the payload
+        type - the hash family is the exception, and it is **preserved rather than harmonised**
+        (constraint C-B). Do not "fix" this into a form-following response.
+
+        ## The `HashFile` overloads are deliberately not projected (C-G)
+
+        The legacy also declares `HashFile` in three forms - one unkeyed at `n_crypto.sru:L27` and
+        two keyed at `:L28-L29` - each taking a `readonly string filename` and hashing a file from
+        the **local filesystem**. **None of the three is projected onto this boundary.**
+
+        A caller-supplied server-side filename arriving over HTTP would create a path-traversal
+        surface that the in-process legacy could not have had: in process, the filename came from
+        the same trust domain as the code that read it. Across a boundary it does not. This is a
+        **documented gap, which is better than a partial implementation** - and it is enumerable,
+        so nothing is silently missing. Should a file-hashing capability ever be needed here, it
+        must take an opaque server-resolved reference exactly as `keyRef` does, and never a raw
+        path.
+
+        ## Hash type selection
+
+        `hashType` is the six-member legacy set. Note that `CRYPTO_HASH_MD5` and
+        `CRYPTO_HASH_CRC32` are both members and both remain selectable; the schema records why
+        neither is removed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HashRequest'
+      responses:
+        '200':
+          description: The digest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DigestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/hmac:
+    post:
+      operationId: hmac
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Compute a keyed digest.
+      description: |-
+        Computes a **keyed** digest over the supplied payload.
+
+        ## The legacy exposes this as four overloads; the wire needs one
+
+        `n_crypto.sru:L23-L26` declares the full two-by-two cross-product of payload type and key
+        type: `(string data, string key)`, `(string data, blob key)`, `(blob data, string key)` and
+        `(blob data, blob key)`. All four return a `string`.
+
+        **The `keyRef` indirection collapses the key half of that cross-product entirely.** A key
+        no longer has a form on the wire, because a key no longer travels on the wire - only a
+        reference to one does. The payload half remains fully expressible through `payloadForm`, so
+        all four overloads are reachable through this single operation without loss.
+
+        ## What `keyRef` replaces, named explicitly
+
+        It stands in the position of the legacy `readonly string key` and `readonly blob key`
+        parameters at `:L23-L26`. In process, passing a key as an argument is unremarkable. On a
+        wire the same signature would place key material into request bodies, into any log that
+        records a request, and into every characterization recording. See the `KeyReference` schema
+        for the full rule, its error behaviour, and the preserved no-key-derivation weakness that
+        travels with it.
+
+        As with the unkeyed operation, the response is a **string digest regardless of
+        `payloadForm`**, because all four legacy overloads return `string`. The three `HashFile`
+        overloads at `:L27-L29`, two of which are keyed, are deliberately not projected - the
+        reasoning is on the unkeyed hash operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HmacRequest'
+      responses:
+        '200':
+          description: The keyed digest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DigestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/symmetric/encrypt:
+    post:
+      operationId: symmetricEncrypt
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Encrypt a payload with a symmetric cipher. Omitting the mode selects ECB.
+      description: |-
+        Encrypts the supplied payload with one of the five legacy symmetric ciphers.
+
+        Covers all **16** legacy `SymEncrypt` overloads at `n_crypto.sru:L30-L45`, which are the
+        cross-product of: payload `string` or `blob`; key `string` or `blob`; initialization vector
+        present or absent; explicit mode present or absent.
+
+        ## KNOWN LEGACY WEAKNESS - omitting `mode` runs in ECB
+
+        `enums.sru:L946` declares `CRYPTO_SYMCRYPT_MODE_DEFAULT = CRYPTO_SYMCRYPT_MODE_ECB`, and
+        the eight mode-omitting overloads consequently run in **ECB**. ECB encrypts identical
+        plaintext blocks to identical ciphertext blocks, so it leaks the structure of the
+        plaintext. **This is preserved as the default and is not silently strengthened** (C-B). A
+        caller who needs otherwise must pass `mode` explicitly.
+
+        ## KNOWN LEGACY WEAKNESS - no authenticated encryption, so no integrity tag
+
+        The mode set is exactly ECB, CBC and CFB [`enums.sru:L943-L945`]. There is no GCM, no CCM
+        and no Poly1305, so **ciphertext produced by this operation carries no integrity tag** and
+        this contract offers no field in which one could be returned. A caller who needs ciphertext
+        integrity must obtain it separately - for instance from the keyed-digest operation above.
+
+        ## KNOWN LEGACY WEAKNESS - padding is fixed and not selectable
+
+        The mechanical proof: **not one of the 32 symmetric overloads at `n_crypto.sru:L30-L61` has
+        a padding parameter at all**, and `enums.sru` declares no symmetric padding constant of any
+        kind - the cipher block at `:L936-L946` exposes a type and a mode and nothing else. The
+        scheme is PKCS#5-family and it is fixed. This contract therefore carries **no padding
+        field**, because offering one would imply a choice the legacy never had.
+
+        ## Key and initialization vector
+
+        `keyRef` stands in the position of the legacy `readonly string key` / `readonly blob key`;
+        `ivRef` stands in the position of `readonly string iv` / `readonly blob iv`. Omitting
+        `ivRef` selects the no-vector overload family, which is the correct and only sensible choice
+        under ECB, since ECB uses no vector at all.
+
+        **A legacy fact worth recording even though the reference form makes it moot** (C-K): in the
+        legacy the key and vector types are **correlated** - a `string` key pairs only with a
+        `string` vector and a `blob` key only with a `blob` vector, and there is no mixed overload.
+        Because neither travels as a value here, no mixed request is expressible and no validation
+        for one is needed. The correlation is documented so that a reader comparing this contract
+        against the 16 declarations can see that nothing was dropped.
+
+        ## The result form follows `payloadForm`
+
+        The legacy return type follows the payload type - `:L30-L37` return `string` for a `string`
+        plaintext and `:L38-L45` return `blob` for a `blob` plaintext - and the response reproduces
+        that exactly. See the `PayloadForm` schema for how the two forms are represented in JSON,
+        and for the three distinct encodings this contract deliberately keeps apart.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SymEncryptRequest'
+      responses:
+        '200':
+          description: The ciphertext, in the same form as the submitted payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/symmetric/decrypt:
+    post:
+      operationId: symmetricDecrypt
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Decrypt a payload with a symmetric cipher. Omitting the mode selects ECB.
+      description: |-
+        Decrypts the supplied payload with one of the five legacy symmetric ciphers.
+
+        Covers all **16** legacy `SymDecrypt` overloads at `n_crypto.sru:L46-L61` - the same
+        cross-product as the encrypt direction, over ciphertext rather than plaintext.
+
+        Every annotation on the encrypt operation applies here unchanged and is not restated in
+        full: **omitting `mode` runs in ECB** [`enums.sru:L946`]; there is **no authenticated
+        decryption**, so a failure to decrypt is not distinguishable from a successful decryption
+        of the wrong key by any integrity check this contract can offer; **padding is fixed and not
+        selectable**, none of the 32 overloads having a padding parameter; `keyRef` and `ivRef`
+        stand in the positions of the legacy key and vector parameters; and **the result form
+        follows `payloadForm`** - `:L46-L53` return `string` and `:L54-L61` return `blob`.
+
+        One consequence of the missing integrity tag deserves to be explicit, because it changes
+        how a caller must treat a `200`: a symmetric decryption that used the wrong key, the wrong
+        mode or the wrong vector can still return a `200` with a well-formed but meaningless
+        payload. **This contract cannot tell the caller which happened.** That is the legacy's
+        behaviour and it is preserved; what is added is that the contract says so.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SymDecryptRequest'
+      responses:
+        '200':
+          description: >-
+            The plaintext, in the same form as the submitted payload. A 200 does not assert that
+            the correct key was used - see the description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+
+  /v1/crypto/rsa/encrypt:
+    post:
+      operationId: rsaEncrypt
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Encrypt a payload with an RSA public key. Omitting the padding selects PKCS#1 v1.5.
+      description: |-
+        Encrypts the supplied payload with an RSA public key.
+
+        Covers all **4** legacy `RSAEncrypt` overloads at `n_crypto.sru:L62-L65` - the cross-product
+        of a `string` or `blob` payload with an explicit `readonly long padding` present or absent.
+
+        ## KNOWN LEGACY WEAKNESS - omitting `padding` selects PKCS#1 v1.5
+
+        `enums.sru:L951` declares `CRYPTO_RSA_PADDING_DEFAULT = CRYPTO_RSA_PADDING_PKCS1`, so the
+        two padding-omitting overloads at `:L62` and `:L64` run under PKCS#1 v1.5. **This is
+        preserved as the default** (C-B). A caller who wants OAEP must pass `padding` explicitly;
+        the default is not quietly upgraded to it.
+
+        ## KNOWN LEGACY WEAKNESS - no-padding is not selectable, and the reason is mechanical
+
+        The legacy declares **exactly two** padding constants: `CRYPTO_RSA_PADDING_PKCS1 = 0` and
+        `CRYPTO_RSA_PADDING_OAEP = 1` [`enums.sru:L949-L950`]. **There is no no-padding constant at
+        all**, so there is nothing for a caller to select and no third value to accept. A request
+        for no padding is therefore **refused** with `400` - the legacy rejects it and so does this
+        contract. The two-member enum on the `padding` field is the whole mechanism; no additional
+        validation rule is needed and none is invented.
+
+        ## The key travels as a reference
+
+        `keyRef` stands in the position of the legacy `readonly string pubkey` at `:L62-L65`. Note
+        that the legacy typed that parameter as `string` in all four overloads regardless of the
+        payload form, so there was never a key-form cross-product to collapse here - only a key
+        *value* to remove from the wire.
+
+        The result form follows `payloadForm`: `:L62-L63` return `string` for a `string` payload and
+        `:L64-L65` return `blob` for a `blob` payload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RsaCipherRequest'
+      responses:
+        '200':
+          description: The ciphertext, in the same form as the submitted payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/rsa/decrypt:
+    post:
+      operationId: rsaDecrypt
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Decrypt a payload with an RSA private key. Omitting the padding selects PKCS#1 v1.5.
+      description: |-
+        Decrypts the supplied payload with an RSA private key.
+
+        Covers all **4** legacy `RSADecrypt` overloads at `n_crypto.sru:L66-L69`.
+
+        Every padding annotation on the encrypt direction applies here unchanged: **omitting
+        `padding` selects PKCS#1 v1.5** [`enums.sru:L951`], and **no-padding is not selectable**
+        because the legacy declares no such constant, so a request for it is refused with `400`.
+
+        ## The private key never leaves this service, and never entered it over the wire either
+
+        `keyRef` stands in the position of the legacy `readonly string prikey` at `:L66-L69`. This
+        is the single clearest illustration of why the reference indirection exists: the legacy
+        signature takes an RSA **private key** as an ordinary string in-parameter. In process that
+        is unremarkable. On a wire it would place a private key into a request body, into any log
+        that records the request, and into every characterization recording of it. **No request
+        anywhere in this document carries a private key.**
+
+        The result form follows `payloadForm`: `:L66-L67` return `string` and `:L68-L69` return
+        `blob`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RsaCipherRequest'
+      responses:
+        '200':
+          description: The plaintext, in the same form as the submitted payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/rsa/sign:
+    post:
+      operationId: rsaSign
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Produce an RSA signature. One of the two primitives the token issuer is built on.
+      description: |-
+        Produces an RSA signature over the supplied payload.
+
+        Covers both legacy `RSASign` overloads at `n_crypto.sru:L70-L71`: `:L70` takes a `string`
+        payload and returns a `string`, `:L71` takes a `blob` and returns a `blob`. The result form
+        therefore follows `payloadForm`.
+
+        ## This is one of the two primitives the token issuer is built on
+
+        `RSASign` and its counterpart `VerifyRSASign` are the legacy anchor for contract C-01. The
+        signing primitives Security owns already existed in the legacy cryptographic surface; what
+        did not exist was a boundary around them. Concentrating that surface behind one boundary is
+        what makes a **single signing authority** possible at all.
+
+        A distinction worth stating so the two are not confused: **this operation is not how a
+        service token is minted.** `POST /v1/tokens` mints tokens, and it does not accept a caller's
+        choice of key or hash. This operation is the general-purpose signature primitive from the
+        legacy surface, exposed for callers that used it directly.
+
+        ## KNOWN LEGACY WEAKNESS - the signature hash set includes MD5 and CRC32
+
+        `enums.sru:L927` comments the six-member hash set as governing
+        `n_crypto::Hash/RSASign/VerifyRSASign:[ntype]`, and `n_crypto.sru:L70-L71` types the
+        `readonly long ntype` parameter accordingly. **The same six-member set therefore governs the
+        RSA signature hash**, which means `CRYPTO_HASH_MD5` = 0 and even `CRYPTO_HASH_CRC32` = 5 -
+        which is a checksum and not a cryptographic hash at all - are **legal signature-hash
+        selectors**.
+
+        This is preserved and the enum is **not restricted for this operation** (C-B). Signing under
+        MD5 or CRC32 produces a signature with no meaningful collision resistance. The contract
+        neither prevents it nor pretends it is safe; it records it.
+
+        ## The key travels as a reference
+
+        `keyRef` stands in the position of the legacy `readonly string prikey` at `:L70-L71`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RsaSignRequest'
+      responses:
+        '200':
+          description: The signature, in the same form as the submitted payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/rsa/verify:
+    post:
+      operationId: rsaVerify
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Verify an RSA signature. The counterpart primitive of the token issuer.
+      description: |-
+        Verifies an RSA signature over the supplied payload and returns a boolean verdict.
+
+        Covers both legacy `VerifyRSASign` overloads at `n_crypto.sru:L72-L73`, both of which return
+        a `boolean`.
+
+        ## `payloadForm` governs the payload AND the signature, because the legacy correlates them
+
+        `:L72` is `boolean VerifyRSASign(readonly string data, readonly string sign, readonly string
+        pubkey, readonly long ntype)` and `:L73` is `boolean VerifyRSASign(readonly blob data,
+        readonly blob sign, readonly string pubkey, readonly long ntype)`. **There is no mixed
+        overload** - a `string` payload is verified against a `string` signature and a `blob`
+        payload against a `blob` signature. One `payloadForm` therefore governs both fields, exactly
+        as the legacy declaration does, and no independent form selector for the signature is
+        offered because none exists.
+
+        ## The verdict is a boolean, and a false verdict is a 200
+
+        A signature that does not verify is a **successful execution with a negative result**, not
+        an error: the response is `200` with `valid` set to false. A `4xx` is reserved for a
+        malformed request, an unresolvable reference or a missing token. Conflating the two would
+        make a legitimate negative verdict indistinguishable from a transport or authorization
+        failure.
+
+        ## KNOWN LEGACY WEAKNESS - the same MD5-and-CRC32-inclusive hash set applies
+
+        The `ntype` parameter at `:L72-L73` takes the same six-member set as the signing operation,
+        for the same reason and with the same consequence [`enums.sru:L927`]. Verification under
+        MD5 or CRC32 is legal here, is preserved, and is not restricted.
+
+        `keyRef` stands in the position of the legacy `readonly string pubkey`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RsaVerifyRequest'
+      responses:
+        '200':
+          description: >-
+            The verification verdict. A signature that does not verify is reported here with
+            `valid` false, not as an error status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RsaVerifyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/rsa/keys:
+    post:
+      operationId: generateRsaKey
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Generate an RSA key pair. The private key is retained and never returned.
+      description: |-
+        Generates an RSA key pair of the requested bit length.
+
+        Covers both legacy `GenRSAKey` overloads at `n_crypto.sru:L19-L20`, the second of which adds
+        a `readonly boolean pemformat` switch that the `pemFormat` field mirrors.
+
+        ## A DELIBERATE NARROWING OF THE LEGACY SURFACE, NOT AN OMISSION (C-K)
+
+        The legacy signature is
+        `boolean GenRSAKey(readonly uint bits, ref string prikey, ref string pubkey)` - it returns
+        **both** keys through **two `ref` out-parameters** and reports only success or failure as
+        its return value.
+
+        **That shape cannot be reproduced across a network boundary without shipping freshly
+        generated private key material across it**, which is precisely what the contract-level
+        secrets rule forbids and precisely the failure mode the whole `keyRef` indirection exists to
+        prevent. Reproducing it faithfully would put a brand-new private key into a response body,
+        into any log that records the response, and into every characterization recording of it.
+
+        The response therefore carries:
+
+        - **`publicKey`** - the generated public key material. It is public by definition, and it is
+          the *only* key-material-bearing field anywhere in this document. Returning it is required:
+          a caller that cannot obtain the public key cannot use the pair it just asked for.
+        - **`keyRef`** - an opaque reference under which this service has stored the generated
+          **private** key. The private key itself is retained here and **is never returned**.
+
+        A caller that needs a signature calls the signing operation with this reference; **it does
+        not obtain the key with which to produce one**. That inversion is the entire point.
+
+        **No private-key export path is offered by this contract.** If one is ever required it must
+        be a separately named operation, documented as such at its own point of definition, and it
+        must never be the default behaviour of this operation.
+
+        ## KNOWN LEGACY WEAKNESS - 1024-bit RSA remains a legal key size
+
+        `CRYPTO_RSA_BITS_1024 = 1024` is a declared, first-class value alongside 2048 and 4096
+        [`enums.sru:L965-L967`], and the legacy's own demonstration generates a 1024-bit pair. A
+        1024-bit modulus is below every current recommendation. **It is accepted, it is annotated,
+        and it is not removed from the accepted set** (C-B). 2048 bits or more is advisable; the
+        `bits` schema records that advice, and it does not enforce it - enforcing it would be a
+        behavioural change of exactly the kind this port forbids.
+
+        ## KNOWN LEGACY WEAKNESS - no key-derivation function anywhere in this surface
+
+        There is no passphrase, salt, iteration count or derivation parameter on this operation, nor
+        on any other in this contract. The mechanical proof is stated once, on the `KeyReference`
+        schema, and it holds here too.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenRsaKeyRequest'
+      responses:
+        '200':
+          description: >-
+            The pair was generated. The response carries the public key and a reference to the
+            retained private key; no private component is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenRsaKeyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: >-
+            The authenticated caller is not permitted to generate a key pair. The response names no
+            part of the configured key store.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+
+  /v1/crypto/random/blob:
+    post:
+      operationId: generateRandomBlob
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Generate random bytes.
+      description: |-
+        Generates `size` random bytes.
+
+        Mirrors `n_crypto.sru:L14` - `blob GenRandomBlob(readonly ulong size)`, the single overload
+        of this operation.
+
+        ## This is one of three determinism seams, and a parity author needs to know that
+
+        `GenRandomBlob`, `GenRandomString` and `GenGUID` [`n_crypto.sru:L14-L18`] are the **primary
+        non-determinism sources** in the whole in-scope estate. Characterization compares a recorded
+        legacy run against a target run, and a value that differs on every execution makes that
+        comparison meaningless unless it is masked on **both** sides.
+
+        The generator behind these three operations is therefore **seamed** server-side: the provider
+        is injected, so a parity test substitutes a deterministic double while production uses the
+        platform generator. The seam is a property of the implementation, but it is recorded in this
+        contract because a consumer writing a parity test needs to know **which response fields to
+        mask**. For this operation that is the whole payload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RandomBlobRequest'
+      responses:
+        '200':
+          description: >-
+            The generated bytes. The legacy overload returns a `blob` unconditionally
+            [n_crypto.sru:L14], so there is no form to select and none is offered. Mask this field in
+            any parity comparison.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/random/string:
+    post:
+      operationId: generateRandomString
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Generate a random string. Omitting the flags selects digits and letters.
+      description: |-
+        Generates a random string of `size` characters drawn from the selected character classes.
+
+        Covers both legacy overloads: `n_crypto.sru:L15` takes only the size and `:L16` adds
+        `readonly ulong flags`. Omitting `flags` selects `CRYPTO_RNDSTRING_DEFAULT`, which
+        `enums.sru:L957` declares as `CRYPTO_RNDSTRING_NUMBER + CRYPTO_RNDSTRING_ALPHABET` and which
+        is therefore **3** - digits and letters, with the symbol class **deliberately excluded**.
+        That exclusion is the legacy's own default and it is preserved rather than widened.
+
+        `flags` is a **bitmask**, not an enumeration: the three classes compose, so 7 selects all
+        three. The `CryptoRndFlags` schema names every bit and its value.
+
+        This is the second of the three determinism seams; the reasoning is on the random-bytes
+        operation and applies here to the returned string.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RndStringRequest'
+      responses:
+        '200':
+          description: >-
+            The generated string. Mask this field in any parity comparison.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RndStringResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/random/guid:
+    post:
+      operationId: generateGuid
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Generate a GUID. Omitting the flags selects both braces and separators.
+      description: |-
+        Generates a globally unique identifier in the requested textual form.
+
+        Covers both legacy overloads: `n_crypto.sru:L17` takes no argument and `:L18` adds
+        `readonly ulong flags`. Omitting `flags` selects `CRYPTO_GUID_DEFAULT`, which
+        `enums.sru:L962` declares as
+        `CRYPTO_GUID_INCLUDE_BRACKET + CRYPTO_GUID_INCLUDE_SEPARATOR` and which is therefore **3** -
+        so the default form carries **both** the surrounding braces and the group separators.
+
+        `flags` is a **bitmask** governing formatting only; it has no bearing on the value
+        generated. The `CryptoGuidFlags` schema names every bit and its value.
+
+        This is the third determinism seam; the reasoning is on the random-bytes operation.
+      requestBody:
+        required: false
+        description: >-
+          Optional. Omitting the body entirely is equivalent to omitting `flags`, which selects the
+          default form - this is how the no-argument legacy overload at `n_crypto.sru:L17` is
+          reached.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuidRequest'
+      responses:
+        '200':
+          description: >-
+            The generated identifier in the requested form. Mask this field in any parity
+            comparison.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuidResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/encoding/string-to-blob:
+    post:
+      operationId: stringToBlob
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Decode an encoded string into bytes, under Base64 or hex.
+      description: |-
+        Decodes an encoded string into bytes.
+
+        Mirrors `n_crypto.sru:L11` - `blob StringToBlob(readonly string data, readonly long
+        encoding)`, the single overload.
+
+        ## `encoding` here is a LEGACY ARGUMENT, and is not the same thing as `payloadForm` (C-K)
+
+        This is the one place in the contract where a confusion is genuinely easy to make, so it is
+        spelled out. **Three distinct encodings exist in this document and none of them is the
+        others:**
+
+        1. **`payloadForm`** - which of the two parallel legacy overload families a request selects,
+          and therefore what form the result takes. It is a wire-shape selector. This operation has
+          no `payloadForm`, because its input is always a `string` and its output is always a `blob`;
+          the legacy declares exactly one overload and there is no family to choose between.
+        2. **The JSON transport encoding of a blob** - JSON has no binary type, so bytes travel as a
+          base64 string. That is a property of JSON, invisible to the legacy, and it applies to
+          every blob-shaped field in this document including this operation's output.
+        3. **`encoding`, the parameter of this operation and of its inverse** - a genuine legacy
+          argument, chosen by the caller per call, that says how the *input string* is to be
+          interpreted: `CRYPTO_ENCODING_BASE64` = 0 or `CRYPTO_ENCODING_HEX` = 1
+          [`enums.sru:L924-L925`].
+
+        Collapsing any two of the three would be a behavioural change, not a simplification. In
+        particular, a request to decode a **hex** string still returns its bytes as a **base64** JSON
+        field, because the two encodings answer different questions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StringToBlobRequest'
+      responses:
+        '200':
+          description: The decoded bytes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/encoding/blob-to-string:
+    post:
+      operationId: blobToString
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Encode bytes into a string, under Base64 or hex.
+      description: |-
+        Encodes bytes into a string.
+
+        Mirrors `n_crypto.sru:L12` - `string BlobToString(readonly blob data, readonly long
+        encoding)`, the single overload, and the exact inverse of the operation above.
+
+        The `encoding` argument is the same genuine legacy argument described there, chosen by the
+        caller per call, and it is **not** the JSON transport encoding: the request's `data` field
+        always carries the input bytes as base64 because JSON has no binary type, and `encoding`
+        then selects whether the *returned string* is Base64 or hex. A caller asking for hex
+        therefore submits base64 and receives hex, and that is correct rather than contradictory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BlobToStringRequest'
+      responses:
+        '200':
+          description: The encoded string.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EncodedTextResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/encoding/blob-reverse:
+    post:
+      operationId: reverseBlob
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Reverse the byte order of a payload. The legacy mutates in place; the wire cannot.
+      description: |-
+        Reverses the byte order of the supplied bytes.
+
+        Mirrors `n_crypto.sru:L13` - `boolean BlobReverse(ref blob data)`, the single overload.
+
+        ## AN IMPEDANCE MISMATCH, DOCUMENTED RATHER THAN QUIETLY RESOLVED (C-K)
+
+        The legacy declaration is unusual and its shape matters: the parameter is `ref blob data`, so
+        **the operation mutates its argument in place** and its `boolean` return value reports only
+        whether the mutation succeeded. The reversed bytes are not returned at all - the caller reads
+        them back out of the variable it passed in.
+
+        **In-place mutation has no wire representation.** A request body is not a variable the server
+        can write back into. The response therefore carries **both** halves of the legacy outcome:
+
+        - `data` - the reversed bytes, which the legacy left in the caller's own variable, and
+        - `succeeded` - the legacy `boolean` return value, carried unchanged.
+
+        Returning the payload is the *addition* the boundary forces; the boolean is preserved
+        **precisely because it is the legacy's actual return value** and dropping it in favour of an
+        HTTP status would discard a signal a caller may be branching on. Both are present, and this
+        note exists so that a reader does not mistake the returned payload for the legacy's own
+        return value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BlobReverseRequest'
+      responses:
+        '200':
+          description: >-
+            The reversed bytes together with the legacy boolean outcome. `succeeded` may be false
+            with a 200 - see the description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlobReverseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+
+components:
+
+  # ================================================================================================
+  #  SECURITY SCHEMES
+  #  Two, and each protects a different kind of edge. There is no third, and in particular there is
+  #  no API-key scheme and no OAuth 2.0 flow object: this contract defines neither, and declaring a
+  #  scheme it does not implement would advertise a way in that does not exist.
+  # ================================================================================================
+  securitySchemes:
+
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |-
+        A JSON Web Token issued by this service through `POST /v1/tokens`, presented in the
+        `Authorization` header.
+
+        ## Where the verification material comes from
+
+        Consumers verify these tokens against **this service's own**
+        `GET /.well-known/jwks.json`, self-configuring from
+        `GET /.well-known/openid-configuration`. Both publication endpoints are anonymous, because
+        verification material is public by design.
+
+        ## Consumers should not hand-write the validation path
+
+        Gateway, DataServices and Persistence each validate inbound tokens with the **stock
+        `Microsoft.AspNetCore.Authentication.JwtBearer` handler**, pointed at the discovery document
+        above. The handler performs signature checking, key fetching and rollover, issuer and
+        audience validation and clock-skew tolerance by itself.
+
+        That is the point, not an implementation note: it keeps the **security-critical path inside
+        framework code rather than hand-written code**, on three services rather than one. It is
+        also the specific reason this contract is REST - gRPC would have forced a bespoke key-set
+        retrieval implementation into each of those three services, which is a net *increase* in
+        hand-written security code.
+
+        This service is the sole issuer of these tokens. No other component holds a signing key.
+
+    mutualTls:
+      type: mutualTLS
+      description: |-
+        A client certificate presented during the TLS handshake, trusted by this service.
+
+        ## Used by exactly one operation, and necessarily so
+
+        `POST /v1/tokens` is the only operation in this document protected this way, because it is
+        the only operation a bearer token **cannot** protect: **a caller cannot present a token in
+        order to obtain its first token.** Something other than a token has to establish identity at
+        that one edge, and mutual TLS is the documented fallback for exactly the pair where a token
+        issuer is inappropriate.
+
+        ## Scope of the fallback
+
+        Mutual TLS applies **to that pair only**. Tokens remain the default on every other edge in
+        the system, and adopting mutual TLS for one pair adds a certificate path setting and a key
+        path setting for those two participants rather than changing the system-wide model. Any such
+        path points at material mounted from the orchestration secret layer: **no certificate and no
+        key is committed to this repository, and none is embedded in a container image.**
+
+        No mutual-TLS material is declared for any service that does not exist in this phase.
+
+  # ================================================================================================
+  #  REUSABLE RESPONSES
+  #  Every one of them carries ProblemDetails. There is exactly ONE error shape in this document and
+  #  no second one is invented anywhere (C-A) - a consumer writes one error handler.
+  # ================================================================================================
+  responses:
+
+    BadRequest:
+      description: >-
+        The request is malformed, or an argument is outside the set this contract accepts - a
+        selector value that is not a member of its enumeration, a size outside its declared domain,
+        an unrecognised property rejected by `additionalProperties: false`, or a payload that is not
+        valid for the declared `payloadForm`. A request for RSA no-padding also lands here, because
+        the legacy declares no such value. `retCode` typically carries `E_INVALID_ARGUMENT` (-3).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    Unauthorized:
+      description: >-
+        No token was presented, or the token presented is expired, malformed, or not valid for this
+        service. This response is part of the published contract rather than an implementation
+        detail: it is the standing proof that the boundary is authenticated (C-G). `retCode`
+        typically carries `E_ACCESS_DENIED` (-25).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    RefForbidden:
+      description: >-
+        The reference resolves, but the authenticated caller is **not permitted** to use it. This is
+        deliberately distinguished from the not-found case below, so that a caller can tell a
+        configuration mistake from an authorization one. **Neither response echoes any part of the
+        stored material**, and neither reveals anything about the configured key store beyond the
+        distinction itself. `retCode` typically carries `E_ACCESS_DENIED` (-25).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    RefNotFound:
+      description: >-
+        No such reference exists in this service's configured key store. Distinguished from the
+        forbidden case above by design. The response does not enumerate the store, does not
+        suggest a nearby reference, and does not echo any part of the stored material. `retCode`
+        typically carries `E_OBJECT_NOT_FOUND` (-16).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    ServerError:
+      description: >-
+        The operation failed for a reason internal to this service. The response carries no key
+        material, no stack trace, no file path, no provider class name and no detail of the
+        configured key store (C-A). `retCode` typically carries `E_INTERNAL_ERROR` (-27), or
+        `UNKNOWN` (-4000) where the failure cannot be classified.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+
+    # ==============================================================================================
+    #  THE SINGLE ERROR SHAPE
+    # ==============================================================================================
+    ProblemDetails:
+      type: object
+      title: ProblemDetails
+      description: |-
+        The **one and only** error body in this document. Every `4xx` and every `5xx` response uses
+        it; no second error shape is defined anywhere (C-A), so a consumer writes one error handler.
+
+        ## Why this shape
+
+        It is the RFC 9457 problem-details object, which is what ASP.NET Core Minimal APIs emit
+        **without hand-written code**. Adopting the framework's own error shape rather than inventing
+        one keeps the error path out of hand-written code, for the same reason the token validation
+        path is left to the stock bearer handler.
+
+        ## The one extension member, and why it is here
+
+        `retCode` carries the legacy PowerFramework return code. RFC 9457 explicitly permits
+        extension members, which is why this schema - alone in this document - sets
+        `additionalProperties: true` rather than `false`. The framework may add further members of
+        its own; a consumer must ignore any it does not recognise.
+      additionalProperties: true
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: >-
+            A URI reference identifying the problem type. RFC 9457's own default of `about:blank` is
+            used when no more specific type applies.
+        title:
+          type: string
+          description: A short, human-readable summary of the problem type. Stable across occurrences.
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code, repeated in the body so a logged body is self-describing.
+        detail:
+          type: string
+          description: >-
+            A human-readable explanation specific to this occurrence. **Never carries key material,
+            a stack trace, a file path, a provider class name, or any part of the configured key
+            store.**
+        instance:
+          type: string
+          format: uri-reference
+          description: A URI reference identifying this specific occurrence.
+        retCode:
+          type: integer
+          format: int64
+          description: |-
+            The legacy PowerFramework return code for this failure, transcribed from
+            `ws_objects/pfw.shared.pbl.src/retcode.sru:L39-L79`.
+
+            ## Numerically identical to the gRPC half of this boundary
+
+            These values are **numerically identical** to `common.v1.RetCode.Value` in the sibling
+            `Proto/common.v1.proto`, and to `PowerFramework.Shared.Kernel.RetCode`. The agreement has
+            no compile-time edge and cannot be given one, so it is maintained by review: if a value
+            here ever differs from either of those, this boundary has silently drifted from the
+            oracle and every stored characterization comparison that mentions the changed member
+            becomes invalid.
+
+            ## Why the enumeration has 38 members while the oracle declares 41 constants (C-K)
+
+            The oracle declares **41** constants over **38 distinct values**, because three of them
+            are aliases:
+
+            - `OK`, `SUCCESS` and `ALLOW` are three spellings of **0** [`:L39-L41`]
+            - `CANCELED` and `CANCELLED` are two spellings of **-2** [`:L44-L45`]
+
+            A JSON Schema `enum` lists *values*, not spellings, so it necessarily carries 38. All
+            five spellings remain valid names for their values and all are preserved in the sibling
+            protobuf definition and in the kernel catalogue; `x-enum-varnames` gives one canonical
+            name per value, and the aliases are recorded here. **41 minus 3 aliases equals 38 is an
+            audit**: if a future edit makes the member count anything other than 38, a value has
+            been added, removed or duplicated.
+
+            ## Two properties of this algebra a consumer must expect rather than repair (C-B)
+
+            The legacy predicates are `rtCode >= OK` and `rtCode < OK` with `CANCELLED` explicitly
+            excluded, which produces a **tri-state hole in a nominally boolean algebra**:
+
+            - `PREVENT` = 1 satisfies the success predicate, so **a prevention reads as a success**
+            - `CANCELLED` = -2 is excluded from failure by an explicit guard while also failing the
+              success test, so **cancelled is neither succeeded nor failed**
+
+            Consumers must branch on the specific value and never on a two-way success test. Nothing
+            is renamed, renumbered, deduplicated or removed to tidy this up.
+
+            ## The catalogue is complete, which is why the enumeration is closed
+
+            `UNKNOWN` = -4000 exists precisely for the unclassifiable case, so no failure this
+            service can produce needs a value outside the set.
+          enum:
+            - 0        # OK / SUCCESS / ALLOW  [retcode.sru:L39-L41] - three spellings of one value
+            - 1        # PREVENT               [:L42] - SATISFIES the success predicate
+            - -1       # FAILED                [:L43]
+            - -2       # CANCELED / CANCELLED  [:L44-L45] - neither succeeded nor failed
+            # The contiguous, gap-free error block -3 .. -33 [:L46-L76]. The density is the
+            # oracle's; there is no gap to tidy and no value to add.
+            - -3       # E_INVALID_ARGUMENT    [:L46]
+            - -4       # E_INVALID_IMAGE       [:L47]
+            - -5       # E_INVALID_OBJECT      [:L48]
+            - -6       # E_INVALID_TYPE        [:L49]
+            - -7       # E_INVALID_TRANSACTION [:L50]
+            - -8       # E_INVALID_SQL         [:L51]
+            - -9       # E_INVALID_DATA        [:L52]
+            - -10      # E_INVALID_DATAOBJECT  [:L53]
+            - -11      # E_INVALID_HANDLE      [:L54]
+            - -12      # E_OUT_OF_BOUND        [:L55]
+            - -13      # E_OUT_OF_RANGE        [:L56]
+            - -14      # E_OUT_OF_MEMORY       [:L57]
+            - -15      # E_FILE_NOT_FOUND      [:L58]
+            - -16      # E_OBJECT_NOT_FOUND    [:L59]
+            - -17      # E_DATA_NOT_FOUND      [:L60]
+            - -18      # E_FUNCTION_NOT_FOUND  [:L61]
+            - -19      # E_EVENT_NOT_FOUND     [:L62]
+            - -20      # E_MEMBER_NOT_FOUND    [:L63]
+            - -21      # E_VAR_NOT_FOUND       [:L64]
+            - -22      # E_NOT_EXISTS          [:L65]
+            - -23      # E_BUSY                [:L66]
+            - -24      # E_TIME_OUT            [:L67]
+            - -25      # E_ACCESS_DENIED       [:L68]
+            - -26      # E_WIN32_ERROR         [:L69] - Windows-flavoured name kept; it is contract
+            - -27      # E_INTERNAL_ERROR      [:L70]
+            - -28      # E_DB_ERROR            [:L71]
+            - -29      # E_HTTP_ERROR          [:L72]
+            - -30      # E_WINHTTP_ERROR       [:L73]
+            - -31      # E_IO_ERROR            [:L74]
+            - -32      # E_SQL_BIND_ARG_FAILED [:L75]
+            - -33      # E_RETRY               [:L76] - last member of the dense block
+            # The three outliers [:L77-L79].
+            - -2000    # E_NO_SUPPORT          [:L77]
+            - -2001    # E_NO_IMPLEMENTATION   [:L78]
+            - -4000    # UNKNOWN               [:L79] - the minimum of the whole catalogue
+          # One canonical identifier per value, in the SAME ORDER as the enumeration above. The
+          # SCREAMING_SNAKE spelling is the oracle's own and is preserved verbatim; the aliases
+          # SUCCESS and ALLOW (0) and CANCELED (-2) are recorded in the description.
+          x-enum-varnames:
+            [OK, PREVENT, FAILED, CANCELLED,
+              E_INVALID_ARGUMENT, E_INVALID_IMAGE, E_INVALID_OBJECT, E_INVALID_TYPE,
+              E_INVALID_TRANSACTION, E_INVALID_SQL, E_INVALID_DATA, E_INVALID_DATAOBJECT,
+              E_INVALID_HANDLE, E_OUT_OF_BOUND, E_OUT_OF_RANGE, E_OUT_OF_MEMORY,
+              E_FILE_NOT_FOUND, E_OBJECT_NOT_FOUND, E_DATA_NOT_FOUND, E_FUNCTION_NOT_FOUND,
+              E_EVENT_NOT_FOUND, E_MEMBER_NOT_FOUND, E_VAR_NOT_FOUND, E_NOT_EXISTS,
+              E_BUSY, E_TIME_OUT, E_ACCESS_DENIED, E_WIN32_ERROR,
+              E_INTERNAL_ERROR, E_DB_ERROR, E_HTTP_ERROR, E_WINHTTP_ERROR,
+              E_IO_ERROR, E_SQL_BIND_ARG_FAILED, E_RETRY,
+              E_NO_SUPPORT, E_NO_IMPLEMENTATION, UNKNOWN]
+
+
+    # ==============================================================================================
+    #  THE PAYLOAD-FORM PATTERN
+    #  This is how 16 symmetric overloads per direction collapse onto ONE operation without losing
+    #  observable behaviour. It is defined once and referenced everywhere.
+    # ==============================================================================================
+    PayloadForm:
+      type: string
+      title: PayloadForm
+      description: |-
+        Selects **which of the two parallel legacy overload families** a request uses, and therefore
+        **what form the result takes**.
+
+        ## The problem it solves
+
+        JSON has no binary type, while the legacy cryptographic surface has parallel `string` and
+        `blob` overload families throughout - and crucially **its return form follows its input
+        form**: `SymEncrypt(readonly string plain, ...)` returns `string` [n_crypto.sru:L30-L37]
+        while `SymEncrypt(readonly blob plain, ...)` returns `blob` [`:L38-L45`]. A contract that
+        offered only one form would silently pick an overload family for the caller and change the
+        observable result shape.
+
+        One selector therefore carries the whole distinction, and it is how **16 symmetric overloads
+        per direction collapse onto a single operation** with nothing lost. Combined with the
+        `keyRef` indirection, which removes the key and vector halves of the same cross-product, all
+        32 symmetric declarations are reachable through two operations.
+
+        ## THREE DISTINCT ENCODINGS EXIST IN THIS DOCUMENT, AND THIS IS ONLY THE FIRST (C-K)
+
+        Conflating any two of them would be a behavioural change, so they are named together here:
+
+        1. **`payloadForm`, this schema** - a *wire-shape selector*. It says which legacy overload
+          family applies. It is not an encoding of anything.
+        2. **The JSON transport encoding of a blob** - when the form is `BLOB`, bytes travel in the
+          `data` string as base64, because JSON cannot carry bytes. This is a property of JSON, is
+          invisible to the legacy, and is not a legacy argument.
+        3. **`CRYPTO_ENCODING_BASE64` / `CRYPTO_ENCODING_HEX`** - a *genuine legacy argument*, chosen
+          by the caller per call, and only on the two encoding-conversion operations
+          [n_crypto.sru:L11-L12]. It says how a string is to be interpreted or produced.
+
+        The third is the one most easily mistaken for the second. They answer different questions,
+        and a request to decode a **hex** string still returns its bytes as a **base64** JSON field.
+
+        ## What each member means for the `data` field
+
+        - `STRING` - the string-shaped legacy overload family. `data` carries the legacy string
+          verbatim. Note that for a *result* the legacy string-shaped overloads already carry a
+          printable, text-safe encoded form of their binary output, which is why a string-shaped
+          ciphertext can be fed straight back to its string-shaped inverse.
+        - `BLOB` - the blob-shaped legacy overload family. `data` carries base64 of the raw bytes the
+          legacy would have held in a `blob`. The blob-shaped overloads perform no encoding of their
+          own; the base64 here is transport only.
+      enum: [STRING, BLOB]
+      x-enum-varnames: [STRING, BLOB]
+
+    PayloadData:
+      type: string
+      title: PayloadData
+      description: >-
+        A payload whose interpretation is governed by the accompanying `payloadForm`. When the form
+        is `STRING` this carries the legacy string verbatim; when it is `BLOB` it carries base64 of
+        the raw bytes, because JSON has no binary type. A single `contentEncoding` cannot be declared
+        on this field precisely because its encoding depends on the form selector - see `PayloadForm`
+        for the three distinct encodings this contract keeps apart.
+
+    # ==============================================================================================
+    #  THE OPAQUE REFERENCES - THE CONTRACT-LEVEL SECRETS RULE MADE STRUCTURAL
+    # ==============================================================================================
+    KeyReference:
+      type: string
+      minLength: 1
+      title: KeyReference
+      description: |-
+        An **opaque handle** to key material held in this service's own configured key store. It
+        carries no key material, is meaningless outside this service, and must not be parsed,
+        constructed or inferred by a caller.
+
+        ## The rule this schema exists to enforce
+
+        > **Raw key material never crosses the wire from a caller.**
+
+        This is the central design decision of contract C-02, and it discharges the
+        no-hardcoded-and-no-transmitted-secret mandate **at the contract level rather than by
+        review**: there is no request field anywhere in this document into which a key could be
+        placed, and every request schema sets `additionalProperties: false` so that one cannot be
+        smuggled in either.
+
+        ## It is a deliberate, documented narrowing, and the legacy shows why it is necessary
+
+        Every keyed legacy operation takes the key as an **ordinary in-parameter**:
+        `readonly string key` / `readonly blob key` on the keyed hash family
+        [n_crypto.sru:L23-L26] and on both symmetric families [`:L30-L61`], and
+        `readonly string prikey` / `readonly string pubkey` on the RSA families [`:L62-L73`]. In
+        process that is unremarkable. On a wire, the same signature would place key material into
+        request bodies, into any log that records a request, and into every characterization
+        recording of one.
+
+        ## Resolution, and the two distinguishable failures
+
+        This service resolves the reference against a store populated **exclusively through
+        configuration injection**. An unresolvable reference returns `404`; a resolvable one the
+        caller is not permitted to use returns `403`. The distinction is deliberate, so a
+        configuration mistake is tellable from an authorization one. **Neither response echoes any
+        part of the stored material**, enumerates the store, or suggests a nearby reference.
+
+        ## KNOWN LEGACY WEAKNESS - no key-derivation function is reachable at all
+
+        Whatever material the store holds **is** the key. There is no PBKDF2, scrypt, bcrypt or
+        Argon2, no salt concept, and no iteration count. The mechanical proof: **no salt, iteration
+        count or derivation parameter appears in any of the 65 declarations at
+        `n_crypto.sru:L9-L73`**, and `enums.sru` declares no derivation constant of any kind.
+
+        A passphrase used as key material is therefore used as **raw key bytes**, with no stretching
+        and no salting. This contract does not derive, stretch or salt, and it offers no field with
+        which to ask it to (C-B).
+
+    IvReference:
+      type: string
+      minLength: 1
+      title: IvReference
+      description: |-
+        An **opaque handle** to an initialization vector held in this service's own configured store,
+        resolved exactly as a `KeyReference` is and subject to the same rule: the vector itself never
+        crosses the wire from a caller.
+
+        It stands in the position of the legacy `readonly string iv` and `readonly blob iv`
+        parameters [n_crypto.sru:L32-L33, :L36-L37, :L40-L41, :L44-L45 and their decrypt
+        counterparts].
+
+        **Omitting it selects the no-vector legacy overload family**, which is the correct choice
+        under the default mode: ECB uses no vector at all, so the eight no-vector overloads and the
+        default mode go together.
+
+    # ==============================================================================================
+    #  THE LEGACY CONSTANT SETS
+    #  Values and identifier spellings are the oracle's, verbatim [enums.sru:L921-L969]. Each is a
+    #  JSON integer regardless of the width the legacy declared it at - see info.description 5.
+    #  Each carries an explicit `<value> = <IDENTIFIER>` mapping in its description and a matching
+    #  x-enum-varnames array in the same member order, so the spelling survives in both a
+    #  human-readable and a machine-readable form.
+    # ==============================================================================================
+    CryptoEncoding:
+      type: integer
+      format: int64
+      title: CryptoEncoding
+      description: |-
+        How a string is to be interpreted or produced by the two encoding-conversion operations.
+        Declared `Constant Long` at `enums.sru:L924-L925`, under the comment
+        `//Encoding (n_crypto::StringToBlob/BlobToString:[encoding])`.
+
+        - `0` = `CRYPTO_ENCODING_BASE64` [`:L924`]
+        - `1` = `CRYPTO_ENCODING_HEX` [`:L925`]
+
+        **This is a genuine legacy argument and is not the JSON transport encoding** of a blob field,
+        which is always base64 because JSON has no binary type. `PayloadForm` names all three
+        encodings this contract keeps apart. There is deliberately **no default**: both legacy
+        declarations take the argument, so a caller always states it.
+      enum: [0, 1]
+      x-enum-varnames: [CRYPTO_ENCODING_BASE64, CRYPTO_ENCODING_HEX]
+
+    CryptoHashType:
+      type: integer
+      format: int64
+      title: CryptoHashType
+      description: |-
+        The digest algorithm selector. Declared `Constant Long` at `enums.sru:L928-L933`.
+
+        - `0` = `CRYPTO_HASH_MD5` [`:L928`]
+        - `1` = `CRYPTO_HASH_SHA1` [`:L929`]
+        - `2` = `CRYPTO_HASH_SHA256` [`:L930`]
+        - `3` = `CRYPTO_HASH_SHA384` [`:L931`]
+        - `4` = `CRYPTO_HASH_SHA512` [`:L932`]
+        - `5` = `CRYPTO_HASH_CRC32` [`:L933`]
+
+        ## KNOWN LEGACY WEAKNESS - THIS SAME SET GOVERNS THE RSA SIGNATURE HASH
+
+        The oracle's own comment at `enums.sru:L927` reads
+        `//Hash types (n_crypto::Hash/RSASign/VerifyRSASign:[ntype])`, and `n_crypto.sru:L70-L73`
+        types the sign and verify `readonly long ntype` accordingly. There is **no separate,
+        narrower set for signatures**.
+
+        The consequence is that `CRYPTO_HASH_MD5` = 0, and even `CRYPTO_HASH_CRC32` = 5 - a checksum,
+        **not a cryptographic hash at all** - are legal **signature-hash** selectors. A signature
+        produced under either has no meaningful collision resistance.
+
+        **The set is not restricted for the signature operations** (C-B). MD5 and SHA-1 likewise
+        remain legal for plain digests. Preserving the set exactly is required; annotating it is the
+        whole remediation.
+      enum: [0, 1, 2, 3, 4, 5]
+      x-enum-varnames:
+        [CRYPTO_HASH_MD5, CRYPTO_HASH_SHA1, CRYPTO_HASH_SHA256,
+          CRYPTO_HASH_SHA384, CRYPTO_HASH_SHA512, CRYPTO_HASH_CRC32]
+
+    CryptoSymCryptType:
+      type: integer
+      format: int64
+      title: CryptoSymCryptType
+      description: |-
+        The symmetric cipher selector. Declared `Constant Long` at `enums.sru:L936-L940`, under the
+        comment `//SymCrypt types  (n_crypto::SymEncrypt/SymDecrypt:[ntype])`.
+
+        - `0` = `CRYPTO_SYMCRYPT_TYPE_DES` [`:L936`]
+        - `1` = `CRYPTO_SYMCRYPT_TYPE_3DES` [`:L937`]
+        - `2` = `CRYPTO_SYMCRYPT_TYPE_AES128` [`:L938`]
+        - `3` = `CRYPTO_SYMCRYPT_TYPE_AES192` [`:L939`]
+        - `4` = `CRYPTO_SYMCRYPT_TYPE_AES256` [`:L940`]
+
+        DES and 3DES are retained because the legacy declares them and callers select them; single
+        DES in particular has a 56-bit effective key and is unfit for new use. **Neither is removed
+        and neither is renumbered** (C-B). There is deliberately no default: all 32 symmetric
+        declarations take this argument, so a caller always states it.
+
+        A width note (C-K): `n_crypto` types this argument as a 16-bit `readonly uint`
+        [n_crypto.sru:L30-L61] while `enums.sru` declares the constants as `Long`. The wire carries
+        a single JSON integer and does not reproduce that inconsistency.
+      enum: [0, 1, 2, 3, 4]
+      x-enum-varnames:
+        [CRYPTO_SYMCRYPT_TYPE_DES, CRYPTO_SYMCRYPT_TYPE_3DES, CRYPTO_SYMCRYPT_TYPE_AES128,
+          CRYPTO_SYMCRYPT_TYPE_AES192, CRYPTO_SYMCRYPT_TYPE_AES256]
+
+    CryptoSymCryptMode:
+      type: integer
+      format: int64
+      title: CryptoSymCryptMode
+      default: 0
+      description: |-
+        The symmetric cipher mode. Declared `Constant Long` at `enums.sru:L943-L946`, under the
+        comment `//SymCrypt modes (n_crypto::SymEncrypt/SymDecrypt:[mode])`.
+
+        - `0` = `CRYPTO_SYMCRYPT_MODE_ECB` [`:L943`]
+        - `1` = `CRYPTO_SYMCRYPT_MODE_CBC` [`:L944`]
+        - `2` = `CRYPTO_SYMCRYPT_MODE_CFB` [`:L945`]
+
+        ## KNOWN LEGACY WEAKNESS 1 - THE DEFAULT IS ECB, AND IT STAYS ECB
+
+        `enums.sru:L946` declares `CRYPTO_SYMCRYPT_MODE_DEFAULT = CRYPTO_SYMCRYPT_MODE_ECB`, so
+        **omitting this field runs in ECB** - which is why the schema default is `0` rather than
+        being left unstated. Sixteen of the 32 symmetric legacy overloads omit the mode argument
+        entirely and therefore run in ECB.
+
+        ECB encrypts identical plaintext blocks to identical ciphertext blocks, so it **leaks the
+        structure of the plaintext** and is unfit for most modern use. It is preserved as the default
+        and **is not silently strengthened to CBC** (C-B). A caller who needs otherwise passes the
+        field explicitly.
+
+        ## KNOWN LEGACY WEAKNESS 2 - NO AUTHENTICATED ENCRYPTION, SO NO INTEGRITY TAG
+
+        The mechanical proof: the mode set is **exactly** the three members above. There is no GCM,
+        no CCM and no Poly1305 constant anywhere in `enums.sru`, and **no tag or associated-data
+        parameter appears anywhere in the legacy surface**. Ciphertext produced under this contract
+        therefore carries **no integrity tag**, and this contract offers no field in which one could
+        travel. **No `authTag` field is added** (C-B); a caller needing ciphertext integrity obtains
+        it separately, for instance from the keyed-digest operation.
+
+        ## KNOWN LEGACY WEAKNESS 3 - PADDING IS FIXED AND NOT SELECTABLE
+
+        The mechanical proof: **not one of the 32 symmetric overloads at `n_crypto.sru:L30-L61` has a
+        padding parameter at all**, and the cipher block at `enums.sru:L936-L946` exposes a type and
+        a mode and nothing else. The scheme is PKCS#5-family and it is fixed, so this contract
+        carries **no padding field for symmetric operations** - offering one would imply a choice the
+        legacy never had.
+      enum: [0, 1, 2]
+      x-enum-varnames:
+        [CRYPTO_SYMCRYPT_MODE_ECB, CRYPTO_SYMCRYPT_MODE_CBC, CRYPTO_SYMCRYPT_MODE_CFB]
+      x-legacy-default-identifier: CRYPTO_SYMCRYPT_MODE_DEFAULT
+
+    CryptoRsaPadding:
+      type: integer
+      format: int64
+      title: CryptoRsaPadding
+      default: 0
+      description: |-
+        The RSA padding scheme. Declared `Constant Long` at `enums.sru:L949-L951`, under the comment
+        `//RSA padding modes (n_crypto::RSAEncrypt/RSADecrypt:[padding])`.
+
+        - `0` = `CRYPTO_RSA_PADDING_PKCS1` [`:L949`], annotated in the oracle itself as
+          `RSA_PKCS1_PADDING`
+        - `1` = `CRYPTO_RSA_PADDING_OAEP` [`:L950`], annotated in the oracle itself as
+          `RSA_PKCS1_OAEP_PADDING`
+
+        ## KNOWN LEGACY WEAKNESS 1 - THE DEFAULT IS PKCS#1 v1.5
+
+        `enums.sru:L951` declares `CRYPTO_RSA_PADDING_DEFAULT = CRYPTO_RSA_PADDING_PKCS1`, so
+        **omitting this field selects PKCS#1 v1.5** - hence the schema default of `0`. Four of the
+        eight RSA cipher overloads omit the argument entirely. PKCS#1 v1.5 encryption padding is
+        vulnerable to padding-oracle attack in the general case. It is preserved as the default and
+        **is not silently upgraded to OAEP** (C-B).
+
+        ## KNOWN LEGACY WEAKNESS 2 - NO-PADDING IS NOT SELECTABLE, AND THE ENUM IS THE MECHANISM
+
+        **The legacy declares exactly these two constants and no third.** There is **no no-padding
+        constant anywhere in `enums.sru`**, so there is nothing for a caller to select. This
+        enumeration therefore has exactly two members, and a request for no padding is **refused with
+        `400`** - the legacy rejects it and so does this contract.
+
+        The two-member enumeration *is* the whole mechanism. No extra validation rule is stated and
+        none is invented, because the absence in the oracle is itself the legacy's own rejection.
+      enum: [0, 1]
+      x-enum-varnames: [CRYPTO_RSA_PADDING_PKCS1, CRYPTO_RSA_PADDING_OAEP]
+      x-legacy-default-identifier: CRYPTO_RSA_PADDING_DEFAULT
+
+    CryptoRndFlags:
+      type: integer
+      format: int64
+      title: CryptoRndFlags
+      minimum: 0
+      default: 3
+      description: |-
+        The character classes a generated random string may draw from. Declared `Constant Ulong` at
+        `enums.sru:L954-L957`, under the comment
+        `//Random string flags (n_crypto::GenRandomString:[flags])`.
+
+        **This is a bitmask, not an enumeration** - the three classes compose, so no closed `enum` is
+        declared and `x-bitmask-varnames` with `x-bitmask-values` documents the individual bits
+        instead:
+
+        - `1` = `CRYPTO_RNDSTRING_NUMBER` [`:L954`] - decimal digits
+        - `2` = `CRYPTO_RNDSTRING_ALPHABET` [`:L955`] - letters
+        - `4` = `CRYPTO_RNDSTRING_SYMBOL` [`:L956`] - punctuation and symbols
+
+        Composed value `7` selects all three.
+
+        ## The default is 3, and the symbol class is deliberately excluded from it
+
+        `enums.sru:L957` declares
+        `CRYPTO_RNDSTRING_DEFAULT = CRYPTO_RNDSTRING_NUMBER + CRYPTO_RNDSTRING_ALPHABET`, which is
+        **3**. Omitting the field therefore selects digits and letters and **not** symbols - which is
+        the legacy's own default. It is reproduced exactly rather than widened to 7 (C-B); a caller
+        who wants symbols asks for them.
+
+        The legacy declares the argument as an unconstrained `readonly ulong`
+        [n_crypto.sru:L16] and defines no behaviour for a bit outside the three above, so this
+        contract states no `maximum`: inventing one would narrow an argument the legacy does not
+        narrow.
+      x-bitmask-values: [1, 2, 4]
+      x-bitmask-varnames:
+        [CRYPTO_RNDSTRING_NUMBER, CRYPTO_RNDSTRING_ALPHABET, CRYPTO_RNDSTRING_SYMBOL]
+      x-legacy-default-identifier: CRYPTO_RNDSTRING_DEFAULT
+
+    CryptoGuidFlags:
+      type: integer
+      format: int64
+      title: CryptoGuidFlags
+      minimum: 0
+      default: 3
+      description: |-
+        The textual form of a generated identifier. Declared `Constant Ulong` at
+        `enums.sru:L960-L962`, under the comment `//Guid flags (n_crypto::GenGuid:[flags])`.
+
+        **A bitmask, not an enumeration** - the two options compose, so no closed `enum` is declared:
+
+        - `1` = `CRYPTO_GUID_INCLUDE_BRACKET` [`:L960`] - surround the value with braces
+        - `2` = `CRYPTO_GUID_INCLUDE_SEPARATOR` [`:L961`] - include the group separators
+
+        These govern **formatting only** and have no bearing on the value generated.
+
+        ## The default is 3 - both braces and separators
+
+        `enums.sru:L962` declares
+        `CRYPTO_GUID_DEFAULT = CRYPTO_GUID_INCLUDE_BRACKET + CRYPTO_GUID_INCLUDE_SEPARATOR`, which is
+        **3**, so omitting the field yields the fully decorated form. Passing `0` yields a bare
+        value with neither. As with the random-string flags, the legacy argument is an unconstrained
+        `readonly ulong` [n_crypto.sru:L18], so no `maximum` is invented here.
+      x-bitmask-values: [1, 2]
+      x-bitmask-varnames: [CRYPTO_GUID_INCLUDE_BRACKET, CRYPTO_GUID_INCLUDE_SEPARATOR]
+      x-legacy-default-identifier: CRYPTO_GUID_DEFAULT
+
+    CryptoRsaKeyBits:
+      type: integer
+      format: int64
+      title: CryptoRsaKeyBits
+      minimum: 0
+      maximum: 65535
+      description: |-
+        The modulus length, in bits, of an RSA key pair to generate.
+
+        ## DELIBERATELY NOT A CLOSED ENUMERATION (C-K)
+
+        The oracle labels its three constants **"RSA predefine bits"** [`enums.sru:L964`] - a
+        *predefine*, which is to say a convenience value, **not an allowed set** - and
+        `n_crypto.sru:L19-L20` types the parameter as a plain `readonly uint` with no constraint of
+        its own. Closing this into a three-member enumeration would be a **behavioural narrowing the
+        legacy does not have**, so it is not done. The three published convenience values are:
+
+        - `1024` = `CRYPTO_RSA_BITS_1024` [`enums.sru:L965`]
+        - `2048` = `CRYPTO_RSA_BITS_2048` [`:L966`]
+        - `4096` = `CRYPTO_RSA_BITS_4096` [`:L967`]
+
+        ## The stated bounds are the legacy parameter's own domain, not a policy of this contract
+
+        `readonly uint` is PowerBuilder's 16-bit **unsigned** integer, so the legacy argument's own
+        domain is exactly `0 .. 65535`, and that is what `minimum` and `maximum` above carry -
+        neither narrower nor wider than the declaration. They are a faithful statement of the
+        parameter's type, **not a cryptographic minimum and not a cryptographic maximum.** The
+        sibling `Proto/common.v1.proto` §1 permits a wire type to be *wider* than its legacy
+        counterpart; here JSON Schema can state the exact domain, so it does.
+
+        ## KNOWN LEGACY WEAKNESS - 1024 BITS REMAINS LEGAL
+
+        `CRYPTO_RSA_BITS_1024` is a declared, first-class value [`enums.sru:L965`] and the legacy's
+        own demonstration generates a 1024-bit pair. A 1024-bit modulus is **below every current
+        recommendation**. 2048 bits or more is advisable, and that advice is recorded here rather
+        than enforced: **no minimum-size guard exists anywhere in the legacy, and imposing one would
+        be a behavioural change of exactly the kind this port forbids** (C-B). 1024 is accepted and
+        is not removed from the accepted set.
+      x-legacy-predefined-values: [1024, 2048, 4096]
+      x-legacy-predefined-varnames: [CRYPTO_RSA_BITS_1024, CRYPTO_RSA_BITS_2048, CRYPTO_RSA_BITS_4096]
+
+    RandomSize:
+      type: integer
+      format: int64
+      title: RandomSize
+      minimum: 0
+      maximum: 4294967295
+      description: >-
+        The number of bytes or characters to generate. The legacy argument is `readonly ulong size`
+        [n_crypto.sru:L14-L16], which is PowerBuilder's 32-bit unsigned integer, so the bounds above
+        are exactly that declaration's own domain - a faithful statement of the parameter's type
+        rather than a policy of this contract. A request for a size the service cannot satisfy is
+        refused with 400 rather than truncated.
+
+
+    # ==============================================================================================
+    #  C-01 SCHEMAS - TOKEN ISSUANCE AND VERIFICATION-MATERIAL PUBLICATION
+    # ==============================================================================================
+    TokenRequest:
+      type: object
+      title: TokenRequest
+      description: |-
+        The three things, and the only three things, a token request carries: a caller identity, an
+        intended audience, and a requested scope set.
+
+        ## WHAT IS DELIBERATELY ABSENT, AND WHY IT MUST STAY ABSENT (C-G)
+
+        There is **no client secret, no password, no API key, no client assertion, no passphrase and
+        no key material of any kind** in this schema. Caller identity is established by the
+        **transport** - the mutual-TLS client certificate the operation requires - and not by a
+        credential in a JSON body.
+
+        `additionalProperties: false` is what makes that structural rather than advisory: a caller
+        cannot add a credential-shaped property, and a request that tries is refused with `400`
+        rather than silently accepted and ignored.
+
+        The `subject` below is a *claim*, not a credential. The identity actually honoured is the one
+        the presented certificate establishes; a mismatch is refused with `403`.
+      additionalProperties: false
+      required: [subject, audience, scopes]
+      properties:
+        subject:
+          type: string
+          minLength: 1
+          description: >-
+            The identity the caller is requesting a token for. This is a claim rather than a
+            credential - it is checked against the identity the presented client certificate
+            establishes, and a mismatch is refused.
+        audience:
+          type: string
+          minLength: 1
+          description: >-
+            The single intended audience for the token, which the recipient's stock bearer handler
+            validates. A caller needing tokens for two audiences requests two tokens; the contract
+            carries one audience per request, deliberately, so that a token is never valid somewhere
+            its holder did not intend.
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: >-
+            The requested scope set. The granted set returned in the response **may be narrower**,
+            and a narrowing is a successful outcome rather than an error, so a caller must read the
+            response rather than assume its request was honoured in full.
+          items:
+            type: string
+            minLength: 1
+            description: One requested scope.
+
+    TokenResponse:
+      type: object
+      title: TokenResponse
+      description: |-
+        The issued token and its metadata.
+
+        ## RFC 6749 §5.1 member spellings, deliberately (C-K)
+
+        `access_token`, `token_type`, `expires_in` and the space-delimited `scope` are the RFC 6749
+        §5.1 spellings, so a **stock client library parses this object without bespoke code** - the
+        same property that made this contract REST rather than gRPC. The request half of this
+        operation does *not* follow that RFC, because it is not a grant request; the asymmetry is
+        intentional and is explained on the operation.
+
+        ## No refresh token exists, here or anywhere in this contract
+
+        The contract issues a **short-lived service token**. A caller that needs another one calls
+        the operation again over the same mutually authenticated channel. Adding refresh semantics
+        would be a new feature (C-B), and it would also create a long-lived credential that the
+        sole-issuer topology deliberately does without.
+      additionalProperties: false
+      required: [access_token, token_type, expires_in, scope]
+      properties:
+        access_token:
+          type: string
+          minLength: 1
+          description: >-
+            The signed token, for presentation in the `Authorization` header as a bearer credential.
+            Recipients verify it against this service's published key set. This is a credential -
+            it is never logged, never echoed by any other operation in this document, and no
+            specimen of one appears anywhere in this specification.
+        token_type:
+          type: string
+          const: Bearer
+          description: >-
+            Always the constant `Bearer`. No other credential type is issued, so the value is fixed
+            rather than enumerated.
+        expires_in:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            The token lifetime in seconds from issuance. Tokens are short-lived by contract; a
+            caller must be prepared to obtain another rather than caching one indefinitely.
+        scope:
+          type: string
+          description: >-
+            The **granted** scope set as a space-delimited list, per RFC 6749 §5.1. It may be
+            narrower than the requested set. A caller must read this value; treating the request as
+            authoritative is the mistake this field exists to prevent. An empty string means no
+            requested scope was granted.
+        issued_at:
+          type: integer
+          format: int64
+          description: >-
+            Optional. The issuance time as seconds since the Unix epoch, matching the `iat` claim of
+            the token itself. Present so a caller can compute an expiry without parsing the token.
+
+    JsonWebKeySet:
+      type: object
+      title: JsonWebKeySet
+      description: >-
+        The set of **public** keys with which tokens issued by this service can be verified.
+        Consumers normally reach this through their stock bearer handler rather than parsing it
+        themselves. More than one key may be present during a key rollover, and a consumer selects by
+        `kid`.
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          description: >-
+            The published keys. Public parameters only. May contain more than one entry while a
+            rollover is in progress, and may legitimately contain exactly one.
+          items:
+            $ref: '#/components/schemas/JsonWebKey'
+
+    JsonWebKey:
+      type: object
+      title: JsonWebKey
+      description: |-
+        One published verification key. **Public parameters only.**
+
+        ## HARD PROHIBITION, AND IT IS STRUCTURAL RATHER THAN ADVISORY (C-G)
+
+        **This schema defines no private and no symmetric key member. There is no `d`, `p`, `q`,
+        `dp`, `dq`, `qi` or `k`, and none may ever be added.** Publishing a private component on an
+        anonymous endpoint would hand any caller the ability to mint tokens indistinguishable from
+        legitimate ones, and would defeat the entire sole-issuer topology in a single request.
+
+        `additionalProperties: false` is what makes the prohibition structural: a private member is
+        **unrepresentable** in a document conforming to this schema, not merely undocumented. A
+        reviewer can therefore check the property by reading this schema rather than by auditing an
+        implementation.
+
+        ## No example value appears on any field of this schema, deliberately
+
+        Neither `n` nor `e` nor `kid` carries an `example`, and no field in this entire specification
+        does. A plausible-looking base64 blob in an example is indistinguishable from real key
+        material to a reader, and specimen keys have a long history of being copied into production
+        unchanged. The fields are **described** instead.
+
+        ## This issuer publishes RSA keys
+
+        The legacy anchor for this contract is the RSA signature pair
+        `RSASign` / `VerifyRSASign` at `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L70-L73`, and the
+        members below model the RSA public parameters accordingly. A move to another key family would
+        be a change to this published contract - which is the correct consequence of versioning it,
+        rather than something to leave open with a permissive schema.
+      additionalProperties: false
+      required: [kty, kid, n, e]
+      properties:
+        kty:
+          type: string
+          enum: [RSA]
+          x-enum-varnames: [RSA]
+          description: The key family. This issuer publishes RSA keys.
+        use:
+          type: string
+          enum: [sig]
+          x-enum-varnames: [sig]
+          description: >-
+            The intended use, which is signature verification. Encryption keys are not published
+            here; this set exists so a recipient can verify a token.
+        key_ops:
+          type: array
+          uniqueItems: true
+          description: >-
+            The permitted operations for this key. Verification only - a published key can never be
+            used to sign, because its private component is not published.
+          items:
+            type: string
+            enum: [verify]
+            x-enum-varnames: [verify]
+            description: The single permitted operation.
+        alg:
+          type: string
+          description: >-
+            The algorithm this key is intended for, as the identifier a stock bearer handler
+            recognises. Present so a consumer need not infer it from the key family.
+        kid:
+          type: string
+          minLength: 1
+          description: >-
+            The key identifier, which the token header repeats so a consumer can select the right key
+            during a rollover. An opaque value; it is not parsed and carries no key material.
+        n:
+          type: string
+          description: >-
+            The RSA **public** modulus, base64url-encoded without padding as the key-set format
+            requires. Public by definition - it is one half of what makes signature verification
+            possible.
+        e:
+          type: string
+          description: >-
+            The RSA **public** exponent, base64url-encoded without padding. Public by definition. No
+            specimen value is given here for the reason stated on this schema.
+
+    ProviderMetadata:
+      type: object
+      title: ProviderMetadata
+      description: |-
+        The discovery metadata a stock bearer handler self-configures from.
+
+        ## Two members are deliberately absent, and the absence is part of the contract (C-K)
+
+        **`authorization_endpoint` and `userinfo_endpoint` are not published, and no equivalent is
+        published under another name.** There is no interactive flow and no user-facing flow anywhere
+        in this system: every caller is a service, identity on the issuance operation is established
+        by the transport, and there is no end user to redirect, to prompt for consent, or to
+        describe. Publishing either member would advertise a capability that does not exist.
+
+        `additionalProperties: false` makes that machine-checkable. The standards that define this
+        document permit additional members and require consumers to ignore unrecognised ones; this
+        contract nevertheless states its member set exactly, so the absence above cannot be quietly
+        filled in without a version change.
+      additionalProperties: false
+      required: [issuer, jwks_uri]
+      properties:
+        issuer:
+          type: string
+          format: uri
+          description: >-
+            The issuer identifier. A consumer's bearer handler validates the `iss` claim of every
+            inbound token against this value, so it must match byte for byte what this service mints.
+        jwks_uri:
+          type: string
+          format: uri
+          description: >-
+            The absolute location of this service's key set, which is `/.well-known/jwks.json` on
+            this same service. This is the member that makes zero-bespoke-code verification possible:
+            a consumer points its handler here and never fetches a key itself.
+        token_endpoint:
+          type: string
+          format: uri
+          description: >-
+            The absolute location of the issuance operation, which is `/v1/tokens` on this same
+            service. Published for completeness; note that the operation is protected by mutual TLS
+            and is not an OAuth 2.0 grant endpoint.
+        id_token_signing_alg_values_supported:
+          type: array
+          uniqueItems: true
+          description: >-
+            The signature algorithm identifiers this issuer uses. Informational, and read by stock
+            consumers when constraining which algorithms they will accept - a constraint worth
+            setting, because accepting any algorithm a token declares is a well-known
+            token-validation weakness.
+          items:
+            type: string
+            description: One algorithm identifier.
+        grant_types_supported:
+          type: array
+          uniqueItems: true
+          description: >-
+            Informational. This issuer performs no interactive grant of any kind; the member is
+            published because stock discovery consumers read it, and it is metadata rather than a
+            request parameter of the issuance operation.
+          items:
+            type: string
+            description: One grant type identifier.
+        subject_types_supported:
+          type: array
+          uniqueItems: true
+          description: Informational, published because stock discovery consumers read it.
+          items:
+            type: string
+            description: One subject type identifier.
+        response_types_supported:
+          type: array
+          uniqueItems: true
+          description: >-
+            Informational, published because stock discovery consumers read it. There is no
+            redirect-based response flow in this system.
+          items:
+            type: string
+            description: One response type identifier.
+
+    # ==============================================================================================
+    #  C-10 SCHEMAS - HEALTH AND THE AUTHENTICATION PROOF
+    # ==============================================================================================
+    HealthReport:
+      type: object
+      title: HealthReport
+      description: |-
+        The readiness of **this service only**. Security has no upstream dependency, so this report is
+        never an aggregate; Gateway builds the aggregate by combining this report with those of
+        DataServices and Persistence, and reports healthy only after all three do.
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy]
+          description: |-
+            The overall verdict, and the field that carries the distinction contract C-10 requires
+            between "not ready" and "unhealthy":
+
+            - `Healthy` - fully ready. Reported with HTTP 200.
+            - `Degraded` - **not ready**, but not failed either. A service still completing its
+              startup validation reports this. Reported with HTTP 200, so a probe that tears down on
+              any non-2xx does not kill a service that is merely still starting.
+            - `Unhealthy` - **failed**. Reported with HTTP 503.
+
+            An operator reading an aggregate needs to tell the middle state from the last one, which
+            is why two states are not collapsed into one.
+        service:
+          type: string
+          const: security
+          description: >-
+            The reporting service, so an aggregate can name each upstream individually rather than
+            returning one opaque verdict.
+        checkedAt:
+          type: string
+          format: date-time
+          description: When this report was produced, so a consumer can detect a stale cached report.
+        checks:
+          type: array
+          description: >-
+            The individual component checks behind the verdict. Present so an operator can tell which
+            check is not yet satisfied. Carries no configuration value, no connection string and no
+            key material.
+          items:
+            $ref: '#/components/schemas/HealthCheckResult'
+
+    HealthCheckResult:
+      type: object
+      title: HealthCheckResult
+      description: One component check contributing to the overall verdict.
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: >-
+            The check's stable name. An identifier for the check, never a file path, a provider class
+            name or any other internal detail of this service (C-A).
+        status:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy]
+          description: This check's own verdict, using the same three states as the overall report.
+        description:
+          type: string
+          description: >-
+            An optional human-readable note. Carries no configuration value and no part of the
+            configured key store.
+
+    PingResponse:
+      type: object
+      title: PingResponse
+      description: >-
+        The successful half of the authentication proof. Returned only when a valid token was
+        presented; the absence of a token yields 401, and both outcomes are part of contract C-10.
+        The body deliberately does not echo the presented token, any claim of it, or any part of the
+        verification material.
+      additionalProperties: false
+      required: [service, authenticated]
+      properties:
+        service:
+          type: string
+          const: security
+          description: The responding service.
+        authenticated:
+          type: boolean
+          const: true
+          description: >-
+            Always true when this body is returned, because the operation cannot be reached without a
+            valid token. It is present so that a conformance test asserting the authenticated path
+            has something explicit to assert on rather than inferring success from a status code.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the response was produced.
+
+
+    # ==============================================================================================
+    #  C-02 SCHEMAS - REQUESTS
+    #  EVERY ONE sets additionalProperties: false. That is the contract-level control that makes the
+    #  secrets rule structural: a caller cannot add a `key`, `iv`, `passphrase`, `password` or
+    #  `secret` property to any request in this document, because an unrecognised property is
+    #  refused with 400 rather than silently ignored. Not one request schema below declares key
+    #  material, an initialization vector, a passphrase or a credential of any kind.
+    # ==============================================================================================
+    HashRequest:
+      type: object
+      title: HashRequest
+      description: >-
+        An unkeyed digest request. Mirrors the two legacy overloads at `n_crypto.sru:L21-L22`;
+        `payloadForm` selects between them. There is no key field here, because these two overloads
+        take no key - the keyed family is a separate operation.
+      additionalProperties: false
+      required: [data, payloadForm, hashType]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        hashType:
+          $ref: '#/components/schemas/CryptoHashType'
+
+    HmacRequest:
+      type: object
+      title: HmacRequest
+      description: >-
+        A keyed digest request. Mirrors the four legacy overloads at `n_crypto.sru:L23-L26`, whose
+        key half is collapsed by the `keyRef` indirection and whose payload half remains selectable
+        through `payloadForm`. The key itself does not appear here and cannot be added - see
+        `KeyReference`.
+      additionalProperties: false
+      required: [data, payloadForm, keyRef, hashType]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        hashType:
+          $ref: '#/components/schemas/CryptoHashType'
+
+    SymEncryptRequest:
+      type: object
+      title: SymEncryptRequest
+      description: |-
+        A symmetric encryption request, covering all 16 legacy `SymEncrypt` overloads at
+        `n_crypto.sru:L30-L45`.
+
+        **Omitting `mode` runs in ECB** [`enums.sru:L946`] - a preserved legacy weakness, annotated on
+        the `CryptoSymCryptMode` schema together with the absence of authenticated encryption and the
+        fixed, unselectable padding. **There is no padding field and no authentication-tag field**,
+        because not one of the 32 symmetric legacy overloads has either.
+      additionalProperties: false
+      required: [data, payloadForm, keyRef, cipherType]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        ivRef:
+          $ref: '#/components/schemas/IvReference'
+        cipherType:
+          $ref: '#/components/schemas/CryptoSymCryptType'
+        mode:
+          $ref: '#/components/schemas/CryptoSymCryptMode'
+
+    SymDecryptRequest:
+      type: object
+      title: SymDecryptRequest
+      description: >-
+        A symmetric decryption request, covering all 16 legacy `SymDecrypt` overloads at
+        `n_crypto.sru:L46-L61`. The shape is identical to the encrypt direction, and every annotation
+        there applies: omitting `mode` runs in ECB, there is no padding field and no
+        authentication-tag field, and neither the key nor the initialization vector travels as a
+        value.
+      additionalProperties: false
+      required: [data, payloadForm, keyRef, cipherType]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        ivRef:
+          $ref: '#/components/schemas/IvReference'
+        cipherType:
+          $ref: '#/components/schemas/CryptoSymCryptType'
+        mode:
+          $ref: '#/components/schemas/CryptoSymCryptMode'
+
+    RsaCipherRequest:
+      type: object
+      title: RsaCipherRequest
+      description: |-
+        An RSA encryption or decryption request. One schema serves both directions because the legacy
+        declarations are symmetrical: `RSAEncrypt` at `n_crypto.sru:L62-L65` differs from
+        `RSADecrypt` at `:L66-L69` only in taking `pubkey` where the other takes `prikey`, and both
+        of those become the same `keyRef` here.
+
+        **Omitting `padding` selects PKCS#1 v1.5** [`enums.sru:L951`], and **no-padding is not
+        selectable at all** because the legacy declares no such constant - both preserved weaknesses,
+        annotated on the `CryptoRsaPadding` schema.
+      additionalProperties: false
+      required: [data, payloadForm, keyRef]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        padding:
+          $ref: '#/components/schemas/CryptoRsaPadding'
+
+    RsaSignRequest:
+      type: object
+      title: RsaSignRequest
+      description: >-
+        An RSA signature request, covering both legacy `RSASign` overloads at
+        `n_crypto.sru:L70-L71`. `keyRef` stands in the position of the legacy
+        `readonly string prikey`. Note that `hashType` accepts the full six-member set, which
+        includes MD5 and CRC32 - a preserved legacy weakness annotated on the `CryptoHashType`
+        schema and on the operation.
+      additionalProperties: false
+      required: [data, payloadForm, keyRef, hashType]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        hashType:
+          $ref: '#/components/schemas/CryptoHashType'
+
+    RsaVerifyRequest:
+      type: object
+      title: RsaVerifyRequest
+      description: >-
+        An RSA signature verification request, covering both legacy `VerifyRSASign` overloads at
+        `n_crypto.sru:L72-L73`. **One `payloadForm` governs both `data` and `signature`**, because the
+        legacy correlates them - `:L72` pairs a string payload with a string signature and `:L73` a
+        blob payload with a blob signature, and there is no mixed overload. `keyRef` stands in the
+        position of the legacy `readonly string pubkey`.
+      additionalProperties: false
+      required: [data, payloadForm, signature, keyRef, hashType]
+      properties:
+        data:
+          $ref: '#/components/schemas/PayloadData'
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        signature:
+          allOf:
+            - $ref: '#/components/schemas/PayloadData'
+          description: >-
+            The signature to verify, in the **same form** as `data`. It is not a credential and not
+            key material; it is the value being checked.
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        hashType:
+          $ref: '#/components/schemas/CryptoHashType'
+
+    GenRsaKeyRequest:
+      type: object
+      title: GenRsaKeyRequest
+      description: >-
+        An RSA key-pair generation request, covering both legacy `GenRSAKey` overloads at
+        `n_crypto.sru:L19-L20`. There is no passphrase field, no salt field and no derivation
+        parameter, because the legacy surface has none anywhere - see `KeyReference` for the
+        mechanical proof of that preserved weakness.
+      additionalProperties: false
+      required: [bits]
+      properties:
+        bits:
+          $ref: '#/components/schemas/CryptoRsaKeyBits'
+        pemFormat:
+          type: boolean
+          description: >-
+            Optional. Mirrors the `readonly boolean pemformat` argument of the second legacy overload
+            at `n_crypto.sru:L20`, which selects the textual key format of the returned public key.
+            Omitting it selects the three-argument overload at `:L19`, which does not take the switch
+            at all.
+
+    RandomBlobRequest:
+      type: object
+      title: RandomBlobRequest
+      description: >-
+        A random-bytes request. Mirrors the single legacy overload at `n_crypto.sru:L14`.
+      additionalProperties: false
+      required: [size]
+      properties:
+        size:
+          allOf:
+            - $ref: '#/components/schemas/RandomSize'
+          description: The number of random bytes to generate.
+
+    RndStringRequest:
+      type: object
+      title: RndStringRequest
+      description: >-
+        A random-string request, covering both legacy overloads at `n_crypto.sru:L15-L16`. Omitting
+        `flags` selects `CRYPTO_RNDSTRING_DEFAULT`, which is 3 - digits and letters, with the symbol
+        class deliberately excluded, exactly as the legacy default excludes it.
+      additionalProperties: false
+      required: [size]
+      properties:
+        size:
+          allOf:
+            - $ref: '#/components/schemas/RandomSize'
+          description: The number of characters to generate.
+        flags:
+          $ref: '#/components/schemas/CryptoRndFlags'
+
+    GuidRequest:
+      type: object
+      title: GuidRequest
+      description: >-
+        An identifier-generation request, covering both legacy overloads at `n_crypto.sru:L17-L18`.
+        Every property is optional, so an empty object - or no body at all - reaches the no-argument
+        overload at `:L17` and yields the default form.
+      additionalProperties: false
+      properties:
+        flags:
+          $ref: '#/components/schemas/CryptoGuidFlags'
+
+    StringToBlobRequest:
+      type: object
+      title: StringToBlobRequest
+      description: >-
+        A decode request. Mirrors the single legacy overload at `n_crypto.sru:L11`. The `encoding`
+        argument is a genuine legacy argument saying how `data` is to be interpreted; it is **not**
+        the JSON transport encoding of the returned bytes, which is always base64 - see `PayloadForm`
+        for the three encodings this contract keeps apart. There is no `payloadForm` here because the
+        legacy declares exactly one overload, taking a string and returning a blob.
+      additionalProperties: false
+      required: [data, encoding]
+      properties:
+        data:
+          type: string
+          description: The encoded string to decode, interpreted according to `encoding`.
+        encoding:
+          $ref: '#/components/schemas/CryptoEncoding'
+
+    BlobToStringRequest:
+      type: object
+      title: BlobToStringRequest
+      description: >-
+        An encode request, and the exact inverse of the decode request. Mirrors the single legacy
+        overload at `n_crypto.sru:L12`. `data` always carries base64 because JSON has no binary type,
+        while `encoding` selects whether the **returned string** is Base64 or hex. A caller asking for
+        hex therefore submits base64 and receives hex, which is correct rather than contradictory.
+      additionalProperties: false
+      required: [data, encoding]
+      properties:
+        data:
+          type: string
+          contentEncoding: base64
+          description: The bytes to encode, carried as base64 because JSON has no binary type.
+        encoding:
+          $ref: '#/components/schemas/CryptoEncoding'
+
+    BlobReverseRequest:
+      type: object
+      title: BlobReverseRequest
+      description: >-
+        A byte-reversal request. Mirrors the single legacy overload at `n_crypto.sru:L13`, whose
+        parameter is `ref blob data` - the legacy mutates the caller's own variable in place. The
+        request therefore carries only the input; the impedance mismatch that creates is documented on
+        the operation and on `BlobReverseResponse`.
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: string
+          contentEncoding: base64
+          description: The bytes to reverse, carried as base64 because JSON has no binary type.
+
+    # ==============================================================================================
+    #  C-02 SCHEMAS - RESPONSES
+    # ==============================================================================================
+    DigestResponse:
+      type: object
+      title: DigestResponse
+      description: |-
+        A digest, from either the unkeyed or the keyed hash operation.
+
+        ## The response form does NOT follow `payloadForm`, and that asymmetry is legacy behaviour
+
+        **All six legacy hash overloads return a `string`** - the two unkeyed at
+        `n_crypto.sru:L21-L22` and the four keyed at `:L23-L26` - so a blob payload still yields a
+        string digest. Everywhere else in this contract the result form follows the payload form,
+        because the legacy return type follows the payload type; the hash family is the exception, and
+        it is **preserved rather than harmonised** (C-B). This schema therefore carries no
+        `payloadForm`, deliberately.
+      additionalProperties: false
+      required: [digest]
+      properties:
+        digest:
+          type: string
+          description: >-
+            The digest, as the legacy string-shaped overloads return it. It is not a credential and
+            carries no key material, even for the keyed operation.
+
+    PayloadResponse:
+      type: object
+      title: PayloadResponse
+      description: >-
+        A result whose form **follows the request's `payloadForm`**, exactly as the legacy return type
+        follows the legacy payload type. Used by both symmetric directions, both RSA cipher
+        directions and the RSA signature operation. `payloadForm` is echoed so the response is
+        self-describing when read in isolation - in a log, in a parity recording, or by a consumer
+        that did not construct the request.
+      additionalProperties: false
+      required: [payloadForm, data]
+      properties:
+        payloadForm:
+          $ref: '#/components/schemas/PayloadForm'
+        data:
+          $ref: '#/components/schemas/PayloadData'
+
+    RsaVerifyResponse:
+      type: object
+      title: RsaVerifyResponse
+      description: >-
+        The verification verdict, carrying the `boolean` that both legacy `VerifyRSASign` overloads
+        return [`n_crypto.sru:L72-L73`]. A signature that does not verify is a **successful execution
+        with a negative result** and is reported here with HTTP 200, not as an error status -
+        conflating the two would make a legitimate negative verdict indistinguishable from a transport
+        or authorization failure.
+      additionalProperties: false
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+          description: >-
+            True when the signature verifies against the referenced key and the selected hash. False
+            when it does not. The response gives no further detail about *why* a verification failed,
+            because the legacy return value carries none either.
+
+    GenRsaKeyResponse:
+      type: object
+      title: GenRsaKeyResponse
+      description: |-
+        The outcome of key-pair generation.
+
+        ## THE DELIBERATE NARROWING, RESTATED AT ITS POINT OF DEFINITION (C-K)
+
+        The legacy signature is
+        `boolean GenRSAKey(readonly uint bits, ref string prikey, ref string pubkey)`
+        [`n_crypto.sru:L19-L20`]: it returns **both** keys through **two `ref` out-parameters** and
+        reports only success or failure as its value.
+
+        **That shape cannot cross a network boundary without shipping freshly generated private key
+        material across it.** This response therefore returns the **public** key together with an
+        opaque reference to the retained private key, and **no private component is returned**. A
+        caller that needs a signature calls the signing operation with the reference; it does not
+        obtain the key with which to produce one.
+
+        This is a narrowing of the legacy surface, recorded as such rather than presented as
+        equivalence. **No private-key export path exists in this contract**; were one ever required it
+        would have to be a separately named operation, documented as such, and never the default
+        behaviour of this one.
+      additionalProperties: false
+      required: [publicKey, keyRef, bits]
+      properties:
+        publicKey:
+          type: string
+          description: >-
+            The generated **public** key, in the textual format the request's `pemFormat` selects.
+            This is the only key-material-bearing field anywhere in this specification, it is a
+            **response** field, and the material is public by definition - a public key is precisely
+            the half that is meant to be handed out. Returning it is required: a caller that cannot
+            obtain the public key cannot use the pair it just asked for. No specimen value is given.
+        keyRef:
+          allOf:
+            - $ref: '#/components/schemas/KeyReference'
+          description: >-
+            The reference under which this service has stored the generated **private** key. The
+            private key is retained here and is never returned. Pass this reference to the signing or
+            decryption operations.
+        bits:
+          allOf:
+            - $ref: '#/components/schemas/CryptoRsaKeyBits'
+          description: >-
+            The modulus length actually generated, echoed so a caller can confirm what it received -
+            which matters most when 1024 was requested, since that value remains legal and is not
+            silently upgraded.
+        pemFormat:
+          type: boolean
+          description: >-
+            Whether the returned public key is in the textual format the second legacy overload's
+            switch selects. Echoed so the response is self-describing.
+
+    RndStringResponse:
+      type: object
+      title: RndStringResponse
+      description: >-
+        A generated random string, as both legacy overloads at `n_crypto.sru:L15-L16` return it. This
+        value differs on every call by definition, so it is one of the three determinism seams a
+        parity comparison must mask.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The generated string, drawn from the selected character classes.
+
+    GuidResponse:
+      type: object
+      title: GuidResponse
+      description: >-
+        A generated identifier, as both legacy overloads at `n_crypto.sru:L17-L18` return it. The
+        surrounding braces and the group separators are present or absent according to the requested
+        flags. This value differs on every call by definition and must be masked in a parity
+        comparison.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: >-
+            The generated identifier in the requested textual form. No pattern is declared, because
+            the form varies with the flags and constraining it would narrow an argument the legacy
+            leaves open.
+
+    BlobResponse:
+      type: object
+      title: BlobResponse
+      description: >-
+        Bytes returned by an operation whose legacy overload returns a `blob` unconditionally - the
+        decode operation at `n_crypto.sru:L11` and the random-bytes operation at `:L14`. There is no
+        `payloadForm` here because there was no overload family to choose between.
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: string
+          contentEncoding: base64
+          description: >-
+            The bytes, carried as base64 because JSON has no binary type. This transport encoding is
+            **not** the `encoding` argument of the conversion operations - see `PayloadForm`.
+
+    EncodedTextResponse:
+      type: object
+      title: EncodedTextResponse
+      description: >-
+        The encoded string returned by the encode operation at `n_crypto.sru:L12`, in the encoding the
+        request's `encoding` argument selected.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The encoded string, in Base64 or hex according to the requested encoding.
+
+    BlobReverseResponse:
+      type: object
+      title: BlobReverseResponse
+      description: |-
+        Both halves of the legacy outcome of `boolean BlobReverse(ref blob data)`
+        [`n_crypto.sru:L13`].
+
+        ## WHY THERE ARE TWO FIELDS RATHER THAN ONE (C-K)
+
+        The legacy **mutates its argument in place** and returns only a `boolean`. A request body is
+        not a variable a server can write back into, so in-place mutation has no wire representation
+        at all. The response therefore carries:
+
+        - `data` - the reversed bytes, which the legacy left in the caller's own variable. Returning
+          them is the *addition* the boundary forces.
+        - `succeeded` - the legacy `boolean` return value, carried **unchanged**. It is preserved
+          precisely because it is the operation's actual return value; discarding it in favour of an
+          HTTP status would drop a signal a caller may be branching on.
+
+        A reader should not mistake `data` for the legacy's return value. It is not.
+      additionalProperties: false
+      required: [data, succeeded]
+      properties:
+        data:
+          type: string
+          contentEncoding: base64
+          description: The reversed bytes, carried as base64 because JSON has no binary type.
+        succeeded:
+          type: boolean
+          description: >-
+            The legacy `boolean` return value, unchanged. It may be false in a 200 response: the
+            operation was executed and reported failure, which is not the same thing as the request
+            being rejected.

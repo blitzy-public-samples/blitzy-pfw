@@ -1,0 +1,2301 @@
+// ==============================================================================================
+//  persistence.v1.proto - THE PERSISTENCE HALF OF THE PUBLISHED CROSS-SERVICE BOUNDARY
+//  --------------------------------------------------------------------------------------------
+//  Carries four contracts, served by Persistence and consumed by DataServices:
+//
+//      C-05  persistence.v1.QueryService        retrieval - one server stream plus configuration
+//      C-06  persistence.v1.UpdateService       the optimistic-concurrency contract
+//      C-07  persistence.v1.CommandService      action-oriented Exec
+//      C-08  persistence.v1.TransactionService  session lifecycle over a nine-field descriptor
+//
+//  IT CARRIES NO BEHAVIOUR. Not one line here executes. PowerFramework.Contracts is the boundary
+//  DEFINITION, not a shared-code back door (constraint C-A): it declares the shapes that cross the
+//  wire and nothing else. Three consequences of that are worth naming up front, because each is a
+//  thing a reader might expect to find here and will not:
+//
+//    * NO STORAGE-PROVIDER DETAIL. There is no connection string, no database file path, no
+//      SQLite URI and no fragment of its grammar - not the read-write-create mode, not the
+//      optional password parameter, not the integrity-check option, not the journal-mode option.
+//      Those belong to the service's own connection factory and its options type. A wire contract
+//      that named them would let a network peer dictate how the server opens its store.
+//    * NO ORM ARTIFACT. No entity, no migration, no schema, no table definition.
+//    * NO CODEC DETAIL. The update and query payloads cross as opaque `bytes`. Their internal
+//      format is the business of the changeset and full-state codecs on both sides, and it is
+//      deliberately NOT described by any field here.
+//
+//  WHY FOUR SERVICES IN ONE FILE, AND WHY FOUR RATHER THAN ONE (C-K)
+//  --------------------------------------------------------------------------------------------
+//  The legacy retrieval / validation / update triple is split into DISTINCT services rather than
+//  folded into one, SO THAT THE THREE CAN VERSION INDEPENDENTLY - and that matters specifically
+//  because THE UPDATE CONTRACT IS THE ONE CARRYING CONCURRENCY SEMANTICS. C-06 is the contract
+//  most likely to need a revision, and a revision to it must not force every retrieval consumer
+//  to move. One service with twenty methods would couple their release cycles permanently.
+//
+//  They share one FILE because they share a package, a namespace, a set of local shapes
+//  (TaskHandle, OperationStatus, PositionalParameter) and a single legacy library:
+//  ws_objects/pfw.thread.ext.pbl.src/ is entirely SQL-shaped, and its two structures are literally
+//  the transaction descriptor and the database-error record. One file per service would duplicate
+//  the shared shapes four times or force a fourth .proto whose only content is those shapes.
+//  One file, four services: separate versioning surfaces, one place for what they genuinely share.
+//
+//  EVERY CONTRACT HERE IS NET NEW, NOT A PORT
+//  --------------------------------------------------------------------------------------------
+//  The legacy PowerFramework is a LIBRARY. It has no process of its own, no listening socket and
+//  no serialization layer, so nothing below translates an existing wire format - there was none to
+//  translate. The source branch contains zero .proto files. What is faithful to the legacy here is
+//  its VALUES and its SEMANTICS, never a schema. Every behavioural claim in this file therefore
+//  carries an oracle locator, because the read-only legacy tree is the only thing that can
+//  adjudicate one.
+//
+//  THE SCALAR AND WIDTH RULE IS NOT RESTATED HERE, DELIBERATELY
+//  --------------------------------------------------------------------------------------------
+//  common.v1.proto SECTION 1 is normative for all three .proto files in this folder and this file
+//  applies it UNCHANGED: long -> int64, integer -> int32, unsignedlong -> uint64,
+//  boolean -> bool, blob -> bytes, `any` -> common.v1.AnyValue (a discriminated union, NEVER a
+//  bare string), dec / decimal(n) -> common.v1.DecimalValue and NEVER double, date / time /
+//  datetime -> three DISTINCT carriers and NO google.protobuf.Timestamp. It is referenced rather
+//  than repeated precisely so the three files cannot drift: a divergence on how a legacy scalar
+//  crosses the wire would be invisible at compile time and fatal to parity.
+//
+//  The decimal half of that rule bites concretely in this file even though no message below
+//  declares a decimal field of its own: the primary fixture
+//  ws_objects/pfw.tests.pbl.src/dw_sqlite.srd carries `salary decimal(2)`, that column reaches this
+//  boundary inside common.v1.ColumnValue on a conflict payload, and a double round trip would lose
+//  precision QUIETLY - the value still looks plausible, so no unit test flags it, and the damage
+//  surfaces only as a byte-exact characterization comparison that can no longer be made.
+//
+//  RULES POSITION
+//  --------------------------------------------------------------------------------------------
+//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
+//  file, and none is invented here. The enterprise-standard baseline applies in their place, and
+//  the binding constraints are the refactor plan's own non-rule inventory. Those that govern this
+//  file are cited inline at the point each is discharged: C-A (boundary definition, not a
+//  shared-code back door), C-B (replicate behaviour and defects, never improve), C-C (the legacy
+//  tree is read-only and is the behavioural oracle), C-D (the four deferred services are not
+//  implemented, even partially), C-E (no fabricated database), C-F (nothing hardcoded, no secret
+//  in any form), C-G (every new boundary authenticated, by framework code) and C-K (document every
+//  technology and boundary decision).
+//
+//  C-C SELF-AUDIT: the ten oracle objects cited throughout - n_cst_thread_task_sqlquery.sru,
+//  _sqlupdate.sru, _sqlcommand.sru, _sqlbase.sru, n_cst_thread_trans.sru,
+//  n_cst_thread_trans_pool.sru, transactiondata.srs, dberrordata.srs, enums.sru and n_sqlite.sru -
+//  were read for VALUES AND SEMANTICS ONLY. Not one was edited, reformatted, moved or proposed for
+//  change, and none is referenced by any build item of this project.
+//
+//  C-D SELF-AUDIT: nothing here implements or anticipates DesignSystem, Documents, Integration or
+//  ScriptBridge. There is no document, JSON or XML message; no HTTP, FTP, WebSocket or MQTT
+//  transport field; no dynamic-script, compiler or evaluator field; and no reserved range held
+//  open for any of them. Note the fine line on the SQL parser, since it is the one place the
+//  boundary could be misread: the six-clause statement model is IN SCOPE for Persistence because
+//  it is a verified hard dependency of the query task, while the eleven JSON and XML objects from
+//  that same legacy library are deferred. A CLAUSE concept is therefore legitimate here and a
+//  DOCUMENT concept is not. The single `reserved` below is the opposite of anticipation: it
+//  FORBIDS a field forever rather than holding a slot for one.
+//
+//  C-E SELF-AUDIT: SQLite is the only storage engine this system provisions, against the only
+//  evidenced schema. DatabaseType below carries two dialect selectors because the paging
+//  behaviours they select are pure string transforms and therefore in scope, but NO field anywhere
+//  in this file models a SQL Server or Oracle connection, provider, session, credential or schema,
+//  because neither has any connection string or DDL anywhere in the repository. And SQLite is
+//  deliberately absent from DatabaseType - see the note there.
+//
+//  C-F SELF-AUDIT: no key, credential, token, password, connection string, certificate or
+//  secret-shaped placeholder value appears anywhere in this file, in any field default, example or
+//  comment. The sharpest edge is the log-password field of the transaction descriptor: it is a
+//  password field, so its write-only treatment below is a C-F obligation and not merely a design
+//  preference, and it is enforced STRUCTURALLY rather than by convention.
+//
+//  C-G SELF-AUDIT: no auth, token, credential or identity message is defined here. Authentication
+//  on this edge is Persistence's stock JwtBearer configuration, which is framework code, and
+//  Persistence holds VERIFICATION MATERIAL ONLY - it is not a token issuer. Hand-writing a
+//  security surface here would duplicate framework code and enlarge the attack surface.
+// ==============================================================================================
+
+syntax = "proto3";
+
+package persistence.v1;
+
+// EXACT VALUE, DECIDED RATHER THAN DEFAULTED (C-K). The sibling PowerFramework.Contracts.csproj
+// enumerates PowerFramework.Contracts.Persistence.V1 by name, and docs/CONTRACTS.md section 2.3
+// does the same, so this is the value the four consuming projects already expect. Persistence
+// implements the generated server bases under this namespace and DataServices consumes the
+// generated client stubs from it.
+option csharp_namespace = "PowerFramework.Contracts.Persistence.V1";
+
+// THE ONLY IMPORT, AND IT IS A BARE FILE NAME (C-K).
+// PowerFramework.Contracts.csproj compiles this folder with a single Protobuf item whose ProtoRoot
+// is set EXPLICITLY to "Proto", so an import is resolved relative to that root and is written as
+// the bare file name. It is never "Proto/common.v1.proto": Grpc.Tools' own root-defaulting target
+// would otherwise fall back to the project directory, and the mismatch surfaces as a confusing
+// protoc "file not found" that looks like a missing file rather than a wrong prefix. Verified by
+// building; the .csproj's own comment states the same contract, so the two agree.
+//
+// NOTHING ELSE IS IMPORTED. dataservices.v1.proto is NOT imported and must not be: C-03 and C-04
+// are peers of these contracts, not dependencies of them, and importing a sibling would make the
+// two definition sets version together. No google/protobuf/*.proto well-known type is imported
+// either, because none is used - Timestamp in particular is rejected for the reason common.v1.proto
+// records under TEMPORAL TYPES.
+import "common.v1.proto";
+
+// Reused from common.v1 and DELIBERATELY NOT REDEFINED HERE: RetCode (as common.v1.RetCode.Value,
+// the enum nested inside the thin wrapper message), DwBuffer, ItemStatus, DbError, ConflictDetail,
+// ConflictRow, ColumnValue, AnyValue and the four value carriers. Redefining any of them would
+// create two independently-drifting definitions of one shape, which is the single failure the
+// common file exists to prevent.
+//
+// THREE OF THEM ARE DIRECT FIELD TYPES BELOW AND THE REST REACH THE WIRE INDIRECTLY, which is
+// recorded here so their absence from any field declaration is not read as an omission (C-K):
+//
+//   common.v1.RetCode.Value   direct    - on OperationStatus.ret_code, so on every unary response
+//   common.v1.DbError         direct    - on OperationStatus.db_error
+//   common.v1.AnyValue        direct    - on PositionalParameter.value
+//   common.v1.DwBuffer        via DbError.buffer and ConflictRow.buffer
+//   common.v1.ItemStatus      via ConflictRow.item_status and ColumnValue.item_status
+//   common.v1.ColumnValue     via ConflictRow.current_values and .original_values
+//   common.v1.ConflictDetail  via the gRPC ABORTED STATUS DETAIL on C-06's Update
+//
+// The last of those is the one worth being explicit about: a status detail is attached to the gRPC
+// status rather than to a response message, so it CANNOT be expressed as a field in this IDL at all -
+// there is no syntax for it. It is nonetheless part of this contract, and it is a compiled message in
+// this same assembly, so consumers reach it by type. See UpdateService's conflict note for why it
+// travels there and deliberately not as a response field. common.v1.proto reaches the same
+// conclusion from its own side: DwBuffer is defined there specifically because DbError has a
+// buffer-typed field and therefore cannot be defined without it.
+
+// ==============================================================================================
+//  SECTION 1 - SqlModifyStyle : THE MIRROR IMAGE OF RetCode'S NO-SENTINEL RULING
+//  --------------------------------------------------------------------------------------------
+//  WHY THIS ENUM LIVES HERE AND NOT IN common.v1.proto (C-A).
+//  Its only consumer is C-05's clause modification - SetWhereClause and SetOrderByClause. The
+//  common file's admission test is that BOTH sibling definitions need a shape; an enum with a
+//  single consumer fails that test, and promoting it anyway would turn the common file into a
+//  shared-code back door, which is exactly what C-A forbids. A single-consumer shape belongs in
+//  its consumer's file. This is the same reasoning that keeps AutoCommitMode and DatabaseType
+//  below in this file too.
+//
+//  THE VALUES, TRANSCRIBED FROM THE ORACLE.
+//  ws_objects/pfw.shared.pbl.src/enums.sru declares three modify styles and no others:
+//
+//      Constant Long SQL_MS_REPLACE = 1   [enums.sru:L718]
+//      Constant Long SQL_MS_APPEND  = 2   [enums.sru:L719]
+//      Constant Long SQL_MS_PREPEND = 3   [enums.sru:L720]
+//
+//  THERE IS NO ZERO VALUE IN THE LEGACY SET. That was verified by extracting every SQL_MS_
+//  occurrence from the oracle rather than by reading around the block: the search returns exactly
+//  those three lines. Meanwhile proto3 REQUIRES the first enumerator of every enum to be zero.
+//
+//  THE RULING: ADD AN EXPLICIT SQL_MS_UNSPECIFIED = 0 SENTINEL, and keep the three legacy values
+//  at their legacy numbers 1, 2 and 3. The sentinel is a PROTO3 MECHANICAL ARTIFACT AND NOT A
+//  LEGACY CONSTANT. It is not a fourth modify style, it has no oracle locator, and it must never
+//  acquire one.
+//
+//  HOW A SERVICE MUST HANDLE IT, STATED RATHER THAN LEFT TO INFERENCE: A REQUEST CARRYING
+//  SQL_MS_UNSPECIFIED IS REJECTED EXPLICITLY, with common.v1.RetCode.Value.E_INVALID_ARGUMENT and
+//  gRPC InvalidArgument. It is NOT silently defaulted to SQL_MS_REPLACE.
+//
+//  That is a deliberate choice and the reasoning is worth keeping, because defaulting is the
+//  tempting option: silently substituting REPLACE would WIDEN the contract with a guess, and the
+//  standing posture where a legacy behaviour cannot be reproduced across a network boundary is to
+//  NARROW IT WITH A DEFINED ERROR rather than widen it. Note also that the legacy never validates
+//  its own `ms` argument at all - of_setwhereclause and of_setorderbyclause pass it straight into
+//  the clause record with no check [n_cst_thread_task_sqlquery.sru:L271-L281, :L288-L298] - so
+//  there is NO legacy behaviour to copy here. That absence is precisely why the handling has to be
+//  DEFINED. Inventing "unset means replace" would be inventing behaviour, not preserving it.
+//
+//  ============ THE MIRROR IMAGE, STATED ADJACENTLY ON PURPOSE ================================
+//  Transposing the next two rulings is a silent error, so they are written side by side:
+//
+//    * common.v1's RetCode must NOT receive a synthetic zero sentinel. OK = 0 ALREADY satisfies
+//      proto3's first-enumerator rule, and adding one would collide with OK - which, with
+//      allow_alias set, would not even be a compile error. It would just quietly add a fourth
+//      name for zero and corrupt the return-code algebra.
+//    * SqlModifyStyle MUST receive one, because it has NO zero at all and proto3 leaves no
+//      alternative.
+//
+//  Same rule, opposite outcomes, and the deciding question is only ever this: DOES THE LEGACY SET
+//  ALREADY CONTAIN ZERO? RetCode does; SQL_MS_ does not. common.v1.proto reaches the identical
+//  conclusion from the other side - its DwBuffer note records that DwBuffer needs a sentinel and
+//  that this is "the same ruling as SQL_MS_* in persistence.v1.proto, not the RetCode one".
+//  ==========================================================================================
+//
+//  SCOPE: TOP-LEVEL IS SAFE HERE, and that is a decision rather than an oversight. Protobuf enum
+//  values use C++ scoping, so a top-level enum's values belong to the enclosing PACKAGE. common.v1
+//  nests its three constant sets for exactly that reason: their legacy spellings are OK, SUCCESS,
+//  FAILED and similarly generic names that would occupy the package scope permanently. The legacy
+//  spellings here are already prefixed SQL_MS_, so they are collision-safe by construction - which
+//  is the same test that makes common.v1's DwBuffer and ItemStatus legitimately top level. The
+//  identifiers are preserved verbatim because they appear in log records and in characterization
+//  recordings, where a rename silently invalidates every stored comparison that mentions one.
+// ==============================================================================================
+enum SqlModifyStyle {
+  // PROTO3 ARTIFACT, NOT A LEGACY CONSTANT. No oracle locator, because there is nothing to cite.
+  // Rejected explicitly with E_INVALID_ARGUMENT; never defaulted to SQL_MS_REPLACE.
+  SQL_MS_UNSPECIFIED = 0;
+
+  // Replace the clause outright. [enums.sru:L718]
+  SQL_MS_REPLACE = 1;
+  // Append to the existing clause. [enums.sru:L719]
+  SQL_MS_APPEND = 2;
+  // Prepend to the existing clause. [enums.sru:L720]
+  SQL_MS_PREPEND = 3;
+}
+
+
+// ==============================================================================================
+//  SECTION 2 - THE PERSISTENCE-LOCAL SHAPES SHARED BY THE FOUR SERVICES
+//  --------------------------------------------------------------------------------------------
+//  These four messages are used by more than one contract in THIS file and by nothing outside it,
+//  so they belong here rather than in common.v1.proto - the same single-consumer-group test that
+//  places SqlModifyStyle here (C-A).
+//
+//  THE TASK MODEL, WHICH IS THE ONE STRUCTURAL DECISION THE REST OF THIS FILE RESTS ON (C-K).
+//  The legacy is not a set of stateless functions. Each of the three task kinds is a STATEFUL
+//  OBJECT: the caller creates it, configures it through a series of of_set* calls that each return
+//  a RetCode, runs it, and destroys it. The configuration lives on the object between calls -
+//  n_cst_thread_task_sqlquery holds its chunk size, paging, clause array and unique-index columns
+//  as private instance state [n_cst_thread_task_sqlquery.sru:L25-L47], and n_cst_thread_task_sqlupdate
+//  holds its table descriptor array and update payload the same way [n_cst_thread_task_sqlupdate.sru:L27-L39].
+//
+//  In-process that state is reached through a POINTER. A pointer cannot be serialized, so the wire
+//  substitute is an opaque server-issued identifier: TaskHandle. CreateTask and ReleaseTask are the
+//  wire form of the legacy's object creation and destruction, and Reset is the wire form of
+//  of_reset - which is a real legacy operation with a real guard, not a convenience added here.
+//
+//  THE ALTERNATIVE THAT WAS REJECTED, recorded so it is not reintroduced as an "improvement":
+//  collapsing each contract to one fat stateless call carrying every setting at once. It reads
+//  more simply, and it cannot express three things the legacy has. First, the per-setter RetCode -
+//  the legacy returns E_INVALID_ARGUMENT from the individual setter, so a caller learns WHICH
+//  setting was rejected, and a single fat call could only say that something was wrong. Second,
+//  of_reset's E_BUSY guard, which is meaningful only against a task that can be running. Third,
+//  incremental reconfiguration between runs, which the query task explicitly supports by upserting
+//  clauses keyed on select index rather than replacing them. So the stateful model is kept, AND
+//  every setting is ALSO expressible in one round trip through the spec messages below, which is
+//  how docs/CONTRACTS.md section 8.2 describes the per-task settings. One model, two access paths
+//  to the same state - not two models.
+
+// TaskHandle - the wire identity of one server-held task.
+//
+// OPAQUE BY CONTRACT. The value is issued by the server and is meaningful only to the server.
+// Consumers must not parse it, derive one, reuse one across services, or attach meaning to its
+// shape: it replaces a pointer, and a pointer has no structure a caller is entitled to read. It is
+// a string rather than an integer so the server may choose its own representation, and because an
+// integer handle invites a consumer to guess a neighbouring value.
+//
+// A handle is scoped to ONE service. A query task handle is not valid on UpdateService, and a
+// handle from one Persistence instance is not valid on another - task state is in-process, exactly
+// as the legacy object's was. A stale, foreign or unknown handle is rejected with
+// common.v1.RetCode.Value.E_INVALID_HANDLE and gRPC NotFound.
+//
+// C-F NOTE: a handle is NOT a credential and must never be treated as one. It authorizes nothing.
+// Authentication on this edge is the JwtBearer configuration, per the C-G self-audit above.
+message TaskHandle {
+  string task_id = 1;
+}
+
+// SessionHandle - the wire identity of one server-held transaction session, issued by C-08's
+// BeginSession and referenced by every task that runs against it.
+//
+// THIS IS A DELIBERATE NARROWING OF THE LEGACY SHAPE, AND C-F IS WHAT DRIVES IT (C-K).
+// The legacy hands each task a transaction DESCRIPTOR BY VALUE - of_settransdata takes a
+// transactiondata structure [n_cst_thread_task_sqlbase.sru:L113] and the pool resolves it to a
+// connection by reference count. Reproducing that literally would mean transmitting the whole
+// descriptor, INCLUDING ITS LOG-PASSWORD FIELD, on every query, update and command call, and
+// therefore into every recording of one. The contract instead resolves the descriptor ONCE through
+// BeginSession and passes this handle thereafter. Pool reference counting and idle expiry are
+// preserved server-side, unchanged; only the number of times credential material crosses the wire
+// changes, and it changes from "every call" to "once".
+//
+// Because this contract is new and no legacy wire format exists, this narrows nothing that was ever
+// observable - it narrows only what a NEWLY CREATED boundary is willing to carry.
+//
+// Same opacity rule as TaskHandle: server-issued, unparseable, not a credential, not portable
+// across instances. An unknown or already-ended session is
+// common.v1.RetCode.Value.E_INVALID_TRANSACTION, matching the code the legacy returns when it is
+// asked to act on a transaction it cannot use [n_cst_thread_trans.sru:L113].
+message SessionHandle {
+  string session_id = 1;
+}
+
+// OperationStatus - the uniform outcome of every unary call in this file.
+//
+// IT MIRRORS THE LEGACY'S TWO-EVENT ERROR REPORTING, WHICH IS WHY IT HAS THREE FIELDS AND NOT ONE.
+// The legacy reports a failure through up to two separate events, and they carry different things:
+//
+//     Event OnError(long code, string msg)                     the framework-level outcome
+//     Event OnDBError(sqldbcode, sqlerrtext, sqlsyntax, buffer, row)   the driver-level detail
+//
+// Both fire on a database failure and only the first fires on a validation failure - visible
+// directly at [n_cst_thread_task_sqlcommand.sru:L110-L111], where the two are adjacent, and at
+// [n_cst_thread_task_sqlupdate.sru:L190-L191]. Flattening them into a single string would discard
+// the driver's own numeric code, the offending buffer and the offending row, all of which a caller
+// needs in order to act rather than merely log.
+//
+// THE RET CODE IS THE AUTHORITATIVE OUTCOME AND IT IS ALWAYS SET. Consumers must branch on its
+// specific value and never on a two-way success test, because the legacy algebra is tri-state:
+// PREVENT = 1 satisfies the legacy success predicate so a PREVENTION READS AS A SUCCESS, and
+// CANCELED / CANCELLED = -2 is NEITHER succeeded nor failed. common.v1.proto section 3 records the
+// full algebra and the predicates that produce it; this file simply must not paper over it (C-B).
+message OperationStatus {
+  // The framework-level outcome. common.v1.RetCode.Value.OK on success. Always populated.
+  common.v1.RetCode.Value ret_code = 1;
+
+  // The legacy OnError message argument, verbatim and OPAQUE.
+  //
+  // MAY BE NON-ENGLISH, and that is preserved rather than corrected (C-B). Many in-scope arms
+  // synthesize Chinese diagnostics - "无效的分页设置!" for an invalid paging setting
+  // [n_cst_thread_task_sqlquery.sru:L308], "SQL解析失败!" for a parse failure [:L315],
+  // "SQL参数绑定失败!" for a binding failure [:L606], "SQL为空!" for empty SQL [:L616],
+  // "无效的SQL!" [n_cst_thread_task_sqlcommand.sru:L66], "没有可更新的表" for the missing update
+  // table [n_cst_thread_task_sqlupdate.sru:L191], "无效的更新数据!" [:L343], "无效的数据源对象!"
+  // [:L327], "没有设置可更新表!" [:L360], and "无效的列名:" plus the column name [:L120].
+  // Consumers must treat this as display text and must NOT parse it to classify an error; branch
+  // on ret_code for that. Empty is legitimate: the unsupported-dialect arm passes an empty message
+  // deliberately [n_cst_thread_task_sqlquery.sru:L397].
+  string error_text = 2;
+
+  // Present ONLY when the legacy would also have fired OnDBError. Absent on a validation failure,
+  // which is the normal case for every guard in this file. Its statement field is REDACTED - see
+  // the redaction note on C-05's error handling and the DisableBind mechanism behind it.
+  common.v1.DbError db_error = 3;
+}
+
+// PositionalParameter - one bound statement parameter.
+//
+// A NAME AND A VALUE, WITH SIGNIFICANT ORDER. The legacy accessor is
+// of_addparam(readonly string name, readonly any value) [n_cst_thread_task_sqlbase.sru:L67], which
+// APPENDS at UpperBound + 1 [:L251-L259], assigning the slot at [:L255-L257], and the collection is then addressable positionally
+// through of_getparam(index), of_getparamname(index) and of_getparamcount() [:L74-L77], all
+// ONE-BASED - of_getparam rejects an index below 1 with E_OUT_OF_BOUND [:L487]. So a parameter has
+// BOTH a name and an ordinal position, the position is the append order, and neither is redundant:
+// positional `?` substitution consumes the order while the name is what the DataWindow argument
+// path matches on.
+//
+// ORDER IS THEREFORE PART OF THE CONTRACT. A repeated field preserves it, and a map would destroy
+// it - which is the whole reason this is not a map<string, AnyValue>.
+//
+// THE NAME IS LOWERCASED BY THE LEGACY [n_cst_thread_task_sqlbase.sru:L256], and a server
+// reproducing legacy matching behaviour must lowercase it too. That is a defect-shaped detail
+// rather than a nicety: a caller sending "ID" and a caller sending "id" are the same parameter to
+// the legacy, and a case-sensitive implementation would diverge (C-B).
+//
+// THE VALUE IS A DISCRIMINATED UNION, never a bare string, because the legacy parameter is typed
+// `any` and its conversion to statement text dispatches on the runtime type. common.v1.AnyValue
+// carries the type WITH the value, including an explicit null arm - and null must never be
+// collapsed to zero or to the empty string, for the reason common.v1.proto records on AnyValue.
+message PositionalParameter {
+  // The legacy parameter name. Lowercased by the legacy on entry; see above.
+  string name = 1;
+
+  // The parameter value, type-tagged. An unset `kind` means "no value supplied", which is NOT the
+  // same statement as AnyValue.is_null = true.
+  common.v1.AnyValue value = 2;
+}
+
+// SqlClauseSpec - one clause modification, as C-05's clause setters take it.
+//
+// IT MIRRORS THE PUBLIC SETTER SIGNATURE, NOT THE PRIVATE STRUCTURE, AND THAT IS DELIBERATE (C-K).
+// The query task does declare a nested structure with these three fields
+// [n_cst_thread_task_sqlquery.sru:L10-L14], but it is PRIVATE to the object - it exists to hold the
+// _whereClauses and _orderByClauses arrays [:L43-L44] and it never crosses any boundary. What the
+// legacy actually exposes is the setter
+//
+//     of_setwhereclause(readonly integer selectindex, readonly long ms, readonly string clause)
+//     [n_cst_thread_task_sqlquery.sru:L53]
+//
+// so the wire shape mirrors THAT, using the setter's own parameter names. Elsewhere in this folder a
+// message that claims to mirror a legacy STRUCTURE keeps the structure's field spellings - DbError
+// and TransactionDescriptor both do - and the distinction is exactly this: a structure that crosses
+// a boundary is mirrored field for field, while a private holder is not mirrored at all.
+message SqlClauseSpec {
+  // ONE-BASED select index, identifying which SELECT within the statement the clause applies to.
+  //
+  // THE ONE-BASEDNESS IS STATED EXPLICITLY BECAUSE IT IS A TRANSLATION HAZARD. One-based to
+  // zero-based translation is the most dangerous mechanical hazard in this whole refactor, and a
+  // reader who assumes a zero-based index here will be wrong by one at every call site. The legacy
+  // guard is `if selectIndex <= 0 or clause = "" then return RetCode.E_INVALID_ARGUMENT`
+  // [n_cst_thread_task_sqlquery.sru:L271] for the WHERE setter and the identical test at [:L288]
+  // for the ORDER BY setter, so ZERO IS INVALID rather than meaning "the first select".
+  //
+  // Legacy type is `integer`, which is 16-bit at source; int32 per the scalar rule's widening.
+  int32 select_index = 1;
+
+  // How the clause combines with what is already there. SQL_MS_UNSPECIFIED is rejected with
+  // E_INVALID_ARGUMENT and is never treated as SQL_MS_REPLACE - see section 1.
+  //
+  // Legacy parameter is `long ms`. Modelled as the named enum rather than a bare int64 so an
+  // out-of-range value is unrepresentable instead of merely undetected: recall the legacy performs
+  // no validation of its own here.
+  SqlModifyStyle modify_style = 2;
+
+  // The clause text, WITHOUT its leading keyword - the legacy passes the body to the parser's
+  // ModifyWhere and ModifyOrder entry points [n_cst_thread_task_sqlquery.sru:L691, :L698].
+  //
+  // AN EMPTY CLAUSE IS INVALID, per the same guard as select_index. Note this is asymmetric with
+  // the legacy's own internal use, which DOES pass an empty clause to ModifyOrder in order to strip
+  // an ORDER BY while building a paged statement [:L390, :L823]; that is an internal path that does
+  // not go through the public setter, so the public guard stands as written (C-B).
+  //
+  // ============================ THIS IS THE SQL-INJECTION SITE ==============================
+  // The contract says so plainly rather than quietly repairing it. THE CLAUSE ARRIVES AS A RAW
+  // STRING AND IS SPLICED INTO THE STATEMENT: the parser rewrites the statement
+  // [n_cst_thread_task_sqlquery.sru:L691, :L698], the rewritten text is read back [:L703], and it
+  // is spliced into the DataWindow's select property [:L709].
+  //
+  // The exposure is MECHANICAL, not hypothetical. Its root is the connection parameter string: the
+  // legacy parses DBParm for a bind-disabling flag [n_cst_thread_task_sqlbase.sru:L128], and
+  // DisableBind=1 MEANS THE RUNTIME DOES NOT USE BIND VARIABLES - values are interpolated into the
+  // statement text as literals. See C-08's connection-flag message for the full note.
+  //
+  // WHAT THE IMPLEMENTATION DOES: parameterized commands internally, while keeping the OBSERVABLE
+  // GENERATED STATEMENT unchanged, with the site annotated as a known legacy defect. WHAT IT MUST
+  // NOT DO: silently alter the generated statement, because that would change observable behaviour
+  // and byte-exact statement parity is the acceptance criterion (C-B).
+  // ==========================================================================================
+  string clause = 3;
+}
+
+
+// ==============================================================================================
+//  SECTION 3 - C-05 persistence.v1.QueryService
+//  --------------------------------------------------------------------------------------------
+//  Oracle: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru (883 lines, READ-ONLY).
+//  Every locator in this section is into that object unless stated otherwise.
+//  Served by Persistence, consumed by DataServices.
+//
+//  ONE STORAGE ENGINE IS PROVISIONED AND IT IS SQLITE (C-E). Stated before the surface, because a
+//  reader who meets the paging dialects of C-08 first could draw the wrong conclusion. No other
+//  engine is provisioned, configured, containerized or connected to - not in development, not in
+//  CI, not in orchestration and not by any test. The two dialect selectors that exist anywhere in
+//  this file select a TEXT GENERATOR, never a connection.
+//
+//  THE GUARD BOUNDARIES ARE DELIBERATELY INCONSISTENT AND MUST NOT BE HARMONISED (C-B).
+//  This is the single most important instruction in this section. The legacy uses THREE different
+//  comparison shapes across four numeric setters, and reproducing them faithfully means resisting
+//  the urge to make them uniform:
+//
+//      of_setchunksize   `chunkSize <= 1000`   [:L410]   INCLUSIVE - 1000 itself is INVALID
+//      of_setmaxrows     `rows < 0`            [:L433]   0 IS LEGAL
+//      of_setpageindex   `pageIndex <= 0`      [:L450]   one-based
+//      of_setpagesize    `pageSize <= 0`       [:L462]   one-based
+//
+//  Each is annotated at its field below. An implementation that "fixes" the first to `< 1000`, or
+//  that gives max rows the same lower bound as page size, has changed observable behaviour.
+
+// QuerySpec - every per-task query setting the legacy exposes, as fields.
+//
+// docs/CONTRACTS.md section 8.2 records that the settings which are CONFIGURATION rather than
+// OPERATIONS are carried as fields on the query request rather than as separate calls, and this is
+// that message. It is accepted both by CreateTask, for a caller that configures in one round trip,
+// and by Query, for a caller that adjusts settings on the run itself.
+//
+// EVERY SCALAR USES PROTO3 EXPLICIT PRESENCE, AND THAT IS LOAD-BEARING (C-K).
+// `optional` here means UNSET LEAVES THE TASK'S EXISTING VALUE ALONE. Without explicit presence an
+// unsent bool would arrive as false and an unsent int64 as 0, so merely omitting a field would
+// silently overwrite the task's state - and for two of these fields the implicit default is not
+// even a legal value: chunk size defaults to 10000 [:L34] and 0 would be rejected by its own guard,
+// while page counting defaults to TRUE [:L38] so an implicit false would silently disable counting.
+// Explicit presence is the only way to say "leave it as it is" without inventing a magic sentinel.
+// This is the same ruling the two nullable table-update settings of C-06 force, for the same reason.
+//
+// A REPEATED FIELD LEFT EMPTY LIKEWISE LEAVES THE TASK'S COLLECTION UNCHANGED. Repeated fields have
+// no explicit-presence form, so the rule is stated instead: to CLEAR a collection, call Reset, which
+// is the legacy's own mechanism [:L237, :L249-L266]. Clause entries are MERGED, not replaced -
+// see the field notes.
+message QuerySpec {
+  // of_setcache [:L58]. When set, the result carrier is retained for reuse instead of being
+  // destroyed after delivery, which also changes the delivery path: with caching off and no
+  // receiver attached on the main thread the legacy hands the carrier over wholesale and stops
+  // [:L85-L91]. No guard.
+  optional bool cache = 1;
+
+  // of_setdataobject [:L59]. Names a pre-existing DataWindow object as the result carrier's source.
+  //
+  // MUTUALLY EXCLUSIVE WITH sql_syntax, AND THE LEGACY ENFORCES IT BY CLEARING THE OTHER: setting
+  // the data object blanks the syntax [:L419-L420] and setting the syntax blanks the data object
+  // [:L474-L475]. Send both in one spec and the later assignment wins, exactly as two successive
+  // legacy setter calls would behave. Neither is modelled as a oneof, because the legacy allows
+  // both to be set in either order and a oneof would reject the sequence the legacy accepts.
+  optional string data_object = 2;
+
+  // of_setsqlsyntax [:L68]. A complete DataWindow syntax string, used to Create the carrier at run
+  // time [:L619]. A Create failure is common.v1.RetCode.Value.E_INVALID_SQL [:L619-L621]. Clears
+  // data_object - see above.
+  optional string sql_syntax = 3;
+
+  // of_setsql [:L67]. The statement to retrieve.
+  //
+  // NOTE THE ASYMMETRY WITH C-07, WHICH IS REAL AND IS PRESERVED (C-B): this setter has NO guard at
+  // all - it is a plain assignment [:L468] - whereas C-07's of_setsql rejects an empty statement
+  // immediately. The emptiness check on this path happens LATER, inside the task body, where an
+  // empty statement yields E_INVALID_SQL with the message "SQL为空!" [:L616-L617]. Same condition,
+  // different code path, different moment; the contract must not move the check forward to match
+  // C-07, because a caller would then see a rejection at configuration time that the legacy defers
+  // to run time.
+  optional string sql = 4;
+
+  // of_sethookclass [:L60]. The class name of a per-retrieve hook object the task instantiates and
+  // destroys around the retrieve. Carried as an opaque name; resolving it is the server's business.
+  //
+  // C-D NOTE: this is NOT a script-invocation or dynamic-evaluation facility and must not be read
+  // as one. It names a server-side class the server already knows; nothing here transmits code,
+  // script or an expression to evaluate, which would be ScriptBridge territory.
+  optional string hook_class = 5;
+
+  // of_setfilter [:L69].
+  //
+  // A DOCUMENTED QUIRK, PRESERVED VERBATIM (C-B): the legacy rewrites an EMPTY filter to a SINGLE
+  // SPACE - `if _sNewFilter = "" then _sNewFilter = " "` [:L481]. So "" and " " are the same
+  // request to the legacy, and a server must apply the same rewrite. It looks like a typo. It is
+  // not: a genuinely empty string and a single space reach the DataWindow filter property
+  // differently, and the space is how the legacy clears a filter rather than leaving it unset.
+  optional string filter = 6;
+
+  // of_setsort [:L70]. Carries the IDENTICAL empty-to-single-space rewrite [:L487]. See filter.
+  optional string sort = 7;
+
+  // of_setmaxrows [:L61]. Guard: `if rows < 0 then return RetCode.E_INVALID_ARGUMENT` [:L433].
+  //
+  // NOTE THE BOUNDARY: it is `< 0`, so ZERO IS A LEGAL VALUE here - and zero is the field's own
+  // legacy default, meaning "no limit". This is DIFFERENT from chunk_size below, and the difference
+  // is deliberate. Do not harmonise them.
+  optional int64 max_rows = 8;
+
+  // of_setchunksize [:L57]. Legacy default 10000 [:L34].
+  //
+  // ======================= THE COUNTER-INTUITIVE GUARD, PRESERVED EXACTLY ====================
+  // `if chunkSize <= 1000 then return RetCode.E_INVALID_ARGUMENT` [:L410].
+  //
+  // THE COMPARISON IS `<=`, NOT `<`, SO 1000 ITSELF IS INVALID AND THE MINIMUM LEGAL VALUE IS 1001.
+  //
+  // This is flagged this loudly because the legacy's OWN inline comment beside the field
+  // contradicts the guard: it reads "Chunk row count,min:1000" [:L34], which says 1000 is the
+  // minimum while the code rejects it. The comment is wrong and the code is the oracle. Anyone
+  // reading only the comment will "correct" the guard to `< 1000` and silently widen the contract
+  // by exactly one value, so: DO NOT. The boundary is inclusive (C-B).
+  // ==========================================================================================
+  optional int64 chunk_size = 9;
+
+  // of_setpaged [:L63]. Switches the paging rewrite on. When off, page_count and record_count come
+  // back as -1 - see QueryPageCounts.
+  optional bool paged = 10;
+
+  // of_setpagesize [:L66]. Guard: `if pageSize <= 0 then return RetCode.E_INVALID_ARGUMENT`
+  // [:L462]. ONE-BASED domain, so zero is invalid, unlike max_rows.
+  //
+  // RE-VALIDATED A SECOND TIME AT RUN TIME, and both checks are preserved: the paged-statement
+  // builder re-tests `if _nPageSize <= 0 or _nPageIndex <= 0` and fails with E_INVALID_ARGUMENT and
+  // the message "无效的分页设置!" [:L308-L310]. That is a redundant double-guard of the same kind
+  // C-07 has on its statement, and it is reproduced rather than collapsed, because a caller that
+  // never called the setter at all reaches only the second one.
+  optional int64 page_size = 11;
+
+  // of_setpageindex [:L64]. Guard: `if pageIndex <= 0 then return RetCode.E_INVALID_ARGUMENT`
+  // [:L450]. ONE-BASED: the first page is 1, not 0. Re-validated at run time as above.
+  optional int64 page_index = 12;
+
+  // of_setpagenative [:L65]. Selects the engine's own paging implementation instead of the
+  // framework's statement rewrite. No guard.
+  optional bool page_native = 13;
+
+  // of_setpagecounting [:L62]. LEGACY DEFAULT IS TRUE [:L38], which is why explicit presence
+  // matters here more than anywhere else in this message: an implicit false would silently switch
+  // counting off for every caller who simply did not mention it.
+  optional bool page_counting = 14;
+
+  // of_setwhereclause [:L53], one entry per select index.
+  //
+  // ENTRIES ARE UPSERTED, NOT APPENDED, AND KEYED ON select_index. The legacy scans its array for a
+  // matching index and overwrites that slot, falling off the end to append only when no match is
+  // found [:L273-L281]. Sending the same select_index twice in one spec is therefore last-wins, and
+  // sending it on a later call replaces the earlier clause rather than adding to it. Note that
+  // SQL_MS_APPEND composes clause TEXT within one select index; it is not a mechanism for
+  // accumulating separate entries.
+  repeated SqlClauseSpec where_clauses = 15;
+
+  // of_setorderbyclause [:L54]. Identical upsert semantics, on a separate array [:L290-L298].
+  repeated SqlClauseSpec order_by_clauses = 16;
+
+  // of_setpageduniqueindexcolumns [:L56]. REPLACES the collection wholesale [:L405-L406], unlike
+  // the clause fields above - the legacy assigns the array rather than merging it.
+  //
+  // A NON-EMPTY LIST SELECTS A DIFFERENT PAGING STRATEGY. The first dialect arm branches on
+  // `UpperBound(_sPagedUniqueIndexColumns) > 0` [:L323] into a unique-index inner-join wrapper
+  // instead of the plain form, so this is not a hint - it changes the generated statement, and
+  // therefore changes what byte-exact statement parity is being compared against.
+  repeated string paged_unique_index_columns = 17;
+
+  // of_addparam [n_cst_thread_task_sqlbase.sru:L67], in append order. Bound before execution;
+  // a binding failure is common.v1.RetCode.Value.E_SQL_BIND_ARG_FAILED [:L605-L607].
+  repeated PositionalParameter parameters = 18;
+}
+
+// ---------- C-05 request and response messages ----------
+//
+// EVERY METHOD HAS ITS OWN DEDICATED REQUEST AND RESPONSE MESSAGE, and none is shared between two
+// methods (C-K). That is deliberate rather than verbose: a shared message cannot gain a field for
+// one method without gaining it for the other, and a method that returns a bare empty message can
+// never report anything at all. The two clause setters take the same three arguments and still get
+// separate messages, because WHERE and ORDER BY diverge in the legacy the moment paging is involved -
+// the paged builder strips ORDER BY and never touches WHERE [:L389-L390].
+
+message CreateQueryTaskRequest {
+  // The session the task will run against. Required.
+  SessionHandle session = 1;
+  // Optional initial configuration, applied as if each of_set* had been called in field order. A
+  // rejected setting fails the whole call with that setting's own RetCode, so a caller learns which
+  // one was wrong - the property the fat-stateless-call alternative could not provide.
+  QuerySpec spec = 2;
+}
+
+message CreateQueryTaskResponse {
+  OperationStatus status = 1;
+  // Populated only when status.ret_code is OK.
+  TaskHandle task = 2;
+}
+
+message ReleaseQueryTaskRequest {
+  TaskHandle task = 1;
+}
+
+message ReleaseQueryTaskResponse {
+  OperationStatus status = 1;
+}
+
+message ResetQueryTaskRequest {
+  TaskHandle task = 1;
+}
+
+message ResetQueryTaskResponse {
+  // RESET FAILS WHILE THE TASK IS RUNNING, and the code is specific: `if #Running then return
+  // RetCode.E_BUSY` [:L237]. E_BUSY is -23 [retcode.sru:L66]. It is not a generic failure and it is
+  // not FAILED - a caller can distinguish "try again once the retrieve finishes" from "this task is
+  // unusable", and flattening the two would remove that distinction (C-B). Maps to gRPC
+  // FailedPrecondition, which is correct here rather than Aborted: retrying the same call
+  // unchanged succeeds once the task stops, and no caller state needs rebasing.
+  OperationStatus status = 1;
+}
+
+message SetChunkSizeRequest {
+  TaskHandle task = 1;
+  // See QuerySpec.chunk_size for the inclusive `<= 1000` boundary. Minimum legal value 1001.
+  int64 chunk_size = 2;
+}
+
+message SetChunkSizeResponse {
+  OperationStatus status = 1;
+}
+
+message SetMaxRowsRequest {
+  TaskHandle task = 1;
+  // Guard is `< 0`, so 0 is legal and means no limit. NOT the same boundary as chunk size [:L433].
+  int64 max_rows = 2;
+}
+
+message SetMaxRowsResponse {
+  OperationStatus status = 1;
+}
+
+message SetWhereClauseRequest {
+  TaskHandle task = 1;
+  // Upserted on select_index. One-based; empty clause invalid; the injection site. See SqlClauseSpec.
+  SqlClauseSpec clause = 2;
+}
+
+message SetWhereClauseResponse {
+  OperationStatus status = 1;
+}
+
+message SetOrderByClauseRequest {
+  TaskHandle task = 1;
+  SqlClauseSpec clause = 2;
+}
+
+message SetOrderByClauseResponse {
+  OperationStatus status = 1;
+}
+
+message SetPagingRequest {
+  TaskHandle task = 1;
+  // of_setpaged [:L63].
+  bool paged = 2;
+  // of_setpagesize [:L66]. `<= 0` invalid.
+  int64 page_size = 3;
+  // of_setpageindex [:L64]. `<= 0` invalid. ONE-BASED: the first page is 1.
+  int64 page_index = 4;
+  // of_setpagenative [:L65].
+  bool page_native = 5;
+  // of_setpagecounting [:L62]. Legacy default TRUE - a caller using this call rather than QuerySpec
+  // is setting it explicitly and must therefore send true to keep counting on.
+  bool page_counting = 6;
+}
+
+message SetPagingResponse {
+  OperationStatus status = 1;
+}
+
+message SetPagedUniqueIndexColumnsRequest {
+  TaskHandle task = 1;
+  // REPLACES the collection wholesale [:L405-L406]. An empty list on THIS call clears it, which is
+  // the one place an empty repeated field means "clear" rather than "leave alone" - because here it
+  // is the entire payload of a dedicated call rather than one field of a merge spec.
+  repeated string columns = 2;
+}
+
+message SetPagedUniqueIndexColumnsResponse {
+  OperationStatus status = 1;
+}
+
+message QueryRequest {
+  // The task to run. Required.
+  TaskHandle task = 1;
+  // Settings applied to the task for THIS run, merged over whatever the Set* calls already applied.
+  // Unset fields leave the task's existing state alone - see QuerySpec's explicit-presence note.
+  QuerySpec spec = 2;
+}
+
+// QueryResponse - one element of the server stream.
+//
+// THE STREAM IS A ONEOF OVER THE LEGACY'S OWN CALLBACKS, WHICH IS WHY IT IS SHAPED THIS WAY (C-K).
+// The legacy does not return a result; it raises a sequence of events on the caller-side proxy
+// object, and the proxy declares them explicitly
+// [ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru]:
+//
+//     event onchilddatareceived(string name, ref blob blbdata)                       [:L10]
+//     event ondatareceived(long rowcount)                                            [:L12]
+//     event type long ondatachunk(ref blob blbdata, long count, long current, boolean fullstate)  [:L13]
+//     event onpagereceived(long pagecount, long recordcount)                         [:L14]
+//
+// Each becomes one arm below, so the stream reproduces the legacy's PROGRESSIVE DELIVERY rather than
+// collapsing it into a single terminal reply. The alternative - one fat response after everything
+// completes - would defeat the entire purpose of chunking, which exists so a large result never has
+// to be materialised whole on either side.
+//
+// NO SEQUENCING TOKEN IS ADDED, AND THAT IS A DECISION. A gRPC server stream is ordered by the
+// transport, so a token would be redundant, and the chunk arm already carries its own index and
+// total. This is the opposite of the DataServices event chain, where an ordering token is genuinely
+// required; adding one here would be inventing a mechanism the legacy does not have and the
+// transport does not need.
+//
+// TWO LEGACY EVENTS ARE DELIBERATELY NOT PROJECTED, recorded so their absence is legible rather
+// than mysterious: oncreatedata(syntax) [:L11] and ondatamove(datastore) [:L15]. Both pass an
+// IN-PROCESS DATAWINDOW OBJECT or exist purely to hand ownership of one to the caller-side proxy -
+// ondatamove's body is literally `Destroy Data` [:L268]. Object ownership transfer has no meaning
+// across a network boundary, where the two sides have separate heaps. This is a documented gap, not
+// an omission: nothing observable is lost, because the DATA those events move is exactly what the
+// data_chunk arm already carries as bytes.
+message QueryResponse {
+  // NAMED `payload` RATHER THAN `event`, WHICH WOULD HAVE READ MORE NATURALLY (C-K). A oneof named
+  // `event` generates a ClearEvent() method and an EventOneofCase enum in C#, and `event` is a C#
+  // keyword; the generator escapes its private backing field but the surrounding naming becomes
+  // needlessly hazardous to read and to extend. `payload` costs nothing and cannot collide.
+  oneof payload {
+    // ondatareceived(long rowcount) [:L12], raised at [:L814]. Sent once, BEFORE the chunks, and it
+    // is the row count of the whole result rather than of a chunk.
+    QueryRowCount row_count = 1;
+
+    // ondatachunk(...) [:L13]. Zero or more, in order.
+    QueryDataChunk data_chunk = 2;
+
+    // onchilddatareceived(name, blob) [:L10], raised at [:L134] for each auto-retrieving
+    // drop-down child. Interleaved with the chunks.
+    QueryChildDataChunk child_data_chunk = 3;
+
+    // onpagereceived(pagecount, recordcount) [:L14], raised last at [:L865].
+    QueryPageCounts page_counts = 4;
+
+    // Terminal failure detail. The stream ends after this arm.
+    //
+    // WHY A STATUS ARM EXISTS ON A STREAM AT ALL: the legacy's error events fire mid-retrieve, after
+    // some chunks may already have been delivered [:L172, :L184, :L220], so a consumer needs the
+    // failure IN BAND with the data it has already accepted. The gRPC status still carries the
+    // failure too - this arm does not replace it, it makes the partial-delivery boundary explicit.
+    OperationStatus status = 5;
+  }
+}
+
+// The row count of the whole result, delivered before the data.
+message QueryRowCount {
+  // Legacy `long rowcount`. Counts the PRIMARY buffer only; filtered rows are counted separately by
+  // the legacy and folded into the chunk arithmetic, not into this number.
+  int64 row_count = 1;
+}
+
+// One chunk of the result carrier, serialized.
+//
+// THE CHUNK COUNT ARITHMETIC IS OBSERVABLE AND IS THEREFORE CONTRACT:
+//     chunk_count = ceiling((rowCount + filteredCount) / chunkSize)   [:L145]
+// It sums BOTH buffers, so a heavily filtered result produces more chunks than its row count alone
+// would suggest.
+//
+// TWO LEGACY DEFECTS TRAVEL WITH THIS SHAPE AND ARE PRESERVED RATHER THAN CORRECTED (C-B). Both are
+// FIXME comments the legacy wrote against itself, and both are properties of the changeset codec,
+// which is why they belong in a comment here and NOT as fields:
+//   1. APPLYING A CHANGESET MAY LOSE ROWS on a sorted carrier that spans more than one chunk
+//      [:L147-L149]. The legacy works around it by staging rows through a temporary carrier.
+//   2. RESET MUST NOT BE USED TO CLEAR DATA between chunks, because doing so makes the changeset
+//      fail to apply [:L175-L176]. The legacy discards rows individually instead.
+// An implementation that tidies either away will produce short results that no row-count assertion
+// catches, because the count it would compare against is computed from the same wrong data.
+message QueryDataChunk {
+  // The serialized carrier state. OPAQUE (C-A): its internal format is the changeset and full-state
+  // codecs' concern on both sides, and no field here describes it. Legacy `ref blob blbdata`.
+  bytes data = 1;
+
+  // Legacy `count` - the TOTAL number of chunks. Argument 2 of the legacy call [:L183, :L219].
+  int64 chunk_count = 2;
+
+  // Legacy `current` - this chunk's ONE-BASED index. Argument 3 [:L183, :L219]. The first chunk is
+  // 1, so a zero-based reading is wrong by one for the whole stream.
+  int64 chunk_index = 3;
+
+  // Legacy `fullstate` - WHICH SERIALIZATION THIS BLOB IS, and the receiver cannot decode it without
+  // knowing. True means a full-state image, false means a changeset. It is not a hint.
+  //
+  // The legacy sets it true on exactly one path: a CROSSTAB or COMPOSITE carrier, which it detects
+  // by processing kind and delivers whole as a single full-state chunk [:L93-L101], passing
+  // (blob, 1, 1, true). Every other path sends changesets with false [:L183, :L219, :L230].
+  //
+  // A THIRD PRESERVED DEFECT LIVES ON THIS FIELD: FULL-STATE TRANSFER CRASHES WHEN A CROSSTAB HAS
+  // TOO MANY COLUMNS, and full-state additionally requires the sort and filter conditions to be
+  // synchronized between the two sides, whereas a changeset does not and is faster without them.
+  // That is why the legacy prefers changesets everywhere it can and why this flag exists at all.
+  bool full_state = 4;
+}
+
+// One drop-down child result, delivered alongside the main result.
+message QueryChildDataChunk {
+  // The COLUMN NAME whose child this is, resolved from the column's own Name property [:L119].
+  // Legacy `string name`.
+  string name = 1;
+
+  // The serialized child carrier. Opaque, as above. Legacy `ref blob blbdata`.
+  bytes data = 2;
+}
+
+// The paging totals, delivered last.
+//
+// BOTH VALUES ARE -1 WHEN COUNTING DID NOT HAPPEN, and -1 is a real legacy value rather than a
+// convention invented here: the legacy assigns `nPageCount = -1` and `nRecordCount = -1` [:L861-L862]
+// on the else-branch taken when the task is not paged, when counting is switched off, or when the
+// source is a stored procedure [:L818]. Consumers must treat -1 as "not counted" and must not
+// arithmetic on it.
+message QueryPageCounts {
+  // Legacy `pagecount`. -1 when not counted.
+  int64 page_count = 1;
+  // Legacy `recordcount`. -1 when not counted.
+  int64 record_count = 2;
+}
+
+message CountRequest {
+  TaskHandle task = 1;
+}
+
+// CountResponse - the totals, plus the fact of whether a statement was issued.
+//
+// THE SHORT-CIRCUIT IS OBSERVABLE THROUGH THE ABSENCE OF A STATEMENT, SO THE CONTRACT STATES IT.
+// When the current page returned fewer rows than the page size, or returned no rows at all on page
+// one, THE LEGACY ISSUES NO COUNTING STATEMENT - the test is at [:L820] and the inferred arms follow
+// at [:L821-L823]. It infers the totals instead: the page count becomes the current page index, the
+// record count becomes `(pageIndex - 1) * pageSize + rowsReturned` [:L822], and a zero record count
+// forces a zero page count [:L823]. Counting is suppressed entirely for a stored-procedure source or
+// when page counting is off, which is the outer test at [:L818].
+//
+// A consumer must not infer from a missing count query that counting FAILED - which is precisely why
+// `counted` is a field rather than something a caller is left to deduce.
+message CountResponse {
+  OperationStatus status = 1;
+
+  // Total pages. -1 when the task is not counting at all.
+  int64 page_count = 2;
+
+  // Total records. -1 when the task is not counting at all.
+  int64 record_count = 3;
+
+  // FALSE when the short-circuit above applied and the totals were inferred without a statement;
+  // TRUE when a counting statement was actually issued.
+  //
+  // THE ISSUED STATEMENT IS OBSERVABLE AND ITS TEXT IS PART OF PARITY, which is the reason this
+  // field is worth carrying: the legacy replaces the column list with the literal `1 AS _` [:L830],
+  // strips any ORDER BY when one is present [:L831-L833], and wraps the result as
+  //     SELECT COUNT(1) AS CNT FROM ( ... ) pfwPagedSQL_Tbl                            [:L834]
+  // Both `1 AS _` and the `CNT` alias are observable, and so is the sentinel table alias. Byte-exact
+  // generated SQL is the acceptance criterion, so none of those spellings may be tidied. A parse
+  // failure on the way there is E_INTERNAL_ERROR [:L826-L829]; parameter binding is then applied to
+  // the wrapper and a binding failure is common.v1.RetCode.Value.E_SQL_BIND_ARG_FAILED [:L836-L839] -
+  // note that is a SECOND, DISTINCT binding site from the retrieve path's at [:L605-L607], and it
+  // additionally passes the DataWindow argument string captured at [:L809-L811].
+  bool counted = 4;
+}
+
+// C-05 QueryService - retrieval.
+//
+// ERRORS RETURN THE STRUCTURED common.v1.DbError, mirroring the legacy error event field for field,
+// WITH ITS STATEMENT FIELD REDACTED. The reason is mechanical and is recorded in full on
+// common.v1.DbError and on C-08's connection flags: the legacy places the complete generated
+// statement, INCLUDING INTERPOLATED LITERAL VALUES, into that field, and the legacy logger performs
+// no redaction whatever.
+//
+// The verified error arms this contract carries, each with its own code so a consumer can tell them
+// apart rather than seeing one generic failure:
+//     invalid paging setting          E_INVALID_ARGUMENT      [:L308-L310]
+//     statement parse failure         E_INTERNAL_ERROR        [:L314-L317]
+//     unrecognised dialect            E_NO_IMPLEMENTATION     [:L396-L398]  the `case else` arm
+//     parameter binding failure       E_SQL_BIND_ARG_FAILED   [:L605-L607]
+//     grid-syntax failure             E_INVALID_SQL           [:L610-L614]
+//     empty statement at run time     E_INVALID_SQL           [:L616-L617]
+//     carrier Create failure          E_INVALID_SQL           [:L619-L621]
+//     clause modification failure     E_INTERNAL_ERROR        [:L691-L693, :L698-L700]
+//     retrieve failure                E_DB_ERROR              [:L856-L857]
+// E_NO_IMPLEMENTATION is -2001 and is a DISTINCT code from E_NO_SUPPORT at -2000
+// [retcode.sru:L77-L78]; the dialect arm returns the former and the two must not be conflated.
+service QueryService {
+  // Create a server-held query task. The wire form of the legacy object creation.
+  rpc CreateQueryTask(CreateQueryTaskRequest) returns (CreateQueryTaskResponse);
+
+  // Destroy it and release its carrier. The wire form of the legacy Destroy. A handle is invalid
+  // afterwards; releasing an already-released handle is E_INVALID_HANDLE, not a silent success.
+  rpc ReleaseQueryTask(ReleaseQueryTaskRequest) returns (ReleaseQueryTaskResponse);
+
+  // of_reset [:L50, :L237]. E_BUSY while running.
+  rpc Reset(ResetQueryTaskRequest) returns (ResetQueryTaskResponse);
+
+  // of_setchunksize [:L57]. Inclusive `<= 1000` guard.
+  rpc SetChunkSize(SetChunkSizeRequest) returns (SetChunkSizeResponse);
+
+  // of_setmaxrows [:L61]. `< 0` guard - a different boundary, deliberately.
+  rpc SetMaxRows(SetMaxRowsRequest) returns (SetMaxRowsResponse);
+
+  // of_setwhereclause [:L53].
+  rpc SetWhereClause(SetWhereClauseRequest) returns (SetWhereClauseResponse);
+
+  // of_setorderbyclause [:L54].
+  rpc SetOrderByClause(SetOrderByClauseRequest) returns (SetOrderByClauseResponse);
+
+  // of_setpaged, of_setpagesize, of_setpageindex, of_setpagenative and of_setpagecounting
+  // [:L62-L66], grouped into one call because the legacy re-validates size and index TOGETHER
+  // [:L308] and a caller that sets one without the other has configured a task that cannot run.
+  rpc SetPaging(SetPagingRequest) returns (SetPagingResponse);
+
+  // of_setpageduniqueindexcolumns [:L56]. Selects the inner-join paging strategy when non-empty.
+  rpc SetPagedUniqueIndexColumns(SetPagedUniqueIndexColumnsRequest) returns (SetPagedUniqueIndexColumnsResponse);
+
+  // Run the retrieve. SERVER STREAMING, reproducing progressive recordset delivery.
+  rpc Query(QueryRequest) returns (stream QueryResponse);
+
+  // Total record and page counts, including the no-statement short-circuit.
+  rpc Count(CountRequest) returns (CountResponse);
+}
+
+
+// ==============================================================================================
+//  SECTION 4 - C-06 persistence.v1.UpdateService : THE OPTIMISTIC-CONCURRENCY CONTRACT
+//  --------------------------------------------------------------------------------------------
+//  Oracle: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru (409 lines, READ-ONLY).
+//  Every locator in this section is into that object unless stated otherwise.
+//  Primary fixture: ws_objects/pfw.tests.pbl.src/dw_sqlite.srd (37 lines).
+//
+//  This is the contract carrying concurrency semantics, which is why it is a SEPARATE service from
+//  C-05 - see the four-services rationale in the file header. It is also, at 409 lines of oracle, the
+//  DENSEST CONCENTRATION OF PRESERVE-EXACTLY BEHAVIOUR in the refactor. Four behaviours below are
+//  ones a straightforward port gets backwards, and each is annotated where it lands:
+//    * SUCCESS IS THE VALUE 1, not the zero of the return-code algebra                    [:L214]
+//    * A CLAIMED SUCCESS IS DEFENSIVELY REWRITTEN INTO A FAILURE                    [:L208-L210]
+//    * THE FILTER BUFFER IS ITERATED BACKWARD, on purpose                                 [:L237]
+//    * A VETO MEANS TWO DIFFERENT THINGS depending on the transaction's own state   [:L195-L202]
+
+// TableUpdateContract - one updatable table, mirroring the legacy structure FIELD FOR FIELD.
+//
+// EXACTLY SIX FIELDS, IN THE ORACLE'S OWN ORDER. The structure is declared at [:L10-L17] with its
+// fields at [:L11-L16]:
+//
+//     string   name                [:L11]  ->  string            name             = 1
+//     string   updatablecolumns[]  [:L12]  ->  repeated string   updatablecolumns = 2
+//     string   keycolumns[]        [:L13]  ->  repeated string   keycolumns       = 3
+//     string   identitycolumn      [:L14]  ->  string            identitycolumn   = 4
+//     long     updatewhere         [:L15]  ->  optional int64    updatewhere      = 5
+//     boolean  updatekeyinplace    [:L16]  ->  optional bool     updatekeyinplace = 6
+//
+// No seventh field, no reordering, no renaming. The legacy spellings are kept verbatim rather than
+// restyled to protobuf's preferred multi-word snake_case (updatable_columns, key_columns): each is
+// already a single lower-case token and therefore already valid, and keeping them makes the
+// correspondence to the oracle checkable at a glance, which is the entire point of a mirror. This is
+// the same discipline common.v1.DbError applies to dberrordata.srs.
+//
+// ================ TWO TYPE FACTS A NAIVE READING GETS WRONG (C-K) =============================
+//
+// FIRST: `updatewhere` IS A long, NOT A BOOLEAN. It is a PowerBuilder update-where MODE, not a
+// switch. The primary fixture uses updatewhere=1 [dw_sqlite.srd:L14], the "key and updateable
+// columns" mode, and the legacy writes the value through as a STRING-QUOTED NUMBER -
+// `"DataWindow.Table.UpdateWhere = '" + String(...) + "'"` [:L132] - which only makes sense for a
+// number. Modelling it as a bool would collapse a mode space onto two values and silently pick one.
+//
+// SECOND: BOTH `updatewhere` AND `updatekeyinplace` ARE GENUINELY NULLABLE, and the legacy proves
+// it in code rather than by convention: each is written into the carrier ONLY WHEN IT IS NOT NULL -
+//     if Not IsNull(Tables[index].UpdateWhere) then ...        [:L131-L133]
+//     if Not IsNull(Tables[index].UpdateKeyInPlace) then ...   [:L135-L141]
+// so null carries the distinct meaning "LEAVE THE CARRIER'S OWN SETTING ALONE". They therefore use
+// PROTO3 EXPLICIT PRESENCE and NOT a magic sentinel value.
+//
+// Why presence and not a sentinel: an implicit-default int64 arrives as 0, and 0 is a LEGAL
+// update-where mode, so unset and "mode zero" would be indistinguishable - a caller who omitted the
+// field would silently force a concurrency mode it never asked for, which is the most dangerous
+// possible failure on this particular contract. A reserved magic number such as -1 would work
+// mechanically but would invent a value that has no oracle locator and would have to be documented
+// at every consumer. Explicit presence says exactly what the legacy's IsNull says, with no invention.
+// ==========================================================================================
+message TableUpdateContract {
+  // The update table name. [:L11]
+  //
+  // REJECTED WHEN EMPTY, together with an empty column list on either side:
+  // `if name = "" or UpperBound(updatableColumns) = 0 or UpperBound(keyColumns) = 0 then return
+  // RetCode.E_INVALID_ARGUMENT` [:L84]. So a descriptor with no key columns is invalid at ADD time,
+  // before any statement exists.
+  string name = 1;
+
+  // Columns this operation may write. [:L12]
+  //
+  // THE RESET-THEN-RE-ENABLE ORDER IS CONTRACT, NOT AN IMPLEMENTATION DETAIL. The legacy first turns
+  // Update, Key and Identity OFF on EVERY column by ordinal [:L103-L108] and only then re-enables
+  // the ones this descriptor names [:L111-L114]. Consequence a caller must expect: A COLUMN MARKED
+  // UPDATABLE IN THE CARRIER'S OWN DEFINITION BUT ABSENT FROM THIS LIST IS NOT UPDATABLE for this
+  // operation. A partial descriptor gets a partial update, deterministically.
+  repeated string updatablecolumns = 2;
+
+  // Key columns for the WHERE clause. [:L13]
+  //
+  // EACH NAME IS RESOLVED THROUGH A DESCRIBE CALL AND CAN FAIL: a non-positive resolved identifier
+  // is common.v1.RetCode.Value.E_INTERNAL_ERROR with a diagnostic naming the offending column
+  // [:L118-L122]. The resolved identifiers are also retained for the self-assignment workaround
+  // described on updatekeyinplace [:L123].
+  repeated string keycolumns = 3;
+
+  // The auto-increment column, if the table has one. Empty means none, and the legacy skips the
+  // marking step entirely in that case [:L127-L129].
+  //
+  // NOTE THIS IS NOT WHAT THE IDENTITY ROUND TRIP USES. The value collected on the response is
+  // discovered at RUN TIME by prefix match, not taken from this field - see IdentityColumnData.
+  string identitycolumn = 4;
+
+  // The update-where MODE. A `long`, not a bool. Unset means "leave the carrier's setting alone".
+  // [:L15, applied conditionally at :L131-L133]
+  //
+  // WHAT MODE 1 REQUIRES OF THE PAYLOAD, because it is the fixture's value and therefore the case
+  // parity is measured on: mode 1 is "key and updateable columns", so the generated WHERE clause
+  // carries the key column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. On the primary
+  // fixture ALL SIX columns are marked `update=yes updatewhereclause=yes` [dw_sqlite.srd:L8-L13], so
+  // the optimistic-concurrency check spans all six columns' original values.
+  //
+  // CONSEQUENCE: THE PAYLOAD MUST BE ABLE TO EXPRESS, PER ROW, BOTH THE CURRENT AND THE ORIGINAL
+  // VALUE OF EVERY MARKED COLUMN. A flat rowset cannot, which is precisely why the request payload is
+  // a CHANGESET rather than a row array - the original-value shadow and the per-column item statuses
+  // travel inside it - and why the conflict response is common.v1.ConflictRow, which carries current
+  // and original values as two separate repeated fields. See UpdateRequest.update_data and
+  // UpdateService's conflict note.
+  optional int64 updatewhere = 5;
+
+  // Whether a key change is performed in place. Unset means "leave the carrier's setting alone".
+  // [:L16, applied conditionally at :L135-L141]
+  //
+  // FALSE TRIGGERS A WORKAROUND THE LEGACY DOCUMENTS AGAINST ITSELF, AND THE FIXTURE EXERCISES IT.
+  // updatekeyinplace = no means a key change becomes DELETE PLUS INSERT rather than an in-place
+  // update. The legacy's own FIXME at [:L151-L154] states that when the requested key field is not
+  // marked as a key the modified state will not generate those statements, so the internal modified
+  // state must be force-refreshed. The implementation follows at [:L155-L167], gated on the RUNTIME
+  // value read back through a describe call [:L155] rather than on this field, and within that gate
+  // it walks rows whose ROW status is modified [:L160] and then each resolved key column whose own
+  // status is modified [:L162], and then:
+  //
+  //     Data.Object.Data[nRow, keyColumnId] = Data.Object.Data[nRow, keyColumnId]      [:L163]
+  //
+  // IT ASSIGNS EACH MODIFIED KEY COLUMN TO ITSELF, purely to flip its item status. There is no .NET
+  // analogue for a self-assignment that mutates hidden state, so the port must model original-value
+  // and status tracking EXPLICITLY and regenerate the same statements from that explicit model. This
+  // contract's share of that obligation is that the changeset payload carries per-column item
+  // statuses - without them the far side has nothing to flip.
+  //
+  // AND THE PRIMARY FIXTURE SETS updatekeyinplace=no ITSELF [dw_sqlite.srd:L14], so this is a path
+  // the fixture exercises. It is not a rare branch that can be deferred.
+  optional bool updatekeyinplace = 6;
+}
+
+message PrepareUpdateRequest {
+  TaskHandle task = 1;
+
+  // The descriptor array. of_addupdatabletable [:L46, :L82-L96], appending at UpperBound + 1 [:L86].
+  //
+  // MULTI-TABLE UPDATE FROM ONE CARRIER IS A REAL LEGACY CAPABILITY, NOT A THEORETICAL ONE, and the
+  // evidence is threefold: the legacy holds `TABLEDATA Tables[]` as an ARRAY [:L30], there is an
+  // explicit add path taking all six descriptor fields [:L46], and there is an explicit switch
+  // [:L51, :L265-L268]. So the contract carries the repeated list AND the flag.
+  //
+  // ORDER IS SIGNIFICANT. With the flag on, the worker loops the array IN ARRAY ORDER, calling
+  // prepare and then update once per table, and STOPS AT THE FIRST FAILURE [:L364-L369] - so a later
+  // table is not attempted after an earlier one fails, and a partial update can be left committed
+  // unless autocommit is off. Sending this field REPLACES the array wholesale, matching the legacy's
+  // reset path which assigns a fresh empty array [:L58-L72, replaced at :L67].
+  repeated TableUpdateContract tables = 2;
+
+  // of_setmultitableupdate [:L51, :L265-L268].
+  //
+  // A BEHAVIOUR THAT IS NOT IN THE PLAN PROSE AND IS IN THE SOURCE, VERIFIED BY LOCATING EVERY CALL
+  // SITE (C-B, C-K): _of_UpdatePrepare HAS EXACTLY ONE CALLER, at [:L365], INSIDE THE MULTI-TABLE
+  // BRANCH. The single-table branch calls the update directly [:L371] and never runs prepare at all.
+  //
+  // THEREFORE: WITH THIS FLAG OFF, THE DESCRIPTOR ARRAY IS NOT APPLIED - the carrier's own static
+  // definition governs update, key, identity, update-where and key-in-place. With it on, the array
+  // is applied per table and overrides that definition. It looks like an oversight in the legacy. It
+  // is the observable behaviour, so it is preserved and documented rather than "fixed" into applying
+  // the descriptor in both modes, which would change the generated statement for every existing
+  // single-table caller.
+  //
+  // WITH THE FLAG ON, AN EMPTY ARRAY IS AN ERROR: E_INVALID_ARGUMENT with the message
+  // "没有设置可更新表!" [:L359-L363]. With the flag off, an empty array is ordinary.
+  bool multi_table_update = 3;
+
+  // of_setdataobject [:L50, :L259-L263]. Names the carrier's source object. Clears sql_syntax, as in
+  // C-05. Absent BOTH this and sql_syntax, the legacy fails with
+  // common.v1.RetCode.Value.E_INVALID_DATAOBJECT and the message "无效的数据源对象!" [:L326-L330] -
+  // note this update path REQUIRES a source, unlike a query which can carry a bare statement.
+  optional string data_object = 4;
+
+  // of_setsqlsyntax [:L52, :L270-L274]. A complete syntax string; clears data_object. A Create
+  // failure is common.v1.RetCode.Value.E_INVALID_SQL [:L316-L320].
+  optional string sql_syntax = 5;
+}
+
+message PrepareUpdateResponse {
+  // On failure from the prepare step, status.error_text carries what the legacy surfaced. Note one
+  // shape peculiarity worth knowing: THE LEGACY'S CARRIER MODIFICATION CALL RETURNS AN ERROR
+  // *STRING*, NOT A CODE - `sErr = Data.Modify(sModString)` with EMPTY MEANING SUCCESS [:L145-L149] -
+  // and the legacy forwards that string as the message of an E_INTERNAL_ERROR. So a prepare failure
+  // arrives here as E_INTERNAL_ERROR plus driver text, and the text is the only detail there is.
+  OperationStatus status = 1;
+}
+
+message UpdateRequest {
+  TaskHandle task = 1;
+
+  // THE UPDATE PAYLOAD CROSSES AS OPAQUE BYTES PLUS A ROW COUNT, NOT AS A ROW ARRAY (C-A).
+  // The legacy setter is `of_setupdatedata(ref blob blbdata, readonly long rows)` [:L44, :L74-L77] -
+  // a blob and a count, nothing else. This is the CHANGESET serialization of the caller's carrier.
+  //
+  // ITS INTERNAL FORMAT IS THE CODECS' CONCERN ON BOTH SIDES AND IS DELIBERATELY NOT DESCRIBED HERE.
+  // That is what keeps this file free of behaviour: the changeset already carries, per row, the
+  // current values, the ORIGINAL-VALUE SHADOW that updatewhere=1 needs, the row's item status and
+  // each column's item status. Enumerating those as fields would move the codec into the contract and
+  // would create a second, drifting definition of a format that already exists on both sides.
+  //
+  // A CHANGESET, NOT A FULL STATE, and the legacy says why: it deliberately CLEARS THE SORT
+  // CONDITION before applying - `data.SetSort("")` [:L334] - so that rows are submitted in the order
+  // they were copied rather than in sorted order. A full state would additionally require sort and
+  // filter synchronization between the two sides.
+  bytes update_data = 2;
+
+  // Legacy `rows`, the caller's own count of rows in the changeset [:L74-L75]. Readable back through
+  // of_getupdaterows [:L45, :L79].
+  //
+  // IT IS NOT REDUNDANT WITH THE BLOB, BECAUSE IT PARTICIPATES IN AN OUTCOME DECISION: when applying
+  // the changeset reports "no data" AND this count is zero, THE LEGACY TREATS THAT AS SUCCESS, not as
+  // failure - `if rtCode = -1 and _nUpdateRows = 0 then rtCode = RetCode.OK` [:L339-L342]. A genuine
+  // changeset failure with a non-zero count is E_INVALID_DATA with the message "无效的更新数据!"
+  // [:L343-L345]. So an empty update is a successful no-op and a corrupt one is an error, and this
+  // field is the only thing that distinguishes them.
+  int64 update_rows = 3;
+
+  // of_setautocommit [:L49, :L254-L257].
+  //
+  // ============ THIS FIELD IS A bool, AND C-07'S IS A THREE-VALUED ENUM. DO NOT UNIFY THEM =====
+  // The asymmetry is real, it is in the source, and it is preserved (C-B, C-K):
+  //
+  //     n_cst_thread_task_sqlupdate.of_setautocommit(readonly boolean autocommit)   [:L49]
+  //     n_cst_thread_task_sqlcommand.of_setautocommit(readonly long autocommit)     [sqlcommand:L28]
+  //
+  // A naive reading unifies them into one enum on the grounds that they share a name. That would
+  // WIDEN this contract by two values it has no behaviour for: the update task's autocommit is a
+  // plain if-test that either commits or does not - `if _bAutoCommit then rtCode = of_Commit(true)`
+  // [:L386-L387] - with no third arm anywhere. It has no AC_NATIVE concept, so offering one here
+  // would be offering a value the server could only reject.
+  //
+  // Unset leaves the task's setting alone; the legacy default is false [:L32, reset at :L62].
+  // ==========================================================================================
+  optional bool autocommit = 4;
+}
+
+// UpdateCounts - the three row counts, delivered together.
+//
+// The legacy fires them as ONE callback with three arguments - `OnUpdated(insertedCount,
+// updatedCount, deletedCount)` [:L247, declared at n_cst_threading_task_sqlupdate.sru:L18] - so they
+// are one message here rather than three fields scattered on the response.
+message UpdateCounts {
+  int64 inserted = 1;
+  int64 updated = 2;
+  int64 deleted = 3;
+}
+
+// IdentityColumnData - the identity round trip.
+//
+// THE COLUMN IS DISCOVERED AT RUN TIME, NOT TAKEN FROM THE DESCRIPTOR [:L217-L225]. The legacy
+// lowercases the update table name, appends a dot, and prefix-matches that against each column's
+// database name - WITH A FIRST-WINS FALLBACK that accepts the first identity column found if no name
+// matched [:L221]. So the value reported here can differ from TableUpdateContract.identitycolumn, and
+// a consumer must read it rather than assume.
+//
+// COLLECTION IS CONDITIONAL AT THREE LEVELS, so an absent identity block means "none collected" and
+// is NOT an error: rows must have been inserted at all [:L215], an identity column must have been
+// found [:L226], and at least one of the two arrays must be non-empty [:L242-L244].
+//
+// ROWS ARE SELECTED BY THE ROW-STATUS CONVENTION, WHICH USES COLUMN INDEX ZERO:
+//     GetItemStatus(nIndex, 0, Primary!) = NewModified!     [:L230]
+//     GetItemStatus(nIndex, 0, Filter!)  = NewModified!     [:L238]
+// COLUMN 0 IS NOT A REAL COLUMN - it means THE ROW ITSELF. The same object reads a genuine per-column
+// status a few lines away with a real column index [:L162], so both readings coexist and the whole
+// distinction is carried by whether the index is zero. common.v1.proto records the same convention on
+// ItemStatus and ColumnValue.
+//
+// ============ WHY THE TWO ARRAYS ARE SEPARATE, AND MUST NEVER BE MERGED OR REORDERED ==========
+// The legacy delivers them through one callback with TWO `ref` ARRAY OUT-PARAMETERS -
+// `OnIdentityColumnDataRetrieved(nIdentityColumn, ref nPrimaryIdValues, ref nFilterIdValues)`
+// [:L243, declared at n_cst_threading_task_sqlupdate.sru:L19] - because they come from DIFFERENT
+// BUFFERS COLLECTED IN DIFFERENT DIRECTIONS:
+//
+//     Primary buffer, FORWARD:    for nIndex = 1 to nCount              [:L228-L233]
+//     Filter buffer,  BACKWARD:   for nIndex = nCount to 1 step -1      [:L237]
+//
+// The justification sits in the source immediately above the backward loop, at [:L235]: THE FILTER
+// BUFFER'S ROW ORDER IS INVERTED relative to the data source that produced the changeset.
+//
+// THIS IS THE MOST DANGEROUS SINGLE LINE IN THE REFACTOR FOR ONE-BASED-TO-ZERO-BASED TRANSLATION. IT
+// LOOKS LIKE A BUG. IT IS NOT A BUG. "Correcting" the direction produces wrong identity values that a
+// row-count assertion WOULD NOT CATCH - the same number of values comes back, paired with the wrong
+// rows, which is exactly the class of regression a characterization suite flags and a unit test does
+// not. Merging the arrays would destroy the only evidence a consumer has of which order each was
+// collected in, so the contract keeps them separate and separately ordered (C-B).
+// ==========================================================================================
+message IdentityColumnData {
+  // The discovered identity column's ONE-BASED ordinal. Legacy `long id`; int64 per the scalar rule's
+  // widening. A real column is 1 or greater, and 0 never appears here - the legacy only fires this
+  // callback when the ordinal is positive [:L226].
+  int64 identity_column_id = 1;
+
+  // Values from the PRIMARY buffer, in FORWARD collection order [:L228-L233]. Read with
+  // GetItemNumber, hence a numeric array.
+  repeated int64 primary_values = 2;
+
+  // Values from the FILTER buffer, in BACKWARD collection order [:L237-L241]. The order is the
+  // legacy's and must be transmitted as collected - see the block above.
+  repeated int64 filter_values = 3;
+}
+
+message UpdateResponse {
+  // ============ THE OUTCOME IS THE RECONCILED ONE, AND IT CANNOT BE RECONSTRUCTED (C-B) ========
+  // Two verified behaviours invert what a straightforward port would produce, and both are folded
+  // into this single field:
+  //
+  // FIRST, SUCCESS IS THE VALUE 1, NOT THE ZERO OF THE RETURN-CODE ALGEBRA. The gate on the entire
+  // success path is `if rtCode = 1 then` [:L214], with anything else falling through to
+  // common.v1.RetCode.Value.E_DB_ERROR [:L249-L250]. The update call itself is made with
+  // ACCEPT-TEXT TRUE AND RESET-FLAG FALSE - `Data.Update(true, false)` [:L204] - so THE CALLER OWNS
+  // THE CARRIER'S STATE AFTERWARDS and this contract must not imply the server reset it.
+  //
+  // SECOND, A CLAIMED SUCCESS IS DEFENSIVELY REWRITTEN INTO A FAILURE:
+  //     if TransObject.SQLCode = -1 and rtCode = 1 then rtCode = -1        [:L208-L210]
+  // AN IMPLEMENTATION THAT TRUSTS THE UPDATE CALL'S OWN RETURN VALUE WILL REPORT SUCCESS ON A FAILED
+  // UPDATE. The transaction's own driver code overrides the operation's self-report.
+  //
+  // A consumer therefore may NOT reconstruct the outcome from any single field: this ret_code is the
+  // reconciled result of both rules, and the counts below are populated only when it is OK.
+  //
+  // THE ORDERING AROUND THE REWRITE IS ALSO CONTRACT: the after-update hook fires at [:L206], BEFORE
+  // the reconciliation at [:L208-L210], so A HOOK OBSERVES THE UNRECONCILED VALUE while the caller
+  // observes the reconciled one. Cancellation is additionally checked both before and after the
+  // update [:L182, :L212].
+  // ==========================================================================================
+  OperationStatus status = 1;
+
+  // OnUpdated [:L247]. Present when status.ret_code is OK.
+  UpdateCounts counts = 2;
+
+  // OnIdentityColumnDataRetrieved [:L243]. OPTIONAL - absent means "none collected", never an error.
+  IdentityColumnData identity = 3;
+}
+
+// C-06 UpdateService - the update third of the retrieval / validation / update triple.
+//
+// ============ ON CONCURRENCY MISMATCH: Aborted, AND NO SILENT OVERWRITE ANYWHERE ==============
+// A mismatch is reported as the gRPC status ABORTED, carrying common.v1.ConflictDetail as the status
+// detail, and Gateway's REST projection surfaces the SAME payload as HTTP 409. Callers implement an
+// explicit retry-or-surface policy. THERE IS NO SILENT OVERWRITE ANYWHERE IN THIS SYSTEM and no
+// field in this file would enable one.
+//
+// THE DETAIL TRAVELS ON THE STATUS AND NOT AS A RESPONSE FIELD, DELIBERATELY. A conflict is not a
+// successful call with a bad outcome, and giving UpdateResponse a conflict field as well would create
+// two ways to report one condition - a consumer could then handle one and miss the other. One
+// mechanism only: Aborted plus the detail.
+//
+// ABORTED RATHER THAN FAILED_PRECONDITION, also deliberately: the operation MAY succeed if the caller
+// re-reads and retries at a higher level, which is precisely what Aborted means and what
+// FailedPrecondition does not, and Aborted is the canonical gRPC mapping to 409.
+//
+// common.v1.ConflictRow carries current_values AND original_values as two separate repeated fields
+// for the reason recorded on TableUpdateContract.updatewhere: under mode 1 the failed statement
+// compared the original value of every marked column, so a payload with only current values could not
+// tell a caller WHICH column moved underneath it. Note also that null and empty are DISTINCT in that
+// comparison - collapsing them would match rows the legacy would not, silently widening the WHERE
+// clause and overwriting a row that should have conflicted.
+// ==========================================================================================
+//
+// ============ THE VETOABLE HOOKS, AND THE DISCRIMINATION A PORT MUST NOT FLATTEN ==============
+// The before-update hook is VETOABLE and a veto means TWO DIFFERENT THINGS [:L195-L202]:
+//
+//     if IsPrevented(TransObject.Event OnBeforeUpdate(Data)) then
+//         if TransObject.of_IsFailed() then  -> emit DbError, return E_DB_ERROR
+//         else                               -> return RetCode.CANCELLED
+//
+// SO A VETO COMBINED WITH A TRANSACTION FAILURE YIELDS A DATABASE ERROR, WHILE A CLEAN VETO YIELDS
+// CANCELLED. The discriminator is the transaction's own failure predicate, which is `SQLCode < 0`
+// [n_cst_thread_trans.sru:L337]. Both outcomes are distinct statuses on this contract because a
+// consumer must be able to tell a deliberate cancellation from a failure - and recall CANCELLED is
+// NEITHER succeeded nor failed in the legacy algebra, so it cannot be folded into either.
+//
+// The after-update hook fires with the result [:L206], before the reconciliation, as noted above.
+// ==========================================================================================
+//
+// ONE MORE VERIFIED ARM, because it fires before any statement is generated: AN EMPTY OR PLACEHOLDER
+// UPDATE TABLE - empty, "!" or "?" - synthesizes a database-error event and returns E_DB_ERROR
+// [:L188-L193]. The synthesized call is `Event OnDBError(-1, "没有可更新的表", "", Primary!, 0)`, a
+// FIVE-POSITIONAL PAYLOAD matching common.v1.DbError field for field, with an EMPTY statement field
+// and row 0 meaning "no particular row". Note the legacy already passes "" for that field here, so an
+// empty redacted statement is ordinary rather than exceptional.
+service UpdateService {
+  // Create a server-held update task. The wire form of the legacy object creation.
+  rpc CreateUpdateTask(CreateUpdateTaskRequest) returns (CreateUpdateTaskResponse);
+
+  // Destroy it. The wire form of the legacy Destroy.
+  rpc ReleaseUpdateTask(ReleaseUpdateTaskRequest) returns (ReleaseUpdateTaskResponse);
+
+  // of_reset [:L43, :L58-L72]. E_BUSY while running [:L60], and it clears the descriptor array, the
+  // autocommit and multi-table flags, the source, the payload and the row count [:L62-L69].
+  rpc Reset(ResetUpdateTaskRequest) returns (ResetUpdateTaskResponse);
+
+  // The descriptor array and the multi-table switch. See PrepareUpdateRequest for the single-table
+  // behaviour, which is the one thing about this method that surprises.
+  rpc PrepareUpdate(PrepareUpdateRequest) returns (PrepareUpdateResponse);
+
+  // Apply the changeset. Aborted plus common.v1.ConflictDetail on a concurrency mismatch.
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+}
+
+message CreateUpdateTaskRequest {
+  // The session the task will run against. Required.
+  SessionHandle session = 1;
+}
+
+message CreateUpdateTaskResponse {
+  OperationStatus status = 1;
+  // Populated only when status.ret_code is OK.
+  TaskHandle task = 2;
+}
+
+message ReleaseUpdateTaskRequest {
+  TaskHandle task = 1;
+}
+
+message ReleaseUpdateTaskResponse {
+  OperationStatus status = 1;
+}
+
+message ResetUpdateTaskRequest {
+  TaskHandle task = 1;
+}
+
+message ResetUpdateTaskResponse {
+  // E_BUSY while running [:L60], exactly as C-05's Reset. Maps to gRPC FailedPrecondition.
+  OperationStatus status = 1;
+}
+
+
+// ==============================================================================================
+//  SECTION 5 - C-07 persistence.v1.CommandService
+//  --------------------------------------------------------------------------------------------
+//  Oracles: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlcommand.sru (116 lines) and
+//           ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru. Both READ-ONLY.
+//  Locators marked [:Lnnn] are into the first; the second is cited by name.
+//
+//  Action-oriented, which is why it is RPC-shaped rather than resource-shaped: the legacy surface is
+//  Exec, Commit, Rollback and an error-text accessor, none of which is a noun.
+
+// AutoCommitMode - the legacy autocommit setting, WHICH IS THREE-VALUED AND NOT A BOOLEAN.
+//
+// Declared as three public constants on the command task [:L16-L18]:
+//
+//     constant long AC_OFF    = 0      [:L16]
+//     constant long AC_ON     = 1      [:L17]  source comment: open a transaction and auto-commit
+//     constant long AC_NATIVE = 2      [:L18]  source comment: do NOT open a transaction
+//
+// with the default `long _nAutoCommit = AC_OFF` [:L21] and the signature
+// `of_setautocommit(readonly long autocommit)` [:L28].
+//
+// THE THREE ARMS ARE VISIBLY DISTINCT IN THE WORKER, so this is not a two-value setting with a spare
+// number. AC_NATIVE toggles the connection's OWN autocommit on before the statement [:L88-L90] and
+// off again afterwards, reporting a commit on success [:L95-L97] and simply restoring the flag on
+// failure [:L105-L106]. AC_ON performs an EXPLICIT commit and surfaces a commit failure through the
+// error event [:L98-L103]. ANY OTHER VALUE, which is to say AC_OFF, falls through to an explicit
+// ROLLBACK on failure [:L107-L109]. A BOOLEAN FIELD COULD NOT EXPRESS THE THIRD VALUE.
+//
+// NO SYNTHETIC SENTINEL IS NEEDED HERE, AND THAT IS THE CONTRAST WITH SECTION 1 (C-K).
+// AC_OFF = 0 ALREADY OCCUPIES ZERO, so proto3's first-enumerator rule is satisfied by a genuine
+// legacy constant. Adding an UNSPECIFIED sentinel would either collide with AC_OFF or displace it,
+// and it would invent a fourth state the legacy has no arm for. This is the same test SqlModifyStyle
+// fails and common.v1's RetCode passes: DOES THE LEGACY SET ALREADY CONTAIN ZERO? Here it does.
+//
+// A CONSEQUENCE WORTH STATING: because AC_OFF is zero, an unset field arrives as AC_OFF, which is
+// exactly the legacy default [:L21] and also what of_reset restores [:L34]. So the implicit default is
+// the correct default here, which is why this field needs no explicit presence while C-06's boolean
+// autocommit does - there, false is a legal value AND the default, so presence is the only way to say
+// "leave it alone", whereas here AC_OFF genuinely IS "leave it alone".
+enum AutoCommitMode {
+  // No transaction handling by this call; the caller's session governs. Legacy default. [:L16]
+  AC_OFF = 0;
+  // Open a transaction and commit it on success. [:L17]
+  AC_ON = 1;
+  // Do NOT open a transaction; switch the driver's own autocommit on for the duration and off
+  // afterwards. THIS IS THE VALUE A BOOLEAN WOULD LOSE. [:L18]
+  AC_NATIVE = 2;
+}
+
+message CreateCommandTaskRequest {
+  // The session the task will run against. Required.
+  SessionHandle session = 1;
+}
+
+message CreateCommandTaskResponse {
+  OperationStatus status = 1;
+  // Populated only when status.ret_code is OK.
+  TaskHandle task = 2;
+}
+
+message ReleaseCommandTaskRequest {
+  TaskHandle task = 1;
+}
+
+message ReleaseCommandTaskResponse {
+  OperationStatus status = 1;
+}
+
+message ResetCommandTaskRequest {
+  TaskHandle task = 1;
+}
+
+message ResetCommandTaskResponse {
+  // E_BUSY WHILE RUNNING - `if #Running then return RetCode.E_BUSY` [:L32] - and on success the reset
+  // RESTORES AUTOCOMMIT TO AC_OFF and clears the statement [:L34-L35]. Both halves are contract: a
+  // caller that reset a task and then ran it without setting autocommit again gets AC_OFF, not
+  // whatever was set before.
+  OperationStatus status = 1;
+}
+
+message SetCommandAutoCommitRequest {
+  TaskHandle task = 1;
+  // of_setautocommit [:L28, :L40-L43]. THREE-VALUED. See the asymmetry note on the service below.
+  AutoCommitMode autocommit = 2;
+}
+
+message SetCommandAutoCommitResponse {
+  OperationStatus status = 1;
+}
+
+message SetCommandSqlRequest {
+  TaskHandle task = 1;
+
+  // of_setsql [:L29, :L45-L50].
+  //
+  // GUARD: `if sql = "" then return RetCode.E_INVALID_SQL` [:L45]. E_INVALID_SQL is -8
+  // [retcode.sru:L51], NOT the generic E_INVALID_ARGUMENT that most other guards in this file use -
+  // an empty statement is classified as a bad statement rather than a bad argument, and that
+  // distinction is preserved.
+  //
+  // THE LEGACY RE-CHECKS THIS INSIDE THE TASK BODY, and the redundant double-guard is PRESERVED, NOT
+  // COLLAPSED (C-B): the worker tests the same condition again and emits the same code with a Chinese
+  // message, "无效的SQL!" [:L65-L68]. Two guards, same condition, DIFFERENT MESSAGES - the setter's
+  // arm carries no message at all while the worker's does. Collapsing them to one check would remove
+  // an observable difference in what a caller sees, and the second guard is the only one a caller who
+  // never called this setter can reach.
+  //
+  // See ExecRequest.sql for the leading-`@` prefix and the batch note; the statement text itself is
+  // identical on both paths.
+  string sql = 2;
+}
+
+message SetCommandSqlResponse {
+  OperationStatus status = 1;
+}
+
+message ExecRequest {
+  TaskHandle task = 1;
+
+  // The statement. Optional here because it may already have been set through SetCommandSql; unset
+  // leaves the task's statement alone, and the worker's own empty-statement guard [:L65-L68] then
+  // applies to whatever the task holds.
+  //
+  // ============ THE LEADING-`@` PREFIX EXECUTION MODE IS PART OF THE STATEMENT TEXT ==============
+  // A statement whose FIRST CHARACTER IS `@` selects the statement-caching execution mode. The prefix
+  // TRAVELS INSIDE THIS STRING, exactly as in the legacy, and is deliberately NOT hoisted into a
+  // separate boolean field - because it is the statement text that selects the mode, and splitting it
+  // would create two sources of truth for one decision and a way for them to disagree. The legacy
+  // demonstrates the form directly at ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw, where an insert
+  // is written "@INSERT INTO ..." with the accompanying comment recording what the prefix does.
+  // ==========================================================================================
+  //
+  // MULTI-STATEMENT BATCH EXECUTION is likewise carried in this one string: the legacy submits a batch
+  // as a single command and rolls it back as a unit on failure, which is what makes the autocommit
+  // mode above meaningful on a batch rather than only on a single statement.
+  optional string sql = 2;
+
+  // Positional parameters, bound before execution. A binding failure is
+  // common.v1.RetCode.Value.E_SQL_BIND_ARG_FAILED [:L82-L85], which is -32 [retcode.sru:L75].
+  //
+  // ============ THE ELEVEN-ARGUMENT CEILING IS A LANGUAGE LIMIT, NOT A SEMANTIC ONE =============
+  // THIS FIELD HAS NO ARITY CAP, DELIBERATELY. The legacy surface is overloaded from zero arguments up
+  // to ELEVEN and then stops - n_sqlite.sru:L32 through :L43 give twelve Exec overloads with :L43
+  // carrying arg11 as the last, and n_sqlite.sru:L44 through :L55 do exactly the same for Query.
+  // There is no twelve-argument form anywhere.
+  //
+  // THAT CEILING EXISTS BECAUSE POWERSCRIPT CANNOT FORWARD AN ARBITRARY-LENGTH ARGUMENT LIST, so the
+  // surface had to be written out by hand one arity at a time. It is a statement about the source
+  // LANGUAGE, not about what the database accepts and not about what any behaviour depends on. A
+  // repeated field has no such limit, so EXCEEDING ELEVEN ARGUMENTS IS NOT A BEHAVIOURAL REGRESSION -
+  // the twelfth simply had no overload to call (C-K).
+  //
+  // The ceiling is recorded anyway for two reasons: it explains an otherwise-baffling shape in the
+  // oracle, and a parity test replaying a legacy recording will never contain more than eleven, so a
+  // reviewer comparing the two should not read the difference as a divergence.
+  // ==========================================================================================
+  repeated PositionalParameter parameters = 3;
+
+  // Optional autocommit override for this call; unset uses the task's setting. THREE-VALUED.
+  optional AutoCommitMode autocommit = 4;
+}
+
+message ExecResponse {
+  // The reconciled outcome. On failure the legacy fires BOTH error events, so status.db_error is
+  // populated here - and note the statement text it would have carried is REDACTED, for the reason
+  // this section's service comment gives.
+  OperationStatus status = 1;
+
+  // ============ ERROR-TEXT RETRIEVAL AND THE THREE NUMERIC ACCESSORS ============================
+  // These four fields are the accessors the legacy exposes for exactly this purpose, which is why
+  // they are carried explicitly rather than folded into the status: n_sqlite.sru declares
+  // SQLNRows() [:L26], SQLCode() [:L27], SQLDBCode() [:L28] and SQLErrText() [:L29], and the command
+  // task reads the transaction's equivalents when it reports a failure [:L110-L111].
+  //
+  // THREE DIFFERENT CODE SPACES, AND THEY MUST NOT BE COMPARED WITH EACH OTHER OR WITH RetCode:
+  // sql_code is the runtime's own status where 0 is success, sql_db_code is the DRIVER's code, and
+  // status.ret_code is the framework's. common.v1.proto makes the same point on DbError.sqldbcode.
+  // ==========================================================================================
+
+  // Rows affected. Legacy SQLNRows.
+  int64 sql_nrows = 2;
+
+  // The runtime's statement status. Legacy SQLCode. 0 is success.
+  //
+  // A VALUE OF 100 IS SUCCESS, NOT AN ERROR, and that is a real legacy determination rather than an
+  // inference: the transaction object's own command path tests
+  // `if SQLCode <> 0 and SQLCode <> 100 then return RetCode.E_DB_ERROR`
+  // [n_cst_thread_trans.sru:L233], so a "nothing found" outcome is explicitly NOT a failure. An
+  // implementation that treats any non-zero code as failure will invent errors the legacy does not
+  // report (C-B).
+  int64 sql_code = 3;
+
+  // The driver's own numeric code. Legacy SQLDBCode. NOT a RetCode and not comparable to sql_code.
+  int64 sql_db_code = 4;
+
+  // The driver's message text, verbatim and opaque. Legacy SQLErrText. May be non-English; classify
+  // on the codes, never by parsing this.
+  string sql_err_text = 5;
+
+  // TRUE when the command actually committed. It mirrors `Event OnCommitted()` [:L97], which the
+  // legacy raises on the AC_NATIVE success path only - the AC_ON path performs its commit through the
+  // task's own commit helper [:L99] and AC_OFF commits nothing at all. So this field distinguishes
+  // "the statement succeeded" from "the statement succeeded AND the work is durable", which a caller
+  // running a batch under AC_OFF genuinely needs to know.
+  bool committed = 6;
+}
+
+// C-07 CommandService - a statement that returns no result set.
+//
+// ============ THE AUTOCOMMIT ASYMMETRY, RESTATED AT THIS SITE TOO (C-B, C-K) ===================
+// C-07'S AUTOCOMMIT IS THE THREE-VALUED AutoCommitMode. C-06'S IS A PLAIN bool. DO NOT UNIFY THEM.
+// The asymmetry is verified in the source at both sites - `of_setautocommit(readonly long autocommit)`
+// here at [:L28] against `of_setautocommit(readonly boolean autocommit)` at
+// n_cst_thread_task_sqlupdate.sru:L49 - and it is annotated at both, here and on
+// UpdateRequest.autocommit, precisely because a reader who meets only one site will unify them.
+// The update task has no AC_NATIVE arm anywhere in its body; offering one would be offering a value
+// the server could only reject.
+// ==========================================================================================
+//
+// COMMIT AND ROLLBACK ARE NOT ON THIS SERVICE, and that is a scoping decision rather than an omission
+// (C-K). They are SESSION-scoped operations on the transaction object, so they live on C-08 where the
+// session lives. What belongs here is the per-statement commit POLICY, which is AutoCommitMode. The
+// legacy agrees: the command task never exposes a commit method of its own - it delegates to the
+// transaction object's commit [:L99] and rollback [:L108].
+//
+// ERRORS RETURN common.v1.DbError WITH ITS STATEMENT FIELD REDACTED, and this service is where the
+// need is most visible in the whole repository: the legacy passes THE FAILING STATEMENT TEXT ITSELF
+// into the error event - `Event OnDBError(transObject.SQLDBCode, transObject.SQLErrText, sSQL,
+// Primary!, 0)` [:L110] - and the legacy logger performs no redaction at all. With bind variables
+// disabled that text contains interpolated literal values, so an unredacted field would emit whatever
+// the failing row contained to a network peer. Producers put placeholders only, or an empty string.
+service CommandService {
+  // Create a server-held command task. The wire form of the legacy object creation.
+  rpc CreateCommandTask(CreateCommandTaskRequest) returns (CreateCommandTaskResponse);
+
+  // Destroy it. The wire form of the legacy Destroy.
+  rpc ReleaseCommandTask(ReleaseCommandTaskRequest) returns (ReleaseCommandTaskResponse);
+
+  // of_reset [:L27, :L32-L38]. E_BUSY while running; restores AC_OFF on success.
+  rpc Reset(ResetCommandTaskRequest) returns (ResetCommandTaskResponse);
+
+  // of_setautocommit [:L28]. THREE-VALUED - see the asymmetry note above.
+  rpc SetAutoCommit(SetCommandAutoCommitRequest) returns (SetCommandAutoCommitResponse);
+
+  // of_setsql [:L29]. Empty statement is E_INVALID_SQL, and the legacy checks it twice.
+  rpc SetSql(SetCommandSqlRequest) returns (SetCommandSqlResponse);
+
+  // Execute. Preserves positional binding, the leading-`@` mode, batch execution and error-text
+  // retrieval.
+  rpc Exec(ExecRequest) returns (ExecResponse);
+}
+
+
+// ==============================================================================================
+//  SECTION 6 - C-08 persistence.v1.TransactionService
+//  --------------------------------------------------------------------------------------------
+//  Oracles: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru (545 lines),
+//           transactiondata.srs, n_cst_thread_trans_pool.sru and
+//           n_cst_thread_task_sqlbase.sru for the connection flags. All READ-ONLY.
+//  Locators marked [:Lnnn] are into n_cst_thread_trans.sru; others are cited by file name.
+
+// DatabaseType - the dialect selector. EXACTLY TWO VALUES.
+//
+//     constant long DBT_MSSQL  = 0     [:L60]
+//     constant long DBT_ORACLE = 1     [:L61]
+//
+// Those are verified locators. There is no third constant in the oracle.
+//
+// ============ SQLITE IS DELIBERATELY ABSENT FROM THIS ENUM. DO NOT ADD IT (C-E) ================
+// It is not an oversight and it is not a gap to close. The legacy enumerates exactly these two and
+// SQLite appears in neither, even though SQLite is the ONLY storage engine this system provisions and
+// the only one with an evidenced schema. Adding a third value would invent a legacy constant, and it
+// would also break the dispatch below in a way no test would catch, because that dispatch has a
+// `case else` arm with defined behaviour.
+//
+// SO WHY DO TWO DIALECTS SURVIVE AT ALL WHEN NEITHER ENGINE IS PROVISIONED? Because THIS SELECTOR
+// SELECTS A TEXT GENERATOR, NOT A CONNECTION. The paging behaviours it chooses are PURE STRING
+// TRANSFORMS - an input statement plus a page size and a page index yields an output statement, with
+// no connection involved at any point - so both are fully unit-testable with NO INSTANCE OF EITHER
+// ENGINE IN EXISTENCE. That is precisely how both behaviours are preserved without fabricating a
+// schema for either. Naming a selector value is not provisioning an engine.
+//
+// PARITY IS BYTE-EXACT GENERATED SQL, WHICH MAKES THE SENTINEL IDENTIFIERS PART OF THIS CONTRACT even
+// though no field carries them. All six were read from the oracle with per-arm attribution; locators
+// are into n_cst_thread_task_sqlquery.sru:
+//
+//     pfwPagedSQL_OutterTbl        first arm only    [:L333, :L350, :L362]
+//     pfwPagedSQL_RN               BOTH arms         [:L355, :L356, :L381, :L382, :L383, :L394, :L395]
+//     pfwPagedSQL_Tbl              first arm, and the count wrapper   [:L356, :L382, :L834]
+//     pfwPagedSQL_TblInnerInner    second arm only   [:L394]
+//     pfwPagedSQL_TblInner         second arm only   [:L394]
+//     pfwPagedSQL_TblOuter         second arm only   [:L394]
+//
+// REPRODUCE THE SPELLINGS EXACTLY, INCLUDING THE DOUBLED `t` IN `OutterTbl`, WHICH IS THE LEGACY
+// SPELLING. It reads like a typo and it is the oracle, so correcting it would break every byte-exact
+// comparison that mentions it (C-B).
+//
+// AND THE EMPTY-ORDER-BY SUBSTITUTIONS DIFFER PER ARM AND ARE NOT INTERCHANGEABLE: the first arm
+// substitutes `(SELECT 0)` [:L370, :L379] while the second substitutes `''` [:L392]. Two arms, two
+// different placeholders for the same idea, both observable in the generated text.
+//
+// Accordingly, NO FIELD ANYWHERE IN THIS FILE MODELS A SQL SERVER OR ORACLE CONNECTION, PROVIDER,
+// SESSION, CREDENTIAL OR SCHEMA, because neither has any connection string or DDL anywhere in the
+// repository (C-E).
+//
+// THE `case else` ARM IS DEFINED BEHAVIOUR AND IS PRESERVED: an unrecognised dialect raises the error
+// event and returns common.v1.RetCode.Value.E_NO_IMPLEMENTATION
+// [n_cst_thread_task_sqlquery.sru:L396-L398], which is -2001 and is a DISTINCT code from E_NO_SUPPORT
+// at -2000 [retcode.sru:L77-L78]. The two must not be conflated.
+//
+// HOW THE SELECTOR IS RESOLVED, WHICH IS SURPRISING AND IS PRESERVED (C-B): it is a SUBSTRING TEST ON
+// THE DESCRIPTOR'S dbms FIELD, and MSSQL IS THE FALLBACK FOR EVERYTHING UNRECOGNISED -
+//     if Pos(Upper(DBMS),"ORACLE") > 0 then return DBT_ORACLE else return DBT_MSSQL   [:L356-L362]
+// So a dbms string naming any other engine, including SQLite, resolves to DBT_MSSQL rather than to an
+// error. That is why the `case else` arm above is reached from the paging builder rather than from
+// this resolver: the resolver cannot produce a third value, but a caller can supply the type directly.
+//
+// NO SYNTHETIC SENTINEL, for the AutoCommitMode reason: DBT_MSSQL = 0 already occupies zero with a
+// genuine legacy constant, so proto3's first-enumerator rule is satisfied without invention.
+enum DatabaseType {
+  // Also the fallback for any unrecognised dbms string. [:L60]
+  DBT_MSSQL = 0;
+  // Selected when the dbms string contains "ORACLE", case-insensitively. [:L61]
+  DBT_ORACLE = 1;
+}
+
+// ConnectionParameterFlags - the two DBParm flags, surfaced EXPLICITLY instead of left buried.
+//
+// Both are extracted by the legacy from the connection-parameter string by regular expression at
+// ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129, and both are surfaced as
+// fields here because BOTH CHANGE OBSERVABLE STATEMENT GENERATION. They remain settable through the
+// string as well, so a caller supplying only the string is not broken - the fields are a projection of
+// the string, not a replacement for it, and a server must resolve a disagreement in favour of the
+// explicit fields since they are the ones the contract type-checks.
+//
+// THEY LIVE ON THE REQUEST AND NOT ON THE DESCRIPTOR, DELIBERATELY (C-K). TransactionDescriptor is a
+// strict nine-field mirror of the legacy structure and must not gain a tenth field, so the flags
+// attach one level up. That keeps the mirror checkable against the oracle at a glance while still
+// surfacing the flags where a caller can set them.
+//
+// THE NESTING IS CONTRACT, NOT AN IMPLEMENTATION ACCIDENT: the legacy resets the
+// national-character flag to false and then consults it ONLY INSIDE the bind-disabling branch -
+//     _bNCharBinding = false
+//     if RegExpFind(DBParm, "DisableBind...") = "1" then
+//         if RegExpFind(DBParm, "NCharBind...") = "1" then _bNCharBinding = true
+//     [n_cst_thread_task_sqlbase.sru:L127-L132]
+// SO NCharBind=1 HAS NO EFFECT WHATSOEVER UNLESS DisableBind=1. A flattened reading that honours
+// national-character binding independently would change generated statements for every caller who set
+// the second flag without the first (C-B).
+message ConnectionParameterFlags {
+  // The bind-disabling flag, parsed from `DisableBind\s*=\s*(0|1)`
+  // [n_cst_thread_task_sqlbase.sru:L128].
+  //
+  // ============ THIS IS THE MECHANICAL ROOT OF THE SQL-INJECTION EXPOSURE (C-K) =================
+  // DisableBind=1 MEANS THE RUNTIME DOES NOT USE BIND VARIABLES. Values are INTERPOLATED INTO THE
+  // STATEMENT TEXT AS LITERALS instead of being bound. Two consequences follow, and neither is
+  // hypothetical:
+  //
+  //   1. It is why the raw clause spliced in by C-05's clause setters is an injection site at all -
+  //      with binding disabled there is no bind boundary for a value to stay behind. See
+  //      SqlClauseSpec.clause.
+  //   2. IT IS WHY common.v1.DbError.sqlsyntax MUST BE REDACTED. The legacy places the complete
+  //      generated statement into that field and its logger redacts nothing, so with binding disabled
+  //      the field carries live row data. That is not a defect in the error path; it is the direct
+  //      consequence of this flag, which is exactly why the redaction rule belongs next to it.
+  //
+  // The implementation uses parameterized commands internally while keeping the observable generated
+  // statement unchanged, and documents each site as a known legacy defect rather than silently
+  // changing it (C-B).
+  // ==========================================================================================
+  bool disable_bind = 1;
+
+  // The national-character binding flag, parsed from `NCharBind\s*=\s*(0|1)`
+  // [n_cst_thread_task_sqlbase.sru:L129]. CONSULTED ONLY WHEN disable_bind IS TRUE - see the nesting
+  // note above. Sending it true on its own is legal and has no effect, matching the legacy exactly.
+  bool nchar_bind = 2;
+}
+
+// PoolKeepAliveSettings - the transaction pool's lifecycle settings, WITH THE CLOCK SEAMED.
+//
+// The legacy pool is REFERENCE COUNTED and its surface is add-reference, remove-reference, get,
+// release, exists, remove-all and collect [n_cst_thread_trans_pool.sru:L64-L70]. Removing a reference
+// decrements the count [:L93], and at zero one of two things happens [:L94-L114]: if keep-alive is on
+// and the connection is not broken the entry is PARKED with an idle start time taken from the process
+// clock [:L97], otherwise the connection is disconnected, destroyed and compacted out of the array.
+// Parked entries are reaped by an idle handler running a collection pass [:L72-L73].
+//
+// THE SETTINGS ARE CARRIED RATHER THAN THE THRESHOLDS BEING HARDCODED, and that is the point of this
+// message (C-K). The legacy reads all three at initialization from named framework data
+// [n_cst_thread_trans_pool.sru:L76-L83], so they are configuration in the legacy too - hardcoding them
+// here would take away something the oracle has.
+//
+// ============ THREE CLOCK READS ARE THE DETERMINISM SEAM, AND A PARITY TEST NEEDS ALL THREE =====
+// A golden-master comparison requires repeatability, and a non-deterministic value must be masked from
+// BOTH the master and the candidate. Three reads must therefore be substitutable:
+//   1. the pool's idle start time                       [n_cst_thread_trans_pool.sru:L97]
+//   2. the last-successful-connection stamp             [:L107, :L212]
+//   3. THE LIVENESS CACHE, which is the subtle one      [:L198]
+// The third reports a connection as CONNECTED WITHOUT PROBING IT when the last success was recent -
+// `if CPU() - _nLastConnOK < 10000 then return true` [:L198], with the stamp typed unsignedlong [:L68].
+// THAT IS OBSERVABLE THROUGH THE ABSENCE OF A PROBE, so a test that does not control the clock cannot
+// reproduce it. Hence the window is a FIELD here and not a constant.
+// ==========================================================================================
+message PoolKeepAliveSettings {
+  // Whether a connection is parked rather than closed when its reference count reaches zero. The
+  // legacy reads this from the framework datum `$SQL.TransPool.KeepAlive`
+  // [n_cst_thread_trans_pool.sru:L76]. When it is off, no idle handler is even registered [:L80].
+  bool keep_alive = 1;
+
+  // How long a parked connection may sit idle, IN SECONDS. The legacy multiplies this by 1000 and
+  // FALLS BACK TO ITS BUILT-IN DEFAULT OF 30000 MILLISECONDS when the result is zero or negative
+  // [n_cst_thread_trans_pool.sru:L78-L79, default declared at :L53]. Both halves of that are
+  // preserved: the unit is seconds on the wire because the legacy datum is in seconds, and a
+  // non-positive value means "use the default" rather than "expire immediately".
+  //
+  // A double rather than an integer because the legacy reads it as a double, and the scalar rule keeps
+  // a genuinely floating-point source value floating point.
+  double keep_alive_expire_seconds = 2;
+
+  // The class name the pool instantiates for a new transaction object
+  // [n_cst_thread_trans_pool.sru:L83]. Opaque; resolving it is the server's business. C-D note: this
+  // names a server-side class the server already knows - it transmits no code, script or expression.
+  string transaction_class = 3;
+
+  // THE LIVENESS-CACHE WINDOW IN MILLISECONDS - the seam for the third clock read above. The legacy
+  // hardcodes 10000 [:L198]; the contract carries it so a deterministic test can set it to zero and
+  // force an actual probe. Zero or negative means "always probe", which is the behaviour a parity run
+  // wants; unset leaves the server's configured value, which defaults to the legacy 10000.
+  int64 liveness_cache_window_ms = 4;
+}
+
+// ==============================================================================================
+//  TransactionDescriptor : THE LEGACY STRUCTURE, MIRRORED FIELD FOR FIELD
+//  --------------------------------------------------------------------------------------------
+//  EXACTLY NINE FIELDS, IN THE ORACLE'S OWN ORDER. transactiondata.srs declares them at [:L4-L12]:
+//
+//      string   dbms        [:L4]   ->  string  dbms       = 1
+//      string   servername  [:L5]   ->  string  servername = 2
+//      string   database    [:L6]   ->  string  database   = 3
+//      string   logid       [:L7]   ->  string  logid      = 4
+//      string   logpass     [:L8]   ->  string  logpass    = 5   WRITE-ONLY, see below
+//      string   dbparm      [:L9]   ->  string  dbparm     = 6
+//      string   lock        [:L10]  ->  string  lock       = 7
+//      boolean  autocommit  [:L11]  ->  bool    autocommit = 8
+//      string   userparm    [:L12]  ->  string  userparm   = 9
+//
+//  EIGHT STRINGS PLUS ONE BOOLEAN. The boolean is EIGHTH and userparm is NINTH - not the other way
+//  round, which is the one ordering a reader is likely to get wrong since a trailing boolean would be
+//  the more natural layout. DO NOT REORDER AND DO NOT ADD A TENTH. The two connection flags that
+//  belong conceptually to dbparm live on ConnectionParameterFlags one level up, precisely so that this
+//  mirror stays exact.
+//
+//  A NOTE ON THE ORACLE'S OWN COMMENT, SO IT DOES NOT MISLEAD ANYONE ELSE: transactiondata.srs:L2 is a
+//  COPY-PASTE DEFECT. Its export comment describes the structure as the database-error structure and
+//  is BYTE-IDENTICAL to dberrordata.srs:L2. Verified by comparing the two lines directly. The wrong
+//  description is deliberately NOT propagated into this comment; this structure is the CONNECTION
+//  descriptor. The defect itself is left exactly where it is, in a read-only file (C-C).
+//
+//  A VERIFIED LEGACY ASYMMETRY WORTH KNOWING, THOUGH IT CHANGES NOTHING HERE: the structure has nine
+//  fields but THE LEGACY ACCESSORS MOVE ONLY SEVEN OF THEM. Both of_settransdata [:L343-L355] and
+//  of_gettransdata [:L402-L419] copy dbms, servername, database, logid, logpass, dbparm and lock -
+//  and touch NEITHER autocommit NOR userparm. The contract still carries all nine, because the
+//  STRUCTURE is what is being mirrored and a consumer setting autocommit through the descriptor is
+//  expressing something the structure can hold. The asymmetry is recorded so nobody "discovers" it
+//  later and deletes two fields to match the accessors.
+//
+//  AND autocommit IS FORCIBLY ERASED AT THE TASK LEVEL, which is a second, independent quirk on the
+//  same field: when a task is handed a descriptor it clears the flag outright -
+//  `_transData.AutoCommit = false` [n_cst_thread_task_sqlbase.sru:L119], under a Chinese comment at
+//  [:L118] explaining that parameters irrelevant to the connection target are erased. So a descriptor's
+//  autocommit does not survive into a task, and per-statement commit policy is C-07's AutoCommitMode
+//  instead. Preserved, not corrected (C-B).
+//
+//  ================= logpass : WRITE-ONLY, AND ENFORCED STRUCTURALLY =========================
+//  THE RULE: it may be SUPPLIED ON A REQUEST. It is NEVER RETURNED ON A RESPONSE and NEVER WRITTEN TO
+//  A LOG. This is a C-F obligation as much as a design choice - it is a password field, so its
+//  treatment is not negotiable, and no example value accompanies it anywhere in this file.
+//
+//  WHY THE ENFORCEMENT IS STRUCTURAL RATHER THAN CONVENTIONAL. The obvious implementation is one
+//  descriptor message plus a rule that servers must blank the field on the way out. That rule is
+//  exactly the kind a caller or a future maintainer forgets, and forgetting it is silent. So the
+//  contract uses TWO SHAPES: this request-side message, which HAS the field, and
+//  TransactionDescriptorView below, which SIMPLY DOES NOT CONTAIN IT. A response cannot carry the
+//  password because there is nowhere on the wire to put it.
+//
+//  THE LEGACY GENUINELY ROUND-TRIPS IT, AND THAT IS WHY BOTH GETTERS MATTER. There are TWO
+//  response-shaped accessors, not one: `transactiondata of_gettransdata()` returns the WHOLE STRUCTURE
+//  BY VALUE [:L92, :L394-L400], and `long of_gettransdata(ref transactiondata data, ref string
+//  errinfo)` fills a caller's structure [:L93, :L402-L419] - and the second assigns
+//  `data.LogPass = LogPass` at [:L414], with the first delegating to it. BOTH are places where the
+//  password must be omitted, which is why the single view message replaces both.
+//
+//  This is a NARROWING of an in-process accessor on a NEW boundary, not a change to an existing wire
+//  format - there was none. It changes only what a newly created boundary is willing to EMIT: the
+//  value still reaches the server, and the server still connects with it.
+//  ==========================================================================================
+message TransactionDescriptor {
+  // The DBMS identifier. [transactiondata.srs:L4]
+  //
+  // ALSO THE DIALECT SELECTOR: the legacy resolves the paging dialect by substring-testing this
+  // string, defaulting to DBT_MSSQL when the test does not match [:L356-L362]. See DatabaseType.
+  string dbms = 1;
+
+  // The server name. [transactiondata.srs:L5]
+  string servername = 2;
+
+  // The database name. [transactiondata.srs:L6]
+  string database = 3;
+
+  // The login identifier. [transactiondata.srs:L7]
+  //
+  // C-F NOTE: this is an ACCOUNT NAME, not a secret, so unlike logpass it appears on the response view
+  // as well. It is nonetheless configuration and never a literal: it reaches a service through its
+  // options type from the orchestration layer, and no value for it appears anywhere in this file.
+  string logid = 4;
+
+  // THE LOGIN PASSWORD. WRITE-ONLY - see the block above. Supplied here, never echoed, never logged.
+  // Deliberately absent from TransactionDescriptorView. [transactiondata.srs:L8]
+  string logpass = 5;
+
+  // The connection parameter string. [transactiondata.srs:L9]
+  //
+  // CARRIES THE TWO FLAGS of ConnectionParameterFlags, which the legacy extracts from it by regular
+  // expression [n_cst_thread_task_sqlbase.sru:L128-L129]. The flags are also surfaced as explicit
+  // fields on the request; this string remains the legacy-faithful carrier.
+  //
+  // C-F NOTE: a connection parameter string CAN contain credential material in some providers'
+  // grammars. A producer must not place one here, and a server must treat the value as sensitive: it
+  // is carried on the request shape only, and TransactionDescriptorView's copy is expected to have
+  // been reduced to its non-sensitive parameters by the server that emits it.
+  string dbparm = 6;
+
+  // The isolation-level string. [transactiondata.srs:L10]
+  string lock = 7;
+
+  // The session autocommit flag - EIGHTH, not last. [transactiondata.srs:L11]
+  //
+  // Note the two quirks recorded above: the legacy accessors never copy this field, and a task erases
+  // it outright when handed the descriptor.
+  bool autocommit = 8;
+
+  // The provider-specific extra parameter string - NINTH and last.
+  // [transactiondata.srs:L12]
+  string userparm = 9;
+}
+
+// TransactionDescriptorView - the RESPONSE-side descriptor. IT HAS NO PASSWORD FIELD.
+//
+// FIELD NUMBERS ARE KEPT ALIGNED WITH TransactionDescriptor ON PURPOSE, so the correspondence to the
+// oracle is still checkable at a glance and slot 5 is visibly, deliberately empty rather than
+// mysteriously missing. Eight fields carried, one forbidden.
+//
+// THE `reserved` BELOW IS THE ENFORCEMENT MECHANISM, AND IT IS THE OPPOSITE OF ANTICIPATION (C-D).
+// Reserving BOTH the number and the name makes it a COMPILE ERROR for any future edit to reintroduce
+// a `logpass` field, or to reuse slot 5 for something else and thereby make an old client's password
+// bytes decode as a new field. This is not a slot held open for a deferred capability - nothing is
+// coming here, ever. It is a permanent prohibition expressed in the type system rather than in a
+// comment a maintainer can skip (C-F).
+message TransactionDescriptorView {
+  string dbms = 1;
+  string servername = 2;
+  string database = 3;
+  string logid = 4;
+
+  // SLOT 5 IS PERMANENTLY FORBIDDEN. `logpass` is write-only and must never appear on a response.
+  reserved 5;
+  reserved "logpass";
+
+  // Expected to carry non-sensitive parameters only - see the note on TransactionDescriptor.dbparm.
+  string dbparm = 6;
+  string lock = 7;
+  bool autocommit = 8;
+  string userparm = 9;
+}
+
+message BeginSessionRequest {
+  // The connection descriptor. Carries logpass; the response view does not.
+  TransactionDescriptor descriptor = 1;
+
+  // The two DBParm flags, surfaced explicitly. Optional: unset means "take them from
+  // descriptor.dbparm by the legacy's own regular expressions".
+  ConnectionParameterFlags flags = 2;
+
+  // Pool lifecycle settings, including the clock seam. Optional: unset uses the server's configured
+  // values, which default to the legacy's own.
+  PoolKeepAliveSettings keep_alive = 3;
+}
+
+message BeginSessionResponse {
+  // of_connect [:L73, :L111]. A BROKEN CONNECTION IS REJECTED UP FRONT with
+  // common.v1.RetCode.Value.E_INVALID_TRANSACTION - `if _bBroken then return
+  // RetCode.E_INVALID_TRANSACTION` [:L113] - before any connection attempt is made.
+  OperationStatus status = 1;
+
+  // Populated only when status.ret_code is OK.
+  SessionHandle session = 2;
+}
+
+message EndSessionRequest {
+  SessionHandle session = 1;
+}
+
+message EndSessionResponse {
+  // of_disconnect [:L74]. RELEASES THE POOL REFERENCE rather than necessarily closing the connection:
+  // at zero references the entry is parked when keep-alive is on and destroyed otherwise
+  // [n_cst_thread_trans_pool.sru:L94-L114]. So a successful EndSession does not imply a closed socket,
+  // and a caller must not infer one.
+  OperationStatus status = 1;
+}
+
+message GetTransactionDataRequest {
+  SessionHandle session = 1;
+}
+
+message GetTransactionDataResponse {
+  // of_gettransdata, BOTH overloads [:L92, :L93]. The legacy's second overload returns FAILED when it
+  // produced diagnostic text [:L405, :L408], so the two outcomes are distinguishable here through
+  // ret_code and error_text rather than by inspecting the descriptor.
+  OperationStatus status = 1;
+
+  // THE VIEW, NOT THE DESCRIPTOR - no password field exists on this type. This is the structural half
+  // of the write-only rule; see the block on TransactionDescriptor.
+  TransactionDescriptorView descriptor = 2;
+}
+
+message SetTransactionAutoCommitRequest {
+  SessionHandle session = 1;
+  // The session-level autocommit flag [:L88 accessor, applied through the descriptor at :L354].
+  //
+  // A PLAIN BOOLEAN, AND CORRECTLY SO: this is the transaction object's own flag, which is genuinely
+  // two-valued. It is NOT C-07's three-valued per-statement mode, and the two are not the same setting
+  // wearing different types - AutoCommitMode selects a per-statement STRATEGY, one arm of which
+  // manipulates this flag temporarily [n_cst_thread_task_sqlcommand.sru:L88-L90, :L96].
+  bool autocommit = 2;
+}
+
+message SetTransactionAutoCommitResponse {
+  OperationStatus status = 1;
+}
+
+message AutoCommitRequest {
+  SessionHandle session = 1;
+}
+
+message AutoCommitResponse {
+  // of_autocommit [:L88, :L370-L380]. The legacy's own documented behaviour, preserved as three arms:
+  // when the statement status is non-zero it ROLLS BACK unless autocommit is already on and returns
+  // common.v1.RetCode.Value.E_DB_ERROR [:L371-L375]; otherwise, when autocommit is off, it COMMITS
+  // with auto-rollback enabled [:L377-L378]; otherwise it is a no-op success.
+  //
+  // n_sqlite.sru:L22 documents the identical policy for the SQLite surface: commit when the status is
+  // zero, otherwise roll back, and roll back too when the commit itself fails.
+  OperationStatus status = 1;
+}
+
+message CommitRequest {
+  SessionHandle session = 1;
+
+  // of_commit's argument [:L79]. UNSET MEANS TRUE, because the legacy's no-argument overload is
+  // literally `return of_Commit(true)` [:L383] - the default is documented in the SQLite surface too,
+  // where n_sqlite.sru:L24 carries a source comment stating the default is true. Explicit presence is
+  // what lets unset mean true rather than the implicit false a plain bool would give.
+  optional bool auto_rollback = 2;
+}
+
+message CommitResponse {
+  // ============ TWO GUARDS, TWO DIFFERENT CODES, AND BOTH ARE PRESERVED (C-B) ====================
+  // of_commit tests two conditions in order, and they return DIFFERENT codes:
+  //     if AutoCommit then return RetCode.FAILED                        [:L240]
+  //     if _bBroken   then return RetCode.E_INVALID_TRANSACTION         [:L241]
+  // COMMIT FAILS WHILE AUTOCOMMIT IS ON, with plain FAILED (-1) rather than an E_ code - so an attempt
+  // to commit a session that is already autocommitting is an error, not a no-op. A BROKEN TRANSACTION
+  // yields E_INVALID_TRANSACTION (-7) instead, so a caller can distinguish "you did not need to commit"
+  // from "this session is unusable". Flattening either into a generic failure removes that distinction.
+  //
+  // ON FAILURE THE ROLLBACK IS CONDITIONAL on the auto-rollback argument [:L249-L254], performing it at [:L251], and the outcome
+  // is E_DB_ERROR either way. The before- and after-commit events fire around the statement
+  // [:L243, :L247].
+  // ==========================================================================================
+  OperationStatus status = 1;
+}
+
+message RollbackRequest {
+  SessionHandle session = 1;
+}
+
+message RollbackResponse {
+  // ============ THE SAME TWO GUARDS, ON ROLLBACK. BOTH MUST BE EXPRESSIBLE (C-B) =================
+  //     if AutoCommit then return RetCode.FAILED                        [:L185]
+  //     if _bBroken   then return RetCode.E_INVALID_TRANSACTION         [:L186]
+  // ROLLBACK FAILS WHILE AUTOCOMMIT IS ON, and A BROKEN TRANSACTION YIELDS A DIFFERENT CODE FROM AN
+  // AUTOCOMMIT CONFLICT. The second guard is easy to miss because it sits on the line after the first
+  // and returns a code the first does not; the contract must be able to express both, and it does,
+  // because ret_code is the full RetCode space rather than a boolean.
+  //
+  // THE ROLLBACK ITSELF PRESERVES THE DRIVER STATE AROUND IT. The legacy saves the five statement
+  // status values, performs the rollback, and RESTORES THEM afterwards [:L163-L183], with the rollback itself at [:L174] between the before and after events at [:L172] and [:L182], so a rollback
+  // does not erase the error that caused it. An implementation that lets the rollback overwrite the
+  // status would leave a caller unable to see why it rolled back at all.
+  // ==========================================================================================
+  OperationStatus status = 1;
+}
+
+message IsConnectedRequest {
+  SessionHandle session = 1;
+}
+
+message IsConnectedResponse {
+  OperationStatus status = 1;
+
+  // of_isconnected [:L77, :L193-L218]. FALSE immediately when no successful connection has ever been
+  // stamped or the session is broken [:L196], and false when the two-stage check probe fails [:L197].
+  bool connected = 2;
+
+  // FALSE when the answer came from THE LIVENESS CACHE rather than from an actual probe -
+  // `if CPU() - _nLastConnOK < 10000 then return true` [:L198].
+  //
+  // THIS FIELD EXISTS BECAUSE THE CACHE IS OBSERVABLE THROUGH THE ABSENCE OF A PROBE, and a parity test
+  // that cannot see the difference cannot reproduce it. Set PoolKeepAliveSettings.liveness_cache_window_ms
+  // to zero to force a probe. When a probe does run it is a two-stage affair - a test event first, and
+  // when that yields nothing a literal one-row select whose text DIFFERS BY DIALECT
+  // ("SELECT 1 FROM DUAL" for Oracle, "SELECT 1" otherwise) [:L200-L210] - and its outcome either
+  // refreshes the stamp or zeroes it [:L211-L215].
+  bool probed = 3;
+}
+
+message GetDatabaseTypeRequest {
+  SessionHandle session = 1;
+}
+
+message GetDatabaseTypeResponse {
+  OperationStatus status = 1;
+  // of_getdbtype [:L86, :L356-L362]. Resolved by substring test on the descriptor's dbms field, with
+  // DBT_MSSQL as the fallback for everything unrecognised. See DatabaseType.
+  DatabaseType database_type = 2;
+}
+
+message GetSessionStateRequest {
+  SessionHandle session = 1;
+}
+
+message GetSessionStateResponse {
+  OperationStatus status = 1;
+
+  // The five statement status values the legacy carries on the transaction object and preserves across
+  // a rollback [:L165-L182]. Three code spaces again: sql_code is the runtime's, sql_db_code is the
+  // driver's, and neither is a RetCode.
+  int64 sql_code = 2;
+  int64 sql_db_code = 3;
+  int64 sql_nrows = 4;
+  string sql_err_text = 5;
+  string sql_return_data = 6;
+
+  // of_issucceeded [:L84, :L340] - EXACTLY `SQLCode >= 0`.
+  //
+  // BOTH PREDICATES ARE CARRIED RATHER THAN ONE, AND THEY ARE NOT COMPLEMENTS OF EACH OTHER IN THE
+  // GENERAL ALGEBRA. These two happen to partition at zero, but they are the transaction object's own
+  // predicates and NOT the framework's tri-state IsSucceeded / IsFailed - which do leave a hole, since
+  // CANCELLED is neither. Carrying both, computed by the server from sql_code, keeps a consumer from
+  // re-deriving them with the wrong boundary.
+  bool succeeded = 7;
+
+  // of_isfailed [:L83, :L337] - EXACTLY `SQLCode < 0`. This is also the DISCRIMINATOR THE UPDATE VETO
+  // USES to decide between a database error and a clean cancellation, so its exact boundary matters
+  // beyond this message - see UpdateService's veto note.
+  bool failed = 8;
+
+  // of_isbroken [:L100]. A broken session is permanently unusable: connect, commit and rollback all
+  // reject it with E_INVALID_TRANSACTION [:L113, :L241, :L186].
+  bool broken = 9;
+}
+
+message ClearStateRequest {
+  SessionHandle session = 1;
+}
+
+message ClearStateResponse {
+  // of_clearstate [:L87, :L363-L369]. Zeroes the three numeric status values and blanks the two
+  // strings. The legacy calls it at the head of every operation [:L120, :L222, :L264], so a caller
+  // rarely needs it - it is carried because the legacy exposes it publicly.
+  OperationStatus status = 1;
+}
+
+message SetBrokenRequest {
+  SessionHandle session = 1;
+}
+
+message SetBrokenResponse {
+  // of_setbroken [:L99]. Marks the session permanently unusable. ONE-WAY: only a successful connection
+  // clears the flag, through the connection-succeeded event [:L107-L108].
+  OperationStatus status = 1;
+}
+
+message GridSyntaxFromSqlRequest {
+  SessionHandle session = 1;
+  // The statement to derive a carrier syntax from.
+  string sql = 2;
+}
+
+message GridSyntaxFromSqlResponse {
+  // of_gridsyntaxfromsql, both overloads [:L81, :L90]. THE LEGACY REPORTS FAILURE THROUGH A `ref
+  // string` DIAGNOSTIC RATHER THAN A CODE, and a non-empty diagnostic is what the query path turns
+  // into common.v1.RetCode.Value.E_INVALID_SQL [n_cst_thread_task_sqlquery.sru:L610-L614]. The
+  // diagnostic text arrives here as status.error_text.
+  OperationStatus status = 1;
+
+  // The derived syntax, empty on failure. Suitable for QuerySpec.sql_syntax.
+  string syntax = 2;
+}
+
+// C-08 TransactionService - session lifecycle over the nine-field descriptor.
+//
+// ============ WHAT IS DELIBERATELY *NOT* ON THIS SERVICE, AND WHERE IT WENT (C-K) ==============
+// The legacy transaction object also exposes the data operations themselves, and they are NOT
+// duplicated here - each maps onto the contract that owns it, so there is exactly one way to perform
+// each operation:
+//
+//     of_exec(sqlcmd)                    [:L78]        ->  C-07 CommandService.Exec
+//     of_query(sql, ref ds[, ref err])   [:L82, :L91]  ->  C-05 QueryService.Query
+//     of_retrieve(ds, ...) x4            [:L94-:L97]   ->  C-05 QueryService.Query
+//     of_update(datastore)               [:L80]        ->  C-06 UpdateService.Update
+//
+// Duplicating them would give two contracts for one operation with two places to drift, which is
+// exactly what C-A's "no shared behaviour across a boundary" is protecting. They are recorded here
+// rather than silently dropped so the mapping is legible.
+//
+// TWO DETAILS FROM THOSE PATHS ARE NONETHELESS PRESERVED HERE, because they are transaction-scoped
+// rather than task-scoped and would otherwise be lost:
+//   * THE COMMAND VETO AND ITS DISCRIMINATION. of_exec's before-command event is vetoable, and a veto
+//     yields E_DB_ERROR when the statement status is already non-zero and RetCode.CANCELLED otherwise
+//     [:L224-L228] - the same shape as the update veto, and the same requirement that the two outcomes
+//     stay distinct. of_exec also rejects an empty or null command with E_INVALID_ARGUMENT [:L220].
+//   * A DRIVER CODE OF 100 IS TREATED AS SUCCESS, NOT AS AN ERROR:
+//     `if SQLCode <> 0 and SQLCode <> 100 then return RetCode.E_DB_ERROR` [:L233]. A "nothing found"
+//     outcome is not a failure. See ExecResponse.sql_code, where the same rule is annotated.
+// Note also that of_retrieve's fourth overload takes a `readonly any params[]` positional parameter
+// ARRAY [:L94], which is the legacy shape PositionalParameter reproduces without an arity cap.
+// ==========================================================================================
+//
+// C-F: logpass is accepted on BeginSessionRequest and appears on NO response type in this file. C-G:
+// no auth, token, credential or identity message is defined here; authentication on this edge is
+// Persistence's stock JwtBearer configuration and Persistence holds verification material only.
+service TransactionService {
+  // of_connect [:L73]. Resolves the descriptor through the reference-counted pool and returns a
+  // session handle. Rejects a broken session with E_INVALID_TRANSACTION [:L113].
+  rpc BeginSession(BeginSessionRequest) returns (BeginSessionResponse);
+
+  // of_disconnect [:L74]. Releases the pool reference; parking or closing is the pool's decision.
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+
+  // of_gettransdata, both overloads [:L92, :L93]. RETURNS THE VIEW, WHICH HAS NO PASSWORD FIELD.
+  rpc GetTransactionData(GetTransactionDataRequest) returns (GetTransactionDataResponse);
+
+  // The session-level autocommit flag [:L88]. A plain boolean - not C-07's three-valued mode.
+  rpc SetAutoCommit(SetTransactionAutoCommitRequest) returns (SetTransactionAutoCommitResponse);
+
+  // of_autocommit [:L88, :L370-L380]. Commit-or-rollback by statement status.
+  rpc AutoCommit(AutoCommitRequest) returns (AutoCommitResponse);
+
+  // of_commit, both overloads [:L79, :L89]. Auto-rollback defaults to TRUE when unset. FAILED while
+  // autocommit is on; E_INVALID_TRANSACTION when broken.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+
+  // of_rollback [:L76]. THE SAME TWO GUARDS, and they return different codes.
+  rpc Rollback(RollbackRequest) returns (RollbackResponse);
+
+  // of_isconnected [:L77]. Reports whether the answer came from the liveness cache or from a probe.
+  rpc IsConnected(IsConnectedRequest) returns (IsConnectedResponse);
+
+  // of_getdbtype [:L86]. Two values only; SQLite is not among them.
+  rpc GetDatabaseType(GetDatabaseTypeRequest) returns (GetDatabaseTypeResponse);
+
+  // of_isfailed, of_issucceeded and of_isbroken [:L83, :L84, :L100], plus the five status values they
+  // are computed from.
+  rpc GetSessionState(GetSessionStateRequest) returns (GetSessionStateResponse);
+
+  // of_clearstate [:L87].
+  rpc ClearState(ClearStateRequest) returns (ClearStateResponse);
+
+  // of_setbroken [:L99]. One-way until a successful reconnect.
+  rpc SetBroken(SetBrokenRequest) returns (SetBrokenResponse);
+
+  // of_gridsyntaxfromsql, both overloads [:L81, :L90]. Reports failure through diagnostic text.
+  rpc GridSyntaxFromSql(GridSyntaxFromSqlRequest) returns (GridSyntaxFromSqlResponse);
+}
