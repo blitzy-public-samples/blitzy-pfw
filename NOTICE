@@ -1,0 +1,289 @@
+===============================================================================
+PowerFramework -- NOTICE
+===============================================================================
+
+This file collects the licence terms and the third-party attributions that apply
+to everything in this repository: the original Appeon PowerBuilder framework
+sources and the binaries shipped with them, and the .NET 10 services that have
+been added alongside those sources.
+
+It is a notice, not a licence. It grants nothing, waives nothing and changes
+nothing. The operative terms are the BSD 2-Clause licence in section 1 together
+with the additional conditions in section 2. Where anything said in this file
+could be read differently from those two texts, those two texts govern.
+
+The most recent framework version recorded in logfile.md is 3.0.7.2062
+(2022-04-14). The repository carries no Git tags, so no release version can be
+inferred beyond that record, and this notice is deliberately unversioned.
+
+Contents
+
+  1. Licence
+  2. Additional conditions (Chinese restatement)
+  3. Third-party components vendored in this repository
+  4. Third-party packages used by the .NET services
+  5. A note on the legacy PowerBuilder tree
+  6. Vendored trust material inside third-party binaries
+
+
+===============================================================================
+1. LICENCE
+===============================================================================
+
+Reproduced in full and unaltered from the LICENSE file at the root of this
+repository.
+
+BSD 2-Clause License
+
+Copyright (c) 2013 - 2022, 金千枝(深圳)软件技术有限公司
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+===============================================================================
+2. ADDITIONAL CONDITIONS (CHINESE RESTATEMENT)
+===============================================================================
+
+The copyright holder also publishes a Chinese restatement of the licence, in the
+"license" section of the README at the root of this repository. It is reproduced
+verbatim below, and it is reproduced here for two reasons: that README section is
+the only place in the repository where it appears, and it states FOUR conditions
+where the English text in section 1 states two.
+
+Conditions 1 and 2 correspond to the two English bullets above. Conditions 3 and
+4 impose obligations that the English BSD 2-Clause text does not, and a
+redistributor who reads only the LICENSE file will miss both of them:
+
+* Condition 3 -- attribution. Every product that uses this software's
+  functionality, and all promotional material for such a product, must carry the
+  attribution sentence stated in that condition, which reads in full:
+
+      “本产品内含有由金千枝(深圳)软件技术有限公司及其软件贡献者所开发的软件。”
+
+  The English text requires attribution only in redistributed source and in the
+  documentation or other materials accompanying a binary redistribution.
+  Condition 3 extends that obligation to the product itself and to material used
+  to promote it.
+
+* Condition 4 -- no endorsement. Without specific prior written permission, the
+  original author's organisation name and the names of contributors may not be
+  used to endorse or promote products derived from this software. The English
+  two-clause text contains no such clause; an equivalent clause is what
+  distinguishes the BSD 3-Clause licence from the 2-Clause one.
+
+The block that follows is a character-for-character copy. Its wording, line
+breaks, indentation and punctuation are the copyright holder's own and have not
+been translated, paraphrased, reflowed or corrected in any respect.
+
+Copyright (c) 2013 - 2022
+著作权由金千枝(深圳)软件技术有限公司所有。著作权人保留一切权利。
+
+这份授权条款，在满足下列条件的前提下，允许使用者再发布经过或未经过
+修改的、源代码或二进制形式的本软件：
+
+1. 源代码的再发布，必须保留原来代码中的版权声明、这几条许可条件细目
+   和下面的免责声明。
+2. 二进制形式的再发布，必须在随同提供的文档和其它媒介中，复制原来的
+   版权声明、这几条许可条件细目和下面的免责声明。
+3. 所有使用到本软件功能的产品及宣传材料，都必须包还含下列之交待文字：
+       “本产品内含有由金千枝(深圳)软件技术有限公司及其软件贡献者所开发的软件。”
+4. 如果没有特殊的事前书面许可，原作者的组织名称，和贡献者名字，都不能
+   用于支持或宣传从既有软件派生的产品。
+
+免责声明：此软件由金千枝(深圳)软件技术有限公司和贡献者以“即此”方式提供，无论明示或
+暗示的，包括但不限于间接的关于基于某种目的的适销性、实用性，在此皆明示
+不予保证。在任何情况下，由于使用此软件造成的，直接、间接、连带、特别、
+惩戒或因此而造成的损害（包括但不限于获得替代品及服务，无法使用，丢失数
+据，损失盈利或业务中断），无论此类损害是如何造成的，基于何种责任推断，
+是否属于合同范畴，严格赔偿责任或民事侵权行为（包括疏忽和其他原因），即
+使预先被告知此类损害可能发生，金千枝(深圳)软件技术有限公司和贡献者均不承担任何责任。
+
+
+===============================================================================
+3. THIRD-PARTY COMPONENTS VENDORED IN THIS REPOSITORY
+===============================================================================
+
+The eleven components listed below are incorporated into the closed-source native
+binaries shipped at the root of this repository -- pfw.dll, pfwx.dll, blink.dll,
+blinkfast.dll, sciter.dll, sqlite3.dll and sqlite3.cipher.dll -- and are credited
+in the framework's own "about" window, at
+ws_objects/pfw.demos.pbl.src/w_about.srw.
+
+No C++ source for those binaries is present in this repository, so the list below
+is the credit the framework itself gives, carried forward here unchanged: the
+same eleven names and the same eleven URLs, in the same order, with the upstream
+projects' own capitalisation.
+
+Anyone redistributing those binaries is also redistributing these components, and
+should obtain each component's current licence text from that component's own
+distribution. Where terms are stated below, they are stated because they could be
+established with confidence. Where no terms are stated, none could be established
+for the version actually linked into these binaries -- this repository records no
+component versions -- and in that case a name and a URL is given rather than a
+guess.
+
+  Sciter          http://sciter.com
+                  Terms not established here; see the vendor.
+
+  MiniBlink       http://miniblink.net
+                  Terms not established here; see the project.
+
+  libpng          http://libmng.com/pub/png/libpng
+                  PNG Reference Library License (the "libpng licence").
+
+  apng-patch      http://sourceforge.net/projects/libpng-apng
+                  An APNG patch against libpng. Terms not established here;
+                  see the project.
+
+  pugixml         http://pugixml.org
+                  MIT License.
+
+  cJSON           http://sourceforge.net/projects/cjson
+                  MIT License.
+
+  websocketpp     http://www.zaphoyd.com/websocketpp
+                  BSD 3-Clause License.
+
+  openssl         https://www.openssl.org
+                  Version dependent. OpenSSL 3.0 and later are under the Apache
+                  License 2.0; earlier releases are under the dual OpenSSL and
+                  SSLeay licences. Which of the two applies depends on the
+                  version linked into the binaries named above, and this
+                  repository does not record it.
+
+  zlib            http://www.zlib.net
+                  zlib License.
+
+  sqlite          https://www.sqlite.org
+                  Public domain.
+
+  zint            http://zint.org.uk
+                  Terms not established here; see the project.
+
+That is eleven components. The list is exactly the framework's own credit list,
+neither extended nor abridged.
+
+
+===============================================================================
+4. THIRD-PARTY PACKAGES USED BY THE .NET SERVICES
+===============================================================================
+
+The .NET 10 tree added alongside the legacy sources takes the dependencies listed
+below. The list is derived from Directory.Packages.props at the root of this
+repository, which is the single authoritative version manifest for the whole .NET
+tree: every project there declares versionless package references and inherits
+its version from that one file. Nothing appears below that is not pinned there,
+and nothing pinned there is omitted below.
+
+The licence identifier beside each package is the expression declared in that
+package's own metadata for the exact pinned version, read from the resolved
+package rather than assumed. These packages are not redistributed in this
+repository; they are fetched from their registry at restore time, and each one
+carries its own licence text within the package.
+
+Registry: nuget.org
+
+  Grpc.AspNetCore                                2.83.0    Apache-2.0
+  Microsoft.AspNetCore.OpenApi                   10.0.10   MIT
+  Microsoft.OpenApi                              2.11.0    MIT
+  Microsoft.AspNetCore.Authentication.JwtBearer  10.0.10   MIT
+  Microsoft.IdentityModel.JsonWebTokens          8.22.0    MIT
+  Microsoft.EntityFrameworkCore.Sqlite           10.0.10   MIT
+  Microsoft.EntityFrameworkCore.Design           10.0.10   MIT
+  Microsoft.Data.Sqlite                          10.0.10   MIT
+  SQLitePCLRaw.bundle_e_sqlite3                  3.0.5     Apache-2.0
+  Microsoft.Extensions.Http.Resilience           10.8.0    MIT
+  Microsoft.AspNetCore.Mvc.Testing               10.0.10   MIT
+  xunit.v3                                       3.2.2     Apache-2.0
+  xunit.runner.visualstudio                      3.1.5     Apache-2.0
+  Microsoft.NET.Test.Sdk                         18.8.1    MIT
+  coverlet.collector                             10.0.1    MIT
+
+The following arrive transitively rather than as direct references. They are
+recorded so that a reader of a lock file does not mistake any of them for an
+undeclared direct dependency, and so that their terms are on the record too.
+
+  Google.Protobuf                                3.31.1    BSD-3-Clause
+  Grpc.Tools                                     2.83.0    Apache-2.0
+  Microsoft.Extensions.Resilience                10.8.0    MIT
+  Polly.Core                                     8.4.2     BSD-3-Clause
+  Polly.Extensions                               8.4.2     BSD-3-Clause
+  Polly.RateLimiting                             8.4.2     BSD-3-Clause
+
+Registry: npmjs.org -- used only by the cross-service end-to-end suite under
+tests/e2e
+
+  @playwright/test                               1.62.1    Apache-2.0
+
+A note on SQLite, which appears in both section 3 and section 4. That is a
+genuine continuity rather than a duplicated entry. The legacy framework links a
+native SQLite library into the binaries listed in section 3; the .NET persistence
+service reaches the same engine through the managed Microsoft.Data.Sqlite and
+Microsoft.EntityFrameworkCore.Sqlite providers, whose native component arrives in
+SQLitePCLRaw.bundle_e_sqlite3. It is one upstream engine reached two ways, and
+SQLite itself is in the public domain on both paths.
+
+
+===============================================================================
+5. A NOTE ON THE LEGACY POWERBUILDER TREE
+===============================================================================
+
+The PowerBuilder sources under ws_objects/, together with the compiled libraries
+and target and workspace files (*.pbl, *.pbt, *.pbw, *.pbg, *.pbr, *.pbd), the
+frozen PowerBuilder 12.5 tree under oldversion/125/, the consolidated
+redistribution libraries under pack/, the native binaries at the repository root,
+the resources under res/, the Sciter samples and widgets under samples/sciter/ and
+sciter_control/, and the legacy browser assets under tests/blink/, tests/sciter/
+and tests/webview/, all remain in this repository deliberately. They are the
+behavioural specification for the .NET services and the oracle against which
+those services are characterized for parity, so they are treated as read-only and
+are not edited, relocated or removed.
+
+The licence terms in sections 1 and 2 apply to them exactly as they always have.
+The .NET tree is purely additive: it does not replace, relicense or supersede any
+part of the legacy tree, and it depends on neither the PowerBuilder toolchain, nor
+the PowerBuilder runtime, nor any of the shipped native binaries.
+
+The same attribution conditions are additionally embedded in the headers of
+individual PowerBuilder objects throughout the legacy tree -- for example
+ws_objects/pfw.shared.pbl.src/retcode.sru -- which is how the copyright holder
+arranged for the conditions to travel with the code itself rather than live only
+in a root file. Sections 1 and 2 above are transcribed from the root LICENSE and
+README files, which are the canonical statement of those terms.
+
+
+===============================================================================
+6. VENDORED TRUST MATERIAL INSIDE THIRD-PARTY BINARIES
+===============================================================================
+
+Some of the third-party binaries credited in section 3 carry trust material of
+their own: certificate and key data embedded by their upstream vendors when those
+binaries were built. That material belongs to the vendored components, it is not
+remediable from the sources in this repository, and none of it is reproduced
+anywhere in the .NET tree.
+
+This notice records only that the material exists, because it travels with the
+attributed components and a redistributor of those binaries should know that it
+does. The locators, the assessment and the required action are recorded in
+docs/SECRETS.md. No values appear in this file, and none may be added to it: this
+is an attribution notice, not a credential inventory.

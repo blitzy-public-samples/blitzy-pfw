@@ -1,52 +1,248 @@
+<?xml version="1.0" encoding="utf-8"?>
 <Project>
 
   <!--
-    Repository-wide MSBuild defaults for the PowerFramework .NET 10 decomposition.
+    ==============================================================================================
+    Directory.Build.props
+    The single shared build contract for every project in the PowerFramework .NET 10 decomposition.
+    ==============================================================================================
 
-    Inherited by every project under shared/** and services/** (application and test projects
-    alike). Authored during environment setup so that a clean checkout restores, builds and tests
-    reproducibly with the toolchain installed on this machine:
+    WHAT THIS FILE IS
+    MSBuild imports this file automatically into every project beneath it by directory walk up, so
+    it is the one place the build contract is expressed. All sixteen projects inherit it: the six
+    shared libraries under shared/, their six sibling test projects, the four service applications
+    under services/, and the four service test projects. No project restates any setting from here.
 
-        .NET SDK   10.0.302  (pinned in global.json, rollForward=latestFeature)
-        Runtimes   Microsoft.NETCore.App 10.0.10 / Microsoft.AspNetCore.App 10.0.10
+    EXACTLY ONE COPY MAY EXIST, AND IT LIVES HERE AT THE REPOSITORY ROOT
+    A project under services/ therefore receives identical settings with zero duplication, which is
+    what lets each service restore, build and test independently from a clean checkout while being
+    unable to drift from the other three. Do NOT create a per service or per tree copy: MSBuild
+    stops walking up at the FIRST Directory.Build.props it finds, so a second copy under services/
+    or shared/ would silently shadow this one and reintroduce precisely the drift this file exists
+    to prevent. A copy under a single service directory is the most damaging variant of that
+    mistake, because the other three services would keep passing and nothing would report it.
 
-    The settings below are mandatory quality gates - do not relax them per project:
-      * Nullable reference types enabled everywhere.
-      * Warnings are errors everywhere, test projects included.
-      * Package versions are managed centrally in Directory.Packages.props, so every
-        PackageReference in every project must be VERSIONLESS.
+    ORDER OF AUTHORSHIP, AND WHY IT MATTERS
+        global.json                selects the SDK that evaluates this file
+        Directory.Build.props      this file, which turns central package management ON
+        Directory.Packages.props   inert until this file does so, then supplies every version
 
-    Deliberately NOT set here:
-      * InvariantGlobalization - the migration ports a localization surface (en / zh-Hans /
-        zh-Hant) plus culture-sensitive date and number formatting parity, so ICU must stay live.
-      * Analyzer/naming suppressions - legacy SCREAMING_SNAKE constant identifiers are preserved
-        verbatim, and their suppressions belong in .editorconfig scoped to the files that carry
-        them, not globally.
+    TOOLCHAIN THIS CONTRACT IS VALIDATED AGAINST
+        .NET SDK   10.0.302, pinned by global.json at this same repository root
+        Runtimes   Microsoft.NETCore.App 10.0.10 and Microsoft.AspNetCore.App 10.0.10
+        Language   C# 14
+
+    PROVENANCE: THERE IS NO LEGACY SOURCE EQUIVALENT TO TRANSLATE
+    The Appeon PowerBuilder 2021 framework this .NET tree is being added to has no build system in
+    the MSBuild sense. Its nearest analogues are the two PowerBuilder project objects, and nothing
+    here is a translation of either, because neither is usable:
+
+        ws_objects/pfw.pbl.src/project.srj   29 PBD: entries, COM:Appeon,       CPY: empty
+        ws_objects/pfw.pbl.src/p_pfw.srj     28 PBD: entries, COM:Sybase, Inc., CPY: empty
+
+    They disagree on library count, they disagree on whether pfw.utility.sqlite.pbl participates at
+    all, they disagree on the vendor, p_pfw.srj embeds developer workstation absolute paths under
+    F:\pfw\ together with the retired library name pfwUtils.pbl, and BOTH declare
+    pfw.utility.imgcodec.pbl, which does not exist anywhere in the repository. Neither would build
+    as written, so both are read as REFERENCE for build INTENT only. Their empty CPY: field, and
+    their COM: values naming the PowerBuilder IDE vendor rather than the framework author, are also
+    why the assembly metadata group below takes its holder from the root LICENSE instead.
+
+    THE LEGACY TREE IS READ ONLY AND SHARES THIS WORKING DIRECTORY
+    ws_objects/, oldversion/125/, pack/, res/, samples/, sciter_control/, the pre-existing browser
+    harness directories under tests/, every *.pbl, *.pbt, *.pbw, *.pbr and *.pbd, and the closed
+    source native Windows *.dll binaries all sit in this same checkout. They are the behavioural
+    oracle for parity testing and are never a build input. This file therefore declares NO ItemGroup
+    of any kind, so nothing here can pull a legacy path into a build, and the C# projects that
+    inherit these settings live only under shared/ and services/, where the SDK's default source
+    globbing cannot reach any legacy path.
   -->
 
+  <!--
+    FRAMEWORK AND LANGUAGE
+    net10.0 is the validated target framework; nothing in this repository multi targets, so the
+    singular TargetFramework is correct rather than TargetFrameworks.
+
+    LangVersion latest resolves to C# 14 on this SDK. It is safe to leave floating precisely because
+    global.json pins the SDK with rollForward latestFeature, which confines roll forward to 10.0
+    feature bands and so cannot silently cross a major language version.
+
+    Nullable and ImplicitUsings are set unconditionally here, applications and test projects alike.
+    Nullable reference types are part of the enterprise baseline for this refactor and are not a per
+    project preference: the ported return code algebra is explicitly tri state and depends on null
+    being representable and visible, so a project that opted out would lose the compiler's help on
+    the single most defect prone translation in the port.
+  -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!--
+    WARNING POLICY: WARNINGS ARE ERRORS EVERYWHERE, TEST PROJECTS INCLUDED
+    This is a quality gate, not a preference, and it has three consequences worth stating because
+    each one surfaces somewhere else in the tree.
+
+    1. It is what makes the NuGet dependency audit FATAL rather than advisory. The stock web
+       template on net10.0 otherwise emits NU1903 for a known high severity advisory reached
+       transitively. The remedy is the pair of mandatory pins in Directory.Packages.props, not a
+       suppression here; this property is only what stops the finding from being ignorable.
+
+    2. It applies to analyzer diagnostics shipped with packages as well as to compiler diagnostics.
+       Concretely, the xunit.v3 analyzer diagnostic raised when an awaited call that accepts a
+       cancellation token is not given the ambient test cancellation token is an ERROR in this
+       repository. Test authors must pass it rather than expect a warning.
+
+       Its boundary is worth stating precisely, because a green build does NOT mean the log is
+       empty. This property becomes the compiler switch warnaserror+, so it governs compiler and
+       analyzer diagnostics only. MSBuild TASK warnings are a separate channel and stay warnings:
+       MSB9008, raised when a ProjectReference names a project file that does not exist, is the one
+       to expect while the tree is still being filled in. Read the build log rather than trusting
+       the exit code alone, and resolve an MSB9008 by creating the referenced project or correcting
+       the reference. Promoting that channel from here is deliberately not done; see the closing
+       section of this file.
+
+    3. It is exactly why the repository root .editorconfig carries SCOPED naming analyzer
+       suppressions. This refactor deliberately preserves the legacy SCREAMING_SNAKE constant
+       identifier spellings verbatim, for example RetCode.OK, RetCode.E_INVALID_ARGUMENT,
+       RetCode.CANCELLED, Enums.SQL_MS_REPLACE, Enums.INIT_FLAG_ENABLE_SQLITE and
+       Categories.CAT_DWSVC, because those exact spellings appear in serialized payloads, in log
+       records and in characterization recordings, where a rename would silently invalidate every
+       stored comparison. Under this property the naming analyzer would turn each of them into a
+       build error, so the suppressions are file glob scoped in .editorconfig to the files that
+       genuinely carry those identifiers. They are deliberately NOT applied globally, and nothing is
+       suppressed from this file.
+
+    EnableNETAnalyzers and AnalysisLevel state the .NET SDK's own defaults for net10.0 explicitly
+    rather than adding anything: the .NET analyzers are already enabled by default for net5.0 and
+    later, and they are the analyzers the SDK itself carries, so no analyzer package is referenced
+    to obtain them. They are declared because a warnings as errors gate is only reproducible if the
+    diagnostic set producing those errors is stated rather than inferred, and because every project
+    file in the tree documents both as inherited from here. As with LangVersion above, latest is
+    bounded by the global.json SDK pin, so the rule set cannot shift under the gate: on this SDK it
+    resolves to the analysis level 10 default rule set. No analyzer package, source generator, style
+    enforcement package or code metrics setting is referenced anywhere in this refactor.
+  -->
+  <PropertyGroup>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>
   </PropertyGroup>
 
-  <!-- Central Package Management: the two mandatory security pins live in exactly one place so
-       that no service can drift onto a vulnerable transitive version. -->
+  <!--
+    CENTRAL PACKAGE MANAGEMENT
+    This switch is what activates Directory.Packages.props, the sibling file at this same repository
+    root, which is inert without it. Every PackageReference in every project must therefore be
+    VERSIONLESS; a project that carries an inline Version attribute fails the build with NU1008
+    rather than quietly winning, and that failure is the desired behaviour.
+
+    This is mandatory rather than merely convenient. It is the mechanism that forces the two
+    mandatory security pins onto all four services from exactly one place, so no service can drift
+    onto a vulnerable transitive version while every other service's audit still passes:
+
+        Microsoft.OpenApi                 pinned to clear the transitive advisory while staying
+                                          compatible with the OpenAPI source generator in this SDK,
+                                          which is compiled against the 2.x object model
+        SQLitePCLRaw.bundle_e_sqlite3     pinned to override the vulnerable native bundle reached
+                                          transitively through the EF Core SQLite provider
+
+    The exact versions, the advisory identifiers and the compiler incompatibility that rules out the
+    obvious forward move all live in Directory.Packages.props next to the pins themselves. Do not
+    restate a version here; there is deliberately no PackageVersion or PackageReference item in this
+    file.
+  -->
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
 
-  <!-- Deterministic, reproducible output. -->
+  <!--
+    ASSEMBLY METADATA
+    Stated once here so that all sixteen assemblies agree, and taken from the root LICENSE rather
+    than invented. The holder string and the 2013 - 2022 span are copied verbatim from LICENSE and
+    cross checked against the license section of README.md, which reproduces the identical BSD
+    2-Clause notice plus a four condition Chinese restatement. Do not substitute a different holder,
+    a different span, or a transliteration: the legacy PowerBuilder project objects carry an empty
+    copyright field and name the IDE vendor, so LICENSE is the only authoritative source.
+
+    The copyright value deliberately names BOTH LICENSE and NOTICE. BSD 2-Clause requires the
+    notice, the conditions and the disclaimer to be reproduced in the materials provided with a
+    binary distribution, a container image is a binary distribution, and NOTICE additionally carries
+    the four condition restatement and the upstream attributions the framework depends on. The root
+    .dockerignore keeps both files in the build context on the strength of this metadata, so an
+    image that dropped either one would be pointing at material it does not carry.
+  -->
+  <PropertyGroup>
+    <Product>PowerFramework</Product>
+    <Company>金千枝(深圳)软件技术有限公司</Company>
+    <Copyright>Copyright (c) 2013 - 2022, 金千枝(深圳)软件技术有限公司. BSD 2-Clause. See LICENSE and NOTICE.</Copyright>
+  </PropertyGroup>
+
+  <!--
+    DETERMINISM
+    Deterministic compilation means identical inputs produce byte identical output, which is what
+    makes a locally built assembly comparable with the one CI produces. ContinuousIntegrationBuild
+    additionally normalizes the source paths embedded in the assembly, and it is applied only when
+    the CI environment variable is set, which GitHub Actions does, so that a local build keeps the
+    absolute paths a debugger needs.
+
+    Kept deliberately minimal: no source link, no symbol publishing and no packaging properties,
+    because nothing in this refactor requires them.
+  -->
   <PropertyGroup>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
-    <Product>PowerFramework</Product>
-    <Company>PowerFramework</Company>
-    <Copyright>Copyright (c) 2013 - 2022 金千枝(深圳)软件技术有限公司. BSD-2-Clause. See LICENSE and NOTICE.</Copyright>
   </PropertyGroup>
+
+  <!--
+    DELIBERATELY NOT SET HERE, EACH FOR A STATED REASON
+    Recorded so the omissions read as decisions rather than oversights, and so nobody "completes"
+    this file by adding one of them.
+
+      * OutputType. It is a per project concern and setting it globally would break the tree in
+        both directions: the four service projects are web applications, the twelve test projects
+        must each be an executable because that is how xunit.v3 runs, and the six shared libraries
+        must stay libraries.
+
+      * IsPackable, GeneratePackageOnBuild, PackageId, and every other NuGet packaging property.
+        Nothing here publishes a package. The shipped artifacts are four container images, one per
+        in scope service.
+
+      * InvariantGlobalization. The port carries a localization surface across en, zh-Hans and
+        zh-Hant plus culture sensitive date and number formatting parity, so ICU must stay live.
+        Trimming it would change observable behaviour, which this refactor forbids.
+
+      * NoWarn, WarningsNotAsErrors, and any project wide or repository wide analyzer suppression.
+        The only suppressions this refactor needs are the naming ones for the preserved constant
+        identifiers, and they belong in .editorconfig scoped to the files that carry them. A
+        suppression here would silently widen that scope to all sixteen projects.
+
+      * MSBuildTreatWarningsAsErrors, which would promote the MSBuild task warning channel described
+        in the warning policy section above. It is not set for two reasons. Nothing in this refactor
+        asks for it, so adding it would be scope creep on a file whose whole purpose is to remove
+        variation. And it would convert every MSB9008 into a hard failure, which turns the ordinary
+        state of a partially populated tree into a build break and would make the failure look like
+        a settings defect rather than the missing project it actually is. The compiler and analyzer
+        gate above is the one this refactor requires; MSBuild task warnings are surfaced by reading
+        the log and by CI, not by escalation from here.
+
+      * GenerateDocumentationFile. With warnings as errors above, a missing XML documentation
+        comment becomes a build error across the whole tree, and no requirement asks for a
+        documentation file.
+
+      * Any Configuration default or configuration forcing. A bare test run builds Debug even
+        immediately after a Release build; that nuance is documented in docs/BUILD.md and must not
+        be papered over from here, because doing so would make the documented per service command
+        behave differently from the same command run anywhere else.
+
+      * Any solution filter mechanism. .NET 10 emits the XML .slnx solution format and legacy .slnf
+        filters are incompatible with it, failing with MSB4014 during restore, build and test.
+        Build scoping is done by the per service .slnx files together with this property sheet.
+
+      * Any ItemGroup whatsoever, and in particular any Compile, Content, None, EmbeddedResource or
+        Remove item naming a legacy path. See the read only note in the header: the legacy tree is
+        the behavioural oracle, never a build input.
+  -->
 
 </Project>
