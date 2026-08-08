@@ -1,0 +1,100 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for PowerFramework.Shared.Containers, the two container primitives that AAP section
+    0.2.1.3 Correction 2 pulled into scope: OrderedMap (from ws_objects/pfw.utility.container.pbl.src/
+    n_map.sru, insertion ordered with a positional get(int)) and Vector (from n_vector.sru, the
+    column expression calculation and recursion stack). Both are consumed in process by DataServices
+    and by Persistence, so a defect here reaches two services; this project is the gate that stops it.
+
+    HAND AUTHORED ON PURPOSE, NOT TEMPLATED. AAP section 0.5.2 records the measured finding that
+    `dotnet new xunit3` does not exist in SDK 10.0.302 and that `dotnet new xunit` scaffolds the
+    xunit v2 line with an older test SDK and an older coverage collector. Regenerating this file from
+    a template would silently downgrade the whole test stack, so it is written and maintained by hand.
+
+    EVERYTHING COMMON IS INHERITED AND IS DELIBERATELY NOT RESTATED BELOW. MSBuild walks up to the
+    repository root Directory.Build.props, which supplies TargetFramework (net10.0), LangVersion,
+    Nullable, ImplicitUsings, TreatWarningsAsErrors, EnableNETAnalyzers, AnalysisLevel,
+    ManagePackageVersionsCentrally, Deterministic, ContinuousIntegrationBuild and the shared assembly
+    metadata. None of those appears here, and none is relaxed: warnings are errors in this test
+    project exactly as they are in the library it tests, which is how AAP section 0.7.2 wants it
+    ("application and test alike"). Restating one would open the seam through which a later edit
+    diverges this project from its fifteen siblings. RootNamespace and AssemblyName are omitted for
+    the same reason: the SDK derives both from this file's name, and that is already the wanted value.
+    No Directory.Build.props is added under shared/ either, because MSBuild stops at the first one it
+    finds and a local copy would shadow the root contract.
+  -->
+
+  <PropertyGroup>
+    <!--
+      MANDATORY. xunit.v3 generates the assembly entry point and the test host launches this project
+      as a process, so a library output is a hard build failure, not a style preference (AAP sections
+      0.5.2 and 0.4.2.8). Do not "tidy" this away: without it the build breaks or zero tests are
+      discovered. It belongs to this test project alone and never to PowerFramework.Shared.Containers,
+      whose own project file records that it stays a class library for exactly this reason.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <!-- A test project is never shipped as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    Exactly four packages, every one VERSIONLESS: central package management is switched on, so the
+    single source of truth for versions is the repository root Directory.Packages.props (xunit.v3
+    3.2.2, xunit.runner.visualstudio 3.1.5, Microsoft.NET.Test.Sdk 18.8.1, coverlet.collector 10.0.1).
+    Adding a Version attribute here is an NU1008 build error and would defeat the mechanism that keeps
+    the repository on one audited version set (AAP section 0.5.4.1).
+
+    Nothing else is referenced. Microsoft.AspNetCore.Mvc.Testing is pinned centrally but is scoped to
+    the four service test projects; PowerFramework.Shared.Containers is a pure Base Class Library
+    substitution with no hosting model, no HTTP surface and no I/O, so an in process web host here
+    would be unrequested scope. No assertion, mocking or auto fixture library is added either: AAP
+    section 0.5.3 enumerates the deliberately excluded packages, and xunit.v3 already carries Assert.
+  -->
+  <ItemGroup Label="Test stack. Versions are pinned centrally in Directory.Packages.props.">
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      coverlet.collector is the component that emits coverage.cobertura.xml, which AAP section 0.6.7
+      identifies as the exact artifact the 80 percent line coverage gate (constraint C-H) is measured
+      from, produced by running `dotnet test` for this project with the "XPlat Code Coverage" data
+      collector in the Release configuration. Note that a bare `dotnet test` builds Debug even straight
+      after a Release build, so the Release configuration has to be requested explicitly when Release
+      coverage is wanted. Dropping or mis-scoping this reference does not fail the build; it silently
+      disables the gate, which is the worst of the available failure modes.
+    -->
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    Exactly one ProjectReference, which is what makes PowerFramework.Shared.Containers.OrderedMap and
+    PowerFramework.Shared.Containers.Vector visible here. It satisfies constraint C-I, since this
+    project restores, builds and tests from a clean checkout using nothing beyond the two root props
+    files, global.json and this reference: no container, no daemon, no database, no network, no test to
+    test reference and no path outside the repository. It also satisfies C-A and C-D, because it
+    reaches no other shared library, nothing under services/ and nothing belonging to a deferred
+    capability. No local solution file accompanies it: AAP section 0.3.2.1 records that .slnf filters
+    are incompatible with the .slnx format and fail with MSB4014, and per service solutions live only
+    under services/, so this project is enumerated by the repository root PowerFramework.slnx instead.
+  -->
+  <ItemGroup Label="System under test. One project reference, by design.">
+    <ProjectReference Include="..\PowerFramework.Shared.Containers\PowerFramework.Shared.Containers.csproj" />
+  </ItemGroup>
+
+  <!--
+    No Compile, Content, None or EmbeddedResource item appears anywhere above. The SDK globs the
+    sibling *.cs test sources automatically, and this project has no data input of any kind, so
+    nothing here reads, copies or embeds any part of the read only legacy tree (ws_objects/**, *.pbl,
+    *.pbt or any root *.dll). That tree is the behavioural oracle these tests are written against and
+    is never a build input, which is constraint C-C.
+  -->
+
+</Project>

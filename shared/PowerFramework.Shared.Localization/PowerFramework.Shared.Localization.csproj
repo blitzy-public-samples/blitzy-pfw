@@ -7,7 +7,17 @@
     Shared library: the I18N translation surface and its three locale providers. One of the six
     shared libraries under shared/ (Kernel, Diagnostics, Eventful, Localization, Containers,
     Contracts) that sit BENEATH the four Phase 1 services. AAP §0.1.5 requires that layer to carry
-    "only pure behaviour and no I/O", and this project holds to it: no host, no socket, no endpoint.
+    "only pure behaviour and no I/O": no host, no socket, no endpoint, no database, and nothing here
+    listens or dials out.
+
+    That rule has exactly ONE narrow exception, stated plainly rather than glossed over, because the
+    file list below would otherwise contradict it: I18nResourceReader.cs READS the pfw.i18n.xml
+    translation table from disk. It is an exception the AAP itself mandates and not a liberty taken
+    here. AAP §0.2.1.3 Correction 6 requires the legacy n_xmldoc load to be SUBSTITUTED with
+    System.Xml.Linq.XDocument.Load, so some read has to happen somewhere, and the legacy performs it
+    inside these very providers. It stays within the spirit of the rule: read only, local, no write
+    path, and no listener or outbound connection of any kind. Which is precisely why localization
+    remains a shared LIBRARY and does not become a service.
 
     WHY THIS IS A SHARED LIBRARY AND NOT A SERVICE
     Localization is a confirmed requirement rather than a conditional one (AAP §0.1.4): the
@@ -69,8 +79,12 @@
     mechanism, and §0.5.4.1 makes central package management mandatory rather than optional.
 
     DELIBERATELY NOT DECLARED HERE, because every one is inherited by MSBuild directory walk up from
-    the repository root Directory.Build.props, the single point of control for all seventeen projects
-    (there is no intervening Directory.Build.props under shared/):
+    the repository root Directory.Build.props, the single point of control for EVERY project in this
+    repository: the six shared libraries, their sibling test projects, the four Phase 1 services and
+    the service test projects alike. No count is quoted on purpose, because the roster grows as the
+    tree is filled in and a numeral here would go stale silently. There is no intervening
+    Directory.Build.props under shared/, so the walk up from this directory reaches the repository
+    root and stops there, which is what makes that file the sole point of control:
 
         TargetFramework net10.0, LangVersion, Nullable enable, ImplicitUsings enable,
         TreatWarningsAsErrors true, EnableNETAnalyzers, AnalysisLevel,
