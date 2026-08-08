@@ -1,83 +1,370 @@
 <Project>
 
   <!--
-    Central Package Management for the PowerFramework .NET 10 decomposition.
+    ==============================================================================================
+    Directory.Packages.props
+    The single authoritative package version manifest for the PowerFramework .NET 10 decomposition.
+    ==============================================================================================
 
-    Every project references these packages WITHOUT a Version attribute; the single source of
-    truth for versions is this file. Enabled by ManagePackageVersionsCentrally in
-    Directory.Build.props.
+    WHAT THIS FILE IS
+    One PackageVersion entry per package used anywhere in this repository. Every project file, the
+    six shared libraries, their six sibling test projects, the four service applications and the
+    four service test projects alike, therefore declares VERSIONLESS PackageReference entries and
+    inherits its versions from here by MSBuild directory walk up.
 
-    Every version below was resolved against nuget.org and verified by an actual restore + build
-    on this machine with SDK 10.0.302 under TreatWarningsAsErrors. No floating versions, no
-    wildcards, no "latest".
+    This file is INERT on its own. It takes effect only because Directory.Build.props, its sibling
+    at this same repository root, sets ManagePackageVersionsCentrally to true.
 
-    ================================ MANDATORY PINS ================================
-    1) Microsoft.OpenApi = 2.11.0
-       Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, which
-       raises NuGet audit warning NU1903 (high severity). Moving to the 3.x line instead BREAKS
-       the build: the 10.0.x OpenAPI source generator is compiled against the 2.x object model and
-       emits two CS0200 errors ("cannot assign - read only") from the generated XML-comment
-       support file. 2.11.0 is the highest published 2.x and the only value that is simultaneously
-       non-vulnerable and compatible. Every REST service must respect this.
+    WHY CENTRAL PACKAGE MANAGEMENT IS MANDATORY HERE, NOT MERELY CONVENIENT
+    It is the mechanism that forces the two mandatory security pins below onto all four services
+    from exactly one place. Without it, a single service could restore a vulnerable transitive
+    package while the dependency audit still passed everywhere else, and nothing would report it.
 
-    2) SQLitePCLRaw.bundle_e_sqlite3 = 3.0.5
-       Microsoft.EntityFrameworkCore.Sqlite 10.0.10 transitively pulls a 2.1.x native bundle that
-       raises NU1903. An explicit direct reference to 3.0.5 overrides it and clears the audit.
-    ================================================================================
+    EXACTLY ONE COPY OF THIS FILE MAY EXIST
+    It lives at the repository root so that a service under services/<service-name>/ inherits these
+    pins by walk up while still restoring, building and testing independently from a clean
+    checkout. Do NOT create a per service copy. A second copy reintroduces precisely the drift this
+    file exists to prevent, and it would do so silently.
+
+    PROVENANCE: THERE IS NO LEGACY SOURCE EQUIVALENT AND NO VERSION TO MIGRATE
+    The repository this .NET tree is being added to is an Appeon PowerBuilder 2021 framework. It
+    contains zero *.csproj, zero packages.config, zero package.json and no lock file of any kind,
+    so every entry below is an addition. There are no dependency updates and no dependency
+    removals in this refactor. The only version facts the repository asserts about itself are
+    legacy ones, and none of them constrains anything here:
+
+        appruntimeversion "21.0.0.1311"   ws_objects/pfw.pbl.src/pfw.sra
+        DataWindow release 12.5           ws_objects/pfw.tests.pbl.src/dw_sqlite.srd
+        framework 3.0.7.2062              logfile.md
+
+    The two PowerBuilder project objects, ws_objects/pfw.pbl.src/project.srj and
+    ws_objects/pfw.pbl.src/p_pfw.srj, are reference only, and only for build INTENT: they disagree
+    on library count (29 versus 28) and on vendor (Appeon versus Sybase), and BOTH name
+    pfw.utility.imgcodec.pbl, which does not exist anywhere in the repository, so neither would
+    build as written. The legacy tree is read only and is the behavioural oracle for parity
+    testing. Nothing in this file references it, and nothing in this file may.
+
+    HOW EVERY VERSION BELOW WAS ESTABLISHED
+    Each was verified twice. First it was resolved as a real published STABLE release from the
+    NuGet flat container index. Then all of them together were assembled into a single net10.0
+    project and COMPILED with SDK 10.0.302 under TreatWarningsAsErrors and central package
+    management. The composite restored clean with no NuGet audit warnings and reported
+    "Build succeeded, 0 Warning(s), 0 Error(s)", and a protocol definition carrying
+    GrpcServices="Both" genuinely generated both its message and its service stubs. No version
+    here is a guess, a placeholder, or "latest". Do not change any of them.
+
+    REGISTRY
+    nuget.org for every entry. There are no private or internal package feeds in this refactor,
+    and consequently no credential, key, token, password or feed URL appears anywhere in this file.
+    The repository's one npm dependency, @playwright/test 1.62.1, belongs to
+    tests/e2e/package.json and deliberately has no representation here.
+
+    TRANSITIVE VERSIONS THAT WILL APPEAR IN LOCK FILES AND DIFFER FROM THE DIRECT PINS
+    Recorded so that a reader does not mistake any of them for drift. None needs its own entry.
+
+      Google.Protobuf resolves to 3.31.1, NOT the newer published line, because Grpc.AspNetCore
+        2.83.0 constrains it. Grpc.Tools arrives at 2.83.0 alongside it.
+      The Polly family resolves to 8.4.2, specifically Polly.Core, Polly.Extensions and
+        Polly.RateLimiting, pulled in by Microsoft.Extensions.Http.Resilience together with
+        Microsoft.Extensions.Resilience 10.8.0.
+      The identity model graph deliberately MIXES two versions, and this is expected rather than
+        drift. Observed resolution:
+          at 8.22.0, unified upward by the direct token minting reference:
+            Microsoft.IdentityModel.JsonWebTokens, Microsoft.IdentityModel.Tokens,
+            Microsoft.IdentityModel.Abstractions, Microsoft.IdentityModel.Logging
+          at 8.19.2, as pulled by the JWT bearer handler:
+            Microsoft.IdentityModel.Protocols, Microsoft.IdentityModel.Protocols.OpenIdConnect,
+            System.IdentityModel.Tokens.Jwt
+        That combination was verified compatible with zero warnings and no vulnerable packages. Do
+        NOT try to unify it by pinning Microsoft.IdentityModel.Tokens or any of the 8.19.2
+        packages: no project references them directly, so such an entry would pin something nobody
+        asked for and would drift the moment either direct reference moves.
+
+    HOUSE RULES FOR EDITING THIS FILE
+      Exact three part versions only. No floating version, no wildcard, no range, and no
+        prerelease, preview, rc or beta suffix.
+      No VersionOverride, here or in any project file. An override in a project defeats the
+        central pin and is exactly how one service drifts away from the others.
+      No PackageReference elements. This file declares VERSIONS; projects declare REFERENCES.
+      No entry for a package used only by a deferred capability area. DesignSystem, Documents,
+        Integration and ScriptBridge receive no code in this phase, so they receive no dependency.
+      A double hyphen is not legal inside an XML comment, so the command line switches quoted in
+        the comments below are written without their leading dashes. Restore them when running.
+
+    HOW THE TWO HALVES OF THE CONTRACT ARE ENFORCED, BOTH VERIFIED ON THIS REPOSITORY
+      If a project declares a Version on a PackageReference, restore FAILS with NU1008: "The
+        following PackageReference items cannot define a value for Version". So a versionless
+        reference is not a convention to remember, it is a build requirement.
+      If a project references a package that has no PackageVersion entry HERE, restore FAILS with
+        NU1010: "The following PackageReference items do not define a corresponding PackageVersion
+        item". So adding a package means adding it to this file, in the same change.
+      Both arrive as errors rather than warnings, so neither can be merged past CI unnoticed.
+
+    A trailing block at the end of this file records the packages that were DELIBERATELY EXCLUDED,
+    together with the reason each was rejected, so that a future maintainer reads a decision
+    instead of rediscovering it.
   -->
 
   <PropertyGroup>
+    <!-- Restated here for self documentation. Directory.Build.props is what actually switches it
+         on for the whole tree; this file is inert if that property is ever turned off. -->
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
 
-  <ItemGroup Label="gRPC and Protobuf (Contracts, DataServices, Persistence + client sides)">
-    <!-- Pulls Grpc.Tools 2.83.0 and Google.Protobuf 3.31.1 transitively; neither needs an
-         explicit reference. Google.Protobuf resolves to 3.31.1 (not the newer line) because
-         Grpc.AspNetCore 2.83.0 constrains it. -->
-    <!-- Grpc.AspNetCore also carries Grpc.AspNetCore.Server.ClientFactory, so the Gateway and
-         DataServices client sides need no additional package reference. -->
+  <!-- ============================================================================================
+       gRPC AND CONTRACTS
+       Consumed by PowerFramework.Contracts, DataServices and Persistence (server sides), and by
+       the Gateway and DataServices client sides. gRPC is the chosen transport for the internal
+       east west edges because those interfaces are ordered, strongly typed and streaming shaped.
+       ============================================================================================ -->
+  <ItemGroup Label="gRPC and contracts">
+    <!-- gRPC server, client, and protocol definition code generation in one package.
+         It pulls Grpc.Tools 2.83.0 and Google.Protobuf 3.31.1 TRANSITIVELY, so neither of those
+         needs an entry of its own here. Verified by compilation: a .proto carrying
+         GrpcServices="Both" genuinely generated its message types and its service base classes.
+         Grpc.AspNetCore also brings Grpc.AspNetCore.Server.ClientFactory, so the two client sides
+         need no additional package either. -->
     <PackageVersion Include="Grpc.AspNetCore" Version="2.83.0" />
   </ItemGroup>
 
-  <ItemGroup Label="OpenAPI / REST surfaces (Gateway, Security, DataServices REST projection)">
+  <!-- ============================================================================================
+       OPENAPI AND REST
+       Consumed by Gateway (the sole ingress and composition root), Security, and the thin REST
+       projection of DataServices that only Gateway calls.
+       ============================================================================================ -->
+  <ItemGroup Label="OpenAPI and REST">
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-    <!-- MANDATORY PIN - see header. -->
+
+    <!--
+      MANDATORY PIN. Do not bump this, in EITHER direction. Both halves of the reason matter, and
+      each half rules out one of the two obvious "helpful" edits:
+
+      (a) It must not be left to transitive resolution, and must not be lower.
+          Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, and the
+          stock net10.0 web template therefore emits NU1903 at restore, a KNOWN HIGH SEVERITY
+          advisory. An explicit direct pin is what overrides that and clears the audit.
+          Reproduced on this repository by omitting the pin. Verbatim:
+            error NU1903: Warning As Error: Package 'Microsoft.OpenApi' 2.0.0 has a known high
+            severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
+          Note that it arrives as an ERROR, not a warning, because Directory.Build.props sets
+          TreatWarningsAsErrors, so removing this pin fails the restore outright.
+
+      (b) It must not be higher either, because moving forward to the current major line BREAKS
+          THE BUILD. Version 3.9.0 was tested directly and produces exactly two CS0200
+          diagnostics. Verbatim, at lines 399 and 461 of the generated file:
+            error CS0200: Property or indexer 'IOpenApiMediaType.Example' cannot be assigned to
+            (it is read only)
+          Critically, they are raised inside the SDK's OWN generated file,
+            obj/<config>/net10.0/Microsoft.AspNetCore.OpenApi.SourceGenerators/
+            Microsoft.AspNetCore.OpenApi.SourceGenerators.XmlCommentGenerator/
+            OpenApiXmlCommentSupport.generated.cs
+          rather than in any code of ours, so there is nothing to work around at the call site and
+          no amount of editing our own sources will clear it. The cause is that the 10.0.10 OpenAPI
+          XML comment source generator is compiled against the 2.x object model, in which the
+          media type Example property is settable, and cannot be satisfied by a 3.x assembly, in
+          which IOpenApiMediaType exposes it as read only.
+
+      2.11.0 is the highest published 2.x, and is therefore the only value that is simultaneously
+      non vulnerable AND compatible. Every REST service in this solution must respect it.
+    -->
     <PackageVersion Include="Microsoft.OpenApi" Version="2.11.0" />
   </ItemGroup>
 
-  <ItemGroup Label="Authentication - JWT bearer validation on every internal edge">
+  <!-- ============================================================================================
+       AUTHENTICATION AND TOKENS
+       Decomposition creates this system's first ever network ingress, so every new boundary is
+       authenticated from the outset. Security is the SOLE token issuer; the other three services
+       hold verification material only and validate against Security's published JWKS.
+       ============================================================================================ -->
+  <ItemGroup Label="Authentication and tokens">
+    <!-- Inbound JWT validation on /v1/ping and on every internal edge. Consumed by ALL FOUR
+         services. The stock bearer handler fetches Security's /.well-known/jwks.json and OIDC
+         discovery document with zero bespoke code, which is the reason Security speaks REST
+         rather than gRPC: it keeps the security critical path in framework code. -->
     <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
-    <!-- Token MINTING. Security only: Security is the sole issuer in the system. -->
+
+    <!-- Token MINTING, and consumed by the SECURITY SERVICE ONLY, because Security is the sole
+         issuer in the system. No other service may reference this package: acquiring a minting
+         dependency elsewhere would create a second signing authority, which the architecture
+         forbids. Exactly one signing secret exists system wide, injected by configuration. -->
     <PackageVersion Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.22.0" />
   </ItemGroup>
 
-  <ItemGroup Label="Persistence - SQLite is the only evidenced storage engine">
+  <!-- ============================================================================================
+       DATA AND SQLITE
+       Consumed by the Persistence service only, which is the sole service that generates or
+       executes SQL and the sole holder of a storage provider.
+
+       SQLITE IS THE ONLY DATABASE PROVIDER PINNED IN THIS REPOSITORY. That is a deliberate scope
+       boundary, not an omission. SQLite is the only storage engine with evidence behind it in the
+       legacy tree, which supplies exactly one connection URI and exactly one CREATE TABLE
+       statement. Do NOT add Microsoft.Data.SqlClient, any Oracle client, Npgsql, or any other
+       provider. The legacy SQL Server and Oracle behaviours this migration preserves are PAGING
+       REWRITERS: pure string in, string out transforms whose acceptance criterion is byte exact
+       generated SQL. They are therefore fully unit testable with no instance of either engine
+       running, no client package is required for them, and adding one would fabricate a database.
+       ============================================================================================ -->
+  <ItemGroup Label="Data and SQLite">
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
+
+    <!-- Design time migration generation for the COMPANY schema, which is the only DDL anywhere in
+         the repository. Reference it with PrivateAssets="all" from the project that owns the
+         migrations, since it is a build time only concern. -->
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" />
-    <!-- ADO-level access for the legacy test.db?mode=rwc[,password] URI grammar and for raw
-         command execution with positional binding, neither of which EF Core alone expresses. -->
+
+    <!-- ADO level access, required IN ADDITION to the EF Core provider rather than instead of it.
+         Two legacy behaviours cannot be expressed through EF Core alone: the connection URI
+         grammar of the form file?mode=rwc with its optional password, integrity check and journal
+         mode extensions, and raw command execution with positional parameter binding. -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.10" />
-    <!-- MANDATORY PIN - see header. -->
+
+    <!--
+      MANDATORY PIN. Microsoft.EntityFrameworkCore.Sqlite 10.0.10 transitively pulls a 2.1.x
+      SQLitePCLRaw native bundle, which raises NU1903 at restore. An explicit DIRECT reference to
+      the 3.0.5 bundle overrides that transitive choice and clears the audit.
+      Reproduced on this repository by omitting the pin. Verbatim:
+        error NU1903: Warning As Error: Package 'SQLitePCLRaw.lib.e_sqlite3' 2.1.11 has a known
+        high severity vulnerability, https://github.com/advisories/GHSA-2m69-gcr7-jv3q
+      Note which package is flagged: the advisory is against the NATIVE lib package that sits
+      beneath the bundle, not against the bundle itself, which is why bumping the bundle is the
+      correct remedy and why searching the advisory for the bundle name finds nothing.
+
+      The resolved graph was inspected afterwards to confirm the fix is coherent rather than
+      partial. All four SQLitePCLRaw packages land at 3.0.5 together:
+        SQLitePCLRaw.bundle_e_sqlite3, SQLitePCLRaw.core, SQLitePCLRaw.config.e_sqlite3 and
+        SQLitePCLRaw.provider.e_sqlite3
+      so the managed and native halves stay matched and no mismatched pair can load at runtime.
+
+      With this pin and the Microsoft.OpenApi pin above BOTH in place, restore reports no audit
+      warnings at all and the build reports 0 Warning(s), 0 Error(s). If NU1903 ever reappears,
+      one of these two pins has been removed or altered; that is the first place to look.
+    -->
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>
 
-  <ItemGroup Label="Resilience on the newly created network edges (Gateway, DataServices)">
-    <!-- Required BY the decomposition: an in-process call cannot fail in transit, a network call
-         can. Pulls Microsoft.Extensions.Resilience 10.8.0 and the Polly family at 8.4.2. -->
+  <!-- ============================================================================================
+       RESILIENCE
+       Consumed by Gateway and DataServices, the two services that make outbound calls.
+       ============================================================================================ -->
+  <ItemGroup Label="Resilience">
+    <!-- Retry and circuit breaker on the newly created network edges.
+
+         This one addition needs justifying against the minimal change constraint, because it has
+         no legacy counterpart. The justification is that AN IN PROCESS CALL CANNOT FAIL IN
+         TRANSIT AND A NETWORK CALL CAN. Handling a failure mode that the decomposition itself
+         creates is required BY the transition, not a behavioural improvement layered on top of
+         it. Without it, the first transient network fault would surface as a defect the legacy
+         framework could not possibly have had, which is a regression introduced by the refactor
+         rather than a preserved behaviour.
+
+         Pulls Microsoft.Extensions.Resilience 10.8.0 and the Polly family at 8.4.2 transitively;
+         none of those needs an entry here. -->
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.8.0" />
   </ItemGroup>
 
-  <ItemGroup Label="Test stack - all *.Tests projects">
-    <!-- xunit.v3 requires <OutputType>Exe</OutputType>. Test projects are HAND-AUTHORED:
-         `dotnet new xunit3` does not exist in this SDK and `dotnet new xunit` scaffolds v2. -->
-    <PackageVersion Include="xunit.v3" Version="3.2.2" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
-    <!-- Emits coverage.cobertura.xml, the artifact the 80%-line-coverage-per-service gate is
-         measured from, via: dotnet test (collect XPlat Code Coverage) -->
-    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
-    <!-- In-process host for service-level tests alongside unit tests. -->
+  <!-- ============================================================================================
+       TESTING AND COVERAGE
+       Consumed by every *.Tests project: the six shared library test projects and the four service
+       test projects. CI enforces 80 percent line coverage PER IN SCOPE SERVICE, evaluated per
+       service rather than repository wide so that one service's coverage cannot mask another's.
+       ============================================================================================ -->
+  <ItemGroup Label="Testing and coverage">
+    <!-- In process host for the service level tests that sit alongside the unit tests, so that
+         endpoints, authorization and status code mapping are exercised without a container. -->
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
+
+    <!-- Unit and service test framework.
+         Two authoring consequences, both per project rather than settable here. First, an
+         xunit.v3 test project MUST set OutputType to Exe. Second, these projects are HAND
+         AUTHORED: dotnet new xunit3 does not exist in SDK 10.0.302, and dotnet new xunit
+         scaffolds the v2 line with older test SDK and coverage packages. The hand authored shape
+         was validated end to end: it restores, builds, runs, and emits Cobertura. -->
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+
+    <!-- Test adapter. Without it the standard test command discovers no xunit.v3 tests at all,
+         and a zero test run reports success, which would silently void the coverage gate. -->
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+
+    <!-- Test host. -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+
+    <!-- Emits coverage.cobertura.xml, which is the EXACT artifact the 80 percent line coverage
+         gate is measured from. Confirmed empirically by running, from a service directory,
+         dotnet test with the XPlat Code Coverage collector (collect:"XPlat Code Coverage").
+         Note that a bare dotnet test builds Debug even straight after a Release build, so pass
+         c Release as well when release configuration coverage is wanted. -->
+    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
   </ItemGroup>
+
+  <!--
+    ==============================================================================================
+    DELIBERATELY EXCLUDED PACKAGES. DO NOT ADD THEM.
+    ==============================================================================================
+
+    Each entry below is an "obvious" choice that is out of scope. Every one of them would be scope
+    creep against the constraint that no behaviour improvement be introduced beyond what the
+    technology and architecture transition strictly requires. They are recorded here, with the
+    reason each was rejected, so that the decision is visible rather than rediscovered.
+
+      Serilog.AspNetCore and the OpenTelemetry.* family
+        Not in the mandated stack. The built in logging abstractions in the shared framework cover
+        the requirement. The only telemetry mention in the brief is attached to the Aspire AppHost,
+        which is itself rejected below.
+
+      FluentValidation
+        The five type validators ported from the legacy DataWindow service layer are PORTED LOGIC
+        WITH EXACT LEGACY SEMANTICS, not a declarative rule set. Expressing them through a
+        validation framework would obscure parity, which is the single property that matters most
+        in this migration.
+
+      Scalar.AspNetCore and Swashbuckle.AspNetCore
+        Microsoft.AspNetCore.OpenApi already produces the OpenAPI document. An interactive UI is
+        not a requirement, and this phase creates no presentation surface at all.
+
+      Grpc.AspNetCore.Server.Reflection
+        A convenience for ad hoc command line gRPC tooling, not a requirement. The contracts are
+        published as .proto files, so callers do not need server reflection to discover them.
+
+      Microsoft.Extensions.Diagnostics.HealthChecks and the URI probe health check packages
+        Health check registration already ships in the Microsoft.AspNetCore.App shared framework,
+        so neither the anonymous /health endpoint nor Gateway's aggregation of its three upstreams
+        needs any package reference.
+
+      Aspire.Hosting.AppHost
+        The rejected orchestration alternative. Its Dockerfile builder APIs remain experimental and
+        require suppressing an experimental API diagnostic, and depends_on with a service_healthy
+        condition was not expressible through the generated model. That would break the
+        "Gateway reports healthy only once its upstreams do" readiness gate, which is the single
+        most important property of the orchestration. Hand authored Docker Compose is the one and
+        only built path.
+
+      Microsoft.SqlServer.TransactSql.ScriptDom
+        Rejected as the substitute for the legacy SQL statement parser. It is SQL Server dialect
+        specific, so it cannot serve the Oracle rewriter, and no BCL SQL parser exists. Since the
+        acceptance criterion is BYTE EXACT clause level string output, including the legacy
+        sentinel identifiers and the count wrapper alias, a focused in repository six clause model
+        is both sufficient and far more verifiable. A deliberate build rather than buy decision.
+
+      Microsoft.Data.SqlClient, any Oracle client, Npgsql, or any other database provider
+        See the Data and SQLite section above. Only SQLite has evidence; the other two dialects are
+        preserved as pure string paging rewriters that need no running instance and no client.
+
+      Any third party cryptography package
+        System.Security.Cryptography in the BCL covers every operation the legacy cryptographic
+        surface exposes: RSA key generation, encryption, decryption, signing and verification;
+        keyed hashing; the MD5 and SHA family; AES, 3DES and DES across ECB, CBC and CFB modes with
+        PKCS family padding; cryptographic random generation; and GUID generation. The legacy weak
+        defaults are preserved as annotated defaults in the service itself, not swapped for a
+        library's safer ones.
+
+      Any pinyin package
+        Deliberately not selected. The legacy pinyin first letter lookup table exists only inside
+        the closed source pfw.dll and its flag semantics are undocumented, so bit exact parity
+        requires characterizing the table against the behavioural oracle rather than trusting a
+        third party table that would be subtly different. This is the single genuine parity risk in
+        the in scope set, and a wrong table would produce filters that return slightly wrong result
+        sets, which a unit test would not catch. It is tracked as a risk, not papered over with a
+        dependency.
+  -->
 
 </Project>

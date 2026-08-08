@@ -1,0 +1,114 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Shared.Diagnostics.Tests
+
+    Unit test project for the PowerFramework.Shared.Diagnostics shared library, which ports the
+    legacy PowerBuilder diagnostics surface of ws_objects/pfw.common.pbl.src:
+
+        assert.srf            the 6 Assert guard overloads plus AssertFailed, which builds the
+                              seven field assertion payload joined by CRLF and then throws
+        assertionfailed.sru   the runtimeerror derived exception carrying Info, WindowMenu,
+                              Object, ObjectEvent, Line, StackTraceInfo and StackTrace[]
+        stacktraceinfo.srf    the 4 StackTraceInfo overloads and their offset/prefix semantics
+        getcurrentscript.srf  the pfwGetCurrentScript prototypes, reexpressed with caller info
+                              attributes so no native binding survives the migration
+
+    The behavioural oracle for these suites is ws_objects/pfw.tests.pbl.src/w_test_assert.srw.
+    Every fixture is constructed in code, so this project deliberately declares no content or
+    none items: it takes no build time or run time dependency on any path under ws_objects, which
+    is read only and is the parity oracle, never a build input.
+
+    HAND AUTHORED ON PURPOSE. SDK 10.0.302 has no `dotnet new xunit3` template, and
+    `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and coverage packages.
+    Do not regenerate this file from a template.
+
+    Verify with, from this directory:
+        dotnet restore
+        dotnet build -c Release
+        dotnet test -c Release (collecting XPlat Code Coverage)
+  -->
+
+  <PropertyGroup>
+
+    <!--
+      xunit v3 requires an executable test project. This is not a stylistic choice: the
+      _XunitValidateBuild target shipped in xunit.v3.core.mtp-v1 raises a hard build error unless
+      OutputType is Exe (and unless an app host is produced, which the same package forces on).
+      It is also what makes the coverage gate reachable at all, since a class library cannot be
+      launched by the runner.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <!--
+      Pinned explicitly rather than left to the directory name, because two separate mechanisms
+      depend on these exact strings:
+
+        1. PowerFramework.Shared.Diagnostics declares InternalsVisibleTo for the assembly name
+           below. That attribute is the only route to the internal payload builder seam used by
+           the assertion payload and system error round trip suites. If the assembly name drifts,
+           those suites stop compiling and the line coverage gate becomes unmeetable.
+
+        2. The xunit v3 entry point generator emits its generated program into $(RootNamespace).
+    -->
+    <AssemblyName>PowerFramework.Shared.Diagnostics.Tests</AssemblyName>
+    <RootNamespace>PowerFramework.Shared.Diagnostics.Tests</RootNamespace>
+
+    <!-- A test project is never shipped as a package. -->
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+
+    <!--
+      Deliberately NOT declared here, because the repository root Directory.Build.props already
+      supplies them to every project, test projects included, and restating them would create a
+      second place to drift: TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings,
+      TreatWarningsAsErrors, EnableNETAnalyzers, AnalysisLevel, Deterministic and
+      ManagePackageVersionsCentrally.
+
+      Also deliberately absent: any NoWarn. Warnings are errors here by inheritance and that is
+      intended. Analyzer suppressions for the preserved legacy SCREAMING_SNAKE constant
+      identifiers live in the repository root .editorconfig, scoped to the production files that
+      carry them, and are not extended to test files.
+    -->
+
+  </PropertyGroup>
+
+  <ItemGroup Label="Test stack. Versions are pinned centrally in Directory.Packages.props.">
+    <!--
+      Every reference below is VERSIONLESS on purpose. ManagePackageVersionsCentrally is true, so
+      a Version attribute here would be a restore error rather than a harmless duplicate. The
+      single source of truth is the repository root Directory.Packages.props, which pins
+      xunit.v3, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk and coverlet.collector.
+    -->
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!--
+      coverlet.collector is what emits coverage.cobertura.xml, and that report is the exact
+      artifact the 80 percent line coverage gate is measured from for the
+      PowerFramework.Shared.Diagnostics assembly. Without this reference the gate cannot be
+      evaluated for that assembly at all.
+    -->
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup Label="System under test. Exactly one project reference, by design.">
+    <!--
+      PowerFramework.Shared.Kernel (RetCode, Predicates) arrives TRANSITIVELY through Diagnostics,
+      which already references it, so a second project reference would be redundant coupling.
+
+      No reference to anything under services/ either, and in particular none to
+      PowerFramework.Gateway even though Gateway is the consumer of the assertion payload these
+      suites pin. The payload consumer is replicated locally in this project instead, which keeps
+      the published contracts as the only coupling that ever crosses a service boundary.
+    -->
+    <ProjectReference Include="..\PowerFramework.Shared.Diagnostics\PowerFramework.Shared.Diagnostics.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,148 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ==============================================================================================
+    PowerFramework.Shared.Localization.Tests
+    ==============================================================================================
+    Unit test project for PowerFramework.Shared.Localization, the .NET port of the legacy
+    PowerBuilder localization surface. The behavioural specification is the read-only legacy tree:
+
+      ws_objects/pfw.ui.pbl.src/n_cst_i18n.sru                    provider contract, a single event
+                                                                  member ontranslate(source,
+                                                                  category, ref text) at L9
+      ws_objects/pfw.ui.pbl.src/i18n.srf                          the three overload facade, with
+                                                                  the silent passthrough fallback
+                                                                  when no provider is installed
+      ws_objects/pfw.ui.controls.ext.pbl.src/ne_cst_i18n.sru       CAT_MSGBOX and CAT_DWSVC as
+                                                                  offsets from I18N_CAT_CUSTOM
+      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_en.sru     English provider, including the
+                                                                  two preserved mistranslations
+      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_chs.sru    Simplified Chinese, the base
+                                                                  locale, a genuine no operation
+      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_cht.sru    Traditional Chinese table lookup
+      pfw.i18n.xml                                                the translation resource table
+
+    HAND AUTHORED, DELIBERATELY. No template can produce this project: `dotnet new xunit3` does not
+    exist in SDK 10.0.302, and `dotnet new xunit` scaffolds the xunit v2 line with older test SDK
+    and coverage packages. Do not regenerate this file from a template and patch it.
+
+    INHERITED, NEVER RESTATED. TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings,
+    TreatWarningsAsErrors and ManagePackageVersionsCentrally all arrive by MSBuild directory walkup
+    from the repository root Directory.Build.props, which declares no Import element and therefore
+    terminates the walkup. Restating any of them here would be duplication; weakening any of them
+    would break a repository wide quality gate. That is why this file contains no NoWarn property
+    and no TargetFramework, and why every package reference below is versionless.
+
+    No credential material of any kind appears in this file, and none may ever be added to it. The
+    project declares no configuration values at all, which is what keeps that guarantee trivial.
+    ==============================================================================================
+  -->
+
+  <PropertyGroup>
+
+    <!--
+      MANDATORY for xunit.v3, and the single property that distinguishes a v3 test project from a
+      v2 one. The v3 runner supplies its own application entry point, so the test assembly must be
+      an executable. Built as a library it never starts, and `dotnet test` discovers zero tests.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <!-- A test assembly is never published to a package feed. -->
+    <IsPackable>false</IsPackable>
+
+    <!-- Declares the project to `dotnet test` and the VSTest platform as a test project. -->
+    <IsTestProject>true</IsTestProject>
+
+    <!--
+      AssemblyName and RootNamespace are deliberately left unset: the SDK already derives both as
+      PowerFramework.Shared.Localization.Tests from this file's name, which is exactly the intended
+      value, and the nine test source files in this folder declare that namespace.
+    -->
+
+  </PropertyGroup>
+
+  <!--
+    Test stack. Every reference is deliberately VERSIONLESS. Central package management is enabled
+    repository wide, so the single source of truth for versions is the repository root
+    Directory.Packages.props, which pins xunit.v3 3.2.2, xunit.runner.visualstudio 3.1.5,
+    Microsoft.NET.Test.Sdk 18.8.1 and coverlet.collector 10.0.1. Adding a Version attribute here
+    would raise an NU1008 class error and defeat the mechanism that forces the repository's
+    mandatory security pins onto every project from one place.
+
+    coverlet.collector is what makes `dotnet test` with the XPlat Code Coverage collector emit
+    coverage.cobertura.xml, the artifact the line coverage gate is measured from. See docs/BUILD.md
+    for the exact command; it cannot be spelled here because an MSBuild comment may not contain two
+    consecutive hyphens.
+
+    The list is exhaustive by design, and matches the sibling shared library test projects:
+      * No Microsoft.AspNetCore.Mvc.Testing. A shared library exposes no HTTP surface, so there is
+        no in process host to spin up.
+      * No XML or XPath package. The resource reader under test uses System.Xml.Linq together with
+        System.Xml.XPath, both of which ship inside the Microsoft.NETCore.App shared framework. A
+        package reference here would be the first thread of coupling to a deferred capability that
+        this phase must not implement even partially.
+      * No mocking or fluent assertion library. The test doubles in this folder are hand written
+        classes (FakeI18nProviders.cs) and assertions use xunit's own Assert.
+      * No logging, parser or pinyin package. Nothing in this project needs one.
+  -->
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <!--
+    Exactly one project reference: the system under test, and nothing else.
+
+    PowerFramework.Shared.Kernel arrives transitively through it, which is how these tests reach
+    RetCode.OK, RetCode.E_INVALID_OBJECT, Enums.I18N_SRC_PFW, Enums.I18N_SRC_CUSTOM, the
+    Enums.I18N_CAT_* set and Formatting.Sprintf. A direct reference to Kernel would be redundant
+    and would misstate this project's dependency shape, so it is deliberately absent, as is any
+    reference to a sibling shared library. One test assembly covers one shared library, so
+    coverage is never merged across libraries and the per project gate cannot be masked.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj" />
+  </ItemGroup>
+
+  <!--
+    Translation resource fixture.
+
+    The legacy providers load the resource table by BARE RELATIVE FILENAME from the process working
+    directory: `_doc.LoadFile("pfw.i18n.xml")` at n_cst_i18n_en.sru:159 and at
+    n_cst_i18n_cht.sru:63. The xunit.v3 test host runs with the build output directory as its
+    working directory, so linking the repository root resource to that same bare filename
+    reproduces the legacy lookup exactly and lets the reader tests assert on the relative filename
+    with zero path arithmetic in test code.
+
+    Why a Content link to the single real file, and never a checked in duplicate:
+
+      * The repository root pfw.i18n.xml is part of the read-only legacy tree and is the
+        behavioural oracle for parity. MSBuild only ever COPIES it into the output directory.
+        Nothing in this project writes to, moves, renames, transforms, re encodes or reformats that
+        path, and no target that would do so may ever be added here. That makes the read-only
+        guarantee structural rather than a matter of reviewer diligence.
+
+      * One source of truth means the fixture cannot drift from the oracle. A second checked in
+        copy could later be "corrected" by a maintainer, and the two documented mistranslations
+        this resource carries must survive verbatim rather than being silently fixed.
+
+      * The copy must stay byte identical to the original: 6824 bytes, no byte order mark, no XML
+        declaration (the document opens directly with the pfw element), UTF-8 encoded Chinese, LF
+        only line endings, and a final closing element with no trailing newline. The repository
+        .gitattributes declares no eol and no text=auto rule, so no checkout normalization occurs
+        and a plain copy preserves every byte. Never introduce an encoding conversion, a newline
+        fixup or any other transform here; a size or hash mismatch in the output directory means
+        the read-only guarantee has been broken.
+
+    Content rather than None, and rather than EmbeddedResource, because the behaviour under test is
+    reading a real file from a real relative path on disk, not streaming an assembly resource.
+    PreserveNewest keeps incremental builds cheap while still refreshing the copy if the oracle is
+    ever updated upstream.
+  -->
+  <ItemGroup>
+    <Content Include="../../pfw.i18n.xml" Link="pfw.i18n.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

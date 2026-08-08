@@ -1,0 +1,17 @@
+{
+  "name": "powerframework-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright cross-service workflow verification for the PowerFramework .NET 10 decomposition (Gateway, DataServices, Persistence, Security), driven over HTTP through Gateway. API-only: no UI, no browser binaries.",
+  "license": "BSD-2-Clause",
+  "scripts": {
+    "test": "playwright test",
+    "test:list": "playwright test --list"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

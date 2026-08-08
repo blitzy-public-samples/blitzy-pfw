@@ -1,0 +1,95 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Test project for shared/PowerFramework.Contracts, the published cross-service boundary:
+    Proto/common.v1.proto, Proto/dataservices.v1.proto, Proto/persistence.v1.proto,
+    OpenApi/security.v1.yaml and OpenApi/gateway.v1.yaml.
+
+    HAND-AUTHORED ON PURPOSE. `dotnet new xunit3` does not exist in SDK 10.0.302 and
+    `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and coverage package,
+    so templating this project would silently downgrade the test stack.
+
+    Everything else is inherited from the repository-root Directory.Build.props by directory
+    walk-up: net10.0, C# latest, nullable enabled, implicit usings enabled, warnings as errors,
+    .NET analysers, and central package management. Those are mandatory quality gates, so they
+    are deliberately NOT restated here and must never be relaxed per project. Adding NoWarn, or
+    turning off warnings as errors, or disabling nullable to make a test compile would be a
+    violation rather than a fix: the fix belongs in the offending test file. Package versions
+    live in the repository-root Directory.Packages.props, which is why every PackageReference
+    below is versionless apart from the one documented override.
+  -->
+
+  <PropertyGroup>
+    <!-- MANDATORY for xunit.v3, which runs tests from a self hosting executable. Without Exe the
+         project still compiles but no test is discovered, and the coverage gate then reads a
+         Cobertura report that contains no data. This is the single property that distinguishes a
+         v3 test project from a v2 one. -->
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Label="Test stack and OpenAPI object model (versions from Directory.Packages.props)">
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!-- Produces coverage.cobertura.xml, the exact artifact the 80 percent line coverage gate is
+         measured from, when the test command collects XPlat Code Coverage. -->
+    <PackageReference Include="coverlet.collector" />
+
+    <!-- Centrally pinned at 2.11.0, and that pin is mandatory: 2.0.0 carries NuGet advisory
+         NU1903, while the 3.x line breaks the build because the 10.0.x OpenAPI source generator
+         is compiled against the 2.x object model and emits CS0200. This project is where that
+         pin gets its regression guard, which is why it takes the reference directly. -->
+    <PackageReference Include="Microsoft.OpenApi" />
+
+    <!--
+      WHY THIS PACKAGE IS HERE, AND WHY IT CARRIES VersionOverride INSTEAD OF Version.
+
+      Microsoft.OpenApi 2.11.0 ships JSON and YAML *writers* plus a JSON *reader* only. Its
+      assembly exposes OpenApiJsonReader, OpenApiJsonWriter and OpenApiYamlWriter, and no YAML
+      reader of any kind (verified by inspecting the published package). Both contract documents
+      are YAML, so loading and validating them against the pinned object model is physically
+      impossible without this reader.
+
+      Microsoft.OpenApi.YamlReader publishes an exactly version locked 2.11.0 whose dependencies
+      are Microsoft.OpenApi 2.11.0, SharpYaml 2.1.4 and System.Text.Json 8.0.5, all MIT licensed.
+      Being locked to 2.11.0, it cannot drag the mandatory pin off that version, and
+      System.Text.Json 8.0.5 already sits in Microsoft.OpenApi's own closure, so SharpYaml is the
+      only net addition to the dependency graph. None of the three carries a NuGet advisory at
+      these versions, so restore stays audit clean, which matters because warnings are errors.
+
+      VersionOverride, never a bare Version attribute (which trips NU1008 under central package
+      management), supplies the version for this one project without editing the repository-root
+      Directory.Packages.props. That is what keeps the promise that this project restores and
+      builds from a clean checkout with no edit to any file outside its own folder.
+    -->
+    <PackageReference Include="Microsoft.OpenApi.YamlReader" VersionOverride="2.11.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The subject under test, and the only supplier of the generated Protobuf message types and
+         of the gRPC service base classes and client stubs (generated with GrpcServices Both).
+         Google.Protobuf arrives transitively through it, so it is deliberately not referenced
+         explicitly here: an explicit reference would risk a version conflict. -->
+    <ProjectReference Include="..\PowerFramework.Contracts\PowerFramework.Contracts.csproj" />
+
+    <!--
+      NOT A STRAY REFERENCE, AND NOT TO BE TIDIED AWAY. PowerFramework.Contracts declares zero
+      project references by design, because the contracts project is the boundary definition and
+      carries no behaviour of its own. The consequence is that the numeric agreement between the
+      RetCode enum in Proto/common.v1.proto and the ported constants in
+      PowerFramework.Shared.Kernel/RetCode.cs has no compile-time edge anywhere else in the tree.
+
+      Kernel is referenced here so the fidelity tests can read their expectations FROM the Kernel
+      constants rather than restating literals, which makes this project the single place where
+      that otherwise review-time-only invariant is enforced mechanically. It is also why this
+      project is sequenced behind Kernel.
+
+      Scope is deliberately limited to these two: no service project and no other shared library
+      is referenced, because a shared test project reaching into a service would invert the
+      layering that keeps the published contracts the only cross-service coupling.
+    -->
+    <ProjectReference Include="..\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+</Project>

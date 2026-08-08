@@ -1,0 +1,156 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Security.Tests
+    Unit and service level tests for the Security service of the PowerFramework .NET 10
+    decomposition.
+
+    Security is the sole JWT issuer in the decomposed system and owns the keyed cryptographic
+    surface ported from the legacy Appeon PowerBuilder framework. The behaviour under test is
+    specified by the read only legacy tree, which is the behavioural oracle. Legacy objects are
+    cited here BY LOCATOR ONLY and are never consumed as a build input by this project:
+
+      ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9 to L73
+        The keyed cryptographic surface, roughly 62 overloads: unkeyed hash and keyed HMAC over
+        the string and blob cross product, symmetric encrypt and decrypt, RSA encrypt, decrypt,
+        sign and verify, RSA key generation, random blob, random string and GUID generation, and
+        the encoding conversions.
+
+      ws_objects/pfw.shared.pbl.src/enums.sru:L924 to L967
+        The CRYPTO_ algorithm, mode, padding and flag catalogue, whose identifier spellings are
+        preserved verbatim because they appear in serialized payloads, log records and
+        characterization recordings. It carries the legacy weak defaults the port replicates as
+        annotated defaults, notably ECB as the default symmetric mode and PKCS1 as the default
+        RSA padding.
+
+    PROJECT SHAPE. Every line below is load bearing, not stylistic:
+
+      * Microsoft.NET.Sdk, deliberately NOT the web SDK variant. The web SDK belongs to the
+        application project; this project consumes that application's host rather than being one.
+
+      * OutputType Exe is MANDATORY, and is declared explicitly rather than left to inheritance.
+        It is the property xunit.v3 itself validates: the package's build targets raise a hard
+        error when the effective value is anything other than Exe, because a v3 test assembly runs
+        as its own process instead of being loaded as a library the way a v2 one was. Measured on
+        this toolchain, SDK 10.0.302 with the pinned test SDK, that test SDK also forces the value
+        from its own targets, so today the explicit declaration is belt as well as braces. It stays
+        regardless, because this project must satisfy the test framework's contract on its own
+        terms rather than depend on a transitive package continuing to set it: without the
+        declaration the project is one package upgrade or one asset restriction away from building
+        as a library that discovers no test at all, which would disable the coverage gate silently.
+
+      * Hand authored, never templated. In SDK 10.0.302 there is no `dotnet new xunit3` template,
+        and `dotnet new xunit` scaffolds the v2 line with an older test SDK and older coverage
+        packages. Any templated output must be discarded rather than patched.
+
+      * TargetFramework, LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors and
+        ManagePackageVersionsCentrally are inherited from the repository root
+        Directory.Build.props by MSBuild directory walk up. They are deliberately NOT restated
+        here: a restatement is duplication that can silently drift away from the repository wide
+        quality gate. Warnings are errors in this project exactly as they are everywhere else.
+
+      * Every PackageReference below is versionless. Central Package Management is enabled
+        repository wide, so the single source of truth for package versions is the repository root
+        Directory.Packages.props. That indirection is the mechanism which forces the mandatory
+        security pins onto every service from one place, so no service can drift onto a vulnerable
+        transitive package. No version attribute may ever be added to a reference in this file; a
+        NuGet audit finding is fixed centrally, never pinned locally.
+
+    INDEPENDENT BUILD AND TEST. This service builds and tests from a clean checkout with no other
+    service, no shared solution and no orchestration:
+
+        cd services/security-service
+        dotnet restore
+        dotnet build -c Release
+        dotnet test with the XPlat Code Coverage collector
+
+    Those bare commands resolve because services/security-service/security-service.slnx is the
+    only solution file in that directory and it enumerates this project at exactly
+    PowerFramework.Security.Tests/PowerFramework.Security.Tests.csproj. A .slnf solution filter
+    must never be authored alongside it: the migration plan records the legacy solution filter
+    format as incompatible with the .slnx format, breaking restore, build and test alike, so the
+    per service .slnx is the only supported entry point for this service.
+
+    Note for anyone reading a coverage report: a bare `dotnet test` builds Debug even immediately
+    after `dotnet build -c Release`. The release configuration form passes -c Release to the test
+    command as well. That is documented toolchain behaviour recorded in docs/BUILD.md and must not
+    be worked around from inside this project file.
+  -->
+
+  <PropertyGroup>
+    <!-- Required by xunit.v3, which runs the test assembly as its own process. See the header. -->
+    <OutputType>Exe</OutputType>
+    <!-- A test assembly is never shipped as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Label="Implicit using for the test framework namespace">
+    <!--
+      The additive companion to the repository wide ImplicitUsings setting, and the reason this
+      item is here rather than left out: the xunit.v3 package ships no implicit using of its own,
+      while the established test project convention, which the SDK's own test template follows, is
+      that the PROJECT declares the test framework namespace globally and the test source files
+      therefore do not repeat it. Without this item every sibling test class would have to declare
+      the namespace itself or fail to compile with CS0246 on Fact, Theory and IClassFixture. This
+      item is not a package reference and carries no version.
+    -->
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup Label="Project coupling: the sibling Security application project, and nothing else">
+    <!--
+      Exactly one ProjectReference, by design. Types from the shared kernel and from the published
+      contracts project arrive TRANSITIVELY through this reference. Reaching them with a direct
+      reference, or referencing any other service or any other service's test project, would
+      create precisely the cross service coupling the architecture forbids: the published
+      contracts are the only sanctioned coupling between services and no shared behaviour crosses
+      a service boundary.
+
+      The referenced project also owns the test visibility declaration and the appsettings content
+      behaviour that the sibling test classes rely on, so neither is duplicated here.
+    -->
+    <ProjectReference Include="..\PowerFramework.Security\PowerFramework.Security.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test stack: versionless, pinned centrally in Directory.Packages.props">
+    <!-- Test framework and assertion library. -->
+    <PackageReference Include="xunit.v3" />
+
+    <!-- Adapter so the standard test command discovers xunit.v3 tests. -->
+    <PackageReference Include="xunit.runner.visualstudio"
+                      PrivateAssets="all"
+                      IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+
+    <!-- Test host. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+
+    <!--
+      Emits coverage.cobertura.xml, which is the exact artifact the 80 percent line coverage per
+      service gate in .github/workflows/ci.yml is measured from. Without this reference the gate
+      cannot be evaluated at all and CI fails for a structural reason rather than a quality one,
+      so the reference is a hard requirement and not a convenience.
+    -->
+    <PackageReference Include="coverlet.collector"
+                      PrivateAssets="all"
+                      IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+
+    <!--
+      In process host for the service level tests. Required HERE even though the shared library
+      test projects deliberately omit it, because this service exposes an HTTP surface, namely
+      token issuance, the JWKS and OpenID discovery metadata, the crypto endpoints, the anonymous
+      health endpoint and the authenticated ping endpoint, which SecurityAppFactory.cs boots in
+      process. Hand rolling a host instead is not an option: the factory must share the
+      application's own service registrations so that the deterministic clock and entropy doubles
+      substitute for the real ones, which is what makes the random, GUID and expiry dependent
+      behaviour reproducible for characterization. This package carries a framework reference to
+      Microsoft.AspNetCore.App, so no additional package or framework reference is needed.
+
+      No further package belongs in this project. No mocking library, no fluent assertion library
+      and no third party cryptographic library: the base class library covers every operation of
+      the legacy cryptographic surface, and the clock and entropy doubles are hand authored in
+      SecurityAppFactory.cs rather than taken from a package.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+</Project>

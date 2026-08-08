@@ -1,0 +1,128 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Shared.Diagnostics
+    =================================
+
+    Shared library: assertions, the structured assertion failure payload, stack trace capture and
+    caller information. One of the six shared libraries under shared/ (Kernel, Diagnostics, Eventful,
+    Localization, Containers, Contracts) that sit BENEATH the four Phase 1 services. Per AAP §0.1.5
+    that layer "carries only pure behaviour and no I/O", and this project holds to it literally.
+
+    Legacy sources ported into this folder, one C# file per legacy object (AAP §0.4.2.3):
+
+        Assert.cs              ws_objects/pfw.common.pbl.src/assert.srf
+                               The 7 assertion overloads plus the seven field failure payload, joined
+                               on CRLF, that ws_objects/pfw.pbl.src/pfw.sra:L111-L144 unpacks before
+                               it terminates the process. Fail fast is preserved as fail fast.
+        AssertionFailure.cs    ws_objects/pfw.common.pbl.src/assertionfailed.sru
+        StackTraceProvider.cs  ws_objects/pfw.common.pbl.src/stacktrace.srf
+                               ws_objects/pfw.common.pbl.src/stacktraceinfo.srf
+        CallerInfo.cs          ws_objects/pfw.common.pbl.src/getcurrentscript.srf
+
+    Those legacy paths are the READ ONLY behavioural oracle (AAP §0.7.3 C-C): read, never edited,
+    moved or reformatted. The two PowerBuilder project objects under ws_objects/pfw.pbl.src are NOT
+    translated into this build; AAP §0.8.6 R5 records that they contradict each other and that both
+    reference a library absent from the repository, so neither would build as written. They are
+    reference for build intent only. Nor is pfw.pbt's LibList ordering encoded here: that ordering is
+    semantically significant in PowerBuilder because it resolves one flat global namespace, and
+    ProjectReference has no ordering analogue.
+
+    GOVERNING CONSTRAINTS. review_rules reports "No user rules provided", so no user rule governs
+    this file and none was invented. In their place AAP §0.7.2 (the enterprise baseline) and §0.7.3
+    (the twelve binding non-rule constraints) apply, and each decision below cites the constraint it
+    discharges. Structural authorities: §0.3.1 names this file as the first child of this folder,
+    §0.5.4.3 classifies every project file as a CREATE, §0.3.2.1 fixes the validated build mechanism,
+    and §0.5.4.1 makes central package management mandatory rather than optional.
+
+    DELIBERATELY NOT DECLARED HERE, because every one of them is inherited by walk up from the
+    repository root Directory.Build.props, which is the single point of control for the whole tree:
+
+        TargetFramework, LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors,
+        EnableNETAnalyzers, AnalysisLevel, ManagePackageVersionsCentrally, Deterministic,
+        ContinuousIntegrationBuild, Product, Company, Copyright.
+
+    Those names appear immediately above as documentation and nowhere else: not one of them is
+    declared in this file. Strip the comments and what remains is three properties and two items.
+
+    Restating any of them would be a defect even where the value happened to match, because it
+    silently decouples this project from that single point of control, which is the exact drift the
+    central configuration design exists to prevent. OutputType is absent for the same class of
+    reason: the SDK default of Library is correct here, and only the hand authored xunit.v3 test
+    projects need Exe. There are no Compile items either, because SDK style projects glob the four
+    .cs files in this directory automatically. And there is no packing metadata (PackageId, Version,
+    IsPackable): nothing in the AAP publishes these libraries as NuGet packages; they are consumed
+    by ProjectReference.
+  -->
+
+  <PropertyGroup>
+    <!-- Both values equal the directory derived defaults, and are stated anyway so that a future
+         directory rename cannot silently change the namespace and assembly identity that the four
+         .cs files here, the sibling test project and the consuming services all resolve against. -->
+    <RootNamespace>PowerFramework.Shared.Diagnostics</RootNamespace>
+    <AssemblyName>PowerFramework.Shared.Diagnostics</AssemblyName>
+    <Description>PowerFramework shared diagnostics: assertions, the structured assertion failure payload, stack trace capture and caller information. Ported from the pfw.common.pbl assert, assertionfailed, stacktrace, stacktraceinfo and getcurrentscript objects.</Description>
+  </PropertyGroup>
+
+  <ItemGroup Label="Project references: exactly one, and it must stay that way">
+    <!--
+      Constraint discharged here: AAP §0.7.3 C-I, each service builds and tests independently.
+
+      Kernel is referenced for ONE reason. The assertion overloads guard on the return code algebra
+      before they build a payload: assert.srf:L101 and :L107 call IsSucceeded(rtcode), and :L113 and
+      :L119 call IsValidObject(object). Both predicates land in Kernel as Predicates.IsSucceeded and
+      Predicates.IsValidObject, and the tri state boundary they carry (a prevention reads as a
+      success; cancelled and null are neither) is behaviour to preserve by reuse, never to
+      reimplement locally where it could drift.
+
+      It is DELIBERATELY NOT a reference for PfwException. In the legacy hierarchy
+      assertionfailed.sru:L4 declares "from runtimeerror" and pfwexception.sru:L3 declares "from
+      runtimeerror" as well, so AssertionFailure is a SIBLING of PfwException and not a subclass.
+      AssertionFailure must not be made to inherit from PfwException.
+
+      C-I also bounds this list: nothing outside shared/ may be referenced, which is what keeps every
+      service independently restorable, buildable and testable from a clean checkout. Relative path
+      only. Never an absolute path, and never a package reference standing in for a project.
+    -->
+    <ProjectReference Include="..\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+  <!--
+    ZERO PackageReference elements, and zero is the correct count (AAP §0.7.3 C-A, §0.1.5).
+
+    Every native binding this project replaces already has a Base Class Library substitute, so there
+    is nothing to buy (AAP §0.6.5 substitution matrix):
+      * stacktrace.srf:L7 binds pfwStackTrace out of the closed pfw.dll, for which no C++ source
+        exists anywhere in the repository. Substitute: System.Diagnostics.StackTrace.
+      * getcurrentscript.srf:L7 and :L8 bind pfwGetCurrentScript out of that same closed binary.
+        Substitute: the System.Runtime.CompilerServices caller information attributes.
+
+    Nothing in this project performs I/O, networking, logging or serialization, so no ASP.NET
+    reference, no web SDK and no third party package belongs in it. If a package ever does become
+    genuinely necessary, add it VERSIONLESS and pin the version in the repository root
+    Directory.Packages.props. ManagePackageVersionsCentrally is enabled repository wide (AAP
+    §0.5.4.1), so an inline Version attribute here is a build error rather than a shortcut, and a
+    floating or wildcard version is barred outright by the §0.7.2 baseline.
+  -->
+
+  <ItemGroup Label="Test seam for the per service coverage gate">
+    <!--
+      Constraint discharged here: AAP §0.7.3 C-H, 80 percent line coverage per in scope service.
+
+      Assert.cs derives its payload from the captured call stack: assert.srf:L38 selects the caller
+      frame at sCallStack[nCount minus 2] and :L61 copies frames 1 through nCount minus 2 into the
+      failure record. That formatting cannot be driven deterministically through the public overloads
+      alone, because the frames it reads depend on whichever test method called them. Making the
+      internal payload builder visible to the sibling test project is what allows the 80 percent line
+      coverage gate, measured from the Cobertura report, to be met with real assertions instead of
+      brittle stack shaped fixtures.
+
+      The .NET SDK converts this MSBuild item into the assembly attribute during build, which is why
+      this project deliberately contains no AssemblyInfo.cs and no Properties folder. Test visibility
+      grants no behavioural latitude whatsoever: nothing about the observable assertion surface
+      changes because of this item.
+    -->
+    <InternalsVisibleTo Include="PowerFramework.Shared.Diagnostics.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,238 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    PowerFramework.DataServices : the DataServices application service.
+
+    Owns the DataWindow retrieval / validation / update triple, the 22 event DataWindow chain and
+    the column expression engine, ported from the 13 objects and 6,763 lines of
+    ws_objects/pfw.datawindow.services.pbl.src/ (se_cst_dw.sru, n_cst_dwsvc.sru,
+    n_cst_dwsvc_columnexp.sru).
+
+    TRANSPORT. gRPC primary on port 5102 for contracts C-03 (DataWindowService) and C-04
+    (ColumnExpressionService), plus a thin REST projection consumed only by Gateway. The legacy
+    interface shape forced that choice: an ordered event chain with veto semantics, a `ref string`
+    out parameter [se_cst_dw.sru:L13] and an `any` return over a `string[]` argument
+    [se_cst_dw.sru:L14]. JSON over REST would carry neither the ordering nor the tri valued veto.
+
+    SDK. Microsoft.NET.Sdk.Web, because this project hosts Kestrel, Minimal API endpoints, an
+    OpenAPI document and gRPC endpoints. No interop or native package is needed either, and that
+    is measured rather than assumed: the legacy library behind this service declares ZERO PBNI
+    native bindings, so it ports as pure logic.
+
+    INHERITED BUILD PROPERTIES, DELIBERATELY NOT RESTATED HERE. The target framework (net10.0),
+    language version, nullable reference types, implicit usings, warnings promoted to errors,
+    analyzer enablement and analysis level, and central package version management all arrive from
+    the repository root Directory.Build.props by MSBuild directory walk up; every package version
+    arrives from the repository root Directory.Packages.props. Constraint C-I is served by keeping
+    exactly one authoritative definition of each, so restating one here would create a second place
+    to drift even when the values agree today. This file sets none of them, deliberately.
+  -->
+
+  <PropertyGroup>
+    <!-- Both match the file name and are still stated explicitly: every file under Configuration/,
+         Domain/, Validators/, Expressions/, Services/, Grpc/, Endpoints/ and Clients/ declares a
+         namespace under PowerFramework.DataServices.*, and the assembly identity is referenced BY
+         NAME from the parent Dockerfile entrypoint (PowerFramework.DataServices.dll) and from the
+         InternalsVisibleTo item below. Leaving it to inference would make both silently fragile. -->
+    <RootNamespace>PowerFramework.DataServices</RootNamespace>
+    <AssemblyName>PowerFramework.DataServices</AssemblyName>
+    <!-- No user secrets id, deliberately. Constraint C-F routes every configuration value, key
+         material included, through environment binding via the options pattern
+         (Configuration/DataServicesOptions.cs); a user secrets id would advertise a local secret
+         store this service must not have. -->
+  </PropertyGroup>
+
+  <!--
+    PROJECT REFERENCES : the six shared projects, and nothing else.
+
+    Constraint C-A is absolute here. No ProjectReference may point at any project under
+    services/gateway-service/, services/persistence-service/ or services/security-service/.
+    Cross service coupling travels exclusively through shared/PowerFramework.Contracts, which is
+    the boundary definition rather than a shared behaviour back door. Each reference below names
+    its principal consumer inside this project, so a future reader can see that nothing in the
+    set is vestigial.
+  -->
+  <ItemGroup>
+    <!-- Generated dataservices.v1 server bases (Grpc/DataWindowService.cs,
+         Grpc/ColumnExpressionService.cs), persistence.v1 client stubs (Clients/
+         PersistenceClient.cs), and the common.v1 messages RetCode / DwBuffer / ItemStatus /
+         DbError / ConflictDetail. -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Contracts\PowerFramework.Contracts.csproj" />
+
+    <!-- RetCode, Predicates, Enums, Formatting.Sprintf, Text.ReplaceAll, and Bits.BitTest for the
+         EID_* gate tests at se_cst_dw.sru:L124, :L130, :L176, :L187. -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+
+    <!-- EventBroker, the tri valued VetoResult and SubscriptionTopic, for
+         Domain/DataWindowEventChain.cs (22 `Eventful.` call sites in the legacy source). -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Eventful\PowerFramework.Shared.Eventful.csproj" />
+
+    <!-- I18n and Categories.CAT_DWSVC. Confirmed, not conditional: I18N(CAT_DWSVC, ...) is called
+         23 times in this library, including from the validation path at se_cst_dw.sru:L355, :L357. -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Localization\PowerFramework.Shared.Localization.csproj" />
+
+    <!-- OrderedMap for the column value map [n_cst_dwsvc.sru:L583] and Vector for the expression
+         engine's calc and recursion stack [n_cst_dwsvc_columnexp.sru:L110], whose ordering is
+         observable on contract C-04's trace payload. -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Containers\PowerFramework.Shared.Containers.csproj" />
+
+    <!-- Assertions for the fail fast structural guards at startup and around the session and
+         expression invariants. Naming trap: the class is `Assertions`, NOT `Assert` (a static
+         class cannot contain a member of its own name : CS0542), though the file is Assert.cs. -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Diagnostics\PowerFramework.Shared.Diagnostics.csproj" />
+  </ItemGroup>
+
+  <!--
+    PACKAGE REFERENCES : five, every one of them VERSIONLESS.
+
+    Central package management is mandatory (AAP 0.5.4.1), so the single source of truth for
+    versions is the repository root Directory.Packages.props. If a build error reports a missing
+    version, the fix is to add the PackageVersion there, never a Version attribute here.
+  -->
+  <ItemGroup>
+    <!--
+      The gRPC server for contracts C-03 and C-04, and the client channel for C-05 through C-08.
+      Transitively supplies Grpc.Tools 2.83.0, Google.Protobuf 3.31.1 and
+      Grpc.AspNetCore.Server.ClientFactory, so none of those needs an explicit reference.
+    -->
+    <PackageReference Include="Grpc.AspNetCore" />
+
+    <!-- The OpenAPI document for the thin REST projection, /health and /v1/ping. -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+
+    <!--
+      Required AS A DIRECT REFERENCE, and it is not redundant. Microsoft.AspNetCore.OpenApi
+      10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, which raises the high severity NuGet
+      audit advisory NU1903 (GHSA-v5pm-xwqc-g5wc); the direct reference is what allows the root
+      Directory.Packages.props pin of 2.11.0 to take effect and clear the audit. VERIFIED BY
+      REMOVING IT: with this line deleted, `dotnet restore` does not merely warn, it FAILS, because
+      the inherited warnings as errors setting promotes NU1903 to an error. Restoring the line
+      returns the restore to zero NuGet warnings. Do NOT modernise this to the 3.x line: 3.9.0 was
+      tested and produces two CS0200 errors inside the SDK's own generated OpenAPI XML comment
+      support file, because the 10.0.10 source generator is compiled against the 2.x object model.
+      2.11.0 is the only value that is simultaneously non vulnerable and compatible.
+    -->
+    <PackageReference Include="Microsoft.OpenApi" />
+
+    <!--
+      Inbound JWT VALIDATION only, against Security's published JWKS with the stock bearer
+      handler. Constraint C-G: Security is the sole issuer, so this service holds verification
+      material and no signing authority.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+
+    <!--
+      Retry and circuit breaker on the two newly created network edges,
+      Clients/PersistenceClient.cs and Clients/SecurityClient.cs. Justified against the minimal
+      change clause C-B because an in process call cannot fail in transit and a network call can:
+      handling a failure mode that the decomposition itself creates is required BY the transition,
+      not an improvement layered on top of it. Pulls Microsoft.Extensions.Resilience 10.8.0 and
+      the Polly family at 8.4.2.
+    -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+  </ItemGroup>
+
+  <!--
+    DELIBERATE ABSENCES. Every package below is absent on purpose. Each entry records the reason
+    so that a later reader does not helpfully add it back and silently break a constraint.
+
+      * Microsoft.IdentityModel.JsonWebTokens : token MINTING, which belongs to Security alone.
+        Referencing it here would give DataServices an independent signing authority, which
+        constraint C-G forbids. This service validates; it never issues. Nothing is lost by the
+        omission: the JwtBearer reference above already brings the whole Microsoft.IdentityModel
+        VALIDATION stack in transitively at 8.19.2, so the only thing a direct reference would add
+        is the minting capability this service must not have.
+      * Microsoft.EntityFrameworkCore.*, Microsoft.Data.Sqlite, SQLitePCLRaw.* : constraint C-E.
+        Persistence is the only service in the refactor that holds a storage provider. This
+        service reaches data solely through the generated persistence.v1 gRPC client stubs in
+        PowerFramework.Contracts, never through a connection of its own.
+      * Microsoft.Extensions.Diagnostics.HealthChecks and the URI probe health check packages :
+        health check registration ships inside the Microsoft.AspNetCore.App shared framework, so
+        /health needs no package reference at all.
+      * Serilog.AspNetCore and the OpenTelemetry.* family : not in the mandated stack. The
+        built in logging abstractions of the shared framework cover the requirement.
+      * FluentValidation : the five ported validators (Validators/DateValidator.cs and its four
+        siblings, from dwnvldate.srf and friends) must show their exact legacy semantics,
+        including the type coercion switch at se_cst_dw.sru:L228 to :L243. A rule framework would
+        obscure the one property that matters most here, which is parity.
+      * Scalar.AspNetCore and Swashbuckle.AspNetCore : Microsoft.AspNetCore.OpenApi already
+        produces the document, and an interactive UI is not a requirement.
+      * Grpc.AspNetCore.Server.Reflection : a convenience for command line gRPC tooling, not a
+        requirement.
+      * Aspire.Hosting.AppHost : the rejected orchestration alternative. Hand authored compose is
+        the single built path, because the generated model could not express
+        `depends_on: condition: service_healthy`.
+      * Any pinyin package : the pfwPinyinFirstLetterLike lookup table exists only inside the
+        closed pfw.dll and its flag semantics are undocumented, so a third party table cannot be
+        shown to be bit exact. Expressions/PinyinFirstLetterMatcher.cs is characterized against
+        the behavioural oracle, or reported BLOCKED. It is never approximated by a dependency.
+      * Any third party cryptography package : this service performs no cryptography. Keyed
+        operations are reached over contract C-02 on Security.
+  -->
+
+  <!--
+    NO Protobuf ITEM AND NO Grpc.Tools REFERENCE HERE. This is the single most likely mistake in
+    this file, so it is called out rather than merely omitted.
+
+    shared/PowerFramework.Contracts/PowerFramework.Contracts.csproj owns ALL .proto compilation
+    through one Protobuf item with GrpcServices="Both" and an explicit ProtoRoot. That single item
+    already emits both the dataservices.v1 server base classes this project implements and the
+    persistence.v1 client stubs it consumes. The generated types arrive through the
+    PowerFramework.Contracts ProjectReference above; there is nothing to compile locally.
+
+    VERIFIED BY DOING IT WRONG ON PURPOSE. Adding a Protobuf item here that points at the same
+    Proto directory produced 244 diagnostics, every one of them CS0436, each reporting that a
+    locally generated type "conflicts with the imported type of the same name in
+    PowerFramework.Contracts". Note WHICH diagnostic that is: CS0436 is normally a WARNING, and it
+    is only fatal here because warnings are promoted to errors repository wide. Without that
+    promotion the build would SUCCEED while silently preferring this assembly's private copy of
+    every contract type, so DataServices and Persistence would each hold a structurally identical
+    but distinct type for the same wire message. That is a far worse outcome than a broken build,
+    which is why this item must never be added rather than merely being kept in check.
+
+    The obvious follow up mistake is blocked too: adding Grpc.Tools explicitly to make such an item
+    work fails restore with NU1010, because central package management has no PackageVersion entry
+    for it. Grpc.Tools 2.83.0 already arrives transitively through Grpc.AspNetCore in any case.
+  -->
+
+  <ItemGroup>
+    <!--
+      Grants the sibling test project access to this assembly's internals, for two reasons. (b) is
+      the load bearing one, and the distinction is recorded so nobody deletes this item on
+      discovering that (a) does not currently bite.
+
+      (a) Microsoft.AspNetCore.Mvc.Testing's WebApplicationFactory<Program> must reach the Program
+          type that top level statements produce. VERIFIED ON SDK 10.0.302: it can do so WITHOUT
+          this item, because ASP.NET Core ships the source generator
+          Microsoft.AspNetCore.SourceGenerators.PublicProgramSourceGenerator, which emits
+          `public partial class Program { }` for every top level statement app under
+          Microsoft.NET.Sdk.Web. Under the plain Microsoft.NET.Sdk that generator does not run and
+          the identical source yields an IMPLICITLY INTERNAL Program, so this clause is what covers
+          the moment that generator is absent or opted out of.
+      (b) Constraint C-H sets an 80 percent line coverage gate per service, measured from
+          coverage.cobertura.xml. Reaching it requires the tests to drive internal seams
+          deterministically: the item change alphabet of Domain/ItemChangeProtocol.cs, the session
+          state of Domain/ValidationSession.cs, the EID_* gate of Domain/EventGate.cs and the
+          expansion modes of the column expression engine. None is public API, and none should be
+          made public merely to be testable. This reason alone justifies the item.
+
+      Same mechanism and rationale as
+      shared/PowerFramework.Shared.Diagnostics/PowerFramework.Shared.Diagnostics.csproj. Exactly
+      one assembly is named: no other may see this service's internals, because constraint C-A
+      forbids any service reaching into another's.
+    -->
+    <InternalsVisibleTo Include="PowerFramework.DataServices.Tests" />
+  </ItemGroup>
+
+  <!--
+    NO Content, None OR EmbeddedResource ITEMS.
+
+    appsettings.json and appsettings.Development.json are included and copied to the output by the
+    Web SDK's default globbing; an explicit item would risk a duplicate item error (NETSDK1022).
+
+    pfw.i18n.xml is deliberately neither embedded nor copied. It is read only legacy data under
+    constraint C-C, and Shared.Localization reads it by relative filename from the working
+    directory, so copying it here would duplicate the oracle rather than reference it.
+  -->
+
+</Project>

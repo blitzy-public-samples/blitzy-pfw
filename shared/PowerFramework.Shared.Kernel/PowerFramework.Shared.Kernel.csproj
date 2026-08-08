@@ -1,0 +1,95 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Shared.Kernel
+    ============================
+    The foundational shared library of the PowerFramework .NET 10 decomposition, and the bottom of
+    the dependency graph: it references nothing, and every other shared library plus all four
+    in-scope services (Gateway, DataServices, Persistence, Security) reference it.
+
+    It carries the pure behaviour ported from the legacy pfw.shared library and the pfw.common
+    primitives. Both PowerBuilder targets list pfw.shared.pbl LAST in their library list, i.e. as
+    the cross-target foundation resolved after everything else [pfw.pbt:LibList, pfwx.pbt:LibList]:
+
+        RetCode.cs         the return code catalogue                (retcode.sru)
+        Predicates.cs      the tri state return code algebra        (issucceeded.srf and siblings)
+        Enums.cs           the constant catalogue                   (enums.sru)
+        PfwException.cs    the framework exception type             (pfwexception.sru)
+        ThrowException.cs  the throw helpers                        (throwexception.srf and pair)
+        Formatting.cs      return code formatting and Sprintf       (formatretcode.srf, sprintf.srf)
+        Bits.cs            the bit plus word and byte operations
+        Ancestry.cs        the ancestry predicates
+        Text.cs            the string and class name helpers
+
+    This project holds shared IMPLEMENTATION, consumed in process through a ProjectReference. It is
+    never a cross-service channel: the only published cross-service coupling in this refactor is the
+    separate shared/PowerFramework.Contracts project, and this project must not become a back door
+    around it. There is therefore deliberately no web, gRPC, ASP.NET, hosting, serialization, HTTP
+    or database dependency here, and none may be added.
+
+    The legacy PowerBuilder tree is the read only behavioural oracle. Nothing under ws_objects/ and
+    no *.pbl, *.pbt, *.pbw, *.pbr or *.pbd is a build input of this project; the .sru files above are
+    cited as the specification for the C# sources, not compiled or embedded.
+  -->
+
+  <!--
+    Only genuinely local properties are set below.
+
+    Everything else is INHERITED from the repository root Directory.Build.props through MSBuild's
+    directory walk up (there is no intervening Directory.Build.props under shared/), and package
+    versions come from the repository root Directory.Packages.props. TargetFramework (net10.0),
+    LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors, EnableNETAnalyzers, AnalysisLevel,
+    ManagePackageVersionsCentrally, Deterministic, ContinuousIntegrationBuild, Product, Company and
+    Copyright are therefore ABSENT ON PURPOSE. Restating any of them here would defeat that single
+    source of truth and let this project drift from the other fifteen, so do not "fix" the omission.
+  -->
+  <PropertyGroup>
+    <!-- Both values equal the defaults MSBuild derives from this file name. They are stated
+         explicitly because every consumer binds to exactly this assembly and namespace root. -->
+    <RootNamespace>PowerFramework.Shared.Kernel</RootNamespace>
+    <AssemblyName>PowerFramework.Shared.Kernel</AssemblyName>
+    <Description>Foundational shared kernel for the PowerFramework .NET 10 decomposition: the return code algebra, constant catalogue, framework exception type, and the text, bit and ancestry primitives ported from the legacy pfw.shared and pfw.common libraries.</Description>
+  </PropertyGroup>
+
+  <!--
+    Intentionally no PackageReference: this library is pure BCL; versions, when ever needed, come
+    from Directory.Packages.props and references stay versionless.
+
+    This is a verified finding, not an oversight. Every entry in the dependency inventory was cross
+    checked and none names Shared Kernel as a consumer: the ported behaviour needs only the C#
+    bitwise operators, System.BitConverter, System.Type and Type.BaseType, System.String, composite
+    formatting and System.Exception. Do not add a package "to be safe"; an unnecessary reference
+    would also drag a NuGet audit surface onto the one project every other project depends on.
+  -->
+
+  <!--
+    Intentionally no ProjectReference: Shared Kernel is the bottom of the dependency graph, so it
+    references nothing and everything references it. In particular it must NOT reference
+    PowerFramework.Contracts: the direction is the reverse. Contracts' common.v1.proto mirrors the
+    numeric values of RetCode, but that is a value correspondence maintained by hand and documented
+    in docs/CONTRACTS.md, never a compile time edge. Nor may it reference any of the four deferred
+    services (DesignSystem, Documents, Integration, ScriptBridge), which are out of scope for this
+    phase and have no project to reference.
+  -->
+
+  <!--
+    Also deliberately absent, each for a stated reason:
+      * OutputType. This is a class library and must stay one. The xunit.v3 requirement for
+        OutputType Exe belongs to the sibling PowerFramework.Shared.Kernel.Tests project.
+      * Compile, Remove and Exclude items. The SDK globs the C# sources automatically and they all
+        sit flat in this directory, so there is nothing to add and nothing to exclude.
+      * InternalsVisibleTo. Every type and member here is public precisely so the sibling test
+        project and the shared and service consumers reach it without one.
+      * NoWarn and any project wide analyzer suppression. The legacy SCREAMING_SNAKE constant
+        identifiers are preserved verbatim because they appear in serialized payloads, log records
+        and characterization recordings; their naming analyzer suppressions are file glob scoped in
+        the repository root .editorconfig to RetCode.cs and Enums.cs only. That scoping is
+        deliberate and a project wide suppression here would broaden it.
+      * GenerateDocumentationFile. Inherited TreatWarningsAsErrors turns a missing XML doc comment
+        (CS1591) into a build error that would break the whole tree, and no requirement asks for a
+        documentation file.
+      * Any solution filter. .NET 10 emits the XML .slnx solution format and legacy .slnf filters
+        are incompatible with it, failing with MSB4014 during restore, build and test.
+  -->
+
+</Project>

@@ -1,0 +1,168 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ================================================================================================
+    PowerFramework.DataServices.Tests
+
+    Unit and service level test project for the DataServices service of the PowerFramework .NET 10
+    decomposition. It characterizes the behaviour ported from the legacy PowerBuilder library
+    `pfw.datawindow.services.pbl` (13 objects, zero native bindings, pure PowerScript):
+
+      * the 22 event DataWindow chain: 9 semantic events plus 13 raw `pbm_dwn*` events
+      * the item change micro protocol: the {0, 1, 2, 3} alphabet reproduced verbatim, including
+        case 1 falling through to case 2, case 3 rewriting itself to 1, and the default arm
+        forcibly returning 2
+      * static single sigil versus dynamic double sigil column expression expansion, which is the
+        one distinction that does not survive naive serialization
+      * the five column type validators: date, datetime, number, string and time
+      * the headless halves of RowSelect, ColumnSort, ContextMenu and DropDownSearch
+
+    Behavioural oracle for these tests. The legacy tree is READ ONLY and is never an edit target:
+      * ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw
+          L151 static expansion, L154 dynamic expansion, L157 dynamic indirect expansion together
+          with a foreign variable, L143 the cross DataWindow `of_AddForeignVar` live pointer
+          fixture, L292 set variable and recalculate, L305 the macro invocation callback,
+          L315 the expression trace carrying the call stack.
+      * ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw
+          L42 the composable row select style bitmask.
+
+    HAND AUTHORED ON PURPOSE. This file is not templated and must not be regenerated from a
+    template. SDK 10.0.302 ships no `xunit3` template, and `dotnet new xunit` scaffolds the xunit v2
+    line with an older test SDK and an older coverage collector. Both were confirmed on this
+    toolchain, so the xunit.v3 project shape is written out explicitly here.
+
+    EVERYTHING GENERIC IS INHERITED, NOTHING IS RESTATED. The target runtime (net10.0), the C#
+    language level, the nullable reference context, the implicit global usings, the warnings as
+    errors gate, the .NET analyzers and central package management all arrive from the repository
+    root `Directory.Build.props` by directory walk up, and every package version arrives from the
+    repository root `Directory.Packages.props`. Re-declaring any of them here would create a second
+    source of truth that can silently drift, so none of them appears below. Warnings are errors here
+    too: a test project is held to exactly the same bar as the application it tests.
+
+    THE MANDATED PER SERVICE COMMAND MUST KEEP WORKING VERBATIM, with no extra arguments, run from
+    the `services/dataservices-service` directory: `dotnet restore`, then `dotnet build -c Release`,
+    then `dotnet test` collecting "XPlat Code Coverage".
+
+    Those resolve without an explicit project argument only because `dataservices-service.slnx` is
+    the single solution file in the service directory and enumerates exactly this project plus
+    `PowerFramework.DataServices`. Note that the legacy solution filter format is incompatible with
+    the newer XML solution format and fails with MSB4014 during restore, build and test, so no
+    solution filter is used or referenced anywhere in this service.
+    ================================================================================================
+  -->
+
+  <PropertyGroup>
+    <!--
+      MANDATORY. xunit.v3 test projects must be executable, and this line is the authoritative
+      declaration of that requirement: the xunit.v3 build assets carry a `_XunitValidateBuild`
+      target that raises a hard MSBuild error when `OutputType` is not `Exe`, and both the auto
+      generated entry point and the app host depend on it.
+
+      Keep this line even though it can look redundant in a trace. Microsoft.NET.Test.Sdk 18.8.1
+      also assigns `Exe` from its own targets file, which is imported after this project body and
+      therefore wins, so on today's exact package set the xunit guard never actually fires. That
+      override is an undocumented implementation detail gated on unrelated WinUI and UWP switches,
+      so leaning on it would leave this project one package bump away from tripping the guard.
+      Design time tooling and any evaluation performed before restore also read the value declared
+      here rather than the overridden one. Never relax it to `Library`.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <!-- A test assembly is never shipped as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+
+    <!--
+      Deliberately NOT set here, because each is already supplied elsewhere and a duplicate would
+      be a second source of truth:
+        * The root namespace and assembly name both default to this project's file name,
+          PowerFramework.DataServices.Tests, which is exactly what is wanted.
+        * The test project marker is inferred by Microsoft.NET.Test.Sdk.
+        * The app host switch and the generated program file switch are both forced by the xunit.v3
+          build assets, which also generate the entry point, so this project intentionally contains
+          no Program.cs of its own.
+    -->
+  </PropertyGroup>
+
+  <!--
+    The complete test stack: exactly five packages, every one of them VERSIONLESS. Central Package
+    Management is enabled repository wide, so the versions live only in Directory.Packages.props
+    (xunit.v3 3.2.2, xunit.runner.visualstudio 3.1.5, Microsoft.NET.Test.Sdk 18.8.1,
+    coverlet.collector 10.0.1, Microsoft.AspNetCore.Mvc.Testing 10.0.10). Pinning a version here
+    instead would raise NU1008 and fail the build.
+
+    No sixth package. There is deliberately no mocking library and no fluent assertion library
+    anywhere in the dependency inventory: the sibling test files use hand written test doubles and
+    plain xunit `Assert`, which keeps parity assertions explicit and auditable against the legacy
+    oracle. A sixth package would also fail restore outright, because Directory.Packages.props
+    carries no `PackageVersion` entry for it.
+  -->
+  <ItemGroup Label="Test stack">
+    <!-- Test framework: the xunit v3 line, supplying the in process runner and the assertions. -->
+    <PackageReference Include="xunit.v3" />
+
+    <!-- Test adapter, so `dotnet test` discovers xunit.v3 tests. Development time asset only. -->
+    <PackageReference Include="xunit.runner.visualstudio">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+
+    <!-- Test host and the `dotnet test` integration. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+
+    <!--
+      The coverage collector. This reference is what makes `dotnet test` with the "XPlat Code
+      Coverage" collector emit `coverage.cobertura.xml` under TestResults, which is the exact
+      artifact the 80 percent line coverage per service gate is measured from in CI. Without it the
+      gate cannot be evaluated at all, so this entry is a requirement rather than a convenience.
+      Its collector registration ships in the package's `build` assets, which is why `build` is
+      retained in IncludeAssets; `PrivateAssets` only stops the asset flowing onward to consumers of
+      this project and therefore does not affect collection here.
+    -->
+    <PackageReference Include="coverlet.collector">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+
+    <!--
+      In process host for the service level tests that sit alongside the unit tests, giving
+      WebApplicationFactory over the real DataServices pipeline so the gRPC surface, the thin REST
+      projection consumed by Gateway, the anonymous /health endpoint and the JWT protected
+      /v1/ping endpoint are all exercised without a container or a network listener.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+  <!--
+    Exactly one project reference, and it is the service under test. Everything else the tests need
+    arrives transitively through it: PowerFramework.Contracts and the shared Kernel, Diagnostics,
+    Eventful, Localization and Containers libraries. Referencing any of them directly would
+    duplicate the dependency graph, and referencing another service would break the rule that the
+    published contracts project is the only coupling permitted across a service boundary.
+
+    Deliberately absent, and each absence is a decision rather than an oversight:
+      * No protocol definition item and no gRPC package. PowerFramework.Contracts compiles
+        Proto/dataservices.v1.proto, Proto/persistence.v1.proto and Proto/common.v1.proto once,
+        generating both the server bases and the client stubs. Re-declaring the protocol definitions
+        here would generate the same types a second time and break the build.
+      * No internals visibility attribute declared here. The grant only ever runs the other way:
+        the application project grants internals visibility to this assembly so the tests can reach
+        its non public types, and this project never grants anything to anyone. WebApplicationFactory
+        binds to the application's generated entry point type, which the single project reference
+        below already makes visible; note also that the xunit.v3 auto generated entry point is
+        emitted as `AutoGenerated.XunitAutoGeneratedEntryPoint` inside this assembly's own
+        namespace, so it cannot collide with the application's entry point type name.
+      * No Entity Framework Core reference, no ADO level SQLite provider and no native SQLite
+        bundle. Persistence is the only service in the system that holds a storage provider;
+        DataServices reaches it over gRPC, and these tests provision no database at all.
+      * No token minting library. Security is the sole token issuer in the system. DataServices
+        holds verification material only, and the sibling tests authenticate through a test
+        authentication scheme rather than by minting a token.
+      * No secret, key, password, connection string or certificate of any kind. Nothing in this
+        project is security sensitive, and all real key material is injected through the options
+        pattern from the orchestration secret layer at run time.
+  -->
+  <ItemGroup Label="Service under test">
+    <ProjectReference Include="../PowerFramework.DataServices/PowerFramework.DataServices.csproj" />
+  </ItemGroup>
+
+</Project>
