@@ -1,0 +1,979 @@
+// ==============================================================================================
+//  common.v1.proto - THE SHARED HALF OF THE PUBLISHED CROSS-SERVICE BOUNDARY
+//  --------------------------------------------------------------------------------------------
+//  This file is the FOUNDATION of the gRPC boundary. Its two siblings in this folder,
+//  dataservices.v1.proto (C-03, C-04) and persistence.v1.proto (C-05..C-08), both import it, so
+//  it is the bottom of the contract graph and it imports nothing itself.
+//
+//  IT CARRIES NO BEHAVIOUR. Not one line here executes. PowerFramework.Contracts is the boundary
+//  DEFINITION, not a shared-code back door: it declares the shapes that cross the wire and
+//  nothing else. Every enum and message below is consumed by BOTH sibling definitions, which is
+//  the admission test for this file - see THE ADMISSION TEST below.
+//
+//  EVERY CONTRACT IN THIS FOLDER IS NET NEW, NOT A PORT
+//  --------------------------------------------------------------------------------------------
+//  The legacy PowerFramework is a LIBRARY. It has no process of its own, no listening socket, no
+//  route table and no serialization layer, so no definition here translates an existing wire
+//  format - there was none to translate. The source branch contains zero .proto files. What is
+//  faithful to the legacy here is therefore its VALUES and its SEMANTICS, never a schema.
+//
+//  THE VALUE BINDING IS MAINTAINED BY REVIEW, NOT BY COMPILATION
+//  --------------------------------------------------------------------------------------------
+//  RetCode.Value below must equal shared/PowerFramework.Shared.Kernel/RetCode.cs member for
+//  member. That agreement has NO COMPILE-TIME EDGE and cannot be given one: Shared.Kernel is the
+//  bottom of the assembly dependency graph and must not reference Contracts, and this project
+//  declares zero ProjectReference by design (constraint C-A). RetCode.cs states the direction of
+//  alignment explicitly in its DECISION 6 - the Contracts author aligns to RetCode.cs, never the
+//  reverse - and this file was authored that way.
+//
+//  The agreement was verified mechanically rather than by eye, in both directions, against the
+//  read-only oracle ws_objects/pfw.shared.pbl.src/retcode.sru (221 lines):
+//
+//      retcode.sru:L39-L79    PowerFramework return codes     41  ->  RetCode.Value
+//      retcode.sru:L84-L100   XML parser parse status         17  ->  XmlParseStatus.Value
+//      retcode.sru:L107-L138  SQLite base result codes        31  ->  SqliteResultCode.Value
+//      retcode.sru:L140-L206  SQLite extended result codes    67  ->  SqliteResultCode.Value
+//                                                           ---
+//                                                           156
+//
+//  156 is an audit, not decoration. If a future edit makes the count anything other than 156, or
+//  makes any single value differ from RetCode.cs, the boundary has silently drifted from the
+//  oracle and every stored characterization comparison that mentions the changed member becomes
+//  invalid. Re-verify by extracting both sides and diffing them, not by reading them.
+//
+//  A NAME CLASH DOWNSTREAM CONSUMERS WILL MEET, AND MUST NOT "FIX"
+//  --------------------------------------------------------------------------------------------
+//  The generated PowerFramework.Contracts.Common.V1.RetCode and the hand-written
+//  PowerFramework.Shared.Kernel.RetCode share the simple type name RetCode. They compile together
+//  without complaint because they sit in different namespaces, but a C# file that uses both needs
+//  a using alias, for example:
+//
+//      using WireRetCode = PowerFramework.Contracts.Common.V1.RetCode;
+//
+//  That alias is the correct resolution. Renaming the contract type is NOT: the name is part of
+//  the published boundary, and the two types are deliberately distinct - Shared.Kernel.RetCode is
+//  the in-process catalogue of const long values, while this one is the wire enum.
+//
+//  RULES POSITION
+//  --------------------------------------------------------------------------------------------
+//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
+//  file and none is invented here. The enterprise-standard baseline applies in their place, and
+//  the binding constraints are the refactor plan's own non-rule inventory. Those that govern this
+//  file are cited inline at the point each is discharged: C-A (boundary definition, not a
+//  shared-code back door), C-B (replicate behaviour and defects, never improve), C-C (the legacy
+//  tree is read-only and is the behavioural oracle), C-D (the four deferred services are not
+//  implemented, even partially), C-K (document every technology and boundary decision), C-F (no
+//  secret in any form) and C-G (do not hand-write security surface).
+//
+//  C-F SELF-AUDIT: no key, credential, token, password, connection string, certificate or
+//  secret-shaped placeholder appears anywhere in this file, in any field, default or comment.
+//  C-G SELF-AUDIT: no auth, token, credential or identity message is defined here. Authentication
+//  on every edge is each service's stock JwtBearer configuration, which is framework code;
+//  hand-writing a security surface here would duplicate it and enlarge the attack surface.
+// ==============================================================================================
+
+syntax = "proto3";
+
+package common.v1;
+
+// EXACT VALUE, DECIDED RATHER THAN DEFAULTED (C-K). The sibling PowerFramework.Contracts.csproj
+// enumerates PowerFramework.Contracts.DataServices.V1, ...Persistence.V1 and ...Security.V1 and
+// leaves only the common message namespace unnamed; docs/CONTRACTS.md section 2.3 does the same.
+// ...Common.V1 is the single value consistent with that scheme and with `package common.v1`, and
+// Gateway, DataServices and Persistence all consume it under that name. Do NOT substitute a
+// variant such as ...Shared.V1: "Shared" is the name of the in-process library layer
+// (PowerFramework.Shared.*), and reusing it here would blur the one distinction this project
+// exists to keep - published boundary versus shared implementation. Do NOT hang these messages
+// off a service namespace either; they belong to no single service.
+option csharp_namespace = "PowerFramework.Contracts.Common.V1";
+
+// NOTHING IS IMPORTED, DELIBERATELY (C-K).
+// This file is the bottom of the contract graph: the siblings import it, it imports nobody. No
+// google/protobuf/*.proto well-known type is imported either, because none is used - and that is
+// a decision, not an omission. google.protobuf.Timestamp in particular is REJECTED, for the
+// reason recorded under TEMPORAL TYPES in the scalar rule below.
+//
+// A note for the sibling authors, because it is the one thing an import can get wrong here: the
+// .csproj sets ProtoRoot="Proto", so an import of this file is the BARE FILE NAME
+//
+//     import "common.v1.proto";
+//
+// and never "Proto/common.v1.proto". If protoc reports this file "not found", the fault is the
+// prefix, not this file.
+
+// ==============================================================================================
+//  SECTION 1 - THE SCALAR AND WIDTH RULE
+//  --------------------------------------------------------------------------------------------
+//  NORMATIVE FOR ALL THREE .proto FILES IN THIS FOLDER. It is stated once, here, precisely so
+//  that dataservices.v1.proto and persistence.v1.proto can REFERENCE it instead of restating it
+//  and drifting. A divergence between the three files on how a legacy scalar crosses the wire
+//  would be invisible at compile time and fatal to parity, which is exactly the class of defect
+//  this section exists to prevent.
+//
+//      PowerScript type     Wire type in this folder     Note
+//      ------------------   --------------------------   ------------------------------------
+//      long                 int64                        widened - see WIDENING
+//      integer              int32                        16-bit at source, widened to 32
+//      unsignedlong         uint64                       widened
+//      boolean              bool
+//      string               string
+//      blob                 bytes
+//      any                  AnyValue                     discriminated union, NEVER a bare string
+//      dec / decimal(n)     DecimalValue                 canonical text, NEVER double
+//      date                 DateValue                    three DISTINCT types, never one instant
+//      time                 TimeValue
+//      datetime             DateTimeValue
+//      dwbuffer             DwBuffer
+//      dwItemStatus         ItemStatus
+//
+//  The four carrier messages take a `Value` suffix rather than the bare legacy type name, and that
+//  is a load-bearing decision rather than a stylistic one: bare `Decimal` and `DateTime` would
+//  collide with System.Decimal and System.DateTime, which ImplicitUsings imports into every
+//  consuming file, and a bare mention would then be a CS0104 build failure in all four services.
+//  Section 7 records the full reasoning at the point of definition.
+//
+//  WIDENING, AND WHY IT IS NOT A BEHAVIOURAL CHANGE
+//  PowerBuilder `integer` is 16-bit signed and `long` is 32-bit signed. The refactor maps legacy
+//  `long` onto C# `long`, i.e. 64-bit, and this file follows that mapping onto int64. Widening is
+//  the safe direction and it is UNOBSERVABLE: every value the legacy can produce fits, so no
+//  round trip can change, while narrowing could truncate. Stated once for the whole folder: a
+//  wire type here may be WIDER than its legacy counterpart without behavioural regression. It may
+//  never be narrower.
+//
+//  DECIMALS ARE NOT DOUBLES. This is the single most dangerous available shortcut in this folder.
+//  Protobuf has no decimal type, and the primary fixture ws_objects/pfw.tests.pbl.src/dw_sqlite.srd
+//  carries `salary decimal(2)`. A double round trip loses precision, and it loses it QUIETLY: the
+//  value still looks plausible, so no unit test flags it, and the damage surfaces only as a
+//  byte-exact characterization comparison that can no longer be made. Decimals therefore travel
+//  as the Decimal message below.
+//
+//  TEMPORAL TYPES ARE THREE TYPES, NOT ONE. The legacy has `date`, `time` and `datetime` as
+//  DISTINCT types, mapped by the refactor onto DateOnly, TimeOnly and DateTime respectively, and
+//  the item-change coercion path dispatches on which one a column is. google.protobuf.Timestamp
+//  collapses all three into a single absolute instant and so destroys exactly the type
+//  information that behaviour depends on - a bare `time` has no date to anchor an instant to, and
+//  a bare `date` has no time of day. Hence three distinct messages, and hence no import.
+//
+//  THE UNIFORM CARRIER RULE, so that the three preceding paragraphs are one decision and not
+//  three: a value whose PRECISION or whose TYPE IDENTITY must survive the wire byte for byte
+//  travels as canonical invariant TEXT inside a named wrapper message. Text is losslessly
+//  comparable, which is precisely what a golden-master recording needs; a named wrapper makes
+//  every site type-checked, keeps the canonical form documented in exactly one place, and leaves
+//  room to add a field later without changing the shape of every message that carries one.
+//  Alternatives considered and rejected: a {units, scale} pair for Decimal, which cannot hold a
+//  full 96-bit C# decimal mantissa in an int64 and needs a normalization convention before two
+//  encodings of the same number compare equal; and structured {year, month, day} temporal
+//  messages, which are fine in isolation but split the folder's carrier convention in two.
+// ==============================================================================================
+
+// ==============================================================================================
+//  SECTION 2 - THE ENUM SCOPING RULING: RESOLVE BY SCOPE, NEVER BY RENAMING
+//  --------------------------------------------------------------------------------------------
+//  THE HAZARD. Protobuf enum values use C++ scoping rules: a value declared in a TOP-LEVEL enum
+//  belongs to the ENCLOSING PACKAGE, not to the enum. Two top-level enums in package common.v1
+//  therefore cannot both declare a value named OK - protoc rejects the file. And the legacy names
+//  at risk are the most generic imaginable: OK, SUCCESS, ALLOW, PREVENT, FAILED, CANCELED,
+//  CANCELLED, UNKNOWN. Declared at top level they would occupy those names in common.v1
+//  permanently, for every message and enum any of the three files in this folder ever adds.
+//
+//  THE RULING. The legacy SCREAMING_SNAKE spellings are preserved EXACTLY - they appear in
+//  serialized payloads, in log records and in characterization recordings, so renaming one does
+//  not restyle a symbol, it silently invalidates every stored comparison that mentions it. The
+//  collision is therefore resolved by SCOPE and never by renaming: each legacy constant set is
+//  nested as an enum named Value inside its own thin wrapper message. Nesting creates a scope, so
+//  the names live in common.v1.RetCode, common.v1.XmlParseStatus and common.v1.SqliteResultCode
+//  instead of in common.v1, and the package scope stays clean.
+//
+//  WHAT NESTING IS AND IS NOT PROTECTING AGAINST. The three sets do not collide with EACH OTHER:
+//  the legacy already prefixes XML_ and SQLITE_. What nesting protects is the package scope from
+//  the bare generic names of the core set. The wrapper messages are deliberately empty of fields;
+//  they exist to create a scope and carry documentation, which is why they are called thin.
+//
+//  A SECOND, INDEPENDENT REASON THE THREE STAY SEPARATE. These are three unrelated numbering
+//  schemes that OVERLAP heavily in value: 0 is OK, SUCCESS, ALLOW, XML_OK and SQLITE_OK at once;
+//  1 is PREVENT, XML_E_FILE_NOT_FOUND and SQLITE_ERROR; every value from 2 to 16 is shared by one
+//  XML_* status and one SQLITE_* base code; and, most confusingly, XML_E_FILE_NOT_FOUND is 1
+//  while E_FILE_NOT_FOUND is -15. They are not duplicates to reconcile - a return code, an XML
+//  parse status and a SQLite result code are three different code spaces catalogued together, and
+//  a value is only meaningful against the space it came from. Three scopes make that structural,
+//  so no consumer can accidentally compare across spaces. RetCode.cs reaches the same conclusion
+//  independently in its DECISION 5.
+//
+//  THE EXCEPTION, AND WHY IT IS PRINCIPLED. DwBuffer and ItemStatus are top-level enums with
+//  Google-style enum-name-prefixed values (DW_BUFFER_*, ITEM_STATUS_*). There is NO legacy
+//  SCREAMING_SNAKE spelling at stake for either: their legacy sources are PowerBuilder BUILT-IN
+//  enumerated literals written Primary!, Delete!, Filter!, NotModified!, DataModified!, New! and
+//  NewModified!, whose trailing-bang syntax cannot be carried into protobuf at all. With no
+//  spelling to preserve, the idiomatic prefixed form is strictly better - it is collision-safe by
+//  construction, so these two can safely be top level and read naturally at every use site. It
+//  also avoids a bare value named DELETE, which is a Win32 macro and a hazardous identifier to
+//  emit into generated code.
+//
+//  A CONSEQUENCE OF C# CODE GENERATION, recorded so nobody reports it as a defect. The protobuf
+//  C# generator normalizes enum value names to PascalCase, so OK generates Ok,
+//  E_INVALID_ARGUMENT generates EInvalidArgument and SQLITE_IOERR_READ generates SqliteIoerrRead.
+//  The preserved spelling survives where it actually matters - in this file, in the compiled
+//  descriptor and in the protobuf-JSON representation, which is what a recording stores - and the
+//  C# identifier is a generated artifact of the toolchain, not part of the boundary. All three
+//  sets were checked for post-normalization collisions, and for any value normalizing to its own
+//  enum's name: there are none (41 -> 41, 17 -> 17, 98 -> 98 distinct identifiers).
+// ==============================================================================================
+
+// ==============================================================================================
+//  SECTION 3 - RetCode : THE POWERFRAMEWORK RETURN-CODE ALGEBRA
+//  --------------------------------------------------------------------------------------------
+//  41 values, transcribed one for one from ws_objects/pfw.shared.pbl.src/retcode.sru:L39-L79 in
+//  the oracle's own order. Each carries its :L locator so any value can be adjudicated against
+//  the oracle without a search. Must equal PowerFramework.Shared.Kernel.RetCode member for member.
+//
+//  THE TRI-STATE ALGEBRA IS A DEFECT, AND IT IS PRESERVED (C-B)
+//  This enum is not a partition into success and failure. The legacy predicates are
+//  `rtCode >= OK` [issucceeded.srf:L11-L13] and `rtCode < OK` with CANCELLED explicitly excluded
+//  [isfailed.srf:L11-L13], which produces three consequences a consumer of this contract must
+//  expect rather than repair:
+//
+//    * PREVENT = 1 satisfies the success predicate, so A PREVENTION READS AS A SUCCESS.
+//    * CANCELED / CANCELLED = -2 is excluded from failure by an explicit guard while also failing
+//      the success test, so CANCELLED IS NEITHER SUCCEEDED NOR FAILED - a tri-state hole in a
+//      nominally boolean algebra.
+//    * A null return is likewise neither, because both predicates return false on null. This is
+//      why the AnyValue carrier in Section 7 has an EXPLICIT null arm: collapsing null to zero
+//      would silently convert "neither" into "succeeded".
+//
+//  Consumers must therefore branch on the specific value, never on a two-way success test. No
+//  member is renamed, renumbered, deduplicated or removed to tidy this up.
+//
+//  WHY allow_alias IS MANDATORY HERE (C-K)
+//  OK, SUCCESS and ALLOW are three names for 0, and CANCELED and CANCELLED are two spellings of
+//  -2. Protobuf forbids duplicate values in an enum unless allow_alias is set, so WITHOUT THE
+//  OPTION BELOW protoc REJECTS THIS FILE OUTRIGHT - it is a build prerequisite, not a style
+//  choice. The aliases are kept because both spellings appear in legacy call sites, in log records
+//  and in characterization recordings; dropping either would invalidate every stored comparison
+//  that used it. This was verified by removing the option and observing the build fail.
+//
+//  The option is scoped deliberately: allow_alias is set HERE ONLY. XmlParseStatus.Value and
+//  SqliteResultCode.Value contain no duplicate values, so setting it there would be noise that
+//  also silently permits a future accidental duplicate to pass unnoticed.
+//
+//  WHY THERE IS NO SYNTHETIC "UNSPECIFIED = 0" SENTINEL (C-K)
+//  proto3 requires the FIRST enumerator to be zero. OK = 0 already satisfies that, so no sentinel
+//  is needed, and adding one would be actively harmful: it would be a fourth name for 0, it would
+//  collide with OK, and it would inject a value the legacy algebra does not contain into a
+//  catalogue whose whole purpose is to equal the oracle exactly.
+//
+//  MIRROR IMAGE - DO NOT TRANSPOSE THESE TWO RULINGS. The SQL_MS_* modification-style set is the
+//  opposite case: it is SQL_MS_REPLACE = 1, SQL_MS_APPEND = 2, SQL_MS_PREPEND = 3
+//  [ws_objects/pfw.shared.pbl.src/enums.sru:L718-L720], so it has NO zero value and therefore
+//  DOES need a synthetic zero sentinel to be a legal proto3 enum. That set lives in
+//  persistence.v1.proto, not here, because only C-05's SetWhereClause and SetOrderByClause consume
+//  it (C-A). The rulings are opposite because the inputs are opposite: RetCode has a natural zero
+//  and must not gain a sentinel; SQL_MS_* has no natural zero and cannot do without one.
+//
+//  NEGATIVE VALUES COST 10 BYTES, AND ARE STILL NOT RENUMBERED (C-K)
+//  Negative enum values are legal in protobuf but are encoded as a plain, non-zigzag varint over
+//  the 64-bit two's-complement representation, so EVERY negative value below occupies the full 10
+//  bytes on the wire - 35 of these 41 members are negative. Renumbering them into a positive dense
+//  range would shrink that, and it is nevertheless FORBIDDEN: these exact numbers appear in
+//  serialized payloads, in log records and in the characterization recordings that are the parity
+//  evidence for the whole migration, so a renumber would silently invalidate every stored
+//  comparison rather than optimise anything. The cost is accepted deliberately, once, here. It is
+//  also small in context: this enum appears as a status field on responses, not in a hot inner
+//  loop, and no performance objective exists anywhere in this refactor to trade against.
+//
+//  RANGE, so the choice of an enum rather than an int32 field is auditable: across all three
+//  constant sets in this file the minimum is UNKNOWN = -4000 and the maximum is
+//  SQLITE_IOERR_ROLLBACK_ATOMIC = 7946. Every value fits int32, which is the protobuf enum's
+//  underlying type, so NO value has to escape to a bare int32 field anywhere in this folder.
+//
+//  The wrapper message is intentionally EMPTY OF FIELDS. It exists to create a scope for the enum
+//  (Section 2) and to carry this documentation. It is never sent as a message.
+// ==============================================================================================
+message RetCode {
+  enum Value {
+    // MANDATORY, AND THIS IS ITS ONLY LEGAL POSITION. allow_alias is an ENUM option, so it belongs
+    // inside `enum Value`, NOT beside it at message level - protoc rejects the message-level
+    // spelling with `Option "allow_alias" unknown`, which is a confusing message for a misplaced
+    // option rather than an absent one. Verified both ways by building (C-K).
+    option allow_alias = true;
+
+    // OK / SUCCESS / ALLOW are three spellings of 0. All three are kept: each appears at legacy
+    // call sites, so each can appear in a recording. [retcode.sru:L39-L41]
+    OK                    =     0;  // [:L39]
+    SUCCESS               =     0;  // [:L40]
+    ALLOW                 =     0;  // [:L41]
+    // PREVENT = 1 SATISFIES the success predicate. A prevention reads as a success. [:L42]
+    PREVENT               =     1;  // [:L42]
+    FAILED                =    -1;  // [:L43]
+    // CANCELED / CANCELLED = -2, both spellings preserved, and NEITHER succeeded nor
+    // failed. [:L44-L45]
+    CANCELED              =    -2;  // [:L44]
+    CANCELLED             =    -2;  // [:L45]
+    // The contiguous, GAP-FREE error block -3 .. -33 [:L46-L76]. There is no gap to tidy and no
+    // value to add; the density is the oracle's, and E_RETRY at -33 is its last member.
+    E_INVALID_ARGUMENT    =    -3;  // [:L46]
+    E_INVALID_IMAGE       =    -4;  // [:L47]
+    E_INVALID_OBJECT      =    -5;  // [:L48]
+    E_INVALID_TYPE        =    -6;  // [:L49]
+    E_INVALID_TRANSACTION =    -7;  // [:L50]
+    E_INVALID_SQL         =    -8;  // [:L51]
+    E_INVALID_DATA        =    -9;  // [:L52]
+    E_INVALID_DATAOBJECT  =   -10;  // [:L53]
+    E_INVALID_HANDLE      =   -11;  // [:L54]
+    E_OUT_OF_BOUND        =   -12;  // [:L55]
+    E_OUT_OF_RANGE        =   -13;  // [:L56]
+    E_OUT_OF_MEMORY       =   -14;  // [:L57]
+    // NOTE the code space collision this file keeps separate by scope: E_FILE_NOT_FOUND is -15
+    // here, while XmlParseStatus.XML_E_FILE_NOT_FOUND is 1. They are not the same code.
+    E_FILE_NOT_FOUND      =   -15;  // [:L58]
+    E_OBJECT_NOT_FOUND    =   -16;  // [:L59]
+    E_DATA_NOT_FOUND      =   -17;  // [:L60]
+    E_FUNCTION_NOT_FOUND  =   -18;  // [:L61]
+    E_EVENT_NOT_FOUND     =   -19;  // [:L62]
+    E_MEMBER_NOT_FOUND    =   -20;  // [:L63]
+    E_VAR_NOT_FOUND       =   -21;  // [:L64]
+    E_NOT_EXISTS          =   -22;  // [:L65]
+    E_BUSY                =   -23;  // [:L66]
+    E_TIME_OUT            =   -24;  // [:L67]
+    E_ACCESS_DENIED       =   -25;  // [:L68]
+    // E_WIN32_ERROR and E_WINHTTP_ERROR keep their Windows-flavoured names even though the target
+    // runtime is Linux containers. The identifiers are contract; the platform is not. [:L69, :L73]
+    E_WIN32_ERROR         =   -26;  // [:L69]
+    E_INTERNAL_ERROR      =   -27;  // [:L70]
+    E_DB_ERROR            =   -28;  // [:L71]
+    E_HTTP_ERROR          =   -29;  // [:L72]
+    E_WINHTTP_ERROR       =   -30;  // [:L73]
+    E_IO_ERROR            =   -31;  // [:L74]
+    E_SQL_BIND_ARG_FAILED =   -32;  // [:L75]
+    E_RETRY               =   -33;  // [:L76]
+    // The three outliers. E_NO_SUPPORT and E_NO_IMPLEMENTATION sit far below the dense block, and
+    // E_NO_IMPLEMENTATION is the value the paging rewriter's `case else` arm returns for an
+    // unrecognised database type. UNKNOWN = -4000 is the minimum of this whole file. [:L77-L79]
+    E_NO_SUPPORT          = -2000;  // [:L77]
+    E_NO_IMPLEMENTATION   = -2001;  // [:L78]
+    UNKNOWN               = -4000;  // [:L79]
+  }
+}
+
+
+// ==============================================================================================
+//  SECTION 4 - XmlParseStatus : 17 VALUES CARRIED, ZERO XML CAPABILITY IMPLIED
+//  --------------------------------------------------------------------------------------------
+//  17 values from ws_objects/pfw.shared.pbl.src/retcode.sru:L84-L100, the parse status the legacy
+//  XML reader reports. The oracle gives each one a short English explanation; those explanations
+//  are carried across verbatim rather than paraphrased.
+//
+//  THE C-D LINE, AND IT IS A FINE ONE - READ THIS BEFORE "CLEANING UP" THIS SECTION
+//  The XML object family belongs to Documents, one of the FOUR DEFERRED SERVICES that this phase
+//  must not implement even partially and not even to stub out. So why is this here at all?
+//
+//  Because A VALUE IS NOT A CAPABILITY. These 17 integers are part of the 156-constant algebra
+//  that PowerFramework.Shared.Kernel.RetCode ports from a single in-scope oracle object, and the
+//  agreement between that file and this one is value-for-value across all 156. Omitting this block
+//  would break that agreement and leave a 17-value hole in the audit, while carrying it implies
+//  nothing whatsoever about XML support.
+//
+//  What would cross the line, and is therefore ABSENT here: any XML service, any XML request or
+//  response message, any XML document, node, query or reader message, any XML field on any message
+//  in this folder, and any reserved field number held open for one. There is none. This section is
+//  a numbering scheme and a scope for it - nothing reads XML, nothing parses XML, and no consumer
+//  of this contract can obtain an XML capability from it. PowerFramework.Shared.Kernel.RetCode
+//  draws exactly the same distinction for exactly the same reason, so the two files agree on the
+//  principle as well as on the numbers.
+//
+//  No allow_alias here: all 17 values are distinct, and XML_OK = 0 already satisfies proto3's
+//  first-enumerator-is-zero rule, so this set needs neither the option nor a sentinel.
+//
+//  Note the deliberate collision with Section 3 that scoping keeps harmless: XML_E_FILE_NOT_FOUND
+//  is 1 while RetCode.E_FILE_NOT_FOUND is -15, and XML_OK, RetCode.OK and
+//  SqliteResultCode.SQLITE_OK are all 0. Three code spaces, three scopes, never compared.
+// ==============================================================================================
+message XmlParseStatus {
+  enum Value {
+    // No error
+    XML_OK                     =  0;  // [:L84]
+    // File was not found during load_file()
+    XML_E_FILE_NOT_FOUND       =  1;  // [:L85]
+    // Error reading from file/stream
+    XML_E_IO_ERROR             =  2;  // [:L86]
+    // Could not allocate memory
+    XML_E_OUT_OF_MEMORY        =  3;  // [:L87]
+    // Internal error occurred
+    XML_E_INTERNAL_ERROR       =  4;  // [:L88]
+    // Parser could not determine tag type
+    XML_E_UNRECOGNIZED_TAG     =  5;  // [:L89]
+    // Parsing error occurred while parsing document declaration/processing instruction
+    XML_E_BAD_PI               =  6;  // [:L90]
+    // Parsing error occurred while parsing comment
+    XML_E_BAD_COMMENT          =  7;  // [:L91]
+    // Parsing error occurred while parsing CDATA section
+    XML_E_BAD_CDATA            =  8;  // [:L92]
+    // Parsing error occurred while parsing document type declaration
+    XML_E_BAD_DOCTYPE          =  9;  // [:L93]
+    // Parsing error occurred while parsing PCDATA section
+    XML_E_BAD_PCDATA           = 10;  // [:L94]
+    // Parsing error occurred while parsing start element tag
+    XML_E_BAD_START_ELEMENT    = 11;  // [:L95]
+    // Parsing error occurred while parsing element attribute
+    XML_E_BAD_ATTRIBUTE        = 12;  // [:L96]
+    // Parsing error occurred while parsing end element tag
+    XML_E_BAD_END_ELEMENT      = 13;  // [:L97]
+    // There was a mismatch of start-end tags (closing tag had incorrect name, some tag was not
+    // closed or there was an excessive closing tag)
+    XML_E_END_ELEMENT_MISMATCH = 14;  // [:L98]
+    // Unable to append nodes since root type is not node_element or node_document (exclusive to
+    // xml_node::append_buffer)
+    XML_E_APPEND_INVALID_ROOT  = 15;  // [:L99]
+    // Parsing resulted in a document without element nodes
+    XML_E_NO_DOCUMENT_ELEMENT  = 16;  // [:L100]
+  }
+}
+
+// ==============================================================================================
+//  SECTION 5 - SqliteResultCode : 98 VALUES, 31 BASE PLUS 67 EXTENDED
+//  --------------------------------------------------------------------------------------------
+//  The SQLite result-code space as the legacy catalogues it: 31 base codes from
+//  ws_objects/pfw.shared.pbl.src/retcode.sru:L107-L138 and 67 extended codes from :L140-L206. It
+//  is reported by the legacy SQLite binding as its SQLDBCode, which is why it is on the boundary
+//  at all - Persistence surfaces it, and DataServices relays it.
+//
+//  Base and extended share ONE enum because they share one code space: SQLite's own convention is
+//  that an extended code is `base + (n * 256)`, so the low byte of an extended code IS its base
+//  code. Splitting them would break that relationship and force consumers to consult two enums to
+//  interpret one field.
+//
+//  EVERY EXTENDED VALUE IS WRITTEN AS A LITERAL, WITH ITS ARITHMETIC IN THE COMMENT (C-K)
+//  The oracle declares each extended code as `(BASE + (n*256))`. A .proto enum requires a literal
+//  integer, so the arithmetic cannot survive as arithmetic - it is preserved in a trailing comment
+//  instead, naming the base and the multiplier. That keeps every line checkable against the oracle
+//  without a calculator, which matters because the multiplicative structure IS the documentation:
+//  it states which base code an extended code refines and which ordinal it is. All 67 literals
+//  were computed mechanically from the oracle, not by hand.
+//
+//  Group counts, verified against the oracle so a missing member is detectable by arithmetic:
+//    ERROR 3, IOERR 31, LOCKED 2, BUSY 2, CANTOPEN 5, CORRUPT 2, READONLY 6, ABORT 1,
+//    CONSTRAINT 10, NOTICE 2, WARNING 1, AUTH 1, OK 1  =  67
+//
+//  FOUR QUIRKS, EACH PRESERVED AND ANNOTATED AT ITS OWN LINE, NEVER REPAIRED (C-B)
+//    * SQLITE_ABORT_ROLLBACK uses multiplier 2 with NO multiplier-1 sibling in existence, so it is
+//      516 and not 260. This looks like an off-by-one and is not one.
+//    * SQLITE_CANTOPEN_DIRTYWAL carries the oracle's own "Not Used" note.
+//    * SQLITE_FORMAT is marked "Not used" and SQLITE_EMPTY "Internal use only" - both are kept as
+//      members regardless, because the oracle declares them.
+//    * SQLITE_OK_LOAD_PERMANENTLY is an EXTENDED code hanging off the SUCCESS base, making it a
+//      positive non-zero value that nevertheless denotes success. It is not an error code.
+//  A fifth structural oddity: the 28-to-100 gap between SQLITE_WARNING and SQLITE_ROW is left
+//  open exactly as the oracle leaves it.
+//
+//  No allow_alias here either: all 98 values were checked and none collides with another, and
+//  SQLITE_OK = 0 satisfies proto3's first-enumerator rule. SQLITE_IOERR_ROLLBACK_ATOMIC = 7946 is
+//  the largest value anywhere in this file.
+// ==============================================================================================
+message SqliteResultCode {
+  enum Value {
+    // ---- 31 base result codes [retcode.sru:L107-L138] ----
+    SQLITE_OK         =   0;  // Successful result | [:L107]
+    SQLITE_ERROR      =   1;  // Generic error | [:L109]
+    SQLITE_INTERNAL   =   2;  // Internal logic error in SQLite | [:L110]
+    SQLITE_PERM       =   3;  // Access permission denied | [:L111]
+    SQLITE_ABORT      =   4;  // Callback routine requested an abort | [:L112]
+    SQLITE_BUSY       =   5;  // The database file is locked | [:L113]
+    SQLITE_LOCKED     =   6;  // A table in the database is locked | [:L114]
+    SQLITE_NOMEM      =   7;  // A malloc() failed | [:L115]
+    SQLITE_READONLY   =   8;  // Attempt to write a readonly database | [:L116]
+    SQLITE_INTERRUPT  =   9;  // Operation terminated by sqlite3_interrupt() | [:L117]
+    SQLITE_IOERR      =  10;  // Some kind of disk I/O error occurred | [:L118]
+    SQLITE_CORRUPT    =  11;  // The database disk image is malformed | [:L119]
+    SQLITE_NOTFOUND   =  12;  // Unknown opcode in sqlite3_file_control() | [:L120]
+    SQLITE_FULL       =  13;  // Insertion failed because database is full | [:L121]
+    SQLITE_CANTOPEN   =  14;  // Unable to open the database file | [:L122]
+    SQLITE_PROTOCOL   =  15;  // Database lock protocol error | [:L123]
+    // QUIRK PRESERVED: the oracle marks this "Internal use only" and declares it anyway. [:L124]
+    SQLITE_EMPTY      =  16;  // Internal use only | [:L124]
+    SQLITE_SCHEMA     =  17;  // The database schema changed | [:L125]
+    SQLITE_TOOBIG     =  18;  // String or BLOB exceeds size limit | [:L126]
+    SQLITE_CONSTRAINT =  19;  // Abort due to constraint violation | [:L127]
+    SQLITE_MISMATCH   =  20;  // Data type mismatch | [:L128]
+    SQLITE_MISUSE     =  21;  // Library used incorrectly | [:L129]
+    SQLITE_NOLFS      =  22;  // Uses OS features not supported on host | [:L130]
+    SQLITE_AUTH       =  23;  // Authorization denied | [:L131]
+    // QUIRK PRESERVED: the oracle marks this "Not used" and declares it anyway. [:L132]
+    SQLITE_FORMAT     =  24;  // Not used | [:L132]
+    SQLITE_RANGE      =  25;  // 2nd parameter to sqlite3_bind out of range | [:L133]
+    SQLITE_NOTADB     =  26;  // File opened that is not a database file | [:L134]
+    SQLITE_NOTICE     =  27;  // Notifications from sqlite3_log() | [:L135]
+    SQLITE_WARNING    =  28;  // Warnings from sqlite3_log() | [:L136]
+    // QUIRK PRESERVED: the 28-to-100 gap is the oracle's, and it is left open. [:L137-L138]
+    SQLITE_ROW        = 100;  // sqlite3_step() has another row ready | [:L137]
+    SQLITE_DONE       = 101;  // sqlite3_step() has finished executing | [:L138]
+
+    // ---- 67 extended result codes [retcode.sru:L140-L206] ----
+    // Literal values with the oracle's `BASE + (n*256)` arithmetic preserved in each comment.
+    SQLITE_ERROR_MISSING_COLLSEQ   =  257;  // SQLITE_ERROR + (1*256) | [:L140]
+    SQLITE_ERROR_RETRY             =  513;  // SQLITE_ERROR + (2*256) | [:L141]
+    SQLITE_ERROR_SNAPSHOT          =  769;  // SQLITE_ERROR + (3*256) | [:L142]
+    SQLITE_IOERR_READ              =  266;  // SQLITE_IOERR + (1*256) | [:L143]
+    SQLITE_IOERR_SHORT_READ        =  522;  // SQLITE_IOERR + (2*256) | [:L144]
+    SQLITE_IOERR_WRITE             =  778;  // SQLITE_IOERR + (3*256) | [:L145]
+    SQLITE_IOERR_FSYNC             = 1034;  // SQLITE_IOERR + (4*256) | [:L146]
+    SQLITE_IOERR_DIR_FSYNC         = 1290;  // SQLITE_IOERR + (5*256) | [:L147]
+    SQLITE_IOERR_TRUNCATE          = 1546;  // SQLITE_IOERR + (6*256) | [:L148]
+    SQLITE_IOERR_FSTAT             = 1802;  // SQLITE_IOERR + (7*256) | [:L149]
+    SQLITE_IOERR_UNLOCK            = 2058;  // SQLITE_IOERR + (8*256) | [:L150]
+    SQLITE_IOERR_RDLOCK            = 2314;  // SQLITE_IOERR + (9*256) | [:L151]
+    SQLITE_IOERR_DELETE            = 2570;  // SQLITE_IOERR + (10*256) | [:L152]
+    SQLITE_IOERR_BLOCKED           = 2826;  // SQLITE_IOERR + (11*256) | [:L153]
+    SQLITE_IOERR_NOMEM             = 3082;  // SQLITE_IOERR + (12*256) | [:L154]
+    SQLITE_IOERR_ACCESS            = 3338;  // SQLITE_IOERR + (13*256) | [:L155]
+    SQLITE_IOERR_CHECKRESERVEDLOCK = 3594;  // SQLITE_IOERR + (14*256) | [:L156]
+    SQLITE_IOERR_LOCK              = 3850;  // SQLITE_IOERR + (15*256) | [:L157]
+    SQLITE_IOERR_CLOSE             = 4106;  // SQLITE_IOERR + (16*256) | [:L158]
+    SQLITE_IOERR_DIR_CLOSE         = 4362;  // SQLITE_IOERR + (17*256) | [:L159]
+    SQLITE_IOERR_SHMOPEN           = 4618;  // SQLITE_IOERR + (18*256) | [:L160]
+    SQLITE_IOERR_SHMSIZE           = 4874;  // SQLITE_IOERR + (19*256) | [:L161]
+    SQLITE_IOERR_SHMLOCK           = 5130;  // SQLITE_IOERR + (20*256) | [:L162]
+    SQLITE_IOERR_SHMMAP            = 5386;  // SQLITE_IOERR + (21*256) | [:L163]
+    SQLITE_IOERR_SEEK              = 5642;  // SQLITE_IOERR + (22*256) | [:L164]
+    SQLITE_IOERR_DELETE_NOENT      = 5898;  // SQLITE_IOERR + (23*256) | [:L165]
+    SQLITE_IOERR_MMAP              = 6154;  // SQLITE_IOERR + (24*256) | [:L166]
+    SQLITE_IOERR_GETTEMPPATH       = 6410;  // SQLITE_IOERR + (25*256) | [:L167]
+    SQLITE_IOERR_CONVPATH          = 6666;  // SQLITE_IOERR + (26*256) | [:L168]
+    SQLITE_IOERR_VNODE             = 6922;  // SQLITE_IOERR + (27*256) | [:L169]
+    SQLITE_IOERR_AUTH              = 7178;  // SQLITE_IOERR + (28*256) | [:L170]
+    SQLITE_IOERR_BEGIN_ATOMIC      = 7434;  // SQLITE_IOERR + (29*256) | [:L171]
+    SQLITE_IOERR_COMMIT_ATOMIC     = 7690;  // SQLITE_IOERR + (30*256) | [:L172]
+    // The largest value anywhere in this file. [:L173]
+    SQLITE_IOERR_ROLLBACK_ATOMIC   = 7946;  // SQLITE_IOERR + (31*256) | [:L173]
+    SQLITE_LOCKED_SHAREDCACHE      =  262;  // SQLITE_LOCKED + (1*256) | [:L174]
+    SQLITE_LOCKED_VTAB             =  518;  // SQLITE_LOCKED + (2*256) | [:L175]
+    SQLITE_BUSY_RECOVERY           =  261;  // SQLITE_BUSY + (1*256) | [:L176]
+    SQLITE_BUSY_SNAPSHOT           =  517;  // SQLITE_BUSY + (2*256) | [:L177]
+    SQLITE_CANTOPEN_NOTEMPDIR      =  270;  // SQLITE_CANTOPEN + (1*256) | [:L178]
+    SQLITE_CANTOPEN_ISDIR          =  526;  // SQLITE_CANTOPEN + (2*256) | [:L179]
+    SQLITE_CANTOPEN_FULLPATH       =  782;  // SQLITE_CANTOPEN + (3*256) | [:L180]
+    SQLITE_CANTOPEN_CONVPATH       = 1038;  // SQLITE_CANTOPEN + (4*256) | [:L181]
+    // QUIRK PRESERVED: the oracle's own inline "Not Used" note is carried, and the member with it.
+    SQLITE_CANTOPEN_DIRTYWAL       = 1294;  // SQLITE_CANTOPEN + (5*256) | Not Used | [:L182]
+    SQLITE_CORRUPT_VTAB            =  267;  // SQLITE_CORRUPT + (1*256) | [:L183]
+    SQLITE_CORRUPT_SEQUENCE        =  523;  // SQLITE_CORRUPT + (2*256) | [:L184]
+    SQLITE_READONLY_RECOVERY       =  264;  // SQLITE_READONLY + (1*256) | [:L185]
+    SQLITE_READONLY_CANTLOCK       =  520;  // SQLITE_READONLY + (2*256) | [:L186]
+    SQLITE_READONLY_ROLLBACK       =  776;  // SQLITE_READONLY + (3*256) | [:L187]
+    SQLITE_READONLY_DBMOVED        = 1032;  // SQLITE_READONLY + (4*256) | [:L188]
+    SQLITE_READONLY_CANTINIT       = 1288;  // SQLITE_READONLY + (5*256) | [:L189]
+    SQLITE_READONLY_DIRECTORY      = 1544;  // SQLITE_READONLY + (6*256) | [:L190]
+    // QUIRK PRESERVED - DO NOT "CORRECT" THIS TO 260. The oracle uses multiplier 2 and there is no
+    // multiplier-1 sibling anywhere, so 516 is right and the apparent off-by-one is the legacy's.
+    SQLITE_ABORT_ROLLBACK          =  516;  // SQLITE_ABORT + (2*256) | [:L191]
+    SQLITE_CONSTRAINT_CHECK        =  275;  // SQLITE_CONSTRAINT + (1*256) | [:L192]
+    SQLITE_CONSTRAINT_COMMITHOOK   =  531;  // SQLITE_CONSTRAINT + (2*256) | [:L193]
+    SQLITE_CONSTRAINT_FOREIGNKEY   =  787;  // SQLITE_CONSTRAINT + (3*256) | [:L194]
+    SQLITE_CONSTRAINT_FUNCTION     = 1043;  // SQLITE_CONSTRAINT + (4*256) | [:L195]
+    SQLITE_CONSTRAINT_NOTNULL      = 1299;  // SQLITE_CONSTRAINT + (5*256) | [:L196]
+    SQLITE_CONSTRAINT_PRIMARYKEY   = 1555;  // SQLITE_CONSTRAINT + (6*256) | [:L197]
+    SQLITE_CONSTRAINT_TRIGGER      = 1811;  // SQLITE_CONSTRAINT + (7*256) | [:L198]
+    SQLITE_CONSTRAINT_UNIQUE       = 2067;  // SQLITE_CONSTRAINT + (8*256) | [:L199]
+    SQLITE_CONSTRAINT_VTAB         = 2323;  // SQLITE_CONSTRAINT + (9*256) | [:L200]
+    SQLITE_CONSTRAINT_ROWID        = 2579;  // SQLITE_CONSTRAINT + (10*256) | [:L201]
+    SQLITE_NOTICE_RECOVER_WAL      =  283;  // SQLITE_NOTICE + (1*256) | [:L202]
+    SQLITE_NOTICE_RECOVER_ROLLBACK =  539;  // SQLITE_NOTICE + (2*256) | [:L203]
+    SQLITE_WARNING_AUTOINDEX       =  284;  // SQLITE_WARNING + (1*256) | [:L204]
+    SQLITE_AUTH_USER               =  279;  // SQLITE_AUTH + (1*256) | [:L205]
+    // QUIRK PRESERVED: an EXTENDED code off the SUCCESS base, so a positive non-zero value that
+    // denotes success rather than an error. Do not treat a non-zero code here as failure.
+    SQLITE_OK_LOAD_PERMANENTLY     =  256;  // SQLITE_OK + (1*256) | [:L206]
+  }
+}
+
+// ==============================================================================================
+//  SECTION 6 - THE TWO DATAWINDOW DOMAIN ENUMS
+//  --------------------------------------------------------------------------------------------
+//  Both are TOP-LEVEL rather than nested, and Section 2 records why that is principled rather
+//  than inconsistent: their legacy sources are PowerBuilder BUILT-IN enumerated literals whose
+//  trailing-bang spelling (Primary!, DataModified!) cannot be carried into protobuf at all, so no
+//  legacy spelling is at stake and the idiomatic enum-name-prefixed form is strictly better.
+// ==============================================================================================
+
+// DwBuffer - the PowerBuilder `dwbuffer` domain, in full.
+//
+// WHY THIS ENUM IS IN THIS FILE AND NOT IN persistence.v1.proto (the C-A justification, C-K).
+// The admission test for common.v1.proto is that a definition be needed by BOTH sibling protocol
+// definitions. DwBuffer passes it twice over, and the first reason is structural rather than a
+// judgement call: DbError below has a `dwbuffer`-typed field [dberrordata.srs:L7], so DbError
+// CANNOT BE DEFINED WITHOUT DwBuffer. Since DbError is shared, its field's type must be too.
+// Independently, both siblings need it on their own account - C-03's Retrieve returns a server
+// stream of buffer-shaped chunks and C-06's update path addresses rows by buffer.
+//
+// EXACTLY THREE MEMBERS, AND THERE IS NO FOURTH. Verified by counting every literal across the
+// eight in-scope legacy libraries rather than assumed from the type's name: Primary! appears 36
+// times, Filter! 18 and Delete! 2. The count is deliberately recorded because a fourth member
+// invented later would be a new capability, not a port.
+//
+// A NOTE ON DW_BUFFER_DELETE. The prefix is not decoration here: a bare value named DELETE would
+// generate an identifier that collides with the Win32 DELETE macro, which is a real hazard in
+// generated C and C++ output from this same descriptor. The prefix removes the problem entirely.
+//
+// FILTER IS NOT A "LEFTOVER" BUFFER, and consumers must not treat it as one: the legacy walks the
+// Filter buffer BACKWARDS during the identity round trip because its row order is inverted
+// relative to the source [n_cst_thread_task_sqlupdate.sru:L235-L238]. That inversion is a property
+// of the buffer, so it is a property of anything reconstructed from a payload tagged with it.
+enum DwBuffer {
+  // proto3 requires a zero first enumerator, and unlike RetCode this domain has NO natural zero -
+  // Primary!, Delete! and Filter! are three peers with no "none" among them. A sentinel is
+  // therefore REQUIRED here, and it is the same ruling as SQL_MS_* in persistence.v1.proto, not
+  // the RetCode one. UNSPECIFIED is a protocol-level "field absent", never a legacy buffer: a
+  // request carrying it is malformed, and a response must never populate it.
+  DW_BUFFER_UNSPECIFIED = 0;
+  DW_BUFFER_PRIMARY     = 1;  // Primary!  - the live rows (36 legacy uses)
+  DW_BUFFER_DELETE      = 2;  // Delete!   - rows deleted but not yet flushed (2 legacy uses)
+  DW_BUFFER_FILTER      = 3;  // Filter!   - filtered-out rows, ROW ORDER INVERTED (18 legacy uses)
+}
+
+// ItemStatus - the PowerBuilder `dwItemStatus` domain, in full.
+//
+// THE FOUR-VERSUS-THREE DECISION, AND WHY FOUR IS THE FAITHFUL CHOICE (C-K).
+// A literal census of the in-scope legacy sources finds only THREE of the four statuses named:
+// DataModified! 11 times, NewModified! 6 and NotModified! once, while bare New! NEVER APPEARS
+// literally anywhere in scope. The tempting move is therefore to carry three.
+//
+// This file carries FOUR, and the reasoning is the distinction between a TYPE'S DOMAIN and the
+// subset of it that in-scope code happens to mention. New! is a legal runtime status: the
+// DataWindow engine assigns it to a row that has been inserted but not yet edited, entirely
+// without any legacy source line having to name it. A three-member enum would therefore make some
+// real rows UNREPRESENTABLE on the wire, and a payload that cannot represent a row's actual state
+// is a lossy payload - it would force a service to either invent a substitute status or drop the
+// row. Carrying all four is faithfulness to the legacy type, not an added capability: no operation,
+// no field and no behaviour accompanies New!, only the ability to say it.
+//
+// THE ROW-STATUS CONVENTION, which is the single most surprising thing about this enum.
+// The legacy reads a ROW's status by asking for COLUMN INDEX 0:
+//     GetItemStatus(nRow, 0, Primary!)   [n_cst_thread_task_sqlupdate.sru:L160]
+//     GetItemStatus(nIndex, 0, Primary!) [:L230]   GetItemStatus(nIndex, 0, Filter!) [:L238]
+// Column 0 is NOT a real column - it means "the row itself". The same object also reads a genuine
+// per-COLUMN status two lines away, with a real column index [:L162], so both readings coexist and
+// the distinction is carried entirely by whether the index is zero. Any message in this folder that
+// pairs an ItemStatus with a column identifier must therefore preserve that convention: a column
+// identifier of 0 denotes the row's own status, not column zero's.
+enum ItemStatus {
+  // Sentinel for the same reason as DwBuffer: proto3 needs a zero first enumerator and this domain
+  // has no natural zero. NotModified! is NOT reused as zero, because "the row is unmodified" and
+  // "no status was supplied" are different statements and conflating them would lose the second.
+  ITEM_STATUS_UNSPECIFIED   = 0;
+  ITEM_STATUS_NOT_MODIFIED  = 1;  // NotModified!  - existing row, unchanged (1 legacy use)
+  ITEM_STATUS_DATA_MODIFIED = 2;  // DataModified! - existing row, edited (11 legacy uses)
+  // New! - inserted, not yet edited. NEVER named literally in scope, but a legal runtime status,
+  // so it is carried to keep the domain complete. See the four-versus-three note above.
+  ITEM_STATUS_NEW           = 3;
+  ITEM_STATUS_NEW_MODIFIED  = 4;  // NewModified!  - inserted and edited (6 legacy uses)
+}
+
+
+// ==============================================================================================
+//  SECTION 7 - THE VALUE CARRIERS
+//  --------------------------------------------------------------------------------------------
+//  The concrete messages that implement Section 1's UNIFORM CARRIER RULE. Each passes the
+//  admission test - both sibling definitions need every one of them. C-03's buffer chunks and
+//  C-04's expression variable environment carry column and variable values; C-05's query results,
+//  C-06's ConflictDetail and C-07's positional binding carry exactly the same value shapes. A
+//  value carrier defined in only one sibling would have to be duplicated in the other, and two
+//  independently-drifting definitions of "a decimal on the wire" is precisely the failure this
+//  file exists to prevent.
+//
+//  WHY EVERY NAME CARRIES A `Value` SUFFIX, WHICH IS A DELIBERATE DEVIATION FROM THE LEGACY TYPE
+//  NAMES (C-K). The obvious naming - Decimal, Date, Time, DateTime, matching Section 1's legacy
+//  column - WOULD BREAK EVERY CONSUMING SERVICE, and the mechanism is worth stating precisely so
+//  the suffix is never "tidied" away. Directory.Build.props sets ImplicitUsings, so the SDK injects
+//  `global using System;` into every project in this repository, application and test alike. A
+//  service file that also writes `using PowerFramework.Contracts.Common.V1;` and then mentions a
+//  bare `DateTime` or `Decimal` would find two candidates in scope - System.DateTime and the
+//  generated contract type - and C# reports that as CS0104 "ambiguous reference". Because
+//  TreatWarningsAsErrors is set, that is a BUILD FAILURE, not a nuisance, and it would appear in
+//  Gateway, DataServices and Persistence at once.
+//
+//  This is the same class of clash the file header flags for RetCode, but the resolution differs
+//  for a reason. RetCode's name is part of the published boundary and its counterpart is a
+//  hand-written type in this same repository, so the fix there is a using alias at the consumer.
+//  These carriers are net-new names with no legacy spelling to preserve - PowerBuilder's `dec`,
+//  `date`, `time` and `datetime` are lower-case built-in keywords, not identifiers that appear in
+//  a payload - so the cheaper and safer fix is available: choose a name that never collides. The
+//  suffix is applied UNIFORMLY, including where it is not strictly needed (DateValue, TimeValue),
+//  because a rule that holds for four types out of four is one a reader can trust, whereas a rule
+//  with exceptions invites the exceptions to be relitigated.
+
+// A decimal, carried as canonical invariant TEXT. NEVER a double - see Section 1.
+//
+// CANONICAL FORM, stated so that two encodings of one number are byte-identical, which is what a
+// golden-master comparison requires: optional leading '-', then digits, then an optional '.' and
+// further digits. No leading '+', no exponent, no thousands separator, no whitespace, and no
+// culture-dependent decimal separator ever - the separator is always '.' regardless of locale.
+// TRAILING ZEROES ARE SIGNIFICANT AND MUST BE PRESERVED, because they carry the declared scale:
+// the primary fixture's `salary decimal(2)` renders 1500 as "1500.00", and normalising that to
+// "1500" would silently change the scale the legacy declared.
+message DecimalValue {
+  string value = 1;
+}
+
+// A calendar date with no time component - the legacy `date` type, mapped by the refactor onto
+// DateOnly. Canonical form is ISO 8601 "yyyy-MM-dd", zero-padded, proleptic Gregorian.
+// This is one of THREE DISTINCT temporal messages, deliberately not one Timestamp (Section 1).
+message DateValue {
+  string value = 1;
+}
+
+// A time of day with no date component - the legacy `time` type, mapped onto TimeOnly. Canonical
+// form is "HH:mm:ss" on a 24-hour clock, with an optional ".ffffff" fractional part present only
+// when non-zero. NO time zone offset and NO 'Z' suffix: a bare time of day has no instant to
+// anchor an offset to, which is one of the two concrete reasons Timestamp cannot serve here.
+message TimeValue {
+  string value = 1;
+}
+
+// A date and time together - the legacy `datetime` type, mapped onto DateTime. Canonical form is
+// "yyyy-MM-ddTHH:mm:ss" with an optional ".ffffff" fractional part present only when non-zero.
+// UNZONED, matching the legacy, which has no time-zone concept at all: adding an offset here would
+// invent information the oracle does not have, and omitting it keeps the round trip exact.
+message DateTimeValue {
+  string value = 1;
+}
+
+// AnyValue - the legacy `any` type as a DISCRIMINATED UNION, never a stringly-typed map.
+//
+// WHY A UNION AND NOT A STRING (C-K). `any` reaches the boundary from two directions: the
+// `any`-returning macro-invocation event, and the expression variable environment, which is
+// strongly typed across SEVEN distinct scalar types (time, string, long, double, datetime, date,
+// boolean). Flattening those to strings would discard the type information that the legacy
+// coercion behaviour dispatches on - the item-change path selects its conversion by the column's
+// declared type - so a stringly-typed carrier would not merely be untidy, it would make the
+// coercion unreproducible.
+//
+// THE EXPLICIT NULL ARM IS LOAD-BEARING, NOT DEFENSIVE. PowerBuilder has null for value types and
+// the return-code predicates depend on it: null is NEITHER succeeded nor failed (Section 3). The
+// refactor's standing instruction is never to collapse null to zero, because doing so converts
+// "neither" into "succeeded". A set `is_null` therefore means "the value is SQL/PowerScript NULL",
+// which is a positive statement, and it is distinct from the whole `kind` oneof being unset, which
+// means "no value was supplied at all". Consumers must keep those two apart.
+//
+// AND NULL IS NOT THE EMPTY STRING EITHER, which is the sharper form of the same rule and the one
+// with a concrete failure attached. In the optimistic-concurrency comparison of Section 9 the
+// legacy distinguishes a null column from an empty one, so collapsing the two WOULD MATCH ROWS THE
+// LEGACY WOULD NOT - it would silently widen the WHERE clause and overwrite a row that should have
+// conflicted. `is_null = true` and `string_value = ""` are therefore different values here, and a
+// producer must never substitute one for the other. This is also why every value on the wire is an
+// AnyValue rather than a bare scalar plus a side-channel flag: the null-ness travels WITH the
+// value, so there is no way to serialize one without the other.
+//
+// int64 covers both `long` and `integer` per Section 1's widening rule, so there is no separate
+// int32 arm; a narrower arm would only create a second way to say the same thing.
+message AnyValue {
+  oneof kind {
+    // Set to true to state the value IS null. Never set it to false - to say "not null", set one of
+    // the other arms instead. This arm existing at all is what keeps null distinct from zero.
+    bool is_null = 1;
+
+    bool bool_value = 2;             // legacy boolean
+    int64 int64_value = 3;           // legacy long AND integer (widened, Section 1)
+    uint64 uint64_value = 4;         // legacy unsignedlong
+    double double_value = 5;         // legacy double/real - genuinely floating point at source
+    DecimalValue decimal_value = 6;  // legacy dec / decimal(n) - NOT double_value
+    DateValue date_value = 7;        // legacy date
+    TimeValue time_value = 8;        // legacy time
+    DateTimeValue datetime_value = 9;// legacy datetime
+    string string_value = 10;        // legacy string
+    bytes blob_value = 11;           // legacy blob
+  }
+}
+
+// ColumnValue - one column's value, tagged with how the legacy identifies that column.
+//
+// BOTH IDENTIFIERS ARE CARRIED, and neither is redundant. The legacy addresses a column by name in
+// expressions and by ordinal in the buffer and status APIs, and the two are not interchangeable at
+// a boundary: a name survives a column reorder while an ordinal does not, and an ordinal is what
+// the status APIs actually take. Carrying both lets a consumer use whichever its call site needs
+// without a lookup table it would have to keep in step.
+//
+// column_id CARRIES THE ROW-STATUS CONVENTION described on ItemStatus: a column_id of 0 denotes
+// THE ROW ITSELF, not the first column, exactly as GetItemStatus(row, 0, buffer) does. Legacy
+// column ordinals are ONE-BASED, so a real column is 1 or greater. That is stated explicitly here
+// because one-based-to-zero-based translation is the most dangerous mechanical hazard in this
+// refactor, and a reader who assumes zero-based ordinals will be wrong by one everywhere.
+// A PER-COLUMN ITEM STATUS IS CARRIED, AND IT IS BEHAVIOURALLY LOAD-BEARING RATHER THAN
+// INFORMATIONAL. The legacy reads a status at BOTH granularities from the same call, distinguished
+// only by whether the column index is zero: GetItemStatus(row, 0, buffer) for the row itself
+// [n_cst_thread_task_sqlupdate.sru:L160] and GetItemStatus(row, <realColumnIndex>, buffer) for one
+// column, two lines away at [:L162]. The per-column status is what SELECTS WHICH STATEMENT KIND IS
+// GENERATED, so a carrier that could not express it would force the update path to guess. It is
+// optional in effect - leave it ITEM_STATUS_UNSPECIFIED when only the value matters, as in a plain
+// query result - because a status is not meaningful on every column in every direction.
+message ColumnValue {
+  string column_name = 1;
+  // ONE-BASED column ordinal. 0 is reserved by the legacy convention for "the row itself".
+  int32 column_id = 2;
+  AnyValue value = 3;
+  // This COLUMN's own status, not the row's. ITEM_STATUS_UNSPECIFIED means "not supplied", which is
+  // the normal case outside the update path; the row's status lives on the containing row message.
+  ItemStatus item_status = 4;
+}
+
+
+// ==============================================================================================
+//  SECTION 8 - DbError : THE LEGACY DATABASE-ERROR STRUCTURE, MIRRORED FIELD FOR FIELD
+//  --------------------------------------------------------------------------------------------
+//  A field-for-field mirror of ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L3-L9, whose own
+//  header calls it the DBError data structure. EXACTLY FIVE FIELDS, IN THE ORACLE'S OWN ORDER:
+//
+//      long      sqldbcode    [:L4]      ->  int64     sqldbcode  = 1
+//      string    sqlerrtext   [:L5]      ->  string    sqlerrtext = 2
+//      string    sqlsyntax    [:L6]      ->  string    sqlsyntax  = 3   REDACTED, see below
+//      dwbuffer  buffer       [:L7]      ->  DwBuffer  buffer     = 4
+//      long      row          [:L8]      ->  int64     row        = 5
+//
+//  No sixth field, no reordering, no renaming. The legacy field spellings are kept verbatim rather
+//  than restyled to protobuf's preferred multi-word snake_case (sql_db_code, sql_err_text): each is
+//  already a single lower-case token and therefore already valid, and keeping them makes the
+//  correspondence to the oracle checkable at a glance, which is the whole point of a mirror.
+//
+//  DbError IS THE OnDBError PAYLOAD - not merely similar to it. The decisive evidence is that the
+//  legacy forwards the five structure fields positionally, in structure order, in one expression:
+//      event dberror;return #ParentTask.Event OnDBError(sqldbcode,sqlerrtext,sqlsyntax,buffer,row)
+//      [n_cst_thread_task_sqlbase_ds.sru:L159]
+//  Other call sites confirm the same five-positional shape, including the synthesized
+//  "no updatable table" error [n_cst_thread_task_sqlupdate.sru:L190] and the failing-command case
+//  [n_cst_thread_task_sqlcommand.sru:L110]. The structure is additionally passed as a `ref`
+//  out-parameter, `of_GetTransObject(ref transObject, ref dbErrData)` [sqlbase.sru:L187,
+//  sqlcommand.sru:L70, sqlquery.sru:L520, sqlupdate.sru:L292], so it is genuinely a carrier the
+//  caller reads back - which is exactly what makes it a response message here.
+//
+//  ================= sqlsyntax : THE ONE FIELD THAT MUST BE REDACTED =========================
+//  SHAPE CHOSEN, EXPLICITLY (C-K). Two shapes were permitted: a single REDACTED field, or a
+//  statement field plus a repeated parameter field. THIS FILE USES THE REDACTED SINGLE FIELD, and
+//  the deciding reason is that it is the only one of the two that ALSO satisfies the
+//  field-for-field five-field mirror above - splitting would have introduced a SIXTH field and
+//  broken the exact correspondence to dberrordata.srs that the rest of this section depends on.
+//  The redacted single field satisfies both requirements at once; the split satisfies only one.
+//
+//  WHY REDACTION IS REQUIRED AT ALL, mechanically rather than as a precaution. The legacy places
+//  the COMPLETE GENERATED STATEMENT, INCLUDING INTERPOLATED LITERAL VALUES, into this field - the
+//  failing command text is passed straight into the error event at
+//  [n_cst_thread_task_sqlcommand.sru:L110] - and the legacy logger performs NO redaction of any
+//  kind. Every literal in a failing statement therefore reaches whatever consumes the error.
+//
+//  THE MECHANICAL ROOT is the connection parameter string. The legacy parses `DBParm` for the
+//  DisableBind and NCharBind flags [n_cst_thread_task_sqlbase.sru:L128-L129], and DisableBind=1
+//  MEANS THE RUNTIME DOES NOT USE BIND VARIABLES - values are interpolated into the statement text
+//  as literals instead. That is not a bug in the error path; it is why the statement text contains
+//  data in the first place, and it is why a field that merely echoed it would leak whatever the
+//  failing row contained.
+//
+//  WHAT A PRODUCER MUST PUT HERE: statement text with every literal removed - parameter
+//  placeholders only, or an empty string when even the shape is sensitive. What a producer must
+//  NEVER put here: an interpolated literal, a column value, or anything derived from row data.
+//  Note that in-scope legacy call sites already pass "" for this field in most cases, so an empty
+//  value is ordinary rather than exceptional.
+//
+//  This is a NARROWING of an in-process field on a NEW boundary, not a change to an existing wire
+//  format - there was no wire format. The unredacted text remains available to the service's own
+//  diagnostics under its own controls, so nothing is lost to the operator who owns the service;
+//  only the network peer's view is narrowed. Consumers must not treat this field as reproducing the
+//  executed statement byte for byte, because deliberately it does not.
+//  ==========================================================================================
+message DbError {
+  // The driver's own numeric code, as the legacy transaction object reports it. NOTE this is NOT a
+  // RetCode: for the SQLite provider it is a SqliteResultCode, and for another provider it is that
+  // provider's code space. Three different code spaces reach this one field depending on provider,
+  // which is why it is a plain integer here and not one of this file's enums. [dberrordata.srs:L4]
+  int64 sqldbcode = 1;
+
+  // The driver's message text, verbatim. May be non-English: legacy call sites synthesize Chinese
+  // diagnostics for framework-detected conditions, for example the "no updatable table" case at
+  // [n_cst_thread_task_sqlupdate.sru:L190]. Consumers must treat this as opaque display text and
+  // must not parse it to classify the error - use sqldbcode for that. [dberrordata.srs:L5]
+  string sqlerrtext = 2;
+
+  // REDACTED STATEMENT TEXT. Placeholders only, never interpolated literals; empty is valid and
+  // common. See the sqlsyntax block above for the full rule and the DisableBind=1 mechanism that
+  // makes it necessary. [dberrordata.srs:L6]
+  string sqlsyntax = 3;
+
+  // The buffer the offending row sits in. DwBuffer is defined in this file precisely so that this
+  // field can exist here - see the DwBuffer placement note. [dberrordata.srs:L7]
+  DwBuffer buffer = 4;
+
+  // The offending row number, ONE-BASED like every legacy row ordinal. 0 means "no particular row",
+  // which is what the legacy passes for a connection- or statement-level failure that is not
+  // attributable to one row [e.g. n_cst_thread_task_sqlupdate.sru:L190]. [dberrordata.srs:L8]
+  int64 row = 5;
+}
+
+// ==============================================================================================
+//  SECTION 9 - ConflictDetail : THE OPTIMISTIC-CONCURRENCY MISMATCH PAYLOAD
+//  --------------------------------------------------------------------------------------------
+//  Carried on the gRPC `Aborted` status returned by C-06's Update, and by C-03's Update which
+//  relays it; Gateway's REST projection surfaces the same payload as HTTP 409. It lives in this
+//  file because BOTH sibling definitions reference it, which is the admission test.
+//
+//  ABORTED, NOT FAILED_PRECONDITION, and the distinction is deliberate: the operation MAY succeed
+//  if the caller re-reads and retries at a higher level, which is exactly what Aborted means and
+//  what FailedPrecondition does not. Aborted is also the canonical gRPC mapping to HTTP 409.
+//
+//  NO SILENT OVERWRITE ANYWHERE IN THE SYSTEM. This message exists so that a mismatch is always
+//  reported rather than resolved by guessing. The caller implements an explicit retry-or-surface
+//  policy; there is no last-writer-wins path and no field here that would enable one.
+//
+//  WHY BOTH CURRENT AND ORIGINAL VALUES MUST TRAVEL - the requirement comes straight from the
+//  legacy DataWindow settings and is not a design preference. The one updatable DataWindow in the
+//  repository, ws_objects/pfw.tests.pbl.src/dw_sqlite.srd, declares `updatewhere=1` and marks ALL
+//  SIX of its columns `updatewhereclause=yes`. updatewhere=1 is the "key and updateable columns"
+//  concurrency mode, so the generated WHERE clause carries the key column PLUS THE ORIGINAL VALUE
+//  OF EVERY UPDATEABLE COLUMN. A payload that carried only current values could therefore not
+//  express what the failed statement actually compared, and the caller could not tell which column
+//  moved underneath it. Hence two repeated fields per row, not one.
+//
+//  This is also why a flat rowset is insufficient anywhere in this folder: the legacy result
+//  carrier derives from a datastore, so it IS a DataWindow complete with buffers and item
+//  statuses, and the original-value shadow is part of that state rather than something
+//  recomputable from the current row.
+// ==============================================================================================
+
+// One row that failed its concurrency check.
+message ConflictRow {
+  // Which buffer the row is in. Remember the Filter buffer's row order is inverted relative to the
+  // source, so a consumer must not assume `row` counts the same way across buffers.
+  DwBuffer buffer = 1;
+
+  // ONE-BASED row ordinal within that buffer.
+  int64 row = 2;
+
+  // The row's status as the SERVER sees it now, read the legacy way with column index 0 (the
+  // row-status convention documented on ItemStatus).
+  ItemStatus item_status = 3;
+
+  // The CURRENT server-side values of the marked columns - the state a retry would be rebased onto.
+  repeated ColumnValue current_values = 4;
+
+  // The ORIGINAL values the caller believed were current: the values that formed the failed
+  // statement's WHERE clause under updatewhere=1. Comparing these against current_values is what
+  // tells a caller WHICH column changed underneath it, which is the whole diagnostic value of this
+  // message. Empty only if the caller supplied no original-value shadow, which is itself a fault.
+  repeated ColumnValue original_values = 5;
+}
+
+// The conflict payload as a whole. Repeated rows rather than a single row because one Update call
+// submits a whole changeset, so more than one row can conflict in a single failed attempt, and
+// reporting only the first would send a caller round the retry loop once per conflicting row.
+message ConflictDetail {
+  // Every row that failed its check. Never empty on an Aborted response: an Aborted with no rows
+  // would tell the caller nothing it could act on.
+  repeated ConflictRow rows = 1;
+
+  // The update table the failing statement targeted. Carried because MULTI-TABLE UPDATE FROM ONE
+  // DATAWINDOW IS A REAL LEGACY CAPABILITY - the update contract is re-derived at runtime from an
+  // ARRAY of table descriptors, not from the DataWindow's static definition - so without this a
+  // caller could not tell which of several targeted tables the conflict came from.
+  string update_table = 2;
+
+  // How many rows the failing statement expected to affect, and how many it actually matched. For
+  // the classic single-row optimistic-concurrency failure these are 1 and 0, and stating both keeps
+  // "the row changed" distinguishable from "the row was deleted" without a second round trip.
+  int64 rows_expected = 3;
+  int64 rows_matched = 4;
+}
+
