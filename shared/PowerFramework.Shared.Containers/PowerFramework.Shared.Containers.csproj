@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Shared.Containers: two container primitives and nothing else.
+        OrderedMap.cs   insertion-ordered, string-keyed, positional get(int)   (n_map.sru)
+        Vector.cs       the column-expression calculation and recursion stack  (n_vector.sru)
+
+    Shared IMPLEMENTATION, consumed in-process through a ProjectReference by DataServices, by
+    Persistence and by the sibling Containers.Tests project. The dependency arrow points only INTO
+    this project, and this project is never a cross-service channel: the one published cross-service
+    coupling in this refactor is the separate shared/PowerFramework.Contracts project. Nothing web,
+    gRPC, ASP.NET, hosting, serialization, HTTP or database belongs here.
+
+    No setting is declared below. Three decisions explain why; read the reason before "fixing" an
+    apparent omission.
+
+    1. EVERY COMMON PROPERTY IS INHERITED, NEVER RESTATED. MSBuild's directory walk-up reaches the
+       repository-root Directory.Build.props, the shared build contract no project file may restate
+       or override, and the root Directory.Packages.props supplies every version. Set there and so
+       deliberately absent here: TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings,
+       TreatWarningsAsErrors, EnableNETAnalyzers, AnalysisLevel, ManagePackageVersionsCentrally,
+       Deterministic, ContinuousIntegrationBuild, Product, Company, Copyright. RootNamespace and
+       AssemblyName are omitted too: the SDK derives both from this file's own name, which is already
+       exactly the value consumers bind to. No Directory.Build.props is added under shared/, because
+       MSBuild stops at the first one it finds and a second copy would shadow the root contract.
+
+    2. ZERO PackageReference: BOTH TYPES ARE BASE CLASS LIBRARY SUBSTITUTIONS. OrderedMap maps onto
+       System.Collections.Generic.OrderedDictionary<TKey, TValue> and Vector onto
+       System.Collections.Generic.List<T>, both shipped in the net10.0 framework reference, so no
+       third-party collection package is needed and none may be added "to be safe"; an unnecessary
+       one would drag a NuGet audit surface onto a library two services depend on. Were a package
+       ever genuinely required, its reference must stay VERSIONLESS with the version registered
+       centrally in the repository-root Directory.Packages.props.
+
+    3. ZERO ProjectReference, AS A MEASURED FACT RATHER THAN AN ASSUMPTION. Under
+       ws_objects/pfw.utility.container.pbl.src/, n_map.sru:L8 and n_vector.sru:L8 are prototype-only
+       declarations that each read native "pfw.dll", and their signatures use nothing but string,
+       any, int, ulong and boolean. Neither names another framework type, not even RetCode, so this
+       project sits at the bottom of the dependency graph and references nothing. It must NOT
+       reference PowerFramework.Shared.Kernel, tempting though that is because most sibling shared
+       libraries do: the measured dependency set is empty, and a reference added for symmetry would
+       be a false coupling and a future cycle risk. n_vector.sru:L9 mentions the sibling n_list, but
+       n_list is assigned to the deferred Documents service and has no in-scope consumer, so it is
+       neither ported nor referenced.
+
+    Also absent, each for a reason, so none is re-added: OutputType, keeping this a class library
+    since the xunit.v3 Exe requirement belongs to the sibling Tests project; GenerateDocumentationFile,
+    which under inherited TreatWarningsAsErrors would make a missing doc comment (CS1591) a build
+    error; InternalsVisibleTo, since both types are public; explicit Compile, None and Content items,
+    since the SDK globs the two flat sources; IsPackable, Version, PackageId and any other packaging
+    or assembly-metadata property, since nothing here is packaged; NoWarn or any project-wide
+    analyzer suppression, which would broaden the glob-scoped naming suppressions belonging in the
+    root .editorconfig; and any conditional PropertyGroup, custom Target or Import element, so this
+    project restores and builds standalone wherever the build is invoked from.
+
+    The legacy PowerBuilder tree is the read-only behavioural oracle: the .sru files cited above
+    specify the C# sources, are never a build input, and no item here reaches them.
+  -->
+
+</Project>

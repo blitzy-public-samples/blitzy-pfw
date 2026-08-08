@@ -1,0 +1,122 @@
+<!--
+  ================================================================================================
+  dataservices-service.slnx : the per service solution for the DataServices service.
+
+  PowerFramework .NET 10 decomposition, Phase 1. DataServices owns the DataWindow retrieval,
+  validation and update triple, the 22 event DataWindow chain and the column expression engine,
+  ported from ws_objects/pfw.datawindow.services.pbl.src/ (13 objects, zero native bindings, pure
+  PowerScript).
+
+  WHY THIS FILE EXISTS, AND WHY IT IS LOAD BEARING (constraints C-I and C-L)
+
+  The mandated per service command runs from THIS directory and names no project and no solution.
+  Chained with &&, its four invocations are: `cd services/dataservices-service`, `dotnet restore`,
+  `dotnet build -c Release`, and `dotnet test` collecting the "XPlat Code Coverage" data collector.
+
+  Every one of those resolves its target by scanning this directory for a solution. They therefore
+  work only because exactly ONE solution file lives here. Measured directly on SDK 10.0.302: with a
+  second solution file present, the bare commands do not pick one, they fail outright with
+
+      MSBUILD : error MSB1011: Specify which project or solution file to use because this folder
+      contains more than one project or solution file.
+
+  The single file rule is therefore the mechanism, not a style preference. Never add a second
+  solution file to this directory, and keep this file's name aligned with the directory name.
+
+  FORMAT: .slnx ONLY. NO .sln, AND NO .slnf.
+
+  .NET 10 tooling emits .slnx, the XML solution format, which is what this file is. The shape below
+  was established empirically against this SDK before the file was written: `dotnet new sln` emits a
+  bare `<Solution>` root, and `dotnet sln add` emits `<Project Path="..." />` children using forward
+  slash separators relative to this file's own directory. Legacy solution filters (.slnf) are
+  recorded as incompatible with the .slnx format, failing with MSB4014 during restore, build and
+  test. Do not reach for one regardless: a per service solution already scoped to two projects has
+  nothing left to filter, and every additional solution artifact courts the MSB1011 ambiguity above.
+
+  SCOPE: EXACTLY TWO PROJECTS, AND NOTHING ELSE (constraints C-A and C-D)
+
+  Constraint C-A decomposes rather than collapses, so this solution is service scoped. It must never
+  name a project under services/gateway-service/, services/persistence-service/ or
+  services/security-service/. The six shared projects are absent on purpose as well, and they are
+  not missing: they arrive transitively through the ProjectReference set of the application project
+  below, so restore and build already pull the entire closure, including
+  shared/PowerFramework.Contracts, which is the sole permitted cross service coupling. Listing them
+  here would quietly turn a service scoped solution into a partial whole repository one and forfeit
+  the C-A acceptance condition, namely that this service restores, builds and tests from a clean
+  checkout without reference to any other service's project. The root PowerFramework.slnx enumerates
+  these same two projects for whole repository builds; that overlap is intentional and neither file
+  supersedes the other.
+
+  Constraint C-D defers DesignSystem, Documents, Integration and ScriptBridge in full, so no entry
+  here names or implies any of them, and there is no placeholder project of any kind.
+
+  ONE CONSEQUENCE OF THAT SCOPING, MEASURED AND DELIBERATELY ACCEPTED
+
+  Because the six shared projects are reached only by ProjectReference and are absent from this
+  solution, a solution build does not pass its configuration down to them. MSBuild unsets the parent
+  configuration for any referenced project it cannot find in the solution configuration table, so
+  during `dotnet build -c Release` here the two projects listed below build Release while the six
+  shared projects build in their own default, Debug, and it is those Debug assemblies that get copied
+  into the application's Release output. Verified on SDK 10.0.302 by comparing assembly hashes.
+
+  This is accepted rather than worked around, on three grounds. It is inherent to a service scoped
+  solution, so the only "fix" would be to list the shared projects here, which is exactly what
+  constraint C-A forbids. The mandated command is unaffected: it still reports a clean Release build
+  with zero warnings and zero errors, the tests still run, and the coverage report is still produced.
+  And the shipped artifact is unaffected, because the container image is produced by
+  `dotnet publish -c Release` against the application project rather than by a solution build, which
+  was measured to build all six shared projects in Release. Do not "correct" this by adding projects
+  to this file.
+
+  THE TEST PROJECT ENTRY IS MANDATORY (constraint C-H)
+
+  `dotnet test` in this directory discovers tests through this solution. Drop the second entry and it
+  finds nothing to run, coverlet never emits TestResults/coverage.cobertura.xml, and the 80 percent
+  line coverage per service gate cannot be evaluated at all. That failure mode is worse than a broken
+  build, because it presents as a green run with a silently unmeasurable gate.
+
+  ENTRY ORDER
+
+  Application before tests, mirroring the dependency direction. Order carries no build semantics,
+  since MSBuild derives the graph from ProjectReference rather than from list position. Noted only so
+  a later reader is not surprised: regenerating this file with `dotnet sln add` sorts entries
+  alphabetically and would place the .Tests entry first. That is harmless, and the ordering below is
+  the intentional one.
+
+  INHERITED CONFIGURATION, DELIBERATELY NOT DUPLICATED
+
+  global.json (SDK 10.0.302, rollForward latestFeature), Directory.Build.props (net10.0, nullable
+  reference types, implicit usings, warnings promoted to errors, central package management) and
+  Directory.Packages.props (every version pin, including the two mandatory security pins) all live at
+  the repository root and reach this service by MSBuild directory walk up. No per service copy of any
+  of them exists or should be created, which is precisely why every PackageReference in this service
+  is versionless.
+
+  LEGACY ANALOGUE, FOR CONTEXT AND NOT FOR TRANSLATION
+
+  The PowerBuilder counterpart of this file is the workspace and target pair: pfw.pbw declares the
+  targets, and pfw.pbt declares a single ordered LibList whose ORDER determines symbol resolution
+  across one flat global namespace. There is no LibList analogue in .slnx and none is needed, because
+  the build graph comes from explicit project references instead of list position. The two
+  PowerBuilder build definitions ws_objects/pfw.pbl.src/project.srj and p_pfw.srj are reference for
+  build INTENT only: they contradict each other (29 versus 28 PBD lines, and a different COM vendor),
+  and both name pfw.utility.imgcodec.pbl, which exists nowhere in the repository, so neither would
+  build as written. The legacy tree remains read only and is never an edit target (constraint C-C).
+  ================================================================================================
+-->
+<Solution>
+  <!--
+    The DataServices application. Hosts the gRPC surface for contracts C-03 (DataWindowService) and
+    C-04 (ColumnExpressionService) on port 5102, plus the thin REST projection consumed only by
+    Gateway, the anonymous /health endpoint and the JWT protected /v1/ping endpoint. Its six shared
+    ProjectReference entries pull the remainder of the build closure in behind it.
+  -->
+  <Project Path="PowerFramework.DataServices/PowerFramework.DataServices.csproj" />
+
+  <!--
+    The xunit.v3 unit and service level test project (OutputType Exe, as xunit.v3 requires). It
+    references the application project above, and its coverlet.collector reference is what turns the
+    mandated `dotnet test` run into the Cobertura report that the coverage gate is measured from.
+  -->
+  <Project Path="PowerFramework.DataServices.Tests/PowerFramework.DataServices.Tests.csproj" />
+</Solution>

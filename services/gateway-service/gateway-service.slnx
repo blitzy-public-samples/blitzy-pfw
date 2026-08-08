@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  gateway-service.slnx
+
+  The per service solution for the Gateway service: the sole ingress and composition root of the
+  PowerFramework .NET 10 decomposition.
+
+  WHY THIS FILE EXISTS AT ALL
+    The mandated per service workflow is run from this directory, and every verb is invoked with no
+    solution or project argument:
+
+        cd services/gateway-service
+        dotnet restore
+        dotnet build -c Release
+        dotnet test (collecting XPlat Code Coverage)
+
+    A bare invocation resolves its target by finding exactly one solution file in the current
+    directory. This file is that solution file. Enumerating Gateway's two projects here is the
+    entire mechanism by which Gateway restores, builds and tests standalone from a clean checkout
+    with no sibling service present, which is the property that makes this service independently
+    deployable rather than a folder inside a monolith.
+
+  FORMAT IS .slnx, NOT .sln
+    .NET 10 emits the XML solution format: dotnet new sln produces a .slnx whose root element is
+    Solution and whose members are Project elements carrying a relative Path attribute. That was
+    verified against SDK 10.0.302 on the machine that authored this file rather than assumed from
+    documentation. The legacy .sln text format is not used anywhere in this repository, and the
+    required path for this file carries the .slnx extension.
+
+  NEVER ADD A SOLUTION FILTER, AND NEVER ADD A SECOND SOLUTION, TO THIS DIRECTORY
+    Do not author a .slnf solution filter here. The planning record documents legacy .slnf filters
+    failing against a .slnx format solution with MSB4014 during restore, build and test, and a
+    filter would be pointless here regardless: this solution has two members and neither of them is
+    ever the one you would want to filter out. A second solution file is worse than pointless. With
+    more than one solution in the directory the bare commands above stop working entirely and fail
+    with MSB1011, "specify which project or solution file to use because this folder contains more
+    than one project or solution file", which was reproduced deliberately on SDK 10.0.302 to confirm
+    the constraint is real rather than folklore. Exactly one solution file belongs in this
+    directory, and it is this one.
+
+  RELATIONSHIP TO THE REPOSITORY ROOT SOLUTION
+    The repository root PowerFramework.slnx enumerates every project in the refactor, including this
+    service's two. The two solutions coexist by design and neither supersedes the other: the root
+    solution is the whole estate view used for a single pass build of everything, while this one is
+    the independently buildable unit that CI and the container build exercise per service. They must
+    always name the same two Gateway project paths, so renaming or relocating either project is a
+    change to both files, plus the sibling Dockerfile, which copies and publishes these same paths
+    from a repository root build context.
+
+  EXACTLY TWO MEMBERS, AND EXACTLY THESE TWO
+
+    PowerFramework.Gateway
+      The application. Its own ProjectReference entries pull in the published contracts project and
+      the shared libraries it consumes, so those arrive transitively and are deliberately NOT listed
+      here. Solution membership is not how a project expresses a dependency, and restating the root
+      solution's list would only create a second inventory to keep in step with the first.
+
+    PowerFramework.Gateway.Tests
+      The tests, and load bearing rather than a courtesy. This project is the only producer of
+      Gateway's coverage.cobertura.xml, and that report is what the 80 percent line coverage per
+      service gate is measured from. Leave it out of this solution and a bare test run in this
+      directory discovers nothing, emits no report, and the gate cannot be evaluated at all, which
+      is a failure that reads exactly like a pass.
+
+    No sibling service project appears here. Gateway reaches DataServices, Persistence and Security
+    over the network through the published contracts, never through a project reference, because a
+    single solution spanning several services is precisely the collapsed outcome this decomposition
+    exists to avoid.
+
+    No deferred capability project appears here either. DesignSystem, Documents, Integration and
+    ScriptBridge are outside this phase and have no project, no placeholder and no empty shell
+    anywhere in this build graph. Their four reserved routes are route table metadata inside the
+    Gateway application, and nothing compiles behind them.
+
+    Both paths below are relative to this file's own directory, and neither rises above it.
+
+  NOTHING IS CONFIGURED HERE
+    No MSBuild property, no package version and no target framework appears in this file. The
+    repository root supplies all of it by MSBuild directory walk up. Directory.Build.props sets
+    net10.0, nullable reference types, implicit usings, warnings as errors and the analyzers, and
+    turns on central package management. Directory.Packages.props holds every package version,
+    including the two mandatory security pins that clear the NuGet audit advisories, and global.json
+    pins the SDK. Restating any of that here would create a second source of truth able to drift
+    this one service off a mandatory pin, which is the exact failure central package management
+    exists to prevent. For the same reason this directory carries no per service
+    Directory.Build.props, Directory.Packages.props, global.json, .editorconfig or .dockerignore.
+
+  LEGACY REFERENCE (read only: never edited, never built, never shipped)
+    The PowerBuilder workspace and target files were read as the conceptual source of the solution
+    idea and for nothing else. The workspace file lists targets in much the way a solution lists
+    projects, but the target it names loads its libraries as one flat ordered list into a single
+    global namespace where symbol resolution depends on that ordering. A solution provides the
+    opposite on purpose: independent compilation units with explicit references and no ordering
+    sensitivity. The two PowerBuilder project objects were read for build intent only and are
+    deliberately not translated, because they disagree with each other on library count and on
+    vendor, one of them embeds developer workstation absolute paths together with a retired library
+    name, and both name an image codec library that exists nowhere in the repository, so neither
+    would build as written. No path in this file points at that tree, at any compiled PowerBuilder
+    library, target or workspace, or at any native binary.
+-->
+<Solution>
+
+  <Project Path="PowerFramework.Gateway/PowerFramework.Gateway.csproj" />
+  <Project Path="PowerFramework.Gateway.Tests/PowerFramework.Gateway.Tests.csproj" />
+
+</Solution>
