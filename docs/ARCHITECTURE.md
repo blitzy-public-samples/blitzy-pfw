@@ -719,8 +719,26 @@ would fabricate a database that does not exist.
 - auto-commit is toggled on and off around the statement [`:L461`, `:L473`].
 
 The same file carries **the only DDL in the entire repository** [`:L463-L469`], creating a `COMPANY`
-table with an auto-increment integer primary key, a required text name, a required integer age, a
-fixed-width 50-character address, a real salary and a text birth field.
+table with an `INTEGER PRIMARY KEY` identifier, a required text name, a required integer age, an
+address column **declared** `CHAR(50)`, a real salary and a text birth field.
+
+Two properties of that DDL are stated precisely here rather than loosely, because both are easy to
+overstate and the entity model depends on getting them right:
+
+- **The declared `CHAR(50)` length is not enforced.** SQLite assigns a declared type containing
+  `CHAR` **TEXT affinity** and ignores the parenthesised length entirely, so the engine neither
+  truncates at 50 nor pads to 50. The address column is therefore *declared* `CHAR(50)` with TEXT
+  affinity, and a longer value round-trips intact — a fact the seeded literal `'Rich-Mond '`
+  [`:L388`], with its trailing space preserved, demonstrates directly. Calling it a fixed-width
+  50-character field would describe a constraint the engine does not apply.
+- **`INTEGER PRIMARY KEY` is a rowid alias, and the `AUTOINCREMENT` keyword is absent.** The column
+  is declared `ID INTEGER PRIMARY KEY NOT NULL` [`:L464`], which makes it an alias for the table's
+  rowid, so SQLite assigns a value automatically on an insert that omits it. That automatic
+  assignment is **not** the SQLite `AUTOINCREMENT` keyword, which the DDL never uses: `AUTOINCREMENT`
+  would additionally guarantee monotonically increasing values and create a `sqlite_sequence` entry,
+  and neither applies here. The legacy's own inline comment on that line marks it the auto-increment
+  column, and that annotation is what the DataWindow's `key=yes identity=yes` corresponds to — but
+  the mechanism is rowid assignment, not the keyword.
 
 **Path 2 — the transaction-object path.**
 
@@ -812,7 +830,7 @@ columns carry `update=yes updatewhereclause=yes` and the identifier column is ad
 | Column | DataWindow declares | DDL declares | Nature of the disagreement | Locators |
 | --- | --- | --- | --- | --- |
 | `name` | `char(100)` | `TEXT NOT NULL` — **unbounded** | The DataWindow imposes a 100-character bound on a column the DDL leaves unbounded, so the DataWindow is **stricter** than the schema | `dw_sqlite.srd:L9`, `w_test_sqlite.srw:L465` |
-| `address` | `char(200)` | `CHAR(50)` | The DataWindow permits 200 characters where the schema permits 50, so here the DataWindow is **looser** than the schema — the opposite direction to `name` | `dw_sqlite.srd:L11`, `w_test_sqlite.srw:L467` |
+| `address` | `char(200)` | `CHAR(50)` — **declared, with TEXT affinity; the length is not enforced** | The DataWindow bounds the column at 200 characters where the DDL *declares* 50 but constrains nothing, so the two declarations disagree while only the DataWindow's bound has any effect — the opposite direction to `name`, and the only row where both oracles name a finite width | `dw_sqlite.srd:L11`, `w_test_sqlite.srw:L467` |
 | `salary` | `decimal(2)` | `REAL` | A fixed two-place decimal declared over a floating-point column | `dw_sqlite.srd:L12`, `w_test_sqlite.srw:L468` |
 | `birth` | `date` | `TEXT` | A date type declared over a text column, so the date format is a convention rather than a constraint | `dw_sqlite.srd:L13`, `w_test_sqlite.srw:L469` |
 
@@ -829,9 +847,20 @@ defect rather than preserve it
 
 Two further facts about the same DDL belong with the table, because they are part of the same
 comparison. The DDL marks only `ID`, `NAME` and `AGE` as `NOT NULL` [`w_test_sqlite.srw:L464-L466`],
-leaving `ADDRESS`, `SALARY` and `BIRTH` nullable [`:L467-L469`]; and the identifier column is
-`INTEGER PRIMARY KEY NOT NULL` with an inline comment marking it the auto-increment column
-[`:L464`], which is what the DataWindow's `key=yes identity=yes` corresponds to.
+leaving `ADDRESS`, `SALARY` and `BIRTH` nullable [`:L467-L469`]; and the identifier column is declared
+`INTEGER PRIMARY KEY NOT NULL` [`:L464`], which makes it a **rowid alias** whose value SQLite assigns
+automatically on an insert that omits it — the mechanism behind the legacy's own inline "auto-increment
+column" annotation on that line, and what the DataWindow's `key=yes identity=yes` corresponds to.
+**The SQLite `AUTOINCREMENT` keyword is not used**, so the stronger guarantees it would add — strictly
+monotonic values and a `sqlite_sequence` row — are absent, as §8.1 sets out.
+
+One consequence for the `address` row above is worth stating separately, because it is the difference
+between a divergence and a bug: since the declared `CHAR(50)` constrains nothing, **the disagreement is
+between two descriptions of one column and never a runtime truncation.** A value longer than 50
+characters is stored and returned intact by the legacy and must be by this port too. `CompanyEntity.cs`
+records the same ruling at its `Address` property, and cites the trailing space in the seeded literal
+`'Rich-Mond '` [`w_test_sqlite.srw:L388`] as the characterization evidence that the column is never
+padded or trimmed.
 
 ### 8.5 The SQL-injection exposure, mechanically explained
 

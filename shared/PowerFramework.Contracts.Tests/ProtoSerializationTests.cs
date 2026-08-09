@@ -326,17 +326,22 @@ public sealed class ProtoSerializationTests
         // introduce representation error into a concurrency comparison. It also carries `is_null`
         // explicitly, which the tri-state algebra depends on: PowerBuilder has null for value types, and
         // collapsing null to zero would convert "neither succeeded nor failed" into "succeeded".
+        // The ordinal literals are written `5L` rather than `5`, and the suffix is deliberate rather than
+        // decorative. `ColumnValue.column_id` is `int64` because the legacy produces the ordinal as
+        // `Long(dwo.ID)`, so the generated property is a `long` and every sibling column identifier in the
+        // contract folder is one too. Spelling the literal as a long is what makes a future narrowing back
+        // to `int32` visible HERE, at a call site, rather than only as a cast somewhere downstream.
         detail.Rows[0].CurrentValues.Add(new ColumnValue
         {
             ColumnName = "salary",
-            ColumnId = 5,
+            ColumnId = 5L,
             Value = new AnyValue { StringValue = "5000.00" },
         });
 
         detail.Rows[0].OriginalValues.Add(new ColumnValue
         {
             ColumnName = "salary",
-            ColumnId = 5,
+            ColumnId = 5L,
             Value = new AnyValue { StringValue = "4000.00" },
         });
 
@@ -362,9 +367,10 @@ public sealed class ProtoSerializationTests
             Assert.Single(row.CurrentValues).Value.StringValue);
 
         // AND THE COLUMN IS IDENTIFIED BY BOTH NAME AND ONE-BASED ORDINAL, because the legacy addresses
-        // columns both ways and a conflict must be resolvable by either.
+        // columns both ways and a conflict must be resolvable by either. The expectation is typed `long`
+        // explicitly, matching the field's int64 width.
         Assert.Equal("salary", Assert.Single(row.CurrentValues).ColumnName);
-        Assert.Equal(5, Assert.Single(row.CurrentValues).ColumnId);
+        Assert.Equal(5L, Assert.Single(row.CurrentValues).ColumnId);
     }
 
     [Fact]

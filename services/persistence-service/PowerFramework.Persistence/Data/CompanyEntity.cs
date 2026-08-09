@@ -321,10 +321,13 @@ namespace PowerFramework.Persistence.Data
         /// FIRST NAMED DIVERGENCE, PRESERVED. The DataWindow declares this same column as
         /// <c>char(200)</c> [dw_sqlite.srd:L11] against the DDL's <c>CHAR(50)</c>
         /// [w_test_sqlite.srw:L467] - a four-fold disagreement, and the one that looks most like
-        /// a bug. It is not a bug; it is one of the three divergences this port is required to
-        /// preserve. The property is therefore <c>string?</c> with NO length constraint of any
-        /// kind: no <c>MaxLength</c>, no <c>StringLength</c>, no <c>HasMaxLength</c> in the
-        /// sibling configuration, and no trimming or padding anywhere.
+        /// a bug. It is not a bug; it is the first of the THREE ORIGINALLY NAMED divergences - this
+        /// one, <see cref="Salary"/> and <see cref="Birth"/> - and one of the FOUR this port
+        /// preserves in total, the fourth being <see cref="Name"/>, which the migration plan does
+        /// not name and which the file header records for exactly that reason. The property is
+        /// therefore <c>string?</c> with NO length constraint of any kind: no <c>MaxLength</c>, no
+        /// <c>StringLength</c>, no <c>HasMaxLength</c> in the sibling configuration, and no trimming
+        /// or padding anywhere.
         /// </para>
         /// <para>
         /// The nuance that makes the ruling safe, and that must not be misstated: SQLite DOES NOT

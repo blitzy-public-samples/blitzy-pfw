@@ -873,7 +873,18 @@ message AnyValue {
 message ColumnValue {
   string column_name = 1;
   // ONE-BASED column ordinal. 0 is reserved by the legacy convention for "the row itself".
-  int32 column_id = 2;
+  //
+  // int64, NOT int32, and the width is fixed by Section 1's rule rather than chosen here. The legacy
+  // produces this ordinal as `Long(dwo.ID)` - PowerBuilder `long` - at every site that reads it
+  // [ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L190, :L219, :L220, :L233;
+  // n_cst_dwsvc_columnexp.sru:L216], and Section 1 maps legacy `long` onto int64. Every sibling
+  // identifier in this folder already does so - IdentityColumnData.identity_column_id below,
+  // dataservices.v1.DwObjectRef.id, ColumnSort.column_id and CalcResult.column_id - so an int32 here
+  // was a silent DRIFT rather than a narrowing anybody decided on: the generated C# gave this one
+  // field an `int` while every identifier beside it got a `long`, which is precisely the kind of
+  // divergence Section 1 exists to prevent, and it would have surfaced as a cast at every consumer
+  // that moved a column id between the two.
+  int64 column_id = 2;
   AnyValue value = 3;
   // This COLUMN's own status, not the row's; the row's status lives on the containing row message.
   //

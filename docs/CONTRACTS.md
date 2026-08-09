@@ -2046,17 +2046,36 @@ is treated as success, not as an error** [`:L233`] — a "nothing found" outcome
 | 5 | **`logpass`** | **Write-only. Never echoed in a response, never logged.** See below |
 | 6 | `dbparm` | Carried, and it carries the two connection flags of [§11.4](#114-the-two-connection-parameter-flags) |
 | 7 | `lock` | Carried |
-| 8 | `autocommit` | Carried |
-| 9 | `userparm` | Carried |
+| 8 | `autocommit` | Carried — but **not moved by either default accessor**; see the seven-of-nine note below. It is also **force-cleared at the task level**, `_transData.AutoCommit = false` [`n_cst_thread_task_sqlbase.sru:L119`], so a descriptor's value does not survive into a task. Per-statement commit policy is C-07's `AutoCommitMode`, and direct control of the transaction object's own flag is C-08's `SetAutoCommit` |
+| 9 | `userparm` | Carried — but, like `autocommit`, **not moved by either default accessor**; see the seven-of-nine note below |
 
 > **The request side carries all nine fields. The RESPONSE side is a different message that
 > structurally forbids three of them**, and the difference is deliberate: `GetTransactionData`
 > returns a *view*, not a mirror.
 
-This is a deliberate narrowing, and the honest statement of it matters. **The legacy in-process
-accessor round-trips the whole descriptor in both directions** — it is read in at
-`n_cst_thread_trans.sru:L349` and written back out at `:L414`. On a wire, echoing any of the three
-fields below would place credential material in a response body and in every recording of one.
+This is a deliberate narrowing, and the honest statement of it matters — which means being precise
+about what the legacy accessors actually move. **The two default accessors each copy SEVEN of the nine
+fields, not all nine.** `of_settransdata` [`n_cst_thread_trans.sru:L343-L352`] and `of_gettransdata`
+[`:L402-L416`] both move `dbms`, `servername`, `database`, `logid`, `logpass`, `dbparm` and `lock`, and
+**touch neither `autocommit` nor `userparm`**. The request side of this contract still carries all nine,
+because it is the *structure* that is mirrored and a consumer setting `autocommit` through the
+descriptor is expressing something the structure can hold — the asymmetry is recorded so nobody
+"discovers" it later and deletes two fields to match the accessors. `persistence.v1.proto` states the
+same asymmetry at `TransactionDescriptor`.
+
+Two consequences follow, and they pull in opposite directions:
+
+- **`logpass` genuinely does round-trip, which is why the narrowing is needed at all.** It is one of the
+  seven: read in at `n_cst_thread_trans.sru:L349` and written back out at `:L414`. On a wire, echoing
+  any of the three fields below would place credential material in a response body and in every
+  recording of one.
+- **A subclass may still populate what the default accessor does not.** `of_gettransdata` fires
+  `Event OnGetTransData(ref data, ref errInfo)` before copying anything [`:L404`], and that override
+  receives the structure by reference — so an application-supplied handler can fill `autocommit`,
+  `userparm`, or any other field, and when it returns `1` the seven-field copy is skipped entirely
+  [`:L404-L407`]. The response-side reservations below therefore have to hold against a populated
+  structure as well as against the default path, which is precisely why they are structural rather than
+  a rule about what the default accessor happens to write.
 
 | Slot | Field forbidden on the response | What it can contain |
 | --- | --- | --- |

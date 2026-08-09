@@ -1640,16 +1640,41 @@ message UpdateRequest {
   // shadow is not optional under `updatewhere=1`.
   repeated DataWindowRow rows = 3;
 
-  // `AcceptText` before submitting, matching the legacy update call's first argument.
-  bool accept_text = 4;
-
-  // Reset the modification flags after a successful update.
+  // ========== THE UPDATE FLAGS ARE NOT PARAMETERS. THE LEGACY FIXES THEM, SO THIS CONTRACT
+  //            REMOVES THEM RATHER THAN PUBLISHING A CHOICE THE ORACLE DOES NOT OFFER ==========
+  // The legacy update call is a single literal, with no argument reaching it from any caller:
   //
-  // THE LEGACY PASSES FALSE, DELIBERATELY, so the CALLER OWNS THE BUFFER STATE AFTERWARDS. The
-  // default here is therefore false, and a consumer that sets it true is asking for behaviour the
-  // legacy does not exhibit. Reproduced as the legacy's value rather than as the value that looks
-  // tidier.
-  bool reset_flags = 5;
+  //     rtCode = Data.Update(true,false)   [n_cst_thread_task_sqlupdate.sru:L204]
+  //
+  // accept-text TRUE and reset-flag FALSE, always, on every update the framework performs. Neither
+  // value is read from a setting, a task field, or a parameter anywhere in the update task, so there
+  // is no legacy behaviour in which either differs. The server therefore APPLIES THE PAIR
+  // UNCONDITIONALLY: it accepts the edit text before submitting, and it NEVER resets the
+  // modification flags, so THE CALLER OWNS THE BUFFER STATE AFTERWARDS.
+  //
+  // WHY THE EARLIER `bool accept_text = 4` AND `bool reset_flags = 5` WERE WRONG, AND WHY REMOVING
+  // THEM IS THE FIX RATHER THAN DOCUMENTING THEM. Both were plain proto3 bools, whose default is
+  // FALSE, and both failure modes are silent:
+  //   * an OMITTED accept_text read as false, which SKIPS AcceptText - so an edit still sitting in
+  //     the edit control would never reach the buffer, and the update would submit stale values while
+  //     reporting success. The legacy cannot do this, and the wrong behaviour was the DEFAULT one.
+  //   * reset_flags = true DESTROYS THE STATE OPTIMISTIC CONCURRENCY IS BUILT ON. Resetting clears
+  //     every row and column item status and discards the original-value shadow, and `updatewhere=1`
+  //     on the sole updatable fixture compares the key column PLUS the original values of all six
+  //     marked columns [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14]. A caller that reset would
+  //     silently lose the ability to detect a conflict at all - the exact opposite of this contract's
+  //     no-silent-overwrite guarantee below.
+  //
+  // THE SLOTS ARE RESERVED BY NUMBER AND BY NAME, WHICH IS ENFORCEMENT RATHER THAN ADVICE. A comment
+  // asking servers to ignore two fields is the kind of rule a future edit forgets, and forgetting it
+  // is invisible. A reserved slot cannot be reoccupied without protoc objecting, and reserving the
+  // NUMBER as well as the name is what makes that durable: the wire hazard is the number, since an
+  // old client's `accept_text` would deserialize into whatever later took slot 4. This is the same
+  // structural device `persistence.v1.proto` uses for the write-only `logpass` - state the guarantee
+  // in the schema, not in prose a caller might not read.
+  reserved 4, 5;
+  reserved "accept_text";
+  reserved "reset_flags";
 }
 
 // Response to Update.

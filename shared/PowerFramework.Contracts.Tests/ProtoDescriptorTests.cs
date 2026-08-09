@@ -1120,9 +1120,180 @@ public sealed class ProtoDescriptorTests
                             $"{message.FullName}.{field.Name} names key material. Raw key material must "
                                 + "never cross the wire; callers pass an opaque key reference that "
                                 + "Security resolves against its configured key store.");
-                        }
+                    }
                 }
             }
         }
+    }
+
+    // ==============================================================================================
+    //  CROSS-CONTRACT SCALAR CONSISTENCY, PRESENCE, AND THE FIXED UPDATE PAIR
+    //  --------------------------------------------------------------------------------------------
+    //  Three guards over properties that are stated in the protocol definitions' comments and were
+    //  previously true only by inspection. Each one failed silently before it was asserted: a width
+    //  drift produced a working build with one `int` among a family of `long`s, a missing presence bit
+    //  made an omitted field indistinguishable from a deliberate zero, and a published pair of flags
+    //  offered callers behaviour the oracle does not have. None of the three is reachable through a
+    //  serialization round trip, which is why they are asserted against the descriptors directly.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Every column identifier across the three protocol definitions is <c>int64</c>.
+    /// </summary>
+    /// <remarks>
+    /// The legacy produces a column ordinal as <c>Long(dwo.ID)</c> - PowerBuilder <c>long</c> - at every
+    /// site that reads one [<c>se_cst_dw.sru:L190</c>, <c>:L219</c>, <c>:L220</c>, <c>:L233</c>;
+    /// <c>n_cst_dwsvc_columnexp.sru:L216</c>], and <c>common.v1.proto</c>'s normative scalar rule maps
+    /// legacy <c>long</c> onto <c>int64</c>. One field once diverged to <c>int32</c>, which no compiler
+    /// could catch because each file compiles independently: the generated C# simply gave that one field
+    /// an <c>int</c> while every identifier beside it got a <c>long</c>. This asserts the family
+    /// together, so a future narrowing of any member fails here rather than surfacing as a cast at a
+    /// consumer.
+    /// </remarks>
+    [Fact]
+    public void EveryColumnIdentifierFieldIsInt64SoTheFamilyCannotDriftApart()
+    {
+        // Message names are dotted where the contract nests - `ColumnSortState.ColumnSort` is declared
+        // inside `ColumnSortState` - and the path is walked by ResolveMessage below rather than handed to
+        // FileDescriptor.FindTypeByName, which returns null for any name containing a dot and would make
+        // a nested member silently unverifiable.
+        (FileDescriptor File, string Message, string Field)[] identifiers =
+        [
+            (Common, "ColumnValue", "column_id"),
+            (Common, "IdentityColumnData", "identity_column_id"),
+            (DataServices, "ColumnSortState.ColumnSort", "column_id"),
+            (DataServices, "CalcResult", "column_id"),
+            (DataServices, "DwObjectRef", "id"),
+        ];
+
+        foreach ((FileDescriptor file, string messageName, string fieldName) in identifiers)
+        {
+            MessageDescriptor? message = ResolveMessage(file, messageName);
+
+            Assert.True(
+                message is not null,
+                $"Message '{messageName}' was not found in {file.Name}. The column-identifier family "
+                    + "cannot be checked for consistency if one of its members has been renamed.");
+
+            FieldDescriptor? field = message!.FindFieldByName(fieldName);
+
+            Assert.True(
+                field is not null,
+                $"{messageName}.{fieldName} was not found in {file.Name}. The column-identifier family "
+                    + "cannot be checked for consistency if one of its members has been renamed.");
+
+            Assert.Equal(FieldType.Int64, field!.FieldType);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a possibly-nested message by walking a dot-separated descriptor path.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="FileDescriptor.FindTypeByName{T}(string)"/> rejects any name containing a dot outright,
+    /// so a nested message cannot be reached through it at all. Walking <see
+    /// cref="MessageDescriptor.NestedTypes"/> segment by segment is what makes a nested declaration
+    /// assertable, and returning null rather than throwing lets each caller phrase its own failure
+    /// message.
+    /// </remarks>
+    private static MessageDescriptor? ResolveMessage(FileDescriptor file, string path)
+    {
+        string[] segments = path.Split('.');
+
+        MessageDescriptor? current = file.FindTypeByName<MessageDescriptor>(segments[0]);
+
+        foreach (string segment in segments.Skip(1))
+        {
+            current = current?.NestedTypes
+                .FirstOrDefault(nested => nested.Name.Equals(segment, StringComparison.Ordinal));
+        }
+
+        return current;
+    }
+
+    /// <summary>
+    /// The liveness-cache window has real presence, so absence is distinguishable from explicit zero.
+    /// </summary>
+    /// <remarks>
+    /// The field carries a three-way rule: absent means "use the configured value, which defaults to the
+    /// legacy 10000 ms" [<c>n_cst_thread_trans.sru:L198</c>], present and non-positive means "always
+    /// probe", and present and positive means "use this window". A plain proto3 <c>int64</c> collapses the
+    /// first two - its default is zero and an omitted field is indistinguishable from an explicit zero -
+    /// so a caller that simply did not set the field would silently disable the cache the legacy has.
+    /// That divergence is observable only through the <c>probed</c> flag on <c>IsConnectedResponse</c>,
+    /// which is the signal a caller is least likely to assert on, so the guarantee is asserted here
+    /// instead.
+    /// </remarks>
+    [Fact]
+    public void TheLivenessCacheWindowHasExplicitPresenceSoAbsenceIsNotAnExplicitZero()
+    {
+        FieldDescriptor? window = Message(Persistence, "PoolKeepAliveSettings")
+            .FindFieldByName("liveness_cache_window_ms");
+
+        Assert.True(window is not null, "PoolKeepAliveSettings.liveness_cache_window_ms was not found.");
+        Assert.Equal(FieldType.Int64, window!.FieldType);
+
+        // THE ASSERTION THAT MATTERS. `HasPresence` is what generates HasLivenessCacheWindowMs, and it is
+        // the only way the three-way rule above becomes expressible on the wire.
+        Assert.True(
+            window.HasPresence,
+            "liveness_cache_window_ms must be declared proto3 `optional`. Without presence, an omitted "
+                + "field and an explicit zero are the same bytes, and the contract assigns them OPPOSITE "
+                + "meanings - the configured 10000 ms window versus never caching at all.");
+
+        // AND ITS SIBLINGS DELIBERATELY DO NOT HAVE PRESENCE, because neither assigns a distinct meaning
+        // to absence: keep_alive off is off, and the expire-seconds field carries the legacy's own
+        // "non-positive means use the default" convention [n_cst_thread_trans_pool.sru:L78-L79], where
+        // absence and zero genuinely coincide. Asserting the negative keeps `optional` a deliberate
+        // signal rather than something sprinkled across the message.
+        foreach (string sibling in (string[])["keep_alive", "keep_alive_expire_seconds", "transaction_class"])
+        {
+            FieldDescriptor? field = Message(Persistence, "PoolKeepAliveSettings").FindFieldByName(sibling);
+            Assert.True(field is not null, $"PoolKeepAliveSettings.{sibling} was not found.");
+            Assert.False(field!.HasPresence);
+        }
+    }
+
+    /// <summary>
+    /// The DataWindow update request publishes no accept-text or reset flag, and reserves both slots.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The legacy update call is a single literal - <c>Data.Update(true,false)</c> at
+    /// <c>n_cst_thread_task_sqlupdate.sru:L204</c> - with no argument reaching it from any caller, so
+    /// there is no legacy behaviour in which either value differs. Publishing them as plain proto3 bools
+    /// offered a choice the oracle does not have, and both wrong answers were silent: an omitted
+    /// accept-text defaults to false and would SKIP AcceptText, submitting stale values while reporting
+    /// success; and a reset would clear the item statuses and the original-value shadow that
+    /// <c>updatewhere=1</c> compares across all six marked columns
+    /// [<c>dw_sqlite.srd:L8-L14</c>], removing the ability to detect a conflict at all.
+    /// </para>
+    /// <para>
+    /// Both halves are asserted. The wire fact - that nothing occupies slot 4 or 5 - is what matters at
+    /// runtime. The source fact - that both numbers and both names are <c>reserved</c> - is what stops a
+    /// later field being GIVEN slot 4, which would make the wire assertion pass while the hazard
+    /// returned, because an old client's <c>accept_text</c> byte would deserialize into it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheUpdateRequestPublishesNoUpdateFlagsAndPermanentlyReservesBothSlots()
+    {
+        MessageDescriptor request = Message(DataServices, "UpdateRequest");
+
+        FieldDescriptor[] fields = [.. request.Fields.InDeclarationOrder()];
+        string[] names = [.. fields.Select(static field => field.Name)];
+
+        Assert.DoesNotContain("accept_text", names);
+        Assert.DoesNotContain("reset_flags", names);
+
+        // Exactly the three fields that carry data, and nothing else.
+        Assert.Equal(["datawindow_handle", "session_id", "rows"], names);
+
+        int[] numbers = [.. fields.Select(static field => field.FieldNumber)];
+        Assert.DoesNotContain(4, numbers);
+        Assert.DoesNotContain(5, numbers);
+
+        AssertReservationDeclared("dataservices.v1.proto", "UpdateRequest", "4, 5", "accept_text");
+        AssertReservationDeclared("dataservices.v1.proto", "UpdateRequest", "4, 5", "reset_flags");
     }
 }

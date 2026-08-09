@@ -433,12 +433,35 @@ message SqlClauseSpec {
   // Legacy type is `integer`, which is 16-bit at source; int32 per the scalar rule's widening.
   int32 select_index = 1;
 
-  // How the clause combines with what is already there. SQL_MS_UNSPECIFIED is rejected with
-  // E_INVALID_ARGUMENT and is never treated as SQL_MS_REPLACE - see section 1.
+  // How the clause combines with what is already there.
   //
-  // Legacy parameter is `long ms`. Modelled as the named enum rather than a bare int64 so an
-  // out-of-range value is unrepresentable instead of merely undetected: recall the legacy performs
-  // no validation of its own here.
+  // Legacy parameter is `long ms`. Modelled as the named enum rather than a bare int64 so the DOMAIN
+  // IS DOCUMENTED at the point of use and a reader does not have to go looking for what 1, 2 and 3
+  // mean.
+  //
+  // ====== THE ENUM DOCUMENTS THE DOMAIN. IT DOES NOT CONSTRAIN THE WIRE. VALIDATE ANYWAY. =======
+  // A proto3 enum field is OPEN, not closed. An unrecognised numeric value is not rejected by the
+  // parser and is not folded to zero: it is preserved and handed to the application as the raw number,
+  // reachable through the generated type's underlying integer. So a request carrying modify_style = 99,
+  // or -1, or 0, arrives intact and deserializes without error. Naming the values buys documentation,
+  // never enforcement, and a reader who assumes otherwise will omit the check below.
+  //
+  // THE SERVER MUST THEREFORE REJECT EXPLICITLY, BEFORE ANY CLAUSE TEXT IS APPLIED: every numeric
+  // value other than SQL_MS_REPLACE (1), SQL_MS_APPEND (2) and SQL_MS_PREPEND (3) is refused with
+  // common.v1.RetCode.Value.E_INVALID_ARGUMENT and gRPC StatusCode.InvalidArgument. SQL_MS_UNSPECIFIED
+  // (0) is refused by that same rule and is NEVER treated as SQL_MS_REPLACE - it is a proto3 mechanical
+  // artifact and not a legacy constant, as section 1 records.
+  //
+  // THE LEGACY OFFERS NO VALIDATION TO COPY, WHICH IS WHY THIS IS DEFINED RATHER THAN INHERITED. The
+  // setters guard only the index and the emptiness of the clause - `if selectIndex <= 0 or clause = ""`
+  // [n_cst_thread_task_sqlquery.sru:L271, :L288] - and then dispatch on `ms` with no default arm, so an
+  // unrecognised style silently modifies nothing in the legacy. Defining the rejection narrows the
+  // contract with a defined error instead of widening it with a guess.
+  //
+  // AND THE CHECK IS SECURITY-RELEVANT, NOT MERELY TIDY, because of where it sits: this is the
+  // raw-clause seam described below. Whatever validation a server performs on the clause text is
+  // selected by this field, so a value that escapes the domain must be refused at the boundary rather
+  // than reaching a code path chosen by elimination.
   SqlModifyStyle modify_style = 2;
 
   // The clause text, WITHOUT its leading keyword - the legacy passes the body to the parser's
@@ -1837,14 +1860,17 @@ message ConnectionParameterFlags {
 //
 // ============ THREE CLOCK READS ARE THE DETERMINISM SEAM, AND A PARITY TEST NEEDS ALL THREE =====
 // A golden-master comparison requires repeatability, and a non-deterministic value must be masked from
-// BOTH the master and the candidate. Three reads must therefore be substitutable:
-//   1. the pool's idle start time                       [n_cst_thread_trans_pool.sru:L97]
-//   2. the last-successful-connection stamp             [:L107, :L212]
-//   3. THE LIVENESS CACHE, which is the subtle one      [:L198]
+// BOTH the master and the candidate. Three reads must therefore be substitutable, and THEY DO NOT ALL
+// LIVE IN THE SAME LEGACY FILE - each is named in full here rather than left to the `[:Lnnn]` shorthand,
+// because the shorthand would carry the pool file across all three and two of them are not in it:
+//   1. the pool's idle start time              [n_cst_thread_trans_pool.sru:L97]
+//   2. the last-successful-connection stamp    [n_cst_thread_trans.sru:L107, n_cst_thread_trans.sru:L212]
+//   3. THE LIVENESS CACHE, the subtle one      [n_cst_thread_trans.sru:L198]
 // The third reports a connection as CONNECTED WITHOUT PROBING IT when the last success was recent -
-// `if CPU() - _nLastConnOK < 10000 then return true` [:L198], with the stamp typed unsignedlong [:L68].
-// THAT IS OBSERVABLE THROUGH THE ABSENCE OF A PROBE, so a test that does not control the clock cannot
-// reproduce it. Hence the window is a FIELD here and not a constant.
+// `if CPU() - _nLastConnOK < 10000 then return true` [n_cst_thread_trans.sru:L198], with the stamp
+// declared `ulong _nLastConnOK` on the transaction object itself [n_cst_thread_trans.sru:L68]. THAT IS
+// OBSERVABLE THROUGH THE ABSENCE OF A PROBE, so a test that does not control the clock cannot reproduce
+// it. Hence the window is a FIELD here and not a constant.
 // ==========================================================================================
 message PoolKeepAliveSettings {
   // Whether a connection is parked rather than closed when its reference count reaches zero. The
@@ -1868,10 +1894,30 @@ message PoolKeepAliveSettings {
   string transaction_class = 3;
 
   // THE LIVENESS-CACHE WINDOW IN MILLISECONDS - the seam for the third clock read above. The legacy
-  // hardcodes 10000 [:L198]; the contract carries it so a deterministic test can set it to zero and
-  // force an actual probe. Zero or negative means "always probe", which is the behaviour a parity run
-  // wants; unset leaves the server's configured value, which defaults to the legacy 10000.
-  int64 liveness_cache_window_ms = 4;
+  // hardcodes 10000 [n_cst_thread_trans.sru:L198]; the contract carries it so a deterministic test can
+  // set it to zero and force an actual probe.
+  //
+  //     ABSENT           -> use the server's configured value, which DEFAULTS TO THE LEGACY 10000 ms
+  //     PRESENT AND <= 0 -> ALWAYS PROBE; never answer from the cache. This is what a parity run wants
+  //     PRESENT AND  > 0 -> use this window instead of the configured one
+  //
+  // ====== DECLARED proto3 `optional`, BECAUSE THE THREE-WAY RULE ABOVE IS OTHERWISE UNSAYABLE ======
+  // A plain proto3 int64 has no presence: the default is 0 and an OMITTED field is indistinguishable
+  // from an EXPLICIT ZERO on the wire. Under the rule above those are the two OPPOSITE ends of the
+  // range - omitted means "use the legacy 10000 ms window", explicit zero means "never cache, probe
+  // every time" - so without presence a caller that simply did not set the field would silently get
+  // probe-every-time, disabling the cache the legacy actually has. That is a behavioural change
+  // introduced by a wire-encoding detail, which is exactly what C-B forbids, and it would have been
+  // INVISIBLE: the responses would still be correct, only the `probed` flag on IsConnectedResponse
+  // would differ, which is the one signal a caller is least likely to be asserting on.
+  //
+  // `optional` generates HasLivenessCacheWindowMs and ClearLivenessCacheWindowMs, so the server reads
+  // presence first and the value second, and all three arms of the rule become expressible. The
+  // sibling fields need no presence because none of them assigns a distinct meaning to absence:
+  // keep_alive off is off, and the expire-seconds field carries its own "non-positive means use the
+  // default" convention FROM THE LEGACY [n_cst_thread_trans_pool.sru:L78-L79], where absence and zero
+  // genuinely do coincide.
+  optional int64 liveness_cache_window_ms = 4;
 }
 
 // ==============================================================================================
@@ -2126,12 +2172,32 @@ message GetTransactionDataResponse {
 
 message SetTransactionAutoCommitRequest {
   SessionHandle session = 1;
-  // The session-level autocommit flag [:L88 accessor, applied through the descriptor at :L354].
+  // The session-level autocommit flag.
   //
-  // A PLAIN BOOLEAN, AND CORRECTLY SO: this is the transaction object's own flag, which is genuinely
-  // two-valued. It is NOT C-07's three-valued per-statement mode, and the two are not the same setting
-  // wearing different types - AutoCommitMode selects a per-statement STRATEGY, one arm of which
-  // manipulates this flag temporarily [n_cst_thread_task_sqlcommand.sru:L88-L90, :L96].
+  // ====== THIS RPC IS THE NEW BOUNDARY'S EXPLICIT DIRECT CONTROL OF THAT FLAG (C-K) ======
+  // `AutoCommit` is not a framework member at all: it is the INHERITED PowerBuilder `transaction`
+  // built-in property, and `n_cst_thread_trans.sru:L4` declares the class `from transaction`. In
+  // process it is therefore read and written by direct property access rather than through any
+  // accessor - READ at [:L185] and [:L240] to fail a rollback or a commit while autocommit is on, and
+  // at [:L371] and [:L376] inside of_autocommit; WRITTEN directly at
+  // [n_cst_thread_task_sqlcommand.sru:L89, :L96, :L106] as the AC_NATIVE arm toggles it around a
+  // statement. Across a network boundary a property assignment has no representation, so the setter
+  // has to become an RPC of its own. That is what this is: a net-new operation the boundary requires,
+  // not a projection of a legacy function.
+  //
+  // TWO THINGS IT IS DELIBERATELY NOT, BECAUSE BOTH ARE EASY TO ASSUME:
+  //   * It is NOT of_settransdata. That function carries SEVEN of the descriptor's nine fields - dbms,
+  //     servername, database, logid, logpass, dbparm and lock [:L343-L352] - and TOUCHES NEITHER
+  //     autocommit NOR userparm; [:L353] is its return and [:L354] its `end function`. See the
+  //     asymmetry note on TransactionDescriptor. So the flag cannot be set through the descriptor, and
+  //     an implementation that routed this RPC through SetTransactionData would silently do nothing.
+  //   * It is NOT of_autocommit [:L88, :L370-L381], which is a commit-or-rollback OPERATION selected by
+  //     the statement status and is carried by the separate AutoCommit RPC below.
+  //
+  // A PLAIN BOOLEAN, AND CORRECTLY SO: the underlying property is genuinely two-valued. It is NOT
+  // C-07's three-valued per-statement mode, and the two are not the same setting wearing different
+  // types - AutoCommitMode selects a per-statement STRATEGY, one arm of which manipulates this flag
+  // temporarily [n_cst_thread_task_sqlcommand.sru:L88-L90, :L96].
   bool autocommit = 2;
 }
 
@@ -2352,10 +2418,14 @@ service TransactionService {
   // of_gettransdata, both overloads [:L92, :L93]. RETURNS THE VIEW, WHICH HAS NO PASSWORD FIELD.
   rpc GetTransactionData(GetTransactionDataRequest) returns (GetTransactionDataResponse);
 
-  // The session-level autocommit flag [:L88]. A plain boolean - not C-07's three-valued mode.
+  // Direct control of the INHERITED transaction object's `AutoCommit` property [:L4 declares the class
+  // `from transaction`; read at :L185, :L240, :L371, :L376]. A net-new operation the boundary requires,
+  // because an in-process property assignment has no wire representation - NOT a projection of
+  // of_settransdata, which does not carry the flag. A plain boolean, not C-07's three-valued mode.
   rpc SetAutoCommit(SetTransactionAutoCommitRequest) returns (SetTransactionAutoCommitResponse);
 
-  // of_autocommit [:L88, :L370-L380]. Commit-or-rollback by statement status.
+  // of_autocommit [:L88, :L370-L380]. Commit-or-rollback by statement status. A DIFFERENT operation
+  // from SetAutoCommit above: this one acts on the statement status, it does not set the flag.
   rpc AutoCommit(AutoCommitRequest) returns (AutoCommitResponse);
 
   // of_commit, both overloads [:L79, :L89]. Auto-rollback defaults to TRUE when unset. FAILED while
