@@ -58,7 +58,7 @@
       PowerFramework.Shared.Localization.Tests from this file's name, which is exactly the intended
       value, and every test source file in this folder declares that namespace.
 
-      The twelve files, and the surface each one owns. Enumerated rather than counted, because a bare
+      The fourteen files, and the surface each one owns. Enumerated rather than counted, because a bare
       count is unverifiable by inspection and drifts the moment a file is added - which is exactly how
       this comment came to overstate the project's contents once already.
 
@@ -79,12 +79,30 @@
         TraditionalChineseProviderTests.cs  the cht language token, the same category map and both of its
                                         quirks, identity translations that are hits rather than misses,
                                         and the proof that the English mistranslations are data-scoped
+        CategoryMappingTests.cs         the category switch driven across BOTH XPath providers in one
+                                        matrix, so an en/cht divergence in a switch that is the same code
+                                        in two files cannot hide from a per-provider suite; the source
+                                        filter proved to run BEFORE the switch using pairs measured to be
+                                        hits; the zero collision between I18N_SRC_PFW and
+                                        I18N_CAT_WINDOW asserted executably rather than warned about; arm
+                                        coverage asserted as a SET; and the data premise behind both
+                                        deliberate holes - the resource has no datawindow element and no
+                                        custom element - which nothing else in the project pinned
         I18nResourceReaderTests.cs      the XDocument/XPath substitution and its structural guards
         I18nResourceFidelityTests.cs    pfw.i18n.xml asserted at the byte, against the read-only oracle
         I18nXPathInjectionTests.cs      the unescaped key: malformed, always-true and union outcomes
+        LookupKeyFormatTests.cs         the key's CONSTRUCTION rather than its outcomes: the two format
+                                        strings carried verbatim from n_cst_i18n_en.sru:L51 and
+                                        n_cst_i18n_cht.sru:L52, the fixed argument order and what a
+                                        transposition costs, the language token as the providers' only
+                                        substantive difference, the source text interpolated with NO
+                                        escaping of any kind, the apostrophe proved hazardous and the
+                                        double quote proved inert against the framework's own XPath
+                                        engine, resource-side braces as data, and a sweep requiring the
+                                        legacy expression and this port to agree on the shipped table
         FakeI18nProviders.cs            the test doubles the facade suites drive; declares no test
 
-      Eleven of the twelve carry tests; FakeI18nProviders.cs is a fixture source and is consumed by
+      Thirteen of the fourteen carry tests; FakeI18nProviders.cs is a fixture source and is consumed by
       I18nTests.cs and II18nProviderTests.cs. SimplifiedChineseProviderTests.cs deliberately consumes
       no double: its subject has exactly two branches and that suite drives both of them directly, so
       a stand in that declines BY CONSTRUCTION would carry no information about the provider under
@@ -97,16 +115,40 @@
       document-level scan. Neither subsumes the other, and duplicated cover on the one behaviour this
       project exists to freeze is the cheapest insurance in the repository.
 
+      CategoryMappingTests.cs overlaps the two per-provider suites on the category map, and that overlap
+      is deliberate for a third, different reason: those suites each see ONE provider, so neither can
+      observe that the two implementations of one switch have diverged, and neither closes the zero
+      collision (EnglishProviderTests.cs pairs its foreign source with I18N_CAT_WINDOW, which is also 0).
+      The cross-provider matrix, the non-zero-category filter rows and the set-level arm-coverage claim
+      exist only here. Nothing in it restates the mistranslated VALUES, the rendered key's shape or the
+      reader's mechanics - it uses pfw.i18n.xml:L49 as a known HIT and never asserts what that entry says.
+
       I18nTests.cs and I18nFacadeTests.cs likewise both drive the facade, and that is deliberate for the
       same reason: the first covers the three overloads as one surface, while the second isolates the
       three properties that are easiest to lose silently - the SILENT passthrough when no provider is
       installed, install-replaces rather than install-chains, and the provider's handled/not-handled
       return value being DISCARDED by every overload. Neither subsumes the other.
 
+      LookupKeyFormatTests.cs and I18nXPathInjectionTests.cs both concern the unescaped lookup key, and
+      the division between them is by SUBJECT rather than by degree. The injection suite is a catalogue
+      of OUTCOMES: what each crafted payload resolves to, recorded against the value the legacy
+      expression produced for it. The format suite is upstream of that, and asserts the key's
+      CONSTRUCTION: which format string each provider uses, which argument occupies which of the two
+      sequential placeholders, and that the source text passes through unescaped. It is the only suite
+      in the project that inspects the composed key STRING, the only one carrying a double-quote control
+      row alongside the apostrophe (the control matters: a double quote cannot escape a single-quoted
+      predicate, so a suite reaching for one as its quote case would report confidence it had not
+      earned), and the only one that evaluates the legacy key against the shipped table with a second
+      framework API and requires the port to agree. Neither subsumes the other, and the overlap on the
+      apostrophe is one behaviour reached from two directions: mechanism here, consequence there.
+
       One test file per shippable type is the rule this project follows, and it is what the per-project
       line coverage gate measures: with all three shipped locale providers now present in the library,
       all three carry a suite. TraditionalChineseProviderTests.cs was added with the provider it covers,
-      because without it the library's measured line coverage falls below that gate.
+      because without it the library's measured line coverage falls below that gate. Four files sit
+      deliberately outside that rule because their subject is a BEHAVIOUR that no single type owns:
+      MistranslationParityTests.cs, CategoryMappingTests.cs, I18nXPathInjectionTests.cs and
+      LookupKeyFormatTests.cs each cut across the reader, the providers and the resource table together.
     -->
 
   </PropertyGroup>
