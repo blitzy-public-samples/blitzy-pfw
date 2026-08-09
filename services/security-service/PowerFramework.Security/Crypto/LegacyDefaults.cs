@@ -1120,4 +1120,3 @@ public readonly record struct SymmetricCipherMetrics(
     /// </remarks>
     public int IvLengthBytes => BlockLengthBytes;
 }
-

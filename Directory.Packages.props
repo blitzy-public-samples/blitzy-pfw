@@ -105,11 +105,16 @@
     instead of rediscovering it.
   -->
 
-  <PropertyGroup>
-    <!-- Restated here for self documentation. Directory.Build.props is what actually switches it
-         on for the whole tree; this file is inert if that property is ever turned off. -->
-    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-  </PropertyGroup>
+  <!--
+    NO PropertyGroup, AND THAT IS THE POINT: THIS FILE DECLARES VERSIONS AND NOTHING ELSE.
+
+    ManagePackageVersionsCentrally and CentralPackageVersionOverrideEnabled both live in
+    Directory.Build.props, which is the one property sheet the whole tree inherits, and neither is
+    restated here. Restating a switch "for self documentation" is not documentation, it is a second
+    executable declaration: two places able to disagree, with the losing one silently inert. The
+    switches are described in Directory.Build.props next to where they are set, which is the only
+    place changing one has any effect.
+  -->
 
   <!-- ============================================================================================
        gRPC AND CONTRACTS
@@ -168,6 +173,37 @@
       non vulnerable AND compatible. Every REST service in this solution must respect it.
     -->
     <PackageVersion Include="Microsoft.OpenApi" Version="2.11.0" />
+
+    <!--
+      LOCK STEPPED TO THE PIN ABOVE, and consumed by PowerFramework.Contracts.Tests ONLY.
+
+      Microsoft.OpenApi 2.11.0 ships JSON and YAML WRITERS plus a JSON READER, and no YAML reader of
+      any kind: its assembly exposes OpenApiJsonReader, OpenApiJsonWriter and OpenApiYamlWriter.
+      Both published REST contract documents, OpenApi/security.v1.yaml and OpenApi/gateway.v1.yaml,
+      are YAML, so loading them back and validating them against the pinned object model is
+      physically impossible without this reader. That validation is the regression guard on the pin
+      itself, which is why the package exists at all rather than being convenience.
+
+      The version is 2.11.0 because Microsoft.OpenApi.YamlReader publishes an EXACTLY VERSION LOCKED
+      dependency on Microsoft.OpenApi 2.11.0, alongside SharpYaml 2.1.4 and System.Text.Json 8.0.5,
+      all MIT licensed. Being locked, it cannot drag the mandatory pin above off 2.11.0 in either
+      direction, and System.Text.Json 8.0.5 already sits inside Microsoft.OpenApi's own closure, so
+      SharpYaml is the only net addition to the graph. None of the three carries a NuGet advisory at
+      these versions, so restore stays audit clean, which matters because warnings are errors.
+
+      THIS ENTRY EXISTS BECAUSE THE ALTERNATIVE WAS A GOVERNANCE BYPASS. The consuming project
+      previously supplied the version itself with VersionOverride, which restores cleanly and so
+      passes both of the enforcement mechanisms recorded in the header: NU1008 fires only on a bare
+      Version attribute, and NU1010 only on a package with no central entry at all. An override is
+      neither, so it slips past both and reintroduces exactly the per project version authority this
+      file exists to remove. Directory.Build.props now sets
+      CentralPackageVersionOverrideEnabled to false, which turns any future override into a hard
+      restore error (NU1013) rather than a silent divergence, so the house rule above is now
+      mechanically enforced instead of merely written down.
+      Both are recorded in the root NOTICE, the reader as a direct reference and SharpYaml as a
+      transitive one.
+    -->
+    <PackageVersion Include="Microsoft.OpenApi.YamlReader" Version="2.11.0" />
   </ItemGroup>
 
   <!-- ============================================================================================
@@ -358,13 +394,23 @@
         library's safer ones.
 
       Any pinyin package
-        Deliberately not selected. The legacy pinyin first letter lookup table exists only inside
-        the closed source pfw.dll and its flag semantics are undocumented, so bit exact parity
-        requires characterizing the table against the behavioural oracle rather than trusting a
-        third party table that would be subtly different. This is the single genuine parity risk in
-        the in scope set, and a wrong table would produce filters that return slightly wrong result
-        sets, which a unit test would not catch. It is tracked as a risk, not papered over with a
-        dependency.
+        Deliberately not selected, and the reason is narrower than it once read here. The FLAGS are
+        documented in the legacy source: ws_objects/pfw.shared.pbl.src/enums.sru declares them under
+        a "//PinyinFirstLetterLike:[flags]" heading at L1146 as PY_LIKE_IGNORE_CASE = 1 (ignore
+        case), PY_LIKE_IGNORE_WIDTH = 2 (ignore full width versus half width) and
+        PY_LIKE_FUZZY_SOUND = 4 (match fuzzy pronunciation, l=n, f=h, r=l) at L1147 to L1149, so the
+        literal 7 the only call site passes
+        [ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323] is all
+        three combined and is not an opaque value. Shared.Kernel/Enums.cs carries the three
+        constants with those meanings.
+        What remains unknown is the LOOKUP TABLE ITSELF, which exists only inside the closed source
+        pfw.dll: which first letter each Han character maps to, and which characters the fuzzy sound
+        rule groups, cannot be read from this repository at any flag value. Bit exact parity
+        therefore requires characterizing the table against the behavioural oracle rather than
+        trusting a third party table that would be subtly different. That is the single genuine
+        parity risk in the in scope set, and a wrong table would produce filters that return
+        slightly wrong result sets, which a unit test would not catch. It is tracked as a risk, not
+        papered over with a dependency.
   -->
 
 </Project>

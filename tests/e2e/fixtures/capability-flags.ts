@@ -260,16 +260,21 @@ export const IN_SCOPE_CAPABILITY_FLAGS: readonly CapabilityFlagName[] =
  */
 
 /**
- * The inclusive upper bound of the legacy domain.
+ * The inclusive upper bound of an **authored** flag.
  *
- * Every flag above is declared in the source as a `Constant Long`, and
- * PowerScript's `Long` is a signed 32-bit integer. The bound is enforced
- * rather than assumed for two independent reasons. JavaScript's bitwise
- * operators coerce their operands to 32 bits, so a value beyond this range
- * would be silently truncated to a different number and `&` would answer a
- * question nobody asked. And a capability mask is a combination of
- * non-negative bits, so a negative value cannot have come from the gate at
- * all.
+ * Every flag above is declared in the legacy source as a `Constant Long`, and
+ * PowerScript's `Long` is a signed 32-bit integer, so this is the domain of
+ * anything this table itself declares — a single bit, or a composite such as
+ * {@link INIT_FLAG_ENABLE_ALL} built by OR-ing them.
+ *
+ * The bound is genuinely load-bearing for a flag rather than merely tidy.
+ * JavaScript's bitwise operators coerce both operands to a **signed** 32-bit
+ * integer and hand back a signed result, so the containment test
+ * `(mask & flag) === flag` silently stops working once `flag` exceeds this
+ * bound: measured, `(0xffffffff & 0x80000000)` evaluates to `-2147483648`, so
+ * the comparison against `0x80000000` is `false` even though every bit of the
+ * flag is in fact present. Rejecting such a flag turns a wrong answer into a
+ * visible error.
  *
  * Module-private: it describes the legacy numeric type rather than the
  * capability set, so it is not part of this fixture's surface.
@@ -277,7 +282,41 @@ export const IN_SCOPE_CAPABILITY_FLAGS: readonly CapabilityFlagName[] =
 const LONG_MAX = 0x7fffffff;
 
 /**
- * Reject a value that cannot be a legacy capability mask or flag.
+ * The inclusive upper bound of a **projected** mask.
+ *
+ * This is deliberately wider than {@link LONG_MAX}, and the difference is not
+ * cosmetic — it is the whole reason the two domains are validated separately.
+ *
+ * A mask does not arrive from this table; it arrives from Gateway, which
+ * derives it by projecting a configured 64-bit value onto 32 unsigned bits
+ * *without* an overflow check — `unchecked((uint)value)` in
+ * `services/gateway-service/.../Composition/CapabilityFlags.cs`. The reachable
+ * range of that projection is therefore the entire `uint` domain, `0 ..
+ * 0xffffffff`, and a configured value with bit 31 set legitimately yields a
+ * mask above `LONG_MAX`. Validating a projected mask against the authored
+ * `Long` bound would make this fixture throw a `TypeError` blaming a
+ * "malformed payload" at the exact moment Gateway is behaving to its own
+ * contract — a false failure accusing correct code, which is the worst kind a
+ * fixture can produce.
+ *
+ * Widening the mask is provably safe for the containment test, and was
+ * measured rather than assumed: for all eight named flags, `mask & flag`
+ * agrees with an arbitrary-precision `BigInt` oracle at every sampled mask
+ * across `0 .. 0xffffffff` (32,768 comparisons, zero disagreements). The
+ * reason is structural — signed coercion changes how the *bit pattern* is
+ * *printed*, not which bits it holds, and all eight flags live in the low 12
+ * bits, far below the sign bit that the coercion reinterprets.
+ *
+ * The bound is still enforced rather than dropped, because a value above
+ * `0xffffffff` cannot have come from a `uint` projection at all, so admitting
+ * one would forfeit the fail-fast posture described below for no gain.
+ *
+ * Module-private, for the same reason as {@link LONG_MAX}.
+ */
+const UINT_MAX = 0xffffffff;
+
+/**
+ * Reject a value that cannot be a capability mask or flag.
  *
  * Deliberately fail-fast rather than forgiving. A mask normally arrives from a
  * decoded JSON response, where an absent field yields `undefined` and
@@ -294,16 +333,60 @@ const LONG_MAX = 0x7fffffff;
  *
  * @param value the candidate mask or flag
  * @param parameterName the caller-facing parameter name, used in the message
- * @throws TypeError when the value is not an integer within `0 .. LONG_MAX`
+ * @param inclusiveMaximum the upper bound of this parameter's domain
+ * @param domainDescription how the domain is named in the message, so a
+ * failure says which of the two domains was applied
+ * @throws TypeError when the value is not an integer within `0 ..
+ * inclusiveMaximum`
  */
-function assertMaskDomain(value: number, parameterName: string): void {
-  if (!Number.isInteger(value) || value < 0 || value > LONG_MAX) {
+function assertDomain(
+  value: number,
+  parameterName: string,
+  inclusiveMaximum: number,
+  domainDescription: string,
+): void {
+  if (!Number.isInteger(value) || value < 0 || value > inclusiveMaximum) {
     throw new TypeError(
       `capability-flags: \`${parameterName}\` must be an integer in the ` +
-        `PowerScript \`Long\` range 0..${LONG_MAX}, received ` +
+        `${domainDescription} range 0..${inclusiveMaximum}, received ` +
         `${String(value)}.`,
     );
   }
+}
+
+/**
+ * Reject a value that cannot be a mask as projected by Gateway.
+ *
+ * Admits the full `uint` domain, for the reasons recorded on
+ * {@link UINT_MAX}.
+ *
+ * @param value the candidate mask
+ * @param parameterName the caller-facing parameter name, used in the message
+ * @throws TypeError when the value is not an integer within `0 .. 0xffffffff`
+ */
+function assertProjectedMaskDomain(
+  value: number,
+  parameterName: string,
+): void {
+  assertDomain(value, parameterName, UINT_MAX, 'projected `uint` mask');
+}
+
+/**
+ * Reject a value that cannot be a flag declared by this table.
+ *
+ * Holds the narrower authored domain, for the reasons recorded on
+ * {@link LONG_MAX} — a flag above it would make the containment test answer
+ * incorrectly rather than merely look odd.
+ *
+ * @param value the candidate flag, single-bit or composite
+ * @param parameterName the caller-facing parameter name, used in the message
+ * @throws TypeError when the value is not an integer within `0 .. 0x7fffffff`
+ */
+function assertAuthoredFlagDomain(
+  value: number,
+  parameterName: string,
+): void {
+  assertDomain(value, parameterName, LONG_MAX, 'PowerScript `Long`');
 }
 
 /**
@@ -321,21 +404,32 @@ function assertMaskDomain(value: number, parameterName: string): void {
  * the worst possible outcome in a test fixture. The guard converts that into
  * an ordinary, visible failure.
  *
- * @param mask a capability mask, typically as projected by Gateway
- * @param flag the bit, or combination of bits, to look for
+ * The two parameters are validated against two **different** domains, which
+ * is the point rather than an inconsistency. `mask` is whatever Gateway
+ * projected, so it may occupy the full `uint` range; `flag` is a value this
+ * table declares, so it stays inside the authored `Long` range. See
+ * {@link UINT_MAX} and {@link LONG_MAX} for why each bound is the correct one
+ * for its parameter.
+ *
+ * @param mask a capability mask, typically as projected by Gateway; `0 ..
+ * 0xffffffff`
+ * @param flag the bit, or combination of bits, to look for; `0 .. 0x7fffffff`
  * @returns `true` when every bit of `flag` is set in `mask`; `false` when
  * `flag` is zero or any of its bits is missing
- * @throws TypeError when either argument is outside the legacy `Long` domain
+ * @throws TypeError when `mask` is outside the projected `uint` domain, or
+ * `flag` is outside the authored `Long` domain
  *
  * @example
  * // Storage is the one capability with an in-scope consumer.
  * hasCapability(INIT_FLAG_ENABLE_ALL, INIT_FLAG_ENABLE_SQLITE); // true
  * // The composite omits the alternative engine build, deliberately.
  * hasCapability(INIT_FLAG_ENABLE_ALL, INIT_FLAG_ENABLE_BLINKFAST); // false
+ * // A mask carrying bit 31 is a legitimate projection, not a malformed one.
+ * hasCapability(0xffffffff, INIT_FLAG_ENABLE_SQLITE); // true
  */
 export function hasCapability(mask: number, flag: number): boolean {
-  assertMaskDomain(mask, 'mask');
-  assertMaskDomain(flag, 'flag');
+  assertProjectedMaskDomain(mask, 'mask');
+  assertAuthoredFlagDomain(flag, 'flag');
 
   if (flag === 0) {
     return false;
@@ -363,17 +457,18 @@ export function hasCapability(mask: number, flag: number): boolean {
  * unnamed bit therefore decomposes to the named bits it does contain, and a
  * spec that needs to detect the surplus compares the mask numerically.
  *
- * @param mask a capability mask, typically as projected by Gateway
+ * @param mask a capability mask, typically as projected by Gateway; `0 ..
+ * 0xffffffff`
  * @returns a fresh, caller-owned array of the contained flag names, in
  * ascending bit order; empty when no named bit is set
- * @throws TypeError when `mask` is outside the legacy `Long` domain
+ * @throws TypeError when `mask` is outside the projected `uint` domain
  *
  * @example
  * capabilityFlagsIn(INIT_FLAG_ENABLE_SQLITE | INIT_FLAG_ENABLE_UI);
  * // => ['INIT_FLAG_ENABLE_UI', 'INIT_FLAG_ENABLE_SQLITE']
  */
 export function capabilityFlagsIn(mask: number): CapabilityFlagName[] {
-  assertMaskDomain(mask, 'mask');
+  assertProjectedMaskDomain(mask, 'mask');
 
   return ALL_CAPABILITY_FLAG_NAMES.filter((name) =>
     hasCapability(mask, CAPABILITY_FLAGS[name]),

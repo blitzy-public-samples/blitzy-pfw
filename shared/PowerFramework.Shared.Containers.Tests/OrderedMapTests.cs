@@ -2,7 +2,13 @@
 //  OrderedMapTests - the characterization suite that pins PowerFramework.Shared.Containers.OrderedMap
 //  --------------------------------------------------------------------------------------------
 //  SYSTEM UNDER TEST  shared/PowerFramework.Shared.Containers/OrderedMap.cs
-//  BEHAVIOURAL ORACLE ws_objects/pfw.utility.container.pbl.src/n_map.sru (31 lines, READ ONLY)
+//  LEGACY DECLARATION ws_objects/pfw.utility.container.pbl.src/n_map.sru (31 lines, READ ONLY)
+//                     Named a DECLARATION rather than an oracle deliberately. It supplies TEN
+//                     PROTOTYPES AND NO BODIES, so it settles names, arities, parameter types and
+//                     return types, and it settles NOTHING about edge behaviour. The behavioural
+//                     oracle proper is the compiled pfw.dll exercised through a characterization
+//                     recording, and no such recording exists yet. See DP-7 EVIDENCE STATUS below
+//                     before reading any expectation in this file as proven legacy behaviour.
 //
 //  WHY THIS SUITE CARRIES MORE WEIGHT THAN AN ORDINARY UNIT TEST
 //  --------------------------------------------------------------------------------------------
@@ -22,10 +28,38 @@
 //  real neighbouring entry rather than failing. Hence the ordering of this file: the one-based
 //  contract is asserted FIRST and in the greatest depth.
 //
+//  DP-7 EVIDENCE STATUS - READ THIS BEFORE CITING ANY ASSERTION AS LEGACY PARITY
+//  --------------------------------------------------------------------------------------------
+//  THIS SUITE IS NOT GOLDEN-MASTER PROOF. It is a target regression guard, and the distinction is
+//  not pedantry: a Golden-Master test compares the port's output against a recording of the
+//  legacy's output, whereas every expectation here was derived from the port plus a prototype
+//  list. Those two things are indistinguishable when they agree and silently divergent when they
+//  do not, so the tier of each assertion is stated rather than left for a reader to guess:
+//
+//    TIER 1  TRACEABLE. Settled by a cited ws_objects/** locator - a member name, an arity, a
+//            parameter type, a return type, or the ulong width of Count(). The .sru genuinely
+//            proves these, because a prototype is a complete statement of a signature.
+//    TIER 3  TARGET-CHARACTERIZED. Settled by the port, because the prototype does not settle it
+//            and no legacy body exists to consult. Every edge behaviour is in this tier: the miss
+//            sentinels (null from Get, string.Empty from GetKey), the boolean duplicate refusal,
+//            Set's in-place overwrite, the case-sensitivity reading, and the inclusive one-based
+//            upper bound. These are DEFINED, REPRODUCIBLE AND COVERED - never verified.
+//
+//  THE ORACLE-CAPTURE PREREQUISITE. Promoting any TIER 3 assertion to parity evidence requires a
+//  paired recording under characterization/recordings/{legacy,dotnet}/<workflowId>/, captured
+//  against one unrecreated persistence-db volume state. Until such a recording exists, no TIER 3
+//  expectation below may be reported as verified legacy behaviour in docs/PARITY.md or anywhere
+//  else. IF A RECORDING LATER CONTRADICTS ONE, THE RECORDING WINS and the test is corrected to
+//  match it; the test is not defended on the grounds that it currently passes.
+//
+//  Nothing is left undefined, because an undefined index or miss sentinel is exactly the hole
+//  that produces an irreproducible defect. Being defined is simply not the same as being proven.
+//
 //  ASSERTED AS OBSERVED, NEVER AS TIDIED
 //  --------------------------------------------------------------------------------------------
-//  Every expectation below was established by reading the two authorities named above, in that
-//  order, and never by assuming what a well-designed map would do:
+//  "Observed" below means OBSERVED FROM THE PORT unless a ws_objects/** locator is cited on the
+//  assertion itself. Every expectation was established by reading the two authorities named
+//  above, in that order, and never by assuming what a well-designed map would do:
 //
 //    * ONE-BASED positional access with an INCLUSIVE upper bound of Count(). Index 0 is never
 //      valid. This is deliberate fidelity, not an off-by-one - see the evidence note on

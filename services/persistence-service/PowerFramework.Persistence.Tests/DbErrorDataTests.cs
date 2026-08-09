@@ -13,19 +13,34 @@
 //
 //  WHAT THIS SUITE IS ACTUALLY PROTECTING
 //  --------------------------------------------------------------------------------------------
-//  DbErrorData looks like a plain five-member data carrier, and that appearance is the risk. Three
-//  of its five members are NOT auto-properties: they project a canonicalised backing field so that
-//  the CLEARED STATE has exactly one representation. The legacy clears its retained error by
-//  assigning a freshly declared structure - the `DBERRORDATA emptyData` idiom at
+//  DbErrorData looks like a plain five-member data carrier, and that appearance is the risk. TWO
+//  of its five members are NOT auto-properties: the string members project a canonicalised backing
+//  field so that the CLEARED STATE has exactly one representation. The legacy clears its retained
+//  error by assigning a freshly declared structure - the `DBERRORDATA emptyData` idiom at
 //  n_cst_threading_task_sqlbase.sru:L55 and :L206, assigned at :L65 and :L208 - and PowerBuilder
 //  initialises `long` to 0 and `string` to "". Every "was an error recorded?" check in the ported
 //  service rests on that state comparing equal however it was spelled.
 //
-//  A regression here would be SILENT. Replace any of those three accessors with a plain
-//  auto-property and each instance still reads back exactly as expected when inspected member by
-//  member - only the equality between two differently-spelled cleared values breaks, and only at
-//  the call sites that compare. That is precisely why the equality cases below are not incidental
-//  coverage but the centre of this suite.
+//  A regression here would be SILENT. Replace either accessor with a plain auto-property and each
+//  instance still reads back exactly as expected when inspected member by member - only the
+//  equality between two differently-spelled cleared values breaks, and only at the call sites that
+//  compare. That is precisely why the equality cases below are not incidental coverage but the
+//  centre of this suite.
+//
+//  THE Buffer MEMBER IS A PLAIN AUTO-PROPERTY, AND THAT IS LOAD-BEARING TOO
+//  --------------------------------------------------------------------------------------------
+//  It needs no canonicalisation only because DwBuffer.Primary is the published enum's ZERO member,
+//  so `default` already observes as the buffer PowerBuilder itself defaults to. That agreement is
+//  a property of the CONTRACT rather than of this type, and it is the kind of thing a later edit to
+//  common.v1.proto could break from a distance with nothing in the build to notice. The two domain
+//  guards below - one for DwBuffer, one for ItemStatus - exist to notice, by asserting the member
+//  count and the zero value directly against the generated enums.
+//
+//  Buffer is deliberately NOT one of those two, and the domain tests below are what keep it that
+//  way. DwBuffer.Primary is the published enum's ZERO member, so a struct's all-bits-zero default
+//  already observes as Primary and stores the same value an explicit assignment stores - the
+//  canonicalisation the strings need is unnecessary there. That holds only while the contract keeps
+//  Primary at zero, which is why the numeric value is asserted rather than assumed.
 //
 //  THE ONE ASSERTION THAT CANNOT BE WRITTEN CARELESSLY
 //  --------------------------------------------------------------------------------------------
@@ -142,20 +157,129 @@ public sealed class DbErrorDataTests
     }
 
     /// <summary>
-    /// The generated enum's zero member is <see cref="DwBuffer.Unspecified"/>, not
-    /// <see cref="DwBuffer.Primary"/> [common.v1.proto:L619-L629]. The contract states that the
-    /// sentinel is "a protocol-level field absent, never a legacy buffer" which "a response must
-    /// never populate" [:L620-L624], so this in-process type folds it onto Primary and can never
-    /// hold it.
+    /// <b>The guard against DB-01 recurring.</b> The published <see cref="DwBuffer"/> domain must be
+    /// EXACTLY the three legacy DataWindow buffers, with <see cref="DwBuffer.Primary"/> on zero so
+    /// that an unassigned member observes as the buffer PowerBuilder itself defaults to. A synthetic
+    /// fourth member would grow a three-value legacy domain, shift every real value, and move this
+    /// type's cleared state off Primary - which is precisely the defect this assertion exists to
+    /// catch, because nothing else in the build would.
     /// </summary>
+    /// <remarks>
+    /// The domain is asserted through <see cref="Enum.GetValues{TEnum}"/> rather than by naming the
+    /// three members, so that ADDING a member fails this test rather than slipping past it.
+    /// </remarks>
     [Fact]
-    public void Buffer_WireSentinelCanonicalisesToPrimary()
+    public void DwBufferDomain_IsExactlyTheThreeLegacyBuffers_WithPrimaryOnZero()
     {
-        DbErrorData sut = new() { Buffer = DwBuffer.Unspecified };
+        DwBuffer[] domain = Enum.GetValues<DwBuffer>();
+
+        Assert.Equal(3, domain.Length);
+        Assert.Equal([DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter], domain);
+        Assert.Equal(0, (int)DwBuffer.Primary);
+        Assert.Equal(DwBuffer.Primary, default(DwBuffer));
+    }
+
+    /// <summary>
+    /// The companion half of the same guard. The published <see cref="ItemStatus"/> domain must be
+    /// EXACTLY the four <c>dwItemStatus</c> literals, in PowerBuilder's own declaration order, with
+    /// <see cref="ItemStatus.NotModified"/> on zero. <c>New!</c> is carried even though it is never
+    /// named literally anywhere in the in-scope legacy sources, because it is a legal runtime status
+    /// and a three-member domain would make some real rows unrepresentable on the wire.
+    /// </summary>
+    /// <remarks>
+    /// This test pins the property the plain auto-property depends on. If a synthetic
+    /// <c>UNSPECIFIED = 0</c> were ever reintroduced to the contract, every real value would shift
+    /// up by one, <c>default(DbErrorData).Buffer</c> would silently stop observing as
+    /// <c>Primary</c>, and the cleared-state equivalence class asserted below would split - none of
+    /// which would produce a compiler diagnostic. Asserting the numeric zero rather than only the
+    /// symbolic name is what makes that regression fail here instead of in a characterization
+    /// comparison much later.
+    /// </remarks>
+    [Fact]
+    public void ItemStatusDomain_IsExactlyTheFourLegacyStatuses_WithNotModifiedOnZero()
+    {
+        ItemStatus[] domain = Enum.GetValues<ItemStatus>();
+
+        Assert.Equal(4, domain.Length);
+        Assert.Equal(
+            [ItemStatus.NotModified, ItemStatus.DataModified, ItemStatus.New, ItemStatus.NewModified],
+            domain);
+        Assert.Equal(0, (int)ItemStatus.NotModified);
+        Assert.Equal(ItemStatus.NotModified, default(ItemStatus));
+    }
+
+    /// <summary>
+    /// <see cref="DbErrorData.Buffer"/> needs no canonicalisation now that
+    /// <see cref="DwBuffer.Primary"/> is the enum's zero member: setting it explicitly and leaving
+    /// it unset must produce the same instance, with no bridging code in the accessor.
+    /// </summary>
+    /// <remarks>
+    /// The numeric assertion is deliberate and is the substance of the test. AAP 0.4.5.3 forbids
+    /// renumbering a legacy value because these numbers appear in serialized payloads, log records
+    /// and characterization recordings; a sentinel inserted at zero would shift all three members
+    /// up by one, and nothing but an assertion on the number itself would catch it.
+    /// </remarks>
+    [Fact]
+    public void Buffer_ExplicitPrimary_EqualsTheClearedState()
+    {
+        DbErrorData sut = new() { Buffer = DwBuffer.Primary };
 
         Assert.Equal(DwBuffer.Primary, sut.Buffer);
-        Assert.NotEqual(DwBuffer.Unspecified, sut.Buffer);
         Assert.Equal(DbErrorData.Empty, sut);
+    }
+
+    /// <summary>
+    /// The other two buffers must round-trip untouched and must NOT compare equal to the cleared
+    /// state. Stated separately from the cleared-state assertions because an accessor that swallowed
+    /// a real buffer would be invisible to them.
+    /// </summary>
+    [Theory]
+    [InlineData(DwBuffer.Delete)]
+    [InlineData(DwBuffer.Filter)]
+    public void Buffer_NonPrimaryBuffers_RoundTripAndAreNotTheClearedState(DwBuffer buffer)
+    {
+        DbErrorData sut = new() { Buffer = buffer };
+
+        Assert.Equal(buffer, sut.Buffer);
+        Assert.NotEqual(DbErrorData.Empty, sut);
+    }
+
+    /// <summary>
+    /// The ordinal half of the same guard, asserted on the NUMBERS rather than on the domain
+    /// membership, because a sentinel inserted at zero would keep every member name intact while
+    /// shifting every value.
+    /// </summary>
+    /// <remarks>
+    /// The numeric assertion is deliberate and is the substance of the test. AAP 0.4.5.3 forbids
+    /// renumbering a legacy value because these numbers appear in serialized payloads, log records
+    /// and characterization recordings; a sentinel inserted at zero would shift all three members
+    /// up by one, and nothing but an assertion on the number itself would catch it.
+    /// </remarks>
+    [Fact]
+    public void Buffer_ZeroMemberIsPrimary_SoTheClearedStateNeedsNoFold()
+    {
+        Assert.Equal(0, (int)DwBuffer.Primary);
+        Assert.Equal(1, (int)DwBuffer.Delete);
+        Assert.Equal(2, (int)DwBuffer.Filter);
+
+        DbErrorData sut = new() { Buffer = DwBuffer.Primary };
+
+        Assert.Equal(DwBuffer.Primary, sut.Buffer);
+        Assert.Equal(DwBuffer.Primary, default(DbErrorData).Buffer);
+        Assert.Equal(DbErrorData.Empty, sut);
+    }
+
+    /// <summary>
+    /// The companion agreement for the status domain: <see cref="ItemStatus.NotModified"/> occupies
+    /// zero, so the four legacy statuses keep their natural numbers and no sentinel displaces them.
+    /// </summary>
+    [Fact]
+    public void ItemStatus_ZeroMemberIsNotModified_AndTheDomainIsUnshifted()
+    {
+        Assert.Equal(0, (int)ItemStatus.NotModified);
+        Assert.Equal(1, (int)ItemStatus.DataModified);
+        Assert.Equal(2, (int)ItemStatus.New);
+        Assert.Equal(3, (int)ItemStatus.NewModified);
     }
 
     /// <summary>
@@ -172,9 +296,11 @@ public sealed class DbErrorDataTests
             DbErrorData.Empty,
             new DbErrorData(),
             new DbErrorData { SqlErrText = "", SqlSyntax = "", Buffer = DwBuffer.Primary },
-            new DbErrorData { Buffer = DwBuffer.Unspecified },
+            new DbErrorData { SqlErrText = null, SqlSyntax = null, Buffer = default },
             DbErrorData.FromTransaction(0, ""),
+            DbErrorData.FromTransaction(0, null),
             DbErrorData.FromStatement(0, "", "", DwBuffer.Primary, 0),
+            DbErrorData.FromStatement(0, null, null, default, 0),
         ];
 
         foreach (DbErrorData spelling in clearedSpellings)
@@ -301,6 +427,81 @@ public sealed class DbErrorDataTests
         DbErrorData viaTransaction = DbErrorData.FromTransaction(5, "synthetic busy");
 
         Assert.Equal(viaTransaction, viaStatement);
+    }
+
+    // ==========================================================================================
+    //  NULL TEXT REACHING THE FACTORIES - the DB-04 contract
+    //  ----------------------------------------------------------------------------------------
+    //  Both factories accept nullable text because the real producer is an ADO.NET provider, whose
+    //  message and statement are nullable references. The point of these cases is not that null
+    //  becomes empty - that is the canonicalisation already covered above - but that a caller CAN
+    //  HAND THEM A NULL AT ALL, with no coercion and no suppression at the call site. If the
+    //  parameters were ever narrowed back to non-nullable `string`, these calls would stop
+    //  compiling, and under TreatWarningsAsErrors that is a build failure rather than a warning.
+    // ==========================================================================================
+
+    /// <summary>
+    /// <see cref="DbErrorData.FromTransaction"/> must accept a null message and canonicalise it, so
+    /// that a provider error with no text is the same value as one with an empty text.
+    /// </summary>
+    [Fact]
+    public void FromTransaction_AcceptsNullText_AndCanonicalisesIt()
+    {
+        string? absentProviderText = null;
+
+        DbErrorData viaNull = DbErrorData.FromTransaction(-1, absentProviderText);
+
+        Assert.Equal(string.Empty, viaNull.SqlErrText);
+        Assert.Equal(DbErrorData.FromTransaction(-1, ""), viaNull);
+    }
+
+    /// <summary>
+    /// <see cref="DbErrorData.FromStatement"/> must accept a null message AND a null statement on
+    /// the same terms. Both are separately nullable at the provider, so both are exercised here.
+    /// </summary>
+    [Fact]
+    public void FromStatement_AcceptsNullTextAndNullStatement_AndCanonicalisesBoth()
+    {
+        string? absentProviderText = null;
+        string? absentStatement = null;
+
+        DbErrorData viaNulls = DbErrorData.FromStatement(
+            -1,
+            absentProviderText,
+            absentStatement,
+            DwBuffer.Filter,
+            7);
+
+        Assert.Equal(string.Empty, viaNulls.SqlErrText);
+        Assert.Equal(string.Empty, viaNulls.SqlSyntax);
+        Assert.Equal(DwBuffer.Filter, viaNulls.Buffer);
+        Assert.Equal(7L, viaNulls.Row);
+        Assert.Equal(DbErrorData.FromStatement(-1, "", "", DwBuffer.Filter, 7), viaNulls);
+    }
+
+    /// <summary>
+    /// The object-initializer path must accept null on both string members too, since
+    /// <c>with</c> expressions and direct initialization are how the ported consumers build these
+    /// values. This is the assertion that pins the <c>[AllowNull]</c> annotation on the accessors.
+    /// </summary>
+    [Fact]
+    public void Initializer_AcceptsNullOnBothStringMembers()
+    {
+        string? absent = null;
+
+        DbErrorData sut = new() { SqlErrText = absent, SqlSyntax = absent };
+
+        Assert.Equal(string.Empty, sut.SqlErrText);
+        Assert.Equal(string.Empty, sut.SqlSyntax);
+        Assert.Equal(DbErrorData.Empty, sut);
+
+        DbErrorData populated = DbErrorData.FromStatement(9, "text", "SELECT 1", DwBuffer.Primary, 3);
+        DbErrorData nulled = populated with { SqlErrText = absent, SqlSyntax = absent };
+
+        Assert.Equal(string.Empty, nulled.SqlErrText);
+        Assert.Equal(string.Empty, nulled.SqlSyntax);
+        Assert.Equal(9L, nulled.SqlDbCode);
+        Assert.Equal(3L, nulled.Row);
     }
 
     // ==========================================================================================
@@ -459,8 +660,8 @@ public sealed class DbErrorDataTests
     }
 
     /// <summary>
-    /// The private canonicalising backing fields must not leak into the rendered form, which would
-    /// both duplicate every member and expose the storage representation.
+    /// The two private canonicalising backing fields must not leak into the rendered form, which
+    /// would both duplicate a member and expose the storage representation.
     /// </summary>
     [Fact]
     public void ToString_DoesNotRenderTheBackingFields()
@@ -469,7 +670,6 @@ public sealed class DbErrorDataTests
 
         Assert.DoesNotContain("_sqlErrText", rendered, StringComparison.Ordinal);
         Assert.DoesNotContain("_sqlSyntax", rendered, StringComparison.Ordinal);
-        Assert.DoesNotContain("_buffer", rendered, StringComparison.Ordinal);
     }
 
     /// <summary>

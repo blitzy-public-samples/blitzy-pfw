@@ -3,9 +3,35 @@
 //  use as the column-expression engine's calculation and recursion stack
 //  --------------------------------------------------------------------------------------------
 //  SYSTEM UNDER TEST   shared/PowerFramework.Shared.Containers/Vector.cs
-//  BEHAVIOURAL ORACLES ws_objects/pfw.utility.container.pbl.src/n_vector.sru               (54 L)
+//  LEGACY DECLARATIONS ws_objects/pfw.utility.container.pbl.src/n_vector.sru               (54 L)
 //                      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru
 //                                                                                       (2,435 L)
+//                      The first is a PROTOTYPE LIST with no bodies and settles signatures only.
+//                      The second is REAL PowerScript and is genuinely readable, so the stack
+//                      USAGE PATTERN it demonstrates is traceable evidence even though the
+//                      vector's own per-member behaviour is not. That asymmetry is why the two
+//                      are tiered separately below rather than cited as one authority.
+//
+//  DP-7 EVIDENCE STATUS - READ THIS BEFORE CITING ANY ASSERTION AS LEGACY PARITY
+//  --------------------------------------------------------------------------------------------
+//  THIS SUITE IS NOT GOLDEN-MASTER PROOF. It is a target regression guard. No recording of the
+//  legacy's behaviour exists, so nothing here was compared against one:
+//
+//    TIER 1  TRACEABLE - settled by a cited ws_objects/** locator. Two distinct kinds qualify:
+//            signatures from n_vector.sru's prototypes, AND the stack-usage sequence read
+//            directly out of n_cst_dwsvc_columnexp.sru, which has real bodies. The latter is the
+//            strongest evidence in this file, because it shows how the legacy actually DRIVES the
+//            cursor rather than merely how the cursor is declared.
+//    TIER 3  TARGET-CHARACTERIZED - settled by the port, because no legacy body defines it. The
+//            cursor's own state machine is here: where the cursor sits after each mutation, what
+//            an exhausted or unpositioned cursor reports, and how reset interacts with an
+//            in-progress walk. DEFINED, REPRODUCIBLE AND COVERED - never verified.
+//
+//  THE ORACLE-CAPTURE PREREQUISITE. Promoting a TIER 3 assertion to parity evidence needs a paired
+//  recording under characterization/recordings/{legacy,dotnet}/<workflowId>/, taken against one
+//  unrecreated persistence-db volume state. Until then no TIER 3 expectation here may be reported
+//  as verified legacy behaviour. IF A RECORDING LATER CONTRADICTS ONE, THE RECORDING WINS and the
+//  test is corrected rather than defended.
 //
 //  WHY THIS FILE EXISTS SEPARATELY FROM ITS SIBLING
 //  --------------------------------------------------------------------------------------------

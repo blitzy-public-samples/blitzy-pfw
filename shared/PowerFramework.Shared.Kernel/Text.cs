@@ -85,6 +85,19 @@
 //  a later characterization run against the behavioural oracle can find exactly the choices, revise
 //  the ones the oracle contradicts, and leave the derived facts above alone:
 //
+//  DP-7: NONE OF THE INFERENCES BELOW IS GOLDEN-MASTER PARITY. The tests pinning I-1 through I-6
+//  are TARGET REGRESSION GUARDS - they stop a later edit to this file moving a choice silently, and
+//  they cannot detect a disagreement with pfw.dll, because replaceall.srf is DECLARATION ONLY and
+//  no recording of the native body's output exists in this repository. Promoting any of them to
+//  parity evidence requires a paired recording under
+//  characterization/recordings/{legacy,dotnet}/<workflowId>/, captured against one unrecreated
+//  persistence-db volume state; until one exists none may be reported as verified legacy behaviour
+//  in docs/PARITY.md or any published summary, and IF A RECORDING CONTRADICTS ONE THE RECORDING
+//  WINS. I-7 is deliberately excluded from that qualification: it is a NARROWING of a body that IS
+//  readable, so it is a documented decision about a known behaviour rather than a reconstruction of
+//  an unknown one. Iif and ClassNameEx are readable PowerScript throughout and are TIER 1
+//  TRACEABLE; only the replaceall family rests on a declaration alone.
+//
 //      I-1  The three argument overload defaults `matchcase` to case sensitive.
 //           Test: ReplaceAllThreeArgumentOverloadDefaultsToCaseSensitiveInferred
 //      I-2  The token boundary definition used by `kwrpl`. See DECISION 6.

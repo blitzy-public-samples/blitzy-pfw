@@ -16,7 +16,8 @@
     turning off warnings as errors, or disabling nullable to make a test compile would be a
     violation rather than a fix: the fix belongs in the offending test file. Package versions
     live in the repository-root Directory.Packages.props, which is why every PackageReference
-    below is versionless apart from the one documented override.
+    below is versionless, without exception: Directory.Build.props disables central version
+    overriding outright, so a VersionOverride here would fail restore with NU1013.
   -->
 
   <PropertyGroup>
@@ -28,7 +29,7 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
-  <ItemGroup Label="Test stack and OpenAPI object model (versions from Directory.Packages.props)">
+  <ItemGroup Label="Test stack and OpenAPI object model : all versionless, versions from Directory.Packages.props">
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
@@ -43,27 +44,42 @@
     <PackageReference Include="Microsoft.OpenApi" />
 
     <!--
-      WHY THIS PACKAGE IS HERE, AND WHY IT CARRIES VersionOverride INSTEAD OF Version.
+      THE PACKAGE SET ABOVE PLUS THIS ONE IS THE WHOLE PACKAGE SET. SIX ENTRIES, NO SEVENTH.
+
+      Every reference here is versionless and resolves against the repository-root
+      Directory.Packages.props, whose sixteen PackageVersion rows are the complete approved
+      dependency inventory for this refactor.
+
+      WHY THIS PACKAGE IS HERE, AND WHY ITS VERSION IS NOT WRITTEN IN THIS FILE.
 
       Microsoft.OpenApi 2.11.0 ships JSON and YAML *writers* plus a JSON *reader* only. Its
       assembly exposes OpenApiJsonReader, OpenApiJsonWriter and OpenApiYamlWriter, and no YAML
       reader of any kind (verified by inspecting the published package). Both contract documents
       are YAML, so loading and validating them against the pinned object model is physically
-      impossible without this reader.
+      impossible without this reader. This project is its only consumer, because it is the only
+      project that READS a contract document rather than serving one.
 
       Microsoft.OpenApi.YamlReader publishes an exactly version locked 2.11.0 whose dependencies
       are Microsoft.OpenApi 2.11.0, SharpYaml 2.1.4 and System.Text.Json 8.0.5, all MIT licensed.
-      Being locked to 2.11.0, it cannot drag the mandatory pin off that version, and
-      System.Text.Json 8.0.5 already sits in Microsoft.OpenApi's own closure, so SharpYaml is the
-      only net addition to the dependency graph. None of the three carries a NuGet advisory at
-      these versions, so restore stays audit clean, which matters because warnings are errors.
+      Being locked to 2.11.0, it cannot drag the mandatory pin off that version. System.Text.Json
+      resolves to the net10.0 shared framework rather than to a package, so SharpYaml 2.1.4 is the
+      only net addition to the resolved graph. Neither carries a NuGet advisory at these versions,
+      so restore stays audit clean, which matters because warnings are errors.
 
-      VersionOverride, never a bare Version attribute (which trips NU1008 under central package
-      management), supplies the version for this one project without editing the repository-root
-      Directory.Packages.props. That is what keeps the promise that this project restores and
-      builds from a clean checkout with no edit to any file outside its own folder.
+      THE VERSION LIVES CENTRALLY, LIKE EVERY OTHER ONE, and this reference is versionless in
+      consequence. An earlier form of this file supplied the version here with VersionOverride, on
+      the reasoning that doing so let the project restore from a clean checkout without editing a
+      file outside its own folder. That reasoning was wrong on both halves. Directory.Packages.props
+      is part of the same clean checkout, so amending it is not an external edit; and the override
+      restored cleanly precisely because it sits in the gap between central package management's two
+      guards - NU1008 catches a bare Version attribute and NU1010 catches a package with no central
+      entry, while an override is neither - so it quietly re established a per project version
+      authority for one package. That is the drift the central manifest exists to prevent.
+      Directory.Build.props now sets CentralPackageVersionOverrideEnabled to false, so a
+      VersionOverride anywhere in the tree is a hard restore error (NU1013) rather than a silent
+      divergence.
     -->
-    <PackageReference Include="Microsoft.OpenApi.YamlReader" VersionOverride="2.11.0" />
+    <PackageReference Include="Microsoft.OpenApi.YamlReader" />
   </ItemGroup>
 
   <ItemGroup>

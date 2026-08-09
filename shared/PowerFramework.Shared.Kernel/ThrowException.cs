@@ -15,6 +15,27 @@
 //  or pfwx.dll entry point behind either of them, and nothing in this file stands in for a
 //  closed-source binary. The only substitution here is a language one - see CREATE USING below.
 //
+//  DP-7 EVIDENCE STATUS - THIS FILE IS THE STRONG CASE, AND ITS INFERENCES ARE A DIFFERENT KIND
+//  --------------------------------------------------------------------------------------------
+//  Recorded explicitly so this file is not swept into the same caveat as the PBNI substitutions,
+//  which would understate the evidence that genuinely exists here. Because both sources are
+//  readable PowerScript, the ported LOGIC is TIER 1 TRACEABLE: every behaviour carries the :L
+//  locator it was taken from, and a reviewer can check each against the source without needing a
+//  recording at all. There is no closed body anywhere behind this file.
+//
+//  The `...Inferred...` test names below therefore do NOT mark reconstructed native behaviour.
+//  They mark decisions about how PowerScript's semantics land on the CLR - which base type an
+//  un-named throw maps to, how a null or differently-cased class name resolves, what happens when
+//  a name resolves to nothing, and how far assembly lookup reaches. Those questions are created by
+//  the TARGET runtime's type system; the legacy has no equivalent question to answer, so no legacy
+//  recording could settle them even once one exists. They are TARGET-DEFINED, not target-guessed.
+//
+//  The practical consequence is the opposite of the PBNI files': a characterization recording will
+//  confirm or refute their logic, and will simply have nothing to say about these type-resolution
+//  choices. They remain reviewable against the CLR's documented behaviour instead. Nothing in this
+//  file is a Golden-Master claim either - no recording exists yet - but the gap being covered here
+//  is a language-mapping gap rather than a missing-oracle gap.
+//
 //  ##############################################################################################
 //  ##  READ THIS FIRST - THE PRESERVED DEFECT                                                  ##
 //  ##############################################################################################

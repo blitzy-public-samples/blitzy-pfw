@@ -34,14 +34,22 @@
 //  The file name is fixed by the refactor plan's own target structure and matches it character for
 //  character. The TYPE names inside are not, and they must not collide with the published
 //  boundary: shared/PowerFramework.Contracts/Proto/common.v1.proto already declares a protobuf
-//  enumeration NAMED ItemStatus, whose five members are
+//  enumeration NAMED ItemStatus, whose four members are
 //
-//      ITEM_STATUS_UNSPECIFIED, ITEM_STATUS_NOT_MODIFIED, ITEM_STATUS_DATA_MODIFIED,
-//      ITEM_STATUS_NEW, ITEM_STATUS_NEW_MODIFIED
+//      ITEM_STATUS_NOT_MODIFIED = 0, ITEM_STATUS_DATA_MODIFIED = 1,
+//      ITEM_STATUS_NEW = 2, ITEM_STATUS_NEW_MODIFIED = 3
 //
 //  under option csharp_namespace = "PowerFramework.Contracts.Common.V1", which protoc's C#
 //  generator emits as PowerFramework.Contracts.Common.V1.ItemStatus with the shouty enum-name
-//  prefix stripped: Unspecified, NotModified, DataModified, New, NewModified.
+//  prefix stripped: NotModified, DataModified, New, NewModified.
+//
+//  FOUR MEMBERS, NOT FIVE, AND NotModified! IS ZERO. The contract carries no synthetic
+//  "unspecified" member: NotModified! already occupies zero, both as the state of a freshly
+//  retrieved row and as the value an unassigned `dwItemStatus` reads as, so proto3's
+//  first-enumerator rule is satisfied without inventing anything. Inserting a sentinel would shift
+//  DataModified!, New! and NewModified! up by one and silently invalidate every stored numeric
+//  comparison (AAP 0.4.5.3). A field that must express "no status was supplied" declares itself
+//  proto3 `optional` - common.v1.ColumnValue.item_status is the one that does.
 //
 //  A second type named ItemStatus in namespace PowerFramework.Persistence.Buffers would make every
 //  unqualified mention of the name ambiguous - CS0104 - in Grpc/QueryService.cs,
@@ -420,8 +428,8 @@ internal static class ItemStatusMachine
     /// <returns>
     /// <see langword="true"/> for <see cref="ItemStatus.NotModified"/> and
     /// <see cref="ItemStatus.DataModified"/>; <see langword="false"/> for every other value,
-    /// including <see cref="ItemStatus.NewModified"/>, <see cref="ItemStatus.New"/>,
-    /// <see cref="ItemStatus.Unspecified"/> and any value outside the declared domain.
+    /// including <see cref="ItemStatus.NewModified"/>, <see cref="ItemStatus.New"/> and any value
+    /// outside the declared domain.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -446,11 +454,10 @@ internal static class ItemStatusMachine
     /// default arm is added, and the status domain is not normalised.
     /// </para>
     /// <para>
-    /// A value outside the declared domain - <see cref="ItemStatus.Unspecified"/>, which the
-    /// published contract documents as a protocol-level "field absent" marker, or an out-of-range
-    /// cast - returns <see langword="false"/> and does not throw. That is exactly what a
-    /// PowerScript <c>choose case</c> with no <c>case else</c> arm does with an unmatched value:
-    /// nothing happens and control falls through.
+    /// A value outside the declared domain - an out-of-range cast, which is the only way to produce
+    /// one now that the contract carries no sentinel member - returns <see langword="false"/> and
+    /// does not throw. That is exactly what a PowerScript <c>choose case</c> with no
+    /// <c>case else</c> arm does with an unmatched value: nothing happens and control falls through.
     /// </para>
     /// </remarks>
     internal static bool IsDeleteCountable(ItemStatus status)
@@ -895,22 +902,22 @@ internal static class ItemStatusMachine
     /// rather than at this helper's.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="buffer"/> is <see cref="DwBuffer.Unspecified"/> or a value outside the
-    /// declared domain.
+    /// <paramref name="buffer"/> is a value outside the declared three-member domain.
     /// </exception>
     /// <remarks>
     /// <para>
     /// The legacy <c>dwbuffer</c> domain has exactly three members - <c>Primary!</c>,
-    /// <c>Delete!</c> and <c>Filter!</c> - and no way to express "unset". The published contract
-    /// adds <c>DW_BUFFER_UNSPECIFIED</c> only because proto3 requires a zero first enumerator, and
-    /// documents it as a protocol-level "field absent" marker that a request must never carry and a
-    /// response must never populate.
+    /// <c>Delete!</c> and <c>Filter!</c> - and the published contract carries exactly those three,
+    /// with <c>DW_BUFFER_PRIMARY = 0</c> occupying zero the way PowerBuilder's own unassigned
+    /// <c>dwbuffer</c> does. There is therefore no sentinel member to screen out, and the only value
+    /// that can reach this method outside the domain is an out-of-range numeric cast - a wire
+    /// payload carrying an unknown enum number, or a caller casting an arbitrary integer.
     /// </para>
     /// <para>
-    /// Rejecting it here is therefore NOT a behavioural addition: it refuses a state the legacy
-    /// cannot represent. This is the refactor's standing rule for such a case - narrow the contract
-    /// with a defined error rather than widen it with a guess - and it is why the failure is a
-    /// thrown argument exception rather than a silently chosen default buffer.
+    /// Rejecting that is NOT a behavioural addition: it refuses a state the legacy cannot represent.
+    /// This is the refactor's standing rule for such a case - narrow the contract with a defined
+    /// error rather than widen it with a guess - and it is why the failure is a thrown argument
+    /// exception rather than a silently chosen default buffer.
     /// </para>
     /// <para>
     /// The screen is private on purpose. It is validation and diagnostics, not a published
@@ -928,9 +935,9 @@ internal static class ItemStatusMachine
         throw new ArgumentOutOfRangeException(
             paramName,
             buffer,
-            "Not one of the three legacy DataWindow buffers. The domain is Primary!, Delete! and " +
-            "Filter! only; DwBuffer.Unspecified is a protocol-level \"field absent\" marker and " +
-            "never a buffer, so a payload carrying it is malformed " +
+            "Not one of the three legacy DataWindow buffers. The domain is exactly Primary! (0), " +
+            "Delete! (1) and Filter! (2); any other number is an out-of-range cast or an unknown " +
+            "enum value from a foreign payload, and the legacy has no state it could denote " +
             "[ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds_mt.sru:L32,L56].");
     }
 
@@ -1011,4 +1018,3 @@ internal static class ItemStatusExtensions
         return ItemStatusMachine.IsModified(status);
     }
 }
-

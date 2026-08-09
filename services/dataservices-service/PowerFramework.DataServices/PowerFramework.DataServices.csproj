@@ -162,10 +162,14 @@
       * Aspire.Hosting.AppHost : the rejected orchestration alternative. Hand authored compose is
         the single built path, because the generated model could not express
         `depends_on: condition: service_healthy`.
-      * Any pinyin package : the pfwPinyinFirstLetterLike lookup table exists only inside the
-        closed pfw.dll and its flag semantics are undocumented, so a third party table cannot be
-        shown to be bit exact. Expressions/PinyinFirstLetterMatcher.cs is characterized against
-        the behavioural oracle, or reported BLOCKED. It is never approximated by a dependency.
+      * Any pinyin package : the pfwPinyinFirstLetterLike LOOKUP TABLE exists only inside the
+        closed pfw.dll, so a third party table cannot be shown to be bit exact. The FLAGS are not
+        the unknown part - enums.sru:L1146-L1149 defines PY_LIKE_IGNORE_CASE = 1,
+        PY_LIKE_IGNORE_WIDTH = 2 and PY_LIKE_FUZZY_SOUND = 4, so the 7 passed at
+        n_cst_dwsvc_dropdownsearch.sru:L323 is all three, and Shared.Kernel Enums publishes them.
+        What no flag value reveals is the character to first letter mapping and the fuzzy sound
+        groupings. Expressions/PinyinFirstLetterMatcher.cs is therefore characterized against the
+        behavioural oracle, or reported BLOCKED. It is never approximated by a dependency.
       * Any third party cryptography package : this service performs no cryptography. Keyed
         operations are reached over contract C-02 on Security.
   -->

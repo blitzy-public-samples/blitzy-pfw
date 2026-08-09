@@ -2,9 +2,34 @@
 //  OrderedMap - the insertion-ordered, string-keyed map with ONE-BASED positional access
 //  --------------------------------------------------------------------------------------------
 //  SUBSTITUTED FOR  ws_objects/pfw.utility.container.pbl.src/n_map.sru (31 lines)
-//  ORACLE STATUS    That .sru is the ONLY specification for this type, and it is READ ONLY: it
-//                   is the behavioural oracle for parity testing, never an edit target. Every
-//                   member below cites the n_map.sru line it is derived from.
+//  ORACLE STATUS    That .sru is the ONLY specification for this type, and it is READ ONLY: it is
+//                   an input to parity testing, never an edit target. Every member below cites the
+//                   n_map.sru line it is derived from.
+//
+//                   BUT IT IS A PROTOTYPE LIST, NOT A BEHAVIOURAL ORACLE. It settles names,
+//                   arities, parameter types and return types, and it settles NOTHING about edge
+//                   behaviour, because it contains no bodies (measured below). The behavioural
+//                   oracle proper is the compiled pfw.dll exercised through a characterization
+//                   recording, and NO SUCH RECORDING EXISTS YET.
+//
+//  DP-7 EVIDENCE STATUS - what a citation on a member below does and does not prove
+//  --------------------------------------------------------------------------------------------
+//  A member's `n_map.sru:Lnn` citation proves that member's SIGNATURE. It does not prove that
+//  member's edge behaviour, and this file must not be read as though it did:
+//
+//    TIER 1  TRACEABLE - the ten member names and their signatures, including Count() returning
+//            ulong and remaining a method rather than becoming a property.
+//    TIER 3  TARGET-CHARACTERIZED - every edge behaviour, because the prototype cannot express
+//            one: the null-from-Get and empty-string-from-GetKey miss sentinels, Add's boolean
+//            duplicate refusal, Set's in-place overwrite, the case-sensitivity reading, and the
+//            inclusive one-based upper bound. Each is DEFINED, REPRODUCIBLE AND COVERED BY A TEST.
+//            None is verified against the binary, and none may be presented as Golden-Master
+//            parity in docs/PARITY.md or anywhere else until a paired recording exists under
+//            characterization/recordings/{legacy,dotnet}/<workflowId>/.
+//
+//  SHOULD A CHARACTERIZATION RECORDING LATER CONTRADICT ANY TIER 3 CHOICE, THE RECORDING WINS and
+//  the member is corrected. Nothing here is left undefined, because an undefined index or miss
+//  sentinel produces an irreproducible defect - but being defined is not the same as being proven.
 //
 //  THIS IS A SUBSTITUTION, NOT A PORT, AND THE DISTINCTION IS LOAD BEARING
 //  --------------------------------------------------------------------------------------------

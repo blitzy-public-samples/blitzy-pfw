@@ -71,10 +71,22 @@
  * The run path includes a collection-only invocation, exposed by the sibling
  * `package.json` as the `test:list` script, which loads and typechecks every
  * fixture and every spec **with no stack running** (C-L). This module is
- * therefore free of module-scope side effects by construction: every
- * environment read has a working default, and there is no top-level `throw`,
- * `await`, `fetch`, request or `process.exit` anywhere in it, and no
- * assertion that anything is reachable.
+ * therefore free of module-scope side effects: it performs no `await`, no
+ * `fetch`, no request, no file read and no `process.exit`, and it asserts
+ * nothing about reachability. Every environment variable has a working
+ * default, so the collection-only run — which sets none of them — resolves
+ * all four addresses from those defaults and validates nothing.
+ *
+ * The one thing this module will do at module scope is **refuse a value that
+ * is configured but structurally unusable**, by throwing. That is not a side
+ * effect and it does not compromise the property above: it is unreachable
+ * unless an operator has explicitly set a variable to something no service
+ * could be reached at, and in that case stopping immediately with the
+ * variable named is the only useful behaviour. Silently substituting a
+ * default would point the suite at a stack nobody asked for and let a green
+ * run attest to a system that was never exercised. The rules are stated in
+ * full on `resolveBaseUrl` below, and the sibling `playwright.config.ts`
+ * already applies the same posture to the ingress URL.
  *
  * A consequence worth stating plainly: importing this module proves nothing
  * about whether the stack is up. Readiness is asserted by the specs against
@@ -110,39 +122,66 @@
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves one base URL from the environment, falling back to a default.
+ * Resolves one base URL from the environment, falling back to a default, and
+ * refuses to resolve a value that is configured but unusable.
  *
- * The four base URLs below all resolve through this one helper so that their
- * behaviour is uniform and there is a single place to read it. The rules, in
- * order:
+ * All four base URLs below resolve through this one helper, so the rules are
+ * uniform across every service rather than strict for the ingress and lax for
+ * the other three. In order:
  *
- * 1. An unset variable yields the default.
- * 2. The configured value is trimmed, because a value that arrives from an
+ * 1. An **unset** variable yields the default. Nothing is validated, because
+ *    nothing was configured; the defaults are authored correct.
+ * 2. A **set** variable is trimmed, because a value arriving from an
  *    environment file or a shell export frequently carries stray whitespace.
- * 3. A value that is empty once trimmed is treated as **absent**, not as an
- *    error, and yields the default.
- * 4. Exactly one trailing `/` is stripped, so that a caller may concatenate a
- *    leading-slash path onto the result without producing a double slash.
+ * 3. A value that is **empty once trimmed** is a fatal misconfiguration and
+ *    throws. It is not silently treated as absent — see below.
+ * 4. The value must be an **absolute URL**, and its scheme must be `http:` or
+ *    `https:`. Anything else throws.
+ * 5. The value must not carry **credentials, a query string or a fragment**.
+ *    Any of the three throws.
+ * 6. Every trailing `/` is stripped, so that a caller may concatenate a
+ *    leading-slash path onto the result without ever producing a double
+ *    slash, and so that two spellings of the same address normalise to one
+ *    string. This is deterministic: `http://h:1//` and `http://h:1` yield the
+ *    identical result.
  *
- * Rule 3 is a deliberate divergence from the sibling `playwright.config.ts`,
- * which treats an empty `GATEWAY_BASE_URL` as a fatal misconfiguration and
- * throws. Both behaviours are correct in their own place: the runner config
- * is entitled to fail fast because it is the entry point, whereas this module
- * must stay importable under the collection-only invocation described above,
- * so it cannot throw at module scope (C-L). The divergence is unobservable in
- * practice — the config is evaluated first, so an empty value ends the run
- * there, before any fixture is imported.
+ * WHY RULE 3 THROWS RATHER THAN FALLING BACK. An earlier form of this module
+ * treated a blank value as absent, on the reasoning that the module must stay
+ * importable under the collection-only invocation. Silently substituting a
+ * default for a value an operator deliberately set is the worst of the
+ * available behaviours: it points the suite at a stack nobody asked for, and
+ * a green run then attests to a system that was never exercised. The blank
+ * value itself is the evidence that something upstream — an unpopulated
+ * environment file, a typo in a variable name, a substitution that produced
+ * nothing — is broken, and swallowing it discards that evidence.
  *
- * Rule 4 strips one slash rather than all of them, so a pathological value
- * ending in `//` normalises to a single trailing slash rather than being
- * silently rewritten further. Aggressive normalisation of an obviously wrong
- * value would hide the mistake instead of surfacing it in the request URL.
+ * IMPORT-SAFETY IS PRESERVED, NOT TRADED AWAY. The collection-only run sets
+ * no service variable at all, so all four constants take rule 1 and nothing
+ * is validated and nothing throws: the module stays importable with no stack
+ * running, which is the property C-L actually requires. A throw is reachable
+ * only when an operator has explicitly configured a structurally unusable
+ * value, which is precisely the case that must stop the run. The sibling
+ * `playwright.config.ts` already behaves this way for the Gateway URL and is
+ * evaluated first, so for that one variable the run ends there; these rules
+ * extend the same posture to the other three, which previously had none.
+ *
+ * NO MESSAGE ECHOES THE CONFIGURED VALUE. A rejected address may carry
+ * credentials — rule 5 exists precisely because one can — and a diagnostic
+ * that quoted it would write them into the console and into whatever
+ * collects it, reintroducing through the error message the leak the rule
+ * exists to prevent. A validator cannot know which of its inputs is
+ * sensitive, so none is quoted: the variable name is what an operator needs
+ * in order to find the offending setting, and the parsed scheme is quoted
+ * where relevant because it is a fixed token that carries nothing.
  *
  * @param variableName the environment variable to read, named exactly as it
  *                     appears in the orchestration environment file
- * @param fallback the default used when the variable is unset or blank; it is
- *                 returned as authored and needs no normalisation
- * @returns an absolute base URL with no trailing slash
+ * @param fallback the default used when the variable is unset; it is returned
+ *                 as authored and needs no normalisation
+ * @returns an absolute http/https base URL with no trailing slash
+ * @throws Error when the variable is set to a blank, unparseable,
+ *         non-http/https, credential-bearing, query-bearing or
+ *         fragment-bearing value
  */
 function resolveBaseUrl(variableName: string, fallback: string): string {
   const configured: string | undefined = process.env[variableName];
@@ -154,10 +193,82 @@ function resolveBaseUrl(variableName: string, fallback: string): string {
   const trimmed: string = configured.trim();
 
   if (trimmed.length === 0) {
-    return fallback;
+    throw new Error(
+      `${variableName} is set but empty. Unset it to use the default service ` +
+        'address, or set it to an absolute http/https URL.',
+    );
   }
 
-  return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(
+      `${variableName} is not a valid absolute URL. Expected a value such as ` +
+        'http://host:port. The configured value is deliberately not quoted ' +
+        'here, because a rejected address may carry a credential.',
+    );
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `${variableName} must use the http or https scheme, got ` +
+        `"${parsed.protocol}".`,
+    );
+  }
+
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new Error(
+      `${variableName} must not embed credentials in the address. Remove the ` +
+        '"user:password@" portion: every service in this system is reached ' +
+        'with a bearer token issued by the Security service, and an address ' +
+        'carrying credentials would leak them into logs and reports.',
+    );
+  }
+
+  if (parsed.search.length > 0) {
+    throw new Error(
+      `${variableName} is a base address and must not carry a query string. ` +
+        'Per-request paths are composed onto it, so a query on the base ' +
+        'would be dropped rather than merged.',
+    );
+  }
+
+  if (parsed.hash.length > 0) {
+    throw new Error(
+      `${variableName} is a base address and must not carry a fragment. A ` +
+        'fragment is never sent to a server, so one here can only be a ' +
+        'mistake.',
+    );
+  }
+
+  return stripTrailingSlashes(trimmed);
+}
+
+/**
+ * Removes every trailing `/` from an address.
+ *
+ * Deterministic by design, and that is the whole point of it being separate:
+ * two spellings of one address must normalise to one string, so that a
+ * `baseUrl + path` concatenation cannot produce a double slash for one
+ * operator and not for another. An earlier form of this module stripped
+ * exactly one slash, on the reasoning that leaving a second one visible in
+ * the request URL surfaced the mistake rather than hiding it. In practice it
+ * produced two different normalised forms for the same intended address, and
+ * the "surfaced" mistake was a 404 whose cause was a doubled separator — a
+ * worse diagnostic than the value simply working.
+ *
+ * @param value an address that has already been validated
+ * @returns the same address with no trailing `/`
+ */
+function stripTrailingSlashes(value: string): string {
+  let end: number = value.length;
+
+  while (end > 0 && value.charAt(end - 1) === '/') {
+    end -= 1;
+  }
+
+  return value.slice(0, end);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,16 +302,41 @@ export const DATASERVICES_BASE_URL: string = resolveBaseUrl(
 );
 
 /**
- * Security, on 5104 — the sole token issuer, reached over REST.
+ * Security, on 5104 — the sole token issuer, reached over REST **and over TLS**.
  *
  * This is the one non-Gateway address the suite calls functionally rather
  * than only probing: token issuance and the published verification material
- * live here (contract C-01), and they are plain HTTP precisely so that a
- * consumer's stock bearer handler can self-configure with no bespoke code.
+ * live here (contract C-01).
+ *
+ * ⚠ REST IS NOT THE SAME PROPERTY AS PLAINTEXT, AND THIS IS THE ONE ADDRESS
+ * WHERE THE DIFFERENCE MATTERS ⚠
+ *
+ * The reason this contract is REST is that a consumer's stock bearer handler
+ * can self-configure from an ordinary HTTP discovery document with no bespoke
+ * code — a property of the protocol shape, not of the transport being
+ * unencrypted. Security is nonetheless the system's trust bootstrap: its token
+ * endpoint authenticates callers with a **client certificate**, which cannot be
+ * presented on a plaintext listener at all, and the key set published at
+ * `/.well-known/jwks.json` is what every other service verifies tokens
+ * against. Fetched over plaintext, that document is substitutable on path, and
+ * an attacker who replaces it has every other service accepting tokens the
+ * attacker signed while behaving exactly as designed.
+ *
+ * `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` therefore
+ * publishes `https://localhost:5104` as its single canonical server, and this
+ * default matches it. The three addresses above stay on `http` because no
+ * comparable requirement has been established for them; that is a difference
+ * in what each edge carries, not an inconsistency.
+ *
+ * That distinction is load-bearing for one endpoint. `POST /v1/tokens` is
+ * protected by **mutual TLS and by nothing else** (see {@link TOKEN_PATH}), so
+ * over plain http it would have no caller authentication available at all. A
+ * spec that exercises issuance must present a client certificate; see
+ * {@link SECURITY_CLIENT_CERTIFICATE}.
  */
 export const SECURITY_BASE_URL: string = resolveBaseUrl(
   'SECURITY_BASE_URL',
-  'http://localhost:5104',
+  'https://localhost:5104',
 );
 
 /**
@@ -223,6 +359,14 @@ export const SECURITY_BASE_URL: string = resolveBaseUrl(
  * compiler** — if either the variable name or the default string is ever
  * changed, it must be changed in both files in the same edit. Verified equal
  * character-for-character at the time of writing.
+ *
+ * The **validation rules** are duplicated too, and deliberately so. Both
+ * files reject a blank, unparseable, non-http/https, credential-bearing,
+ * query-bearing or fragment-bearing value, both normalise trailing slashes
+ * the same way, and neither echoes the configured value in a diagnostic. They
+ * were equal in behaviour when written, and a change to one is a change to
+ * both. The config is evaluated first, so for this one variable its copy is
+ * what an operator will actually see fire.
  */
 export const GATEWAY_BASE_URL: string = resolveBaseUrl(
   'GATEWAY_BASE_URL',
@@ -307,12 +451,33 @@ export const CAPABILITIES_PATH: string = '/v1/capabilities';
 export const DATAWINDOW_PATH_PREFIX: string = '/v1/datawindow';
 
 /**
- * Token issuance on Security — contract C-01, `POST`, caller identity
- * required.
+ * Token issuance on Security — contract C-01, `POST`, **mutual TLS only**.
  *
  * Issues a short-lived service token from a caller identity, an audience and
  * a scope set. **Security is the sole token issuer**; no other service mints,
  * so this path is meaningful only against {@link SECURITY_BASE_URL}.
+ *
+ * **This is the single mutual-TLS edge in the system, and it is the only
+ * operation in the contract a bearer token cannot protect** — a caller cannot
+ * present a token in order to obtain its first token. The OpenAPI definition
+ * declares a `mutualTLS` scheme and applies it here as an override of the
+ * document-level bearer requirement, so the identity that is honoured is the
+ * one the presented **client certificate** establishes. The request body
+ * carries no credential of any kind, and `additionalProperties: false` means
+ * one cannot be added.
+ *
+ * Two statuses are therefore part of the contract rather than implementation
+ * detail, and a spec asserting on them is asserting the boundary is
+ * authenticated:
+ *
+ * * `401` — no client certificate presented, or the certificate is not
+ *   trusted. There is no bearer-token alternative to fall back to.
+ * * `403` — the certificate is trusted but the caller is not permitted the
+ *   requested subject or audience; in particular the claimed `subject` does
+ *   not match the identity the certificate establishes.
+ *
+ * See {@link SECURITY_CLIENT_CERTIFICATE} for how a spec supplies the
+ * certificate, and why the local plain-http bring-up needs none.
  */
 export const TOKEN_PATH: string = '/v1/tokens';
 
@@ -334,6 +499,119 @@ export const JWKS_PATH: string = '/.well-known/jwks.json';
  * code rather than becoming hand-written code in three services.
  */
 export const OIDC_DISCOVERY_PATH: string = '/.well-known/openid-configuration';
+
+// ---------------------------------------------------------------------------
+// The client certificate for the one mutual-TLS edge
+// ---------------------------------------------------------------------------
+
+/**
+ * A client certificate for {@link TOKEN_PATH}, resolved from the environment.
+ *
+ * WHY THIS EXISTS AT ALL
+ * ----------------------
+ * `POST /v1/tokens` is protected by mutual TLS and by nothing else, so against
+ * an https deployment a spec that calls it must present a client certificate or
+ * be refused with `401`. Without this resolver the suite would have no way to
+ * exercise the issuance edge as it is actually specified, and every downstream
+ * spec would be limited to whatever a plain-http loopback bring-up happens to
+ * accept — which is precisely the gap between the contract and the test that
+ * lets an authentication requirement rot unnoticed.
+ *
+ * WHAT IT DOES *NOT* DO
+ * ---------------------
+ * It resolves **paths**, never material. No certificate, key, passphrase or any
+ * other credential appears in this file or anywhere else in this suite; the
+ * files these paths point at are mounted from the orchestration secret layer and
+ * are not part of this repository. The passphrase, if the key needs one, is read
+ * from the environment and is never defaulted, never logged and never included
+ * in an assertion message.
+ *
+ * ABSENT IS THE NORMAL CASE, AND IT IS NOT AN ERROR
+ * -------------------------------------------------
+ * The documented local bring-up publishes plain http on loopback, where there is
+ * no TLS handshake and therefore no certificate to present. This resolver
+ * returns `undefined` there, and it does so deliberately rather than throwing:
+ * a suite that refused to start without certificates would be unrunnable on the
+ * one topology the setup instructions actually document. A spec that requires a
+ * certificate should skip itself when this is `undefined`, and state in the skip
+ * reason that the issuance edge is only exercisable against an https deployment.
+ *
+ * Shape matches Playwright's `use.clientCertificates` entry so a config or a
+ * spec can pass it through unchanged: the `origin` it applies to, a certificate
+ * and key path pair, and an optional passphrase.
+ */
+export interface ClientCertificate {
+  /**
+   * The origin the certificate is presented to — Security's base URL.
+   *
+   * Playwright matches this against the request origin exactly, and a client
+   * certificate only exists inside a TLS handshake, so in practice this is an
+   * `https` origin. It is taken from {@link SECURITY_BASE_URL} rather than
+   * hardcoded so that the certificate follows wherever `SECURITY_BASE_URL`
+   * points; if that variable still names the plain-http loopback default then no
+   * handshake occurs and the entry is inert.
+   */
+  readonly origin: string;
+
+  /** Path to the PEM certificate, from `SECURITY_MTLS_CERT_PATH`. */
+  readonly certPath: string;
+
+  /** Path to the PEM private key, from `SECURITY_MTLS_KEY_PATH`. */
+  readonly keyPath: string;
+
+  /** Passphrase from `SECURITY_MTLS_KEY_PASSPHRASE`, when the key needs one. */
+  readonly passphrase?: string;
+}
+
+/**
+ * Reads an environment variable, treating blank as absent.
+ *
+ * Shares rule 2 and rule 3 of {@link resolveBaseUrl}: values arriving from an
+ * environment file or a shell export frequently carry stray whitespace, and a
+ * value that is empty once trimmed means "not set" rather than "set to empty".
+ *
+ * @param variableName the environment variable to read
+ * @returns the trimmed value, or `undefined` when unset or blank
+ */
+function readOptional(variableName: string): string | undefined {
+  const configured: string | undefined = process.env[variableName];
+
+  if (configured === undefined) {
+    return undefined;
+  }
+
+  const trimmed: string = configured.trim();
+
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
+/**
+ * The client certificate to present to Security, or `undefined` when none is
+ * configured.
+ *
+ * Both the certificate path and the key path must be present: a certificate
+ * without its key cannot complete a handshake, so half a configuration is
+ * treated as no configuration rather than as something to attempt and fail on
+ * with a message that names neither variable.
+ */
+export const SECURITY_CLIENT_CERTIFICATE: ClientCertificate | undefined = (():
+  | ClientCertificate
+  | undefined => {
+  const certPath: string | undefined = readOptional('SECURITY_MTLS_CERT_PATH');
+  const keyPath: string | undefined = readOptional('SECURITY_MTLS_KEY_PATH');
+
+  if (certPath === undefined || keyPath === undefined) {
+    return undefined;
+  }
+
+  const passphrase: string | undefined = readOptional('SECURITY_MTLS_KEY_PASSPHRASE');
+
+  return Object.freeze(
+    passphrase === undefined
+      ? { origin: SECURITY_BASE_URL, certPath, keyPath }
+      : { origin: SECURITY_BASE_URL, certPath, keyPath, passphrase },
+  );
+})();
 
 // ---------------------------------------------------------------------------
 // The service endpoint table
@@ -549,4 +827,3 @@ export function gatewayUrl(path: string): string {
 export function securityUrl(path: string): string {
   return joinUrl(SECURITY_BASE_URL, path);
 }
-

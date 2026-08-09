@@ -41,24 +41,53 @@
  * From this directory, unchanged from the documented path:
  *
  *   npm ci && npx playwright test        # or: npm test
- *   npx playwright test --list           # collect + typecheck, no stack needed
  *
- * The stack it runs against is brought up separately and beforehand, by the
- * one orchestration manifest under `orchestration/`. This config never starts
- * anything; see the `webServer` note below.
+ * Two gates need no running stack, and between them they are everything that
+ * can be verified without one:
+ *
+ *   npm run typecheck                    # tsc --noEmit, strict
+ *   npm run test:list                    # collect and enumerate every spec
+ *   npm run verify                       # both, in that order
+ *
+ * THE TWO GATES DO DIFFERENT JOBS AND NEITHER SUBSTITUTES FOR THE OTHER.
+ * `playwright test --list` loads and collects the spec files, so it catches a
+ * syntax error, a missing module and a spec that fails at import time - and it
+ * performs NO TYPE CHECKING WHATSOEVER, because the runner transpiles each
+ * file with Babel, which strips types without reading them. A misspelled
+ * fixture export, a string passed where a number is required, or an ignored
+ * possibly-undefined value all survive collection intact. Only `tsc --noEmit`
+ * reads the types, and it is configured by the sibling `tsconfig.json` with
+ * the strict family plus the additional checks documented there.
+ *
+ * The stack the specs run against is brought up separately and beforehand, by
+ * the one orchestration manifest under `orchestration/`. This config never
+ * starts anything; see the `webServer` note below.
  */
 import { defineConfig } from '@playwright/test';
+
+import { SECURITY_CLIENT_CERTIFICATE } from './fixtures/service-endpoints';
 
 /**
  * The Gateway composition root, overridable for a non-default host or port.
  *
  * The default matches the documented access URL for the composition root, so
  * the suite runs against a stock local bring-up with no environment set at
- * all. Resolution is inlined here on purpose: coupling the runner config to a
- * fixtures module would make the config depend on a filename it cannot
- * verify, and the runner must load even when the fixtures layer does not.
+ * all.
+ *
+ * Resolution is inlined here rather than imported, and that is still a
+ * deliberate choice even though this file now imports one symbol from the
+ * fixtures layer. The base URL is what the runner needs in order to start at
+ * all, so keeping its resolution local means a fault in the fixtures layer
+ * surfaces as failing specs rather than as a config that will not load. The one
+ * import above is confined to `use.clientCertificates`, which only the config
+ * can populate and which no amount of duplication here could resolve without
+ * also duplicating Security's own base-URL resolution — two resolvers copied
+ * instead of one value imported. The `fixtures/service-endpoints.ts` module is
+ * deliberately free of side effects at import time and reads only the
+ * environment, so importing it cannot start anything or fail on a missing
+ * service.
  */
-const resolvedGatewayBaseUrl = process.env.GATEWAY_BASE_URL ?? 'http://localhost:5105';
+const resolvedGatewayBaseUrl = process.env['GATEWAY_BASE_URL'] ?? 'http://localhost:5105';
 
 /**
  * Fail fast on a structurally unusable base URL rather than degrade.
@@ -70,9 +99,43 @@ const resolvedGatewayBaseUrl = process.env.GATEWAY_BASE_URL ?? 'http://localhost
  * continue past, and this suite keeps that posture: a bad configuration stops
  * the run immediately, with a message that names the variable at fault.
  *
+ * SIX RULES, and the last three are about the value being a BASE address
+ * rather than an arbitrary URL. `use.baseURL` has per-request paths composed
+ * onto it, so three components that parse perfectly well are nevertheless
+ * wrong here:
+ *
+ * - **Credentials** (`http://user:secret@host:5105`). Rejecting them is a
+ *   secrets control rather than tidiness. Playwright records the request URL
+ *   in traces, reports and failure messages, so a credential embedded in the
+ *   base address is a credential written into every artifact the run
+ *   produces — and the suite has no use for one, because it authenticates
+ *   with a bearer token obtained from the Security service.
+ * - **A query string.** It is dropped rather than merged when a path is
+ *   composed onto the base, so a caller believing it had configured one would
+ *   be wrong with no diagnostic at all.
+ * - **A fragment.** Never transmitted, so one here can only be a mistake.
+ *
+ * NO MESSAGE ECHOES THE CONFIGURED VALUE. An earlier form of this function
+ * quoted the rejected value in its unparseable-URL message, which would print
+ * a credential-bearing address into the console and into whatever collects the
+ * run output — reintroducing through the error message the leak the credential
+ * rule exists to prevent. The variable name is what an operator needs; the
+ * parsed scheme is quoted where relevant because it is a fixed token that
+ * carries nothing.
+ *
+ * TRAILING SLASHES ARE STRIPPED, all of them, so that two spellings of one
+ * address normalise to one string and a `baseURL` + leading-slash-path
+ * concatenation can never produce a doubled separator.
+ *
+ * These rules are duplicated in `fixtures/service-endpoints.ts`, which applies
+ * them to all four service addresses. The duplication is deliberate — see the
+ * note on `resolvedGatewayBaseUrl` above for why this config imports nothing
+ * from the fixtures layer — so a change to one is a change to both.
+ *
  * @param candidate the resolved base URL, from the environment or the default
- * @returns the same value, once proven to be an absolute http/https URL
- * @throws Error when the value is blank, unparseable, or not http/https
+ * @returns the same value, normalised, once proven usable as a base address
+ * @throws Error when the value is blank, unparseable, not http/https, or
+ *         carries credentials, a query string or a fragment
  */
 function assertUsableBaseUrl(candidate: string): string {
   const trimmed = candidate.trim();
@@ -89,8 +152,9 @@ function assertUsableBaseUrl(candidate: string): string {
     parsed = new URL(trimmed);
   } catch {
     throw new Error(
-      `GATEWAY_BASE_URL is not a valid absolute URL: "${trimmed}". ` +
-        'Expected a value such as http://host:port.',
+      'GATEWAY_BASE_URL is not a valid absolute URL. Expected a value such ' +
+        'as http://host:port. The configured value is deliberately not quoted ' +
+        'here, because a rejected address may carry a credential.',
     );
   }
 
@@ -100,7 +164,37 @@ function assertUsableBaseUrl(candidate: string): string {
     );
   }
 
-  return trimmed;
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new Error(
+      'GATEWAY_BASE_URL must not embed credentials in the address. Remove ' +
+        'the "user:password@" portion: the suite authenticates with a bearer ' +
+        'token obtained from the Security service, and Playwright records ' +
+        'request URLs in traces and reports.',
+    );
+  }
+
+  if (parsed.search.length > 0) {
+    throw new Error(
+      'GATEWAY_BASE_URL is a base address and must not carry a query ' +
+        'string. Per-request paths are composed onto it, so a query on the ' +
+        'base would be dropped rather than merged.',
+    );
+  }
+
+  if (parsed.hash.length > 0) {
+    throw new Error(
+      'GATEWAY_BASE_URL is a base address and must not carry a fragment. A ' +
+        'fragment is never sent to a server, so one here can only be a ' +
+        'mistake.',
+    );
+  }
+
+  let end = trimmed.length;
+  while (end > 0 && trimmed.charAt(end - 1) === '/') {
+    end -= 1;
+  }
+
+  return trimmed.slice(0, end);
 }
 
 export default defineConfig({
@@ -142,8 +236,9 @@ export default defineConfig({
   retries: 0,
 
   // A stray `test.only` silently narrows a CI run to one test while still
-  // reporting green. Fail the run instead when CI is set.
-  forbidOnly: !!process.env.CI,
+  // reporting green. Fail the run instead when CI is set. Bracket notation for
+  // the same reason as the base URL above.
+  forbidOnly: !!process.env['CI'],
 
   // Per-test liveness guard against a hung request or a wedged upstream — it
   // is NOT a latency budget and asserts nothing about response time. No
@@ -159,10 +254,13 @@ export default defineConfig({
     timeout: 10_000,
   },
 
-  // Console only. The repository's ignore rules are not being changed by this
-  // migration, so any generated report directory would be an untracked
-  // artifact that must simply never be committed — the safest configuration is
-  // one that generates nothing to begin with. No third-party reporter, no
+  // Console only. Two independent reasons, and both still hold now that
+  // `tests/e2e/.gitignore` exists: report and trace directories ARE ignored, so
+  // the accident of committing one is prevented rather than merely discouraged —
+  // but a configuration that generates nothing cannot leak anything at all, and
+  // a trace records request and response bodies, which for this suite means
+  // bearer tokens. Defence in depth: the ignore rule is the safety net, and not
+  // generating the artifact is the control. No third-party reporter, no
   // performance tracing and no metrics collection are configured.
   reporter: [['list']],
 
@@ -191,10 +289,38 @@ export default defineConfig({
     // Certificate and host verification stay ON. Stated as an explicit
     // negative rather than left to a default: the legacy code disables both in
     // a deferred capability area, and that is a documented legacy security
-    // defect which this suite must not adopt as its own configuration. The
-    // local bring-up serves plain HTTP on loopback, so there is nothing here
-    // that would need suppressing anyway.
+    // defect which this suite must not adopt as its own configuration. It must
+    // stay on for a second reason too — see `clientCertificates` below. Turning
+    // it off to "make TLS work locally" would silently disable the very
+    // verification a mutually authenticated handshake exists to establish.
     ignoreHTTPSErrors: false,
+
+    // The client certificate for the one mutual-TLS edge in the system.
+    //
+    // `POST /v1/tokens` on Security is protected by mutual TLS and by nothing
+    // else, because a caller cannot present a bearer token in order to obtain
+    // its first bearer token. Against an https deployment a spec that exercises
+    // token issuance must therefore present a client certificate or be refused
+    // with `401`, and this is where the runner supplies it.
+    //
+    // NO CREDENTIAL IS IN THIS FILE. The entry is resolved by the fixtures
+    // layer from `SECURITY_MTLS_CERT_PATH`, `SECURITY_MTLS_KEY_PATH` and
+    // `SECURITY_MTLS_KEY_PASSPHRASE`, and it carries file PATHS only. The files
+    // are mounted from the orchestration secret layer and are not part of this
+    // repository.
+    //
+    // Absent is the normal case and is not an error: the documented local
+    // bring-up publishes plain HTTP on loopback, where there is no handshake and
+    // so no certificate to present, and the resolver yields nothing. `[]` then
+    // configures no certificate at all, which is exactly right — a suite that
+    // refused to start without certificates would be unrunnable on the one
+    // topology the setup instructions document. A spec that needs the issuance
+    // edge should skip itself when the fixtures layer reports none, saying so.
+    //
+    // This is the one place the runner imports from `fixtures/`, and the reason
+    // is that the value must reach `use`, which only the config can populate.
+    // The base-URL resolution above stays inlined for the reason stated there.
+    clientCertificates: SECURITY_CLIENT_CERTIFICATE ? [SECURITY_CLIENT_CERTIFICATE] : [],
 
     // Every artifact capture off. Screenshots and video are meaningless for a
     // suite that never opens a page, and a trace would add artifact weight for

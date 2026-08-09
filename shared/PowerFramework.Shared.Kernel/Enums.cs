@@ -137,7 +137,7 @@
 //      enums.sru:L13-L34   The BSD 2-Clause notice and its four-condition Chinese restatement.
 //                          Not duplicated here: the text lives in the repository-root LICENSE and
 //                          NOTICE, and the assembly-level Copyright in Directory.Build.props
-//                          points at both. Duplicating a licence into one source file of sixteen
+//                          points at both. Duplicating a licence into one source file of twenty
 //                          projects would create a second place for it to drift.
 //      enums.sru:L1-L2     The PowerBuilder export header and $PBExportComments$ line, which are
 //                          toolchain metadata with no meaning outside the PBL exporter.

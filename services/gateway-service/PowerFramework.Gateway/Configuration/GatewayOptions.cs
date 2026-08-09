@@ -25,18 +25,32 @@
 //       "Locale": "en",
 //       "CapabilityFlags": 3847,
 //       "Upstreams": {                              <-- UpstreamAddresses, nested
-//         "DataServices": "http://localhost:5102",
-//         "Security":     "http://localhost:5104"
+//         "DataServices": "https://localhost:5102",
+//         "Security":     "https://localhost:5104"
 //       }
 //     }
 //
 //     "Authentication": { "Schemes": { "Bearer": {  <-- JwtBearerVerificationOptions
-//       "Authority": "http://localhost:5104",       <-- a SEPARATE root, not a child of "Gateway"
-//       "RequireHttpsMetadata": false,
-//       "ValidIssuers":   [ "http://localhost:5104" ],
+//       "RequireHttpsMetadata": true,               <-- a SEPARATE root, not a child of "Gateway"
 //       "ValidAudiences": [ "powerframework-gateway" ],
 //       "MapInboundClaims": false
 //     } } }
+//
+//   THE BEARER SHAPE IS SPLIT ACROSS TWO FILES, AND THE SPLIT IS A SECURITY BOUNDARY RATHER THAN
+//   TIDINESS. The base appsettings.json above carries only settings that are safe in EVERY
+//   environment, because that is exactly where base settings load. The two that are not - the
+//   plain-HTTP loopback authority and its matching issuer, together with the RequireHttpsMetadata
+//   relaxation those require - live in appsettings.Development.json and nowhere else:
+//
+//     "Authentication": { "Schemes": { "Bearer": {  <-- appsettings.Development.json ONLY
+//       "Authority": "http://localhost:5104",
+//       "RequireHttpsMetadata": false,
+//       "ValidIssuers": [ "http://localhost:5104" ]
+//     } } }
+//
+//   So an environment that configures nothing gets the strict shape and fails to start naming the
+//   missing authority, instead of inheriting a relaxation it never asked for. The binding contract is
+//   unchanged either way: the same keys, the same spellings, the same path.
 //
 //   The JWT settings live under the stock "Authentication:Schemes:Bearer" path because that is the
 //   path the framework's own JWT bearer handler binds itself, which is precisely the "zero bespoke
@@ -339,24 +353,41 @@ public sealed class GatewayOptions : IValidatableObject
         /// gRPC is the transport on this edge because the interface it carries is an ordered event
         /// chain with typed veto semantics, which needs compile-time contract enforcement and
         /// bidirectional streaming rather than a resource-shaped REST surface. The default names the
-        /// local orchestration topology and is overridden per environment through
-        /// <c>Gateway__Upstreams__DataServices</c>; the container-network host name comes from the
-        /// sibling appsettings.json rather than from a scheme invented here.
+        /// local orchestration topology over https, matching the base appsettings.json, and is
+        /// overridden per environment through <c>Gateway__Upstreams__DataServices</c> - by
+        /// appsettings.Development.json for the loopback plain-HTTP bring-up, and by the orchestration
+        /// manifest for a deployed one. The default is https so that a missing override cannot silently
+        /// downgrade the edge; the host name comes from configuration rather than from a scheme
+        /// invented here.
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
-        public string DataServices { get; set; } = "http://localhost:5102";
+        public string DataServices { get; set; } = "https://localhost:5102";
 
         /// <summary>
         /// The Security service's REST address. Defaults to the local topology's port 5104.
         /// </summary>
         /// <remarks>
-        /// REST is the transport on this edge so that token issuance and key publication stay plain
-        /// HTTP, which is what lets a stock bearer handler fetch the published key material with no
-        /// bespoke code. Overridden per environment through <c>Gateway__Upstreams__Security</c>.
-        /// This address identifies the service; it never carries credentials of any kind.
+        /// REST is the transport on this edge so that token issuance and key publication use ordinary
+        /// HTTP semantics, which is what lets a stock bearer handler fetch the published key material
+        /// with no bespoke code. HTTP semantics, not the plain-http scheme: the default here is https,
+        /// and appsettings.Development.json overrides it to http for the loopback bring-up only.
+        /// Overridden per environment through <c>Gateway__Upstreams__Security</c>. This address
+        /// identifies the service; it never carries credentials of any kind.
+        /// </remarks>
+        /// <remarks>
+        /// <para>
+        /// THE SCHEME IS <c>https</c> AND THAT IS NOT INTERCHANGEABLE WITH <c>http</c> HERE. Security
+        /// is this system's trust bootstrap: it is the sole token issuer, its token endpoint
+        /// authenticates callers with a client certificate - which cannot be presented on a plaintext
+        /// listener at all - and the key set every other service verifies against is fetched from it.
+        /// A plaintext address on this edge means an on-path attacker can substitute the published keys
+        /// and have all three verifying services accept tokens the attacker signed, while behaving
+        /// exactly as designed. See <c>OpenApi/security.v1.yaml</c>'s <c>servers</c> block, which
+        /// records the same decision on the publishing side.
+        /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
-        public string Security { get; set; } = "http://localhost:5104";
+        public string Security { get; set; } = "https://localhost:5104";
     }
 }
 
@@ -366,7 +397,7 @@ public sealed class GatewayOptions : IValidatableObject
 /// <remarks>
 /// <para>
 /// A SECOND TOP-LEVEL TYPE, NOT A CHILD OF <see cref="GatewayOptions"/>, AND THAT IS THE WHOLE POINT.
-/// The sibling appsettings.json declares these settings under the stock
+/// The sibling appsettings files declare these settings under the stock
 /// <c>Authentication:Schemes:Bearer</c> path, which is a different configuration root from
 /// <c>Gateway</c>. Modelling them as <c>Gateway:Jwt:*</c> would have produced a type that compiles,
 /// passes a naive default-value test, and binds nothing whatsoever, because no such key exists. The
@@ -409,22 +440,46 @@ public sealed class JwtBearerVerificationOptions : IValidatableObject
     /// set are resolved beneath this address.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Security publishes standard discovery metadata and a standard key set document, so a stock
     /// bearer handler given this address self-configures and fetches verification keys without bespoke
-    /// code. The default names the local topology and is overridden per environment through
-    /// <c>Authentication__Schemes__Bearer__Authority</c>. This is an address, never a credential.
+    /// code. This is an address, never a credential.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY UNSET, AND THE EMPTY DEFAULT IS THE POINT. An earlier form of this type defaulted
+    /// to the loopback address of the local topology. That put an environment-specific plain-HTTP
+    /// address into source, where it is invisible to a deployment review, and it meant a deployment
+    /// that configured nothing still got a usable-looking authority pointing at a host that does not
+    /// exist for it. With no default, the presence rule below rejects the omission by name, so an
+    /// unconfigured deployment fails to start with a message identifying the exact configuration key -
+    /// which is the fail-fast posture the legacy framework had when a structural fault terminated the
+    /// application rather than degrading it. The loopback value now lives in
+    /// appsettings.Development.json, where it is one file, one environment and visible as such, and it
+    /// is supplied in every other environment through
+    /// <c>Authentication__Schemes__Bearer__Authority</c>.
+    /// </para>
     /// </remarks>
     [Required(AllowEmptyStrings = false)]
-    public string Authority { get; set; } = "http://localhost:5104";
+    public string Authority { get; set; } = string.Empty;
 
     /// <summary>
     /// Whether discovery metadata must be retrieved over HTTPS. Defaults to <see langword="true"/>.
     /// </summary>
     /// <remarks>
-    /// The safe value is the default in code. The sibling appsettings.json relaxes it for the local
-    /// topology, where every address is plain HTTP on a private container network, and that relaxation
-    /// is deliberately expressed in configuration where it is visible and reviewable rather than
-    /// buried as a weak default in source. A deployment that omits the key gets the strict behaviour.
+    /// <para>
+    /// The safe value is the default in code AND in the base appsettings.json, which states it
+    /// explicitly rather than leaving it implied.
+    /// </para>
+    /// <para>
+    /// THE RELAXATION IS SCOPED TO DEVELOPMENT, and it was not always. An earlier form of the base
+    /// appsettings.json set this to <see langword="false"/> so that the local plain-HTTP topology
+    /// worked out of the box. Base settings load in EVERY environment and take precedence over a code
+    /// default, so that arrangement silently disabled transport security for metadata retrieval
+    /// everywhere - a production deployment that simply omitted an override inherited the relaxation
+    /// without anything saying so. It now lives in appsettings.Development.json alongside the
+    /// plain-HTTP authority it exists for, so the two travel together and neither reaches an
+    /// environment that did not ask for it. Do not move either one back into the base file.
+    /// </para>
     /// </remarks>
     public bool RequireHttpsMetadata { get; set; } = true;
 
@@ -550,7 +605,8 @@ public sealed class JwtBearerVerificationOptions : IValidatableObject
 internal static class AddressValidation
 {
     /// <summary>
-    /// Checks that a configured address is present and is an absolute http or https URI.
+    /// Checks that a configured address is present, is an absolute http or https URI, and is shaped
+    /// like a base address: no embedded credentials, no query string and no fragment.
     /// </summary>
     /// <param name="value">The configured value, which may be null, empty or whitespace.</param>
     /// <param name="configurationKey">
@@ -563,10 +619,43 @@ internal static class AddressValidation
     /// it is not.
     /// </returns>
     /// <remarks>
+    /// <para>
     /// The scheme is constrained to http or https because both consumers of these addresses require
     /// it: a gRPC channel and an HTTP client base address each reject anything else. Reachability is
     /// never attempted here - that is a health-check concern, and dialling out from a configuration
     /// validator would turn a transient condition into a failure to start.
+    /// </para>
+    /// <para>
+    /// THESE ARE BASE ADDRESSES, WHICH IS WHY THE LAST THREE RULES EXIST. A base address carries a
+    /// scheme, a host, a port and optionally a path prefix, and nothing else. The three components
+    /// rejected below are each accepted by <see cref="Uri.TryCreate(string?, UriKind, out Uri?)"/>
+    /// and each would fail late and confusingly rather than at startup:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// <see cref="Uri.UserInfo"/> - credentials embedded in the address, as in
+    /// <c>http://user:secret@host:5102</c>. Rejecting it is a secrets control, not tidiness. Such a
+    /// value would be a credential living in configuration under a key named for an address, it would
+    /// be copied into every log line, exception message and trace that records the request URI, and
+    /// this system has no use for it in any case: every internal edge is authenticated with a bearer
+    /// token minted by the Security service, and no address here is ever a place to put a secret.
+    /// </description></item>
+    /// <item><description>
+    /// A query string. A base address is composed with per-request paths, and a query on the base
+    /// would be silently dropped by both consumers rather than merged, so a caller believing it had
+    /// configured one would be wrong with no diagnostic.
+    /// </description></item>
+    /// <item><description>
+    /// A fragment. Fragments are never transmitted, so one here can only be a mistake.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// EVERY MESSAGE NAMES THE KEY AND NEVER ECHOES THE VALUE. The configuration key is enough for an
+    /// operator to find the offending setting, whereas echoing the value would put a credential
+    /// bearing address into the startup log - which is exactly the failure the userinfo rule exists
+    /// to prevent, reintroduced by the error message that reports it. The scheme rule quotes the
+    /// parsed scheme alone, which is a fixed token from a small set and carries nothing.
+    /// </para>
     /// </remarks>
     internal static ValidationResult? Check(string? value, string configurationKey, string memberName)
     {
@@ -581,7 +670,8 @@ internal static class AddressValidation
         {
             return new ValidationResult(
                 $"'{configurationKey}' must be an absolute URI, for example "
-                    + "'http://service-host:5102'.",
+                    + "'http://service-host:5102'. The configured value is not quoted here because a "
+                    + "rejected address may carry a credential.",
                 [memberName]);
         }
 
@@ -596,7 +686,34 @@ internal static class AddressValidation
                 [memberName]);
         }
 
+        if (parsed.UserInfo.Length > 0)
+        {
+            return new ValidationResult(
+                $"'{configurationKey}' must not embed credentials in the address. Remove the "
+                    + "'user:password@' portion: every edge in this system is authenticated with a "
+                    + "bearer token issued by the Security service, and an address carrying "
+                    + "credentials would leak them into logs and traces. The configured value is "
+                    + "deliberately not quoted here.",
+                [memberName]);
+        }
+
+        if (!string.IsNullOrEmpty(parsed.Query))
+        {
+            return new ValidationResult(
+                $"'{configurationKey}' is a base address and must not carry a query string. A query "
+                    + "on a base address is dropped rather than merged when a per-request path is "
+                    + "composed onto it, so it would have no effect and no diagnostic.",
+                [memberName]);
+        }
+
+        if (!string.IsNullOrEmpty(parsed.Fragment))
+        {
+            return new ValidationResult(
+                $"'{configurationKey}' is a base address and must not carry a fragment. A fragment "
+                    + "is never sent to a server, so one here can only be a mistake.",
+                [memberName]);
+        }
+
         return null;
     }
 }
-

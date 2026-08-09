@@ -50,23 +50,34 @@
   Constraint C-D defers DesignSystem, Documents, Integration and ScriptBridge in full, so no entry
   here names or implies any of them, and there is no placeholder project of any kind.
 
-  ONE CONSEQUENCE OF THAT SCOPING, MEASURED AND DELIBERATELY ACCEPTED
+  ONE CONSEQUENCE OF THAT SCOPING, AND HOW IT IS HANDLED WITHOUT WEAKENING C-A
 
   Because the six shared projects are reached only by ProjectReference and are absent from this
-  solution, a solution build does not pass its configuration down to them. MSBuild unsets the parent
-  configuration for any referenced project it cannot find in the solution configuration table, so
-  during `dotnet build -c Release` here the two projects listed below build Release while the six
-  shared projects build in their own default, Debug, and it is those Debug assemblies that get copied
-  into the application's Release output. Verified on SDK 10.0.302 by comparing assembly hashes.
+  solution, MSBuild's default behaviour when building through a solution is to UNSET the parent
+  configuration for any referenced project it cannot find in the solution configuration table, so the
+  referenced project falls back to its own default. Measured on SDK 10.0.302: `dotnet build -c
+  Release` in this directory then built the two projects listed below into bin/Release while all six
+  shared projects landed in bin/Debug, and those Debug assemblies were copied into the application's
+  Release output. The command reported a clean Release build throughout, so nothing surfaced the
+  mismatch.
 
-  This is accepted rather than worked around, on three grounds. It is inherent to a service scoped
-  solution, so the only "fix" would be to list the shared projects here, which is exactly what
-  constraint C-A forbids. The mandated command is unaffected: it still reports a clean Release build
-  with zero warnings and zero errors, the tests still run, and the coverage report is still produced.
-  And the shipped artifact is unaffected, because the container image is produced by
-  `dotnet publish -c Release` against the application project rather than by a solution build, which
-  was measured to build all six shared projects in Release. Do not "correct" this by adding projects
-  to this file.
+  That is not accepted, because it makes the meaning of `-c Release` depend on solution membership: a
+  Release artifact would consume assemblies compiled with Debug settings, and the same command would
+  produce a different result depending on which solution resolved it.
+
+  It is fixed WITHOUT touching this file's membership. The repository root Directory.Build.props sets
+  ShouldUnsetParentConfigurationAndPlatform to false, which makes MSBuild pass this solution's
+  configuration through to a referenced project the solution does not list, and it adds an assertion
+  target that FAILS the build (PFW0001) if any referenced output ever arrives from a different
+  configuration again. Re-measured after the change: `dotnet build -c Release` here puts every shared
+  project in bin/Release, with zero warnings. Projects that ARE solution members are unaffected,
+  because the solution configuration still maps them explicitly, so the repository root solution
+  behaves exactly as before.
+
+  So the two obvious "corrections" remain wrong and must not be made. Do not add the shared projects
+  to this file - constraint C-A forbids it, and it is no longer necessary. Do not override
+  ShouldUnsetParentConfigurationAndPlatform back to true on a command line or in a project; the
+  assertion target will fail the build if you do, which is the point of it.
 
   THE TEST PROJECT ENTRY IS MANDATORY (constraint C-H)
 

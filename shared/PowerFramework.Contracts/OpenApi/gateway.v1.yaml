@@ -1,0 +1,2525 @@
+# ==================================================================================================
+#  gateway.v1.yaml - CONTRACT C-09 (REST INGRESS) AND THE INGRESS HALF OF C-10 (READINESS)
+#  ------------------------------------------------------------------------------------------------
+#  AUTHORITY         docs/CONTRACTS.md 12.1 (C-09), 12.2 (C-10), 13 (the four reserved routes)
+#                    Agent Action Plan 0.4.3 C-09/C-10 and 0.4.4
+#  SERVED BY         gateway-service, PowerFramework.Gateway, port 5105
+#  CONSUMED BY       External clients. This is the system's FIRST-EVER ingress.
+#
+#  WHY THIS DOCUMENT IS REST AND NOT gRPC
+#  ------------------------------------------------------------------------------------------------
+#  Gateway is the sole ingress, and an ingress needs three properties gRPC cannot give it: reach from
+#  a browser or a third party without a translating proxy, alignment with HTTP-standard caching and
+#  proxying, and mature description tooling. gRPC-Web requires a translating proxy and supports
+#  server streaming only, so choosing gRPC here would forfeit exactly what an ingress exists to
+#  provide. The internal east-west edges are gRPC precisely because both ends are owned; this one is
+#  not. The decision is recorded per service in docs/ARCHITECTURE.md and is not restated here.
+#
+#  THE PROJECTION IS A TRANSLATION LAYER, NOT A SECOND IMPLEMENTATION
+#  ------------------------------------------------------------------------------------------------
+#  Gateway holds no DataWindow logic, no expression engine and no validator. Every /v1/datawindow
+#  operation maps onto exactly one gRPC method of C-03 or C-04, and maps the returned status back to
+#  HTTP. Each operation therefore declares the method it projects in `x-grpc-method`, and the request
+#  and response payload shapes in `x-proto-request` and `x-proto-response`.
+#
+#  PAYLOAD SHAPES ARE DELEGATED TO THE PROTOCOL DEFINITIONS - A DELIBERATE DECISION UNDER C-K
+#  ------------------------------------------------------------------------------------------------
+#  The bodies of the /v1/datawindow operations are the canonical protobuf JSON mapping of the messages
+#  named in the `x-proto-*` extensions. Those messages are defined in Proto/dataservices.v1.proto and
+#  Proto/common.v1.proto IN THIS SAME PROJECT, and they are the single authority for the shapes.
+#
+#  Transcribing them into JSON Schema here was considered and REJECTED. It would create a second
+#  source of truth for well over a hundred messages, in a different language, with no mechanism
+#  keeping the two in step - and the first divergence would be silent, because nothing compiles this
+#  file against those definitions. The `x-proto-*` extensions are the alternative: they are mechanical,
+#  one-to-one, and CHECKABLE, and the sibling test project asserts that every one of them resolves to
+#  a real generated type. A schema copy would have been longer, less precise, and unverifiable.
+#
+#  What this document does specify exhaustively, because it is the ingress contract and nothing else
+#  publishes it: every route, its authentication posture, its HTTP status surface, the gRPC-to-HTTP
+#  status mapping, and the four reserved extension points. Those are C-09 and C-10.
+#
+#  THE FOUR RESERVED ROUTES ARE METADATA, NOT STUBS
+#  ------------------------------------------------------------------------------------------------
+#  /v1/design, /v1/documents, /v1/integration and /v1/scripting are declared here and return 501 with
+#  a machine-readable body naming the deferred service. Per docs/CONTRACTS.md 13.1 there is no project,
+#  no container definition, no test project, no partial implementation and no exception-throwing
+#  placeholder class for any of the four. A declaration in a route table implements nothing: it has no
+#  handler beyond the constant response, it calls nothing, and it can reach nothing. The prohibition in
+#  C-D is on IMPLEMENTING the deferred services, and this document does not.
+#
+#  OPENAPI VERSION
+#  ------------------------------------------------------------------------------------------------
+#  3.1.0, matching OpenApi/security.v1.yaml. No 3.0-only construct is used: there is no `nullable`
+#  keyword anywhere, and an optional-null is expressed as a JSON Schema type array.
+# ==================================================================================================
+
+openapi: 3.1.0
+
+info:
+  title: PowerFramework Gateway API
+  version: 1.0.0
+  summary: >-
+    The composition root and sole ingress of the PowerFramework .NET decomposition. Contract C-09
+    (REST ingress), the ingress half of C-10 (health and readiness), and the four reserved extension
+    points that name the deferred Phase-2 services.
+  license:
+    # NAME ONLY. The full BSD 2-Clause text, its four-condition Chinese restatement and the eleven
+    # upstream attributions live in the repository-root NOTICE and LICENSE files.
+    name: BSD-2-Clause
+  description: |-
+    # PowerFramework Gateway API
+
+    Gateway is the **composition root** of the decomposed system and its **only** ingress. Nothing
+    else in the system accepts an unsolicited external request.
+
+    ## What Gateway is, in terms of the legacy it replaces
+
+    The legacy PowerFramework is a *library*: 39 PowerBuilder libraries loaded into one process, with
+    no listener, no route table and no server tier. Its closest analogue to this document is the
+    coarse `open` / `close` / `systemerror` application lifecycle of
+    `ws_objects/pfw.pbl.src/pfw.sra:L88-L108` plus a navigation surface - a request/response shape,
+    which is one of the reasons this contract is REST.
+
+    Two consequences follow and are worth stating plainly:
+
+    * **Every route below is new.** None translates an existing wire format, because there was no
+      wire. That is why the contract inventory in `docs/CONTRACTS.md` exists to be reviewed rather
+      than generated silently.
+    * **"No new attack surface" cannot mean "no new surface".** Decomposition creates the system's
+      first ingress, so the requirement reads as: every newly created surface is authenticated from
+      the outset. That is why `/v1/ping` exists, and why it is here rather than only being asserted.
+
+    ## Authentication
+
+    A bearer token is required by default. Exactly three operations override that, and each declares
+    itself anonymous explicitly:
+
+    * `GET /health` - a readiness probe holds no token and probes precisely while the service is
+      starting.
+    * The two reserved-route families are *not* among the exceptions: they require a token like every
+      other `/v1` route, so an unauthenticated caller cannot enumerate the deferred roster.
+
+    Gateway **validates** tokens; it does not issue them. Security is the sole minter in the system
+    and publishes its verification material at its own `/.well-known/jwks.json`, which Gateway's
+    stock `Microsoft.AspNetCore.Authentication.JwtBearer` handler consumes. Gateway holds no signing
+    key. See `docs/SECRETS.md` for the token topology.
+
+    ## Status mapping, which is the substantive part of the projection
+
+    The `/v1/datawindow` routes translate gRPC statuses from C-03 and C-04 into HTTP. The mapping is
+    published in full at `docs/CONTRACTS.md` 12.1 and reproduced by the response sets below. The one
+    that matters most: **gRPC `Aborted` becomes HTTP `409`**, carrying the optimistic-concurrency
+    conflict detail unchanged. There is no silent overwrite anywhere in the system.
+
+    That mapping covers the statuses C-03 and C-04 **return**. It does not cover the case where the
+    call never reached them, so this document adds exactly one status beyond it — **`502`**, when an
+    upstream is unreachable or the call failed in transit after the retry policy was exhausted. That
+    is a failure mode decomposition itself creates: an in-process call cannot fail in transit and a
+    network call can. It is added rather than omitted because leaving it undocumented would make the
+    first transient fault an unhandled status in every generated client.
+
+    ## What is deliberately NOT projected
+
+    The two streaming methods of C-03 (`Retrieve`, `EventChain`) and the three streaming methods of
+    C-04 (`EventStream`, `InvokeMethodChannel`, `TraceChannel`) have **no REST projection**. A
+    bidirectional stream carrying an ordered event chain with a per-message veto has no faithful REST
+    representation, and a partial projection would be worse than none - a consumer would receive part
+    of the chain with no way to know what it had missed. A server stream is no more projectable than a
+    bidirectional one, because the property that matters is the same: the server decides when the next
+    message arrives. Consumers needing those five use the gRPC contract directly. This is a documented
+    gap with an enumerable boundary, not an oversight, and the five are named individually below so the
+    boundary is checkable.
+
+    **Every other method of C-03 and C-04 IS projected, including the eight read-and-apply operations
+    of the four headless models.** A partial projection would be the worst outcome available: Gateway
+    is the sole ingress, so an operation the gRPC contract publishes but this document omits is
+    unreachable from outside the cluster, and a consumer would read that as a bug in its own client
+    rather than as a boundary of the contract. The sibling test project asserts the correspondence in
+    both directions.
+
+    ## Related documents
+
+    `docs/ARCHITECTURE.md` is the service topology and port map, `docs/CONTRACTS.md` is the full
+    ten-contract inventory, `docs/DEFERRED.md` is the authoritative deferred-service roster, and
+    `Proto/dataservices.v1.proto` and `Proto/common.v1.proto` are the payload authority for the
+    projected operations. Where any of those and this document disagree about a route, a status or an
+    authentication posture, **this document is authoritative for the wire** and the prose is corrected
+    to match it.
+
+servers:
+  # ONE ENTRY, DELIBERATELY. Port 5105 is Gateway's listener per docs/ARCHITECTURE.md 4.1, and it is
+  # the documented composition-root access URL the attached environment fixes. The other services'
+  # ports belong in their own documents, not here.
+  - url: http://localhost:5105
+    description: >-
+      The gateway-service listener and the documented composition-root access URL. Port 5105 is fixed
+      by the port map in docs/ARCHITECTURE.md 4.1 and is the same value the local orchestration
+      manifest publishes. Inside the orchestration network, callers reach this service by its service
+      name on the same port rather than through localhost.
+
+tags:
+  - name: Health
+    x-contract-id: C-10
+    description: >-
+      Contract C-10. Aggregated readiness and the standing proof that this boundary is authenticated.
+      Gateway reports healthy only after Persistence, DataServices and Security all report healthy;
+      `/health` is anonymous on all four services and `/v1/ping` requires a token on all four.
+  - name: Capabilities
+    x-contract-id: C-09
+    description: >-
+      Contract C-09. Projects the framework's eight-bit capability gate as configuration. The bits are
+      carried by their preserved legacy identifiers; `INIT_FLAG_ENABLE_SQLITE` is the only one with an
+      in-scope consumer in this phase.
+  - name: DataWindow
+    x-contract-id: C-09
+    description: >-
+      Contract C-09's REST projection of C-03 (`dataservices.v1.DataWindowService`). The retrieval,
+      validation-session, update and event-gate surface. Gateway holds no DataWindow logic; each
+      operation maps onto exactly one gRPC method and maps its status back.
+  - name: ColumnExpression
+    x-contract-id: C-09
+    description: >-
+      Contract C-09's REST projection of C-04 (`dataservices.v1.ColumnExpressionService`). The
+      expression, variable, flag and calculation surface. Kept separate from the DataWindow tag for
+      the same reason C-04 is a separate contract from C-03: the expansion engine versions
+      independently.
+  - name: Reserved
+    x-contract-id: C-09
+    description: >-
+      The four reserved extension points of docs/CONTRACTS.md 13. Each names a DEFERRED Phase-2
+      service and returns 501 with a machine-readable body. These are routing declarations, not
+      implementations: no project, container, test project or placeholder class exists behind any of
+      them.
+
+# DOCUMENT-LEVEL DEFAULT: a token is required unless an operation overrides it. Stating the
+# requirement once and overriding it in exactly one place is deliberate - it makes "authenticated" the
+# default posture and forces every anonymous operation to declare itself, so an anonymous surface can
+# never be created by forgetting to add a requirement (constraint C-G).
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ================================================================================================
+  #  C-10 - HEALTH AND READINESS
+  # ================================================================================================
+
+  /health:
+    get:
+      operationId: getHealth
+      x-contract-id: C-10
+      tags: [Health]
+      summary: Report aggregated readiness across Gateway and its three upstreams. Anonymous.
+      description: |-
+        Reports Gateway's readiness **and that of each of its three upstreams individually**.
+
+        **Gateway reports healthy only after Persistence, DataServices and Security all report
+        healthy.** The ordering is expressed in the orchestration manifest as a dependency condition
+        on upstream health, and it is the readiness property that ruled out the alternative
+        orchestration approach recorded in `docs/ARCHITECTURE.md` 10.4 - the generated model could not
+        express it.
+
+        **The aggregate names each upstream and its own state rather than returning one opaque
+        verdict.** An operator reading a failed aggregate needs to know *which* upstream is not ready;
+        collapsing three states into one would make the aggregate useless for the diagnosis it exists
+        to support.
+
+        **This endpoint is anonymous, on all four services.** The thing that probes it - a container
+        orchestrator, a load balancer, an operator - holds no token, and it probes precisely during the
+        window in which the service is still starting. Requiring a token would make readiness depend
+        on the very service being probed and on Security's token issuance being already live, which is
+        a circular dependency that cannot resolve during a cold start.
+
+        **`Degraded` and `Unhealthy` are different states and are reported differently.** A service
+        still completing startup validation is not the same as one whose dependency has failed.
+        `Degraded` is reported with 200 so a probe that tears down on any non-2xx does not kill a
+        service that is merely still starting; `Unhealthy` is reported with 503.
+      security:
+        - {}
+      responses:
+        '200':
+          description: >-
+            Gateway is `Healthy` or `Degraded`. Both are 200 for the reason given above. The body
+            names each upstream with its own state, so a `Degraded` aggregate identifies which
+            upstream is responsible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AggregateHealthReport'
+        '503':
+          description: >-
+            Gateway is `Unhealthy` - one of its three upstreams has failed, or Gateway's own startup
+            validation has. The failing participant is named in the problem `detail` and `retCode`
+            carries the corresponding legacy return code.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /v1/ping:
+    get:
+      operationId: ping
+      x-contract-id: C-10
+      tags: [Health]
+      summary: The standing proof that this boundary is authenticated. Token required.
+      description: |-
+        Returns a trivial success **only** when a valid token is presented, and `401` without one.
+
+        This operation exists for one reason: to make the authenticated-boundary requirement
+        **testable rather than merely asserted**. The legacy opens no listening socket and receives no
+        unsolicited request, so decomposition creates every boundary in this system from nothing - and
+        the requirement that each be authenticated needs a surface a conformance test can point at.
+
+        It is present on **all four** services rather than only at the ingress, because an internal
+        edge is a created boundary too. That uniformity is part of contract C-10.
+
+        The body does not echo the presented token, any claim of it, or any part of the verification
+        material.
+      responses:
+        '200':
+          description: A valid token was presented.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PingResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ================================================================================================
+  #  C-09 - CAPABILITY PROJECTION
+  # ================================================================================================
+
+  /v1/capabilities:
+    get:
+      operationId: getCapabilities
+      x-contract-id: C-09
+      tags: [Capabilities]
+      summary: Project the framework's eight-bit capability gate. Token required.
+      description: |-
+        Reports which of the framework's eight capability bits are enabled in this deployment.
+
+        ## The gate is the legacy's own decomposition intent
+
+        `ws_objects/pfw.shared.pbl.src/enums.sru:L41-L49` declares eight capability bits, and a module
+        not explicitly initialized is unusable - *and its native library need not ship*
+        [`docs/README.md` initialization section]. That bitmask is the legacy framework telling us
+        where its own seams are, and mapping it onto the service roster is independent corroboration
+        that the Phase-1 slice is drawn correctly.
+
+        ## Only one bit has an in-scope consumer in this phase
+
+        | Bit | Value | Phase-1 destination |
+        | --- | --- | --- |
+        | `INIT_FLAG_ENABLE_UI` | 1 | DesignSystem - deferred |
+        | `INIT_FLAG_ENABLE_SCITER` | 2 | ScriptBridge - deferred |
+        | `INIT_FLAG_ENABLE_BLINK` | 4 | ScriptBridge - deferred |
+        | `INIT_FLAG_ENABLE_BLINKFAST` | 8 | ScriptBridge - deferred |
+        | `INIT_FLAG_ENABLE_ORCA` | 256 | packaging tooling, not a service |
+        | `INIT_FLAG_ENABLE_SQLITE` | 512 | **Persistence - in scope** |
+        | `INIT_FLAG_ENABLE_DPIAWARE` | 1024 | DesignSystem - deferred |
+        | `INIT_FLAG_ENABLE_WEBVIEW` | 2048 | ScriptBridge - deferred |
+
+        ## `INIT_FLAG_ENABLE_ALL` deliberately omits `BLINKFAST`
+
+        It is not an oversight and must not be "corrected": `blink.dll` and `blinkfast.dll` are
+        alternative builds of one engine, so enabling both is meaningless. The omission is reproduced
+        verbatim under C-B, and the reported `all` mask reflects it.
+
+        ## The identifiers are preserved verbatim
+
+        The bit names are the legacy `SCREAMING_SNAKE` spellings, in deliberate departure from .NET
+        naming convention, because they appear in serialized payloads, log records and
+        characterization recordings where a rename would silently invalidate every stored comparison
+        (Agent Action Plan 0.4.5.3).
+      responses:
+        '200':
+          description: The capability report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityReport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ================================================================================================
+  #  C-09 - THE /v1/datawindow PROJECTION OF C-03 (dataservices.v1.DataWindowService)
+  #
+  #  Fourteen of C-03's sixteen methods are projected: the six lifecycle, update and gate operations
+  #  first, then the eight read-and-apply operations of the four headless models. `Retrieve` (server
+  #  streaming) and `EventChain` (bidirectional) are NOT - see the introduction. Every operation below
+  #  names the gRPC method it projects and the protobuf messages that define its payload.
+  # ================================================================================================
+
+  /v1/datawindow/sessions:
+    post:
+      operationId: openValidationSession
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/OpenValidationSession
+      x-proto-request: dataservices.v1.OpenValidationSessionRequest
+      x-proto-response: dataservices.v1.OpenValidationSessionResponse
+      tags: [DataWindow]
+      summary: Open a validation session and receive its correlation identifier.
+      description: |-
+        Materializes the four pieces of cross-event mutable state that
+        `ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L89-L96` holds as private fields:
+        the disabled-event bitmask, the inside-item-change flag, the inside-validation-error flag,
+        and - most consequentially - the item-changed return value **stashed for the validation-error
+        event to consume**.
+
+        A stateless request boundary has nowhere to put those, which is why the session is explicit
+        rather than implicit. The returned identifier correlates every subsequent operation in the
+        chain.
+
+        Sessions must be closed. An abandoned session holds server-side state until its configured
+        idle expiry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    delete:
+      operationId: closeValidationSession
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/CloseValidationSession
+      x-proto-request: dataservices.v1.CloseValidationSessionRequest
+      x-proto-response: dataservices.v1.CloseValidationSessionResponse
+      tags: [DataWindow]
+      summary: Close a validation session and release its cross-event state.
+      description: >-
+        Releases the session opened above. Closing a session that does not exist is reported as `404`
+        rather than silently succeeding, so a caller can detect a double close - which in the legacy
+        would have been a use-after-destroy.
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/update:
+    post:
+      operationId: updateDataWindow
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/Update
+      x-proto-request: dataservices.v1.UpdateRequest
+      x-proto-response: dataservices.v1.UpdateResponse
+      tags: [DataWindow]
+      summary: Apply buffered changes. Returns 409 on an optimistic-concurrency conflict.
+      description: |-
+        Applies the buffered insert, update and delete set through C-03, which in turn reaches C-06 on
+        Persistence.
+
+        ## The 409 is the substantive part of this operation
+
+        The sole updatable DataWindow in the legacy estate carries `updatewhere=1` with all six
+        columns marked `updatewhereclause=yes`
+        [`ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14`], so the optimistic-concurrency check
+        spans **all six columns' original values**. On a mismatch, C-06 returns gRPC `Aborted` and
+        this operation returns **HTTP `409`** with the conflict detail carrying the current row state,
+        unchanged.
+
+        `Aborted` is the canonical gRPC-to-409 mapping and is chosen over `FailedPrecondition`
+        deliberately: the operation may succeed if retried at a higher level, which is what the status
+        is defined to mean.
+
+        **Callers implement an explicit retry-or-surface policy. There is no silent overwrite
+        anywhere in the system.** A caller that ignores the 409 and re-sends the same payload will
+        receive the same 409, because the original values it carries are still stale.
+
+        ## What the response carries
+
+        Inserted, updated and deleted counts, plus the identity column and the two identity value
+        arrays that reproduce the legacy identity round-trip
+        [`ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L215-L245`].
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/event-gate:
+    get:
+      operationId: getEventGate
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/GetEventGate
+      x-proto-request: dataservices.v1.GetEventGateRequest
+      x-proto-response: dataservices.v1.GetEventGateResponse
+      tags: [DataWindow]
+      summary: Read the event-gate bitmask.
+      description: |-
+        Reports which of the three gated events are currently disabled.
+
+        The bitmask is `EID_ROWFOCUSCHANGE = 1`, `EID_ITEMFOCUSCHANGE = 2` and `EID_ITEMCHANGE = 4`
+        [`se_cst_dw.sru:L41-L43`], and the identifiers are composable.
+
+        **One coupling must be carried and is easy to miss:** disabling item-change also **suppresses
+        column-expression evaluation** [`se_cst_dw.sru:L109-L111`]. So a caller that disables item
+        change to stop a validation cascade also silently stops every computed column from
+        recalculating. That is legacy behaviour, reproduced under C-B, and the response states the
+        coupling so a caller can see it before relying on the gate.
+      parameters:
+        - $ref: '#/components/parameters/SessionIdQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/event-gate/disable:
+    post:
+      operationId: disableEvent
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/DisableEvent
+      x-proto-request: dataservices.v1.DisableEventRequest
+      x-proto-response: dataservices.v1.DisableEventResponse
+      tags: [DataWindow]
+      summary: Disable one or more gated events.
+      description: >-
+        Sets bits in the event gate. Disabling `EID_ITEMCHANGE` also suppresses column-expression
+        evaluation - see `GET /v1/datawindow/event-gate`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/event-gate/enable:
+    post:
+      operationId: enableEvent
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/EnableEvent
+      x-proto-request: dataservices.v1.EnableEventRequest
+      x-proto-response: dataservices.v1.EnableEventResponse
+      tags: [DataWindow]
+      summary: Re-enable one or more gated events.
+      description: >-
+        Clears bits in the event gate, restoring both the named events and - when `EID_ITEMCHANGE` is
+        among them - column-expression evaluation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+
+  # ------------------------------------------------------------------------------------------------
+  #  THE FOUR HEADLESS MODELS OF C-03, READ AND APPLY
+  #
+  #  DropDownSearch, ColumnSort, ContextMenu and RowSelect each split into a headless half that ships
+  #  and a rendering half that does not (Agent Action Plan 0.3.5, docs/CONTRACTS.md 6.4). The eight
+  #  operations below are the headless half, and they are projected for the same reason the rest of
+  #  C-03 is: Gateway is the SOLE ingress, so an unprojected operation is unreachable from outside the
+  #  cluster no matter how completely the gRPC contract declares it.
+  #
+  #  Every one is headless without exception - no geometry, no DPI conversion, no font metric, no pixel
+  #  coordinate, no window handle and no IME state crosses this boundary. The rendering halves are the
+  #  reserved /v1/design/** extension point at the end of this document, and NOTHING here implements
+  #  any part of them (C-D).
+  #
+  #  All eight are POST, including the four reads. Each request is a STRUCTURED SELECTOR keyed on a
+  #  DataWindow handle rather than a session id - ContextMenu additionally carries a row and a
+  #  DataWindow-object reference - and a structured selector does not survive a query string without
+  #  inventing an encoding this contract would then have to specify. That is the same reason the
+  #  expression reads are POST, and it is stated per operation rather than assumed.
+  # ------------------------------------------------------------------------------------------------
+
+  /v1/datawindow/drop-down-search/state:
+    post:
+      operationId: getDropDownSearchState
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/GetDropDownSearchState
+      x-proto-request: dataservices.v1.GetDropDownSearchStateRequest
+      x-proto-response: dataservices.v1.GetDropDownSearchStateResponse
+      tags: [DataWindow]
+      summary: Read the drop-down search state, including the generated filter expression.
+      description: |-
+        Reports the search state for one column: the terms currently applied, the row and filtered
+        counts, and the generated filter expression.
+
+        **The `filterExpression` field is COMPATIBILITY AND DIAGNOSTIC data. It is not something a
+        receiver executes.** The legacy interpolates user-typed search data into that expression
+        unescaped [`n_cst_dwsvc_dropdownsearch.sru:L323`]; the field is published so a caller can
+        compare it against the oracle byte for byte, and it is a known legacy defect recorded in
+        `docs/SECRETS.md` rather than a template to evaluate.
+
+        Window positioning and IME text input are the deferred half and are not reachable here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/drop-down-search/apply:
+    post:
+      operationId: applyDropDownSearch
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/ApplyDropDownSearch
+      x-proto-request: dataservices.v1.ApplyDropDownSearchRequest
+      x-proto-response: dataservices.v1.ApplyDropDownSearchResponse
+      tags: [DataWindow]
+      summary: Apply or clear the drop-down search filter.
+      description: >-
+        Applies `of_filter`, or clears it through `of_clearfilter` when the clear flag is set, and
+        carries the `#FilterType` and `#ShowFilteredRows` settings. The search terms are sent **as
+        typed**: DataServices performs the legacy's own transformations server-side so the generated
+        expression matches the oracle byte for byte without the caller having to build filter syntax -
+        which is also what keeps the unescaped-interpolation defect confined to one implementation
+        instead of every client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/column-sort/state:
+    post:
+      operationId: getColumnSortState
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/GetColumnSortState
+      x-proto-request: dataservices.v1.GetColumnSortStateRequest
+      x-proto-response: dataservices.v1.GetColumnSortStateResponse
+      tags: [DataWindow]
+      summary: Read the sort state and the generated Sort property string.
+      description: >-
+        Reports the ordered sort columns and the `Sort` property string the service generated from
+        them. The sort indicator's geometry is DPI conversion and is the deferred half.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/column-sort/apply:
+    post:
+      operationId: applyColumnSort
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/ApplyColumnSort
+      x-proto-request: dataservices.v1.ApplyColumnSortRequest
+      x-proto-response: dataservices.v1.ApplyColumnSortResponse
+      tags: [DataWindow]
+      summary: Apply an ordered multi-column sort.
+      description: >-
+        Applies an ordered multi-column sort. **Column order IS the sort order** and is preserved
+        exactly as sent - a JSON array is ordered, so the ordering survives the projection, and a
+        receiver that re-sorts the array by name would change the result. Setting the expression-only
+        flag generates the `Sort` string without applying it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/context-menu/state:
+    post:
+      operationId: getContextMenuModel
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/GetContextMenuModel
+      x-proto-request: dataservices.v1.GetContextMenuModelRequest
+      x-proto-response: dataservices.v1.GetContextMenuModelResponse
+      tags: [DataWindow]
+      summary: Read the context-menu item model for one row and column.
+      description: |-
+        Returns the menu **item model** for a given row and DataWindow object: labels, ids, enabled and
+        split flags, and the computed **logical** text widths.
+
+        Logical widths are the headless measurement the legacy performs before conversion. The
+        pixel widths, the font metrics and the rendering itself are the deferred half - the legacy
+        reaches `GetWindowRect`, creates `n_cst_font` and converts through `PX2MMX(D2PX(...))`
+        [`n_cst_dwsvc_contextmenu.sru:L187,L1092,L1241`], and none of that crosses this boundary.
+
+        The request carries a row and a DataWindow-object reference as well as the handle, which is
+        why this read is a POST.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/context-menu/apply:
+    post:
+      operationId: applyContextMenuModel
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/ApplyContextMenuModel
+      x-proto-request: dataservices.v1.ApplyContextMenuModelRequest
+      x-proto-response: dataservices.v1.ApplyContextMenuModelResponse
+      tags: [DataWindow]
+      summary: Add, insert or replace context-menu items and the five built-in toggles.
+      description: >-
+        Projects `of_additem`, `of_insertitem`, `of_addseparator` and `of_insertseparator`, and carries
+        the five built-in toggles. **Each of those five defaults to true in the legacy, so each is
+        optional on the wire and an omitted toggle means "unchanged" rather than "false"** - collapsing
+        the distinction would silently disable a built-in item on every call that did not mention it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/row-select/state:
+    post:
+      operationId: getRowSelectState
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/GetRowSelectState
+      x-proto-request: dataservices.v1.GetRowSelectStateRequest
+      x-proto-response: dataservices.v1.GetRowSelectStateResponse
+      tags: [DataWindow]
+      summary: Read the row-selection state.
+      description: >-
+        Reports the current selection style, the selected rows and the current row. **Row selection is
+        the one of the four services that is headless in its entirety** - its single presentational
+        dependency was one dialog [`n_cst_dwsvc_rowselect.sru:L239`], which is projected as a
+        structured error rather than a rendered message box.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/row-select/style:
+    post:
+      operationId: applyRowSelectStyle
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/ApplyRowSelectStyle
+      x-proto-request: dataservices.v1.ApplyRowSelectStyleRequest
+      x-proto-response: dataservices.v1.ApplyRowSelectStyleResponse
+      tags: [DataWindow]
+      summary: Set the selection style and the selected rows.
+      description: |-
+        Projects `of_setstyle` and the selection changes it performs.
+
+        Three legacy behaviours are preserved and are visible in the outcome, none of which is what a
+        reader would guess:
+
+        - Setting the style to the value it already holds returns **`OK`** and changes nothing.
+        - A style of **`0` is `E_INVALID_ARGUMENT`**, not "clear the selection".
+        - A successful style change **clears the selection and then re-selects the current row**,
+          unless the new style is exactly `RS_MULTIPLE`.
+
+        Sending no style at all leaves the style alone and applies only the row changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  # ================================================================================================
+  #  C-09 - THE /v1/datawindow/expression PROJECTION OF C-04
+  #  (dataservices.v1.ColumnExpressionService)
+  #
+  #  Twenty-three of C-04's twenty-six methods are projected. Three are NOT: `EventStream` is the
+  #  engine's own SERVER stream of the three events it declares on itself, and `InvokeMethodChannel`
+  #  and `TraceChannel` are the two INVERTED bidirectional streams - the legacy expects the APPLICATION
+  #  to implement the macro switch, so across a boundary DataServices must call back into its client,
+  #  which REST cannot express.
+  # ================================================================================================
+
+  /v1/datawindow/expression/sessions:
+    post:
+      operationId: openExpressionSession
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/OpenExpressionSession
+      x-proto-request: dataservices.v1.OpenExpressionSessionRequest
+      x-proto-response: dataservices.v1.OpenExpressionSessionResponse
+      tags: [ColumnExpression]
+      summary: Open an expression session, which scopes foreign-variable DataWindow handles.
+      description: |-
+        Opens the session that scopes cross-DataWindow variable references.
+
+        ## This session carries the refactor's one deliberately narrowed contract
+
+        `foreignvardata.expsvc` [`n_cst_dwsvc_columnexp.sru:L80-L83`] is a **live in-process object
+        pointer** to another DataWindow's expression service, and a pointer cannot be serialized.
+
+        Cross-DataWindow variables are therefore resolved by a **session-scoped DataWindow handle**,
+        and are supported **only** when both DataWindows are co-resident in the same expression
+        session inside one DataServices instance. A foreign reference spanning sessions or service
+        instances is **BLOCKED and returns a defined error** - never a silently wrong value.
+
+        This is a genuine, unavoidable narrowing of the legacy contract. It is published here rather
+        than discovered during integration, because the alternative - approximating a pointer
+        dereference across a network - would produce results wrong in a way no test would obviously
+        catch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    delete:
+      operationId: closeExpressionSession
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/CloseExpressionSession
+      x-proto-request: dataservices.v1.CloseExpressionSessionRequest
+      x-proto-response: dataservices.v1.CloseExpressionSessionResponse
+      tags: [ColumnExpression]
+      summary: Close an expression session and release its DataWindow handles.
+      description: >-
+        Releases the session and every foreign-variable handle scoped to it. Any expression still
+        holding a cross-DataWindow reference into this session becomes unresolvable, which is
+        reported as a defined error rather than as a stale value.
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/expressions/add:
+    post:
+      operationId: addExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/AddExpression
+      x-proto-request: dataservices.v1.AddExpressionRequest
+      x-proto-response: dataservices.v1.AddExpressionResponse
+      tags: [ColumnExpression]
+      summary: Add a column expression.
+      description: |-
+        Adds an expression to a column.
+
+        ## The payload must carry three things, not one
+
+        A variable reference expands in one of five modes - **static**, **dynamic**,
+        **dynamic-indirect**, **macro-direct** and **macro-dynamic** - and the mode is a **per-
+        reference** property, not a per-expression one: the legacy specification documents an example
+        mixing static and dynamic expansion inside a single expression
+        [`docs/n_cst_dwsvc_columnexp.md`].
+
+        Static expansion (`$name`) substitutes the variable's value **at the moment the expression is
+        set**, so the variable name is *gone* from the stored text and no later assignment can reach
+        it. Dynamic expansion (`$$name`) retains a **reference**, resolved at calculation time, so
+        later mutation propagates. The documented worked example fixes a static result at 5
+        permanently while the dynamic one yields 6.
+
+        Consequently the request carries **all three** of the unexpanded source expression text, the
+        bind-time variable snapshot, and the live variable environment - plus, per reference, which
+        expansion mode applied. Transmitting an already-expanded string would make static bindings
+        indistinguishable from literals and strip dynamic bindings of their resolution environment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/expressions/set:
+    post:
+      operationId: setExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetExpression
+      x-proto-request: dataservices.v1.SetExpressionRequest
+      x-proto-response: dataservices.v1.SetExpressionResponse
+      tags: [ColumnExpression]
+      summary: Replace a column expression.
+      description: >-
+        Replaces an existing expression. Because static references are resolved **at set time**, this
+        operation is where a static binding acquires its permanent value - re-setting an expression
+        re-binds every static reference in it against the environment as it stands now.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/expressions/get:
+    post:
+      operationId: getExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/GetExpression
+      x-proto-request: dataservices.v1.GetExpressionRequest
+      x-proto-response: dataservices.v1.GetExpressionResponse
+      tags: [ColumnExpression]
+      summary: Read a column expression.
+      description: |-
+        Returns the expression as stored.
+
+        Projected as `POST` rather than `GET` deliberately: the request carries a structured selector
+        that identifies the column by index or by name within a session, and encoding a structured
+        body into a query string would introduce a second encoding this contract would then have to
+        specify. The operation is nonetheless read-only and has no side effect.
+
+        **What comes back is the STORED text, which for a statically expanded reference no longer
+        contains the variable name.** That is not a defect in the read - it is the consequence of
+        static expansion rewriting the expression in place at bind time, and it is why the unexpanded
+        source text is carried separately.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/expressions/remove:
+    post:
+      operationId: removeExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/RemoveExpression
+      x-proto-request: dataservices.v1.RemoveExpressionRequest
+      x-proto-response: dataservices.v1.RemoveExpressionResponse
+      tags: [ColumnExpression]
+      summary: Remove one column expression.
+      description: >-
+        Removes a single expression. Any other expression whose reverse dependency index named the
+        removed column is left in place and will report an unresolvable reference on its next
+        calculation rather than silently evaluating to a default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/expressions/remove-all:
+    post:
+      operationId: removeAllExpressions
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/RemoveAllExpressions
+      x-proto-request: dataservices.v1.RemoveAllExpressionsRequest
+      x-proto-response: dataservices.v1.RemoveAllExpressionsResponse
+      tags: [ColumnExpression]
+      summary: Remove every column expression in the session.
+      description: >-
+        Clears the whole expression set, including the reverse dependency index and the tri-state
+        calculation cache. Variables are **not** removed: they belong to the session's environment
+        rather than to any one expression.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/variables/add:
+    post:
+      operationId: addVariable
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/AddVariable
+      x-proto-request: dataservices.v1.AddVariableRequest
+      x-proto-response: dataservices.v1.AddVariableResponse
+      tags: [ColumnExpression]
+      summary: Add a typed expression variable.
+      description: |-
+        Adds a variable to the session's environment.
+
+        The legacy declares **seven typed overloads** of variable addition - time, string, long,
+        double, datetime, date and boolean - so the wire representation of a variable's value is a
+        **discriminated union**, never a stringly-typed map. Collapsing it to strings would lose the
+        type information the coercion behaviour depends on, and coercion is observable: an expression
+        comparing a date variable behaves differently from one comparing its text rendering.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/variables/set:
+    post:
+      operationId: setVariable
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetVariable
+      x-proto-request: dataservices.v1.SetVariableRequest
+      x-proto-response: dataservices.v1.SetVariableResponse
+      tags: [ColumnExpression]
+      summary: Assign a variable, optionally recalculating.
+      description: |-
+        Assigns a new value to an existing variable.
+
+        The legacy offers each of the seven types in **three arities** - value; value plus
+        recalculate; value plus recalculate plus force - and the arity is carried as explicit request
+        fields rather than as three operations.
+
+        **Only dynamically expanded references see the new value.** A statically expanded reference
+        was resolved when its expression was set and is unaffected, which is the whole of the
+        `$name` versus `$$name` distinction. A caller expecting an assignment to propagate must have
+        used the dynamic form.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/variable-expressions/add:
+    post:
+      operationId: addVariableExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/AddVariableExpression
+      x-proto-request: dataservices.v1.AddVariableExpressionRequest
+      x-proto-response: dataservices.v1.AddVariableExpressionResponse
+      tags: [ColumnExpression]
+      summary: Add a variable whose value is itself an expression.
+      description: >-
+        Adds a variable whose value is an expression with its own variable and function references
+        [`localvardata` at `n_cst_dwsvc_columnexp.sru:L73-L78`]. The structure is **recursive**, so a
+        variable expression may reference another variable expression, and the session's recursion
+        stack is what detects a cycle.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/variable-expressions/set:
+    post:
+      operationId: setVariableExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetVariableExpression
+      x-proto-request: dataservices.v1.SetVariableExpressionRequest
+      x-proto-response: dataservices.v1.SetVariableExpressionResponse
+      tags: [ColumnExpression]
+      summary: Replace a variable expression.
+      description: >-
+        Replaces a variable expression. Available in three arities matching the plain variable setter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/variable-expressions/get:
+    post:
+      operationId: getVariableExpression
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/GetVariableExpression
+      x-proto-request: dataservices.v1.GetVariableExpressionRequest
+      x-proto-response: dataservices.v1.GetVariableExpressionResponse
+      tags: [ColumnExpression]
+      summary: Read a variable expression.
+      description: >-
+        Returns a variable expression as stored. Read-only, and projected as `POST` for the same
+        structured-selector reason as `expressions/get`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/foreign-variables/add:
+    post:
+      operationId: addForeignVariable
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/AddForeignVariable
+      x-proto-request: dataservices.v1.AddForeignVariableRequest
+      x-proto-response: dataservices.v1.AddForeignVariableResponse
+      tags: [ColumnExpression]
+      summary: Add a cross-DataWindow variable. Subject to the session co-residency limit.
+      description: |-
+        Adds a variable resolved against **another DataWindow's** expression service.
+
+        ## The narrowed contract, restated at the operation that reaches it
+
+        The legacy holds a live object pointer for this
+        [`foreignvardata.expsvc`, `n_cst_dwsvc_columnexp.sru:L80-L83`], and a pointer does not
+        serialize. The reference is therefore resolved by a **session-scoped DataWindow handle**, and
+        is supported **only** when both DataWindows are co-resident in the same expression session
+        inside one DataServices instance.
+
+        A reference spanning sessions or service instances returns **`422`** with a defined error
+        rather than a wrong value. `422` rather than `400` because the request is well-formed and its
+        arguments are individually valid - what fails is a **semantic precondition** of the
+        distributed topology, and a caller needs to tell that apart from a malformed request in order
+        to know that retrying will not help.
+
+        The legacy documentation notes that a foreign variable **requires** dynamic expansion, which
+        this contract enforces: a static foreign reference is rejected as `400`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/CrossSessionReferenceBlocked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/relative-columns/set:
+    post:
+      operationId: setRelativeColumns
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetRelativeColumns
+      x-proto-request: dataservices.v1.SetRelativeColumnsRequest
+      x-proto-response: dataservices.v1.SetRelativeColumnsResponse
+      tags: [ColumnExpression]
+      summary: Declare the columns an expression depends on.
+      description: >-
+        Sets the relative-column and relative-input-column sets that build the **reverse dependency
+        index** [`columndata` at `n_cst_dwsvc_columnexp.sru:L44-L48`] - the graph from a column to the
+        expressions and variables depending on it, which is what makes dirty-propagation work. The
+        legacy offers these in singular and plural array forms and by index and by name; all four
+        shapes are carried as request fields rather than as four operations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/flags/set:
+    post:
+      operationId: setExpressionFlag
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetExpressionFlag
+      x-proto-request: dataservices.v1.SetExpressionFlagRequest
+      x-proto-response: dataservices.v1.SetExpressionFlagResponse
+      tags: [ColumnExpression]
+      summary: Set the always-calculate, recursive and trigger-event flags.
+      description: >-
+        Sets the three per-expression behaviour flags the legacy exposes by index and by name -
+        always-calculate, recursive, and trigger-event. Carried as one operation with a flag selector
+        rather than as six, because the legacy's six entry points differ only in which flag and which
+        addressing mode they name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/calc:
+    post:
+      operationId: calc
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/Calc
+      x-proto-request: dataservices.v1.CalcRequest
+      x-proto-response: dataservices.v1.CalcResponse
+      tags: [ColumnExpression]
+      summary: Calculate one expression.
+      description: |-
+        Calculates a single expression, in any of the four arities the legacy offers.
+
+        **A parse failure is reported as `400` carrying the expression text and the caret position**
+        [`_of_BuildParseError`, `n_cst_dwsvc_columnexp.sru:L1308,L1383,L1390`], because a caret
+        position is the only way a caller can point a user at the offending character.
+
+        A defect is preserved here and is visible in the response: the 28 parse-error messages this
+        engine produces are **hardcoded Chinese and do NOT route through localization**, unlike the
+        equivalent messages elsewhere in the DataWindow service layer which do. That inconsistency is
+        legacy behaviour, reproduced under C-B rather than harmonized, so a caller should not assume
+        an error message honours the requested locale.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/CrossSessionReferenceBlocked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/calc-all:
+    post:
+      operationId: calcAll
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/CalcAll
+      x-proto-request: dataservices.v1.CalcAllRequest
+      x-proto-response: dataservices.v1.CalcAllResponse
+      tags: [ColumnExpression]
+      summary: Calculate every expression in the session.
+      description: >-
+        Calculates the whole expression set, in either of the two arities the legacy offers. The
+        tri-state calculation cache - unknown, yes, no - is what stops an expression being evaluated
+        twice within one pass, and the recursion stack is what detects a cycle.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/CrossSessionReferenceBlocked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/calc-empty:
+    post:
+      operationId: calcEmpty
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/CalcEmpty
+      x-proto-request: dataservices.v1.CalcEmptyRequest
+      x-proto-response: dataservices.v1.CalcEmptyResponse
+      tags: [ColumnExpression]
+      summary: Calculate only the expressions whose value is currently empty.
+      description: >-
+        Calculates the subset of expressions flagged empty. Distinct from `calc-all` because the
+        legacy tracks emptiness separately from dirtiness: an expression may be clean and empty, and
+        that combination is what this operation targets.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/CrossSessionReferenceBlocked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/calc-item:
+    post:
+      operationId: calcItem
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/CalcItem
+      x-proto-request: dataservices.v1.CalcItemRequest
+      x-proto-response: dataservices.v1.CalcItemResponse
+      tags: [ColumnExpression]
+      summary: Calculate one row-and-column item.
+      description: >-
+        Calculates a single item. The legacy entry point behind this operation is
+        `_of_calcitem`, which is **declared public despite carrying the private-convention underscore
+        prefix** - an anomaly carried across rather than tidied, because the framework's own callers
+        reach it and a rename would break them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/CrossSessionReferenceBlocked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/enabled:
+    post:
+      operationId: setExpressionServiceEnabled
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetEnabled
+      x-proto-request: dataservices.v1.SetEnabledRequest
+      x-proto-response: dataservices.v1.SetEnabledResponse
+      tags: [ColumnExpression]
+      summary: Enable or disable the expression service.
+      description: >-
+        Sets the service's `#Enabled` state. Note the coupling from the other direction: disabling
+        `EID_ITEMCHANGE` on the event gate also suppresses expression evaluation, so a caller
+        observing no recalculation should check both this flag and the gate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/trace:
+    post:
+      operationId: setExpressionTrace
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/SetTrace
+      x-proto-request: dataservices.v1.SetTraceRequest
+      x-proto-response: dataservices.v1.SetTraceResponse
+      tags: [ColumnExpression]
+      summary: Enable or disable expression tracing.
+      description: >-
+        Sets the `#Trace` flag that gates trace emission. **The trace records themselves are NOT
+        available through this contract** - they arrive on C-04's `TraceChannel`, one of the two
+        inverted streams with no REST projection. So this operation turns tracing on and a consumer
+        must use the gRPC contract to receive what it produces; that asymmetry is deliberate and is
+        stated here so it is not discovered as a missing endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/datawindow/expression/state:
+    post:
+      operationId: getExpressionServiceState
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/GetServiceState
+      x-proto-request: dataservices.v1.GetServiceStateRequest
+      x-proto-response: dataservices.v1.GetServiceStateResponse
+      tags: [ColumnExpression]
+      summary: Read the expression service's state.
+      description: >-
+        Reports the service's enabled and trace flags together with the session's expression and
+        variable census. Read-only, and projected as `POST` for the same structured-selector reason as
+        the other read operations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+
+  /v1/datawindow/expression/engine-state:
+    post:
+      operationId: getExpressionState
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/GetExpressionState
+      x-proto-request: dataservices.v1.GetExpressionStateRequest
+      x-proto-response: dataservices.v1.GetExpressionStateResponse
+      tags: [ColumnExpression]
+      summary: Read the engine-state snapshot - the expression table, the reverse dependency index and the bindings.
+      description: |-
+        The snapshot that makes the engine's seven internal structures reachable rather than merely
+        declared: the expression table, the **reverse dependency index** from a column to the
+        expressions and variables depending on it, the grammar sentinels, and - when the bindings flag
+        is set - the global variable table together with the three-part `$` / `$$` bindings.
+
+        ## Why the three parts travel together
+
+        A `$name` reference is resolved and substituted **at the moment the expression is set**, so the
+        variable name is gone from the stored text and no later assignment can reach it. A `$$name`
+        reference is retained as a reference and resolved at calculation time, so later mutation
+        propagates [`docs/n_cst_dwsvc_columnexp.md`]. Transmitting an already-expanded string would
+        make a static binding indistinguishable from a literal and would strip a dynamic binding of its
+        resolution environment - so the payload carries the **unexpanded source text**, the
+        **bind-time snapshot** and the **live environment**, with the expansion mode tagged
+        per reference rather than per expression.
+
+        ## Read-only by design
+
+        State is mutated through the typed operations above and never by posting a snapshot back. There
+        is deliberately no counterpart that accepts this shape: an engine that could be restored from a
+        caller-supplied graph would let a caller install a dependency index inconsistent with the
+        expressions it indexes.
+
+        Projected as `POST` for the same structured-selector reason as the other reads.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  # ================================================================================================
+  #  THE FOUR RESERVED EXTENSION POINTS  (docs/CONTRACTS.md 13)
+  #
+  #  Each returns 501 with a machine-readable body naming the deferred service. These are ROUTING
+  #  DECLARATIONS. There is no project, no container definition, no test project, no partial
+  #  implementation and no exception-throwing placeholder class for any of the four deferred services
+  #  - see docs/CONTRACTS.md 13.1, which states the compliance position so it is auditable rather
+  #  than argued.
+  #
+  #  The catch-all path parameter is what makes each a route FAMILY rather than a single route, so a
+  #  Phase-2 consumer's eventual URL shape is already legible from this contract.
+  # ================================================================================================
+
+  /v1/design/{path}:
+    parameters:
+      - $ref: '#/components/parameters/ReservedPath'
+    get:
+      operationId: reservedDesignSystem
+      x-contract-id: C-09
+      x-deferred-service: DesignSystem
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred DesignSystem service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        This route family will eventually reach the **DesignSystem** service: theming, geometry
+        structures, colour functions, the DPI conversion family, canvas, painter, font, image, image
+        list, popup menu, tooltip, tray icon, timer, `win32` interop, the logo control, and the
+        **presentational halves** of ColumnSort, ContextMenu and DropDownSearch.
+
+        Three DataWindow services in scope are irreducibly part presentational and each is split: the
+        **headless half ships** on C-03 - the data model, the filter and sort expression construction,
+        the row-selection state machine, and the menu *item* model including labels, identifiers,
+        enabled and split flags and computed logical text widths - while the **rendering half is
+        deferred** and reached, eventually, through here. That is a documented capability gap with an
+        enumerable boundary, not a silent omission.
+
+        Nothing exists behind this route. It has no handler beyond the constant response below, it
+        calls nothing, and it can reach nothing.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+
+  /v1/documents/{path}:
+    parameters:
+      - $ref: '#/components/parameters/ReservedPath'
+    get:
+      operationId: reservedDocuments
+      x-contract-id: C-09
+      x-deferred-service: Documents
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred Documents service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        This route family will eventually reach the **Documents** service: JSON and its helpers, the
+        XML object family, ZIP, barcode and QR generation, file scanning, logging, and the
+        date/number conversion set.
+
+        Note one thing this route is **not** needed for: the shared Localization library reads
+        `pfw.i18n.xml` with `System.Xml.Linq` rather than with the deferred XML object family, so
+        localization acquires **no** Documents coupling and does not wait on this service.
+
+        Nothing exists behind this route.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+
+  /v1/integration/{path}:
+    parameters:
+      - $ref: '#/components/parameters/ReservedPath'
+    get:
+      operationId: reservedIntegration
+      x-contract-id: C-09
+      x-deferred-service: Integration
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred Integration service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        This route family will eventually reach the **Integration** service: the HTTP client and its
+        extensions, FTP, WebSocket, MQTT, and the `pfwx.*` transports.
+
+        Nothing exists behind this route. Note also that **no signing, verification or mutual-TLS
+        configuration is provisioned for this or any other deferred service** - the token topology in
+        `docs/SECRETS.md` scaffolds material only for the four services that exist.
+
+        Five of the eight hardcoded-secret sites found by the repository sweep live in the legacy
+        MQTT test object, which maps to this service. They are recorded in `docs/SECRETS.md` with
+        their locators and required actions, and **no value from any of them appears anywhere in the
+        .NET tree**.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+
+  /v1/scripting/{path}:
+    parameters:
+      - $ref: '#/components/parameters/ReservedPath'
+    get:
+      operationId: reservedScriptBridge
+      x-contract-id: C-09
+      x-deferred-service: ScriptBridge
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred ScriptBridge service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        This route family will eventually reach the **ScriptBridge** service: Sciter and its
+        extensions, MiniBlink, WebView embedding, the PowerScript compiler and evaluator, dynamic
+        object and script invocation, and global-variable access.
+
+        Note one thing this route is **not** needed for: the legacy's dynamic-invocation object is a
+        *variadic-call escape hatch* - PowerScript cannot forward an arbitrary-length argument list,
+        so the SQL task layer unrolls its calls positionally and falls back to dynamic invocation only
+        past the unrolled maximum. C# has native variadic support, so the workaround has no analogue
+        to port and Persistence acquires **no** ScriptBridge coupling.
+
+        Nothing exists behind this route.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |-
+        A JSON Web Token **issued by the Security service**, presented in the `Authorization` header.
+
+        **Gateway validates; it does not issue.** Security is the sole minter in the system, and
+        exactly one signing key exists anywhere in it - `SECURITY_JWT_SIGNING_KEY`, held by Security
+        and injected through the options pattern from the orchestration secret layer. Gateway holds
+        **verification material only**.
+
+        Verification uses the **stock `Microsoft.AspNetCore.Authentication.JwtBearer` handler**,
+        pointed at Security's `GET /.well-known/openid-configuration`. The handler performs signature
+        checking, key fetching and rollover, issuer and audience validation and clock-skew tolerance
+        by itself. That is the point rather than an implementation note: it keeps the
+        security-critical path inside framework code rather than hand-written code.
+
+        No key material appears in this repository, in any application settings file, or in any
+        container image.
+
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      description: >-
+        The correlation identifier returned when the session was opened. It is the handle for the
+        server-held state that a stateless boundary cannot carry per request.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+
+    SessionIdQuery:
+      name: sessionId
+      in: query
+      required: true
+      description: The correlation identifier of the session to read.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+
+    ReservedPath:
+      name: path
+      in: path
+      required: true
+      description: >-
+        The remainder of the requested path. Present so that each reserved entry is a route FAMILY
+        rather than a single route, which is what makes the eventual URL shape of the deferred service
+        legible from this contract. Its value is echoed in the `route` field of the 501 body and is
+        otherwise unused, because nothing exists behind the route to use it.
+      schema:
+        type: string
+      allowReserved: true
+
+  responses:
+    ProjectedSuccess:
+      description: >-
+        The projected gRPC method returned `OK`. The body is the canonical protobuf JSON mapping of
+        the message named in the operation's `x-proto-response` extension.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProtoPayload'
+
+    BadRequest:
+      description: >-
+        The projected gRPC method returned `InvalidArgument`, or the request failed Gateway's own
+        binding. `retCode` carries the **originating legacy return code** so the specific legacy
+        validation is identifiable rather than merely the HTTP class - `E_INVALID_ARGUMENT` (-3) for
+        an argument outside its accepted domain, and the expression engine's own codes for a parse
+        failure, which also carries the expression text and the caret position.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    Unauthorized:
+      description: >-
+        No token was presented, or the token presented is expired, malformed, or not valid for this
+        service. This response is part of the published contract rather than an implementation
+        detail: it is the standing proof that the boundary is authenticated (C-G).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    Forbidden:
+      description: >-
+        The projected gRPC method returned `PermissionDenied`. The token is valid but does not carry
+        the scope this operation requires. Deliberately distinguished from `401` so a caller can tell
+        a missing credential from an insufficient one.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    NotFound:
+      description: >-
+        The projected gRPC method returned `NotFound` - most often a session identifier that has
+        expired or was already closed, or a column selector naming a column the DataWindow does not
+        have.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    Conflict:
+      description: |-
+        **The projected gRPC method returned `Aborted`: an optimistic-concurrency conflict.**
+
+        The body carries the conflict detail **unchanged** from C-06, including the current row state,
+        so a caller has what it needs to decide between retrying and surfacing.
+
+        **Callers implement an explicit retry-or-surface policy, and there is no silent overwrite
+        anywhere in the system.** Re-sending the same payload will produce the same 409, because the
+        original values it carries are still stale - a retry must first re-read.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ConflictProblemDetails'
+
+    CrossSessionReferenceBlocked:
+      description: |-
+        The request was rejected. On these operations one rejection reason is distinctive enough to
+        document separately: a cross-DataWindow variable reference that **spans expression sessions or
+        service instances**, which is BLOCKED.
+
+        ## Why this is a 400 and not a status of its own
+
+        A dedicated `422` was considered and REJECTED, because the status mapping in
+        `docs/CONTRACTS.md` 12.1 is the specification for this contract and it does not sanction one.
+        That mapping already provides the mechanism for exactly this need: `InvalidArgument` projects to
+        `400` **carrying the originating `RetCode`**, so a caller distinguishes one rejection from
+        another by reading `retCode` rather than by counting statuses. Introducing a ninth status would
+        have been this document overriding its own specification for a case the specification already
+        covers.
+
+        So a caller identifies this outcome from the `retCode`, and from the expression-error category
+        `CATEGORY_FOREIGN_REFERENCE_BLOCKED` — not from the HTTP status.
+
+        ## Why the reason is worth documenting at all
+
+        This is the refactor's one deliberately narrowed contract. `foreignvardata.expsvc` is a **live
+        in-process object pointer** to another DataWindow's expression service, and a pointer cannot be
+        serialized. References are therefore resolved by a session-scoped DataWindow handle and are
+        supported only when both DataWindows are co-resident in one expression session inside one
+        DataServices instance.
+
+        Approximating a pointer dereference across a network would produce results wrong in a way no
+        test would obviously catch, so the contract is **narrowed with a defined error rather than
+        widened with a guess**. A caller receiving this must not retry: the topology, not the request,
+        is what rejected it.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    InternalError:
+      description: >-
+        The projected gRPC method returned `Internal`. **The statement field is redacted**: the legacy
+        `sqlsyntax` field carries the complete generated statement including interpolated literal
+        values and the legacy logger performs no redaction at all, so the projection redacts or
+        parameter-separates it before it reaches a caller. `detail` never carries key material, a
+        stack trace, a file path or a connection string.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    UpstreamUnavailable:
+      description: |-
+        An upstream service could not be reached, or the call to it failed in transit after the
+        configured retry policy was exhausted.
+
+        **This response exists because of the decomposition itself.** An in-process call cannot fail
+        in transit and a network call can, so handling the failure is required *by* the transition
+        rather than being a behavioural improvement layered on top of it. Without it, the first
+        transient network fault would surface as a defect the legacy could not have had - a regression
+        introduced by the refactor rather than a preserved behaviour.
+
+        The body names which upstream failed, so an operator does not have to correlate logs to find
+        out.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    ReservedForPhaseTwo:
+      description: |-
+        **Not implemented. Reserved for Phase 2.**
+
+        The body is **machine-readable** rather than a text message, so a client can branch on it
+        without parsing prose: it names the deferred service the route will eventually reach and
+        carries the marker `reserved for Phase 2`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReservedRouteBody'
+
+  schemas:
+
+    ProblemDetails:
+      type: object
+      title: ProblemDetails
+      description: |-
+        The **one and only** error body in this document apart from its conflict specialization below.
+        Every `4xx` and every `5xx` response uses one of the two, so a consumer writes one error
+        handler.
+
+        It is the RFC 9457 problem-details object, which is what ASP.NET Core Minimal APIs emit
+        **without hand-written code**. Adopting the framework's own error shape rather than inventing
+        one keeps the error path out of hand-written code, for the same reason token validation is
+        left to the stock bearer handler.
+
+        `retCode` carries the legacy PowerFramework return code. RFC 9457 explicitly permits extension
+        members, which is why this schema sets `additionalProperties: true` rather than `false`.
+      additionalProperties: true
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: >-
+            A URI reference identifying the problem type. RFC 9457's own default of `about:blank` is
+            used when no more specific type applies.
+        title:
+          type: string
+          description: A short, human-readable summary of the problem type. Stable across occurrences.
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code, repeated in the body so a logged body is self-describing.
+        detail:
+          type: string
+          description: >-
+            A human-readable explanation specific to this occurrence. **Never carries key material, a
+            stack trace, a file path, a connection string, or an unredacted SQL statement.**
+        instance:
+          type: string
+          format: uri-reference
+          description: A URI reference identifying this specific occurrence.
+        retCode:
+          type: integer
+          format: int64
+          description: |-
+            The legacy PowerFramework return code for this failure, transcribed from
+            `ws_objects/pfw.shared.pbl.src/retcode.sru`. `Proto/common.v1.proto` is the numeric
+            authority; `PowerFramework.Shared.Kernel.RetCode` is the same set in C#, and the sibling
+            test project asserts the two agree numerically.
+
+            **The tri-state algebra is preserved and matters when interpreting this field.**
+            `IsSucceeded` tests `>= 0`, so `PREVENT` (1) reads as a SUCCESS; `IsFailed` tests `< 0`
+            **with an explicit exclusion of `CANCELLED` (-2)**, so cancelled is **neither** succeeded
+            nor failed. A consumer must not infer failure from a non-zero value.
+        upstream:
+          type: string
+          enum: [persistence, dataservices, security]
+          x-enum-varnames: [Persistence, DataServices, Security]
+          description: >-
+            Which upstream service the failure originated from, when it originated from one. Present
+            on `502` and on any status the projection forwarded, so an operator can attribute the
+            failure without correlating logs. Absent when Gateway itself produced the response.
+
+    ConflictProblemDetails:
+      title: ConflictProblemDetails
+      description: |-
+        The `409` body: a problem-details object carrying the optimistic-concurrency conflict detail.
+
+        The detail is forwarded **unchanged** from C-06 rather than reshaped, because a caller
+        deciding between retrying and surfacing needs the current row state exactly as the database
+        reported it.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            conflict:
+              $ref: '#/components/schemas/ProtoPayload'
+
+    ProtoPayload:
+      type: object
+      title: ProtoPayload
+      description: |-
+        A payload whose shape is defined by the protobuf message named in the enclosing operation's
+        `x-proto-request` or `x-proto-response` extension, encoded in the **canonical protobuf JSON
+        mapping**.
+
+        **This is a deliberate delegation, not an unspecified body.** The messages live in
+        `Proto/dataservices.v1.proto` and `Proto/common.v1.proto` in this same project, and they are
+        the single authority for the shapes. Transcribing well over a hundred of them into JSON Schema
+        here would create a second source of truth in a different language with nothing keeping the
+        two in step - and the first divergence would be silent, because nothing compiles this document
+        against those definitions.
+
+        The `x-proto-*` extensions are the alternative, and they are **checkable**: the sibling test
+        project asserts that every one of them resolves to a real generated type. A schema copy would
+        have been longer, less precise, and unverifiable.
+
+        `additionalProperties: true` because the authority is elsewhere; a consumer validates against
+        the generated message type, not against this placeholder.
+      additionalProperties: true
+
+    AggregateHealthReport:
+      type: object
+      title: AggregateHealthReport
+      description: |-
+        Gateway's readiness **and that of each of its three upstreams individually**.
+
+        Gateway reports `Healthy` only after Persistence, DataServices and Security all do. The
+        aggregate names each upstream with its own state rather than returning one opaque verdict,
+        because an operator reading a failed aggregate needs to know which upstream is responsible.
+      additionalProperties: false
+      required: [status, service, upstreams]
+      properties:
+        status:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy]
+          description: |-
+            The aggregate verdict, carrying the distinction contract C-10 requires between "not ready"
+            and "unhealthy":
+
+            - `Healthy` - Gateway and all three upstreams are ready. Reported with HTTP 200.
+            - `Degraded` - **not ready**, but not failed. Gateway is still completing startup
+              validation, or an upstream is. Reported with HTTP 200, so a probe that tears down on any
+              non-2xx does not kill a service that is merely still starting.
+            - `Unhealthy` - **failed**. Reported with HTTP 503.
+        service:
+          type: string
+          const: gateway
+          description: The reporting service.
+        checkedAt:
+          type: string
+          format: date-time
+          description: When this report was produced, so a consumer can detect a stale cached report.
+        upstreams:
+          type: array
+          minItems: 3
+          maxItems: 3
+          description: >-
+            The three upstreams Gateway aggregates, each named with its own state. Exactly three:
+            Persistence, DataServices and Security. No entry exists for any deferred service, because
+            no deferred service exists.
+          items:
+            $ref: '#/components/schemas/UpstreamHealth'
+        checks:
+          type: array
+          description: >-
+            Gateway's own component checks, behind its own contribution to the verdict. Carries no
+            configuration value, no connection string and no key material.
+          items:
+            $ref: '#/components/schemas/HealthCheckResult'
+
+    UpstreamHealth:
+      type: object
+      title: UpstreamHealth
+      description: One upstream's individually reported state within Gateway's aggregate.
+      additionalProperties: false
+      required: [service, status]
+      properties:
+        service:
+          type: string
+          enum: [persistence, dataservices, security]
+          x-enum-varnames: [Persistence, DataServices, Security]
+          description: >-
+            Which upstream this entry describes. The enumeration is closed at three: the composition
+            root depends on exactly these, and the 5103 slot in the port band is a commented Phase-2
+            placeholder rather than a fourth participant.
+        status:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy, Unreachable]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy, Unreachable]
+          description: >-
+            This upstream's own verdict, or `Unreachable` when Gateway could not obtain one at all.
+            `Unreachable` is distinguished from `Unhealthy` because they call for different operator
+            action - a network or startup-ordering problem rather than a failed dependency inside a
+            running service.
+        detail:
+          type: string
+          description: >-
+            A human-readable note about this upstream's state. Never carries a connection string, a
+            key, or any configuration value.
+
+    HealthCheckResult:
+      type: object
+      title: HealthCheckResult
+      description: >-
+        One component check behind a verdict. Present so an operator can tell which check is not yet
+        satisfied rather than only that something is not.
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          description: The check's identifier.
+        status:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy]
+          description: This check's own verdict.
+        detail:
+          type: string
+          description: >-
+            A human-readable note. **Carries no configuration value, no connection string and no key
+            material** - a health endpoint is anonymous, so anything it reports is public.
+
+    PingResponse:
+      type: object
+      title: PingResponse
+      description: >-
+        The successful half of the authentication proof. Returned only when a valid token was
+        presented; the absence of a token yields 401, and both outcomes are part of contract C-10. The
+        body deliberately does not echo the presented token, any claim of it, or any part of the
+        verification material.
+      additionalProperties: false
+      required: [service, authenticated]
+      properties:
+        service:
+          type: string
+          const: gateway
+          description: The responding service.
+        authenticated:
+          type: boolean
+          const: true
+          description: >-
+            Always true when this body is returned, because the operation cannot be reached without a
+            valid token. It is present so that a conformance test asserting the authenticated path has
+            something explicit to assert on rather than inferring success from a status code.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the response was produced.
+
+    CapabilityReport:
+      type: object
+      title: CapabilityReport
+      description: |-
+        The framework's eight-bit capability gate, projected as configuration.
+
+        The bit identifiers are the legacy `SCREAMING_SNAKE` spellings from
+        `ws_objects/pfw.shared.pbl.src/enums.sru:L41-L49`, preserved verbatim in deliberate departure
+        from .NET naming convention because they appear in serialized payloads, log records and
+        characterization recordings (Agent Action Plan 0.4.5.3).
+      additionalProperties: false
+      required: [effectiveMask, allMask, capabilities]
+      properties:
+        effectiveMask:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: |-
+            The bitmask actually in effect in this deployment.
+
+            The domain is the full **unsigned 32-bit** range, not the signed one. The configured value
+            is projected with an **unchecked** conversion, so every one of the 2^32 values is
+            representable and none is rejected - a negative configured value wraps rather than
+            failing. That is deliberate: the legacy flag word is an unsigned long, and rejecting a
+            wrapped value would make a configuration that the legacy accepted fail to start.
+        allMask:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: |-
+            The value of `INIT_FLAG_ENABLE_ALL`.
+
+            **It deliberately omits `INIT_FLAG_ENABLE_BLINKFAST` (8).** That is not an oversight and
+            must not be "corrected": `blink.dll` and `blinkfast.dll` are alternative builds of one
+            engine, so enabling both is meaningless. The omission is reproduced verbatim under C-B, so
+            `allMask` is **not** the bitwise union of every declared bit.
+        unrecognizedBits:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: >-
+            Any bits set in `effectiveMask` that are not among the eight declared capabilities.
+            Reported rather than rejected, so a configuration carrying a future or mistaken bit starts
+            and says so instead of failing.
+        capabilities:
+          type: array
+          minItems: 8
+          maxItems: 8
+          description: >-
+            All eight declared capabilities with their values and enabled state. Exactly eight - the
+            set is closed by the legacy declaration.
+          items:
+            $ref: '#/components/schemas/Capability'
+
+    Capability:
+      type: object
+      title: Capability
+      description: One declared capability bit.
+      additionalProperties: false
+      required: [name, value, enabled, phaseOneDestination]
+      properties:
+        name:
+          type: string
+          enum:
+            - INIT_FLAG_ENABLE_UI
+            - INIT_FLAG_ENABLE_SCITER
+            - INIT_FLAG_ENABLE_BLINK
+            - INIT_FLAG_ENABLE_BLINKFAST
+            - INIT_FLAG_ENABLE_ORCA
+            - INIT_FLAG_ENABLE_SQLITE
+            - INIT_FLAG_ENABLE_DPIAWARE
+            - INIT_FLAG_ENABLE_WEBVIEW
+          description: >-
+            The legacy identifier, spelled exactly as `enums.sru:L41-L49` declares it. Preserved
+            verbatim because it appears in stored characterization comparisons.
+        value:
+          type: integer
+          format: int64
+          description: >-
+            The bit's numeric value. The eight are sparse - 1, 2, 4, 8, 256, 512, 1024, 2048 - rather
+            than the first eight powers of two, and the gap is the legacy's.
+        enabled:
+          type: boolean
+          description: Whether this bit is set in `effectiveMask`.
+        phaseOneDestination:
+          type: string
+          enum: [Persistence, DesignSystem, ScriptBridge, PackagingTooling]
+          x-enum-varnames: [Persistence, DesignSystem, ScriptBridge, PackagingTooling]
+          description: >-
+            Where this capability's implementation lives in the Phase-1 slice. **Only
+            `INIT_FLAG_ENABLE_SQLITE` maps to an in-scope service.** `PackagingTooling` is
+            `INIT_FLAG_ENABLE_ORCA`, which is build tooling rather than a service at all - so a client
+            can see from this field that enabling a bit whose destination is deferred has no runtime
+            effect in this phase.
+
+    ReservedRouteBody:
+      type: object
+      title: ReservedRouteBody
+      description: |-
+        The `501` body returned by each of the four reserved routes.
+
+        **Machine-readable rather than a text message**, so a client can branch on it without parsing
+        prose - which is the whole point of declaring the routes: the shape of the eventual system is
+        legible from this contract, while nothing is implemented behind it.
+      additionalProperties: false
+      required: [status, service, marker, route]
+      properties:
+        status:
+          type: integer
+          const: 501
+          description: Always 501. Repeated in the body so a logged body is self-describing.
+        service:
+          type: string
+          enum: [DesignSystem, Documents, Integration, ScriptBridge]
+          x-enum-varnames: [DesignSystem, Documents, Integration, ScriptBridge]
+          description: >-
+            The deferred service this route will eventually reach. The four are the Phase-2 half of the
+            eight-service target roster; `docs/DEFERRED.md` is the authoritative roster and records
+            which legacy objects each is assigned.
+        marker:
+          type: string
+          const: reserved for Phase 2
+          description: >-
+            The literal marker `reserved for Phase 2`, exactly as specified. A constant rather than
+            free text so a conformance test and a client can both match on it.
+        route:
+          type: string
+          description: The matched route pattern, echoed so a client can log what it asked for.

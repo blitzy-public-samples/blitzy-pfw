@@ -1,3 +1,21 @@
+<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
+     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
+     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
+     without splitting the locator from what it proves, and a wrapped command is a command that does
+     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
+       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
+                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
+     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
+     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
+     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
+     and are never edited, so a command that reports them would fail for reasons this refactor must not
+     "fix".
+
+     Declared inline, per file, so the policy travels with the document and applies to the six files
+     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
+     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+<!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
+
 # PowerFramework → .NET 10 — Deferred Services and Documented Capability Gaps
 
 This document is the **record of scope** for the four capability destinations that this refactor
@@ -15,6 +33,20 @@ produce exactly the half-built service the brief forbids. The resolution applied
 **precise about scope and silent about method**: this document says exactly which objects belong
 where and exactly which artifacts must not exist, and says nothing at all about how any deferred
 destination would be built.
+
+## Current state of the artifacts this document references
+
+Some artifacts referenced below are **planned and not yet present in this repository**. They are named
+because they are where the corresponding work belongs, not because a reader can open them today:
+
+| Artifact | What it will carry | State |
+| --- | --- | --- |
+| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
+| The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
+
+Everything else this document references — the solution and project files, the shared libraries, the
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+the read-only legacy tree — **is present in the tree today**.
 
 ---
 
@@ -67,7 +99,7 @@ argue about intent.
 ### 1.3 Discovery rigor was not relaxed on the deferred majority
 
 Of the 544 legacy objects under `ws_objects/**`, **441 — roughly 81% — are not implemented in this
-phase**: 325 deferred across the four destinations, and 116 permanently out of scope. That majority
+phase**: 323 deferred across the four destinations, and 118 permanently out of scope. That majority
 does not license shallow mapping, and it did not receive it. All **39** exported libraries and all
 **544** objects are assigned to a destination with a justification grounded in capability cohesion,
 and the arithmetic reconciles to the object with **zero objects unassigned**. Section 7 carries the
@@ -167,16 +199,21 @@ assignment is made for translation convenience, and none is made on any operatio
 
 ### 3.1 The roster
 
-| Deferred service | Libraries and object counts assigned | Reserved Gateway route |
-| --- | --- | --- |
-| **DesignSystem** | `pfw.ui` (56 remaining of 58), `pfw.ui.controls` (28), `pfw.ui.controls.ext` (38 remaining of 43), `pfw.ui.objects` (64 — the largest deferred library), `pfw.base::u_logo.sru` (1), plus the **presentational halves** of ColumnSort, ContextMenu and DropDownSearch | `/v1/design/**` |
-| **Documents** | `pfw.utility.parser` (11 remaining of 13), `pfw.utility.zip` (4), `pfw.utility.barcode` (2), `pfw.utility` (11 remaining of 14), `pfw.utility.container::n_list.sru` (1), `pfw.utility.regexp` (5), `pfw.utility.devinfo` (2) | `/v1/documents/**` |
-| **Integration** | `pfw.net.http` (22), `pfw.net.http.ext` (4), `pfw.net.ftp` (3), `pfw.net.websocket` (2), `pfwx.net.http` (7), `pfwx.net.mqtt` (3), `pfwx.base` (1), `pfwx.utility.parser` (1) | `/v1/integration/**` |
-| **ScriptBridge** | `pfw.ui.sciter` (15), `pfw.ui.sciter.ext` (4), `pfw.ui.blink` (15), `pfw.ui.webview` (11), `pfw.utility.compiler` (2), `pfw.utility.invoker` (7 remaining of 8) | `/v1/scripting/**` |
+| Deferred service | Libraries and object counts assigned | Objects | Reserved Gateway route |
+| --- | --- | ---: | --- |
+| **DesignSystem** | `pfw.ui` (56 remaining of 58), `pfw.ui.controls` (28), `pfw.ui.controls.ext` (39 remaining of 43, one of them REFERENCE-only), `pfw.ui.objects` (64 — the largest deferred library), `pfw.base::u_logo.sru` (1), plus the **presentational halves** of ColumnSort, ContextMenu and DropDownSearch | 188 | `/v1/design/**` |
+| **Documents** | `pfw.utility.parser` (11 remaining of 13), `pfw.utility.zip` (4), `pfw.utility.barcode` (2), `pfw.utility` (13 remaining of 14), `pfw.utility.container::n_list.sru` (1), `pfw.utility.regexp` (5), `pfw.utility.devinfo` (2) | 38 | `/v1/documents/**` |
+| **Integration** | `pfw.net.http` (22), `pfw.net.http.ext` (4), `pfw.net.ftp` (3), `pfw.net.websocket` (2), `pfwx.net.http` (7), `pfwx.net.mqtt` (3), `pfwx.base` (1), `pfwx.utility.parser` (1) | 43 | `/v1/integration/**` |
+| **ScriptBridge** | `pfw.ui.sciter` (15), `pfw.ui.sciter.ext` (4), `pfw.ui.blink` (15), `pfw.ui.webview` (11), `pfw.utility.compiler` (2), `pfw.utility.invoker` (7 remaining of 8) | 54 | `/v1/scripting/**` |
+| **Total** | | **323** | |
 
-Every count in that table was taken directly off the filesystem. Where a library is split, the
-in-scope contribution and the deferred remainder are shown together in Section 7.3 so the split
-arithmetic can be followed per library.
+Every count in that table is the object-level ledger of
+[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §13 filtered on that destination, so the roster and the
+reconciliation of Section 7 cannot disagree: 56 + 28 + 39 + 64 + 1 = 188;
+11 + 4 + 2 + 13 + 1 + 5 + 2 = 38; 22 + 4 + 3 + 2 + 7 + 3 + 1 + 1 = 43; 15 + 4 + 15 + 11 + 2 + 7 = 54;
+and 188 + 38 + 43 + 54 = **323**. Where a library is split, the in-scope contribution and the
+deferred remainder are shown together in Section 7.3 so the split arithmetic can be followed per
+library.
 
 ### 3.2 DesignSystem — `/v1/design/**`
 
@@ -217,10 +254,11 @@ in-scope consumer at all. The two split contributions are narrower and are worth
   exactly five JSON objects and six XML objects, and all eleven are Documents. The split is a
   capability boundary, not a convenience: parsing a `SELECT` statement into clauses and parsing a
   JSON document share a library in the legacy but share no behaviour.
-- **`pfw.utility` splits 14 = 1 + 11 recorded** (13 by a strict count of the remainder — see Section
-  7.2, attribution 3). The one contributed in-scope behaviour is the pinyin first-letter match
-  invoked from inside a DataWindow filter expression; `n_logger.sru`, `n_filescanner.sru`,
-  `loaduri.srf` and the date and number conversion functions are Documents.
+- **`pfw.utility` splits 14 = 1 + 13.** The one contributed in-scope behaviour is the pinyin
+  first-letter match invoked from inside a DataWindow filter expression; the other thirteen —
+  `n_logger.sru`, `n_filescanner.sru`, `loaduri.srf`, the date and number conversion functions, and
+  the two sibling pinyin helpers `getpinyinfirstletter.srf` and `getpinyinfirstletters.srf`, neither
+  of which is reached from any in-scope code path — are Documents (Section 7.2).
 
 `pfw.utility.container::n_list.sru` joins Documents as the one container type in that three-object
 library with no in-scope consumer; the ordered map and the vector are in scope as a shared container
@@ -505,9 +543,10 @@ This is a **structural inheritance edge, not a call**, so no refactor of a call 
 `se_cst_dw` actually consumes from its parent, and implements against that.
 `ws_objects/pfw.ui.controls.ext.pbl.src/se_cst_datawindow.sru` is recorded **REFERENCE-only** —
 read, never ported. It is therefore **neither an in-scope deliverable nor a DesignSystem
-deliverable**, which is not a bookkeeping nicety: it is one of the three boundary attributions that
-explain the reconciliation in Section 7.2, and the reason `pfw.ui.controls.ext` reconciles as
-4 + 1 + 38 = 43 rather than 5 + 38.
+deliverable**. It is nonetheless a **DesignSystem row carrying the REFERENCE role**, because
+REFERENCE records what is done with an object rather than being a fourth destination — so
+`pfw.ui.controls.ext` reconciles as 4 + 39 = 43, with one of those 39 marked REFERENCE, rather than
+as 4 + 1 + 38 outside every roster (Section 7.2).
 
 ### 6.5 One more idiom the deferred boundary removes
 
@@ -523,90 +562,85 @@ because it is a decision rather than a gap.
 ## 7. Reconciliation
 
 This section restates the reconciliation from [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11
-identically. The two documents are cross-checked against each other, so any divergence between them
-is a defect rather than a difference of emphasis.
+identically, and both documents derive every figure from the same source: the object-level ledger at
+[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §13, which gives each of the 544 objects exactly one
+category, exactly one destination and exactly one role. Nothing below is an independent count, so a
+divergence between the two documents would be a defect rather than a difference of emphasis — and
+there is no arithmetic here that could drift away from the assignments it summarises.
 
 ### 7.1 Headline reconciliation
 
-| Category | Objects |
-| --- | --- |
-| In scope | 103 |
-| Deferred — split remainders | 120 |
-| Deferred — whole libraries | 205 |
-| Permanently out of scope | 116 |
-| **Total** | **544** |
+| Category | Objects | Derivation from the ledger |
+| --- | ---: | --- |
+| In scope | 103 | rows whose Category is *In scope* |
+| Deferred — split remainders | 128 | rows whose Category is *Deferred — split* |
+| Deferred — whole libraries | 195 | rows whose Category is *Deferred — whole* |
+| Permanently out of scope | 118 | rows whose Category is *Permanently out* |
+| **Total** | **544** | every row |
 
-**Zero objects are unassigned.** Every one of the 544 objects under `ws_objects/**` falls into
-exactly one of the four categories above, and the deferred total is 120 + 205 = **325 objects across
-the four deferred services**.
+**Zero objects are unassigned**, and that is a property of the ledger rather than a claim about it:
+it holds exactly 544 rows, one per object under `ws_objects/**`, each with a category, a destination
+and a role. The deferred total is 128 + 195 = **323 objects across the four deferred services**,
+which is exactly the total of the Section 3.1 roster.
 
-**"Permanently out of scope" is a distinct category from deferred, not a synonym for it.** Those 116
+**"Permanently out of scope" is a distinct category from deferred, not a synonym for it.** Those 118
 objects are **not scheduled for a later phase**, because there is nothing to migrate. They are the
 repository's three application objects, the two contradictory legacy build definitions and the
 PowerBuilder packager window — all REFERENCE only, read for the lifecycle and composition-root
 behaviour they record — together with the test and demonstration libraries, which are
 characterization-fixture source only: never ported as-is, never edited, and load-bearing precisely
-*as* the behavioural oracle. The deferred 325, by contrast, are objects whose capability has a named
+*as* the behavioural oracle. The deferred 323, by contrast, are objects whose capability has a named
 destination. [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §9 carries the per-library detail and is not
 reproduced here.
 
-### 7.2 Accounting note — two defensible apportionments, both totalling 544
+### 7.2 The deferred 323, by destination
 
-A strict one-object-one-category count taken directly over the filesystem apportions the three
-non-in-scope categories differently from the headline table. An audit that concealed that would not
-be an audit, so it is stated plainly, and it is worded here as it is worded in
-[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11.2.
+The ledger filtered on its destination column across both deferred categories. This is the table
+Section 3.1 must agree with, and it does:
 
-A strict filesystem count yields **103 in scope + 128 split remainders + 195 whole-library
-deferred + 118 permanently out = 544**, also with zero objects unassigned. Both apportionments
-total 544; the differences are **−8** on split remainders, **+10** on whole-library deferred and
-**−2** on permanently out of scope, and they **net to zero**. The in-scope figure of 103 is
-identical under both counts, so nothing about the work actually being done in this phase depends on
-the choice.
+| Destination | Objects | of which split remainder | of which whole library |
+| --- | ---: | ---: | ---: |
+| DesignSystem | 188 | 96 | 92 |
+| Documents | 38 | 25 | 13 |
+| Integration | 43 | — | 43 |
+| ScriptBridge | 54 | 7 | 47 |
+| **Total** | **323** | **128** | **195** |
 
-Three boundary attributions account for the whole difference. Each is a genuine judgement about a
-single object or library, not a counting error:
-
-1. **`ws_objects/pfwx.pbl.src/pfwx.sra` is attributable two ways.** It is simultaneously a REFERENCE
-   object for the deferred `pfwx` target and a permanently-out-of-scope application object. A
-   full-estate table that lists the `pfwx` library under both headings produces 40 rows for 39
-   libraries, while on disk there is exactly one `ws_objects/pfwx.pbl.src` holding exactly one
-   object. It is counted **once, under permanently out of scope**, with its Integration relevance
-   noted in prose rather than double-counted.
-2. **`ws_objects/pfw.ui.controls.ext.pbl.src/se_cst_datawindow.sru` is REFERENCE-only.** It is read
-   as the structural parent of `se_cst_dw` (Section 6.4) but is neither ported nor a DesignSystem
-   deliverable, so it falls outside the "38 remaining → DesignSystem" figure while still being one
-   of that library's 43 objects. The library reconciles as **4 in scope + 1 REFERENCE + 38
-   DesignSystem = 43**.
-3. **The `pfw.utility` split is recorded as 1 in-scope + 11 Documents** of a 14-object library,
-   while a strict count of the remainder is 13. The two figures differ over the two sibling pinyin
-   helpers `getpinyinfirstletter.srf` and `getpinyinfirstletters.srf`, which sit at the boundary of
-   the same contributed pinyin behaviour as the in-scope `pinyinfirstletterlike.srf`. The remaining
-   11 are unambiguously Documents.
+Where these figures differ from the summary table in the refactor plan — which states 120 split
+remainders, 205 whole-library deferred, 116 permanently out and a deferred total of 325 — the
+difference is three specific attributions, each verifiable in one command against `ws_objects/**`:
+`pfw.utility` holds 14 objects of which exactly one is in scope, so its remainder is **13** and not
+11; `se_cst_datawindow.sru` is a DesignSystem row carrying the REFERENCE **role** rather than a row
+outside every destination, which is what previously left one object out of the rosters; and
+`ws_objects/pfwx.pbl.src/pfwx.sra` is counted **once**, under permanently out of scope, with its
+Integration relevance noted in prose rather than double-counted.
+[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11.3 states all three object by object. The in-scope
+figure of **103 is identical** either way, so nothing about the work being done in this phase turns
+on it.
 
 ### 7.3 Verified split arithmetic
 
 Shown per library so a reviewer can follow the reconciliation down to the object:
 
-| Library | Total | = | In scope | + | REFERENCE | + | Deferred |
-| --- | ---: | :-: | ---: | :-: | ---: | :-: | ---: |
-| `pfw.base` | 6 | = | 5 | + | — | + | 1 |
-| `pfw.utility.invoker` | 8 | = | 1 | + | — | + | 7 |
-| `pfw.ui` | 58 | = | 2 | + | — | + | 56 |
-| `pfw.ui.controls.ext` | 43 | = | 4 | + | 1 | + | 38 |
-| `pfw.utility.parser` | 13 | = | 2 | + | — | + | 11 |
-| `pfw.utility.container` | 3 | = | 2 | + | — | + | 1 |
-| `pfw.utility` | 14 | = | 1 | + | — | + | 13 |
+| Library | Total | = | In scope | + | Deferred | Deferred destination | REFERENCE rows inside the deferred figure |
+| --- | ---: | :-: | ---: | :-: | ---: | --- | ---: |
+| `pfw.base` | 6 | = | 5 | + | 1 | DesignSystem | — |
+| `pfw.utility.invoker` | 8 | = | 1 | + | 7 | ScriptBridge | — |
+| `pfw.ui` | 58 | = | 2 | + | 56 | DesignSystem | — |
+| `pfw.ui.controls.ext` | 43 | = | 4 | + | 39 | DesignSystem | 1 |
+| `pfw.utility.parser` | 13 | = | 2 | + | 11 | Documents | — |
+| `pfw.utility.container` | 3 | = | 2 | + | 1 | Documents | — |
+| `pfw.utility` | 14 | = | 1 | + | 13 | Documents | — |
 
 In compact form: `pfw.base` 6 = 5 + 1; `pfw.utility.invoker` 8 = 1 + 7; `pfw.ui` 58 = 2 + 56;
-`pfw.ui.controls.ext` 43 = 4 + 1 + 38; `pfw.utility.parser` 13 = 2 + 11; `pfw.utility.container` 3 =
-2 + 1; `pfw.utility` 14 = 1 + 13.
+`pfw.ui.controls.ext` 43 = 4 + 39; `pfw.utility.parser` 13 = 2 + 11; `pfw.utility.container` 3 =
+2 + 1; `pfw.utility` 14 = 1 + 13. The seven deferred figures sum to
+1 + 7 + 56 + 39 + 11 + 1 + 13 = **128**, which is the split-remainder row of Section 7.1.
 
-Two reading notes, both pointing back to Section 7.2 rather than introducing anything new. The
-`pfw.ui.controls.ext` row is the only one with a non-empty REFERENCE column, and that single object
-is `se_cst_datawindow.sru` (attribution 2). And the `pfw.utility` row shows the **strict** remainder
-of 13, whereas Sections 3.1 and 3.3 record 11 to Documents; the two figures, and the two objects
-they differ over, are exactly attribution 3.
+One reading note. The `pfw.ui.controls.ext` row is the only one whose deferred figure contains a
+REFERENCE object, and that object is `se_cst_datawindow.sru`: it is counted inside the 39 rather than
+beside it, because REFERENCE is a role recording what is done with an object, not a fourth
+destination (Section 7.2).
 
 ---
 
@@ -654,8 +688,8 @@ are covered by the headless/deferred split of Section 6.
 > and **46** respectively; the in-scope class-binding figures of 29 and 28, and the four zeros, are
 > identical under both counts. The measured figures are used above because a locator-checkable count
 > is the only admissible evidence (Section 2.1), and the difference is recorded rather than absorbed
-> for the same reason Section 7.2 discloses its two apportionments. No assignment and no decision in
-> this document changes either way.
+> for the same reason Section 7.2 discloses where its counts differ from the plan's summary table. No
+> assignment and no decision in this document changes either way.
 
 ### 8.2 Three deliberate non-ports — decisions, not gaps
 
@@ -682,16 +716,35 @@ discovered.
 Its **behaviour is in scope**, because it is invoked from inside a DataWindow filter expression: the
 drop-down search service appends a pinyin clause to the filter it builds at
 [`ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323`], passing the
-searched text and a flag value of `7`. Its **implementation is unavailable**: the lookup table
-exists only inside the closed native binary, there is no C++ source anywhere in the repository, and
-the meaning of that flag value is documented nowhere in the tree.
+searched text and a flag value of `7`.
 
-Bit-exact parity therefore requires characterizing both the table and the flag behaviour from the
-behavioural oracle. **If the oracle cannot be exercised, the pinyin filter is reported as BLOCKED
-rather than approximated.** An approximation would return subtly different result sets — a
-regression that a characterization comparison would flag but that a unit test would not, and one
-that would look like correct behaviour to a reader. [`PARITY.md`](PARITY.md) carries the oracle, the
-fixture corpus and this risk.
+**The flags are documented, and only the table is not.** That distinction narrows the risk and is
+worth stating precisely, because a reader who believes the flags are opaque will characterize more
+than they need to. [`ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149`] declares them under the
+comment `//PinyinFirstLetterLike:[flags]`:
+
+| Constant | Value | Meaning as declared |
+| --- | ---: | --- |
+| `PY_LIKE_IGNORE_CASE` | 1 | Ignore case |
+| `PY_LIKE_IGNORE_WIDTH` | 2 | Ignore full-width versus half-width forms |
+| `PY_LIKE_FUZZY_SOUND` | 4 | Match fuzzy pronunciations — the declaration names `l`/`n`, `f`/`h` and `r`/`l` |
+
+`7` is therefore `1 | 2 | 4`: the call site enables **all three**, and no characterization is needed
+to establish that.
+
+What **is** unavailable is the **lookup table and the matching algorithm**: they exist only inside
+the closed native binary, and there is no C++ source anywhere in the repository. Two parts of that
+are genuinely unknowable from the tree — the first-letter table itself, and how far the fuzzy-sound
+equivalence actually extends, since the three pairs named in the declaration are illustrative and
+nothing states they are exhaustive.
+
+Bit-exact parity therefore requires characterizing the table and the matching behaviour from the
+behavioural oracle — not the flag decoding. **If the oracle cannot be exercised, the pinyin filter is
+reported as BLOCKED rather than approximated.** An approximation would return subtly different result
+sets — a regression that a characterization comparison would flag but that a unit test would not, and
+one that would look like correct behaviour to a reader. The parity documentation
+(`docs/PARITY.md`, planned — not yet present in the tree) will carry the oracle, the fixture corpus
+and this risk.
 
 ---
 
@@ -742,9 +795,11 @@ binding clauses. Each is cited by name, with what this document does to satisfy 
 | **C-B** — no new features, no behaviour improvements, no performance objective | Apply the principle that a half-built deferred service is worse than a documented gap, and assert no service-level figure | Section 1.1 states the principle and Section 6.2 is where it is applied — the data half ships and the rendering half is named as an enumerable gap rather than approximated. Section 6.3 preserves the non-localized column-expression messages as a defect rather than harmonizing them. No latency figure, throughput target, availability commitment or service-level agreement appears anywhere, because the repository publishes none and there is nothing from which to infer one; the only quantitative non-functional requirement in the brief is the per-service coverage gate, which is [`BUILD.md`](BUILD.md)'s subject |
 
 The enterprise-standard baseline that applies in the rules' place (Section 1.4) is met by the
-evidence discipline of Section 2.1, the measured counts of Sections 3 and 8, and the two disclosures
-where the arithmetic admits more than one defensible reading — Section 7.2 and the measurement note
-in Section 8.1 — each of which states the difference rather than picking a figure silently.
+evidence discipline of Section 2.1, the measured counts of Sections 3 and 8, every reconciliation
+figure being derived from the object-level ledger at [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §13
+rather than asserted, and the two places where a measured figure differs from the plan's summary —
+Section 7.2 and the measurement note in Section 8.1 — each of which states the difference object by
+object rather than picking a figure silently.
 
 ### 10.2 Cross-references
 
@@ -757,7 +812,7 @@ siblings:
 | Service topology, transport choice per service, the port map and the reserved 5103 slot, the capability bit table, and the architectural statement that the four routes are metadata | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | The cross-service contract inventory, the four reserved Gateway extension points, and the machine-readable body the reserved routes return | [`CONTRACTS.md`](CONTRACTS.md) |
 | Secret locators, severities and required actions — the single register, and the reason none is restated here | [`SECRETS.md`](SECRETS.md) |
-| The characterization model, the fixture corpus, the determinism seams, and the pinyin parity risk | [`PARITY.md`](PARITY.md) |
+| The characterization model, the fixture corpus, the determinism seams, and the pinyin parity risk | `docs/PARITY.md` (planned) |
 | Build and test commands, the solution layout, per-service build independence, and the coverage gate | [`BUILD.md`](BUILD.md) |
 | The legacy JavaScript-to-PowerScript bridges for the ScriptBridge capability area — read-only reference, never edited | [`Blink交互.md`](Blink交互.md), [`Sciter交互.md`](Sciter交互.md) |
 

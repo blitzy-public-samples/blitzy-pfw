@@ -164,6 +164,44 @@
 //     would make parity depend on deployment. They are private because the published surface of
 //     this file is the nine overloads plus `FunctionName`, and nothing else needs them.
 //
+//   DECISION 11 - THE NINE `Convert` RESULTS ARE PARITY TEXT. EXECUTION GOES THROUGH `Bind`.
+//     `Convert` renders exactly what `dwvaluetoexp.srf` renders, DEFECT 7 included, and that text
+//     is COMPATIBILITY AND DIAGNOSTIC DATA: it is what a characterization recording compares, what
+//     a legacy-shaped payload carries and what a trace shows. It is NOT a safe thing to splice into
+//     an expression and evaluate, and the reason is DEFECT 7 read carefully. The comment on the
+//     string overload used to say a quote merely produces a MALFORMED expression. That is true of
+//     an unbalanced quote and false of a balanced one: `O'Brien` breaks, but a value such as
+//     `x' or 1=1 or 'y` closes the literal, contributes its own predicate and reopens a literal, so
+//     the expression stays well formed and MEANS SOMETHING ELSE. Concatenating a caller-supplied
+//     value into text that is later evaluated is therefore a code-injection sink, and the
+//     enterprise security baseline (constraint C-G) forbids leaving one in place.
+//
+//     The resolution keeps both properties, because the plan already provides for exactly this
+//     case: AAP 0.1.5 states that the implementation MAY be safer than the legacy where the change
+//     is unobservable, with parameterized SQL in place of interpolation as its canonical example,
+//     and AAP 0.6.4 applies the same ruling to the estate's other unescaped-interpolation sites -
+//     preserve the OBSERVABLE generated statement, execute through bound parameters.
+//
+//       * `Convert` is UNCHANGED and stays byte exact. Nothing about DEFECT 7 is repaired: the
+//         quote is still not escaped, doubled, stripped or rejected, and `Convert("O'Brien")` still
+//         answers `'O'Brien'`. That is the parity contract and it is what the parity tests assert.
+//       * `Bind` returns a BOUND LITERAL NODE carrying the value TYPED and UNMODIFIED, the literal
+//         kind the legacy would have emitted, whether the null sentinel applies, and the parity text
+//         alongside - never in place of - the value.
+//       * THE RULE FOR EVERY CONSUMER, and the only rule that closes the sink: an evaluator, filter
+//         builder or expression composer must read `Kind`, `HasValue` and `Value` from the node and
+//         bind them. It must NEVER take `ParityText` and place it in text it then evaluates. Text
+//         assembled from `ParityText` may be recorded, logged, compared or returned as diagnostic
+//         data, and that is the whole of its permitted use.
+//
+//     This does not widen the nine-member surface of DECISION 2 and must not be read as doing so.
+//     `Bind` has exactly nine overloads over exactly the nine mapped types - the same nine
+//     `Convert` has - so no type is added, none is merged and none is dropped, and each `Bind`
+//     derives its parity text by CALLING `Convert` rather than by restating any part of it. A
+//     reflection test over this file should assert nine `Convert` overloads whose parameter types
+//     are the nine mapped types, nine `Bind` overloads over that same set, and no tenth type in
+//     either family.
+//
 //   UNVERIFIED-FROM-REPOSITORY - three formatting questions this repository cannot settle. Each is
 //   annotated again at its point of use so a characterization author can find it:
 //     U-1  `decimal` trailing zeros. C# preserves scale, so `1.50m` renders `1.50` (measured).
@@ -238,6 +276,17 @@ namespace PowerFramework.DataServices.Validators;
 /// callable function under <see cref="FunctionName"/>, beside the five <c>dwNvl*</c> names, or the
 /// variable expression path at <c>:L2388-L2396</c> will answer <c>"?"</c> and raise the error at
 /// <c>:L2392</c>. Register <see cref="FunctionName"/> rather than a re-typed literal.
+/// </para>
+/// <para>
+/// TWO SURFACES, AND THE DIFFERENCE BETWEEN THEM IS A SECURITY BOUNDARY.
+/// <see cref="Convert(in string?)"/> and its eight siblings produce PARITY TEXT - byte for byte what
+/// the legacy produces, preserved legacy defect included - and that text is compatibility and
+/// diagnostic data. <see cref="Bind(in string?)"/> and its eight siblings produce a
+/// <see cref="BoundLiteral{T}"/> carrying the value typed and unmodified. A consumer that EVALUATES
+/// an expression must build it from bound literals and must never splice parity text into text it
+/// then evaluates, because a balanced quote in a value does not merely break such text - it changes
+/// what the text means. DECISION 11 in the file header states the rule, the measurement behind it
+/// and the plan clause that licenses it.
 /// </para>
 /// <para>
 /// A repository wide search for the identifier across <c>ws_objects/**</c> returns exactly those
@@ -533,6 +582,15 @@ public static class ValueToExpression
     //  MALFORMED expression: `O'Brien` becomes `'O'Brien'`, which a DataWindow expression parses as
     //  the literal `'O'` followed by the unresolvable token `Brien'`.
     //
+    //  AN UNBALANCED QUOTE BREAKS THE TEXT. A BALANCED ONE CHANGES WHAT IT MEANS, AND THAT IS WHY
+    //  THIS TEXT IS NOT SOMETHING TO EVALUATE. `x' or 1=1 or 'y` closes the literal, adds its own
+    //  predicate and reopens a literal, leaving a WELL FORMED expression that answers a different
+    //  question - no `"?"`, no `"!"`, no error anywhere. The defect below is therefore reproduced as
+    //  PARITY TEXT and execution goes through `Bind` instead, which carries the value typed so a
+    //  consumer binds it rather than splicing it. DECISION 11 in the file header is that ruling in
+    //  full, with the plan clause (AAP 0.1.5) that licenses being safer where nothing observable
+    //  changes. Nothing about the text this overload returns changes.
+    //
     //  DO NOT FIX THIS. Behaviour preservation forbids correcting a legacy defect, and this one is
     //  the same class of unescaped interpolation that the plan records, and documents rather than
     //  repairs, elsewhere in the estate. Two further reasons it must stay:
@@ -721,6 +779,230 @@ public static class ValueToExpression
         return TimeLiteralPrefix
             + TimeValidator.Format(val.Value)
             + WrappedLiteralSuffix;
+    }
+
+    // ==============================================================================================
+    //  THE BOUND LITERAL SURFACE                                                        DECISION 11
+    // ==============================================================================================
+    //
+    //  Nine `Bind` overloads over the same nine types the nine `Convert` overloads take. Each hands
+    //  back the value TYPED and UNTOUCHED beside the parity text, so a consumer that has to EVALUATE
+    //  an expression binds the value instead of splicing text. Nothing here changes, escapes,
+    //  validates, truncates or normalises a value, and nothing here changes what `Convert` returns:
+    //  every `Bind` obtains its parity text by calling `Convert`, so the two can never drift and the
+    //  preserved defect of DECISION 7 is reproduced in exactly one place.
+    //
+    //  Read DECISION 11 in the file header before using either surface. The short form: bind from
+    //  `Kind`, `HasValue` and `Value`; treat `ParityText` as data to record, compare or return, never
+    //  as text to evaluate.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The kind of DataWindow expression literal the legacy renders for a value, which is what a
+    /// consumer binding the value needs to know in order to bind it as the right type.
+    /// </summary>
+    /// <remarks>
+    /// Five kinds for nine overloads, because that is how the legacy groups them: the five numeric
+    /// overloads all render a bare number and all share one sentinel (DECISION 8), while the string
+    /// and the three temporal overloads each render their own shape. The kind does NOT record
+    /// absence - <see cref="BoundLiteral{T}.HasValue"/> does - so a null <c>decimal</c> is
+    /// <see cref="NumberLiteral"/> with no value rather than a kind of its own.
+    /// </remarks>
+    public enum BoundLiteralKind
+    {
+        /// <summary>
+        /// A bare numeric literal, from any of the five numeric overloads
+        /// [dwvaluetoexp.srf:L17-L45]. Its absent form is
+        /// <see cref="NumberValidator.NullLiteralExpression"/>.
+        /// </summary>
+        NumberLiteral = 0,
+
+        /// <summary>
+        /// A quoted string literal [dwvaluetoexp.srf:L47-L51]. Its absent form is
+        /// <see cref="StringValidator.NullLiteralExpression"/>. This is the kind whose parity text
+        /// carries the preserved unescaped quote of DECISION 7, and therefore the kind a consumer
+        /// must bind rather than splice.
+        /// </summary>
+        StringLiteral = 1,
+
+        /// <summary>
+        /// A <c>DateTime('...')</c> conversion literal [dwvaluetoexp.srf:L53-L57]. Its absent form
+        /// is <see cref="DateTimeValidator.NullLiteralExpression"/>.
+        /// </summary>
+        DateTimeLiteral = 2,
+
+        /// <summary>
+        /// A <c>Date('...')</c> conversion literal [dwvaluetoexp.srf:L59-L63]. Its absent form is
+        /// <see cref="DateValidator.NullLiteralExpression"/>.
+        /// </summary>
+        DateLiteral = 3,
+
+        /// <summary>
+        /// A <c>Time('...')</c> conversion literal [dwvaluetoexp.srf:L65-L69]. Its absent form is
+        /// <see cref="TimeValidator.NullLiteralExpression"/>.
+        /// </summary>
+        TimeLiteral = 4,
+    }
+
+    /// <summary>
+    /// A cell value carried as a bound literal: the value itself, typed and unmodified, together
+    /// with the literal kind the legacy would render and the parity text it would render.
+    /// </summary>
+    /// <typeparam name="T">
+    /// The value's type, one of the nine the legacy prototypes take. It is the SAME type the
+    /// matching <see cref="Convert(in decimal?)"/> overload accepts, so no width is widened or
+    /// narrowed on the way through - which matters for <c>double</c> against <c>real</c>, where the
+    /// width is observable (DECISION 2).
+    /// </typeparam>
+    /// <param name="Kind">
+    /// The literal kind the legacy renders for this value's type.
+    /// </param>
+    /// <param name="HasValue">
+    /// <see langword="false"/> when the cell value was absent, in which case the legacy renders the
+    /// null sentinel for <paramref name="Kind"/> and <paramref name="Value"/> carries no meaning.
+    /// </param>
+    /// <param name="Value">
+    /// The value, exactly as supplied: not escaped, not quoted, not trimmed, not normalised and not
+    /// formatted. Meaningful only when <paramref name="HasValue"/> is <see langword="true"/>;
+    /// otherwise it is the type's default, and <see cref="string.Empty"/> for the string overload so
+    /// that the type parameter can stay non-nullable.
+    /// </param>
+    /// <param name="ParityText">
+    /// What the matching <see cref="Convert(in decimal?)"/> overload returns for the same input, byte
+    /// for byte, obtained by calling it. COMPATIBILITY AND DIAGNOSTIC DATA ONLY: record it, compare
+    /// it, return it - never place it in text that is then evaluated. See DECISION 11.
+    /// </param>
+    /// <remarks>
+    /// A <see langword="readonly record struct"/> so that binding a cell allocates nothing on the
+    /// path the expression engine takes per row per column, and so that value equality makes the
+    /// node directly assertable in a table driven parity theory.
+    /// </remarks>
+    public readonly record struct BoundLiteral<T>(
+        BoundLiteralKind Kind,
+        bool HasValue,
+        T Value,
+        string ParityText)
+        where T : notnull;
+
+    /// <summary>
+    /// Binds a <c>decimal</c> cell value [dwvaluetoexp.srf:L17-L21].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in decimal?)"/>.</returns>
+    public static BoundLiteral<decimal> Bind(in decimal? val)
+    {
+        return new BoundLiteral<decimal>(
+            BoundLiteralKind.NumberLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds an <c>integer</c> cell value, PowerBuilder's 16 bit integer
+    /// [dwvaluetoexp.srf:L23-L27].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in short?)"/>.</returns>
+    public static BoundLiteral<short> Bind(in short? val)
+    {
+        return new BoundLiteral<short>(
+            BoundLiteralKind.NumberLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>long</c> cell value, PowerBuilder's 32 bit integer [dwvaluetoexp.srf:L29-L33].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in long?)"/>.</returns>
+    public static BoundLiteral<long> Bind(in long? val)
+    {
+        return new BoundLiteral<long>(
+            BoundLiteralKind.NumberLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>double</c> cell value, the 8 byte floating point form
+    /// [dwvaluetoexp.srf:L35-L39].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in double?)"/>.</returns>
+    public static BoundLiteral<double> Bind(in double? val)
+    {
+        return new BoundLiteral<double>(
+            BoundLiteralKind.NumberLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>real</c> cell value, the 4 byte floating point form [dwvaluetoexp.srf:L41-L45].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in float?)"/>.</returns>
+    /// <remarks>
+    /// The one overload where keeping the width matters twice over: the parity text renders at float
+    /// precision (DECISION 2), and a consumer binding the value gets a <see cref="float"/> rather
+    /// than a silently widened <see cref="double"/>.
+    /// </remarks>
+    public static BoundLiteral<float> Bind(in float? val)
+    {
+        return new BoundLiteral<float>(
+            BoundLiteralKind.NumberLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>string</c> cell value [dwvaluetoexp.srf:L47-L51].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in string?)"/>.</returns>
+    /// <remarks>
+    /// THE OVERLOAD DECISION 11 EXISTS FOR. The value is carried VERBATIM, quotes and all, and the
+    /// parity text still reproduces the unescaped interpolation of <c>dwvaluetoexp.srf:L48</c>
+    /// exactly. A consumer that evaluates must bind <see cref="BoundLiteral{T}.Value"/>: a value such
+    /// as <c>x' or 1=1 or 'y</c> leaves the parity text WELL FORMED and meaning something the caller
+    /// did not ask for, so splicing that text is a code-injection sink rather than a parity choice.
+    /// An absent value binds with <see cref="string.Empty"/> in
+    /// <see cref="BoundLiteral{T}.Value"/> and <see cref="BoundLiteral{T}.HasValue"/> false, which is
+    /// how absence stays distinguishable from an empty cell - the same distinction
+    /// <see cref="Convert(in string?)"/> preserves by answering the sentinel rather than <c>''</c>.
+    /// </remarks>
+    public static BoundLiteral<string> Bind(in string? val)
+    {
+        return new BoundLiteral<string>(
+            BoundLiteralKind.StringLiteral, val is not null, val ?? string.Empty, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>datetime</c> cell value [dwvaluetoexp.srf:L53-L57].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in DateTime?)"/>.</returns>
+    /// <remarks>
+    /// The <see cref="DateTime.Kind"/> of the value is neither read nor normalised here, matching a
+    /// zone less PowerBuilder <c>datetime</c> and matching <see cref="Convert(in DateTime?)"/>.
+    /// </remarks>
+    public static BoundLiteral<DateTime> Bind(in DateTime? val)
+    {
+        return new BoundLiteral<DateTime>(
+            BoundLiteralKind.DateTimeLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>date</c> cell value [dwvaluetoexp.srf:L59-L63].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in DateOnly?)"/>.</returns>
+    public static BoundLiteral<DateOnly> Bind(in DateOnly? val)
+    {
+        return new BoundLiteral<DateOnly>(
+            BoundLiteralKind.DateLiteral, val.HasValue, val ?? default, Convert(val));
+    }
+
+    /// <summary>
+    /// Binds a <c>time</c> cell value [dwvaluetoexp.srf:L65-L69].
+    /// </summary>
+    /// <param name="val">The value to bind. <see langword="null"/> binds as absent.</param>
+    /// <returns>The bound literal, whose parity text is <see cref="Convert(in TimeOnly?)"/>.</returns>
+    public static BoundLiteral<TimeOnly> Bind(in TimeOnly? val)
+    {
+        return new BoundLiteral<TimeOnly>(
+            BoundLiteralKind.TimeLiteral, val.HasValue, val ?? default, Convert(val));
     }
 
     // ==============================================================================================

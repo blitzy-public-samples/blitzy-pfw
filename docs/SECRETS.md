@@ -1,3 +1,21 @@
+<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
+     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
+     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
+     without splitting the locator from what it proves, and a wrapped command is a command that does
+     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
+       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
+                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
+     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
+     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
+     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
+     and are never edited, so a command that reports them would fail for reasons this refactor must not
+     "fix".
+
+     Declared inline, per file, so the policy travels with the document and applies to the six files
+     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
+     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+<!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
+
 # PowerFramework → .NET 10 — Secrets Remediation Register
 
 > ## No secret value is reproduced anywhere in this document, by design
@@ -23,6 +41,24 @@ to it explicitly.
 It discharges constraint **C-F** — nothing hardcoded may be carried forward, and the three secret
 sites named in the requirements are **a floor, not a ceiling**.
 
+## Current state of the artifacts this document references
+
+Some artifacts referenced below are **planned and not yet present in this repository**. They are named
+because they are where the corresponding work belongs, not because a reader can open them today:
+
+| Artifact | What it will carry | State |
+| --- | --- | --- |
+| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/.env.example`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up | **Planned — not yet present** |
+
+Everything else this document references — the solution and project files, the shared libraries, the
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+the read-only legacy tree — **is present in the tree today**.
+
+**No control described in this document depends on those absent artifacts to be true.** The secret
+register, the locators and the severities are read from files that exist today; the orchestration layer
+is where injected values will *come from*, and its absence changes nothing about where the material is.
+
 ---
 
 ## Table of contents
@@ -35,7 +71,7 @@ sites named in the requirements are **a floor, not a ceiling**.
 | [4. Token topology](#4-token-topology) | One signing secret, one issuer, three verifiers, the mutual-TLS fallback, and nothing scaffolded for a deferred service |
 | [5. Credential-bearing fields on the new boundaries](#5-credential-bearing-fields-on-the-new-boundaries) | The per-field handling rules the contracts delegate here |
 | [6. Statement redaction — the one control this refactor adds](#6-statement-redaction--the-one-control-this-refactor-adds) | Why a control is added rather than a behaviour preserved, and why that is not a behavioural change |
-| [7. Cryptographic weak defaults are preserved as annotated defaults](#7-cryptographic-weak-defaults-are-preserved-as-annotated-defaults) | Seven weaknesses kept exactly as they are, and annotated rather than fixed |
+| [7. Cryptographic weak defaults are preserved as annotated defaults](#7-cryptographic-weak-defaults-are-preserved-as-annotated-defaults) | Eight weaknesses kept exactly as they are — four of them established by absence — and annotated rather than fixed |
 | [8. Constraint compliance and cross-references](#8-constraint-compliance-and-cross-references) | How this document honours each governing constraint, what it does not claim, and where to read next |
 
 ---
@@ -128,7 +164,8 @@ first impressions:
   found (§2.4).
 - **The most severe finding in this repository is not a key at all.** It is a credential triple in a
   comment block (§2.4, site 6), which scores **Critical** because it names a live-looking target
-  along with an administrative account and its cleartext password.
+  along with an administrative account and its cleartext password — and because nothing in the
+  repository can establish that the target is *not* still live.
 
 ---
 
@@ -186,7 +223,7 @@ numbers** were the working output throughout; matched content was never printed.
 | **3** | `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L521-L522` | A plaintext broker **user name and password** pair, as two adjacent literals | **High** | **Yes** | Never replicate. Rotate the account at the broker. Supply any test credential through configuration, never through a literal |
 | **4** | `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L161` | A self-signed **root certificate authority**, bare base64-encoded DER. **Still within validity — not-after 2027** | **Medium** | **No — newly found** | Never replicate. A trust anchor still inside its validity window should not be distributed in a source tree; confirm with its owner whether it remains a trusted root anywhere, and retire it if so. No private key for this root is present in the repository |
 | **5** | `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L163` | A plaintext base64-encoded DER **RSA private key that matches the certificate at site 2** — certificate plus matching key is **a complete, usable identity**, not merely a certificate | **Critical** | **No — newly found** | Never replicate. Treat the identity as compromised and revoke it. Because the key is present, the expiry of site 2's certificate is not a mitigation for anything a holder of this key could reissue or impersonate offline |
-| **6** | `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L176-L178`, inside the trailing comment block of the open event | A **live broker host address, an administrative account name, and that account's cleartext password** — a production-shaped credential triple committed to version control | **Critical** | **No — newly found** | **Operational, and it cannot be discharged by generating code.** Treat as compromised and rotate at the broker, by its owner. See §3.6, follow-up 1 |
+| **6** | `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L176-L178`, inside the trailing comment block of the open event | A **broker host address, an account name whose spelling indicates administrative intent, and that account's cleartext password** — a production-shaped credential triple committed to version control. **Whether the host still resolves and the credential still authenticates cannot be determined from the repository** (see the note below the table) | **Critical** | **No — newly found** | **Operational, and it cannot be discharged by generating code.** Treat as compromised **until its owner confirms otherwise**, and rotate at the broker. See §3.6, follow-up 1 |
 | **7** | `ws_objects/pfw.tests.pbl.src/n_cst_appconfig.sru:L22-L23`, consumed at `:L337`, `:L552`, `:L583`, `:L615` and `:L992` | A 32-character hardcoded **AES-256 configuration-encryption key** — the key under which the object encrypts and decrypts application settings | **High** | **No — newly found** | **Operational, and it cannot be discharged by generating code.** Rotate, *with* a migration for values already encrypted under it. The structural problem is explained in §2.5 and the follow-up in §3.6, follow-up 2 |
 | **8** | `ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L466` and `:L718` | **Two distinct** plaintext base64-encoded DER **RSA private keys**, embedded directly in event scripts | **High** | **No — newly found** | Never replicate. Treat both keys as compromised. Three further weaknesses travel with them — see §2.6 |
 
@@ -262,11 +299,64 @@ three are why the object should not be used as a pattern by anyone reading it fo
 
 ### 2.7 The three binary sites are vendored, and are not source-remediable
 
-| Locator | Material class | Matches | Severity | Action |
-| --- | --- | --- | --- | --- |
-| `sciter.dll` | Embedded certificate and base64-encoded trust material inside a third-party binary | 24 | **Informational** | Documented only. Not source-remediable |
-| `blink.dll` | The same, in a third-party binary | 1 | **Informational** | Documented only. Not source-remediable |
-| `pfwx.dll` | The same, in a framework-vendored binary | 1 | **Informational** | Documented only. Not source-remediable |
+**The method, stated first so the counts below are reproducible.** Every root binary was scanned as
+**bytes** — not as text, because these files are not text — for the PEM block header pattern
+`-----BEGIN ([A-Z0-9 ]+)-----`. Each match was then classified by whether a corresponding
+`-----END <same type>-----` exists within a plausible span *and* the span between them contains
+base64 characters. That second step is what separates **embedded key or certificate material** from a
+**format string that merely contains the marker text**, and it is the step that matters: the raw
+marker count alone overstates the finding. Reproduce with:
+
+```bash
+python3 - <<'EOF'
+import re, glob
+pat = re.compile(rb'-----BEGIN ([A-Z0-9 ]+)-----')
+for f in sorted(glob.glob('*.dll') + glob.glob('*.pbd')):
+    data = open(f, 'rb').read()
+    marks = list(pat.finditer(data))
+    bodied = []
+    for m in marks:
+        t = m.group(1).decode()
+        e = re.compile(('-----END %s-----' % t).encode()).search(data, m.end())
+        if e and 40 < (e.start() - m.end()) < 20000            and len(re.findall(rb'[A-Za-z0-9+/=]', data[m.end():e.start()])) > 40:
+            bodied.append(t)
+    if marks:
+        print(f, 'markers=', len(marks), 'with a real PEM body=', len(bodied), bodied)
+EOF
+```
+
+| Locator | Markers | With a real PEM body | What the bodied matches actually are | Severity | Action |
+| --- | ---: | ---: | --- | --- | --- |
+| `sciter.dll` | 13 | **12** | 8 × `CERTIFICATE`, 3 × `RSA PRIVATE KEY` — **one of the three is itself encrypted**, carrying a `DES-EDE3-CBC` procedure header — and 1 × `DH PARAMETERS`. **The 13th marker has no body**: it is a `CERTIFICATE` marker inside a format string | **Informational** | Documented only. Not source-remediable |
+| `blink.dll` | 1 | **0** | A `PUBLIC KEY` marker with **no body at all** — a format string used for public-key-pinning output | **Informational** | Documented only. Nothing embedded |
+| `pfwx.dll` | 2 | **0** | Two `PRIVATE KEY` markers with **no body**, inside diagnostic message text | **Informational** | Documented only. Nothing embedded |
+
+The remaining root binaries — `blinkfast.dll`, `pfw.dll`, `sqlite3.dll`, `sqlite3.cipher.dll` and
+`pfw.pack.pbd` — return **zero markers**. Enumerating the clean ones matters as much as the dirty
+ones: it shows the scan covered every binary rather than stopping at the first hit.
+
+**Two of the three sites contain no embedded material whatsoever**, which an earlier draft of this
+table did not distinguish — it reported raw marker counts of 24, 1 and 1 without separating markers
+from bodies, and the sciter figure was not reproducible by the method now published above. The
+corrected reading is narrower and more useful: **the only binary with genuinely embedded key and
+certificate material is `sciter.dll`**, and `blink.dll` and `pfwx.dll` are matches on marker *text*
+in strings. Recording that distinction is the difference between an audit a reader can re-run and a
+number they must take on trust.
+
+> **What is asserted about site 6, and what is not.** The three values are read directly from the
+> source, so their *shape* is a fact: a hostname, an account name whose spelling indicates
+> administrative intent, and a cleartext password. Their *current status* is not a fact available here.
+> **This document does not probe live systems** — resolving the host or attempting the credential would
+> be both outside a documentation review and inappropriate — so it cannot state that the endpoint is
+> reachable, that the account exists, or that the password still works.
+>
+> That uncertainty is precisely why the severity is **Critical rather than lower**. An unverifiable
+> credential cannot be cleared from inside the repository, and the only safe default is to treat it as
+> live until the owner establishes otherwise. Recording it as "confirmed live" would overstate the
+> evidence; recording it as "probably stale" would understate the risk. The same reasoning applies to
+> the certificate validity windows in the table: those *are* stated as facts because a not-after date
+> is readable from the encoded certificate itself, whereas reachability is not readable from anything
+> in the tree.
 
 All three exist at the repository root and all three are **closed binaries with no source anywhere in
 the repository**, so there is no literal to remove and no build step of this refactor that could
@@ -389,7 +479,7 @@ has. There is no other statement of intended behaviour to consult, no usable leg
 and a changelog that stopped years before the commit history did. Every behavioural assertion in the
 generated .NET code is adjudicated against a legacy locator, and the test and demonstration libraries
 are specifically the **characterization-fixture corpus** — the recorded-oracle inputs that parity
-testing compares against ([`PARITY.md`](PARITY.md)). Editing an object in that corpus changes the
+testing compares against (`docs/PARITY.md`, planned). Editing an object in that corpus changes the
 oracle, which means a subsequent parity failure can no longer be attributed: it might be a port defect,
 or it might be the edit. That is an expensive and self-inflicted loss of diagnostic power.
 
@@ -459,11 +549,12 @@ lost unless they are carried out of this document and assigned to an owner.
 
 > #### Follow-up 1 — Rotate the broker credential triple at site 6, and treat it as compromised
 >
-> `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L176-L178` carries a live broker host
-> address, an administrative account name, and that account's cleartext password. **Rotation must be
-> performed by the owner of that broker.** Until it is, the credential is valid and the repository
-> discloses it. Revoking the identity at site 5 belongs to the same conversation, since both concern
-> the same messaging estate.
+> `ws_objects/pfw.tests.pbl.src/w_test_websocket_mqtt.srw:L176-L178` carries a broker host address, an
+> account name indicating administrative intent, and that account's cleartext password. **Rotation must
+> be performed by the owner of that broker**, who is also the only party able to establish whether the
+> credential still authenticates. **Until that confirmation exists, the credential must be treated as
+> live and the repository as disclosing it** — the safe default, not a verified fact. Revoking the
+> identity at site 5 belongs to the same conversation, since both concern the same messaging estate.
 
 The second follow-up has a different owner and a different shape: it is not a single account to reset
 but a key whose blast radius extends to every deployment derived from this repository, and it cannot be
@@ -504,15 +595,45 @@ than a later addition. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.1 works through 
 | **Appears in source?** | **No** |
 | **Appears in `appsettings.json` or `appsettings.Development.json`?** | **No** |
 | **Appears in any container definition?** | **No** |
-| **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform and it is not committed |
+| **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform |
 
 The **name** of the variable is recorded here because consumers need to know what to set. **Its value
 is not recorded here, is not recorded anywhere else in this repository, and no placeholder resembling a
 value appears in this document** — an example key is indistinguishable from a real one to a reader, and
 placeholder keys have a long history of reaching production unchanged.
 
-`orchestration/.env.example` carries the variable roster with empty values for exactly this reason: it
-tells an operator what to fill in without shipping anything to fill it in with.
+The template `orchestration/.env.example` will carry the variable roster with empty values for exactly
+this reason: it tells an operator what to fill in without shipping anything to fill it in with. That
+file is not yet present in the tree; it is created at the orchestration boundary.
+
+> #### ⚠ Where the filled-in environment file must live — read before generating a key
+>
+> **This repository's ignore rules do not exclude an environment file, and this refactor does not
+> change them.** A generated signing key written to a path inside the working tree is therefore an
+> untracked file that `git add -A` would stage and a careless commit would publish. Nothing in the
+> tooling prevents that, so the control has to be the path itself.
+>
+> **The documented path is an environment file kept OUTSIDE the working tree**, referenced explicitly.
+> The commands below describe the intended bring-up; `orchestration/` does not exist yet, so they are the
+> specification for that work rather than steps a reader can run today:
+>
+> ```bash
+> mkdir -p "$HOME/.config/powerframework" && chmod 700 "$HOME/.config/powerframework"
+> cp orchestration/.env.example "$HOME/.config/powerframework/pfw.env"
+> chmod 600 "$HOME/.config/powerframework/pfw.env"
+> # populate SECURITY_JWT_SIGNING_KEY in that file -- openssl rand -base64 32
+> cd orchestration && docker compose --env-file "$HOME/.config/powerframework/pfw.env" up --build -d
+> ```
+>
+> The attached environment's own instruction is the in-tree form, `cp .env.example .env` followed by
+> `docker compose --env-file .env up`. It remains supported and [`BUILD.md`](BUILD.md) §8 records it —
+> **but only with the precondition stated there**: add an ignore rule covering `orchestration/.env`
+> *before* writing any key into it, and never rely on the file being untracked to keep it unpublished.
+> An untracked secret is one `git add -A` away from a tracked one.
+>
+> Either way, `.env` files are excluded from every image layer by the repository-root `.dockerignore`,
+> so no environment file reaches a container image. That control is about images, not about version
+> control, and it is not a substitute for the path discipline above.
 
 ### 4.2 One issuer, three verifiers
 
@@ -544,13 +665,35 @@ direction.
 `401` without one, so authentication is testable rather than merely asserted
 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.2).
 
-### 4.3 Mutual TLS is the documented per-pair fallback
+### 4.3 Mutual TLS is the per-pair fallback, and token issuance is that pair
 
-Where a token issuer is inappropriate for some service pair, **mutual TLS is the documented fallback**,
-and it applies **to that pair only** — adding a certificate path setting and a key path setting for
-those two services rather than changing the system-wide model. JSON Web Tokens remain the default on
-every edge. Any such paths point at material mounted from the secret layer; no certificate or key is
-committed, and none is embedded in an image.
+Mutual TLS is the documented fallback for a pair where a token issuer is inappropriate, it applies **to
+that pair only** — adding a certificate path setting and a key path setting for those two services
+rather than changing the system-wide model — and JSON Web Tokens remain the default on every other
+edge. That is the general rule, and it has exactly one instance, which this register names rather than
+leaving abstract:
+
+> **`POST /v1/tokens` is the single mutual-TLS edge in the system, and mutual TLS is mandatory on that
+> operation.** A caller cannot present a bearer token in order to obtain its first bearer token, so
+> caller identity on issuance comes from the client certificate the transport presents.
+> `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` declares a `mutualTLS` scheme, applies it
+> to that operation as an override of the document-level bearer requirement, and defines `401` for an
+> absent or untrusted certificate and `403` for a trusted certificate whose caller is not permitted the
+> requested subject or audience.
+
+Two consequences belong in a secrets register specifically:
+
+- **Certificate and key paths are secret-layer material, exactly like the signing key.** They point at
+  files mounted from the orchestration secret layer. **No certificate and no private key is committed
+  to this repository, and none is embedded in a container image.** The eight in-source sites in §2 are
+  the standing illustration of what committing such material costs.
+- **The issuance path must not sit behind a TLS-terminating proxy.** Mutual TLS authenticates the
+  client to Security itself, so an intermediary that terminates TLS there either discards the
+  certificate or leaves Security trusting a forwarded assertion of identity it cannot verify. Both
+  outcomes defeat the sole-issuer topology this section exists to protect.
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the deployment model, including the loopback-only
+  plain-HTTP development exception under which issuance has no caller authentication available at
+  all.
 
 ### 4.4 No secret is scaffolded for any deferred service
 
@@ -707,7 +850,7 @@ three points:
 1. **The observable generated statement is preserved byte for byte wherever behaviour depends on it.**
    Parity for the paging rewriters and clause construction is byte-exact generated SQL, sentinel
    identifiers and count aliases included ([`CONTRACTS.md`](CONTRACTS.md) §8.4,
-   [`PARITY.md`](PARITY.md)). Redaction applies to the **error and log projection** of a statement, not
+   `docs/PARITY.md` (planned)). Redaction applies to the **error and log projection** of a statement, not
    to the statement the engine executes or to any statement a parity test compares.
 2. **The boundary being narrowed is new.** As in §5.1, there is no prior wire format whose contract
    could be broken. The field's in-process behaviour is untouched.
@@ -756,19 +899,25 @@ risk **without the behaviour changing**.
 | # | Preserved legacy behaviour | Evidence |
 | --- | --- | --- |
 | 1 | **The default symmetric mode is ECB.** Overloads that omit the mode selector run in ECB, so identical plaintext blocks produce identical ciphertext blocks and structure is preserved | The default mode constant is declared equal to the ECB constant at `ws_objects/pfw.shared.pbl.src/enums.sru:L946`; the mode-omitting overloads are exactly `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L30`, `:L32`, `:L34` and `:L36`, with `:L31`, `:L33`, `:L35` and `:L37` carrying the mode |
-| 2 | **The default RSA padding is PKCS#1, and no-padding is explicitly unsupported** — the legacy rejects it, and so does the port | Exactly two padding values exist, PKCS#1 and OAEP, with the default declared equal to PKCS#1, at `enums.sru:L949-L951`. **There is no "none" value to select**, so the rejection is the legacy's own rather than an addition |
-| 3 | **PKCS#5-family symmetric padding only, and not selectable** | Established by **absence**: there is no symmetric padding constant of any kind anywhere in `enums.sru`, and the cipher block at `:L936-L946` exposes type and mode and nothing else. The contract carries no field for padding, because offering one would imply a choice the legacy never had |
-| 4 | **No key-derivation function is reachable at all**, and there is no salt concept — so a passphrase is used as **raw key bytes** | Established by **absence**: no PBKDF2, scrypt, bcrypt, Argon2 or salt constant exists in `enums.sru`, and no signature in `n_crypto.sru:L30-L61` accepts an iteration count or a salt. Whatever the caller supplies as key material *is* the key |
-| 5 | **No authenticated encryption** — no GCM, CCM or Poly1305 — so ciphertext carries **no integrity tag** | Established by **absence**: the mode set is exactly ECB, CBC and CFB at `enums.sru:L943-L945`. A caller needing ciphertext integrity must obtain it separately, for instance through the keyed-hash operations |
-| 6 | **1024-bit RSA remains a legal key size**, and the legacy demonstration uses it | The 1024-bit constant is a declared, first-class value alongside 2048 and 4096 at `enums.sru:L965-L967`. It is annotated as a legacy-compatibility value and is **not** removed from the accepted set |
-| 7 | **The algorithm identifier sets are preserved exactly**, values and spellings alike | See the table below. A rename would silently invalidate every stored characterization comparison, because these exact spellings appear in serialized payloads, log records and recordings |
+| 2 | **The default RSA padding is PKCS#1 v1.5** | The default padding constant is declared equal to the PKCS#1 constant at `enums.sru:L949-L951`, so an overload that omits the selector signs and encrypts under PKCS#1 |
+| 3 | **No-padding is explicitly unsupported** — the legacy rejects it, and so does the port | Established by **absence**: exactly two padding values exist, PKCS#1 and OAEP, at `enums.sru:L949-L950`. **There is no "none" value to select**, so the rejection is the legacy's own rather than an addition |
+| 4 | **PKCS#5-family symmetric padding only, and not selectable** | Established by **absence**: there is no symmetric padding constant of any kind anywhere in `enums.sru`, the cipher block at `:L936-L946` exposes type and mode and nothing else, and none of the 32 symmetric overloads at `n_crypto.sru:L30-L61` carries a padding parameter. The contract carries no field for padding, because offering one would imply a choice the legacy never had |
+| 5 | **No key-derivation function is reachable at all**, and there is no salt concept — so a passphrase is used as **raw key bytes** | Established by **absence**: no PBKDF2, scrypt, bcrypt, Argon2 or salt constant exists in `enums.sru`, and no signature in `n_crypto.sru:L30-L61` accepts an iteration count or a salt. Whatever the caller supplies as key material *is* the key |
+| 6 | **No authenticated encryption** — no GCM, CCM or Poly1305 — so ciphertext carries **no integrity tag** | Established by **absence**: the mode set is exactly ECB, CBC and CFB at `enums.sru:L943-L945`. A caller needing ciphertext integrity must obtain it separately, for instance through the keyed-hash operations |
+| 7 | **1024-bit RSA remains a legal key size**, and the legacy demonstration uses it | The 1024-bit constant is a declared, first-class value alongside 2048 and 4096 at `enums.sru:L965-L967`. It is annotated as a legacy-compatibility value and is **not** removed from the accepted set |
+| 8 | **The same six-member hash set governs the RSA signature hash**, so MD5 — and even CRC32, which is a checksum rather than a cryptographic hash — are legal **signature**-hash selectors | The declaring comment at `enums.sru:L927` names the set's consumers as `Hash`, **`RSASign` and `VerifyRSASign`**: one set, three consumers. All four signature overloads accept it as a hash-type argument [`n_crypto.sru:L70-L73`]. The weakness is the *scope* of an otherwise ordinary constant set, and narrowing it would refuse input the legacy accepts |
 
-Items 3, 4 and 5 rest on absence, and §1.3 requires that to be said rather than glossed. Here the
+Items **3, 4, 5 and 6** rest on absence, and §1.3 requires that to be said rather than glossed. Here the
 absence is exactly the right kind of evidence: **a capability the legacy cannot express is a capability
 the port must not offer**, because offering it would be a new feature (**C-B**). There is no constant to
 select and no signature that accepts one.
 
-The identifier sets required by item 7, verified value by value:
+**Separately from the eight — and not itself a weakness — the algorithm identifier sets are preserved
+exactly**, values and spellings alike. A rename would silently invalidate every stored characterization
+comparison, because these exact spellings appear in serialized payloads, log records and recordings.
+That is a preservation *rule* rather than a defect, which is why it is not counted as a ninth item.
+
+The identifier sets that rule covers, verified value by value:
 
 | Set | Identifiers and values | Locator |
 | --- | --- | --- |
@@ -790,15 +939,18 @@ Two related points belong with this section:
   estate. Characterization compares a recorded legacy run against a target run, so a value that differs
   on every execution must be masked on **both** sides. The provider behind them is therefore injected so
   a test can substitute a deterministic double while production uses the platform generator. The full
-  seam register is in [`PARITY.md`](PARITY.md); the contract-side note is
+  seam register is in `docs/PARITY.md` (planned); the contract-side note is
   [`CONTRACTS.md`](CONTRACTS.md) §5.4.
 - **Weak defaults and the key-reference rule are independent.** Preserving ECB does not mean preserving
   the legacy's habit of passing key bytes as arguments. The *algorithm* behaviour is preserved (§7); the
   *transport* of key material is narrowed (§4.5). One is behaviour, the other is a property of a
   boundary that did not previously exist.
 
-[`CONTRACTS.md`](CONTRACTS.md) §5.3 carries the same seven items with the exact annotation text each
-contract description emits.
+[`CONTRACTS.md`](CONTRACTS.md) §5.3 carries the same eight items in the same order, with the exact
+annotation text each contract description emits, and
+[`OpenApi/security.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/security.v1.yaml) §6 carries
+them a third time at the boundary itself. All three lists are numbered identically so a reader can
+check them against one another item by item.
 
 ---
 
@@ -815,7 +967,7 @@ attached environment's setup instructions. Six of them bear on this document dir
 | **C-C** — the legacy tree is read-only and is the behavioural oracle | Determine the remediation posture accordingly, and explain why deletion is wrong | §3.1 shows all eight in-source sites lie in the read-only region. §3.2 states the posture. §3.3 explains why deletion would corrupt the oracle and buy nothing, and confirms this document **never** recommends editing any legacy path or any of the five pre-existing Chinese documents. This register is purely additive |
 | **C-G** — no new attack surface: every newly created boundary is authenticated | Carry the token topology | §4 in full: one signing secret (§4.1), sole issuer and three verifiers (§4.2), mutual TLS as a per-pair fallback (§4.3), the opaque key-reference rule (§4.5) |
 | **C-D** — do not implement the four deferred services | Scaffold no secret material for any of them | §4.4. No signing, verification or mutual-TLS variable is provisioned for DesignSystem, Documents, Integration or ScriptBridge, and the environment's design-service and localization-service names are explicitly not provisioned |
-| **C-B** — no new features, no behaviour improvements, no performance objective | Preserve the weak defaults and annotate them; assert no performance figure | §7 preserves all seven and states that annotation **is** the remediation. §6.3 justifies the one added control as a logging and transport control rather than a behavioural change. No performance, latency, throughput, availability or service-level figure appears anywhere in this document, because the repository publishes none |
+| **C-B** — no new features, no behaviour improvements, no performance objective | Preserve the weak defaults and annotate them; assert no performance figure | §7 preserves all eight and states that annotation **is** the remediation. §6.3 justifies the one added control as a logging and transport control rather than a behavioural change. No performance, latency, throughput, availability or service-level figure appears anywhere in this document, because the repository publishes none |
 | **C-K** — document every technology-specific and boundary-specific decision | Document the remediation decisions, the operational follow-ups, and the cleared false positives | §3 carries the posture and its reasoning. §3.6 surfaces both operational follow-ups. §2.10 clears the false positives so remediation is not misdirected, and §2.9 records a corrected attribution for the same reason |
 
 ### 8.2 The value checks, and their results
@@ -864,11 +1016,11 @@ It deliberately does not duplicate its siblings:
 | For | See |
 | --- | --- |
 | Service boundaries, the port and transport map, storage, the capability gate, the sole-issuer topology in architectural terms, and the SQL-injection exposure explained mechanically | [`ARCHITECTURE.md`](ARCHITECTURE.md) §8.5, §9, §10.2 |
-| The token service and its sole-issuer property (C-01), the cryptographic service with its key-reference rule and the seven annotated defaults (C-02), the redaction rule at the contract level (C-05, C-08), and the reserved deferred routes | [`CONTRACTS.md`](CONTRACTS.md) §5.2, §5.3, §8.3, §8.6, §11.2, §11.4 |
-| The characterization model, the fixture corpus drawn from the test and demonstration libraries, the determinism seams, and the byte-exact parity criteria referenced in §6.3 | [`PARITY.md`](PARITY.md) |
+| The token service and its sole-issuer property (C-01), the cryptographic service with its key-reference rule and the eight annotated defaults (C-02), the redaction rule at the contract level (C-05, C-08), and the reserved deferred routes | [`CONTRACTS.md`](CONTRACTS.md) §5.2, §5.3, §8.3, §8.6, §11.2, §11.4 |
+| The characterization model, the fixture corpus drawn from the test and demonstration libraries, the determinism seams, and the byte-exact parity criteria referenced in §6.3 | `docs/PARITY.md` (planned) |
 | Why the secret-bearing libraries are deferred or permanently out of scope, and the same corrected MQTT attribution from the deferral side | [`DEFERRED.md`](DEFERRED.md) §3, §4.5, §5.2 |
 | The full-estate library-to-destination assignment, and the same corrected attribution from the mapping side | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §9, §12.2 |
-| The variable roster an operator must populate, with empty values by design | `orchestration/.env.example` |
+| The variable roster an operator must populate, with empty values by design | `orchestration/.env.example` (planned) |
 | Build and test commands, and per-service build independence | [`BUILD.md`](BUILD.md) |
 
 ---

@@ -61,11 +61,12 @@
 //
 // THE RETURN VALUE IS PART OF THE CONTRACT - AND THE PLAN'S OWN SUMMARY OF THIS FILE IS WRONG
 // AAP §0.4.2.3 summarises this member as "ontranslate(source, category, ref text) - translation
-// mutates a `ref string`, it does not return a value", and the neighbouring
-// PowerFramework.Shared.Localization.csproj repeats that wording verbatim. The first half is right;
-// the second half is not. :L9 declares `event type long ontranslate`, so the member returns a long.
-// The correction is recorded HERE, at the point of reproduction, rather than left as a discrepancy
-// between plan and code for a later reader to trip over.
+// mutates a `ref string`, it does not return a value". The first half is right; the second half is
+// not. :L9 declares `event type long ontranslate`, so the member returns a long. The correction is
+// recorded HERE, at the point of reproduction, rather than left as a discrepancy between plan and
+// code for a later reader to trip over. The neighbouring
+// PowerFramework.Shared.Localization.csproj repeated the plan's wording verbatim and now carries
+// the corrected description too, so the two files agree and neither restates the error.
 //
 // It is not a pedantic difference, because one of the three providers consists of nothing else.
 // SimplifiedChineseProvider's original is a genuine no-op that NEVER TOUCHES text and communicates

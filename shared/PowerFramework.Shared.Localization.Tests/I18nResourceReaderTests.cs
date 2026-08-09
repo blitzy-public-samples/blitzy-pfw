@@ -38,7 +38,15 @@
 //
 //      n_xmldoc            ->  System.Xml.Linq.XDocument
 //      n_xmldoc.LoadFile   ->  System.Xml.Linq.XDocument.Load
-//      n_xmldoc.Query      ->  System.Xml.XPath.Extensions.XPathSelectElements over XDocument
+//      n_xmldoc.Query      ->  a LINQ to XML traversal of that same XDocument. Correction 6 names
+//                              XPathSelectElements, and that was the mechanism until the reader's
+//                              interpolated expression was found to be an injection sink rather
+//                              than a faithfully reproduced defect - a balanced payload SELECTED
+//                              an entry the caller never asked for. The framework XML API is
+//                              still the substitute, which is what Correction 6 requires; only
+//                              the query spelling changed, and it changed nothing observable
+//                              (see CraftedArgumentsCannotSelectAnUnaskedForTranslation and
+//                              EveryEntryInTheResourceResolvesToItsRecordedTranslation).
 //      GetValueString      ->  reading the "to" attribute's Value
 //      n_xmlqueryresult    ->  NOTHING, deliberately. Its only in-scope declaration
 //                              (n_cst_i18n_cht.sru:L31) is dead code with no observable
@@ -58,8 +66,8 @@
 //  behavioural. It enumerates the referenced assemblies of the assembly under test and pins both
 //  halves of Correction 6:
 //
-//      the POSITIVE half - the framework XML and XPath facades ARE referenced, so the
-//                          substitution is demonstrably the mechanism actually in use;
+//      the POSITIVE half - the framework XML facades ARE referenced, so the substitution is
+//                          demonstrably the mechanism actually in use;
 //      the NEGATIVE half - nothing outside the framework and the shared kernel is referenced,
 //                          and specifically no Documents-capability and no logging assembly.
 //
@@ -387,9 +395,12 @@ public sealed class I18nResourceReaderTests
     /// modified.
     /// <para>
     /// It also matters for constraint C-D that the inspection side uses the SAME framework XML API
-    /// the substitution names - <see cref="XDocument"/> together with the
-    /// <c>System.Xml.XPath</c> extensions - and no other. This suite reaches for no parser
-    /// the reader could not have used.
+    /// the substitution names - <see cref="XDocument"/>, together with the
+    /// <c>System.Xml.XPath</c> extensions where a test wants an INDEPENDENT second opinion on the
+    /// document's shape - and no other. This suite reaches for no parser the reader could not have
+    /// used. Note the deliberate asymmetry: the reader itself no longer evaluates XPath at all, so
+    /// where a test does, it is cross-checking the traversal against a different framework API
+    /// rather than re-running the reader's own mechanism.
     /// </para>
     /// </remarks>
     private static XDocument LoadResourceForInspection()
@@ -1311,31 +1322,34 @@ public sealed class I18nResourceReaderTests
 
     /// <summary>
     /// Proves that degenerate arguments miss rather than throw, including the two that make the
-    /// underlying XPath expression malformed.
+    /// legacy's own interpolated expression malformed.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// C-B, and the legacy's own injection analogue preserved rather than corrected. The legacy
-    /// builds its query by UNESCAPED substitution at <c>n_cst_i18n_en.sru:L51</c>, so two of these
-    /// inputs produce an expression that is not valid XPath at all:
+    /// All four rows are misses in the legacy and all four are misses in the reader, and the two
+    /// halves reach that result by different routes - which is the point of grouping them. The
+    /// legacy builds its query by UNESCAPED substitution at <c>n_cst_i18n_en.sru:L51</c>, so two of
+    /// these inputs produce an expression that is not valid XPath at all:
     /// </para>
     /// <list type="bullet">
     /// <item>
-    /// An EMPTY CATEGORY yields a path with an empty step. The legacy never reaches it because it
-    /// guards the category upstream at <c>n_cst_i18n_en.sru:L49</c> with
-    /// <c>if sCat &lt;&gt; "" then</c>, so the reader deliberately does not duplicate that guard -
-    /// it simply lands in the same silent miss.
+    /// An EMPTY CATEGORY yields a path with an empty step. The legacy additionally guards the
+    /// category upstream at <c>n_cst_i18n_en.sru:L49</c> with <c>if sCat &lt;&gt; "" then</c>. The
+    /// reader reaches the same miss through its well-formed-name guard, which is REQUIRED rather
+    /// than incidental: the category names an element, and without the guard an unusable name would
+    /// throw out of a method contracted never to throw.
     /// </item>
     /// <item>
-    /// A source text containing an APOSTROPHE closes the predicate's string literal early. The
-    /// legacy breaks on exactly the same input, and the caller sees no translation.
+    /// A source text containing an APOSTROPHE closes the predicate's string literal early in the
+    /// legacy. The reader compares the apostrophe as data instead, and no <c>text</c> attribute in
+    /// the resource contains one - the very next test asserts that - so the input matches nothing
+    /// and the caller sees no translation either way.
     /// </item>
     /// </list>
     /// <para>
-    /// The remaining two rows are well-formed expressions that simply match nothing. Grouping all
-    /// four here documents that a MALFORMED query and an UNMATCHED query are indistinguishable at
-    /// the call site, which is the legacy's behaviour and is what keeps the facade's passthrough
-    /// uniform.
+    /// The remaining two rows match nothing under both spellings. Grouping all four here documents
+    /// that a MALFORMED query and an UNMATCHED query are indistinguishable at the call site, which
+    /// is the legacy's behaviour and is what keeps the facade's passthrough uniform.
     /// </para>
     /// </remarks>
     [Fact]
@@ -1345,17 +1359,182 @@ public sealed class I18nResourceReaderTests
 
         I18nResourceReader reader = new();
 
-        // Malformed expression: an empty step. Guarded upstream by the legacy, never by the reader.
+        // An unusable category element name. Malformed in the legacy expression, rejected by the
+        // reader's well-formed-name guard, and a miss in both.
         Assert.Equal(string.Empty, reader.Lookup("en", string.Empty, "还原"));
 
-        // Malformed expression: the apostrophe closes the predicate's literal early. The legacy's
-        // own injection analogue, preserved rather than sanitised, because sanitising it would
-        // change the observable result.
+        // The apostrophe closes the predicate's literal early in the legacy. Here it is compared as
+        // data, and no entry's source text contains one, so both spellings miss.
         Assert.Equal(string.Empty, reader.Lookup("en", "window", "it's"));
 
         // Well-formed expressions that match nothing.
         Assert.Equal(string.Empty, reader.Lookup(string.Empty, "window", "还原"));
         Assert.Equal(string.Empty, reader.Lookup("en", "window", string.Empty));
+    }
+
+    /// <summary>
+    /// Proves no <c>text</c> attribute in the resource table contains an apostrophe, which is the
+    /// property that makes the reader's data comparison and the legacy's interpolated expression
+    /// observationally identical over every real entry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The load-bearing premise of the query change, asserted rather than assumed. The legacy
+    /// interpolates the source text into an XPath string literal, so an apostrophe in a
+    /// <c>text</c> attribute would break the legacy's own query for that entry while the reader
+    /// resolved it perfectly - a real divergence rather than a theoretical one. Because the table
+    /// contains no such entry, the divergence is unreachable for every translation the framework
+    /// actually performs.
+    /// </para>
+    /// <para>
+    /// The resource is inside the read-only legacy region, so this cannot regress through an edit
+    /// made here; it can regress through an edit made upstream, and this test is what would report
+    /// it. The <c>to</c> attribute is deliberately NOT asserted: a translation's content never
+    /// reaches a query, only an entry's source text does.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoEntrySourceTextContainsAnApostrophe()
+    {
+        RequireResourceFixture();
+
+        XDocument document = XDocument.Load(I18nResourceReader.DefaultResourceFileName);
+
+        List<string> offending =
+        [
+            .. document
+                .Descendants(EntryElementName)
+                .Select(entry => (string?)entry.Attribute(SourceTextAttributeName) ?? string.Empty)
+                .Where(text => text.Contains('\'', StringComparison.Ordinal))
+        ];
+
+        Assert.True(
+            offending.Count == 0,
+            $"{offending.Count} entry source text(s) in " +
+            $"{I18nResourceReader.DefaultResourceFileName} contain an apostrophe: " +
+            $"[{string.Join(", ", offending)}]. That is the one input class where the legacy's " +
+            $"interpolated XPath (n_cst_i18n_en.sru:L51) and the reader's data comparison differ - " +
+            $"the legacy breaks its own query and misses, the reader resolves the entry. While the " +
+            $"count is zero the two are observationally identical over the whole table. If this " +
+            $"ever fails, re-measure the pair and record the divergence; do NOT reintroduce the " +
+            $"interpolated expression, which the reader replaced because a balanced payload " +
+            $"selected an entry the caller never asked for.");
+    }
+
+    /// <summary>
+    /// Proves every entry in the resource table resolves through the reader to the translation the
+    /// table records, byte for byte.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The whole-table equivalence assertion. <see cref="KnownGoodLookupsReturnTheRecordedTranslation"/>
+    /// pins a hand-picked sample and the two mistranslations; this walks EVERY section and EVERY
+    /// entry the file declares and requires each one to come back out of the reader unchanged, so a
+    /// change to the query mechanism cannot pass by resolving most of the table.
+    /// </para>
+    /// <para>
+    /// It also pins the traversal's document-order semantics on the one entry class where order is
+    /// observable: two entries can share a source text within a section only if the file declares a
+    /// duplicate, and the legacy's <c>string()</c> wrapper takes the FIRST node in document order,
+    /// so this test compares against the first declaration of each source text rather than the
+    /// last.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryEntryInTheResourceResolvesToItsRecordedTranslation()
+    {
+        RequireResourceFixture();
+
+        XDocument document = XDocument.Load(I18nResourceReader.DefaultResourceFileName);
+        I18nResourceReader reader = new();
+
+        int asserted = 0;
+
+        foreach (XElement section in document.Root!.Elements())
+        {
+            string category = section.Name.LocalName;
+            string language = (string?)section.Attribute(LanguageAttributeName) ?? string.Empty;
+
+            HashSet<string> seen = new(StringComparer.Ordinal);
+
+            foreach (XElement entry in section.Elements(EntryElementName))
+            {
+                string source = (string?)entry.Attribute(SourceTextAttributeName) ?? string.Empty;
+
+                // Document order: only the FIRST declaration of a source text is reachable, which
+                // is the legacy string(node-set) rule. A later duplicate is unreachable in both.
+                if (!seen.Add(source))
+                {
+                    continue;
+                }
+
+                string expected = (string?)entry.Attribute(TranslationAttributeName) ?? string.Empty;
+                string actual = reader.Lookup(language, category, source);
+
+                Assert.Equal(expected, actual);
+                asserted++;
+            }
+        }
+
+        Assert.True(
+            asserted >= ExpectedEntryCount,
+            $"Only {asserted} entries were asserted, fewer than the {ExpectedEntryCount} measured " +
+            $"in {I18nResourceReader.DefaultResourceFileName}. Either the resource shrank or the " +
+            $"walk stopped early; both invalidate the whole-table equivalence this test provides.");
+    }
+
+    /// <summary>
+    /// Proves a crafted source text, category or language cannot make the reader return a
+    /// translation other than the one asked for.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The security regression test for the query change, and every row is a payload that was
+    /// MEASURED returning a real translation while the reader interpolated its arguments into an
+    /// XPath expression. Against the shipped table, that mechanism answered:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><c>nosuch' or @text='关闭</c> as the source text returned <c>Close</c> - a specific
+    /// entry of the attacker's choosing.</item>
+    /// <item><c>nosuch' or '1'='1</c> as the source text returned <c>Maximize</c> - whatever the
+    /// section declares first.</item>
+    /// <item><c>' or '1'='1</c> as the LANGUAGE returned <c>Restore</c> - the requested text out of
+    /// any language section, defeating the language selection entirely.</item>
+    /// </list>
+    /// <para>
+    /// Each must now be a miss. The reader's output is shown to users as validation and error text
+    /// (<c>se_cst_dw.sru:L357</c>, <c>:L368</c> route dialog text through the facade), so a caller
+    /// able to choose WHICH translation comes back can spoof that text; the enterprise security
+    /// baseline of constraint C-G forbids leaving such a sink in place. The last two rows carry
+    /// path and predicate syntax in the category and in the source text to show that neither
+    /// position accepts syntax any more - only data.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("en", "window", "nosuch' or @text='关闭", "selects a chosen entry")]
+    [InlineData("en", "window", "nosuch' or '1'='1", "selects the section's first entry")]
+    [InlineData("' or '1'='1", "window", "还原", "defeats the language predicate")]
+    [InlineData("en", "window", "window[@lang='en']/tr[@text='关闭']", "path syntax as source text")]
+    [InlineData("en", "window[@lang='en'] | pfw/window", "还原", "path syntax as category")]
+    [InlineData("en", "window", "还原' and @to='Restore", "closes and extends the predicate")]
+    public void CraftedArgumentsCannotSelectAnUnaskedForTranslation(
+        string language,
+        string category,
+        string text,
+        string payloadKind)
+    {
+        RequireResourceFixture();
+
+        I18nResourceReader reader = new();
+
+        string translation = reader.Lookup(language, category, text);
+
+        Assert.True(
+            translation.Length == 0,
+            $"A crafted argument that {payloadKind} returned '{translation}' instead of the " +
+            $"not-found result. The reader must compare language, category and source text as " +
+            $"DATA; a spelling in which any of the three can contribute query SYNTAX lets a " +
+            $"caller choose which localized string is returned, which constraint C-G forbids.");
     }
 
     /// <summary>
@@ -1777,13 +1956,17 @@ public sealed class I18nResourceReaderTests
     //
     // Every other region in this file is behavioural, and behaviour cannot see the difference. A
     // future edit that swapped the framework XML stack for a package would keep returning "Restore"
-    // for the restore label, and all 59 of the tests above would still pass. Only the assembly's own
+    // for the restore label, and every behavioural test above would still pass. Only the assembly's own
     // reference table can tell the two apart, which is what this region reads.
     //
     // Two halves, and both are needed:
-    //     POSITIVE  the framework XML and XPath facades ARE referenced, so the substitution named
-    //               by Correction 6 is demonstrably the mechanism in use rather than merely the
-    //               mechanism intended.
+    //     POSITIVE  the framework XML facades ARE referenced, so the substitution named by
+    //               Correction 6 is demonstrably the mechanism in use rather than merely the
+    //               mechanism intended. The two XPATH facades were part of this half until the
+    //               reader stopped interpolating its arguments into a query string; the reason
+    //               they were dropped rather than kept is recorded on
+    //               RequiredSubstitutionAssemblies, and it is a security fix rather than a
+    //               loosening of the assertion.
     //     NEGATIVE  nothing outside the framework and the shared kernel is referenced, and
     //               specifically nothing from the deferred Documents capability area and nothing
     //               that logs.
@@ -1823,13 +2006,29 @@ public sealed class I18nResourceReaderTests
     /// Each maps onto one half of Correction 6:
     /// </para>
     /// <list type="bullet">
-    /// <item><c>System.Xml.XDocument</c> - where <see cref="XDocument"/> lives, so this is
-    /// <c>XDocument.Load</c>, the substitute for <c>n_xmldoc.LoadFile</c>.</item>
-    /// <item><c>System.Xml.XPath.XDocument</c> - where the <c>XPathSelectElements</c> extension
-    /// methods live, so this is the substitute for <c>n_xmldoc.Query</c>.</item>
-    /// <item><c>System.Xml.XPath</c> - where <c>XPathException</c> lives, which is how a malformed
-    /// interpolated expression becomes the miss that Region 4 asserts.</item>
+    /// <item><c>System.Xml.XDocument</c> - where <see cref="XDocument"/>, <see cref="XElement"/>
+    /// and <see cref="XName"/> live, so this is both <c>XDocument.Load</c>, the substitute for
+    /// <c>n_xmldoc.LoadFile</c>, and the element and attribute traversal that substitutes for
+    /// <c>n_xmldoc.Query</c>.</item>
+    /// <item><c>System.Xml.ReaderWriter</c> - where <see cref="XmlReader"/> and
+    /// <see cref="XmlConvert"/> live, so this is the read-only parse the constructor performs and
+    /// the well-formed-name guard the category argument passes through.</item>
     /// </list>
+    /// <para>
+    /// TWO XPATH FACADES USED TO BE REQUIRED HERE AND DELIBERATELY ARE NOT ANY MORE.
+    /// <c>System.Xml.XPath.XDocument</c> (the <c>XPathSelectElements</c> extensions) and
+    /// <c>System.Xml.XPath</c> (<c>XPathException</c>) were required while the reader built its
+    /// query by interpolating the language, the category and the source text into an XPath string.
+    /// That spelling was an injection sink rather than a faithful reproduction of a defect: a
+    /// balanced payload in the source text or the language EXTENDED the expression and selected an
+    /// entry the caller never asked for, which was measured against the real table before the
+    /// change. The reader now compares those values as data, so the two XPath facades are no longer
+    /// referenced and requiring them would fail the build for the security fix. Correction 6 is
+    /// still satisfied and still asserted: it mandates that the deferred Documents XML family be
+    /// substituted with the FRAMEWORK XML API, and the remaining two names are that API. What the
+    /// assertion protects is unchanged - a reader that had stopped reading XML at all, in favour of
+    /// an embedded string table or a generated dictionary, still fails it.
+    /// </para>
     /// <para>
     /// The SDK is pinned by <c>global.json</c> with <c>rollForward: latestFeature</c>, so roll
     /// forward is confined to 10.0 feature bands and this facade set cannot shift under the
@@ -1841,8 +2040,7 @@ public sealed class I18nResourceReaderTests
     private static readonly string[] RequiredSubstitutionAssemblies =
     [
         "System.Xml.XDocument",
-        "System.Xml.XPath.XDocument",
-        "System.Xml.XPath",
+        "System.Xml.ReaderWriter",
     ];
 
     /// <summary>
@@ -2024,24 +2222,27 @@ public sealed class I18nResourceReaderTests
             $"which is neither a framework assembly nor '{PermittedProjectReference}'. " +
             $"Constraint C-D forbids implementing the deferred services even partially, and AAP " +
             $"0.2.1.3 Correction 6 requires the legacy n_xmldoc/n_xmlqueryresult pair to be " +
-            $"SUBSTITUTED with System.Xml.Linq plus System.Xml.XPath - both of which ship inside " +
-            $"the shared framework - precisely so this library acquires NO Documents coupling. " +
+            $"SUBSTITUTED with the framework XML API - System.Xml.Linq over System.Xml, which " +
+            $"ships inside the shared framework - precisely so this library acquires NO Documents " +
+            $"coupling. " +
             $"Remove the reference; do not widen this allow-list. " +
             $"Full referenced set: [{string.Join(", ", referenced)}].");
     }
 
     /// <summary>
-    /// Proves the framework XML and XPath substitution is the mechanism actually in use.
+    /// Proves the framework XML substitution is the mechanism actually in use.
     /// </summary>
     /// <remarks>
     /// The positive half of Correction 6, and the half a pure deny-list would miss entirely. An
     /// implementation that had stopped reading XML at all - swapped the resource for an embedded
     /// string table, say, or for a generated dictionary - would satisfy every negative assertion in
     /// this region while no longer being the substitution the plan mandates. Asserting the presence
-    /// of the two named APIs' facades makes that divergence visible.
+    /// of the named APIs' facades makes that divergence visible. The set it asserts over, and why
+    /// the two XPath facades are no longer in it, are documented on
+    /// <see cref="RequiredSubstitutionAssemblies"/>.
     /// </remarks>
     [Fact]
-    public void TheLibraryUnderTestReferencesTheFrameworkXmlAndXPathSubstitution()
+    public void TheLibraryUnderTestReferencesTheFrameworkXmlSubstitution()
     {
         string[] referenced = ReferencedAssemblyNamesOfTheLibraryUnderTest();
 
@@ -2051,9 +2252,9 @@ public sealed class I18nResourceReaderTests
                 referenced.Contains(required, StringComparer.Ordinal),
                 $"PowerFramework.Shared.Localization does not reference '{required}'. AAP 0.2.1.3 " +
                 $"Correction 6 mandates that the deferred Documents XML parser be substituted with " +
-                $"System.Xml.Linq.XDocument.Load plus XPathSelectElements, so the framework XML and " +
-                $"XPath facades must be the mechanism in use. Their absence means the reader is no " +
-                $"longer that substitution. " +
+                $"the framework XML API - XDocument.Load plus a traversal of the loaded document - " +
+                $"so those facades must be the mechanism in use. Their absence means the reader is " +
+                $"no longer that substitution. " +
                 $"Full referenced set: [{string.Join(", ", referenced)}].");
         }
 

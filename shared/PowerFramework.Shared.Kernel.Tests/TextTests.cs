@@ -832,6 +832,22 @@ public sealed class TextTests
     // the corpus is silent, matching the D-1..D-3 and I-1..I-6 labels the implementation uses, so a
     // later characterization run against the behavioural oracle can revise exactly the inferences
     // and leave the derived facts alone.
+    //
+    // DP-7: THE INFERRED ASSERTIONS ARE NOT GOLDEN-MASTER PARITY. The paragraph above says what
+    // evidence exists; this one names the claim being withheld. An assertion labelled INFERRED is a
+    // TARGET REGRESSION GUARD - it stops a later edit to Text.cs moving the choice silently, and it
+    // cannot detect a disagreement with pfw.dll, because there is no recording of pfw.dll's output
+    // in this repository to compare against. Promoting one to parity evidence requires a paired
+    // recording under characterization/recordings/{legacy,dotnet}/<workflowId>/, captured against
+    // one unrecreated persistence-db volume state; until then no INFERRED assertion here may be
+    // reported as verified legacy behaviour in docs/PARITY.md or any published summary, and IF A
+    // RECORDING CONTRADICTS ONE THE RECORDING WINS rather than the passing test.
+    //
+    // The DERIVED assertions are NOT qualified this way, and the difference is real rather than
+    // presentational: a D-label is settled by an actual call site in the legacy corpus, which is
+    // readable evidence about how the legacy is used even though the callee's body is not. Applying
+    // the same caveat to both would understate the D-labels and flatten a distinction this file
+    // exists to keep.
 
     /// <summary>
     /// The substitution matrix for the five-argument form at <c>replaceall.srf:L9</c>, which is the

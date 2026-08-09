@@ -9,9 +9,13 @@
     `pfw.datawindow.services.pbl` (13 objects, zero native bindings, pure PowerScript):
 
       * the 22 event DataWindow chain: 9 semantic events plus 13 raw `pbm_dwn*` events
-      * the item change micro protocol: the {0, 1, 2, 3} alphabet reproduced verbatim, including
-        case 1 falling through to case 2, case 3 rewriting itself to 1, and the default arm
-        forcibly returning 2
+      * the item change micro protocol: the {0, 1, 2, 3} alphabet reproduced verbatim as FOUR
+        DISTINCT ARMS, because PowerScript `choose case` does not fall through - case 1 is an
+        EMPTY arm that returns 1 unchanged and restores nothing, case 2 restores value and status
+        only when the value was unchanged, case 3 keeps the value and rewrites the result to 1, and
+        the default arm coerces by column type prefix, fires the changed event and forcibly returns
+        2 [se_cst_dw.sru:L211-L252]. A test that expected case 1 to restore would be asserting a
+        fall through the language does not have
       * static single sigil versus dynamic double sigil column expression expansion, which is the
         one distinction that does not survive naive serialization
       * the five column type validators: date, datetime, number, string and time

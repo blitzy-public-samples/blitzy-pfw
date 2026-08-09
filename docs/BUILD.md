@@ -1,3 +1,21 @@
+<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
+     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
+     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
+     without splitting the locator from what it proves, and a wrapped command is a command that does
+     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
+       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
+                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
+     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
+     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
+     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
+     and are never edited, so a command that reports them would fail for reasons this refactor must not
+     "fix".
+
+     Declared inline, per file, so the policy travels with the document and applies to the six files
+     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
+     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+<!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
+
 # PowerFramework → .NET 10 — Build Reference
 
 This document is the authoritative reference for **building, testing and packaging** the four-service
@@ -8,8 +26,15 @@ cd services/<service-name> && dotnet restore && dotnet build -c Release && dotne
 ```
 
 Everything else here — central package management, the two mandatory package pins, the hand-authored
-test projects, the one-solution-file-per-directory rule — exists so that this single command works
-**verbatim, from a clean checkout, for each of the four services independently** (C-I).
+test projects, the one-solution-file-per-directory rule — exists so that this single command **will**
+work **verbatim, from a clean checkout, for each of the four services independently** (C-I).
+
+> **State of that command today, measured rather than assumed.** The build machinery is in place and the
+> shared half of the tree builds and tests clean. **The four service *application* projects do not yet
+> compile**: each reports `error CS5001: Program does not contain a static 'Main' method suitable for an
+> entry point`, because their `Program.cs` files have not been authored yet. So for each of the four
+> services the command above currently fails at the build step, and it fails for that one reason.
+> §13 records exactly what has and has not been exercised.
 
 **Read §2 before anything else.** It carries two findings that were observed directly and that break the
 build if a reader misses them. A reader who stops after the first screen must still have seen both.
@@ -25,12 +50,41 @@ itself:
 | For | See |
 | --- | --- |
 | Service topology, transport rationale, the port map, the orchestration decision and its rejected alternative | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
-| The characterization model, the fixture corpus, coverage mechanics in context and the determinism seams | [`PARITY.md`](PARITY.md) |
+| The characterization model, the fixture corpus, coverage mechanics in context and the determinism seams | `docs/PARITY.md` (planned) |
 | The legacy build-definition anomalies in full, and the full-estate object mapping | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | Secret locators, severities, required actions and the token-topology register | [`SECRETS.md`](SECRETS.md) |
 | Compose bring-up detail and the readiness gates step by step | `orchestration/README.md` |
 | The cross-service contract inventory | [`CONTRACTS.md`](CONTRACTS.md) |
 | The four deferred destinations, which receive no project and no container in this phase | [`DEFERRED.md`](DEFERRED.md) |
+
+## Current state of the artifacts this document references
+
+Some artifacts referenced below are **planned and not yet present in this repository**. They are named
+because they are where the corresponding work belongs, not because a reader can open them today:
+
+| Artifact | What it will carry | State |
+| --- | --- | --- |
+| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/.env.example`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up | **Planned — not yet present** |
+| `.github/workflows/ci.yml` | The build/test/coverage pipeline and the per-service coverage gate | **Planned — not yet present** |
+| The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
+| `tests/e2e/specs/` | The Playwright cross-service workflow specs | **Planned — not yet present** |
+
+Everything else this document references — the solution and project files, the shared libraries, the
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+the read-only legacy tree — **is present in the tree today**.
+
+**This matters most in this document**, because the commands in later sections divide into three kinds,
+and conflating them is how a build reference becomes misleading:
+
+1. **Runs clean today.** `dotnet restore` (audit-clean), and the build and test of the shared libraries
+   and the contracts project — `0 Warning(s)`, `0 Error(s)`, and **1,034 tests passing** across the three
+   shared test projects.
+2. **Runs today and fails for one known reason.** Any build that includes the four service *application*
+   projects, each of which reports `CS5001` because its entry point is not yet authored. The failure is
+   that and nothing else: zero warnings, and no other diagnostic.
+3. **Describes the intended workflow once the artifacts above exist.** The compose bring-up, the health
+   probes and the Playwright run. Where a command belongs to this kind, the surrounding text says so.
 
 ---
 
@@ -49,6 +103,7 @@ itself:
 11. [Toolchain constraints a project author must respect](#11-toolchain-constraints-a-project-author-must-respect)
 12. [Why the build is authored from scratch](#12-why-the-build-is-authored-from-scratch)
 13. [Closing note: what this document claims and does not claim](#13-closing-note-what-this-document-claims-and-does-not-claim)
+14. [Markdown lint policy for this documentation set](#14-markdown-lint-policy-for-this-documentation-set)
 
 ---
 
@@ -85,7 +140,7 @@ against it end to end. It produced:
 - **`Passed!  - Failed:     0, Passed:     1`**;
 - **`coverage.cobertura.xml`** — the exact artifact the coverage gate of §10 is measured from.
 
-The diagnostic codes quoted in §2, §3.3 and §11 were obtained the same way — by provoking each failure on
+The diagnostic codes quoted in §2, §3.2 to §3.4 and §11 were obtained the same way — by provoking each failure on
 the pinned SDK and reading what it printed — rather than recalled from memory. §2 additionally
 distinguishes the solution-filter code that the repository records repository-wide from the codes a
 misused filter surfaces on this SDK, and §13 summarises that distinction.
@@ -117,7 +172,7 @@ The legacy PowerBuilder tree is read-only and is the behavioural oracle (C-C). N
 or CI step defined in this document reads it as an input, writes to it, or requires it to be present:
 
 - `ws_objects/**`, the `*.pbl`/`*.pbt`/`*.pbw`/`*.pbr`/`*.pbd` artifacts, `oldversion/125/**` and
-  `pack/**` are inputs to **parity work only**, never to the build. See [`PARITY.md`](PARITY.md).
+  `pack/**` are inputs to **parity work only**, never to the build. See `docs/PARITY.md` (planned).
 - The two PowerBuilder project objects are cited in §12 as **REFERENCE for build *intent* only**. They
   are not translated, and §12 shows why neither could be.
 - The five pre-existing Chinese documents in this folder — `docs/README.md`, `docs/Blink交互.md`,
@@ -133,16 +188,27 @@ Both were observed directly. Each breaks the build if it is ignored.
 
 ### ⚠️ Finding 1 — `.slnx` is the .NET 10 solution format, and solution filters are not a supported path here
 
-**.NET 10's `dotnet new sln` emits `.slnx`**, the XML solution format — not `.sln`. Reproduce it in one
-command:
+**.NET 10's `dotnet new sln` emits `.slnx`**, the XML solution format — not `.sln`. Reproduce it in a
+throwaway directory, never in your working tree:
 
 ```bash
-dotnet new sln -n Probe && ls Probe.*
+set -euo pipefail
+probe="$(mktemp -d)"
+( cd "$probe" && dotnet new sln -n Probe && ls Probe.* )
+rm -rf -- "$probe"
 # -> Probe.slnx
 ```
 
+> **Run this in `mktemp -d`, never where you are standing.** `dotnet new sln` writes into the *current*
+> directory, so running it at the repository root creates a second root solution — and a directory with
+> two solution files breaks every bare `dotnet restore`, `dotnet build` and `dotnet test` with
+> `MSB1011`, which is the exact failure §3.4 tells you to avoid. The subshell keeps the `cd` from
+> outliving the snippet, and the trailing `rm -rf --` removes only the temporary directory the command
+> above created. If you would rather not run it at all, the output shown in the comment is the whole
+> result.
+
 Every solution file in this repository is consequently `.slnx`: the root `PowerFramework.slnx` of §6 and
-the four per-service solutions of §3.3.
+the four per-service solutions of §3.4.
 
 **Legacy solution filters (`.slnf`) are incompatible with the `.slnx` format.** A hand-authored filter
 pointing at a `.slnx`-format solution **fails with `MSB4014` during restore, during build *and* during
@@ -173,7 +239,7 @@ The practical point behind every one of these codes is the same: a filter's proj
 in exact agreement with the solution **by hand**, and any drift fails hard. That maintenance would be
 spent reproducing a scoping the per-service solutions already give for free, by construction.
 
-**The resolution is the per-service `.slnx` design of §3.3.** Each service directory carries exactly one
+**The resolution is the per-service `.slnx` design of §3.4.** Each service directory carries exactly one
 solution file listing exactly that service's projects, so scoping is structural rather than curated. Use
 those. Any agent or developer who reaches for a solution filter will break the build.
 
@@ -236,6 +302,8 @@ way for one service's build to be configured differently from another's by accid
 | `EnableNETAnalyzers` | `true` | States the SDK's own default explicitly, because a warnings-as-errors gate is only reproducible if the diagnostic set producing those errors is stated rather than inferred |
 | `AnalysisLevel` | `latest` | As above; bounded by the SDK pin, so the rule set cannot shift under the gate |
 | `ManagePackageVersionsCentrally` | `true` | Enables the mechanism of §3.2 |
+| `CentralPackageVersionOverrideEnabled` | `false` | Closes the one hole §3.2's two guards leave open. `NU1008` catches a bare `Version` attribute and `NU1010` catches a package with no central entry, but a `VersionOverride` is neither, so it restores cleanly while re-establishing a per-project version authority. With this set, any `VersionOverride` anywhere in the tree is a hard restore error (**`NU1013`**) |
+| `ShouldUnsetParentConfigurationAndPlatform` | `false` | Makes `dotnet build -c Release` mean Release for a service's **whole** dependency closure, not only for the two projects its solution lists. See §3.3 |
 
 It builds **warning-clean** against both the ASP.NET Core web template and xunit.v3 — verified, not
 assumed.
@@ -263,16 +331,23 @@ assumed.
    naming analyzer would turn each of them into a **build error**, so `CA1707` and `IDE1006` are set to
    `none` in `.editorconfig` — **scoped by file glob to the ten files that genuinely carry those
    identifiers**, deliberately not applied globally. Adding a new file with such identifiers requires
-   adding its own scoped section; it will otherwise fail the build. See [`PARITY.md`](PARITY.md) for why
+   adding its own scoped section; it will otherwise fail the build. See `docs/PARITY.md` (planned) for why
    the spellings are preserved.
 
 ### 3.2 Repository-root `Directory.Packages.props` — central package management is mandatory
 
 Central package management is **mandatory here, not stylistic.** All package versions live in this one
-file as `PackageVersion` entries, and **every `PackageReference` in every `.csproj` is versionless**:
+file as `PackageVersion` entries, and **every `PackageReference` in every `.csproj` is versionless** —
+no `Version` attribute and no `VersionOverride` attribute anywhere in the twenty project files, which
+is checkable in one command:
+
+```bash
+# Expect no output. Any hit is a project supplying its own version and defeating central management.
+grep -rnE '<PackageReference[^>]*(Version|VersionOverride)=' --include='*.csproj' shared services
+```
 
 ```xml
-<!-- In any project file: NO Version attribute. -->
+<!-- In any project file: NO Version attribute, and NO VersionOverride attribute. -->
 <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
 ```
 
@@ -292,8 +367,60 @@ Two practical consequences:
   a local override.
 - Referencing a package that has **no** `PackageVersion` entry in `Directory.Packages.props` fails
   restore with **`NU1010`**. The fix is to add the entry centrally — never to add a version locally.
+- **`VersionOverride` is not the escape hatch it looks like, and it no longer restores at all.** It used
+  to slip past both guards above and build cleanly, so it announced nothing, while taking that one
+  package's version out of the central manifest: nothing pinned it in the one authoritative place, and
+  anyone auditing versions or third-party licences from `Directory.Packages.props` — including the root
+  `NOTICE` — would not see the package at all. One reference did carry it
+  (`Microsoft.OpenApi.YamlReader` in `shared/PowerFramework.Contracts.Tests`); it was removed, the
+  version moved into `Directory.Packages.props`, and the package added to `NOTICE`. The bypass is now
+  closed mechanically rather than by convention: `CentralPackageVersionOverrideEnabled` is `false`, so
+  an override fails restore with **`NU1013`** — *"The following PackageReference items cannot specify a
+  value for VersionOverride … configured to disable this functionality."* Verified by reinstating one
+  deliberately. If a project genuinely needs a version no other project can take, that is a
+  conversation about the pin, not a reason to bypass the manifest.
 
-### 3.3 Per-service `services/<service-name>/<service-name>.slnx` — and why exactly one is load-bearing
+`Directory.Packages.props` therefore contains **`PackageVersion` entries and nothing else** — no
+`PropertyGroup`, and in particular no restatement of either switch above. A switch declared in two files
+is two executable declarations of one setting, with the losing copy silently inert; both live in
+`Directory.Build.props`, which is the only place changing one has any effect.
+
+### 3.3 Configuration propagation across the solution boundary
+
+Because each service solution lists only its two own projects (§3.4), the shared projects it consumes are
+reached purely by `ProjectReference`. MSBuild's default behaviour when building through a solution is to
+**unset** the parent configuration for any referenced project it cannot find in the solution
+configuration table, so that project falls back to its own default.
+
+Measured on SDK 10.0.302 **before this was addressed**: `dotnet build -c Release` in a service directory
+built the two listed projects into `bin/Release` while every shared project it references landed in
+`bin/Debug` — and those Debug assemblies were then copied into the application's Release output. The
+command reported a clean Release build throughout, so nothing surfaced the mismatch.
+
+That is a real defect, not a quirk: it makes the meaning of `-c Release` depend on solution membership,
+so the same command yields a different artifact depending on which solution resolved it.
+
+Two things fix it, both at the repository root:
+
+- **`ShouldUnsetParentConfigurationAndPlatform` is `false`**, so the building project's configuration is
+  passed through to a referenced project the solution does not list. Re-measured after the change: every
+  shared project lands in `bin/Release`, with zero warnings. Solution *members* are unaffected, because
+  the solution configuration still maps them explicitly — so the root solution of §6 behaves as before.
+- **An assertion target, `PowerFrameworkAssertProjectReferenceConfiguration`**, runs after project
+  references are resolved and **fails the build with `PFW0001`** if any referenced output was not
+  produced by the configuration being built. Verified both ways: silent across the whole tree with
+  propagation on, and failing with the offending assembly paths named when propagation is forced off.
+
+Neither of the two obvious "corrections" is right, and both are called out at the point of temptation in
+the service solution files. Do **not** add the shared projects to a service solution — C-A forbids it and
+it is now unnecessary. Do **not** override `ShouldUnsetParentConfigurationAndPlatform` back to `true`;
+`PFW0001` exists so that doing so fails loudly instead of silently.
+
+This is a different matter from Finding 2 in §2, which is about a bare `dotnet test` choosing Debug. That
+finding still stands: this property never *chooses* a configuration, it only stops MSBuild from
+discarding the one the caller already chose.
+
+### 3.4 Per-service `services/<service-name>/<service-name>.slnx` — and why exactly one is load-bearing
 
 Each service directory carries exactly one solution file, listing exactly that service's application and
 test projects:
@@ -335,8 +462,14 @@ replacement for them. A single collapsed solution would be a failure mode, not a
 | Requirement | Version | Needed for |
 | --- | --- | --- |
 | .NET SDK | **10.0.302** | Everything. Pinned by repository-root `global.json` |
-| Node.js | v22.23.2 verified sufficient on the authoring host | The end-to-end tests of §9 **only** |
-| npm | 11.18.0 verified sufficient on the authoring host | The end-to-end tests of §9 **only** |
+| Node.js | **`>=22.12.0`**, declared as the floor in `tests/e2e/package.json`; v22.23.2 verified on the authoring host | The end-to-end tests of §9 **only** |
+| npm | **`npm@11.18.0`**, pinned as `packageManager` in `tests/e2e/package.json`; verified sufficient on the authoring host | The end-to-end tests of §9 **only** |
+
+The Node floor is **>= 22.12.0** rather than the looser `>= 22.0.0` an earlier manifest declared, and
+rather than `@playwright/test`'s own `>= 20`. It is set to the version the environment's setup
+documents as its requirement, so that a host satisfying `engines` also satisfies the environment: a
+manifest whose floor is *below* the environment's would let `npm ci` succeed on a host the environment
+considers unsupported, which is a check that passes without checking anything.
 | Docker + Compose v2 | — | The Compose path of §8 **only** — and see §1.3: that path is unexercised |
 
 The SDK pin, in full:
@@ -381,7 +514,9 @@ build produced by the preceding step.
 ### 5.2 The four services, concretely
 
 Service directory names, project names and ports are identical to those in
-[`ARCHITECTURE.md`](ARCHITECTURE.md) and root `README.md`.
+[`ARCHITECTURE.md`](ARCHITECTURE.md). **The root `README.md` does not yet list them** — appending a
+.NET section to it is planned and not yet done, so it cannot currently be used to cross-check this
+table.
 
 | Service directory | Application project | Test project | Port |
 | --- | --- | --- | --- |
@@ -433,7 +568,7 @@ services/<service-name>/<project>.Tests/TestResults/<run-guid>/coverage.cobertur
 
 `coverage.cobertura.xml` is the exact artifact the 80%-per-service gate of §10 reads. Its emission by
 `coverlet.collector` was confirmed empirically (§1.2). For what the coverage number is expected to cover
-and which values are masked for determinism, see [`PARITY.md`](PARITY.md).
+and which values are masked for determinism, see `docs/PARITY.md` (planned).
 
 ---
 
@@ -468,14 +603,18 @@ sibling test projects, the four service applications and their four test project
 From the repository root:
 
 ```bash
-dotnet restore
-dotnet build -c Release
-dotnet test
+dotnet restore && dotnet build -c Release && dotnet test
 ```
 
+> **Chained with `&&`, deliberately.** Run as three separate lines, a failed Release build is followed by
+> a test run that succeeds against the *previous* Debug output — so the shell's last exit status is `0`
+> and a broken build reads as a passing one. Reproduced deliberately to confirm it: unchained, the pair
+> exits `0`; chained, it exits non-zero. Chaining makes the first failure the outcome, and the same
+> applies to every multi-step snippet in this document, which is why they are all chained or guarded.
+>
 > **This is a developer convenience. It does not supersede the per-service solutions.**
 >
-> The four per-service solutions of §3.3 are what make independent per-service build and test work, and
+> The four per-service solutions of §3.4 are what make independent per-service build and test work, and
 > they are what CI exercises (C-A, C-I). The root solution exists so that a developer can open or build
 > the whole tree in one step; it is never the path by which a service's independence is demonstrated. If
 > the root build and a per-service build ever disagree, the per-service build is authoritative.
@@ -538,18 +677,53 @@ the remediation posture.
 One hand-authored Compose manifest brings all four services up together (C-J). From the repository root:
 
 ```bash
+set -euo pipefail
+# The environment file is kept OUTSIDE the working tree -- see the warning below for why.
+mkdir -p "$HOME/.config/powerframework" && chmod 700 "$HOME/.config/powerframework"
+cp orchestration/.env.example "$HOME/.config/powerframework/pfw.env"
+chmod 600 "$HOME/.config/powerframework/pfw.env"
+# Populate SECURITY_JWT_SIGNING_KEY in that file before bringing the stack up:
+#   openssl rand -base64 32
 cd orchestration
-cp .env.example .env
-# Populate the signing-key variable in .env before bringing the stack up.
-docker compose --env-file .env up --build -d
+docker compose --env-file "$HOME/.config/powerframework/pfw.env" up --build -d
 ```
 
-The environment file is `orchestration/.env.example`, used as a template. It declares the JWT signing key
-by the variable name **`SECURITY_JWT_SIGNING_KEY`** and nothing else as a signing secret, because Security
-is the sole token issuer — the other three services hold verification material only. **No value for it
-appears in this document, in `.env.example`, in any `appsettings.json` or in any container definition.**
-Generate one locally and keep it out of version control; `.env` files are excluded from images by §7.3.
-See [`SECRETS.md`](SECRETS.md) for the token topology.
+The template is `orchestration/.env.example`. It declares the JWT signing key by the variable name
+**`SECURITY_JWT_SIGNING_KEY`** and nothing else as a signing secret, because Security is the sole token
+issuer — the other three services hold verification material only. **No value for it appears in this
+document, in `.env.example`, in any `appsettings.json` or in any container definition.** Generate one
+locally. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling rule.
+
+> ### ⚠️ Why the filled-in environment file is written outside the working tree
+>
+> **The root ignore rules do not exclude an environment file, and this refactor does not change them**
+> (the plan records that no root `.gitignore` change is required). One nested ignore file *is* added,
+> `tests/e2e/.gitignore`, and it covers that directory's generated output — `node_modules/`, the report
+> and trace directories, and `.env` files beneath it — but it has no effect on `orchestration/`. A key
+> written to `orchestration/.env` is therefore an untracked file inside the working tree that
+> `git add -A` would stage and a careless commit would publish. Being untracked is not a control;
+> it is one command away from being tracked.
+>
+> The attached environment's own instruction is the in-tree form — `cp .env.example .env` followed by
+> `docker compose --env-file .env up` — and it remains supported, **with one precondition: add an ignore
+> rule covering `orchestration/.env` before writing any key into it.** The command above avoids the
+> question entirely by keeping the file on a path version control does not reach, which is why it is the
+> documented default here.
+>
+> **If you do use the in-tree form, guard the copy and fail fast.** `set -euo pipefail` is what
+> stops the last line running regardless: without it a failed `cd` or a failed `cp` still falls
+> through to `docker compose`, which then reads whatever `.env` happens to be in whatever
+> directory you are actually standing in. And an unguarded `cp` overwrites a populated `.env`
+> with the template silently, destroying the key and leaving a stack that starts and then rejects
+> every token — a failure whose cause is nowhere near its symptom. Use
+> `[ -f .env ] || cp .env.example .env` so the first bring-up copies the template and every later
+> one leaves your file alone.
+>
+> Two things this is *not* a substitute for. `.env` files are excluded from every image layer by the
+> repository-root `.dockerignore` (§7.3) — that control is about images, not about version control. And
+> file permissions on a developer's machine are not secret management; the deployment path for real key
+> material is the orchestration secret layer, injected as environment configuration and never written
+> into the repository at all.
 
 ### 8.1 The readiness model
 
@@ -582,10 +756,62 @@ Cross-service workflow verification lives in `tests/e2e/` and uses `@playwright/
 install-and-run path:
 
 ```bash
+set -euo pipefail
 cd tests/e2e
-npm ci
-npx playwright test
+npm ci && npm test
 ```
+
+**What exists in `tests/e2e/` today, and what it can and cannot verify.** The bootstrap is present —
+`package.json`, `package-lock.json`, `playwright.config.ts`, `tsconfig.json`, `.gitignore` and
+`fixtures/` — so `npm ci` succeeds and the runner loads its configuration, and `specs/` carries the
+cross-service workflow suites. What those specs cannot do yet is exercise a running stack: the four
+services do not build and run at all (§1, §13), so every assertion that needs a live endpoint skips
+with an explicit reason and only the static gates below actually prove anything.
+
+> **`npm test`, not `npx playwright test`, and the difference is a supply-chain one.** The `test` script
+> in `tests/e2e/package.json` runs `playwright test` through the local binary that `npm ci` just
+> installed from the lockfile, at the pinned `1.62.1`. `npx` prefers a local binary too, but when there
+> is not one — which is precisely the state left behind by an `npm ci` that failed — it will go and
+> **acquire** a package to run instead. Chained with `&&` and under `set -euo pipefail`, a failed
+> install ends the snippet; `npm test` then guarantees that what runs is the locked local executable
+> and nothing else. The pinned floor the snippet expects is `node >=22.12.0` and `npm@11.18.0`, both
+> declared in `tests/e2e/package.json` (§4).
+
+### 9.1 Type-checking is a separate command, because `--list` does not do it
+
+```bash
+cd tests/e2e && npm run typecheck        # tsc --noEmit
+```
+
+**`npx playwright test --list` does not type-check.** Playwright transpiles each file with esbuild,
+which strips type annotations without checking them, so a genuine type error transpiles cleanly and
+`--list` reports success. This was verified directly rather than assumed: a file containing
+`const n: number = "a string"` left `--list` reporting `Total: 0 tests in 0 files` with no complaint,
+while `npm run typecheck` failed it with
+`error TS2322: Type 'string' is not assignable to type 'number'`.
+
+`tsconfig.json` configures that gate with `strict` plus `noUnusedLocals`, `noUnusedParameters`,
+`noImplicitOverride`, `noFallthroughCasesInSwitch` and `exactOptionalPropertyTypes`, and `noEmit` so
+nothing is ever written beside the sources. The last of those is not incidental: the endpoint fixtures
+distinguish an **absent** optional property from one **present and `undefined`** — the
+client-certificate resolver returns `undefined` when the mutual-TLS paths are unset — and
+`exactOptionalPropertyTypes` is what keeps that distinction checked. The suite currently passes the
+gate with zero errors.
+
+### 9.2 Generated output is ignored, by a nested rule
+
+`tests/e2e/.gitignore` excludes `node_modules/`, `test-results/`, `playwright-report/`, `blob-report/`,
+`playwright/.cache/`, `*.tsbuildinfo` and `.env` files. It is nested rather than added to the root
+ignore file because the plan records that no root `.gitignore` change is required, and because these
+rules should apply to this directory alone.
+
+**The trace and report rules are a secrets control, not housekeeping.** A Playwright trace records
+request and response bodies, so a run against a configured environment can capture a bearer token
+verbatim. The reporter is also configured to generate nothing (§9, `reporter: [['list']]`), which makes
+this defence in depth: not generating the artifact is the control, and the ignore rule is the safety
+net. What is deliberately **not** ignored is `package.json`, `package-lock.json`,
+`playwright.config.ts`, `tsconfig.json`, `fixtures/` and `specs/` — the lock file especially, since
+`npm ci` requires it and fails without it.
 
 > ### ⚠️ `tests/` is not a greenfield directory
 >
@@ -612,8 +838,11 @@ its unverified status (§8.2).
 
 ## 10. Continuous integration
 
-`.github/workflows/ci.yml` runs a **four-service matrix** — `gateway-service`, `dataservices-service`,
-`persistence-service`, `security-service` — and for each matrix leg:
+`.github/workflows/ci.yml` **is planned and has not been authored yet** — there is no `.github/`
+directory in the tree today, so this section is the specification the workflow will be written against
+rather than a description of a pipeline that runs. As specified, it runs a **four-service matrix** —
+`gateway-service`, `dataservices-service`, `persistence-service`, `security-service` — and for each
+matrix leg:
 
 1. `dotnet restore`
 2. `dotnet build -c Release`
@@ -634,7 +863,7 @@ project and no container definition in this phase, so there is nothing for CI to
 [`DEFERRED.md`](DEFERRED.md).
 
 For coverage mechanics in context — what the number is expected to cover, and which non-deterministic
-values are masked so that a coverage run is repeatable — see [`PARITY.md`](PARITY.md).
+values are masked so that a coverage run is repeatable — see `docs/PARITY.md` (planned).
 
 ---
 
@@ -719,6 +948,7 @@ internal feeds** in this refactor.
 | `Grpc.AspNetCore` | 2.83.0 | gRPC server, client and protocol-definition code generation. Pulls `Grpc.Tools` 2.83.0 and `Google.Protobuf` 3.31.1 transitively, so **neither needs an explicit reference** | Contracts, DataServices, Persistence, and the Gateway/DataServices client sides |
 | `Microsoft.AspNetCore.OpenApi` | 10.0.10 | OpenAPI document generation for the REST surfaces | Gateway, Security, DataServices REST projection |
 | `Microsoft.OpenApi` | **2.11.0 — mandatory pin** | OpenAPI object model (§11.1) | all REST services |
+| `Microsoft.OpenApi.YamlReader` | 2.11.0 | YAML reader for the object model above, which ships a JSON reader only. Version locked to the `Microsoft.OpenApi` release it pairs with, so it cannot drag the mandatory pin off 2.11.0 | `shared/PowerFramework.Contracts.Tests` only — the two contract definitions it loads are YAML |
 | `Microsoft.AspNetCore.Authentication.JwtBearer` | 10.0.10 | Inbound JWT validation on `/v1/ping` and every internal edge | all four services |
 | `Microsoft.IdentityModel.JsonWebTokens` | 8.22.0 | Token **minting** — **Security only**, because Security is the sole issuer | Security |
 | `Microsoft.EntityFrameworkCore.Sqlite` | 10.0.10 | EF Core provider for the only evidenced storage engine | Persistence |
@@ -737,6 +967,8 @@ internal feeds** in this refactor.
 | Registry | Package | Version | Purpose |
 | --- | --- | --- | --- |
 | npmjs.org | `@playwright/test` | 1.62.1 | Cross-service workflow verification (§9) |
+| npmjs.org | `typescript` | 5.9.3 | The `npm run typecheck` gate — `tsc --noEmit`. **Deliberately the 5.x line, not `latest`**: 5.9.3 is the mature compiler, whereas the current `latest` is the 7.x native rewrite, which `@playwright/test` 1.62.1's own type definitions are not validated against |
+| npmjs.org | `@types/node` | 22.20.1 | Node globals for the type gate — the endpoint fixtures read `process.env`. **Deliberately the 22.x line to match the Node 22 runtime**; the 26.x line would type-check against APIs the runtime does not have |
 
 **Container images:**
 
@@ -753,6 +985,10 @@ files:
 - The Polly family resolves to **8.4.2**.
 - The identity-model graph **mixes 8.19.2** (pulled by the bearer handler) **with 8.22.0** (the direct
   minting reference) — verified compatible, with zero warnings.
+- `SharpYaml` resolves to **2.1.4** through `Microsoft.OpenApi.YamlReader`, and is the only package that
+  reader adds to the graph. The reader's third declared dependency, `System.Text.Json` 8.0.5, resolves
+  to the `Microsoft.NETCore.App` shared framework on `net10.0` rather than to a package, so it appears
+  in no lock file.
 
 **No version above was taken from a repository dependency manifest, because there is none.** The
 repository contains zero `*.csproj`, zero `packages.config`, zero `package.json` and no lock file of any
@@ -784,7 +1020,7 @@ requires (C-B).
 | The Aspire hosting package | The rejected orchestration alternative. Reasoning in [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | A managed SQL parser | SQL-Server-dialect-only, so it cannot serve the Oracle rewriter, and the acceptance criterion is byte-exact clause output. Implemented in-repo instead |
 | **Any third-party cryptography package** | `System.Security.Cryptography` in the BCL covers every operation the legacy surface performs |
-| **Any pinyin package** | The legacy lookup table exists only inside a closed binary, so bit-exact parity requires characterizing from the oracle rather than trusting a third-party table. See [`PARITY.md`](PARITY.md) |
+| **Any pinyin package** | The legacy lookup table exists only inside a closed binary, so bit-exact parity requires characterizing from the oracle rather than trusting a third-party table. See `docs/PARITY.md` (planned) |
 
 ### 11.5 One inclusion that needs justifying — and it is a correctness argument
 
@@ -852,12 +1088,17 @@ legacy document itself is not edited.
 
 **Claimed, because it was exercised:**
 
-- The per-service path of §5 — restore, release build, and coverage-collecting test — was run end to end on
-  .NET SDK 10.0.302 and produced `Build succeeded.` with `0 Warning(s)` and `0 Error(s)`,
-  `Passed!  - Failed:     0, Passed:     1`, and a `coverage.cobertura.xml` report.
+- **The command *shape* of §5 works** — restore, release build, and coverage-collecting test — run end to
+  end on .NET SDK 10.0.302, producing `Build succeeded.` with `0 Warning(s)` and `0 Error(s)`,
+  `Passed!  - Failed:     0, Passed:     1`, and a `coverage.cobertura.xml` report. **That run was against
+  a throwaway skeleton project, not against this repository's services** — the single passing test is the
+  giveaway — and it is quoted here as evidence that the command and the coverage collector work, not as a
+  result for these four services.
+- **In this repository today**, restore is audit-clean, and the shared libraries and the contracts project
+  build with `0 Warning(s)` and `0 Error(s)` and run **1,034 passing tests** with zero failures.
 - `dotnet new sln` emits `.slnx` (§2, Finding 1).
 - Bare `dotnet test` builds Debug after a Release build, and `-c Release` changes that (§2, Finding 2).
-- A second solution file in a service directory breaks the bare commands with `MSB1011` (§3.3).
+- A second solution file in a service directory breaks the bare commands with `MSB1011` (§3.4).
 - `dotnet new xunit3` does not exist in this SDK, `dotnet new xunit` scaffolds v2, and a hand-authored
   xunit.v3 project restores, builds, runs and emits Cobertura (§11.2).
 - With both mandatory pins applied, restore is audit-clean and the build reports zero warnings and zero
@@ -865,6 +1106,9 @@ legacy document itself is not edited.
 
 **Not claimed, because it was not exercised:**
 
+- **That the four services build.** They do not, yet: each application project reports `CS5001` for a
+  missing entry point, because `Program.cs` is not yet authored for any of them. Nothing in this document
+  should be read as evidence that a service compiles, starts, or serves a request.
 - **The container bring-up.** Docker was unavailable in the environment where this migration was planned,
   so the Compose path of §8 and its ordered health probes were never run. Correctness there rests on
   container-definition and Compose manifest review plus CI (§1.3, §8.2).
@@ -881,6 +1125,67 @@ legacy document itself is not edited.
   throughout.
 
 If you are adding a project, the four things to get right are: put it in the right per-service `.slnx` and
-add no second solution file (§3.3); reference packages **versionlessly** (§3.2); if it is a test project,
-hand-author it with `<OutputType>Exe</OutputType>` (§11.2); and expect the warnings-as-errors gate to be
-enforced, including analyzer diagnostics (§3.1).
+add no second solution file (§3.4); reference packages **versionlessly — no `Version`, and no
+`VersionOverride` either** (§3.2); if it is a test project, hand-author it with
+`<OutputType>Exe</OutputType>` (§11.2); and expect the warnings-as-errors gate to be enforced, including
+analyzer diagnostics (§3.1). If the project takes a package no other project takes, add its
+`PackageVersion` to `Directory.Packages.props` and add the package to the root `NOTICE` in the same
+change — the licence inventory there is derived from that manifest, so a pin that is missing from one is
+missing from both.
+
+---
+
+## 14. Markdown lint policy for this documentation set
+
+The seven Markdown documents this refactor authors are linted, and the policy is **declared in the
+files themselves** rather than described here and hoped for.
+
+**The policy.** `MD013` (line length) is set to **120 characters**, and is **disabled for tables and
+for fenced code blocks**. Every other `markdownlint` rule is left at its default and is satisfied.
+
+**Why 120 and not the 80-character default.** Prose in these documents *is* wrapped, and is held to the
+120 limit — the exemptions are not a licence to stop wrapping. The two exempt constructs cannot be
+wrapped without damage:
+
+- **Tables.** An evidence row typically carries a legacy locator, the finding it proves and the action
+  it implies. Markdown has no continuation syntax for a table cell, so wrapping means splitting the
+  locator away from what it proves — turning one checkable row into two half-rows. The evidence tables
+  in [`SECRETS.md`](SECRETS.md) and the RPC inventories in [`CONTRACTS.md`](CONTRACTS.md) are the cases
+  that decided this.
+- **Fenced code blocks.** A wrapped command is a command that does not run. Every code block here is
+  meant to be copied and executed verbatim, which is the standard this document holds itself to
+  throughout.
+
+**How it is declared, and why that way.** Each document carries a `markdownlint-configure-file`
+directive in an HTML comment at its head. Three properties made that the right mechanism rather than a
+repository-root configuration file:
+
+1. **It is enforceable, not advisory.** Any `markdownlint` invocation on these files honours it, with no
+   flags to remember and no external file to locate. Verified with no configuration file present
+   anywhere: the same document that reports `MD013` violations against the 80-character default reports
+   **zero** issues once the directive is in place.
+2. **It leaves the read-only legacy documents alone.** The five pre-existing Chinese documents in
+   `docs/` are the behavioural oracle and are never edited (C-C). A root configuration would have
+   silently changed how they are linted too; a per-file directive cannot.
+3. **It adds no repository-root artifact.** The plan enumerates the root files this refactor creates,
+   and a lint configuration is not among them.
+
+**Verifying.** From the repository root:
+
+```bash
+npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
+                      docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
+```
+
+Expected output is `Summary: 0 issues in 0 files`.
+
+**Name the files; do not glob.** `npx markdownlint-cli2 "docs/*.md"` also sweeps the five read-only
+legacy documents, which carry **55 pre-existing violations** of their own — 21 `MD040` unlabelled code
+fences, 16 `MD010` hard tabs, and the remainder across `MD032`, `MD031`, `MD041`, `MD029` and `MD009`.
+Those are **out of scope and are deliberately not fixed**, because the files are read-only. A glob
+therefore reports a failure that must not be acted on, which is worse than no check at all. One of the
+legacy files is not even UTF-8 — `docs/Blink交互.md` is GBK-encoded — so tooling that assumes UTF-8
+across `docs/` will fault on it.
+
+`docs/PARITY.md` is planned and not yet present; when it is authored it should carry the same directive
+and join the command above.

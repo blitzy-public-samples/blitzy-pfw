@@ -96,19 +96,29 @@
       Listing them would mean paths climbing out of this directory and a second inventory to keep in
       step with the root solution's, for no gain.
 
-      One consequence of that choice is measured, expected, and NOT a defect to correct from here.
-      When a solution build reaches a project that is not itself a member, MSBuild does not map the
-      solution configuration onto it, so the referenced project builds in its own default
-      configuration. Observed on SDK 10.0.302: `dotnet build -c Release` in this directory builds
-      both members below into bin/Release as intended, while the two shared libraries land in
-      bin/Debug. The identical behaviour was confirmed against the other three per service solutions,
-      and the repository root solution, which does list every project, puts all of them in
-      bin/Release. Adding the shared projects here to chase that would buy a uniform configuration
-      at the price of the brittle out of directory paths described above, and would leave this one
-      service shaped differently from its three siblings, so it is deliberately not done. Anything
-      needing release built shared binaries, the container publish above all, targets a project or
-      the root solution rather than relying on a per service solution to propagate a configuration
-      it is not responsible for.
+      One consequence of that choice was measured, and it is FIXED at the repository root rather than
+      by changing this file. When a solution build reaches a project that is not itself a member,
+      MSBuild's default is to unset the parent configuration so the referenced project builds in its
+      own default. Observed on SDK 10.0.302 before the fix: `dotnet build -c Release` in this
+      directory built both members below into bin/Release as intended, while the two shared libraries
+      landed in bin/Debug, and the identical behaviour was confirmed against the other three per
+      service solutions. That is a real defect and not a quirk to live with, because it makes a
+      Release artifact consume assemblies compiled with Debug settings while the command still reports
+      a clean Release build.
+
+      The repository root Directory.Build.props now sets ShouldUnsetParentConfigurationAndPlatform to
+      false, so this solution's configuration is passed through to the projects it references but does
+      not list, and it carries an assertion target that fails the build (PFW0001) if any referenced
+      output ever arrives from a different configuration again. Re-measured after the change: both
+      shared projects land in bin/Release, with zero warnings. The repository root solution, which
+      does list every project, is unaffected because the solution configuration still maps its members
+      explicitly.
+
+      Adding the shared projects to this file remains the wrong fix and must not be done: it would buy
+      nothing that is not already guaranteed, at the price of the brittle out of directory paths
+      described above, and it would leave this one service shaped differently from its three siblings.
+      Overriding ShouldUnsetParentConfigurationAndPlatform back to true is equally wrong, and the
+      assertion target exists precisely so that doing so fails loudly instead of silently.
 
     PowerFramework.Security.Tests
       The tests, load bearing rather than a courtesy. This project is the only producer of

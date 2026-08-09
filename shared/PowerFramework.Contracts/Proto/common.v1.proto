@@ -87,11 +87,21 @@ package common.v1;
 // off a service namespace either; they belong to no single service.
 option csharp_namespace = "PowerFramework.Contracts.Common.V1";
 
-// NOTHING IS IMPORTED, DELIBERATELY (C-K).
-// This file is the bottom of the contract graph: the siblings import it, it imports nobody. No
-// google/protobuf/*.proto well-known type is imported either, because none is used - and that is
-// a decision, not an omission. google.protobuf.Timestamp in particular is REJECTED, for the
-// reason recorded under TEMPORAL TYPES in the scalar rule below.
+import "google/protobuf/descriptor.proto";
+
+// EXACTLY ONE IMPORT, AND IT IS NOT A WELL-KNOWN TYPE (C-K).
+// This file is still the bottom of the CONTRACT graph: the siblings import it and it imports no
+// sibling. The single import is descriptor.proto, which is the protobuf compiler's own descriptor
+// language and is required - there is no alternative mechanism - to declare the CUSTOM METHOD
+// OPTIONS in Section 11. Extending google.protobuf.MethodOptions is the one form of `extend` proto3
+// permits, and it is what makes the rich-error binding MACHINE-READABLE rather than prose.
+//
+// No well-known VALUE type is imported, because none is used, and that is a decision rather than an
+// omission. google.protobuf.Timestamp in particular is REJECTED, for the reason recorded under
+// TEMPORAL TYPES in the scalar rule below. google/rpc/status.proto is likewise NOT imported, and
+// Section 11 records why: it is absent from this repository's pinned dependency closure
+// (AAP 0.5 lists no Google.Api.CommonProtos / Grpc.StatusProto package), so importing it would
+// silently add a dependency the plan does not authorise.
 //
 // A note for the sibling authors, because it is the one thing an import can get wrong here: the
 // .csproj sets ProtoRoot="Proto", so an import of this file is the BARE FILE NAME
@@ -268,6 +278,29 @@ option csharp_namespace = "PowerFramework.Contracts.Common.V1";
 //  persistence.v1.proto, not here, because only C-05's SetWhereClause and SetOrderByClause consume
 //  it (C-A). The rulings are opposite because the inputs are opposite: RetCode has a natural zero
 //  and must not gain a sentinel; SQL_MS_* has no natural zero and cannot do without one.
+//
+//  WHICH SIDE DwBuffer AND ItemStatus FALL ON, stated here because this is where a reader looks for
+//  the rule and getting it wrong is a cross-boundary defect rather than a style slip: BOTH fall on
+//  the RetCode side, and NEITHER carries a sentinel. Each has a natural zero - an unassigned
+//  PowerBuilder `dwbuffer` is Primary!, and NotModified! is the first literal of `dwItemStatus` and
+//  the status of a row nothing has happened to - so zero is spent on the legacy default rather than
+//  on a synthetic name for "absent". The two enums in Section 6 carry that reasoning in full,
+//  together with the mechanism that replaces a sentinel where wire absence must genuinely be
+//  distinguishable: proto3 EXPLICIT PRESENCE on the individual field, never an extra domain value.
+//
+//  THE TALLY, SO THE RULING IS NOT MISREAD AS A ONE-OFF. Three of the four enums reachable from
+//  this boundary sit on the RetCode side and carry no sentinel: RetCode itself, DwBuffer and
+//  ItemStatus. Exactly one - SQL_MS_* - sits on the other side. The test is always the same single
+//  question, DOES THE LEGACY SET ALREADY CONTAIN ZERO, and it is answered from the oracle rather
+//  than from whether the type's name sounds like it has a "none" state.
+//
+//  THE DECISION PROCEDURE FOR ANY FUTURE ENUM IN THIS FOLDER, in full, so it need not be rederived.
+//  Ask whether the LEGACY domain contains a value that means "none". If it does, use it. If it does
+//  not and the legacy numbering starts at 1, a sentinel is unavoidable - that is the SQL_MS_* case.
+//  If it does not and there is no legacy numbering at all, put the legacy DEFAULT on zero - which is
+//  the DwBuffer and ItemStatus case. Where a FIELD, rather than a domain, needs to say "not
+//  supplied", express it with proto3 explicit field presence (`optional`) - see
+//  ColumnValue.item_status.
 //
 //  NEGATIVE VALUES COST 10 BYTES, AND ARE STILL NOT RENUMBERED (C-K)
 //  Negative enum values are legal in protobuf but are encoded as a plain, non-zigzag varint over
@@ -603,10 +636,13 @@ message SqliteResultCode {
 // Independently, both siblings need it on their own account - C-03's Retrieve returns a server
 // stream of buffer-shaped chunks and C-06's update path addresses rows by buffer.
 //
-// EXACTLY THREE MEMBERS, AND THERE IS NO FOURTH. Verified by counting every literal across the
-// eight in-scope legacy libraries rather than assumed from the type's name: Primary! appears 36
-// times, Filter! 18 and Delete! 2. The count is deliberately recorded because a fourth member
-// invented later would be a new capability, not a port.
+// EXACTLY THREE MEMBERS, AND THERE IS NO FOURTH - NOT A SENTINEL EITHER. Verified by counting
+// every literal across the eight in-scope legacy libraries rather than assumed from the type's
+// name: Primary! appears 36 times, Filter! 18 and Delete! 2. The count is deliberately recorded
+// because a fourth member invented later would be a new capability, not a port - and that includes
+// a fourth member added for protocol convenience. AAP §0.4.5.2 maps `dwbuffer` to exactly
+// `{ Primary, Delete, Filter }`, so three is the mandated target domain and not merely the
+// observed one.
 //
 // A NOTE ON DW_BUFFER_DELETE. The prefix is not decoration here: a bare value named DELETE would
 // generate an identifier that collides with the Win32 DELETE macro, which is a real hazard in
@@ -617,15 +653,36 @@ message SqliteResultCode {
 // relative to the source [n_cst_thread_task_sqlupdate.sru:L235-L238]. That inversion is a property
 // of the buffer, so it is a property of anything reconstructed from a payload tagged with it.
 enum DwBuffer {
-  // proto3 requires a zero first enumerator, and unlike RetCode this domain has NO natural zero -
-  // Primary!, Delete! and Filter! are three peers with no "none" among them. A sentinel is
-  // therefore REQUIRED here, and it is the same ruling as SQL_MS_* in persistence.v1.proto, not
-  // the RetCode one. UNSPECIFIED is a protocol-level "field absent", never a legacy buffer: a
-  // request carrying it is malformed, and a response must never populate it.
-  DW_BUFFER_UNSPECIFIED = 0;
-  DW_BUFFER_PRIMARY     = 1;  // Primary!  - the live rows (36 legacy uses)
-  DW_BUFFER_DELETE      = 2;  // Delete!   - rows deleted but not yet flushed (2 legacy uses)
-  DW_BUFFER_FILTER      = 3;  // Filter!   - filtered-out rows, ROW ORDER INVERTED (18 legacy uses)
+  // NO SYNTHETIC SENTINEL, AND THE ZERO MEMBER IS Primary! (C-K).
+  // This domain DOES have a natural zero. PowerBuilder initialises an unassigned `dwbuffer` to
+  // Primary!, so in the legacy "no buffer was supplied" and "the default buffer" are ONE state
+  // rather than two - which is why the legacy can synthesize an error with Primary! and a row of 0
+  // and mean "not attributable to any buffer or row" [n_cst_thread_task_sqlupdate.sru:L190].
+  // Primary! therefore occupies zero on its own account and proto3's first-enumerator rule is
+  // already satisfied, exactly as OK = 0 satisfies it for RetCode.
+  //
+  // WHY A SENTINEL WOULD BE A DEFECT RATHER THAN A CONVENIENCE. Inserting an UNSPECIFIED = 0 shifts
+  // all three real members up by one, and AAP 0.4.5.3 forbids that outright: the values themselves
+  // appear in serialized payloads, log records and characterization recordings, so a renumber
+  // silently invalidates every stored comparison and every numeric bridge that casts between this
+  // enum and a legacy buffer ordinal. Nothing fails to compile and everything reads one state too
+  // high at runtime, which is the worst available failure shape.
+  //
+  // HOW ABSENCE IS EXPRESSED INSTEAD. Where a field genuinely needs to say "no buffer was supplied"
+  // - RetrieveChunk.buffer in dataservices.v1.proto, whose single-buffer convenience value is
+  // meaningless in a mixed chunk - that FIELD is declared proto3 `optional`, which gives real
+  // presence tracking (HasBuffer / ClearBuffer on the generated C# type) without disturbing the
+  // value domain at all. Presence is a property of a field, never a member of a value set.
+  //
+  // THE MIRROR IMAGE, STATED ADJACENTLY SO THE TWO RULINGS CANNOT BE TRANSPOSED. SQL_MS_* in
+  // persistence.v1.proto MUST carry a synthetic SQL_MS_UNSPECIFIED = 0, because its legacy values
+  // are 1, 2 and 3 and it occupies no zero at all. One rule - never renumber a legacy value -
+  // producing opposite outcomes, decided purely by whether the legacy set already holds zero.
+  // DwBuffer and ItemStatus follow the RetCode ruling; SQL_MS_* is the exception, and it is the
+  // only one in the folder.
+  DW_BUFFER_PRIMARY = 0;  // Primary! - the live rows; also the state of an unassigned dwbuffer (36 legacy uses)
+  DW_BUFFER_DELETE  = 1;  // Delete!  - rows deleted but not yet flushed (2 legacy uses)
+  DW_BUFFER_FILTER  = 2;  // Filter!  - filtered-out rows, ROW ORDER INVERTED (18 legacy uses)
 }
 
 // ItemStatus - the PowerBuilder `dwItemStatus` domain, in full.
@@ -654,16 +711,25 @@ enum DwBuffer {
 // pairs an ItemStatus with a column identifier must therefore preserve that convention: a column
 // identifier of 0 denotes the row's own status, not column zero's.
 enum ItemStatus {
-  // Sentinel for the same reason as DwBuffer: proto3 needs a zero first enumerator and this domain
-  // has no natural zero. NotModified! is NOT reused as zero, because "the row is unmodified" and
-  // "no status was supplied" are different statements and conflating them would lose the second.
-  ITEM_STATUS_UNSPECIFIED   = 0;
-  ITEM_STATUS_NOT_MODIFIED  = 1;  // NotModified!  - existing row, unchanged (1 legacy use)
-  ITEM_STATUS_DATA_MODIFIED = 2;  // DataModified! - existing row, edited (11 legacy uses)
+  // NO SYNTHETIC SENTINEL, AND THE ZERO MEMBER IS NotModified! - the same ruling as DwBuffer above,
+  // for the same reason and with the same AAP 0.4.5.3 authority (C-K). NotModified! is the state a
+  // freshly retrieved row is in and the state an unassigned `dwItemStatus` reads as, so it occupies
+  // zero naturally and proto3's first-enumerator rule is already satisfied.
+  //
+  // "THE ROW IS UNMODIFIED" VERSUS "NO STATUS WAS SUPPLIED" - a real distinction, kept, but moved
+  // off the value domain and onto field presence. The two statements are genuinely different and
+  // conflating them would lose the second, which is why an earlier reading reached for a sentinel.
+  // The correct mechanism is proto3 `optional` on the field that needs it: ColumnValue.item_status
+  // is declared optional precisely because a status is not meaningful on every column in every
+  // direction, and its absence is then expressed by presence tracking rather than by a fourth-plus
+  // enum member that shifts DataModified!, New! and NewModified! up by one and breaks every
+  // recorded numeric comparison.
+  ITEM_STATUS_NOT_MODIFIED  = 0;  // NotModified!  - existing row, unchanged (1 legacy use)
+  ITEM_STATUS_DATA_MODIFIED = 1;  // DataModified! - existing row, edited (11 legacy uses)
   // New! - inserted, not yet edited. NEVER named literally in scope, but a legal runtime status,
   // so it is carried to keep the domain complete. See the four-versus-three note above.
-  ITEM_STATUS_NEW           = 3;
-  ITEM_STATUS_NEW_MODIFIED  = 4;  // NewModified!  - inserted and edited (6 legacy uses)
+  ITEM_STATUS_NEW           = 2;
+  ITEM_STATUS_NEW_MODIFIED  = 3;  // NewModified!  - inserted and edited (6 legacy uses)
 }
 
 
@@ -801,16 +867,23 @@ message AnyValue {
 // [n_cst_thread_task_sqlupdate.sru:L160] and GetItemStatus(row, <realColumnIndex>, buffer) for one
 // column, two lines away at [:L162]. The per-column status is what SELECTS WHICH STATEMENT KIND IS
 // GENERATED, so a carrier that could not express it would force the update path to guess. It is
-// optional in effect - leave it ITEM_STATUS_UNSPECIFIED when only the value matters, as in a plain
-// query result - because a status is not meaningful on every column in every direction.
+// optional in the protobuf sense rather than merely "in effect" - omit the field entirely when only
+// the value matters, as in a plain query result - because a status is not meaningful on every column
+// in every direction.
 message ColumnValue {
   string column_name = 1;
   // ONE-BASED column ordinal. 0 is reserved by the legacy convention for "the row itself".
   int32 column_id = 2;
   AnyValue value = 3;
-  // This COLUMN's own status, not the row's. ITEM_STATUS_UNSPECIFIED means "not supplied", which is
-  // the normal case outside the update path; the row's status lives on the containing row message.
-  ItemStatus item_status = 4;
+  // This COLUMN's own status, not the row's; the row's status lives on the containing row message.
+  //
+  // DECLARED proto3 `optional`, WHICH IS HOW ABSENCE IS EXPRESSED HERE (C-K). ItemStatus carries no
+  // "unspecified" member - see the ruling on that enum - so the ability to say "no status was
+  // supplied" lives on this field instead, as real presence tracking. The generated C# gains
+  // HasItemStatus and ClearItemStatus, and an omitted field is unambiguously distinct from an
+  // explicit ITEM_STATUS_NOT_MODIFIED, which is exactly the distinction a sentinel would have been
+  // reaching for. Absent is the NORMAL case outside the update path.
+  optional ItemStatus item_status = 4;
 }
 
 
@@ -895,6 +968,12 @@ message DbError {
 
   // The buffer the offending row sits in. DwBuffer is defined in this file precisely so that this
   // field can exist here - see the DwBuffer placement note. [dberrordata.srs:L7]
+  //
+  // NOT `optional`, DELIBERATELY. The legacy structure always carries a buffer, and its cleared
+  // state is Primary! rather than an absence - the framework's own synthesized error passes
+  // Primary! with row 0 to mean "not attributable to one row" [n_cst_thread_task_sqlupdate.sru:L190].
+  // Because DW_BUFFER_PRIMARY is the zero member, a default-constructed DbError observes exactly the
+  // legacy cleared state with no presence machinery and no bridging code on either side.
   DwBuffer buffer = 4;
 
   // The offending row number, ONE-BASED like every legacy row ordinal. 0 means "no particular row",
@@ -944,6 +1023,11 @@ message ConflictRow {
 
   // The row's status as the SERVER sees it now, read the legacy way with column index 0 (the
   // row-status convention documented on ItemStatus).
+  //
+  // A ROW ALWAYS HAS A STATUS, so unlike ColumnValue.item_status this field needs no explicit
+  // presence: the server has read one by the time it builds a conflict row, and the zero value
+  // NotModified! is a real status rather than a stand-in for "unknown". A server that has not read
+  // the status has no business emitting this message.
   ItemStatus item_status = 3;
 
   // The CURRENT server-side values of the marked columns - the state a retry would be rebased onto.
@@ -976,4 +1060,197 @@ message ConflictDetail {
   int64 rows_expected = 3;
   int64 rows_matched = 4;
 }
+// ==============================================================================================
+//  SECTION 10 - IdentityColumnData : THE IDENTITY ROUND TRIP
+//  --------------------------------------------------------------------------------------------
+//  WHY THIS MESSAGE IS IN THE COMMON FILE (the C-A admission test, C-K).
+//  It was originally declared in persistence.v1.proto, and it moved here for one reason: BOTH
+//  siblings now need it. C-06's UpdateResponse produces it, and C-03's UpdateResponse RELAYS IT
+//  UNCHANGED to Gateway - without which a caller that inserted rows could never learn the
+//  auto-increment values the database assigned them, and no inserted DataWindow row could be
+//  reconciled with its generated identity. Two consumers, so one definition, here. Duplicating it in
+//  both service files would let the two copies drift, and this payload is exactly the kind whose
+//  drift is invisible: both copies would carry two int64 arrays and only the ORDER would differ.
+//
+//  THE COLUMN IS DISCOVERED AT RUN TIME, NOT TAKEN FROM THE DESCRIPTOR
+//  [n_cst_thread_task_sqlupdate.sru:L217-L225]. The legacy lowercases the update table name, appends
+//  a dot, and prefix-matches that against each column's database name - WITH A FIRST-WINS FALLBACK
+//  that accepts the first identity column found if no name matched [:L221]. So the value reported
+//  here can differ from the identity column named in the request's table contract, and a consumer
+//  must READ it rather than assume it.
+//
+//  COLLECTION IS CONDITIONAL AT THREE LEVELS, so an absent identity block means "none collected" and
+//  is NOT an error: rows must have been inserted at all [:L215], an identity column must have been
+//  found [:L226], and at least one of the two arrays must be non-empty [:L242-L244].
+//
+//  ROWS ARE SELECTED BY THE ROW-STATUS CONVENTION, WHICH USES COLUMN INDEX ZERO:
+//      GetItemStatus(nIndex, 0, Primary!) = NewModified!     [:L230]
+//      GetItemStatus(nIndex, 0, Filter!)  = NewModified!     [:L238]
+//  COLUMN 0 IS NOT A REAL COLUMN - it means THE ROW ITSELF. The same object reads a genuine
+//  per-column status a few lines away with a real column index [:L162], so both readings coexist and
+//  the whole distinction is carried by whether the index is zero. Section 6 records the same
+//  convention on ItemStatus, and Section 7 on ColumnValue.column_id.
+//
+//  ============ WHY THE TWO ARRAYS ARE SEPARATE, AND MUST NEVER BE MERGED OR REORDERED =========
+//  The legacy delivers them through one callback with TWO `ref` ARRAY OUT-PARAMETERS -
+//  OnIdentityColumnDataRetrieved(nIdentityColumn, ref nPrimaryIdValues, ref nFilterIdValues)
+//  [:L243, declared at n_cst_threading_task_sqlupdate.sru:L19] - because they come from DIFFERENT
+//  BUFFERS COLLECTED IN DIFFERENT DIRECTIONS:
+//
+//      Primary buffer, FORWARD:    for nIndex = 1 to nCount              [:L228-L233]
+//      Filter buffer,  BACKWARD:   for nIndex = nCount to 1 step -1      [:L237]
+//
+//  The justification sits in the source immediately above the backward loop, at [:L235]: THE FILTER
+//  BUFFER'S ROW ORDER IS INVERTED relative to the data source that produced the changeset.
+//
+//  THIS IS THE MOST DANGEROUS SINGLE LINE IN THE REFACTOR FOR ONE-BASED-TO-ZERO-BASED TRANSLATION.
+//  IT LOOKS LIKE A BUG. IT IS NOT A BUG. "Correcting" the direction produces wrong identity values
+//  that a row-count assertion WOULD NOT CATCH - the same number of values comes back, paired with the
+//  wrong rows, which is exactly the class of regression a characterization suite flags and a unit test
+//  does not. Merging the arrays would destroy the only evidence a consumer has of which order each
+//  was collected in, so the contract keeps them separate and separately ordered (C-B).
+//
+//  THE RELAY IS ORDER-PRESERVING BY CONTRACT. Any service that forwards this message - Gateway
+//  forwards C-03's, C-03 forwards C-06's - MUST forward both arrays element for element in the order
+//  received. Re-sorting either array, deduplicating it, or concatenating the two is a contract
+//  violation, not an optimisation.
+// ==============================================================================================
 
+message IdentityColumnData {
+  // The discovered identity column's ONE-BASED ordinal. Legacy `long id`; int64 per the scalar rule's
+  // widening. A real column is 1 or greater, and 0 never appears here - the legacy only fires this
+  // callback when the ordinal is positive [n_cst_thread_task_sqlupdate.sru:L226].
+  int64 identity_column_id = 1;
+
+  // Values from the PRIMARY buffer, in FORWARD collection order [:L228-L233]. Read with
+  // GetItemNumber, hence a numeric array.
+  repeated int64 primary_values = 2;
+
+  // Values from the FILTER buffer, in BACKWARD collection order [:L237-L241]. The order is the
+  // legacy's and must be transmitted, and relayed, as collected - see the block above.
+  repeated int64 filter_values = 3;
+}
+
+
+// ==============================================================================================
+//  SECTION 11 - THE RICH-ERROR MECHANISM : ONE WAY TO CARRY ConflictDetail AND DbError
+//  --------------------------------------------------------------------------------------------
+//  THE PROBLEM THIS SECTION SOLVES. A conflict is reported as the gRPC status ABORTED, and a status
+//  carries only a code and a message - neither can hold ConflictDetail. Without a declared mechanism
+//  each service would invent its own encoding, a client would have to know which service it was
+//  talking to in order to decode it, and the retry-or-surface policy the concurrency contract
+//  requires would be undecidable. So exactly ONE mechanism is defined here, and it is
+//  machine-readable rather than prose: a versioned BINARY TRAILER carrying RichErrorTrailer, bound to
+//  each RPC by a custom method option that names the key, the status code and the payload type.
+//
+//  WHY NOT google.rpc.Status WITH Any, WHICH WOULD OTHERWISE BE THE IDIOMATIC CHOICE (C-K).
+//  It requires google/rpc/status.proto, which ships in Google.Api.CommonProtos / Grpc.StatusProto -
+//  and AAP 0.5's dependency inventory lists NEITHER, nor is either present in this repository's
+//  restored package closure. Importing it would therefore add an unpinned dependency the plan does
+//  not authorise, and AAP 0.5.3 is explicit that packages outside the inventory are scope creep. The
+//  binary-trailer form needs nothing but descriptor.proto, which the protobuf toolchain already
+//  provides, and it is the alternative the review of this contract named as acceptable. The trade is
+//  recorded rather than hidden: a caller using a generic google.rpc.Status-aware client library will
+//  not decode this automatically and must read the trailer, which is why the key is declared on the
+//  method rather than left to documentation.
+//
+//  HOW A CLIENT USES IT, CONCRETELY, WITH NO HAND-WRITTEN CONTRACT CODE ANYWHERE.
+//    1. Catch RpcException. Read ex.Status.StatusCode - ABORTED for a concurrency conflict.
+//    2. Read the trailer named by RICH_ERROR_TRAILER_KEY below:
+//           byte[] raw = ex.Trailers.GetValueBytes("powerframework-rich-error-v1-bin");
+//       The `-bin` suffix is not decoration: gRPC treats a metadata key ending in `-bin` as BINARY
+//       and base64-transports it, and a key without that suffix may only carry ASCII - so a
+//       protobuf payload under a non-`-bin` key would be corrupted in transit.
+//    3. Parse it: RichErrorTrailer.Parser.ParseFrom(raw), then switch on the oneof.
+//    4. To discover which RPCs can produce it without reading comments, read the option off the
+//       generated descriptor:
+//           var binding = MethodDescriptor.GetOptions()
+//               .GetExtension(CommonV1Extensions.RichError);
+//       Every accessor named here is GENERATED from this file by Grpc.Tools. No .cs file in this
+//       project supplies any of it, which is what keeps the contracts project free of behaviour (C-A).
+//
+//  VERSIONING. The key carries `v1`, matching the `common.v1` package. A future RichErrorTrailer with
+//  incompatible semantics gets a NEW key ending `-v2-bin` and both may be sent on one response during
+//  a migration, so a v1 client keeps working unchanged. Never redefine the meaning of an existing key.
+// ==============================================================================================
+
+// The rich-error payload. Exactly one of the alternatives is set: a oneof rather than two optional
+// fields because a single failure is one KIND of failure, and a response carrying both would leave a
+// client to guess which one to act on.
+message RichErrorTrailer {
+  oneof detail {
+    // Optimistic-concurrency mismatch. Accompanies gRPC ABORTED, which Gateway projects as HTTP 409.
+    // Section 9 records why both current and original values travel per row.
+    ConflictDetail conflict = 1;
+
+    // A database-level failure the legacy would have surfaced through its error event. Accompanies
+    // whichever status the operation's own contract specifies - it is NOT tied to ABORTED. Section 8
+    // records that sqlsyntax is redacted, and that rule applies here too: this trailer crosses the
+    // network, so an unredacted statement in it would be the exact exposure Section 8 exists to
+    // prevent.
+    DbError db_error = 2;
+  }
+
+  // The reconciled outcome code, so a client that only wants to classify the failure need not decode
+  // the oneof at all. Numerically a RetCode.Value.
+  int64 ret_code = 3;
+}
+
+// The binding an RPC declares to say "this method can fail with a rich error". Message-typed rather
+// than three separate options so a reader sees the whole contract in one place, and so a future
+// alternative payload type is expressible without adding another option.
+message RichErrorBinding {
+  // The metadata key the trailer is sent under. MUST be RICH_ERROR_TRAILER_KEY's value exactly; it is
+  // repeated on each method so the descriptor is self-describing to a client that never reads this
+  // file.
+  string trailer_key = 1;
+
+  // The gRPC status code the trailer accompanies, as the canonical numeric code - 10 is ABORTED,
+  // which is the canonical mapping to HTTP 409 and the only value the concurrency contract uses. A
+  // plain integer rather than an enum because the canonical code space is gRPC's, not this file's,
+  // and mirroring it here would create a second copy free to drift.
+  int32 grpc_status_code = 2;
+
+  // The fully-qualified payload type carried under trailer_key. Always "common.v1.RichErrorTrailer"
+  // today; named explicitly so a v2 payload can be introduced without changing the option's shape.
+  string payload_type = 3;
+}
+
+// Constants for the mechanism, in an enum so they are part of the descriptor rather than prose a
+// consumer has to copy. Section 2's scoping ruling applies: nested inside a wrapper message so the
+// bare member names cannot poison the package scope.
+message RichError {
+  enum Key {
+    // The one canonical trailer key. Its spelling is the contract: lowercase, hyphenated, prefixed
+    // with the product so it cannot collide with another library's trailer, versioned, and ending
+    // `-bin` so gRPC transports it as binary.
+    //
+    //     powerframework-rich-error-v1-bin
+    //
+    // An enum cannot hold a string, so the VALUE here is an ordinal and the spelling lives in this
+    // comment and in each method's RichErrorBinding.trailer_key - which is the field a client
+    // actually reads, and the reason the spelling is machine-readable despite this limitation.
+    RICH_ERROR_TRAILER_KEY_V1 = 0;
+  }
+}
+
+// The custom method options themselves. Extending google.protobuf.MethodOptions is the ONLY form of
+// `extend` proto3 permits, and it is why descriptor.proto is imported.
+//
+// FIELD NUMBERS. 50001 and 50002 sit inside 50000-99999, the range protobuf reserves for options
+// used INSIDE ONE ORGANISATION and never published to a global registry. That is exactly this case:
+// these options are read by this repository's four services and by nothing else. They are recorded
+// here so a later option is added at 50003 rather than colliding.
+extend google.protobuf.MethodOptions {
+  // Declares that the method can fail with a rich error, and how to retrieve it. Absent means the
+  // method has no rich-error contract - which is a real statement, not a default: a client may then
+  // rely on the status code and message alone.
+  RichErrorBinding rich_error = 50001;
+
+  // The legacy PowerScript identifier this RPC corresponds to, where the two differ. Protobuf
+  // identifiers cannot begin with an underscore, so an RPC cannot literally be named `_of_calcitem`;
+  // this option carries the original spelling so compatibility adapters and characterization
+  // recordings can key on the legacy name instead of the protobuf one. Absent means the RPC name and
+  // the legacy name agree, or that no single legacy member corresponds to the RPC.
+  string legacy_name = 50002;
+}

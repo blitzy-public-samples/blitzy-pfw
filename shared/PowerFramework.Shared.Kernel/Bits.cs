@@ -174,6 +174,18 @@
 //  choices, revise any the oracle contradicts, and leave the derived facts above untouched. None
 //  of the three below is presented as verified.
 //
+//  DP-7: "NOT PRESENTED AS VERIFIED" MEANS NOT GOLDEN-MASTER PARITY. Naming the standard, because
+//  the disclaimer above states the limitation without saying which claim it withholds. The tests
+//  pinning I-1, I-2 and I-3 are TARGET REGRESSION GUARDS: each stops a later edit to this file
+//  moving the choice silently, and none can detect a disagreement with pfw.dll, because no
+//  recording of pfw.dll's output exists in this repository to compare against. Promoting any of
+//  the three to parity evidence requires a paired recording under
+//  characterization/recordings/{legacy,dotnet}/<workflowId>/, captured against one unrecreated
+//  persistence-db volume state; until one exists none may be reported as verified legacy behaviour
+//  in docs/PARITY.md or any published summary, and IF A RECORDING CONTRADICTS ONE THE RECORDING
+//  WINS. The DERIVED facts above are unaffected: each is settled by a cited locator or by the
+//  operator the plan sanctions, and downgrading them here would understate real evidence.
+//
 //      I-1  GetBit numbers bits from ONE, so bit 1 is the least significant bit. The repository
 //           does NOT adjudicate this: getbit.srf is declaration only, no call site exercises it,
 //           and no comment anywhere documents the base. PowerBuilder is pervasively one based and

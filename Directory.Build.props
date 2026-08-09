@@ -9,9 +9,13 @@
 
     WHAT THIS FILE IS
     MSBuild imports this file automatically into every project beneath it by directory walk up, so
-    it is the one place the build contract is expressed. All sixteen projects inherit it: the six
-    shared libraries under shared/, their six sibling test projects, the four service applications
-    under services/, and the four service test projects. No project restates any setting from here.
+    it is the one place the build contract is expressed. Every project in PowerFramework.slnx
+    inherits it, and the roster adds up in place so a wrong count here cannot survive a reading: the
+    six shared libraries under shared/ (Kernel, Diagnostics, Eventful, Localization, Containers and
+    Contracts), their six sibling test projects, the four service applications under services/, and
+    the four service test projects - that is 6 + 6 + 4 + 4 = 20 projects, of which ten are test
+    projects, matching the twenty project entries in the root PowerFramework.slnx and the twenty
+    *.csproj files under shared/ and services/. No project restates any setting from here.
 
     EXACTLY ONE COPY MAY EXIST, AND IT LIVES HERE AT THE REPOSITORY ROOT
     A project under services/ therefore receives identical settings with zero duplication, which is
@@ -152,14 +156,32 @@
     obvious forward move all live in Directory.Packages.props next to the pins themselves. Do not
     restate a version here; there is deliberately no PackageVersion or PackageReference item in this
     file.
+
+    THIS IS THE ONLY PLACE EITHER SWITCH IS DECLARED. Directory.Packages.props carries package
+    versions and nothing else, and deliberately holds no PropertyGroup of its own: a switch restated
+    there would be a second executable declaration of one setting, so the two could disagree with the
+    losing copy silently inert. One declaration, at the root, inherited by all twenty projects.
+
+    THE SECOND SWITCH CLOSES THE HOLE THE FIRST ONE LEAVES OPEN, and it is not optional. Central
+    package management has two enforcement mechanisms and a gap between them: NU1008 rejects a bare
+    Version attribute on a PackageReference, and NU1010 rejects a PackageReference whose package has
+    no central entry, but a project supplying its own version through VersionOverride is neither of
+    those, so it restores cleanly and re establishes exactly the per project version authority this
+    design exists to remove. Setting CentralPackageVersionOverrideEnabled to false turns any such
+    override into a hard restore error (NU1013, "cannot be overridden ... central package version
+    overriding is disabled"), which is what makes the "no VersionOverride anywhere" rule in
+    Directory.Packages.props mechanically enforced rather than merely written down. Adding a package
+    therefore always means adding its version centrally, in the same change - which is the property
+    that keeps the two mandatory security pins genuinely single sourced.
   -->
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageVersionOverrideEnabled>false</CentralPackageVersionOverrideEnabled>
   </PropertyGroup>
 
   <!--
     ASSEMBLY METADATA
-    Stated once here so that all sixteen assemblies agree, and taken from the root LICENSE rather
+    Stated once here so that every assembly in the solution agrees, and taken from the root LICENSE rather
     than invented. The holder string and the 2013 - 2022 span are copied verbatim from LICENSE and
     cross checked against the license section of README.md, which reproduces the identical BSD
     2-Clause notice plus a four condition Chinese restatement. Do not substitute a different holder,
@@ -196,14 +218,60 @@
   </PropertyGroup>
 
   <!--
+    CONFIGURATION PROPAGATION ACROSS A SOLUTION BOUNDARY
+    This is the property that makes `dotnet build -c Release` mean Release for the WHOLE dependency
+    closure of a service, and not merely for the two projects its solution happens to list.
+
+    THE PROBLEM IT SOLVES, measured on SDK 10.0.302 rather than reasoned about. Each service
+    directory carries a .slnx listing exactly two projects, the application and its tests, because
+    constraint C-A forbids a service solution from enumerating the shared projects it consumes: those
+    arrive by ProjectReference, and listing them would create a second inventory and paths climbing
+    out of the service directory. When MSBuild builds through a solution it hands each project a
+    solution configuration table, and for a ProjectReference it cannot find in that table it UNSETS
+    the parent's Configuration and Platform, so the referenced project falls back to its own default.
+    The observable consequence was that `dotnet build -c Release` in a service directory put the two
+    listed projects in bin/Release while every shared project it references landed in bin/DEBUG, and
+    those Debug assemblies were then copied into the application's Release output. Reproduced
+    directly: a solution listing only PowerFramework.Shared.Localization.Tests built that project
+    into bin/Release and both PowerFramework.Shared.Localization and PowerFramework.Shared.Kernel
+    into bin/Debug.
+
+    That is not a cosmetic mismatch. It makes the meaning of the mandated per service command depend
+    on solution membership, so the same command produces a different artifact depending on which
+    solution resolved it, and a Release build silently ships assemblies compiled with Debug settings.
+
+    WHAT THIS PROPERTY DOES. Setting it to false tells the AssignProjectConfiguration task to pass
+    the building project's Configuration and Platform through to a referenced project that the
+    solution configuration does not cover, instead of clearing them. Verified with the same
+    reproduction above: every one of the three projects then lands in bin/Release, with zero
+    warnings. Projects that ARE solution members are unaffected, because the solution configuration
+    still maps them explicitly, so the repository root solution behaves exactly as before.
+
+    WHY NOT THE OBVIOUS ALTERNATIVES. Listing the shared projects in each service solution is barred
+    by C-A and would defeat the independence the per service solutions exist to demonstrate. Per
+    ProjectReference SetConfiguration metadata would work but would have to be repeated on all
+    twenty three references in the tree, so a reference added later would silently miss it. This
+    property is inherited by every project from one place, which is the same reason the package and
+    warning policies live here.
+
+    The assertion target at the end of this file is what stops the guarantee from being a claim: it
+    fails the build if any referenced output ever arrives from a different configuration again.
+  -->
+  <PropertyGroup>
+    <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
+  </PropertyGroup>
+
+
+  <!--
     DELIBERATELY NOT SET HERE, EACH FOR A STATED REASON
     Recorded so the omissions read as decisions rather than oversights, and so nobody "completes"
     this file by adding one of them.
 
       * OutputType. It is a per project concern and setting it globally would break the tree in
-        both directions: the four service projects are web applications, the twelve test projects
+        both directions: the four service projects are web applications, the ten test projects
         must each be an executable because that is how xunit.v3 runs, and the six shared libraries
-        must stay libraries.
+        must stay libraries. That is the same 4 + 10 + 6 = 20 inventory counted a different way,
+        splitting the ten test projects into the six under shared/ and the four under services/.
 
       * IsPackable, GeneratePackageOnBuild, PackageId, and every other NuGet packaging property.
         Nothing here publishes a package. The shipped artifacts are four container images, one per
@@ -216,7 +284,7 @@
       * NoWarn, WarningsNotAsErrors, and any project wide or repository wide analyzer suppression.
         The only suppressions this refactor needs are the naming ones for the preserved constant
         identifiers, and they belong in .editorconfig scoped to the files that carry them. A
-        suppression here would silently widen that scope to all sixteen projects.
+        suppression here would silently widen that scope to every project in the solution.
 
       * MSBuildTreatWarningsAsErrors, which would promote the MSBuild task warning channel described
         in the warning policy section above. It is not set for two reasons. Nothing in this refactor
@@ -234,15 +302,66 @@
       * Any Configuration default or configuration forcing. A bare test run builds Debug even
         immediately after a Release build; that nuance is documented in docs/BUILD.md and must not
         be papered over from here, because doing so would make the documented per service command
-        behave differently from the same command run anywhere else.
+        behave differently from the same command run anywhere else. Note the distinction from the
+        configuration propagation property set above, which is not a default and forces nothing: it
+        never chooses a configuration, it only stops MSBuild from DISCARDING the one the caller
+        already chose when it crosses into a project the solution does not list. Setting a
+        Configuration default here would change what a bare command builds; that property leaves it
+        untouched.
 
       * Any solution filter mechanism. .NET 10 emits the XML .slnx solution format and legacy .slnf
         filters are incompatible with it, failing with MSB4014 during restore, build and test.
         Build scoping is done by the per service .slnx files together with this property sheet.
 
-      * Any ItemGroup whatsoever, and in particular any Compile, Content, None, EmbeddedResource or
-        Remove item naming a legacy path. See the read only note in the header: the legacy tree is
-        the behavioural oracle, never a build input.
+      * Any project level ItemGroup whatsoever, and in particular any Compile, Content, None,
+        EmbeddedResource or Remove item naming a legacy path. See the read only note in the header:
+        the legacy tree is the behavioural oracle, never a build input. The single ItemGroup in this
+        file is scoped inside the assertion target below, is evaluated only while that target runs,
+        contributes nothing to any compilation, and names no path at all: it filters a list MSBuild
+        itself produced.
   -->
+
+  <!--
+    BUILD ASSERTION : EVERY REFERENCED OUTPUT MUST COME FROM THE CONFIGURATION BEING BUILT
+    The companion to the configuration propagation property above. That property makes the guarantee
+    true; this target makes it CHECKED, so that a Release build can never again quietly consume a
+    Debug assembly.
+
+    HOW IT WORKS. After the SDK has resolved project references it publishes their output paths in
+    _ResolvedProjectReferencePaths. Every project in this repository uses the default output layout,
+    bin\$(Configuration)\$(TargetFramework), and a reference assembly lands under
+    obj\$(Configuration)\$(TargetFramework)\ref, so the configuration being built appears as a path
+    segment in either shape. The item filter below therefore selects any resolved reference whose path
+    does not carry the current configuration as a segment, and a non empty result is a hard error.
+    Separators are normalised to forward slashes first so the rule behaves identically on Linux, the
+    target operating system, and on Windows.
+
+    Verified both ways on SDK 10.0.302 rather than assumed: with propagation in place the target
+    selects nothing across every project in the tree, and with propagation switched off it selects the
+    shared project outputs and fails the build with the message below.
+
+    IT IS AN Error AND NOT A Warning, deliberately. MSBuildTreatWarningsAsErrors is not set, for the
+    reasons recorded above, so a warning here would be advisory only and could be merged past CI
+    unread. This is a correctness invariant about the artifact, so it stops the build.
+
+    The condition on the target keeps it inert for a project with no project reference, which is every
+    shared library at the bottom of the graph, so it costs nothing there.
+  -->
+  <Target Name="PowerFrameworkAssertProjectReferenceConfiguration"
+          AfterTargets="ResolveProjectReferences"
+          Condition="'@(_ResolvedProjectReferencePaths)' != ''">
+
+    <ItemGroup>
+      <PowerFrameworkForeignConfigurationReference
+          Include="@(_ResolvedProjectReferencePaths)"
+          Condition="!$([System.String]::Copy('%(FullPath)').Replace('\', '/').Contains('/$(Configuration)/'))" />
+    </ItemGroup>
+
+    <Error Condition="'@(PowerFrameworkForeignConfigurationReference)' != ''"
+           Code="PFW0001"
+           File="$(MSBuildThisFileFullPath)"
+           Text="Configuration mismatch across a project reference. $(MSBuildProjectName) is building '$(Configuration)', but the following referenced output(s) were not produced by a '$(Configuration)' build: @(PowerFrameworkForeignConfigurationReference->'%(FullPath)', ', '). A referenced project therefore built in a different configuration from the one requested, which means a '$(Configuration)' artifact would consume assemblies compiled with other settings. Do NOT resolve this by adding the referenced project to a per service solution: that is barred by constraint C-A. The supported mechanism is the ShouldUnsetParentConfigurationAndPlatform property set in this file; check that it has not been overridden on the command line or in a project." />
+
+  </Target>
 
 </Project>

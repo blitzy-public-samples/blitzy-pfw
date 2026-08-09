@@ -189,11 +189,19 @@ neither extended nor abridged.
 ===============================================================================
 
 The .NET 10 tree added alongside the legacy sources takes the dependencies listed
-below. The list is derived from Directory.Packages.props at the root of this
-repository, which is the single authoritative version manifest for the whole .NET
-tree: every project there declares versionless package references and inherits
-its version from that one file. Nothing appears below that is not pinned there,
-and nothing pinned there is omitted below.
+below. The direct list is derived from Directory.Packages.props at the root of
+this repository, which is the single authoritative version manifest for the whole
+.NET tree: every project there declares versionless package references and
+inherits its version from that one file. The correspondence is exact and checkable
+in both directions -- every PackageVersion entry in that manifest appears in the
+direct list below at the same version, and every entry in the direct list below is
+pinned there. The transitive list that follows it is taken from the resolved
+dependency graph instead, because by definition those packages have no entry in
+the manifest.
+
+Where a package is referenced by only one project, that is noted against it, so
+that the inventory doubles as a record of which parts of the tree carry which
+terms rather than implying every project takes every dependency.
 
 The licence identifier beside each package is the expression declared in that
 package's own metadata for the exact pinned version, read from the resolved
@@ -206,6 +214,7 @@ Registry: nuget.org
   Grpc.AspNetCore                                2.83.0    Apache-2.0
   Microsoft.AspNetCore.OpenApi                   10.0.10   MIT
   Microsoft.OpenApi                              2.11.0    MIT
+  Microsoft.OpenApi.YamlReader                   2.11.0    MIT   (1)
   Microsoft.AspNetCore.Authentication.JwtBearer  10.0.10   MIT
   Microsoft.IdentityModel.JsonWebTokens          8.22.0    MIT
   Microsoft.EntityFrameworkCore.Sqlite           10.0.10   MIT
@@ -219,6 +228,11 @@ Registry: nuget.org
   Microsoft.NET.Test.Sdk                         18.8.1    MIT
   coverlet.collector                             10.0.1    MIT
 
+  (1) Referenced by shared/PowerFramework.Contracts.Tests only. Microsoft.OpenApi
+      2.11.0 ships a JSON reader but no YAML reader, and both contract definitions
+      under shared/PowerFramework.Contracts/OpenApi are YAML, so that one test
+      project takes this reader in order to load and assert on them.
+
 The following arrive transitively rather than as direct references. They are
 recorded so that a reader of a lock file does not mistake any of them for an
 undeclared direct dependency, and so that their terms are on the record too.
@@ -229,6 +243,14 @@ undeclared direct dependency, and so that their terms are on the record too.
   Polly.Core                                     8.4.2     BSD-3-Clause
   Polly.Extensions                               8.4.2     BSD-3-Clause
   Polly.RateLimiting                             8.4.2     BSD-3-Clause
+  SharpYaml                                      2.1.4     MIT
+
+SharpYaml arrives through Microsoft.OpenApi.YamlReader and is the only package
+that reader adds to the resolved graph. The reader also declares dependencies on
+Microsoft.OpenApi 2.11.0, which is already a direct reference above, and on
+System.Text.Json 8.0.5, which resolves to the Microsoft.NETCore.App shared
+framework on net10.0 rather than to a package and therefore appears in no lock
+file and adds no third-party terms.
 
 Registry: npmjs.org -- used only by the cross-service end-to-end suite under
 tests/e2e

@@ -1,0 +1,1175 @@
+// ==================================================================================================
+//  GatewayContractTests - CONTRACT C-09 (REST INGRESS) AND THE INGRESS HALF OF C-10 (READINESS)
+//  ------------------------------------------------------------------------------------------------
+//  SUBJECT     OpenApi/gateway.v1.yaml
+//  AUTHORITY   docs/CONTRACTS.md 12.1 (C-09), 12.2 (C-10), 13 (the four reserved routes)
+//              Agent Action Plan 0.4.3 C-09/C-10 and 0.4.4
+//
+//  WHAT THIS FILE ESTABLISHES
+//  ------------------------------------------------------------------------------------------------
+//  Gateway is the composition root and the system's ONLY ingress. The legacy has none - it is a
+//  library with no listener, no route table and no authentication of any kind, because there was
+//  nothing to authenticate against. So every property asserted here is a property of a NEW boundary,
+//  and there is no legacy behaviour to compare it against: the specification in docs/CONTRACTS.md IS
+//  the oracle for this contract, and these tests hold the document to it.
+//
+//  That is a different kind of test from the parity suites elsewhere in this repository, and the
+//  distinction is worth being explicit about. A parity test asserts that ported code reproduces
+//  measured legacy behaviour. These assert that a PUBLISHED CONTRACT matches its SPECIFICATION -
+//  agreement between two authored artifacts, one of which is prose. Neither is a Golden-Master
+//  comparison against the PowerBuilder oracle, and nothing here should be read as one.
+//
+//  THE FOUR THINGS WORTH THE MOST SCRUTINY
+//  ------------------------------------------------------------------------------------------------
+//  1. `Aborted` -> 409. The optimistic-concurrency conflict must reach a REST caller as a status it
+//     can act on, carrying the conflict detail. A silent overwrite anywhere in the system is a
+//     correctness failure, not a robustness one.
+//  2. /health anonymous, /v1/ping authenticated. These two together are the whole of the
+//     authenticated-boundary requirement made testable.
+//  3. The four reserved routes return 501 with a MACHINE-READABLE body, and NOTHING exists behind
+//     them. This is the C-D compliance boundary and it is asserted from both directions - that the
+//     routes are declared, and that no deferred service is implemented.
+//  4. Every `x-proto-*` extension resolves to a REAL generated message. gateway.v1.yaml delegates its
+//     payload shapes to the protocol definitions rather than transcribing them, and states in its own
+//     comments that this test project checks the delegation. This file is that claim being kept.
+// ==================================================================================================
+
+using System.Text.Json.Nodes;
+using Google.Protobuf.Reflection;
+using Microsoft.OpenApi;
+using PowerFramework.Contracts.Common.V1;
+using PowerFramework.Contracts.DataServices.V1;
+using PowerFramework.Contracts.Persistence.V1;
+using Xunit;
+
+namespace PowerFramework.Contracts.Tests;
+
+public sealed class GatewayContractTests
+{
+    private const string GatewayResourceName = "PowerFramework.Contracts.OpenApi.gateway.v1.yaml";
+
+    private static OpenApiDocument Document =>
+        OpenApiContractDocumentTests.ParseEmbeddedDocument(GatewayResourceName);
+
+    /// <summary>Every (route, method, operation) triple in the document, flattened.</summary>
+    private static IEnumerable<(string Route, HttpMethod Method, OpenApiOperation Operation)> Operations(
+        OpenApiDocument document)
+    {
+        foreach ((string route, IOpenApiPathItem pathItem) in document.Paths)
+        {
+            foreach ((HttpMethod method, OpenApiOperation operation) in pathItem.Operations!)
+            {
+                yield return (route, method, operation);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads a string-valued specification extension. Returns null when absent.
+    /// </summary>
+    /// <remarks>
+    /// Microsoft.OpenApi 2.x models an unrecognised extension as a <c>JsonNodeExtension</c> wrapping a
+    /// <c>JsonNode</c>, so the value is reached through the node rather than off a typed property.
+    /// </remarks>
+    private static string? Extension(OpenApiOperation operation, string name)
+    {
+        if (operation.Extensions is null
+            || !operation.Extensions.TryGetValue(name, out IOpenApiExtension? extension))
+        {
+            return null;
+        }
+
+        return extension is JsonNodeExtension node ? node.Node?.GetValue<string>() : null;
+    }
+
+    /// <summary>
+    /// Resolves a fully-qualified protobuf message name - for example
+    /// <c>dataservices.v1.UpdateRequest</c> - against the generated file descriptors.
+    /// </summary>
+    /// <remarks>
+    /// Resolution goes through the DESCRIPTORS rather than through <c>Type.GetType</c> on the
+    /// generated C# names, deliberately. The descriptor is the contract; the C# type is one projection
+    /// of it, and its name is subject to the generator's own conventions - <c>csharp_namespace</c>,
+    /// message nesting rendered through a <c>Types</c> holder, and reserved-word mangling. Asserting
+    /// against the descriptor asserts against the thing the wire actually agrees on.
+    /// </remarks>
+    private static MessageDescriptor? ResolveProtoMessage(string fullName)
+    {
+        FileDescriptor[] files =
+        [
+            CommonV1Reflection.Descriptor,
+            DataservicesV1Reflection.Descriptor,
+            PersistenceV1Reflection.Descriptor,
+        ];
+
+        foreach (FileDescriptor file in files)
+        {
+            if (!fullName.StartsWith(file.Package + ".", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string relative = fullName[(file.Package.Length + 1)..];
+            MessageDescriptor? found = file.FindTypeByName<MessageDescriptor>(relative);
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    // ==============================================================================================
+    //  C-10 - /health IS ANONYMOUS, AND IT IS THE ONLY ANONYMOUS OPERATION
+    // ==============================================================================================
+
+    [Fact]
+    public void HealthIsTheOnlyAnonymousOperationInTheDocument()
+    {
+        OpenApiDocument document = Document;
+
+        // An anonymous operation overrides the document-level requirement with an EMPTY requirement
+        // object - `security: [- {}]`. An operation that simply inherits has no `security` member at
+        // all, which the reader models as null rather than as an empty list.
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] anonymous = Operations(document)
+            .Where(static entry =>
+                entry.Operation.Security is { Count: 1 }
+                && entry.Operation.Security[0].Count == 0)
+            .ToArray();
+
+        // EXACTLY ONE. The count matters as much as the identity: this is the assertion that stops a
+        // future operation being made anonymous without anyone noticing, which is the failure mode
+        // constraint C-G exists to prevent.
+        (string route, HttpMethod method, _) = Assert.Single(anonymous);
+        Assert.Equal("/health", route);
+        Assert.Equal(HttpMethod.Get, method);
+    }
+
+    [Fact]
+    public void HealthIsAnonymousBecauseAProbeHoldsNoTokenAndProbesDuringStartup()
+    {
+        OpenApiDocument document = Document;
+        OpenApiOperation health = document.Paths["/health"].Operations![HttpMethod.Get];
+
+        // The requirement is a real one and worth restating where it is asserted: requiring a token on
+        // a readiness probe would make readiness depend on the very service being probed AND on
+        // Security's token issuance already being live. During a cold start neither holds, so the
+        // dependency cannot resolve and the service never reports ready. Anonymity here is a
+        // correctness requirement, not a convenience.
+        Assert.NotNull(health.Security);
+        Assert.Empty(Assert.Single(health.Security));
+
+        Assert.True(health.Responses!.ContainsKey("200"));
+        Assert.True(health.Responses.ContainsKey("503"));
+
+        // AND IT MUST NOT DECLARE A 401. Declaring one would tell a consumer a token is sometimes
+        // required, which would be a contradiction of the anonymity this operation depends on.
+        Assert.False(
+            health.Responses.ContainsKey("401"),
+            "/health is anonymous, so a 401 in its response set would contradict its own contract.");
+    }
+
+    [Fact]
+    public void TheHealthAggregateNamesExactlyThreeUpstreamsIndividually()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema report = document.Components!.Schemas!["AggregateHealthReport"];
+
+        Assert.NotNull(report.Properties);
+        Assert.True(report.Properties.ContainsKey("upstreams"));
+
+        IOpenApiSchema upstreams = report.Properties["upstreams"];
+
+        // THREE, BOUNDED AT BOTH ENDS.
+        //
+        // C-10 requires that the aggregate NAME each upstream and its individual state rather than
+        // returning one opaque verdict, because an operator reading a failed aggregate needs to know
+        // WHICH upstream is responsible. Bounding the array at exactly three encodes the topology:
+        // Gateway depends on Persistence, DataServices and Security, and on nothing else. The 5103
+        // slot in the port band is a commented Phase-2 placeholder, not a fourth participant.
+        Assert.Equal(3, upstreams.MinItems);
+        Assert.Equal(3, upstreams.MaxItems);
+
+        Assert.NotNull(report.Required);
+        Assert.Contains("upstreams", report.Required);
+        Assert.Contains("status", report.Required);
+    }
+
+    [Fact]
+    public void TheAggregateDistinguishesNotReadyFromUnhealthy()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema status = document.Components!.Schemas!["AggregateHealthReport"].Properties!["status"];
+
+        string[] states = status.Enum!.Select(static node => node!.GetValue<string>()).ToArray();
+
+        // C-10 REQUIRES THE DISTINCTION EXPLICITLY.
+        //
+        // A service still completing startup validation is not the same as one whose dependency has
+        // failed, and collapsing the two would make the endpoint useless for the decision it exists to
+        // support. `Degraded` is reported with 200 so a probe that tears down on any non-2xx does not
+        // kill a service that is merely still starting; `Unhealthy` is reported with 503.
+        Assert.Equal(["Healthy", "Degraded", "Unhealthy"], states);
+    }
+
+    [Fact]
+    public void AnUpstreamCanBeReportedUnreachableSeparatelyFromUnhealthy()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema upstreamStatus =
+            document.Components!.Schemas!["UpstreamHealth"].Properties!["status"];
+
+        string[] states = upstreamStatus.Enum!.Select(static node => node!.GetValue<string>()).ToArray();
+
+        // `Unreachable` IS A FOURTH STATE ON AN UPSTREAM, AND IT IS NOT REDUNDANT.
+        //
+        // "I asked and it said it was unhealthy" and "I could not reach it to ask" call for different
+        // operator action - a failed dependency inside a running service, versus a network or
+        // startup-ordering problem. This distinction exists only because of decomposition: an
+        // in-process call cannot be unreachable.
+        Assert.Equal(["Healthy", "Degraded", "Unhealthy", "Unreachable"], states);
+
+        IOpenApiSchema service = document.Components.Schemas["UpstreamHealth"].Properties!["service"];
+        Assert.Equal(
+            ["persistence", "dataservices", "security"],
+            service.Enum!.Select(static node => node!.GetValue<string>()).ToArray());
+    }
+
+    [Fact]
+    public void TheHealthSchemasCarryNoConfigurationValueOrCredentialField()
+    {
+        OpenApiDocument document = Document;
+
+        // A HEALTH ENDPOINT IS ANONYMOUS, SO EVERYTHING IT REPORTS IS PUBLIC.
+        //
+        // That makes it the one place where a "helpful" diagnostic field - the connection string it
+        // could not open, the key it could not load, the upstream URL it could not reach - would be
+        // disclosed to an unauthenticated caller. The schemas therefore carry a free-text `detail` and
+        // nothing structured that names a configuration value.
+        string[] forbidden =
+        [
+            "connectionString", "connection_string", "password", "secret", "key", "signingKey",
+            "token", "credential", "dbparm", "logpass", "url", "uri", "endpoint", "address",
+        ];
+
+        foreach (string schemaName in (string[])["AggregateHealthReport", "UpstreamHealth", "HealthCheckResult"])
+        {
+            IOpenApiSchema schema = document.Components!.Schemas![schemaName];
+            foreach (string property in schema.Properties!.Keys)
+            {
+                foreach (string marker in forbidden)
+                {
+                    Assert.False(
+                        property.Equals(marker, StringComparison.OrdinalIgnoreCase),
+                        $"{schemaName}.{property} would disclose '{marker}' to an unauthenticated "
+                            + "caller, because /health is anonymous.");
+                }
+            }
+        }
+    }
+
+    // ==============================================================================================
+    //  C-10 - /v1/ping IS THE AUTHENTICATION PROOF
+    // ==============================================================================================
+
+    [Fact]
+    public void PingRequiresATokenAndPublishesItsUnauthorizedResponse()
+    {
+        OpenApiDocument document = Document;
+        OpenApiOperation ping = document.Paths["/v1/ping"].Operations![HttpMethod.Get];
+
+        // NO SECURITY OVERRIDE means the document-level bearer requirement applies. That is the
+        // authenticated-by-default posture working as intended: this operation is protected because it
+        // said nothing, not because it remembered to.
+        Assert.Null(ping.Security);
+
+        Assert.True(ping.Responses!.ContainsKey("200"));
+
+        // THE 401 IS PART OF THE PUBLISHED CONTRACT, NOT AN IMPLEMENTATION DETAIL.
+        //
+        // The whole purpose of this operation is to make "every new boundary is authenticated"
+        // TESTABLE rather than merely asserted. A conformance test needs a documented negative outcome
+        // to assert against, and this is it.
+        Assert.True(
+            ping.Responses.ContainsKey("401"),
+            "/v1/ping must publish its 401: the unauthenticated outcome is the point of the endpoint.");
+    }
+
+    [Fact]
+    public void ThePingResponseAssertsAuthenticationWithoutEchoingTheToken()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema pingResponse = document.Components!.Schemas!["PingResponse"];
+
+        Assert.NotNull(pingResponse.Properties);
+
+        // `authenticated: true` AS A CONSTANT, so a conformance test has something explicit to assert
+        // on rather than inferring success from a status code alone.
+        Assert.Equal("gateway", pingResponse.Properties["service"].Const);
+
+        // MEASURED, NOT ASSUMED - AND THE CAPITAL LETTER IS NOT A TYPO.
+        //
+        // Microsoft.OpenApi 2.x exposes `const` as a STRING holding the value's rendered form, and the
+        // rendering is .NET's rather than YAML's or JSON's. The document carries the YAML boolean
+        // `true`; the reader parses it to a JSON boolean; `Const` renders that with
+        // `Boolean.ToString()`, which produces "True". A numeric const comes back as its digits and a
+        // string const comes back unchanged, so booleans are the only kind that changes shape in transit.
+        //
+        // This was measured against the real reader rather than inferred. The natural-looking assertion
+        // here is "true" and it FAILS, so the comment exists to stop a future reader "correcting" this
+        // line and rediscovering the same failure.
+        Assert.Equal("True", pingResponse.Properties["authenticated"].Const);
+
+        // AND NOTHING FROM THE TOKEN COMES BACK.
+        //
+        // A ping that echoed its own credential, or a claim of it, would turn an authentication probe
+        // into a token-disclosure endpoint - and it would do so in the exact response a caller is most
+        // likely to log verbatim.
+        foreach (string property in pingResponse.Properties.Keys)
+        {
+            foreach (string marker in (string[])["token", "jwt", "bearer", "claim", "authorization", "sub", "key"])
+            {
+                Assert.False(
+                    property.Contains(marker, StringComparison.OrdinalIgnoreCase),
+                    $"PingResponse.{property} would echo credential material back to the caller.");
+            }
+        }
+
+        Assert.False(pingResponse.AdditionalPropertiesAllowed);
+    }
+
+    [Fact]
+    public void EveryAuthenticatedOperationPublishesItsUnauthorizedResponse()
+    {
+        OpenApiDocument document = Document;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            bool anonymous = operation.Security is { Count: 1 } && operation.Security[0].Count == 0;
+            if (anonymous)
+            {
+                continue;
+            }
+
+            // A CONSUMER CANNOT HANDLE AN UNDOCUMENTED STATUS.
+            //
+            // A generated client typically throws on any status absent from the contract, so an
+            // operation that can return 401 but does not say so produces an unhandled exception rather
+            // than a re-authentication attempt. Every authenticated route can return 401, so every one
+            // declares it - including the four reserved routes, which are authenticated precisely so an
+            // unauthenticated caller cannot enumerate the deferred roster.
+            Assert.True(
+                operation.Responses!.ContainsKey("401"),
+                $"{method} {route} requires a token but does not declare a 401.");
+        }
+    }
+
+    // ==============================================================================================
+    //  C-09 - THE CAPABILITY PROJECTION
+    // ==============================================================================================
+
+    [Fact]
+    public void TheCapabilityReportNamesAllEightLegacyBitsWithTheirPreservedIdentifiers()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema name = document.Components!.Schemas!["Capability"].Properties!["name"];
+
+        string[] identifiers = name.Enum!.Select(static node => node!.GetValue<string>()).ToArray();
+
+        // THE SPELLINGS ARE THE LEGACY'S, VERBATIM.
+        //
+        // These are the SCREAMING_SNAKE identifiers from
+        // ws_objects/pfw.shared.pbl.src/enums.sru:L41-L49, kept in deliberate departure from .NET
+        // naming convention because they appear in serialized payloads, log records and
+        // characterization recordings - where a rename would silently invalidate every stored
+        // comparison rather than failing loudly.
+        Assert.Equal(
+            [
+                "INIT_FLAG_ENABLE_UI",
+                "INIT_FLAG_ENABLE_SCITER",
+                "INIT_FLAG_ENABLE_BLINK",
+                "INIT_FLAG_ENABLE_BLINKFAST",
+                "INIT_FLAG_ENABLE_ORCA",
+                "INIT_FLAG_ENABLE_SQLITE",
+                "INIT_FLAG_ENABLE_DPIAWARE",
+                "INIT_FLAG_ENABLE_WEBVIEW",
+            ],
+            identifiers);
+
+        IOpenApiSchema capabilities =
+            document.Components.Schemas["CapabilityReport"].Properties!["capabilities"];
+        Assert.Equal(8, capabilities.MinItems);
+        Assert.Equal(8, capabilities.MaxItems);
+    }
+
+    [Fact]
+    public void TheCapabilityMasksSpanTheFullUnsignedThirtyTwoBitDomain()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema report = document.Components!.Schemas!["CapabilityReport"];
+
+        foreach (string maskProperty in (string[])["effectiveMask", "allMask", "unrecognizedBits"])
+        {
+            IOpenApiSchema mask = report.Properties![maskProperty];
+
+            // THE DOMAIN IS UNSIGNED 32-BIT, NOT SIGNED, AND THAT IS A DELIBERATE DECISION.
+            //
+            // Gateway projects the configured value with an UNCHECKED conversion to `uint`, so every
+            // one of the 2^32 values is representable and a negative configured value WRAPS rather
+            // than being rejected. The legacy flag word is an unsigned long, so rejecting a wrapped
+            // value would make a configuration the legacy accepted fail to start - which would be a
+            // behavioural change introduced by the refactor, not a preserved behaviour.
+            //
+            // Publishing 0..4294967295 rather than 0..2147483647 is what tells a consumer that. A
+            // signed-32-bit bound here would have been the natural-looking choice and would have
+            // contradicted the implementation.
+            // NOTE ON THE COMPARISON TYPE: Microsoft.OpenApi 2.x models a JSON Schema numeric bound as a
+            // STRING rather than a decimal, deliberately - JSON Schema numbers have no precision limit
+            // and parsing them into a CLR numeric type would silently round a bound a document is
+            // entitled to state exactly. So the bounds are compared as the text the document carries.
+            Assert.Equal("0", mask.Minimum);
+            Assert.Equal("4294967295", mask.Maximum);
+        }
+    }
+
+    [Fact]
+    public void OnlyTheSqliteCapabilityMapsToAnInScopeServiceInThisPhase()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema destination =
+            document.Components!.Schemas!["Capability"].Properties!["phaseOneDestination"];
+
+        string[] destinations = destination.Enum!.Select(static node => node!.GetValue<string>()).ToArray();
+
+        // MAPPING THE EIGHT BITS ONTO THE SERVICE ROSTER IS INDEPENDENT CORROBORATION THAT THE PHASE-1
+        // SLICE IS DRAWN CORRECTLY.
+        //
+        // Of the eight, exactly one - SQLITE - has an in-scope consumer. UI and DPIAWARE are
+        // DesignSystem; SCITER, BLINK, BLINKFAST and WEBVIEW are ScriptBridge; ORCA is packaging
+        // tooling and not a service at all. Publishing the destination lets a consumer see that
+        // enabling a deferred bit has no runtime effect in this phase, rather than discovering it.
+        Assert.Equal(
+            ["Persistence", "DesignSystem", "ScriptBridge", "PackagingTooling"],
+            destinations);
+
+        // AND ONLY ONE OF THOSE FOUR IS AN IN-SCOPE PHASE-1 SERVICE.
+        string[] inScope = ["Gateway", "DataServices", "Persistence", "Security"];
+        Assert.Equal(["Persistence"], destinations.Where(inScope.Contains).ToArray());
+    }
+
+    // ==============================================================================================
+    //  C-09 - THE STATUS MAPPING, WHOSE CENTREPIECE IS Aborted -> 409
+    // ==============================================================================================
+
+    [Fact]
+    public void TheUpdateOperationIsTheOnlyOneCarryingAConflictAndItProjectsAborted()
+    {
+        OpenApiDocument document = Document;
+
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] conflicting = Operations(document)
+            .Where(static entry => entry.Operation.Responses!.ContainsKey("409"))
+            .ToArray();
+
+        // EXACTLY ONE OPERATION CAN CONFLICT, AND IT IS THE UPDATE.
+        //
+        // The optimistic-concurrency check belongs to the update half of the retrieval/validation/update
+        // triple and to nothing else. A 409 appearing on a read would mean the mapping had been applied
+        // by habit rather than from the semantics.
+        (string route, HttpMethod method, OpenApiOperation update) = Assert.Single(conflicting);
+        Assert.Equal("/v1/datawindow/update", route);
+        Assert.Equal(HttpMethod.Post, method);
+
+        Assert.Equal("dataservices.v1.DataWindowService/Update", Extension(update, "x-grpc-method"));
+    }
+
+    [Fact]
+    public void TheConflictResponseCarriesTheCurrentRowStateRatherThanABareStatus()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiResponse conflict = document.Components!.Responses!["Conflict"];
+
+        Assert.NotNull(conflict.Content);
+        Assert.True(conflict.Content.ContainsKey("application/problem+json"));
+
+        IOpenApiSchema specialised = document.Components.Schemas!["ConflictProblemDetails"];
+
+        // THE CONFLICT DETAIL IS WHAT MAKES THE 409 ACTIONABLE.
+        //
+        // The sole updatable DataWindow in the legacy estate carries `updatewhere=1` with all six
+        // columns marked, so the concurrency check spans ALL SIX columns' original values
+        // [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14]. A caller told only "409" cannot tell
+        // which column moved, and cannot construct a retry - it would re-send the same stale original
+        // values and receive the same 409 forever.
+        //
+        // So the response carries the CURRENT ROW STATE, forwarded unchanged from C-06 rather than
+        // reshaped, because a caller deciding between retrying and surfacing needs it exactly as the
+        // database reported it.
+        Assert.NotNull(specialised.AllOf);
+        Assert.NotEmpty(specialised.AllOf);
+
+        bool carriesConflict = specialised.AllOf
+            .Any(static part => part.Properties is not null && part.Properties.ContainsKey("conflict"));
+
+        Assert.True(
+            carriesConflict,
+            "ConflictProblemDetails must carry the conflict detail; a bare 409 cannot be retried "
+                + "against, because the caller has no way to learn the current row state.");
+    }
+
+    [Fact]
+    public void EveryProjectedOperationDeclaresTheFullStatusSurfaceItsMappingCanProduce()
+    {
+        OpenApiDocument document = Document;
+
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] projected = Operations(document)
+            .Where(static entry => Extension(entry.Operation, "x-grpc-method") is not null)
+            .ToArray();
+
+        Assert.NotEmpty(projected);
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in projected)
+        {
+            // EVERY PROJECTED OPERATION CAN FAIL IN TRANSIT, AND MUST SAY SO.
+            //
+            // 502 is the status that exists BECAUSE OF the decomposition: an in-process call cannot
+            // fail in transit and a network call can. Handling that is required BY the transition
+            // rather than being a robustness improvement layered on top - without it, the first
+            // transient network fault surfaces as a defect the legacy could not have had, which is a
+            // regression introduced by the refactor.
+            Assert.True(
+                operation.Responses!.ContainsKey("502"),
+                $"{method} {route} projects a gRPC call, so it can fail in transit and must declare 502.");
+
+            Assert.True(
+                operation.Responses.ContainsKey("500"),
+                $"{method} {route} must declare 500 for a projected gRPC Internal status.");
+
+            Assert.True(
+                operation.Responses.ContainsKey("403"),
+                $"{method} {route} must declare 403 for a projected gRPC PermissionDenied status: a "
+                    + "valid-but-insufficient credential is a different outcome from a missing one.");
+        }
+    }
+
+    [Fact]
+    public void TheInternalErrorResponseCommitsToRedactingTheStatementText()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiResponse internalError = document.Components!.Responses!["InternalError"];
+
+        // THIS IS A C-F OBLIGATION SURFACING IN A STATUS DESCRIPTION.
+        //
+        // The legacy `sqlsyntax` field carries the COMPLETE generated statement including interpolated
+        // literal values - and `DisableBind=1` means the runtime does not use bind variables at all, so
+        // those literals are real user data. The legacy logger performs NO redaction. Forwarding that
+        // field verbatim through an ingress would publish row data to whoever reads an error response.
+        //
+        // The commitment is published in the contract rather than left to the implementation, so a
+        // consumer knows the field is redacted and does not build a diagnostic flow that depends on
+        // seeing the raw statement.
+        Assert.NotNull(internalError.Description);
+        Assert.Contains("redact", internalError.Description, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TheCrossSessionForeignReferenceLimitIsPublishedAsItsOwnStatus()
+    {
+        OpenApiDocument document = Document;
+
+        Assert.True(document.Components!.Responses!.ContainsKey("CrossSessionReferenceBlocked"));
+
+        // THE ONE DELIBERATELY NARROWED CONTRACT IN THE REFACTOR IS PUBLISHED, NOT HIDDEN.
+        //
+        // `foreignvardata.expsvc` [n_cst_dwsvc_columnexp.sru:L80-L83] is a LIVE OBJECT POINTER to
+        // another DataWindow's expression service, and a pointer does not serialize. Cross-DataWindow
+        // references are therefore supported only when both DataWindows are co-resident in one
+        // expression session; anything wider is BLOCKED with a defined error rather than approximated.
+        //
+        // IT IS PROJECTED AS 400, NOT AS A STATUS OF ITS OWN, AND THAT CHOICE IS THE SPECIFICATION'S
+        // RATHER THAN THIS DOCUMENT'S.
+        //
+        // A dedicated 422 is the intuitive reading - the request is well-formed and its arguments are
+        // individually valid, so what fails is a semantic precondition of the topology. But the status
+        // mapping in docs/CONTRACTS.md 12.1 is the specification for C-09 and it sanctions eight
+        // statuses, not nine; and it already provides the mechanism for this need, because
+        // `InvalidArgument` projects to 400 CARRYING THE ORIGINATING RetCode so a caller distinguishes
+        // one rejection from another by reading the code. Adding a ninth status would have been the
+        // document overriding its own specification for a case the specification already covers.
+        //
+        // So the outcome is identified from `retCode` and from the expression-error category
+        // CATEGORY_FOREIGN_REFERENCE_BLOCKED, which ProtoDescriptorTests asserts exists.
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] blocked = Operations(document)
+            .Where(static entry =>
+                entry.Operation.Responses!.TryGetValue("400", out IOpenApiResponse? response)
+                && response.Description is not null
+                && response.Description.Contains("BLOCKED", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.NotEmpty(blocked);
+
+        // NO STATUS OUTSIDE THE SANCTIONED SET APPEARS ANYWHERE.
+        Assert.DoesNotContain(
+            "422",
+            Operations(document).SelectMany(static entry => entry.Operation.Responses!.Keys));
+
+        // It must reach the operation that ADDS a foreign variable, and the calculation operations that
+        // RESOLVE one - a reference can be accepted and later become unresolvable when its session ends.
+        string[] routes = blocked.Select(static entry => entry.Route).ToArray();
+        Assert.Contains("/v1/datawindow/expression/foreign-variables/add", routes);
+        Assert.Contains("/v1/datawindow/expression/calc", routes);
+        Assert.Contains("/v1/datawindow/expression/calc-item", routes);
+    }
+
+    [Fact]
+    public void TheStatusSurfaceStaysWithinTheSetTheSpecificationSanctions()
+    {
+        OpenApiDocument document = Document;
+
+        // THE EIGHT MAPPED STATUSES OF docs/CONTRACTS.md 12.1, PLUS EXACTLY ONE ADDITION.
+        //
+        // The mapping table covers the statuses C-03 and C-04 RETURN: 200, 400, 401, 403, 404, 409, 500
+        // and 501. It does not cover the case where the call never reached them, so this document adds
+        // 502 - and only 502 - for an unreachable upstream or a transit failure after the retry policy
+        // is exhausted. That gap is real rather than an oversight in the specification: a gRPC status
+        // mapping cannot describe the absence of a gRPC response.
+        //
+        // 503 IS ALSO SANCTIONED, BUT BY A DIFFERENT CONTRACT, AND THE DISTINCTION IS THE POINT.
+        //
+        // It is not a projected gRPC status at all - it is C-10's `Unhealthy` verdict on `/health`, and
+        // C-10 is a separate contract with its own specification in docs/CONTRACTS.md 12.2. Reading the
+        // C-09 mapping table as the whole status surface of this document would have been the mistake:
+        // the document publishes TWO contracts, and each brings its own statuses.
+        //
+        // Asserting the closed set is what stops the surface growing by accretion. Every status is a
+        // branch every generated client must handle, and one added without a specification change is a
+        // divergence rather than a feature.
+        string[] sanctioned =
+        [
+            // C-09's mapping table (docs/CONTRACTS.md 12.1).
+            "200", "400", "401", "403", "404", "409", "500", "501",
+
+            // The one addition, for a failure the mapping cannot describe: no gRPC response at all.
+            "502",
+
+            // C-10's own status (docs/CONTRACTS.md 12.2): the `Unhealthy` aggregate verdict.
+            "503",
+        ];
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            foreach (string status in operation.Responses!.Keys)
+            {
+                Assert.Contains(status, sanctioned);
+            }
+        }
+    }
+
+    // ==============================================================================================
+    //  C-09 - THE PROJECTION'S CORRESPONDENCE TO C-03 AND C-04
+    //         This is the section that keeps the document's own stated promise.
+    // ==============================================================================================
+
+    [Fact]
+    public void EveryProtoMessageNamedByTheProjectionResolvesToARealGeneratedMessage()
+    {
+        OpenApiDocument document = Document;
+
+        int checkedNames = 0;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            foreach (string extensionName in (string[])["x-proto-request", "x-proto-response"])
+            {
+                string? fullName = Extension(operation, extensionName);
+                if (fullName is null)
+                {
+                    continue;
+                }
+
+                // THIS IS THE ASSERTION gateway.v1.yaml PROMISES IN ITS OWN COMMENTS.
+                //
+                // The document delegates its payload shapes to the protocol definitions instead of
+                // transcribing well over a hundred messages into JSON Schema - a transcription would
+                // have been a second source of truth in a different language with nothing keeping the
+                // two in step, and the first divergence would have been SILENT because nothing
+                // compiles a YAML file against a .proto.
+                //
+                // The delegation is only defensible if it is checked. This is the check: every named
+                // message must resolve against the generated descriptors. A message renamed or removed
+                // in the proto now breaks the build's test run rather than misleading a consumer.
+                MessageDescriptor? resolved = ResolveProtoMessage(fullName);
+
+                Assert.True(
+                    resolved is not null,
+                    $"{method} {route} declares {extensionName}: {fullName}, which does not resolve to "
+                        + "any message in common.v1, dataservices.v1 or persistence.v1. The projection's "
+                        + "payload delegation is broken.");
+
+                Assert.Equal(fullName, resolved!.FullName);
+                checkedNames++;
+            }
+        }
+
+        // 37 projected operations, each naming a request and a response.
+        Assert.Equal(74, checkedNames);
+    }
+
+    [Fact]
+    public void EveryProjectedOperationNamesAnRpcThatActuallyExistsAndPairsWithItsOwnMessages()
+    {
+        OpenApiDocument document = Document;
+
+        FileDescriptor dataServices = DataservicesV1Reflection.Descriptor;
+        int checkedOperations = 0;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            string? grpcMethod = Extension(operation, "x-grpc-method");
+            if (grpcMethod is null)
+            {
+                continue;
+            }
+
+            // `x-grpc-method` IS `<package>.<Service>/<Method>` - the same shape a gRPC path uses, so a
+            // reader can match it against a trace without translating.
+            string[] parts = grpcMethod.Split('/');
+            Assert.Equal(2, parts.Length);
+
+            string serviceFullName = parts[0];
+            string methodName = parts[1];
+
+            Assert.StartsWith("dataservices.v1.", serviceFullName, StringComparison.Ordinal);
+            string serviceName = serviceFullName["dataservices.v1.".Length..];
+
+            ServiceDescriptor? service = dataServices.FindTypeByName<ServiceDescriptor>(serviceName);
+            Assert.True(service is not null, $"{route} names service '{serviceFullName}', which does not exist.");
+
+            MethodDescriptor? rpc = service!.FindMethodByName(methodName);
+            Assert.True(rpc is not null, $"{route} names RPC '{grpcMethod}', which does not exist.");
+
+            // THE PAIRING IS CHECKED, NOT JUST THE EXISTENCE.
+            //
+            // A projection that named a real RPC but the wrong message types would look entirely
+            // plausible and would generate a client that sends the wrong payload. Asserting that the
+            // declared request and response ARE that RPC's input and output types is what makes the
+            // mapping trustworthy rather than merely well-formed.
+            Assert.Equal(rpc!.InputType.FullName, Extension(operation, "x-proto-request"));
+            Assert.Equal(rpc.OutputType.FullName, Extension(operation, "x-proto-response"));
+
+            // AND IT MUST NOT BE A STREAM - see the dedicated test below for why.
+            Assert.False(
+                rpc.IsClientStreaming || rpc.IsServerStreaming,
+                $"{route} projects streaming RPC '{grpcMethod}'. Streams have no faithful REST "
+                    + "projection and must not be projected.");
+
+            checkedOperations++;
+        }
+
+        Assert.Equal(37, checkedOperations);
+    }
+
+    [Fact]
+    public void EveryUnaryRpcOfCThreeAndCFourIsProjectedAndNoStreamIs()
+    {
+        OpenApiDocument document = Document;
+
+        string[] projectedRpcs = Operations(document)
+            .Select(static entry => Extension(entry.Operation, "x-grpc-method"))
+            .OfType<string>()
+            .Select(static name => name.Split('/')[1])
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        FileDescriptor dataServices = DataservicesV1Reflection.Descriptor;
+
+        List<MethodDescriptor> allRpcs = dataServices.Services
+            .SelectMany(static service => service.Methods)
+            .ToList();
+
+        string[] unary = allRpcs
+            .Where(static rpc => !rpc.IsClientStreaming && !rpc.IsServerStreaming)
+            .Select(static rpc => rpc.Name)
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        string[] streaming = allRpcs
+            .Where(static rpc => rpc.IsClientStreaming || rpc.IsServerStreaming)
+            .Select(static rpc => rpc.Name)
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        // COMPLETENESS IN BOTH DIRECTIONS.
+        //
+        // A PARTIAL projection would be the worst outcome: a consumer would find most of the surface
+        // over REST and have no way to know which parts were missing, so it would look like a bug in
+        // their client rather than a boundary of the contract. Every unary RPC is projected.
+        Assert.Equal(unary, projectedRpcs);
+
+        // AND THE FIVE STREAMS ARE EXCLUDED, DELIBERATELY.
+        //
+        // `Retrieve` is server-streaming; `EventChain` is bidirectional and carries an ordered event
+        // chain with a per-message veto; `InvokeMethodChannel` and `TraceChannel` are the two INVERTED
+        // streams, where the legacy expects the APPLICATION to implement the macro switch so across a
+        // boundary DataServices must call back INTO its client; and `EventStream` is C-04's own server
+        // stream of the three events the engine declares on itself. REST cannot express any of those,
+        // and a partial projection of an ordered chain would deliver part of it with no way for the
+        // consumer to detect what it had missed.
+        //
+        // THE SET IS ASSERTED RATHER THAN THE COUNT, so a stream added to either service fails here
+        // with its own name in the message instead of an off-by-one - and it must fail, because a new
+        // stream is a new documented gap in the ingress and the document names its gaps individually.
+        Assert.Equal(
+            ["EventChain", "EventStream", "InvokeMethodChannel", "Retrieve", "TraceChannel"],
+            streaming);
+        Assert.Empty(projectedRpcs.Intersect(streaming, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void TheProjectionReachesNoServiceOtherThanDataServices()
+    {
+        OpenApiDocument document = Document;
+
+        // GATEWAY CALLS DATASERVICES AND SECURITY, AND NOTHING ELSE.
+        //
+        // The topology is layered and acyclic: Gateway -> DataServices, Gateway -> Security,
+        // DataServices -> Persistence, Persistence -> Security's keys. Gateway reaching Persistence
+        // DIRECTLY would flatten that and put SQL generation one hop from the ingress - so no
+        // `/v1/datawindow` operation may project a `persistence.v1` RPC, and none does.
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            string? grpcMethod = Extension(operation, "x-grpc-method");
+            if (grpcMethod is null)
+            {
+                continue;
+            }
+
+            Assert.DoesNotContain("persistence.v1", grpcMethod, StringComparison.Ordinal);
+            Assert.DoesNotContain("security.v1", grpcMethod, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void EveryDataWindowRouteSitsUnderTheDeclaredPathPrefix()
+    {
+        OpenApiDocument document = Document;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            if (Extension(operation, "x-grpc-method") is null)
+            {
+                continue;
+            }
+
+            // C-09 DECLARES THE FAMILY AS `/v1/datawindow/**`, AND THE TESTS' e2e FIXTURE HARDCODES
+            // THAT PREFIX. A projected operation outside it would be unreachable through the
+            // documented ingress surface.
+            Assert.StartsWith("/v1/datawindow/", route, StringComparison.Ordinal);
+        }
+    }
+
+    // ==============================================================================================
+    //  THE FOUR RESERVED EXTENSION POINTS - C-D COMPLIANCE, ASSERTED FROM BOTH DIRECTIONS
+    // ==============================================================================================
+
+    [Fact]
+    public void ExactlyFourReservedRoutesAreDeclaredAndTheyNameTheFourDeferredServices()
+    {
+        OpenApiDocument document = Document;
+
+        (string Route, string Service)[] reserved = Operations(document)
+            .Select(entry => (entry.Route, Service: Extension(entry.Operation, "x-deferred-service")))
+            .Where(static entry => entry.Service is not null)
+            .Select(static entry => (entry.Route, Service: entry.Service!))
+            .OrderBy(static entry => entry.Route, StringComparer.Ordinal)
+            .ToArray();
+
+        // FOUR, AND EXACTLY FOUR.
+        //
+        // The eight-service target roster is four in-scope plus four deferred. A fifth reserved route
+        // would mean a capability area nobody mapped; a third would mean one silently dropped from the
+        // roster. docs/DEFERRED.md is the authoritative list and this is the wire agreeing with it.
+        Assert.Equal(
+            [
+                ("/v1/design/{path}", "DesignSystem"),
+                ("/v1/documents/{path}", "Documents"),
+                ("/v1/integration/{path}", "Integration"),
+                ("/v1/scripting/{path}", "ScriptBridge"),
+            ],
+            reserved);
+    }
+
+    [Fact]
+    public void EveryReservedRouteReturnsNotImplementedAndNothingElseSucceeds()
+    {
+        OpenApiDocument document = Document;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            if (Extension(operation, "x-deferred-service") is null)
+            {
+                continue;
+            }
+
+            Assert.True(operation.Responses!.ContainsKey("501"));
+
+            // NO SUCCESS STATUS ANYWHERE ON A RESERVED ROUTE.
+            //
+            // This is the sharpest available statement that nothing is implemented behind it. A 2xx in
+            // the response set - even one described as a placeholder - would tell a consumer the route
+            // sometimes works, and would be exactly the "stub them out" outcome the requirements forbid.
+            foreach (string status in operation.Responses.Keys)
+            {
+                Assert.False(
+                    status.StartsWith('2'),
+                    $"Reserved route {route} declares success status {status}. Nothing is implemented "
+                        + "behind a reserved route, so it can never succeed.");
+            }
+        }
+    }
+
+    [Fact]
+    public void TheReservedRouteBodyIsMachineReadableAndCarriesTheExactPhaseTwoMarker()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema body = document.Components!.Schemas!["ReservedRouteBody"];
+
+        Assert.NotNull(body.Properties);
+
+        // MACHINE-READABLE, WHICH IS THE WHOLE POINT OF DECLARING THE ROUTES AT ALL.
+        //
+        // The requirement is that the shape of the eventual system be legible from the gateway's
+        // contract while nothing is implemented behind it. A prose message would satisfy neither half:
+        // a client could not branch on it, and a human would have to guess which service was meant.
+        Assert.Equal("501", body.Properties["status"].Const);
+        Assert.Equal("reserved for Phase 2", body.Properties["marker"].Const);
+
+        Assert.Equal(
+            ["DesignSystem", "Documents", "Integration", "ScriptBridge"],
+            body.Properties["service"].Enum!.Select(static node => node!.GetValue<string>()).ToArray());
+
+        Assert.NotNull(body.Required);
+        foreach (string required in (string[])["status", "service", "marker", "route"])
+        {
+            Assert.Contains(required, body.Required);
+        }
+
+        // CLOSED, so an unrecognised field in a 501 body is a detectable error rather than ignored data.
+        Assert.False(body.AdditionalPropertiesAllowed);
+
+        // THE 501 IS `application/json`, NOT `application/problem+json`.
+        //
+        // Deliberate, and the one documented exception to the single-error-shape convention: a
+        // problem-details body would not carry the deferred-service name and the marker as structured
+        // members a client can branch on, which is the only reason the routes exist.
+        IOpenApiResponse response = document.Components.Responses!["ReservedForPhaseTwo"];
+        Assert.True(response.Content!.ContainsKey("application/json"));
+        Assert.False(response.Content.ContainsKey("application/problem+json"));
+    }
+
+    [Fact]
+    public void AReservedRouteIsAFamilyRatherThanASingleRoute()
+    {
+        OpenApiDocument document = Document;
+
+        foreach (string route in (string[])
+        [
+            "/v1/design/{path}",
+            "/v1/documents/{path}",
+            "/v1/integration/{path}",
+            "/v1/scripting/{path}",
+        ])
+        {
+            IOpenApiPathItem pathItem = document.Paths[route];
+
+            // THE CATCH-ALL PARAMETER IS WHAT MAKES `/v1/design/**` A FAMILY.
+            //
+            // docs/CONTRACTS.md 13 specifies each reserved entry as `/v1/<area>/**`, so the eventual
+            // URL shape of the deferred service is legible now. A single fixed route would only reserve
+            // one URL and would tell a reader nothing about the surface behind it.
+            Assert.NotNull(pathItem.Parameters);
+            IOpenApiParameter parameter = Assert.Single(pathItem.Parameters);
+            Assert.Equal("path", parameter.Name);
+            Assert.Equal(ParameterLocation.Path, parameter.In);
+            Assert.True(parameter.Required);
+        }
+    }
+
+    [Fact]
+    public void AReservedRouteRequiresATokenSoTheDeferredRosterIsNotAnonymouslyEnumerable()
+    {
+        OpenApiDocument document = Document;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            if (Extension(operation, "x-deferred-service") is null)
+            {
+                continue;
+            }
+
+            // AUTHENTICATED, DESPITE IMPLEMENTING NOTHING.
+            //
+            // It would be tempting to leave a route that only ever returns 501 anonymous, since it
+            // exposes no capability. But the BODY names the deferred service and the roadmap marker, so
+            // an anonymous reserved route publishes the system's Phase-2 plan to any unauthenticated
+            // caller. Requiring a token costs nothing and keeps the roster inside the boundary.
+            Assert.Null(operation.Security);
+            Assert.True(operation.Responses!.ContainsKey("401"));
+        }
+    }
+
+    [Fact]
+    public void NoReservedRouteProjectsAnyRpcOrNamesAnyImplementationTarget()
+    {
+        OpenApiDocument document = Document;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            if (Extension(operation, "x-deferred-service") is null)
+            {
+                continue;
+            }
+
+            // A ROUTING DECLARATION IS NOT A STUB, AND THIS IS THAT STATED AS AN ASSERTION.
+            //
+            // The prohibition in C-D is on IMPLEMENTING the deferred services. A reserved route has no
+            // handler beyond the constant response, calls nothing, and can reach nothing - so it names
+            // NO gRPC method, NO request message and NO response message. If any of these extensions
+            // ever appeared here, something behind the route would have been built.
+            Assert.Null(Extension(operation, "x-grpc-method"));
+            Assert.Null(Extension(operation, "x-proto-request"));
+            Assert.Null(Extension(operation, "x-proto-response"));
+
+            Assert.Equal("reserved for Phase 2", Extension(operation, "x-reserved-marker"));
+
+            Assert.False(operation.Responses!.ContainsKey("409"));
+            Assert.False(operation.Responses.ContainsKey("502"));
+        }
+    }
+
+    [Fact]
+    public void NoContractIdentifierForADeferredServiceAppearsAnywhereInTheDocument()
+    {
+        OpenApiDocument document = Document;
+
+        string[] contractIds = Operations(document)
+            .Select(static entry => Extension(entry.Operation, "x-contract-id"))
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static id => id, StringComparer.Ordinal)
+            .ToArray();
+
+        // THE TEN CONTRACTS ARE C-01..C-10 AND ALL TEN BELONG TO THE FOUR IN-SCOPE SERVICES.
+        //
+        // Gateway's own document touches four of them: C-09 for its ingress surface, C-10 for
+        // readiness, and C-03/C-04 for the operations it projects. A C-11 or higher would mean a
+        // contract nobody inventoried, which is precisely what the requirement to review the contract
+        // inventory before code generation exists to prevent.
+        Assert.Equal(["C-03", "C-04", "C-09", "C-10"], contractIds);
+    }
+
+    // ==============================================================================================
+    //  DOCUMENT-WIDE STRUCTURE
+    // ==============================================================================================
+
+    [Fact]
+    public void TheDocumentDeclaresFortyFourOperationsAcrossFortyFourRoutes()
+    {
+        OpenApiDocument document = Document;
+
+        // 3 (health, ping, capabilities) + 37 (projected) + 4 (reserved) = 44.
+        //
+        // The 37 is every unary RPC of C-03 and C-04: six lifecycle/update/gate operations plus the
+        // eight read-and-apply operations of the four headless models for C-03, and twenty-three for
+        // C-04. The five streams are excluded and are named individually in
+        // EveryUnaryRpcOfCThreeAndCFourIsProjectedAndNoStreamIs.
+        //
+        // The count is asserted so a route added without a test, or removed without the documentation
+        // being updated, fails here. It is the cheapest possible guard against the document and the
+        // specification drifting apart, which is the failure that produced finding I-2 in the first
+        // place - a contract documented as published while absent.
+        Assert.Equal(44, document.Paths.Count);
+        Assert.Equal(44, Operations(document).Count());
+    }
+
+    [Fact]
+    public void EverySchemaExceptProblemDetailsIsClosedToUnknownMembers()
+    {
+        OpenApiDocument document = Document;
+
+        foreach ((string name, IOpenApiSchema schema) in document.Components!.Schemas!)
+        {
+            // `ProblemDetails` MUST be open - RFC 9457 defines extension members and `retCode` is one.
+            // `ConflictProblemDetails` composes it through allOf and inherits that openness.
+            // `ProtoPayload` MUST be open - its authority is the .proto, so this placeholder cannot
+            // enumerate its members without becoming the second source of truth it exists to avoid.
+            if (name is "ProblemDetails" or "ConflictProblemDetails" or "ProtoPayload")
+            {
+                continue;
+            }
+
+            // EVERY OTHER SCHEMA IS CLOSED.
+            //
+            // An open schema silently accepts a misspelled field, so a consumer sending `serivce`
+            // instead of `service` gets a success with a missing value rather than a validation error.
+            // Closing them makes that a detectable mistake.
+            Assert.False(
+                schema.AdditionalPropertiesAllowed,
+                $"Schema '{name}' permits unknown members. Only ProblemDetails (RFC 9457 extension "
+                    + "members) and ProtoPayload (authority delegated to the .proto) may.");
+        }
+    }
+
+    [Fact]
+    public void EveryTagUsedByAnOperationIsDeclaredWithAContractIdentifier()
+    {
+        OpenApiDocument document = Document;
+
+        Assert.NotNull(document.Tags);
+
+        var declared = document.Tags.ToDictionary(static tag => tag.Name!, StringComparer.Ordinal);
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            Assert.NotNull(operation.Tags);
+            Assert.NotEmpty(operation.Tags);
+
+            foreach (OpenApiTagReference tag in operation.Tags)
+            {
+                Assert.True(
+                    declared.ContainsKey(tag.Name!),
+                    $"{method} {route} uses undeclared tag '{tag.Name}'. An undeclared tag produces an "
+                        + "unnamed, undescribed group in generated documentation and clients.");
+            }
+        }
+
+        // AND EVERY DECLARED TAG CARRIES ITS CONTRACT IDENTIFIER, so a reader of any grouping can trace
+        // it back to the entry in docs/CONTRACTS.md that specifies it.
+        foreach (OpenApiTag tag in document.Tags)
+        {
+            Assert.NotNull(tag.Extensions);
+            Assert.True(
+                tag.Extensions.ContainsKey("x-contract-id"),
+                $"Tag '{tag.Name}' does not declare x-contract-id.");
+        }
+    }
+
+    [Fact]
+    public void EveryDeclaredTagIsActuallyUsedByAnOperation()
+    {
+        OpenApiDocument document = Document;
+
+        var used = Operations(document)
+            .SelectMany(static entry => entry.Operation.Tags!)
+            .Select(static tag => tag.Name!)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (OpenApiTag tag in document.Tags!)
+        {
+            // AN UNUSED TAG IS A LEFTOVER, and it is usually the residue of a route that was renamed or
+            // removed - which is a signal worth catching, because the route may have been removed
+            // without the documentation following.
+            Assert.Contains(tag.Name!, used);
+        }
+    }
+}

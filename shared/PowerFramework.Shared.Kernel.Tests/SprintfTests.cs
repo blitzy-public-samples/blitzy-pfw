@@ -152,49 +152,61 @@
 //  treatment of it is UNOBSERVED, and REGION 6 is careful to assert only the part the evidence
 //  actually establishes.
 //
-//  REPORTED DISCREPANCIES BETWEEN THE EVIDENCE AND THE AS-BUILT PORT
+//  DISCREPANCIES FOUND BETWEEN THE EVIDENCE AND THE AS-BUILT PORT, AND HOW EACH WAS SETTLED
 //  --------------------------------------------------------------------------------------------
 //  Formatting.cs enumerates its inferred choices in a register it calls DECISION 13, and each
 //  entry names the test that pins it. Writing those tests meant re-running the call-site census,
-//  and the census turned up w_test_logger.srw - a file the register's stated premises do not
-//  account for. Six findings follow. NONE of them is fixed here: this file's job is to
-//  characterize the port and report, not to change behaviour it was not asked to change, and
-//  bending the tests to assert un-implemented behaviour would simply redden the shared tree's
-//  gate. Each finding is pinned by a named test so that a later characterization run against the
-//  real pfw.dll can change the behaviour deliberately and see exactly which assertion moves.
+//  and the census turned up w_test_logger.srw - a file the register's stated premises did not
+//  account for. Six findings followed.
 //
-//      D-1  BRACE ESCAPING USES THE WRONG MECHANISM.
+//  THE FIRST VERSION OF THIS FILE REPORTED ALL SIX AND FIXED NONE, asserting the port's
+//  un-corrected output and putting an Assert.NotEqual beside it to "record the divergence". That
+//  was the wrong call and the reasoning is worth stating so it is not repeated: a test that
+//  asserts a known-wrong value makes the deviation permanently green, and it inverts the
+//  authority - correcting the implementation would have BROKEN the suite, so the defect would
+//  have read as the specification and the fix as the regression. A missing test leaves a gap; a
+//  test like that actively defends one. Three of the six were behaviour gaps and are now FIXED in
+//  Formatting.cs, with these tests asserting the legacy's output; the other three were always
+//  documentation corrections.
+//
+//      D-1  BRACE ESCAPING USED THE WRONG MECHANISM.               [FIXED]
 //           w_test_logger.srw:L104 documents the backslash as the brace escape, and all five format
 //           literals in that file use it - L107, L171, L198, L226 and L253 - so `\{1\}` renders a
-//           literal `{1}` in the legacy. The port implements DOUBLED braces instead. Observable
-//           effect: the port leaves the backslashes in the output where the legacy consumes them.
-//           Pinned by: SprintfBraceEscapingIsAnInferredChoice
+//           literal `{1}`. The port implemented DOUBLED braces only, leaving the backslashes in the
+//           output where the legacy consumes them. Formatting.cs DECISION 14 now implements the
+//           documented escape, in the main scan loop and in the mask scanner both.
+//           Pinned by: SprintfBackslashEscapesABraceAsTheLegacyDocuments
 //
-//      D-2  THE STATED PREMISE FOR CHOOSING DOUBLED BRACES IS FALSIFIED.
-//           The register justifies doubled braces on the ground that no call site contains a brace
+//      D-2  THE STATED PREMISE FOR CHOOSING DOUBLED BRACES WAS FALSIFIED.   [DOCUMENTED]
+//           The register justified doubled braces on the ground that no call site contains a brace
 //           outside a placeholder, so nothing could regress. Braces outside placeholders DO occur,
 //           in all five w_test_logger.srw format literals - and one of them, L107, is a genuine
-//           Sprintf call site, so the premise fails even on the strictest reading of "call site".
-//           The conclusion may still be defensible: no literal anywhere uses a DOUBLED brace, so
-//           doubling breaks no existing caller. But the reasoning needs restating, and backslash
-//           escaping is the mechanism the legacy documents.
-//           Pinned by: SprintfBraceEscapingIsAnInferredChoice
+//           Sprintf call site, so the premise failed even on the strictest reading of "call site".
+//           The CONCLUSION survives its premise, though: no literal anywhere uses a DOUBLED brace,
+//           so supporting doubling regresses no caller, and it is retained alongside the backslash
+//           rather than removed. CHOICE 1 in the register now states the narrower question.
+//           Pinned by: SprintfDoubledBraceAlsoEscapesWhichIsAnInferredChoice
 //
-//      D-3  A MASK APPLIED TO A STRING IS NOT UNOBSERVED.
-//           The register calls this an unexercised case. w_test_logger.srw:L107 applies the
-//           PowerBuilder string mask `(@@@)-@@@@` to the string "1234567", and L171 applies
-//           `\{@@@\}-(@@@@@)` to another string. The port drops a mask on a non-IFormattable
-//           value, so it renders "1234567" where the legacy renders "(123)-4567".
-//           Pinned by: SprintfMaskOnNonFormattableValueIsAnInferredChoice
+//      D-3  A MASK APPLIED TO A STRING WAS NOT UNOBSERVED.         [FIXED]
+//           The register called this an unexercised case. w_test_logger.srw:L107 applies the
+//           PowerBuilder string mask `(@@@)-@@@@` to the string "1234567", and L171, L198, L226 and
+//           L253 apply `\{@@@\}-(@@@@@)` to another string, so the legacy renders "(123)-4567"
+//           where the port rendered "1234567". Formatting.cs DECISION 15 now applies a mask
+//           carrying the '@' character placeholder by string surgery. A mask with NO '@' is still
+//           dropped, which is the case CHOICE 10 was always actually about.
+//           Pinned by: SprintfStringMaskIsAppliedToAStringAsTheLegacyDoes, and the two edges the
+//           corpus does not exercise by SprintfStringMaskExhaustedValueIsAnInferredChoice and
+//           SprintfStringMaskSurplusCharactersAreAnInferredChoice
 //
-//      D-4  A MASK CONTAINING AN ESCAPED CLOSING BRACE IS TRUNCATED.
-//           The port's mask scanner runs to the first '}' unconditionally, so
-//           `{2,20:\{@@@\}-(@@@@@)}` at w_test_logger.srw:L171 ends at the escaped brace: the mask
-//           becomes `\{@@@\` and the remaining `-(@@@@@)}` leaks into the output as literal text.
-//           This is D-1's consequence one level down and would be fixed by the same change.
-//           Pinned by: SprintfMalformedPlaceholderIsAnInferredChoice
+//      D-4  A MASK CONTAINING AN ESCAPED CLOSING BRACE WAS TRUNCATED.    [FIXED]
+//           The mask scanner ran to the first '}' unconditionally, so `{2,20:\{@@@\}-(@@@@@)}` at
+//           w_test_logger.srw:L171 ended at the escaped brace: the mask became `\{@@@\` and the
+//           remaining `-(@@@@@)}` leaked into the output as literal text. This was D-1's
+//           consequence one level down and the same change fixed it - the scanner now decodes
+//           escapes as it goes and terminates only at an UNESCAPED brace.
+//           Pinned by: SprintfMalformedPlaceholderIsAnInferredChoice (the two escaped-mask rows)
 //
-//      D-5  THE MASK-TOKEN CENSUS IS INCOMPLETE, BUT THE TRANSLATION IS RIGHT ANYWAY.
+//      D-5  THE MASK-TOKEN CENSUS IS INCOMPLETE, BUT THE TRANSLATION IS RIGHT ANYWAY.   [DOCUMENTED]
 //           The register says only "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS" and "#.0#" are corpus
 //           verified and treats every other token as best effort. w_test_logger.srw:L171 also uses
 //           `MMM-DDD-YY HH:MM:SS`, `H:MM:SS AM/PM`, `###,###,##0.0` and L107 uses `###,###,##0`.
@@ -203,7 +215,7 @@
 //           promotes those rows from best effort to verified.
 //           Pinned by: SprintfGeneralMaskTokensAreAnInferredChoice
 //
-//      D-6  POSITIVE ALIGNMENT IS DOCUMENTED AND USED, NOT INFERRED.
+//      D-6  POSITIVE ALIGNMENT IS DOCUMENTED AND USED, NOT INFERRED.                   [DOCUMENTED]
 //           The register's alignment census lists only negative widths plus `{,-4}`.
 //           w_test_logger.srw:L107 and L171 use `{2,20}`, `{1,20}`, `{3,20}`, `{4,20}` and
 //           `{5,20}`, and L102 documents the sign convention in words. Right-alignment is
@@ -1270,9 +1282,23 @@ public sealed class SprintfTests
     /// opens the read-only legacy resource at run time.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The two English entries are transcribed from <c>pfw.i18n.xml:L51-L53</c>. The second one,
     /// <c>第{}行</c> mapping to <c>Line {}</c>, is the entry whose translated value CARRIES A
     /// PLACEHOLDER - the reason the localization chain and Sprintf are coupled at all.
+    /// </para>
+    /// <para>
+    /// EVERY VALUE HERE IS TRANSCRIBED CHARACTER FOR CHARACTER FROM THE ORACLE, and the Traditional
+    /// Chinese entry is why that is worth a paragraph. It is <c>pfw.i18n.xml:L128</c>,
+    /// <c>to="修改數據被拒絕"</c>. An earlier revision of this file wrote <c>修改資料被拒絕</c>
+    /// instead - a plausible and idiomatic Traditional rendering of the same phrase, but NOT the one
+    /// the table contains. That made this constant a second, conflicting oracle for a value the
+    /// read-only resource already fixes: a reader could not tell which was authoritative, and a
+    /// localization test written against the real file would disagree with this one for reasons that
+    /// had nothing to do with either. An inline fixture that is not byte-identical to what it claims
+    /// to transcribe is worse than one that is obviously synthetic, so if a future edit needs a value
+    /// the table does not contain, use an unmistakably invented sentinel rather than a near-miss.
+    /// </para>
     /// </remarks>
     private const string LocalizationDocument =
         "<pfw>"
@@ -1281,7 +1307,7 @@ public sealed class SprintfTests
                 + "<tr text='第{}行' to='Line {}'/>"
             + "</dwsvc>"
             + "<dwsvc lang='cht'>"
-                + "<tr text='修改数据被拒绝' to='修改資料被拒絕'/>"
+                + "<tr text='修改数据被拒绝' to='修改數據被拒絕'/>"
             + "</dwsvc>"
         + "</pfw>";
 
@@ -1361,7 +1387,7 @@ public sealed class SprintfTests
             expression);
 
         // The Traditional Chinese entry, NOT the English one that shares the same source text.
-        Assert.Equal("修改資料被拒絕", Assert.IsType<string>(document.XPathEvaluate(expression)));
+        Assert.Equal("修改數據被拒絕", Assert.IsType<string>(document.XPathEvaluate(expression)));
     }
 
     /// <summary>
@@ -1658,52 +1684,89 @@ public sealed class SprintfTests
     // discrepancies D-1 through D-5 in the file header.
 
     /// <summary>
-    /// [REPORTED DISCREPANCY D-1 and D-2] Pins register CHOICE 1: how a literal brace is escaped.
+    /// [VERIFIED BEHAVIOUR, formerly D-1 and D-2] The BACKSLASH escapes a literal <c>{</c> or
+    /// <c>}</c>, exactly as the legacy documents it.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The register states that brace escaping is undetermined "because NO call site in the
-    /// repository contains a brace that is not part of a placeholder", and on that basis chose the
-    /// doubled brace, mirroring .NET. THAT PREMISE IS FALSE. Five call sites contain braces outside
-    /// placeholders - <c>w_test_logger.srw:L107, L171, L198, L226, L253</c> - and
-    /// <c>w_test_logger.srw:L104</c> documents the mechanism in words: the BACKSLASH escapes
-    /// <c>{</c> and <c>}</c>. The legacy renders <c>\{1\}</c> as <c>{1}</c>.
+    /// <c>w_test_logger.srw:L104</c> states the rule in words -
+    /// <c>//*使用右斜杠'\'转义中括号:'{','}'</c>, "use the backslash '\' to escape the braces '{' and
+    /// '}'" - directly above a live <see cref="Formatting.Sprintf(string, object[])"/> call site, and
+    /// all five format literals in that file rely on it: <c>:L107</c> in a genuine Sprintf call and
+    /// <c>:L171</c>, <c>:L198</c>, <c>:L226</c> and <c>:L253</c> through the logger. So the legacy
+    /// renders <c>\{1\}</c> as the literal text <c>{1}</c>, and this is documented behaviour rather
+    /// than an inferred choice.
     /// </para>
     /// <para>
-    /// The port does not implement backslash escaping, so it renders <c>\{1\}</c> with the
-    /// backslashes intact. This test pins BOTH halves of the situation - what the port does with a
-    /// backslash escape, and what it does with a doubled brace - so that implementing the documented
-    /// mechanism later breaks exactly one named test, deliberately, rather than surprising someone.
-    /// Nothing is corrected here: this suite characterizes and reports, and a test asserting
-    /// un-implemented behaviour would simply redden the shared tree's gate without fixing anything.
+    /// THIS TEST USED TO ASSERT THE OPPOSITE, and the history is worth keeping because it is the
+    /// failure mode the file header now warns about. The port originally implemented doubled braces
+    /// only; this test derived the backslash rule from the evidence above, reported it as a
+    /// discrepancy, and then asserted the port's un-corrected output with an
+    /// <c>Assert.NotEqual("{1}", ...)</c> beside it. That combination makes a known semantic
+    /// deviation permanently green and turns the test into a gate AGAINST its own finding: correcting
+    /// the implementation would have broken it, so the wrong behaviour would have looked like the
+    /// specification. The implementation now escapes with the backslash [Formatting.cs DECISION 14]
+    /// and the assertions below state the legacy's output.
     /// </para>
     /// <para>
-    /// Worth noting for whoever picks this up: the conclusion may survive the correction to its
-    /// premise, because no call site uses a DOUBLED brace, so supporting doubling regresses no
-    /// caller. What is missing is support for the documented backslash form, and all five affected
-    /// call sites are in <c>pfw.tests.pbl.src</c>, a characterization-fixture library that no
-    /// in-scope service depends on.
+    /// The doubled brace is retained ALONGSIDE it and is still an inferred choice, because no corpus
+    /// literal contains one - see
+    /// <see cref="SprintfDoubledBraceAlsoEscapesWhichIsAnInferredChoice"/>. The two mechanisms do not
+    /// interfere: the backslash arm is tested before either brace arm, so neither can shadow the
+    /// other.
     /// </para>
     /// </remarks>
     [Fact]
-    public void SprintfBraceEscapingIsAnInferredChoice()
+    public void SprintfBackslashEscapesABraceAsTheLegacyDocuments()
     {
-        // The port's chosen mechanism: a doubled brace collapses to one literal brace.
+        // The documented form, and the exact shape all five corpus literals use.
+        Assert.Equal("{1}", Formatting.Sprintf("\\{1\\}", "value"));
+
+        // Each half independently, so a regression names which brace stopped being escaped.
+        Assert.Equal("{", Formatting.Sprintf("\\{"));
+        Assert.Equal("}", Formatting.Sprintf("\\}"));
+
+        // THE ESCAPE MUST NOT CONSUME AN ARGUMENT. `\{1\}` is literal text, not a placeholder, so
+        // the sequential cursor never advances and the argument is untouched - which is what lets
+        // the corpus literals label their placeholders with the very syntax they are labelling:
+        // "\{1\}:{1:...}" prints "{1}:" and then substitutes argument 1 exactly once.
+        Assert.Equal("{1}:value", Formatting.Sprintf("\\{1\\}:{1}", "value"));
+        Assert.Equal("{}:first", Formatting.Sprintf("\\{\\}:{}", "first", "second"));
+
+        // A BACKSLASH BEFORE ANYTHING ELSE IS NOT AN ESCAPE. The rule names exactly two characters,
+        // so a path, a tab escape or a doubled backslash survives verbatim. Widening the escape
+        // would invent grammar the legacy does not have and would corrupt any format string that
+        // carries a Windows path or a regular expression.
+        Assert.Equal("a\\b", Formatting.Sprintf("a\\b"));
+        Assert.Equal("C:\\temp\\x v", Formatting.Sprintf("C:\\temp\\x {1}", "v"));
+
+        // A trailing backslash with nothing after it is likewise just a backslash.
+        Assert.Equal("abc\\", Formatting.Sprintf("abc\\", "v"));
+    }
+
+    /// <summary>
+    /// [CHARACTERIZES THE PORT] Pins register CHOICE 1: a DOUBLED brace also escapes, in addition to
+    /// the documented backslash.
+    /// </summary>
+    /// <remarks>
+    /// This is the part of the old brace question that remains genuinely open. No corpus literal
+    /// contains a doubled brace, so nothing adjudicates whether <c>{{</c> collapses to one brace or
+    /// stands for two, and the port chose to collapse it as .NET composite formatting does. Nothing
+    /// can regress, precisely because no caller writes one, and a .NET author reaching for the
+    /// convention they already know is not silently surprised. Pinned here so that a later
+    /// characterization run against the behavioural oracle can overturn it deliberately and see
+    /// exactly which assertion moves.
+    /// </remarks>
+    [Fact]
+    public void SprintfDoubledBraceAlsoEscapesWhichIsAnInferredChoice()
+    {
         Assert.Equal("{value}", Formatting.Sprintf("{{{1}}}", "value"));
         Assert.Equal("{}", Formatting.Sprintf("{{}}"));
         Assert.Equal("{", Formatting.Sprintf("{{"));
 
-        // D-1: the DOCUMENTED mechanism is the backslash, and the port does not implement it. The
-        // backslashes survive into the output, where w_test_logger.srw:L104 says the legacy consumes
-        // them and emits a bare "{1}". This assertion states the port's behaviour, not the
-        // legacy's - the inequality below is what records the divergence.
-        Assert.Equal("\\{1\\}", Formatting.Sprintf("\\{1\\}", "value"));
-        Assert.NotEqual("{1}", Formatting.Sprintf("\\{1\\}", "value"));
-
-        // ...and the reason the backslash form does not accidentally substitute: "{1\}" is not a
-        // well-formed placeholder, so the opening brace is emitted verbatim and scanning resumes
-        // after it. The argument is therefore never consumed, which is why "value" is absent above.
-        Assert.DoesNotContain("value", Formatting.Sprintf("\\{1\\}", "value"), StringComparison.Ordinal);
+        // The two mechanisms coexist rather than compete, and this row is what says so: a doubled
+        // brace and a backslash-escaped brace in one format string both collapse, once each.
+        Assert.Equal("{{}", Formatting.Sprintf("{{\\{\\}"));
     }
 
     /// <summary>
@@ -1886,12 +1949,14 @@ public sealed class SprintfTests
     /// embedded whitespace, and a digit run past the parser's guard.
     /// </para>
     /// <para>
-    /// The final assertion records D-4. Because the mask field runs to the first <c>}</c>
-    /// unconditionally, the live mask <c>{2,20:\{@@@\}-(@@@@@)}</c> at
-    /// <c>w_test_logger.srw:L171</c> ends at the ESCAPED closing brace: the mask becomes
-    /// <c>\{@@@\</c> and the remaining <c>-(@@@@@)}</c> leaks into the output as literal text. That
-    /// is a consequence of D-1 one level down and would be fixed by the same change, so it is pinned
-    /// here rather than in a test of its own.
+    /// The final two assertions are what used to be D-4, now corrected. The mask field runs to the
+    /// first UNESCAPED <c>}</c>, so the live mask <c>{2,20:\{@@@\}-(@@@@@)}</c> at
+    /// <c>w_test_logger.srw:L171</c> is read whole - the escaped braces are DATA inside it - and the
+    /// placeholder terminates at the real closing brace [Formatting.cs DECISION 14]. The earlier
+    /// revision of this test asserted the truncated reading, in which the mask became <c>\{@@@\</c>
+    /// and the remaining <c>-(@@@@@)}</c> leaked into the output as literal text; the row is kept
+    /// here, with the corrected expectation, because the boundary between "an escaped brace" and "the
+    /// end of the mask" is exactly what a future edit to the scanner would get wrong.
     /// </para>
     /// </remarks>
     [Fact]
@@ -1924,13 +1989,21 @@ public sealed class SprintfTests
         Assert.Equal("{1000001}", Formatting.Sprintf("{1000001}", "v"));
         Assert.Equal("[]", Formatting.Sprintf("[{1000000}]", "v"));
 
-        // D-4: the live brace-escaped mask from w_test_logger.srw:L171, where the mask is truncated
-        // at the escaped closing brace and the remainder becomes literal text. The value is a
-        // string, so the truncated mask is then dropped as well - see
-        // SprintfMaskOnNonFormattableValueIsAnInferredChoice.
+        // The live brace-escaped mask from w_test_logger.srw:L171. The mask is `{@@@}-(@@@@@)` once
+        // its two escapes are decoded, the placeholder ends at the UNESCAPED brace, and the eight
+        // character placeholders consume all eight characters of the value, giving `{123}-(45678)` -
+        // thirteen characters, then right-aligned to the declared width of 20 by seven spaces. See
+        // SprintfStringMaskIsAppliedToAStringAsTheLegacyDoes for the mask semantics themselves.
         Assert.Equal(
-            "            12345678-(@@@@@)}",
+            "       {123}-(45678)",
             Formatting.Sprintf("{2,20:\\{@@@\\}-(@@@@@)}", "abc", "12345678"));
+
+        // ...and the malformed sibling, which is the row that pins WHERE the boundary sits. Here the
+        // escaped brace is consumed as mask data and the string then runs out with no unescaped
+        // closing brace ever found, so the placeholder is malformed and the whole thing renders
+        // verbatim - with the escape still honoured during that verbatim pass, because the escape is
+        // an outer-level rule rather than a placeholder-level one.
+        Assert.Equal("{1:{abc", Formatting.Sprintf("{1:\\{abc", "v"));
     }
 
     /// <summary>
@@ -2035,49 +2108,120 @@ public sealed class SprintfTests
     }
 
     /// <summary>
-    /// [REPORTED DISCREPANCY D-3] Pins register CHOICE 10: a mask applied to a value that cannot
-    /// honour one, such as a string.
+    /// [VERIFIED BEHAVIOUR, formerly D-3] A PowerBuilder <c>String()</c> mask carrying the <c>@</c>
+    /// character placeholder IS applied to a string value, by string surgery, because that is the
+    /// only way such a mask was ever meant to be applied.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The port drops the mask and renders the value unmasked, because <see cref="string"/> does not
-    /// implement <see cref="IFormattable"/> and there is nothing to hand the mask to.
+    /// <c>w_test_logger.srw:L103</c> points the mask field at the <c>String()</c> function's display
+    /// formats, and that dialect's string masks use <c>@</c> as a placeholder for ONE character of
+    /// the value while every other mask character is a literal. The corpus applies exactly that to a
+    /// string at five call sites: <c>:L107</c> renders <c>(@@@)-@@@@</c> over <c>"1234567"</c> as
+    /// <c>(123)-4567</c>, and <c>:L171</c>, <c>:L198</c>, <c>:L226</c> and <c>:L253</c> render
+    /// <c>\{@@@\}-(@@@@@)</c> over <c>"12345678"</c> as <c>{123}-(45678)</c>.
     /// </para>
     /// <para>
-    /// THE REGISTER CALLS THIS UNEXERCISED AND IT IS NOT. <c>w_test_logger.srw:L107</c> applies the
-    /// PowerBuilder string mask <c>(@@@)-@@@@</c> to the string <c>"1234567"</c>, and
-    /// <c>L171, L198, L226</c> and <c>L253</c> apply <c>\{@@@\}-(@@@@@)</c> to another string.
-    /// <c>w_test_logger.srw:L103</c> points at the <c>String()</c> function's masks, whose <c>@</c>
-    /// is a character placeholder - so the legacy renders <c>(123)-4567</c> where the port renders
-    /// <c>1234567</c>.
+    /// THIS TEST USED TO ASSERT THE UNMASKED DIGITS with an <c>Assert.NotEqual("(123)-4567", ...)</c>
+    /// beside them, on the reasoning that implementing the mask was a behaviour change this file
+    /// should not drive. That reasoning inverted the file's own purpose: the register had called this
+    /// case unexercised, the census proved it exercised five times over, and pinning the port's
+    /// unmasked output made the deviation a gate that the correction would have had to break. The
+    /// implementation now applies the mask [Formatting.cs DECISION 15] and the rows below assert the
+    /// legacy's output.
     /// </para>
     /// <para>
-    /// Pinned, not fixed, for the reasons given in the file header: implementing the <c>@</c> string
-    /// mask is a behaviour change this file is not the place to make, and asserting it before it
-    /// exists would redden the gate without moving the work forward. All five affected call sites
-    /// are in <c>pfw.tests.pbl.src</c>, which no in-scope service depends on.
+    /// The dispatch turns on the MASK rather than on the value, which is what keeps this from
+    /// swallowing the case CHOICE 10 still covers: a mask with no <c>@</c> in it cannot be a string
+    /// mask, so a date or numeric mask landing on a string is still dropped - see
+    /// <see cref="SprintfNonStringMaskOnAStringIsAnInferredChoice"/>.
     /// </para>
     /// </remarks>
     [Fact]
-    public void SprintfMaskOnNonFormattableValueIsAnInferredChoice()
+    public void SprintfStringMaskIsAppliedToAStringAsTheLegacyDoes()
+    {
+        // The live mask from w_test_logger.srw:L107, over the value that call site passes.
+        Assert.Equal("(123)-4567", Formatting.Sprintf("{1:(@@@)-@@@@}", "1234567"));
+
+        // The live mask from :L171 after its escapes are decoded, over the value those call sites
+        // pass. Asserted here without the alignment so the mask's own output is visible.
+        Assert.Equal("{123}-(45678)", Formatting.Sprintf("{1:\\{@@@\\}-(@@@@@)}", "12345678"));
+
+        // Alignment is applied AFTER masking, not instead of it, which is how the affected corpus
+        // columns line up: ten masked characters padded to the declared width of 20.
+        Assert.Equal(
+            "          (123)-4567",   // 10 spaces + 10 characters = 20
+            Formatting.Sprintf("{1,20:(@@@)-@@@@}", "1234567"));
+
+        // A mask that is nothing but placeholders is a pure truncation to that width.
+        Assert.Equal("abc", Formatting.Sprintf("{1:@@@}", "abcdef"));
+
+        // The mask's literal characters are emitted as written even when the value is empty, so the
+        // shape survives rather than collapsing.
+        Assert.Equal("()", Formatting.Sprintf("{1:(@@@)}", ""));
+    }
+
+    /// <summary>
+    /// [CHARACTERIZES THE PORT] Pins register CHOICE 14: a string mask with more <c>@</c>
+    /// placeholders than the value has characters.
+    /// </summary>
+    /// <remarks>
+    /// The surplus placeholders emit NOTHING, so a short value is not padded and no filler character
+    /// is invented, while the mask's literals around them are still emitted. No corpus call site
+    /// passes a value shorter than its mask, so this is a choice; it is the conservative one, because
+    /// inventing a filler would put characters in the output that neither the mask nor the value
+    /// contains.
+    /// </remarks>
+    [Fact]
+    public void SprintfStringMaskExhaustedValueIsAnInferredChoice()
+    {
+        Assert.Equal("(12)-", Formatting.Sprintf("{1:(@@@)-@@@@}", "12"));
+        Assert.Equal("()", Formatting.Sprintf("{1:(@@@)}", ""));
+        Assert.Equal("a", Formatting.Sprintf("{1:@@@@}", "a"));
+    }
+
+    /// <summary>
+    /// [CHARACTERIZES THE PORT] Pins register CHOICE 15: a value with more characters than the mask
+    /// has <c>@</c> placeholders.
+    /// </summary>
+    /// <remarks>
+    /// The surplus characters are DROPPED. A mask states a fixed shape, so appending an unmasked tail
+    /// would produce output matching neither the mask nor the value. Unadjudicated by the corpus,
+    /// where <c>:L107</c>'s seven <c>@</c> exactly match its seven-character value and
+    /// <c>:L171</c>'s eight exactly match its eight.
+    /// </remarks>
+    [Fact]
+    public void SprintfStringMaskSurplusCharactersAreAnInferredChoice()
+    {
+        Assert.Equal("(123)", Formatting.Sprintf("{1:(@@@)}", "123456"));
+        Assert.Equal("ab", Formatting.Sprintf("{1:@@}", "abcdefgh"));
+    }
+
+    /// <summary>
+    /// [CHARACTERIZES THE PORT] Pins register CHOICE 10 as it now stands: a mask that carries NO
+    /// <c>@</c> placeholder, applied to a value that cannot honour a .NET format string.
+    /// </summary>
+    /// <remarks>
+    /// Such a mask cannot be a <c>String()</c> character mask and cannot be handed to the value
+    /// either, so it is dropped and the value renders unmasked. This is the residue of the original
+    /// CHOICE 10 once the <c>@</c> case was promoted to verified behaviour, and it is genuinely
+    /// unexercised: no corpus call site applies a date or numeric mask to a string.
+    /// </remarks>
+    [Fact]
+    public void SprintfNonStringMaskOnAStringIsAnInferredChoice()
     {
         // A date mask on a string: dropped, value rendered as-is.
         Assert.Equal("not-a-date", Formatting.Sprintf("{1:YYYY-MM-DD}", "not-a-date"));
 
-        // A numeric mask on a string: also dropped, rather than applied by string surgery.
+        // A numeric mask on a string: also dropped, rather than applied by string surgery. Note this
+        // is the row that would move if the '@' test were ever loosened into "any mask on a string
+        // is a string mask".
         Assert.Equal("12345", Formatting.Sprintf("{1:###,###}", "12345"));
 
-        // D-3: the live PowerBuilder string mask from w_test_logger.srw:L107. The port renders the
-        // digits unmasked; the legacy would render "(123)-4567". The inequality is what records the
-        // divergence, so a future implementation of the @ mask breaks a named assertion on purpose.
-        Assert.Equal("1234567", Formatting.Sprintf("{1:(@@@)-@@@@}", "1234567"));
-        Assert.NotEqual("(123)-4567", Formatting.Sprintf("{1:(@@@)-@@@@}", "1234567"));
-
-        // The alignment beside a dropped mask is still honoured, which is how the affected corpus
-        // columns keep their width even while the mask is ignored.
+        // Alignment beside a dropped mask is still honoured.
         Assert.Equal(
             "             1234567",   // 13 spaces + 7 characters = 20
-            Formatting.Sprintf("{1,20:(@@@)-@@@@}", "1234567"));
+            Formatting.Sprintf("{1,20:###,###}", "1234567"));
     }
 
     /// <summary>

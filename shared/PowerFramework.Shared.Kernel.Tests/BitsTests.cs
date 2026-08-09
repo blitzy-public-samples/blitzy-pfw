@@ -133,6 +133,26 @@
 //  place to revise. Everything outside those three is either a declared width, a canonical macro
 //  identity, or an algebraic property of the operator the plan sanctions as the substitute.
 //
+//  DP-7 EVIDENCE STATUS - THESE THREE ARE NOT GOLDEN-MASTER PARITY
+//  --------------------------------------------------------------------------------------------
+//  Said in the terms a parity report uses, because "CHARACTERIZED FROM THE PORT" states the
+//  provenance without naming the standard it falls short of. I-1, I-2 and I-3 are TARGET
+//  REGRESSION GUARDS: each pins a choice so a later edit to Bits.cs cannot move it silently, and
+//  none of them can detect a disagreement with pfw.dll, because no recording of pfw.dll's output
+//  exists in this repository to compare against. Golden-Master parity means such a comparison was
+//  made; here it was not.
+//
+//  Promoting I-1, I-2 or I-3 to parity evidence requires a paired recording under
+//  characterization/recordings/{legacy,dotnet}/<workflowId>/, captured against one unrecreated
+//  persistence-db volume state. Until one exists, none of the three may be reported as verified
+//  legacy behaviour in docs/PARITY.md or in any published summary, and IF A RECORDING CONTRADICTS
+//  ONE THE RECORDING WINS - the test is corrected, not defended for having passed.
+//
+//  This qualification is deliberately confined to the three. The declared widths, the canonical
+//  macro identities and the operator algebra are TIER 1 TRACEABLE, each settled by the cited
+//  ws_objects/pfw.common.pbl.src/*.srf locator, and downgrading them alongside the inferences
+//  would understate evidence that genuinely exists.
+//
 //  ONE CONTRACT IS SETTLED FROM THE CORPUS RATHER THAN INFERRED
 //  --------------------------------------------------------------------------------------------
 //  BitTest is a MASK test with ANY-BIT semantics, and that is derived rather than assumed.

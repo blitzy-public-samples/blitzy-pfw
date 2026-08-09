@@ -759,4 +759,3 @@ public static class Predicates
         return value is not null;
     }
 }
-

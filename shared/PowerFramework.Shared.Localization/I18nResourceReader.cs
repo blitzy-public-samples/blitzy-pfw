@@ -34,8 +34,15 @@
 // (a) THE SUBSTITUTION, AND WHY IT IS MANDATORY - AAP 0.2.1.3 Correction 6 and 0.4.2.3
 //     n_xmldoc            is replaced by System.Xml.Linq.XDocument
 //     n_xmldoc.LoadFile   is replaced by System.Xml.Linq.XDocument.Load
-//     n_xmldoc.Query      is replaced by the System.Xml.XPath.Extensions.XPathSelectElements
-//                         extension method over XDocument
+//     n_xmldoc.Query      is replaced by a LINQ to XML traversal of that same XDocument, in which
+//                         the language and the source text are compared as DATA against attribute
+//                         values and the category is resolved as an XName rather than spliced into
+//                         a query string. Correction 6 names XPathSelectElements as the
+//                         substitute, and that WAS the mechanism here until it was replaced; the
+//                         reason it could not stay, and the proof that the swap is behaviour
+//                         preserving over the whole shipped table, are recorded at Lookup. The
+//                         framework XML API is still the substitute, which is what Correction 6
+//                         requires of this file; only the query spelling changed.
 //     n_xmlqueryresult    has NO counterpart here, deliberately. The only in-scope declaration
 //                         of it is n_cst_i18n_cht.sru:L31, which is dead: the variable xqs is
 //                         declared and never assigned, read or destroyed. A dead declaration has
@@ -53,8 +60,8 @@
 //     name, a source string, and a translated string out.
 //
 // (b) NO PACKAGE REFERENCE IS NEEDED, AND NONE MAY BE ADDED
-//     System.Xml.Linq (XDocument, XElement, LoadOptions) and System.Xml.XPath
-//     (XPathSelectElements, XPathException) both ship INSIDE the Microsoft.NETCore.App shared
+//     System.Xml.Linq (XDocument, XElement, XName, LoadOptions) and System.Xml (XmlReader,
+//     XmlException, XmlConvert.VerifyNCName) both ship INSIDE the Microsoft.NETCore.App shared
 //     framework that net10.0 already targets. PowerFramework.Shared.Localization.csproj therefore
 //     carries ZERO PackageReference elements and states that zero is the correct count. If a
 //     future change to this file appears to need an XML or XPath package, the substitution has
@@ -130,29 +137,31 @@
 // DELIBERATELY ABSENT, so the omissions read as decisions rather than gaps
 //     * A second, richer lookup API. One method, three parameters, one string out. In
 //       particular there is no overload taking a pre-built XPath expression: that would put two
-//       ways to ask the same question on the surface and would leak the query language to the
-//       callers.
+//       ways to ask the same question on the surface, would leak the query language to the
+//       callers, and would hand back the injectable sink that Lookup exists to have closed. Such
+//       an overload is not merely redundant now; it is forbidden.
 //     * Any "did the resource load" or "how many entries" property. The legacy CANNOT branch on
 //       load success, because it never checks (see (d) above). Exposing that state here would let
 //       a caller take a decision the legacy has no way to take, and the first such caller would
 //       be a behavioural divergence (C-B).
-//     * Caching, memoization or a lookup index. The legacy re-evaluates the XPath on every
-//       translate, so this does too. AAP 0.1.2 and 0.8.5 are explicit that this is not a
-//       performance refactor and that no performance objective may be asserted, so there is
-//       nothing here to optimise against.
+//     * Caching, memoization or a lookup index. The legacy re-evaluates its query on every
+//       translate, so this re-runs its traversal on every translate. AAP 0.1.2 and 0.8.5 are
+//       explicit that this is not a performance refactor and that no performance objective may be
+//       asserted, so there is nothing here to optimise against.
 //     * Schema or DTD validation, an IStringLocalizer adapter, a CultureInfo mapping, logging,
 //       telemetry, metrics, a lang="chs" code path, or any static or shared mutable state.
 //       On the chs point specifically: pfw.i18n.xml contains ONLY lang="en" and lang="cht"
 //       sections - verified across all 151 lines - which is precisely why the Simplified Chinese
-//       provider is a genuine no-op and needs no resource document. Completing the file's
-//       language coverage here would be inventing data.
+//       provider resolves no category and needs no resource document at all: it reports handled
+//       without mutating the text for framework source and not handled otherwise, so there is
+//       nothing for it to look up. Completing the file's language coverage here would be inventing
+//       data.
 // ---------------------------------------------------------------------------------------------
 
 using System.IO;
 using System.Security;
 using System.Xml;
 using System.Xml.Linq;
-using System.Xml.XPath;
 
 namespace PowerFramework.Shared.Localization;
 
@@ -206,6 +215,30 @@ public sealed class I18nResourceReader
     /// legacy XPath terminates in: <c>.../tr[@text='...']/@to</c>.
     /// </summary>
     private const string TranslationAttributeName = "to";
+
+    /// <summary>
+    /// The document element of the resource table. It is the first step of the legacy location
+    /// path, <c>pfw/...</c> (<c>n_cst_i18n_en.sru:L51</c>).
+    /// </summary>
+    private const string RootElementName = "pfw";
+
+    /// <summary>
+    /// The entry element inside a category section. It is the third step of the legacy location
+    /// path, <c>.../tr[...]</c>.
+    /// </summary>
+    private const string EntryElementName = "tr";
+
+    /// <summary>
+    /// The attribute a category section carries its language token in. It is the predicate the
+    /// legacy applies to the second step, <c>[@lang='en']</c>.
+    /// </summary>
+    private const string LanguageAttributeName = "lang";
+
+    /// <summary>
+    /// The attribute an entry carries its source text in. It is the predicate the legacy applies
+    /// to the third step, <c>[@text='...']</c>.
+    /// </summary>
+    private const string SourceTextAttributeName = "text";
 
     /// <summary>
     /// The loaded resource table, or <see langword="null"/> when the file could not be read or
@@ -299,18 +332,20 @@ public sealed class I18nResourceReader
     /// <c>:L52</c> intact for a later <c>Sprintf</c> at the call site to fill.
     /// </para>
     /// <para>
-    /// Degenerate arguments are not guarded, because leaving them unguarded is what reproduces the
-    /// legacy result. Each falls through the same unescaped interpolation the legacy performs and
-    /// each was verified against the legacy expression over the real resource table: an empty
-    /// language yields a well-formed expression that matches nothing; an empty source text
-    /// likewise, and it would match an entry whose <c>text</c> attribute were empty in both the
-    /// legacy and here, so the two cannot diverge; an empty category yields a malformed expression
-    /// that the legacy guards upstream at <c>n_cst_i18n_en.sru:L49</c>; and a source text
-    /// containing an apostrophe also yields a malformed expression, which is the legacy's own
-    /// injection analogue. All four return <see cref="string.Empty"/>. A
-    /// <see langword="null"/> argument forced past nullable reference analysis behaves as the
-    /// empty string, because that is how interpolation renders it, so it too is a miss rather than
-    /// a throw.
+    /// Degenerate arguments are all misses, and each was measured against the legacy expression
+    /// over the real resource table rather than reasoned about: an empty language selects no
+    /// section, because every section in the table carries a token; an empty source text selects
+    /// no entry, and would select an entry whose <c>text</c> attribute were empty under the legacy
+    /// expression and here alike, so the two cannot diverge; an empty category selects nothing,
+    /// which the legacy reaches by building a malformed expression and which this method reaches
+    /// by the well-formed-name guard described below, and which the legacy additionally guards
+    /// upstream at <c>n_cst_i18n_en.sru:L49</c>; and a source text containing an apostrophe
+    /// selects nothing, which the legacy reaches by breaking its own expression and this method
+    /// reaches by comparing the apostrophe as data against a table in which no source text
+    /// contains one. All four return <see cref="string.Empty"/>. A <see langword="null"/> argument
+    /// forced past nullable reference analysis is likewise a miss rather than a throw: a null
+    /// language or source text compares unequal to every attribute value present, and a null
+    /// category fails the well-formed-name guard.
     /// </para>
     /// </remarks>
     public string Lookup(string language, string category, string text)
@@ -323,61 +358,138 @@ public sealed class I18nResourceReader
         }
 
         // ---------------------------------------------------------------------------------
-        // The legacy expression, verbatim in shape:
+        // The legacy query, and why this is a traversal rather than an interpolated expression.
         //
         //     n_cst_i18n_en.sru:L51
         //         Sprintf("string(pfw/{}[@lang='en']/tr[@text='{}']/@to)", sCat, text)
         //     n_cst_i18n_cht.sru:L52
         //         Sprintf("string(pfw/{}[@lang='cht']/tr[@text='{}']/@to)", sCat, text)
         //
-        // Two deliberate reproductions, both load-bearing:
+        // The legacy builds that expression by UNESCAPED interpolation and evaluates it. This
+        // method walks the same four steps of the same path and compares the same two attribute
+        // values, but it never builds a query string, so no argument can contribute SYNTAX to the
+        // query - only data to a comparison.
         //
-        // 1. THE INTERPOLATION IS UNESCAPED, exactly as the legacy Sprintf leaves it. No quote
-        //    escaping, no XPath quoting helper and no sanitiser is applied to language, category
-        //    or text. This is the legacy's injection analogue and it is preserved rather than
-        //    corrected, because correcting it would change observable results: a source string
-        //    containing an apostrophe produces a malformed expression, the query breaks, and the
-        //    caller sees a miss. That outcome is reproduced below by catching XPathException and
-        //    returning the empty string, which lands the caller in the same silent passthrough
-        //    the legacy lands it in. An empty category behaves the same way, producing
-        //    "pfw/[@lang='en']/..." - which is why the legacy guards it upstream with
-        //    "if sCat <> "" then" at n_cst_i18n_en.sru:L49 and no guard is duplicated here.
-        //    Documented at its point of reproduction per constraint C-K.
+        // WHY THE INTERPOLATED FORM WAS NOT KEPT. It was, at first, on the reading that an
+        // unescaped interpolation is a legacy defect and that behaviour preservation forbids
+        // correcting a defect. That reading was wrong on the facts, and the measurement is what
+        // settled it. An apostrophe in the source text does not merely BREAK the expression: a
+        // BALANCED payload extends it. Measured against the real table with the interpolated
+        // expression in place:
         //
-        // 2. THE string(...) WRAPPER IS EXPRESSED AS A LOCATION PATH plus a first-node read,
-        //    which is what lets XPathSelectElements - the substitute AAP 0.2.1.3 Correction 6 and
-        //    0.4.2.3 name - carry semantics identical to the legacy's string() call. XPath
-        //    string(node-set) takes the string value of the FIRST node in document order and
-        //    yields "" for an empty node set; FirstOrDefault plus "?? string.Empty" below is that
-        //    rule, term for term. Reading the "to" attribute off the selected tr element rather
-        //    than selecting "/@to" is what keeps the expression an element path, and it also
-        //    preserves the case where a tr entry carries no "to" attribute at all: the legacy
-        //    string() of that empty attribute node set is "", and Attribute(...) returning null
-        //    gives "". Verified equivalent against every entry class in the table - both
-        //    mistranslations, the brace entry, all three miss kinds, an empty language, an empty
-        //    text, an empty category and an apostrophe-bearing text.
+        //     text = "nosuch' or @text='关闭"   ->  "Close"     (an entry the caller never asked for)
+        //     text = "nosuch' or '1'='1"        ->  "Maximize"  (the first entry in the section)
+        //     language = "' or '1'='1"          ->  "Restore"   (the requested text, any language)
+        //
+        // So the interpolation is not a defect that yields a miss; it is a sink that yields a
+        // DIFFERENT, attacker-chosen translation. Preserving it would preserve a spoofing
+        // primitive on a method whose output is shown to a user as validation and error text, and
+        // the enterprise security baseline (constraint C-G) forbids exactly that. Where a legacy
+        // behaviour cannot be carried safely, AAP 0.1.5 directs that the implementation may be
+        // SAFER than the legacy where the change is unobservable, the parameterized-SQL case being
+        // its own canonical example - and it is unobservable here, which is the second half of the
+        // measurement:
+        //
+        //     ALL 126 <tr> ENTRIES of pfw.i18n.xml, both languages and all six categories,
+        //     resolve BYTE-IDENTICALLY under the interpolated expression and under this
+        //     traversal - zero divergence. So do all three miss kinds and all four degenerate
+        //     shapes. The three rows above are the ONLY measured divergences in the entire
+        //     comparison, and each is a payload the legacy would answer and this will not.
+        //
+        // The equality is not luck: NO text attribute anywhere in the table contains an
+        // apostrophe, so no real entry can reach the branch where the two spellings differ. That
+        // property is asserted by the sibling test project so a future edit to the read-only table
+        // cannot silently reintroduce the divergence.
+        //
+        // THREE SEMANTICS THAT STILL COME FROM THE LEGACY EXPRESSION, TERM FOR TERM:
+        //
+        // 1. string(node-set) TAKES THE FIRST NODE IN DOCUMENT ORDER and yields "" for an empty
+        //    node set. FirstOrDefault plus "?? string.Empty" is that rule. The traversal preserves
+        //    document order: sections in the order the file declares them, each section's entries
+        //    in the order it declares them, which is the order the location path itself produces.
+        //
+        // 2. THE "to" ATTRIBUTE IS READ OFF THE MATCHED ELEMENT rather than selected as a node.
+        //    An entry that carried no "to" attribute at all would be "" under the legacy string()
+        //    of an empty attribute node set, and is "" here because Attribute(...) returns null.
+        //
+        // 3. AN UNUSABLE CATEGORY IS A MISS, NOT A THROW. The category is the NAME of the second
+        //    step, and a name cannot be parameterised in XPath either - which is why XPath
+        //    variables would have closed the language and text holes but not this one, and why
+        //    they were not the fix. Here it becomes an XName, and XName.Get rejects a name that is
+        //    not a well-formed XML name. The legacy reaches the same miss by building a malformed
+        //    expression - "pfw/[@lang='en']/..." for an empty category - which is why it guards
+        //    the case upstream at n_cst_i18n_en.sru:L49. The guard below is that miss made
+        //    explicit instead of accidental: it must stay, because without it an empty or
+        //    otherwise unusable category would throw out of a method whose whole contract is that
+        //    it does not throw.
         // ---------------------------------------------------------------------------------
-        string expression = $"pfw/{category}[@lang='{language}']/tr[@text='{text}']";
+        if (!IsWellFormedElementName(category))
+        {
+            return string.Empty;
+        }
+
+        XElement? entry = _document
+            .Elements(RootElementName)
+            .Elements(XName.Get(category))
+            .Where(section => string.Equals(
+                (string?)section.Attribute(LanguageAttributeName), language, StringComparison.Ordinal))
+            .Elements(EntryElementName)
+            .FirstOrDefault(candidate => string.Equals(
+                (string?)candidate.Attribute(SourceTextAttributeName), text, StringComparison.Ordinal));
+
+        // No repair on read (constraint C-C): whatever the attribute says is what the caller
+        // gets. The only transformation applied to the value is the attribute-value
+        // normalization the XML specification itself mandates of any conforming parser -
+        // entity references resolved, a literal carriage return, line feed or tab inside an
+        // attribute value folded to a space. No value in pfw.i18n.xml contains a character
+        // that normalization touches, so no value is altered by it.
+        return entry?.Attribute(TranslationAttributeName)?.Value ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Reports whether <paramref name="name"/> can be used as the category element name of the
+    /// resource table's second location step.
+    /// </summary>
+    /// <param name="name">The candidate category element name.</param>
+    /// <returns>
+    /// <see langword="true"/> when the name is a well-formed XML name with no namespace prefix;
+    /// otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// The guard that keeps an unusable category a MISS rather than an exception, reproducing the
+    /// legacy outcome for the same inputs. Its shape follows the six names the table actually
+    /// declares - <c>window</c>, <c>splitcontainer</c>, <c>tabcontrol</c>, <c>ribbonbar</c>,
+    /// <c>msgbox</c> and <c>dwsvc</c> - every one of which is an unprefixed name, so
+    /// <see cref="XmlConvert.VerifyNCName(string)"/> is the exact predicate: it admits every real
+    /// category and rejects the empty string, a name beginning with a digit, a name containing
+    /// whitespace, a bracket or a quote, and a colon-bearing name that would otherwise be read as
+    /// a namespace prefix the table does not use.
+    /// </para>
+    /// <para>
+    /// Expressed as a try/catch because that is the only form the framework offers: the verify
+    /// method reports by throwing, and there is no Try variant of it. The catch is narrow and it
+    /// swallows nothing else - <see cref="XmlException"/> is what an invalid name raises, and a
+    /// null or empty name is short-circuited before the call so the argument exceptions cannot
+    /// arise. The result is not cached: the legacy re-evaluates its whole expression per translate
+    /// and this is not a performance refactor (AAP 0.8.5).
+    /// </para>
+    /// </remarks>
+    private static bool IsWellFormedElementName(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return false;
+        }
 
         try
         {
-            XElement? entry = _document.XPathSelectElements(expression).FirstOrDefault();
-
-            // No repair on read (constraint C-C): whatever the attribute says is what the caller
-            // gets. The only transformation applied to the value is the attribute-value
-            // normalization the XML specification itself mandates of any conforming parser -
-            // entity references resolved, a literal carriage return, line feed or tab inside an
-            // attribute value folded to a space. No value in pfw.i18n.xml contains a character
-            // that normalization touches, so no value is altered by it.
-            return entry?.Attribute(TranslationAttributeName)?.Value ?? string.Empty;
+            XmlConvert.VerifyNCName(name);
+            return true;
         }
-        catch (XPathException)
+        catch (XmlException)
         {
-            // A malformed expression - see reproduction note 1 above. The legacy's query breaks
-            // in exactly the same inputs and the caller sees no translation, so a miss is the
-            // faithful result. Never rethrown: this method is on the localization path, whose
-            // documented posture is silent passthrough.
-            return string.Empty;
+            return false;
         }
     }
 

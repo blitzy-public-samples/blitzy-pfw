@@ -17,10 +17,13 @@
     HAND-AUTHORED ON PURPOSE, NOT TEMPLATED.
     `dotnet new xunit3` does not exist in SDK 10.0.302 (it exits 103 and suggests searching
     NuGet.org), and `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and an
-    older coverage collector. Neither can produce this file, so it is written by hand and its
-    shape is the canonical one the three sibling service test projects mirror:
-    plain versionless PackageReference elements with no PrivateAssets or IncludeAssets metadata,
-    matching the metadata convention the SDK's own test template uses.
+    older coverage collector. Neither can produce this file, so it is written by hand, and its
+    shape mirrors the Gateway sibling element for element because the four service test manifests
+    must be structurally identical: versionless PackageReference elements throughout, with
+    PrivateAssets and IncludeAssets metadata on exactly the two build-time tooling packages
+    (xunit.runner.visualstudio and coverlet.collector) and on neither of the three library ones.
+    Gateway is the reference; DataServices and Security carry the same pairing. If this file ever
+    disagrees with those three, this file is the one that is wrong.
 
     NOTHING INHERITED IS RESTATED HERE.
     TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors,
@@ -113,9 +116,35 @@
   -->
   <ItemGroup Label="Test stack">
     <PackageReference Include="xunit.v3" />
-    <PackageReference Include="xunit.runner.visualstudio" />
+
+    <!--
+      THE TWO TOOLING PACKAGES CARRY ASSET METADATA; THE THREE LIBRARY PACKAGES DO NOT.
+      The split is not cosmetic and it matches the Gateway, DataServices and Security siblings
+      element for element, which is the point - four structurally identical service test manifests
+      mean a reader who has understood one has understood all four.
+
+      PrivateAssets=all stops these two flowing onward to anything that references this assembly.
+      They are build-time tooling, not part of any API surface, so propagating them would put test
+      infrastructure into an unrelated project's dependency closure.
+
+      IncludeAssets deliberately RETAINS `build`, and dropping it would be the damaging mistake
+      here: both packages deliver their registration through MSBuild targets in their `build`
+      assets, so a narrower list silently disables discovery and collection. The failure mode is
+      the worst kind - the test command still exits successfully while finding nothing, and the
+      coverage gate then reads a Cobertura report with no data, which looks like success.
+    -->
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
-    <PackageReference Include="coverlet.collector" />
+
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
   </ItemGroup>
 

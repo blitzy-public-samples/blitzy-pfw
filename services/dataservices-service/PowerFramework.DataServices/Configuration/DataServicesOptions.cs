@@ -269,8 +269,10 @@ public sealed class LocalizationOptions
     /// <para>
     /// The accepted values are exactly three, taken from the provider selection at
     /// <c>pfw.sra:L95-L102</c>: <c>"en"</c> selects the English provider, <c>"chs"</c> the
-    /// Simplified Chinese provider - a genuine no-op, because Simplified Chinese is the base
-    /// locale - and <c>"cht"</c> the Traditional Chinese provider. The validator enforces that
+    /// Simplified Chinese provider - which reports <em>handled</em> without mutating the text for
+    /// framework-sourced strings and <em>not handled</em> for anything else, because Simplified
+    /// Chinese is the base locale - and <c>"cht"</c> the Traditional Chinese provider. The validator
+    /// enforces that
     /// set, and it compares ORDINALLY: PowerScript's <c>choose case</c> on strings is
     /// case-sensitive, so the legacy would not have matched a differently cased spelling either.
     /// </para>
@@ -1026,9 +1028,15 @@ public sealed class EventChainOptions
 /// it would move its path and break the sibling appsettings.json that declares it there.
 /// </para>
 /// <para>
-/// Validated by data annotations through startup validation, which is fatal for the same fail-fast
-/// reason recorded on <see cref="DataServicesOptions"/>: a service that cannot verify an inbound
-/// credential must not start and then accept requests it cannot authenticate.
+/// Validated at startup by <see cref="JwtAuthenticationOptionsValidator"/>, which is fatal for the
+/// same fail-fast reason recorded on <see cref="DataServicesOptions"/>: a service that cannot verify
+/// an inbound credential must not start and then accept requests it cannot authenticate. The
+/// annotations on the members below are necessary but NOT sufficient, and an earlier form of this file
+/// claimed otherwise. An attribute can say that an authority is present; it cannot say that the value
+/// is an absolute address, that its scheme is one the handler can fetch metadata over, or that it does
+/// not directly contradict <see cref="RequireHttpsMetadata"/>. Each of those survives an
+/// annotation-only check and then fails at metadata retrieval or on the first protected request, long
+/// after the process reported itself started. They are enforced in the validator instead.
 /// </para>
 /// </remarks>
 public sealed class JwtAuthenticationOptions
@@ -1159,9 +1167,10 @@ public sealed class JwtAuthenticationOptions
 /// discover them one restart at a time.
 /// </para>
 /// <para>
-/// Its subject is <see cref="DataServicesOptions"/> only. <see cref="JwtAuthenticationOptions"/>
-/// binds a different section, and its rules are expressible as annotations on its own members, so it
-/// needs no counterpart here.
+/// Its subject is <see cref="DataServicesOptions"/> only. <see cref="JwtAuthenticationOptions"/> binds
+/// a different section and has its own counterpart, <see cref="JwtAuthenticationOptionsValidator"/>,
+/// registered separately. One validator per bound section, so a failure message always names a
+/// section that exists.
 /// </para>
 /// <para>
 /// TWO OMISSIONS BELOW ARE DELIBERATE AND LOAD BEARING, and both are marked at the point of
@@ -1373,27 +1382,15 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
     }
 
     /// <summary>
-    /// Appends a failure when a required upstream address is present but is not a usable absolute
+    /// Appends a failure when a required upstream address is present but is not a usable absolute base
     /// address.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// An empty value is passed over here rather than reported twice: the presence annotation on the
-    /// property has already reported it, and two messages for one fault reads as two faults.
-    /// </para>
-    /// <para>
-    /// TWO CHECKS RATHER THAN ONE, AND THE SECOND IS NOT DECORATION. Absolute-URI parseability alone
-    /// is a weaker rule than it looks on the target platform, which is Linux containers: on a Unix
-    /// host a rooted filesystem path such as <c>/v1/persistence</c> parses successfully AS AN
-    /// ABSOLUTE URI, because it is a well-formed local-file address. Measured directly on this
-    /// toolchain rather than assumed. A value like that would therefore pass a parse-only rule at
-    /// startup and then fail when the channel or client is constructed, which is precisely the
-    /// late-and-hard-to-attribute failure that startup validation exists to prevent. Requiring the
-    /// parsed scheme to be one of the two the clients can actually use closes that gap, and it
-    /// excludes nothing a deployment could legitimately want: the Persistence contract is gRPC over
-    /// HTTP/2 and the Security contract is REST over HTTP, so neither has any other reachable
-    /// scheme.
-    /// </para>
+    /// property has already reported it, and two messages for one fault reads as two faults. Every
+    /// other rule, and the reasoning behind each, lives in <see cref="ConfiguredAddress"/>, which the
+    /// authentication validator applies to the same effect - one rule set, applied twice, rather than
+    /// two copies able to drift.
     /// </remarks>
     private static void AppendAddressFailure(string value, string configurationPath, List<string> failures)
     {
@@ -1402,27 +1399,10 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
             return;
         }
 
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? parsed))
+        string? fault = ConfiguredAddress.DescribeFault(value, configurationPath, allowQuery: false);
+        if (fault is not null)
         {
-            failures.Add(string.Concat(
-                configurationPath,
-                " must be an absolute address, for example a scheme, host and port. Supplied: \"",
-                value,
-                "\"."));
-            return;
-        }
-
-        if (!string.Equals(parsed.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
-            && !string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
-        {
-            failures.Add(string.Concat(
-                configurationPath,
-                " must use the http or https scheme, which are the only two the typed clients can ",
-                "reach. Supplied scheme: \"",
-                parsed.Scheme,
-                "\", from \"",
-                value,
-                "\"."));
+            failures.Add(fault);
         }
     }
 
@@ -1510,5 +1490,331 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
                 value.ToString(null, CultureInfo.InvariantCulture),
                 "\"."));
         }
+    }
+}
+
+/// <summary>
+/// Validates a bound <see cref="JwtAuthenticationOptions"/> instance at startup.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Registered by Program.cs alongside the binding of the <c>Authentication:Jwt</c> section, exactly as
+/// <see cref="DataServicesOptionsValidator"/> is registered for the <c>DataServices</c> section:
+/// <c>services.AddSingleton&lt;IValidateOptions&lt;JwtAuthenticationOptions&gt;,
+/// JwtAuthenticationOptionsValidator&gt;()</c> together with <c>ValidateOnStart</c>. Because this type
+/// runs the section's data annotations itself, the registration must NOT also call
+/// <c>ValidateDataAnnotations</c>, or every presence failure would be reported twice and read as two
+/// faults. One validator per bound section is the rule this file follows throughout.
+/// </para>
+/// <para>
+/// WHY THIS TYPE EXISTS. An earlier form of this file asserted that the section's rules "are
+/// expressible as annotations on its own members, so it needs no counterpart here". They are not. An
+/// attribute can establish that <see cref="JwtAuthenticationOptions.Authority"/> is present; it cannot
+/// establish that the value is an absolute address, that its scheme is one over which the framework's
+/// bearer handler can retrieve discovery metadata, that
+/// <see cref="JwtAuthenticationOptions.MetadataAddress"/> - which carries no annotation at all, being
+/// optional - is usable when supplied, or that
+/// <see cref="JwtAuthenticationOptions.RequireHttpsMetadata"/> does not directly contradict the scheme
+/// of the endpoint it governs. Every one of those defects survives an annotation-only check and then
+/// surfaces at metadata retrieval or on the first protected request, by which time the process has
+/// reported itself started and is accepting traffic it cannot authenticate. Catching them at startup is
+/// the same fail-fast posture the legacy framework had when a structural fault terminated the
+/// application outright - its systemerror handler unpacks a seven-field assertion payload and then
+/// executes <c>HALT CLOSE</c> [ws_objects/pfw.pbl.src/pfw.sra:L111-L144] - rather than degrading into a
+/// service that answers requests it cannot verify.
+/// </para>
+/// <para>
+/// THE TLS CONSISTENCY RULE IS THE ONE NO SINGLE ATTRIBUTE COULD EVER SEE, because it is a relationship
+/// between two properties. Requiring transport-secured metadata while pointing at a plain-http
+/// authority is a contradiction: the handler would discover it only on its first fetch. Note the
+/// direction of the check. A plain-http endpoint with the requirement switched OFF is legitimate and is
+/// deliberately allowed - that is the local topology, where every service address is plain http on a
+/// private container network - so the rule fires only on the combination that cannot work.
+/// </para>
+/// <para>
+/// VERIFICATION ONLY, AND NOTHING HERE CHANGES THAT. This type inspects addresses, an audience and four
+/// boolean switches. It reads no key material, because the section carries none: Security is the sole
+/// issuer in this system and this service holds verification material only. Nothing in this type may
+/// ever validate, parse or normalise a signing value, because there is none here to validate.
+/// </para>
+/// <para>
+/// ALL failures are collected and returned together rather than the first one being thrown, for the
+/// same reason as the sibling validator: a deployment correcting its configuration should see every
+/// fault in one startup attempt instead of discovering them one restart at a time.
+/// </para>
+/// </remarks>
+public sealed class JwtAuthenticationOptionsValidator : IValidateOptions<JwtAuthenticationOptions>
+{
+    /// <summary>
+    /// Validates one bound instance.
+    /// </summary>
+    /// <param name="name">
+    /// The named options instance being validated, or <see langword="null"/> or empty for the default
+    /// instance. Included in every message so a fault in a named instance is attributable.
+    /// </param>
+    /// <param name="options">The bound instance to validate.</param>
+    /// <returns>
+    /// <see cref="ValidateOptionsResult.Success"/> when no rule is broken, otherwise a failure result
+    /// carrying one message per broken rule, each prefixed with the configuration path it belongs to.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    public ValidateOptionsResult Validate(string? name, JwtAuthenticationOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        List<string> failures = [];
+        string prefix = string.IsNullOrEmpty(name)
+            ? JwtAuthenticationOptions.SectionName
+            : string.Concat(JwtAuthenticationOptions.SectionName, "[", name, "]");
+
+        // --- The annotations first, so a missing value is reported once and by name ---------------
+        ValidationContext context = new(options);
+        List<ValidationResult> annotationResults = [];
+        if (!Validator.TryValidateObject(options, context, annotationResults, validateAllProperties: true))
+        {
+            foreach (ValidationResult result in annotationResults)
+            {
+                string message = result.ErrorMessage ?? "is invalid.";
+                bool attributed = false;
+
+                foreach (string member in result.MemberNames)
+                {
+                    attributed = true;
+                    failures.Add(string.Concat(prefix, ":", member, " ", message));
+                }
+
+                if (!attributed)
+                {
+                    failures.Add(string.Concat(prefix, " ", message));
+                }
+            }
+        }
+
+        // --- Authority: a usable absolute base address ---------------------------------------------
+        // The discovery document and the published verification set are resolved BENEATH this address,
+        // so it is a base address and is held to the base-address shape: no credentials, no query, no
+        // fragment. A blank value is passed over because the annotation above has already named it.
+        if (!string.IsNullOrWhiteSpace(options.Authority))
+        {
+            string authorityPath = string.Concat(prefix, ":", nameof(JwtAuthenticationOptions.Authority));
+            string? authorityFault = ConfiguredAddress.DescribeFault(
+                options.Authority, authorityPath, allowQuery: false);
+
+            if (authorityFault is not null)
+            {
+                failures.Add(authorityFault);
+            }
+            else
+            {
+                AppendHttpsConsistencyFailure(options, options.Authority, authorityPath, failures);
+            }
+        }
+
+        // --- MetadataAddress: optional, and only validated when supplied ---------------------------
+        // Unset is the normal case and is correct whenever the authority is addressed directly, so an
+        // absent value is not a fault. A PRESENT one must be usable, because the handler requires an
+        // absolute address of it: an unusable value here is a fault the handler would only discover on
+        // its first fetch, which is precisely what this validator exists to pre-empt. A query string is
+        // permitted, unlike on the authority, because this is a complete document address rather than a
+        // base onto which paths are composed, so a query on it is transmitted as written.
+        if (options.MetadataAddress is not null)
+        {
+            string metadataPath = string.Concat(
+                prefix, ":", nameof(JwtAuthenticationOptions.MetadataAddress));
+
+            if (string.IsNullOrWhiteSpace(options.MetadataAddress))
+            {
+                // Present but blank, which is distinguished from absent deliberately. An unset property
+                // means "derive the discovery address from the authority" and is the normal case; a
+                // property written and then left empty means a configuration entry was started and not
+                // finished, which is a mistake rather than a choice, and silently treating it as unset
+                // would hide it.
+                failures.Add(string.Concat(
+                    metadataPath,
+                    " was supplied but is blank. Remove the key entirely to derive the discovery ",
+                    "address from the authority, rather than setting it to an empty value."));
+            }
+            else
+            {
+                string? metadataFault = ConfiguredAddress.DescribeFault(
+                    options.MetadataAddress, metadataPath, allowQuery: true);
+
+                if (metadataFault is not null)
+                {
+                    failures.Add(metadataFault);
+                }
+                else
+                {
+                    AppendHttpsConsistencyFailure(
+                        options, options.MetadataAddress, metadataPath, failures);
+                }
+            }
+        }
+
+        return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+    }
+
+    /// <summary>
+    /// Appends a failure when transport-secured metadata is required but the endpoint that would be
+    /// retrieved is not an https address.
+    /// </summary>
+    /// <remarks>
+    /// Only ever called with an address that has already been proven parseable and http or https, so the
+    /// parse below cannot fail for a reason this method would have to report. The one-directional rule
+    /// is deliberate and is explained on the type: a plain-http endpoint with the requirement switched
+    /// off is the supported local topology, so only the contradictory combination is rejected.
+    /// </remarks>
+    private static void AppendHttpsConsistencyFailure(
+        JwtAuthenticationOptions options,
+        string address,
+        string configurationPath,
+        List<string> failures)
+    {
+        if (!options.RequireHttpsMetadata)
+        {
+            return;
+        }
+
+        if (Uri.TryCreate(address, UriKind.Absolute, out Uri? parsed)
+            && !string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                " is not an https address, but ",
+                nameof(JwtAuthenticationOptions.RequireHttpsMetadata),
+                " is true, so discovery metadata could never be retrieved from it. Either publish the ",
+                "endpoint over https, or set ",
+                nameof(JwtAuthenticationOptions.RequireHttpsMetadata),
+                " to false for a plain-http topology - and set it in the development settings file ",
+                "rather than in the base settings, so the relaxation reaches only the environment that ",
+                "asked for it."));
+        }
+    }
+}
+
+/// <summary>
+/// Shared shape checking for every configured address in this file.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Internal, static and deliberately small. It exists so that the upstream service addresses and the
+/// authentication endpoints are held to ONE rule set rather than to two copies able to drift, and it
+/// lives in this file because the scope of this folder is one file. It adds no public surface and holds
+/// no state. Its counterpart in the Gateway service applies the identical rules to that service's own
+/// addresses, so an operator sees the same diagnosis from either service.
+/// </para>
+/// <para>
+/// PARSEABILITY ALONE IS A WEAKER RULE THAN IT LOOKS, and the scheme check is not decoration. On the
+/// target platform, which is Linux containers, a rooted filesystem path such as <c>/v1/persistence</c>
+/// parses successfully AS AN ABSOLUTE URI, because it is a well-formed local-file address. Measured
+/// directly on this toolchain rather than assumed. A value like that would pass a parse-only rule at
+/// startup and then fail when a channel or client was constructed - the late, hard-to-attribute failure
+/// that startup validation exists to prevent. Constraining the parsed scheme closes that gap and
+/// excludes nothing a deployment could legitimately want: the Persistence contract is gRPC over HTTP/2,
+/// the Security contract is REST over HTTP, and the discovery endpoints are plain HTTP, so none of them
+/// has any other reachable scheme.
+/// </para>
+/// <para>
+/// THREE FURTHER COMPONENTS ARE REJECTED, each of which parses successfully and each of which would
+/// otherwise fail late and confusingly:
+/// </para>
+/// <list type="bullet">
+/// <item><description>
+/// <see cref="Uri.UserInfo"/> - credentials embedded in the address, as in
+/// <c>http://user:secret@host:5101</c>. Rejecting it is a secrets control rather than tidiness. Such a
+/// value would be a credential living under a configuration key named for an address; it would be
+/// copied into every log line, exception and trace that records the request URI; and this system has no
+/// use for it, because every internal edge is authenticated with a bearer token minted by the Security
+/// service. No address is ever a place to put a secret (constraints C-F and C-G).
+/// </description></item>
+/// <item><description>
+/// A query string, on a BASE address only. A base address is composed with per-request paths, and a
+/// query on the base is dropped rather than merged, so a caller believing it had configured one would be
+/// wrong with no diagnostic at all. A complete document address - a discovery metadata address - is
+/// exempt, because a query on it is transmitted as written.
+/// </description></item>
+/// <item><description>
+/// A fragment, always. Fragments are never transmitted, so one in configuration can only be a mistake.
+/// </description></item>
+/// </list>
+/// <para>
+/// NO MESSAGE EVER ECHOES THE CONFIGURED VALUE. The configuration path is what an operator needs in
+/// order to find the offending setting; the value adds nothing, and for the userinfo case it would put a
+/// credential-bearing address into the startup log - reintroducing through the error message the very
+/// leak the rule exists to prevent. A validator cannot know which of its inputs is sensitive, so none is
+/// quoted. The scheme rule quotes the parsed scheme alone, which is a fixed token from a small set and
+/// carries nothing.
+/// </para>
+/// </remarks>
+internal static class ConfiguredAddress
+{
+    /// <summary>
+    /// Describes why a configured address is unusable, or returns <see langword="null"/> when it is
+    /// usable.
+    /// </summary>
+    /// <param name="value">
+    /// The configured value. Callers screen out null, empty and whitespace beforehand, so that a missing
+    /// value is reported once by its presence rule rather than twice.
+    /// </param>
+    /// <param name="configurationPath">
+    /// The full configuration path, quoted into the message so an operator can find the offending key
+    /// without consulting source.
+    /// </param>
+    /// <param name="allowQuery">
+    /// <see langword="true"/> for a complete document address, which may carry a query;
+    /// <see langword="false"/> for a base address, which may not.
+    /// </param>
+    /// <returns>The message describing the fault, or <see langword="null"/> when there is none.</returns>
+    internal static string? DescribeFault(string value, string configurationPath, bool allowQuery)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? parsed))
+        {
+            return string.Concat(
+                configurationPath,
+                " must be an absolute address, for example a scheme, host and port. The configured ",
+                "value is deliberately not quoted here, because a rejected address may carry a ",
+                "credential.");
+        }
+
+        // Uri.Scheme is already lower-cased by the parser, so an ordinal comparison is both correct and
+        // free of any culture dependency.
+        if (!string.Equals(parsed.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+            && !string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            return string.Concat(
+                configurationPath,
+                " must use the http or https scheme, which are the only two this service can reach. ",
+                "Supplied scheme: \"",
+                parsed.Scheme,
+                "\".");
+        }
+
+        if (parsed.UserInfo.Length > 0)
+        {
+            return string.Concat(
+                configurationPath,
+                " must not embed credentials in the address. Remove the \"user:password@\" portion: ",
+                "every edge in this system is authenticated with a bearer token issued by the Security ",
+                "service, and an address carrying credentials would leak them into logs and traces.");
+        }
+
+        if (!allowQuery && !string.IsNullOrEmpty(parsed.Query))
+        {
+            return string.Concat(
+                configurationPath,
+                " is a base address and must not carry a query string. A query on a base address is ",
+                "dropped rather than merged when a per-request path is composed onto it, so it would ",
+                "have no effect and no diagnostic.");
+        }
+
+        if (!string.IsNullOrEmpty(parsed.Fragment))
+        {
+            return string.Concat(
+                configurationPath,
+                " must not carry a fragment. A fragment is never sent to a server, so one here can ",
+                "only be a mistake.");
+        }
+
+        return null;
     }
 }

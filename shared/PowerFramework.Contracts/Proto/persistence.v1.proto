@@ -213,9 +213,23 @@ import "common.v1.proto";
 //      alternative.
 //
 //  Same rule, opposite outcomes, and the deciding question is only ever this: DOES THE LEGACY SET
-//  ALREADY CONTAIN ZERO? RetCode does; SQL_MS_ does not. common.v1.proto reaches the identical
-//  conclusion from the other side - its DwBuffer note records that DwBuffer needs a sentinel and
-//  that this is "the same ruling as SQL_MS_* in persistence.v1.proto, not the RetCode one".
+//  ALREADY CONTAIN ZERO? RetCode does; SQL_MS_ does not.
+//
+//  SqlModifyStyle IS THE ONLY ENUM ON THIS SIDE OF THE RULING, which is worth knowing before
+//  reaching for a sentinel anywhere else. common.v1.proto applies the identical test to its other
+//  two domains and both land on the RetCode side: DwBuffer carries NO sentinel because an
+//  unassigned PowerBuilder `dwbuffer` initialises to Primary!, and ItemStatus carries none because
+//  an untouched existing row is NotModified! - so each already contains its zero and a synthetic
+//  member would invent a state the oracle does not have (C-B). SQL_MS_ is genuinely different: its
+//  three legacy values start at 1 and there is no legacy "no style" at all.
+//
+//  AND WHERE A FIELD NEEDS TO SAY "NOT SUPPLIED", THAT IS FIELD PRESENCE, NOT AN ENUM MEMBER.
+//  The two are separate mechanisms and conflating them is what produces a spurious sentinel:
+//  absence belongs to a FIELD, a domain member belongs to a TYPE. proto3 explicit presence
+//  (`optional`) covers the former - this file already uses it for the cache flag on the paging
+//  request, and common.v1.proto's ColumnValue.item_status states the reasoning in full. The
+//  sentinel below exists for the OTHER reason entirely: proto3's first-enumerator-is-zero rule
+//  leaves SqlModifyStyle no alternative, since none of its legacy values is 0.
 //  ==========================================================================================
 //
 //  SCOPE: TOP-LEVEL IS SAFE HERE, and that is a decision rather than an oversight. Protobuf enum
@@ -1232,59 +1246,22 @@ message UpdateCounts {
   int64 deleted = 3;
 }
 
-// IdentityColumnData - the identity round trip.
+// THE IDENTITY ROUND TRIP NOW LIVES IN common.v1.proto SECTION 10, AND THIS IS WHY (C-A, C-K).
+// IdentityColumnData was declared here first, when C-06 was believed to be its only producer. It
+// moved to the common file when C-03 was given the relay: DataServices' Gateway-facing UpdateResponse
+// forwards this payload UNCHANGED, because without it a caller that inserted rows could never learn
+// the auto-increment values the database assigned, and no inserted DataWindow row could be reconciled
+// with its generated identity. Two consumers means one definition, and duplicating it would let the
+// two copies drift in the one way that is invisible - both would carry two int64 arrays and only the
+// ORDER would differ.
 //
-// THE COLUMN IS DISCOVERED AT RUN TIME, NOT TAKEN FROM THE DESCRIPTOR [:L217-L225]. The legacy
-// lowercases the update table name, appends a dot, and prefix-matches that against each column's
-// database name - WITH A FIRST-WINS FALLBACK that accepts the first identity column found if no name
-// matched [:L221]. So the value reported here can differ from TableUpdateContract.identitycolumn, and
-// a consumer must read it rather than assume.
-//
-// COLLECTION IS CONDITIONAL AT THREE LEVELS, so an absent identity block means "none collected" and
-// is NOT an error: rows must have been inserted at all [:L215], an identity column must have been
-// found [:L226], and at least one of the two arrays must be non-empty [:L242-L244].
-//
-// ROWS ARE SELECTED BY THE ROW-STATUS CONVENTION, WHICH USES COLUMN INDEX ZERO:
-//     GetItemStatus(nIndex, 0, Primary!) = NewModified!     [:L230]
-//     GetItemStatus(nIndex, 0, Filter!)  = NewModified!     [:L238]
-// COLUMN 0 IS NOT A REAL COLUMN - it means THE ROW ITSELF. The same object reads a genuine per-column
-// status a few lines away with a real column index [:L162], so both readings coexist and the whole
-// distinction is carried by whether the index is zero. common.v1.proto records the same convention on
-// ItemStatus and ColumnValue.
-//
-// ============ WHY THE TWO ARRAYS ARE SEPARATE, AND MUST NEVER BE MERGED OR REORDERED ==========
-// The legacy delivers them through one callback with TWO `ref` ARRAY OUT-PARAMETERS -
-// `OnIdentityColumnDataRetrieved(nIdentityColumn, ref nPrimaryIdValues, ref nFilterIdValues)`
-// [:L243, declared at n_cst_threading_task_sqlupdate.sru:L19] - because they come from DIFFERENT
-// BUFFERS COLLECTED IN DIFFERENT DIRECTIONS:
-//
-//     Primary buffer, FORWARD:    for nIndex = 1 to nCount              [:L228-L233]
-//     Filter buffer,  BACKWARD:   for nIndex = nCount to 1 step -1      [:L237]
-//
-// The justification sits in the source immediately above the backward loop, at [:L235]: THE FILTER
-// BUFFER'S ROW ORDER IS INVERTED relative to the data source that produced the changeset.
-//
-// THIS IS THE MOST DANGEROUS SINGLE LINE IN THE REFACTOR FOR ONE-BASED-TO-ZERO-BASED TRANSLATION. IT
-// LOOKS LIKE A BUG. IT IS NOT A BUG. "Correcting" the direction produces wrong identity values that a
-// row-count assertion WOULD NOT CATCH - the same number of values comes back, paired with the wrong
-// rows, which is exactly the class of regression a characterization suite flags and a unit test does
-// not. Merging the arrays would destroy the only evidence a consumer has of which order each was
-// collected in, so the contract keeps them separate and separately ordered (C-B).
-// ==========================================================================================
-message IdentityColumnData {
-  // The discovered identity column's ONE-BASED ordinal. Legacy `long id`; int64 per the scalar rule's
-  // widening. A real column is 1 or greater, and 0 never appears here - the legacy only fires this
-  // callback when the ordinal is positive [:L226].
-  int64 identity_column_id = 1;
-
-  // Values from the PRIMARY buffer, in FORWARD collection order [:L228-L233]. Read with
-  // GetItemNumber, hence a numeric array.
-  repeated int64 primary_values = 2;
-
-  // Values from the FILTER buffer, in BACKWARD collection order [:L237-L241]. The order is the
-  // legacy's and must be transmitted as collected - see the block above.
-  repeated int64 filter_values = 3;
-}
+// The full contract, including the run-time column discovery with its first-wins fallback, the
+// three-level conditional collection, the row-status-at-column-zero convention, and above all WHY THE
+// PRIMARY ARRAY IS FORWARD AND THE FILTER ARRAY IS BACKWARD [:L228-L241, justified at :L235], is
+// documented on the message itself in common.v1.proto Section 10 rather than restated here, so the two
+// cannot diverge. The relay obligation is part of that contract: a forwarding service transmits both
+// arrays element for element in the order received, and re-sorting, deduplicating or concatenating
+// them is a contract violation rather than an optimisation.
 
 message UpdateResponse {
   // ============ THE OUTCOME IS THE RECONCILED ONE, AND IT CANNOT BE RECONSTRUCTED (C-B) ========
@@ -1316,7 +1293,8 @@ message UpdateResponse {
   UpdateCounts counts = 2;
 
   // OnIdentityColumnDataRetrieved [:L243]. OPTIONAL - absent means "none collected", never an error.
-  IdentityColumnData identity = 3;
+  // Defined in common.v1.proto Section 10 because C-03 relays this exact payload to Gateway.
+  common.v1.IdentityColumnData identity = 3;
 }
 
 // C-06 UpdateService - the update third of the retrieval / validation / update triple.
@@ -1382,7 +1360,20 @@ service UpdateService {
   rpc PrepareUpdate(PrepareUpdateRequest) returns (PrepareUpdateResponse);
 
   // Apply the changeset. Aborted plus common.v1.ConflictDetail on a concurrency mismatch.
-  rpc Update(UpdateRequest) returns (UpdateResponse);
+  //
+  // THE BINDING BELOW IS THE MACHINE-READABLE HALF OF THAT SENTENCE, AND IT IS WHAT MAKES THE DETAIL
+  // RETRIEVABLE (C-K). A gRPC status carries only a code and a message, so ConflictDetail travels as a
+  // binary trailer; the option names the key, the status code and the payload type on the descriptor
+  // itself, so a client discovers all three without reading this comment. common.v1.proto Section 11
+  // documents the retrieval steps, the `-bin` suffix requirement, and why google.rpc.Status was not
+  // used. 10 is the canonical numeric code for ABORTED, which is the canonical mapping to HTTP 409.
+  rpc Update(UpdateRequest) returns (UpdateResponse) {
+    option (common.v1.rich_error) = {
+      trailer_key: "powerframework-rich-error-v1-bin"
+      grpc_status_code: 10
+      payload_type: "common.v1.RichErrorTrailer"
+    };
+  }
 }
 
 message CreateUpdateTaskRequest {
@@ -1437,10 +1428,17 @@ message ResetUpdateTaskResponse {
 //
 // THE THREE ARMS ARE VISIBLY DISTINCT IN THE WORKER, so this is not a two-value setting with a spare
 // number. AC_NATIVE toggles the connection's OWN autocommit on before the statement [:L88-L90] and
-// off again afterwards, reporting a commit on success [:L95-L97] and simply restoring the flag on
-// failure [:L105-L106]. AC_ON performs an EXPLICIT commit and surfaces a commit failure through the
-// error event [:L98-L103]. ANY OTHER VALUE, which is to say AC_OFF, falls through to an explicit
-// ROLLBACK on failure [:L107-L109]. A BOOLEAN FIELD COULD NOT EXPRESS THE THIRD VALUE.
+// off again afterwards, raising the commit event inline on success [:L95-L97] and simply restoring the
+// flag on failure [:L105-L106]. AC_ON performs an EXPLICIT commit through the task's commit helper
+// and surfaces a commit failure through the error event [:L98-L103]. ANY OTHER VALUE, which is to say
+// AC_OFF, falls through to an explicit ROLLBACK on failure [:L107-L109]. A BOOLEAN FIELD COULD NOT
+// EXPRESS THE THIRD VALUE.
+//
+// BOTH OF THE FIRST TWO ARMS COMMIT, AND BOTH RAISE THE SAME EVENT - do not read the inline raise on
+// the AC_NATIVE arm as the only one. AC_ON's commit helper raises `Event OnCommitted()` itself on a
+// successful commit [n_cst_thread_task_sqlbase.sru:L230-L237], so the two arms differ in HOW they
+// commit and not in WHETHER they report it. ExecResponse.committed is defined from that event rather
+// than from either arm, and its field comment carries the full case analysis.
 //
 // NO SYNTHETIC SENTINEL IS NEEDED HERE, AND THAT IS THE CONTRAST WITH SECTION 1 (C-K).
 // AC_OFF = 0 ALREADY OCCUPIES ZERO, so proto3's first-enumerator rule is satisfied by a genuine
@@ -1613,11 +1611,42 @@ message ExecResponse {
   // on the codes, never by parsing this.
   string sql_err_text = 5;
 
-  // TRUE when the command actually committed. It mirrors `Event OnCommitted()` [:L97], which the
-  // legacy raises on the AC_NATIVE success path only - the AC_ON path performs its commit through the
-  // task's own commit helper [:L99] and AC_OFF commits nothing at all. So this field distinguishes
-  // "the statement succeeded" from "the statement succeeded AND the work is durable", which a caller
-  // running a batch under AC_OFF genuinely needs to know.
+  // TRUE when the command actually committed. The field distinguishes "the statement succeeded" from
+  // "the statement succeeded AND the work is durable", which a caller running a batch under AC_OFF
+  // genuinely needs to know.
+  //
+  // ============ DEFINED BY THE MEASURED `OnCommitted` EVENT CHAIN, NOT BY ONE BRANCH ============
+  // A producer sets this field TRUE exactly when the legacy would have raised `Event OnCommitted()`.
+  // That event has EXACTLY TWO raise sites in the whole SQL task layer, and BOTH are reachable from
+  // this call - which is why the field must not be described as an AC_NATIVE-only signal:
+  //
+  //   AC_NATIVE, on success -> TRUE. The worker switches the connection's own autocommit on before
+  //     the statement [:L88-L90], and on success switches it back off and raises the event DIRECTLY
+  //     [:L95-L97]. There is no separate commit step to fail here: the driver committed as part of
+  //     executing the statement, so the statement's own success IS the commit.
+  //
+  //   AC_ON, on success, IF THE COMMIT ITSELF SUCCEEDS -> TRUE. The worker calls the task's commit
+  //     helper, `rtCode = of_Commit(true)` [:L99]. That helper issues a real COMMIT through the
+  //     transaction object and raises `Event OnCommitted()` only when the commit succeeded -
+  //     `if IsSucceeded(rtCode) then Event OnCommitted()`
+  //     [n_cst_thread_task_sqlbase.sru:L230-L237]. So an AC_ON call whose statement succeeded but
+  //     whose COMMIT failed reports FALSE here, and reports the failure through status as well,
+  //     because the worker overwrites its own return code with the commit's [:L99-L102].
+  //
+  //   AC_OFF -> FALSE always. Nothing is committed; the caller's session governs, and on failure the
+  //     worker rolls back explicitly [:L107-L109].
+  //
+  //   ANY FAILING STATEMENT -> FALSE, on every mode. The success arm at [:L94-L103] is not entered at
+  //     all; control takes the else arm at [:L104-L112], which contains no commit and no event.
+  //
+  // WHY THIS IS SPELLED OUT RATHER THAN LEFT TO THE IMPLEMENTATION (C-B, C-K). Reading only the
+  // AC_NATIVE arm makes the AC_ON commit look like a private detail of the task, because its event is
+  // raised one level down in the shared helper rather than inline. It is not private - it is the same
+  // event, signalling the same durability, to the same subscriber chain, which fans the signal out to
+  // the current task and every preceding one [n_cst_thread_task_sqlbase.sru:L100-L111]. A contract
+  // that reported a successful AC_ON commit as uncommitted would understate durability, and a caller
+  // acting on it would re-commit work that was already durable.
+  // ==========================================================================================
   bool committed = 6;
 }
 
@@ -1941,9 +1970,15 @@ message TransactionDescriptor {
   // fields on the request; this string remains the legacy-faithful carrier.
   //
   // C-F NOTE: a connection parameter string CAN contain credential material in some providers'
-  // grammars. A producer must not place one here, and a server must treat the value as sensitive: it
-  // is carried on the request shape only, and TransactionDescriptorView's copy is expected to have
-  // been reduced to its non-sensitive parameters by the server that emits it.
+  // grammars - `Password=`, `PWD=`, `AccessToken=`, or an entire nested connection string - and this
+  // contract cannot constrain what a caller puts here because the legacy does not either. The value is
+  // therefore treated as sensitive: IT EXISTS ON THIS REQUEST SHAPE ONLY.
+  //
+  // TransactionDescriptorView DOES NOT CARRY IT AT ALL - slot 6 there is permanently `reserved`. An
+  // earlier reading of this rule expected the emitting server to reduce the string to its non-sensitive
+  // parameters, which is not a control: it asks every implementation to sanitise, forever, a string it
+  // cannot reliably parse, and one straightforward field-for-field mirror defeats it. The response
+  // instead carries the typed ConnectionParameterFlags allowlist - see that message and the view.
   string dbparm = 6;
 
   // The isolation-level string. [transactiondata.srs:L10]
@@ -1957,21 +1992,56 @@ message TransactionDescriptor {
 
   // The provider-specific extra parameter string - NINTH and last.
   // [transactiondata.srs:L12]
+  //
+  // C-F NOTE: free-form by the legacy's own description, so it can carry anything a caller chose to put
+  // in it, credentials included. Like dbparm it EXISTS ON THIS REQUEST SHAPE ONLY, and slot 9 on
+  // TransactionDescriptorView is permanently `reserved`.
   string userparm = 9;
 }
 
-// TransactionDescriptorView - the RESPONSE-side descriptor. IT HAS NO PASSWORD FIELD.
+// TransactionDescriptorView - the RESPONSE-side descriptor. IT CARRIES NO CREDENTIAL-CAPABLE FIELD.
 //
 // FIELD NUMBERS ARE KEPT ALIGNED WITH TransactionDescriptor ON PURPOSE, so the correspondence to the
-// oracle is still checkable at a glance and slot 5 is visibly, deliberately empty rather than
-// mysteriously missing. Eight fields carried, one forbidden.
+// oracle is still checkable at a glance and every forbidden slot is visibly, deliberately empty rather
+// than mysteriously missing. Six fields carried, THREE PERMANENTLY FORBIDDEN.
 //
-// THE `reserved` BELOW IS THE ENFORCEMENT MECHANISM, AND IT IS THE OPPOSITE OF ANTICIPATION (C-D).
-// Reserving BOTH the number and the name makes it a COMPILE ERROR for any future edit to reintroduce
-// a `logpass` field, or to reuse slot 5 for something else and thereby make an old client's password
-// bytes decode as a new field. This is not a slot held open for a deferred capability - nothing is
-// coming here, ever. It is a permanent prohibition expressed in the type system rather than in a
-// comment a maintainer can skip (C-F).
+// ============ THREE SLOTS ARE FORBIDDEN, NOT ONE, AND HERE IS WHY (C-F, C-G) ====================
+// `logpass` was always forbidden - it is literally a password. The other two are forbidden for the same
+// reason once the question is asked honestly: WHAT CAN THEY CONTAIN?
+//
+//   * `dbparm` is the provider's connection-parameter string. Provider DBParm strings routinely carry
+//     credentials - `Password=`, `PWD=`, `AccessToken=`, a full connection string - and this contract
+//     cannot constrain what a caller put there, because the legacy does not constrain it either.
+//   * `userparm` is, by the legacy's own description, a provider-specific EXTRA parameter string. It is
+//     free-form by definition, so it can carry anything the caller chose to put in it.
+//
+// THE PREVIOUS SHAPE PROTECTED THEM WITH PROSE - a comment saying the field was "expected to carry
+// non-sensitive parameters only". THAT IS NOT A CONTROL. It relies on every server implementation
+// choosing to sanitise an opaque string it cannot parse reliably, forever, in every code path, and a
+// single straightforward descriptor mirror - copy the nine fields, blank the password - leaks both
+// strings through GetTransactionDataResponse to any caller allowed to read session state. The
+// write-only rule for `logpass` was already expressed STRUCTURALLY for exactly this reason; leaving its
+// two neighbours to goodwill was the inconsistency.
+//
+// WHAT REPLACES THEM. The only DBParm content a consumer has a demonstrated need for is the two flags
+// that change observable statement generation, and those are already a TYPED, CLOSED, NON-SENSITIVE
+// allowlist: ConnectionParameterFlags. Carrying that instead is strictly more useful as well as safe -
+// a consumer no longer has to re-implement the legacy's regular expressions over a string to learn
+// whether binding was disabled. If some future consumer needs another setting, it is added to that
+// message as a named typed field and reviewed on its own merits, which is the point of an allowlist.
+//
+// THE `reserved` ENTRIES ARE THE ENFORCEMENT MECHANISM, AND THEY ARE THE OPPOSITE OF ANTICIPATION
+// (C-D). Reserving BOTH the number and the name makes it a COMPILE ERROR for any future edit to
+// reintroduce these fields, or to reuse a slot for something else and thereby make an old client's
+// credential bytes decode as a new field. Nothing is coming to slots 5, 6 or 9, ever. This is a
+// permanent prohibition expressed in the type system rather than in a comment a maintainer can skip.
+//
+// BOTH LEGACY RESPONSE SHAPES ARE COVERED, WHICH IS THE WHOLE POINT OF DOING IT HERE. The legacy has
+// two getters - `transactiondata of_gettransdata()` returning the structure BY VALUE and
+// `long of_gettransdata(ref transactiondata data, ref string errinfo)` returning it through a `ref`
+// out-parameter - and both would have echoed all nine fields. On the wire both are the same RPC,
+// GetTransactionData, and it returns THIS type, so one structural rule closes both.
+// ==========================================================================================
 message TransactionDescriptorView {
   string dbms = 1;
   string servername = 2;
@@ -1982,11 +2052,26 @@ message TransactionDescriptorView {
   reserved 5;
   reserved "logpass";
 
-  // Expected to carry non-sensitive parameters only - see the note on TransactionDescriptor.dbparm.
-  string dbparm = 6;
+  // SLOT 6 IS PERMANENTLY FORBIDDEN. `dbparm` is an opaque provider string that can contain a password
+  // or a whole connection string; the typed `flags` below carries the only part of it a consumer needs.
+  reserved 6;
+  reserved "dbparm";
+
   string lock = 7;
   bool autocommit = 8;
-  string userparm = 9;
+
+  // SLOT 9 IS PERMANENTLY FORBIDDEN. `userparm` is a free-form provider-specific string by the legacy's
+  // own description, so it can carry anything - including a credential.
+  reserved 9;
+  reserved "userparm";
+
+  // THE TYPED, NON-SENSITIVE PROJECTION OF dbparm - the two flags that change observable statement
+  // generation, and nothing else. A closed allowlist rather than an opaque string, so what crosses is
+  // decided by this contract rather than by whatever a caller happened to put in a connection string.
+  //
+  // Field 10 rather than a reused slot: reusing 6 would let an old client's `dbparm` bytes be read as
+  // this message, which is precisely what reserving the slot prevents.
+  ConnectionParameterFlags flags = 10;
 }
 
 message BeginSessionRequest {

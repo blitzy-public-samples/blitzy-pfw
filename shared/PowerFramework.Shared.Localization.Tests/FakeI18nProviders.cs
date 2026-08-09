@@ -562,4 +562,3 @@ public sealed class RecordingProvider : II18nProvider
         return ReturnCode;
     }
 }
-

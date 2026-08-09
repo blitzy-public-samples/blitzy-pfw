@@ -1,3 +1,21 @@
+<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
+     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
+     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
+     without splitting the locator from what it proves, and a wrapped command is a command that does
+     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
+       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
+                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
+     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
+     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
+     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
+     and are never edited, so a command that reports them would fail for reasons this refactor must not
+     "fix".
+
+     Declared inline, per file, so the policy travels with the document and applies to the six files
+     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
+     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+<!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
+
 # PowerFramework → .NET 10 — Target Architecture
 
 This document is the authoritative reference for the **service topology**, the **transport chosen for
@@ -21,9 +39,29 @@ itself:
 | The full-estate mapping — all 39 libraries and all 544 objects assigned to a destination | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | The cross-service contract inventory and the four reserved Gateway extension points | [`CONTRACTS.md`](CONTRACTS.md) |
 | Build and test commands, the solution layout, and per-service build independence | [`BUILD.md`](BUILD.md) |
-| The characterization model, the fixture corpus and the determinism seams | [`PARITY.md`](PARITY.md) |
+| The characterization model, the fixture corpus and the determinism seams | `docs/PARITY.md` (planned) |
 | Secret locators, severities, required actions and the token-topology register | [`SECRETS.md`](SECRETS.md) |
 | The four deferred destinations in detail and their assigned objects | [`DEFERRED.md`](DEFERRED.md) |
+
+## Current state of the artifacts this document references
+
+Some artifacts referenced below are **planned and not yet present in this repository**. They are named
+because they are where the corresponding work belongs, not because a reader can open them today:
+
+| Artifact | What it will carry | State |
+| --- | --- | --- |
+| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/.env.example`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up | **Planned — not yet present** |
+| `characterization/` | The paired legacy and target recordings | **Planned — not yet present** |
+| The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
+
+Everything else this document references — the solution and project files, the shared libraries, the
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+the read-only legacy tree — **is present in the tree today**.
+
+**The topology described below is therefore a design, not a running system.** Every service boundary,
+port assignment and readiness dependency is specified and internally consistent, but no container has
+been built from this document and no bring-up has been observed.
 
 ---
 
@@ -189,8 +227,14 @@ folders is a failure mode, not a cautious choice, and is not what is built here.
 | **Persistence** | `services/persistence-service` | `PowerFramework.Persistence` | **The only service that generates or executes SQL, and the only one holding a storage provider** | `ws_objects/pfw.utility.sqlite.pbl.src/` (3), `ws_objects/pfw.thread.pbl.src/` (6), `ws_objects/pfw.thread.ext.pbl.src/` (15) |
 | **Security** | `services/security-service` | `PowerFramework.Security` | The keyed cryptographic surface; **sole JSON Web Token issuer** for all four services | `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9-L73` |
 
-These directory and project names are canonical. They are used identically in
-[`BUILD.md`](BUILD.md), [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) and the root `README.md`.
+These directory and project names are canonical, and they are used identically in
+[`BUILD.md`](BUILD.md) and [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md).
+
+**The root `README.md` does not yet carry them.** It still holds only its original legacy content, and
+appending a .NET section that names these services and their ports is **planned work that has not been
+done** — so a reader should not expect the root README to corroborate this table today. That update is
+the one and only modification this refactor makes to a pre-existing file, and it is deliberately
+scoped so the existing licence text and its Chinese restatement are preserved verbatim.
 
 Two boundary justifications are worth drawing out, because they are the ones a reader is most likely
 to question:
@@ -288,10 +332,20 @@ re-mapped onto the four real services.
 | `services/persistence-service` | `PowerFramework.Persistence` | **5101** | gRPC, plus REST `/health` and `/v1/ping` | verification only |
 | `services/dataservices-service` | `PowerFramework.DataServices` | **5102** | gRPC primary + a thin REST projection for Gateway | verification only |
 | *(reserved)* | — | **5103** | — | **commented-out DesignSystem Phase-2 slot** |
-| `services/security-service` | `PowerFramework.Security` | **5104** | REST + `/.well-known/jwks.json` | **SOLE ISSUER** |
+| `services/security-service` | `PowerFramework.Security` | **5104** | REST + `/.well-known/jwks.json`, **over HTTPS** | **SOLE ISSUER** |
 | `services/gateway-service` | `PowerFramework.Gateway` | **5105** | REST + OpenAPI | verification only |
 
 The composition root is reachable at `http://localhost:5105`.
+
+**Security's listener is the one that must be TLS, and for a functional reason rather than a
+hardening one.** Its published server is `https://localhost:5104`. Token issuance authenticates the
+caller with a **client certificate**, and a client certificate cannot be presented on a plaintext
+listener at all — published over `http` the token endpoint would be uncallable and no service could
+obtain its first token. The JWKS and discovery documents are additionally the verification material
+the other three services trust, so a channel an attacker can rewrite would let that attacker choose
+the keys every token in the system is validated against. Consumers configure their bearer handler's
+authority as `https://localhost:5104` with metadata retrieval over HTTPS required; inside the
+orchestration network they use the service name on the same port.
 
 ### 4.2 The endpoint contract common to all four
 
@@ -364,9 +418,14 @@ publishes no service-level objective of any kind (§12 and C-B).
 `open`, `close` and `systemerror` [`ws_objects/pfw.pbl.src/pfw.sra:L88-L108`, `:L111-L144`] — plus a
 navigation surface. That is a request/response shape, not a streamed or ordered one.
 
-**Additionally required because Gateway is the sole ingress.** REST over plain HTTP gives browser and
-third-party reach, alignment with HTTP-standard caching and proxying, and mature OpenAPI tooling for a
-surface that external clients must be able to discover.
+**Additionally required because Gateway is the sole ingress.** REST gives browser and third-party
+reach, alignment with HTTP-standard caching and proxying, and mature OpenAPI tooling for a surface that
+external clients must be able to discover. Note carefully what "REST" names here and what it does not:
+it names **HTTP semantics** — request/response, resource paths, status codes, an OpenAPI description a
+stock client consumes — and says nothing about the scheme. **Every service in this system speaks those
+semantics over HTTPS in a deployed topology**; the plain-HTTP loopback addresses in §4.1 and in the
+documented bring-up are a local-development convenience, and §9.4 states the transport-security model
+in full.
 
 **Rejected alternative — gRPC at the edge.** gRPC-Web requires a translating proxy in front of it and
 supports server streaming only. Choosing it for the ingress would forfeit exactly the properties an
@@ -414,9 +473,12 @@ operations. Four further properties confirm the choice:
 `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9-L73` is stateless request/response throughout, with no
 ordering requirement and nothing to stream.
 
-**Additionally required by how tokens are consumed.** Token issuance and key publication must be plain
-HTTP so that consumers' stock JSON Web Token bearer handlers fetch `/.well-known/jwks.json` and OpenID
-Connect discovery metadata with **zero bespoke code**. That keeps the security-critical retrieval path
+**Additionally required by how tokens are consumed.** Token issuance and key publication must speak
+**ordinary HTTP** — not a bespoke protocol — so that consumers' stock JSON Web Token bearer handlers
+fetch `/.well-known/jwks.json` and OpenID Connect discovery metadata with **zero bespoke code**. HTTP
+*semantics*, over HTTPS: the scheme is not what makes a stock handler work, and §9.4 records both the
+transport-security model and the one edge on which it is load-bearing. That keeps the security-critical
+retrieval path
 inside framework code rather than hand-written code.
 
 **Rejected alternative — gRPC for Security.** Choosing gRPC here would force custom key-set retrieval
@@ -431,7 +493,7 @@ convenient one.
 | Gateway | REST + OpenAPI | Coarse lifecycle shape; sole-ingress reach and tooling | gRPC-Web at the edge — needs a translating proxy, server streaming only |
 | DataServices | gRPC + thin REST projection | 22-event ordered chain, `ref string` out-parameter, `any` return | JSON over REST — loses ordering and the typed veto |
 | Persistence | gRPC | Action-oriented verbs, thread affinity, structured errors, rich status, server streaming | — |
-| Security | REST + JWKS | Stateless surface; stock bearer handlers self-configure | gRPC — would force bespoke key retrieval into three services |
+| Security | REST + JWKS over HTTPS | Stateless surface; stock bearer handlers self-configure from the discovery document. TLS is not the reason REST was chosen, but it is a hard requirement of the chosen shape — see §4.1 | gRPC — would force bespoke key retrieval into three services |
 
 ---
 
@@ -693,13 +755,34 @@ Those sentinels differ per arm, so the attribution matters:
 | --- | --- | --- |
 | `pfwPagedSQL_OutterTbl` | SQL Server arm only | `:L333`, `:L350`, `:L362` |
 | `pfwPagedSQL_RN` | both arms | `:L355`, `:L356`, `:L381-L383` and `:L394-L395` |
+| `pfwPagedSQL_Tbl` | SQL Server arm, and the count wrapper | `:L356`, `:L382`, `:L834` |
 | `pfwPagedSQL_TblInnerInner` | Oracle arm only | `:L394` |
 | `pfwPagedSQL_TblInner` | Oracle arm only | `:L394` |
 | `pfwPagedSQL_TblOuter` | Oracle arm only | `:L394` |
 
-Parity also covers the empty-order-by substitution at `:L392` and the count-wrapper column alias at
-`:L830`. The three SQL Server strategies include a unique-index strategy selected when unique index
-columns have been supplied [`:L323`].
+**The SQL Server arm has FOUR generated forms, not three, and each must be reproduced separately.**
+It is a two-by-two: the outer test is whether unique-index columns were supplied [`:L323`] and the
+inner test is the native-paging flag [`:L343`, `:L366`].
+
+| # | Unique-index columns | Native paging | Locators | Generated form |
+| --- | --- | --- | --- | --- |
+| 1 | supplied | yes | `:L343-L350`, result at `:L364` | Unique columns appended to `ORDER BY`, column list swapped for the unique columns, `OFFSET … ROWS FETCH NEXT … ROWS ONLY` on the inner query, column list restored, inner query appended as `INNER JOIN (…) pfwPagedSQL_OutterTbl ON …` |
+| 2 | supplied | no | `:L351-L362`, result at `:L364` | `ORDER BY` stripped, column list swapped for `TOP … <unique columns>,ROW_NUMBER() OVER (…) AS pfwPagedSQL_RN`, wrapped in `SELECT TOP … FROM (…) pfwPagedSQL_Tbl WHERE pfwPagedSQL_RN BETWEEN …`, column list and `ORDER BY` restored, wrapper appended as the same `INNER JOIN`. **No trailing `ORDER BY pfwPagedSQL_RN`** |
+| 3 | none | yes | `:L366-L373` | `ORDER BY` kept or `(SELECT 0)` substituted, then replaced by `<order> OFFSET … ROWS FETCH NEXT … ROWS ONLY`. No join, no row-number column |
+| 4 | none | no | `:L374-L383` | `ORDER BY` captured and stripped or `(SELECT 0)` substituted, column list swapped for `TOP … ,ROW_NUMBER() OVER (…) AS pfwPagedSQL_RN`, wrapped as in branch 2, and — **uniquely** — a trailing `ORDER BY pfwPagedSQL_RN` appended [`:L383`] |
+
+Branches 1 and 2 return the re-parsed original statement [`:L364`], so the outer column list survives;
+branches 3 and 4 return the constructed string. Together with the branch-4-only trailing `ORDER BY`,
+those are the two properties by which a collapsed branch betrays itself.
+
+Parity also covers the empty-order-by substitutions, which are **not interchangeable between arms** —
+SQL Server substitutes `(SELECT 0)` [`:L370`, `:L379`] while Oracle substitutes `''` [`:L392`] — and
+the count wrapper, whose column list is replaced by the alias `1 AS _` [`:L830`] before the statement
+is wrapped as `SELECT COUNT(1) AS CNT FROM (…) pfwPagedSQL_Tbl` [`:L834`].
+
+Oracle contributes a fifth generated form and the `case else` arm a sixth outcome, so one dispatch has
+**six** observable results and a parity matrix needs a case for each.
+[`CONTRACTS.md`](CONTRACTS.md) §8.4 carries the per-form detail; it is not duplicated here.
 
 So: two engine *dialects* are reproduced as text generators; one storage engine is provisioned. Those
 are different claims, and only the second one involves a running database.
@@ -726,14 +809,29 @@ columns carry `update=yes updatewhereclause=yes` and the identifier column is ad
 `key=yes identity=yes` [`:L8-L13`], with table settings
 `update="COMPANY" updatewhere=1 updatekeyinplace=no` [`:L14`]:
 
-| Column | DataWindow declares | DDL declares | Locators |
-| --- | --- | --- | --- |
-| `address` | `char(200)` | `CHAR(50)` | `dw_sqlite.srd:L11`, `w_test_sqlite.srw:L467` |
-| `salary` | `decimal(2)` | `REAL` | `dw_sqlite.srd:L12`, `w_test_sqlite.srw:L468` |
-| `birth` | `date` | `TEXT` | `dw_sqlite.srd:L13`, `w_test_sqlite.srw:L469` |
+| Column | DataWindow declares | DDL declares | Nature of the disagreement | Locators |
+| --- | --- | --- | --- | --- |
+| `name` | `char(100)` | `TEXT NOT NULL` — **unbounded** | The DataWindow imposes a 100-character bound on a column the DDL leaves unbounded, so the DataWindow is **stricter** than the schema | `dw_sqlite.srd:L9`, `w_test_sqlite.srw:L465` |
+| `address` | `char(200)` | `CHAR(50)` | The DataWindow permits 200 characters where the schema permits 50, so here the DataWindow is **looser** than the schema — the opposite direction to `name` | `dw_sqlite.srd:L11`, `w_test_sqlite.srw:L467` |
+| `salary` | `decimal(2)` | `REAL` | A fixed two-place decimal declared over a floating-point column | `dw_sqlite.srd:L12`, `w_test_sqlite.srw:L468` |
+| `birth` | `date` | `TEXT` | A date type declared over a text column, so the date format is a convention rather than a constraint | `dw_sqlite.srd:L13`, `w_test_sqlite.srw:L469` |
+
+**There are four, not three.** `name` is the one most easily missed, because a bound over an unbounded
+column looks benign next to the other three — but it is a disagreement in the *opposite direction* to
+`address`, and the two together are why the entity cannot simply adopt either side's types wholesale.
 
 These are **preserved, not corrected** (C-B). They are reproduced in the entity and DataWindow models
 and annotated at the point of reproduction so a future reader cannot mistake them for a porting error.
+The entity records all four against the same locators, and explicitly declines to impose the
+DataWindow's `char(100)` and `char(200)` bounds on the entity because doing so would correct the
+defect rather than preserve it
+[`services/persistence-service/PowerFramework.Persistence/Data/CompanyEntity.cs`].
+
+Two further facts about the same DDL belong with the table, because they are part of the same
+comparison. The DDL marks only `ID`, `NAME` and `AGE` as `NOT NULL` [`w_test_sqlite.srw:L464-L466`],
+leaving `ADDRESS`, `SALARY` and `BIRTH` nullable [`:L467-L469`]; and the identifier column is
+`INTEGER PRIMARY KEY NOT NULL` with an inline comment marking it the auto-increment column
+[`:L464`], which is what the DataWindow's `key=yes identity=yes` corresponds to.
 
 ### 8.5 The SQL-injection exposure, mechanically explained
 
@@ -812,16 +910,69 @@ Concretely:
 This topology is also the reason Security speaks REST: the stock bearer handler consumes a published
 key set with zero bespoke code, which keeps the security-critical path inside framework code (§5.4).
 
-### 9.3 Mutual TLS is the documented per-pair fallback
+### 9.3 Mutual TLS is the per-pair fallback, and the token-issuance edge is that pair
 
-Where a token issuer is inappropriate for some service pair, **mutual TLS is the documented fallback**,
-and it applies **for that pair only** — adding certificate and key path settings for those two services
-rather than changing the system-wide model. JSON Web Tokens remain the default for every edge.
+Mutual TLS is the documented fallback for a pair where a token issuer is inappropriate, it applies
+**for that pair only**, and JSON Web Tokens remain the default on every other edge. That is the general
+rule. What matters operationally is that the rule already has exactly one instance, and naming it is
+the difference between a policy and a design:
+
+> **`POST /v1/tokens` is the single mutual-TLS edge in the system, and mutual TLS is mandatory on it.**
+
+The reason is structural rather than a hardening preference: **a caller cannot present a bearer token in
+order to obtain its first bearer token**, so caller identity on the issuance operation must come from
+somewhere other than a token, and it comes from the client certificate the transport presents. The
+contract says so in a machine-readable way rather than in prose —
+`shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` declares a `mutualTLS` security scheme,
+applies it to `POST /v1/tokens` as an **override** of the document-level bearer requirement, and
+defines the two failure modes as part of the contract:
+
+| Status | Meaning on `POST /v1/tokens` |
+| --- | --- |
+| `401` | No client certificate was presented, or the certificate presented is not trusted. There is no bearer-token alternative on this operation to fall back to |
+| `403` | The certificate is trusted, but the caller is not permitted the requested subject or audience — in particular the claimed `subject` does not match the identity the certificate establishes. The response names neither the expected identity nor any stored configuration |
+
+Adopting it for that pair adds a certificate path setting and a key path setting **for those two
+participants only**, and any such path points at material mounted from the orchestration secret layer:
+no certificate and no key is committed to this repository or embedded in an image.
 
 **No signing, verification or mutual-TLS material is scaffolded for any deferred service.** The
 attached environment named five per-service signing secrets against a placeholder roster; the two that
 correspond to services which do not exist in this phase are deliberately **not provisioned**, because
 provisioning a credential for a service that does not exist creates an unowned secret.
+
+### 9.4 Transport security: HTTPS is the deployed scheme, and plain HTTP is a development exception
+
+This subsection exists because two facts elsewhere in this document read as a contradiction if the
+distinction underneath them is left implicit, and they are not one.
+
+**"REST" names an interface shape, not a scheme.** §5.1 and §5.4 choose REST for Gateway and Security
+because their interfaces are request/response and because stock tooling consumes an HTTP surface with
+no bespoke code. Neither statement is a claim about `http` versus `https`. **In a deployed topology
+every service in this system speaks its HTTP semantics over HTTPS.**
+
+**The loopback addresses are a development convenience, and they are confined to where they belong.**
+The `http://localhost:510x` addresses in §4.1, in the documented bring-up and in the end-to-end suite's
+defaults are what the local bring-up publishes on the loopback interface. In the .NET configuration
+they are expressed as **`appsettings.Development.json` overrides**, while the base `appsettings.json`
+carries https authorities, https upstreams and `RequireHttpsMetadata` set to true. That split is the
+mechanism, not a nicety: a relaxation that lives in a base file is inherited by every environment that
+forgets to override it, whereas one that lives in the Development file applies only when
+`ASPNETCORE_ENVIRONMENT` is `Development`. `Configuration/GatewayOptions.cs` additionally rejects
+`RequireHttpsMetadata` true against a non-https authority at startup, so an incoherent pair fails fast
+rather than surfacing on a first metadata fetch.
+
+**The one path that constrains deployment.** Bearer-protected and anonymous operations may sit behind a
+TLS-terminating proxy in the ordinary way. **`POST /v1/tokens` may not.** Mutual TLS authenticates the
+client to Security itself, so an intermediary that terminates TLS on that path either discards the
+client certificate or leaves Security trusting a forwarded assertion of an identity it cannot verify —
+and either outcome defeats the sole-issuer topology of §9.2. If a proxy fronts the issuance path at
+all, it passes the connection through rather than terminating it.
+
+**What plain HTTP costs, stated rather than glossed.** On `http`, `POST /v1/tokens` has no client
+certificate to present and therefore no caller authentication available at all. That is acceptable on a
+developer's own loopback interface and acceptable nowhere else, which is precisely why the scheme is an
+explicit, named exception here instead of an unremarked default.
 
 ---
 
@@ -830,7 +981,9 @@ provisioning a credential for a service that does not exist creates an unowned s
 ### 10.1 The built path
 
 A hand-authored `orchestration/docker-compose.yml` plus `orchestration/.env.example` is the **primary
-and only built** orchestration path (C-J). It declares:
+and only** orchestration path (C-J). **Neither file has been authored yet** — this subsection specifies
+what the manifest must declare, and is the specification that work will be built against rather than a
+description of a file in the tree. It declares:
 
 - the four services of §3.1, **one container per service**;
 - a `persistence-db` volume, attached to Persistence alone — it is the only service with a storage
@@ -839,15 +992,16 @@ and only built** orchestration path (C-J). It declares:
 - a `depends_on` chain using **health conditions**, so that Gateway is gated behind Persistence,
   DataServices and Security (§4.2).
 
-One manifest brings all four services up together, which is the local-orchestration requirement; and
+One manifest will bring all four services up together, which is the local-orchestration requirement; and
 because the four are separate images with no in-process dependency on one another, instance counts can
-vary per service independently.
+vary per service independently. **Independent scalability is a structural property of one-container-per-service
+and holds by construction; it is not a measured result, and no throughput figure is claimed for it.**
 
 ### 10.2 Container build context
 
-Each service's container definition lives at `services/<service-name>/Dockerfile`, but the Compose
-manifest sets the build **context to the repository root** — `context: ..` with
-`dockerfile: services/<service-name>/Dockerfile`.
+Each service's container definition **will live** at `services/<service-name>/Dockerfile` — none of the
+four exists yet — and the Compose manifest sets the build **context to the repository root**:
+`context: ..` with `dockerfile: services/<service-name>/Dockerfile`.
 
 This is not stylistic. Every service project references the shared libraries and the generated contract
 stubs under `shared/`, and a Docker build cannot reach outside its own context, so **a
@@ -891,7 +1045,8 @@ service becomes `persistence-service` in the reviewed roster (§3.1), the volume
 **`persistence-db`**.
 
 The environment's paired-capture persistence rule survives the rename intact: it is restated verbatim
-against the new name in both [`PARITY.md`](PARITY.md) and `characterization/README.md`. The rule itself
+against the new name in both `docs/PARITY.md` and `characterization/README.md` (both planned, neither yet
+present). The rule itself
 is not restated here — it belongs with the characterization model, and duplicating it is exactly how a
 rule drifts.
 
@@ -937,11 +1092,15 @@ detail lives in [`CONTRACTS.md`](CONTRACTS.md).
   set. This is *why* Security is REST: the stock bearer handler consumes that endpoint with zero
   bespoke code, so the security-critical path is framework code rather than hand-written code (§5.4,
   §9.2).
-- **Event broker with decomposed topic identity.** The legacy topic string fuses three independent
-  encodings into one opaque value — a lexical ordering prefix, the logical name, and a
-  persistence-namespace suffix. The contract carries them as three separate fields and reconstitutes
+- **Event broker with decomposed topic identity.** The legacy topic string fuses several independent
+  encodings into one opaque value — a lexical ordering prefix, the logical name, a
+  persistence-namespace suffix, a capture mode, an explicit priority, a prepend flag, and two negation
+  flags belonging to the *filter* grammar. The contract carries each as its own field and reconstitutes
   the fused legacy form only at the compatibility edge, because transmitting the fused string makes the
-  ordering invisible while parsing it at the far end gives the contract an undocumented grammar.
+  ordering invisible while parsing it at the far end gives the contract an undocumented grammar. The
+  negation flags matter most: a negated-namespace filter removes the subscriptions that are **not** in
+  the named namespace, so a model that recorded only "the persistent namespace" would invert the
+  behaviour while looking correct — see [`CONTRACTS.md`](CONTRACTS.md) §6.7.
 - **Explicit validation-session context.** Four pieces of cross-event mutable state
   [`ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L89-L96`] — the disabled-event mask, two
   re-entrancy flags, and the item-change return value stashed for the validation-error event to
@@ -1028,7 +1187,7 @@ blocked rather than approximate", that is what it says.
 
 | # | Limitation or anomaly | Position taken |
 | --- | --- | --- |
-| L1 | **Pinyin first-letter matching cannot be proven exact from the repository alone.** The lookup table exists only inside the closed native binary, and the flag semantics are undocumented — the call site passes a literal `7` whose meaning is recorded nowhere [`n_cst_dwsvc_dropdownsearch.sru:L323`] | Characterize both from the behavioural oracle. **If the oracle cannot be exercised, report the pinyin filter as blocked rather than approximating it** — an approximation returns subtly different result sets, which is a regression that looks like correct behaviour |
+| L1 | **Pinyin first-letter matching cannot be proven exact from the repository alone**, and the risk is narrower than it first appears. The **flags are documented**: [`ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149`] declares them under the comment `//PinyinFirstLetterLike:[flags]` as `PY_LIKE_IGNORE_CASE` = 1 (ignore case), `PY_LIKE_IGNORE_WIDTH` = 2 (ignore full-width versus half-width) and `PY_LIKE_FUZZY_SOUND` = 4 (fuzzy sound matching, `l`/`n`, `f`/`h`, `r`/`l`), so the literal `7` the call site passes [`n_cst_dwsvc_dropdownsearch.sru:L323`] enables **all three**. What remains unavailable is the **lookup table and the matching algorithm**, which exist only inside the closed native binary with no C++ source anywhere in the tree — and in particular the exact fuzzy-sound equivalence set, whose three documented pairs are illustrative rather than provably exhaustive | Characterize the table and the matching behaviour from the behavioural oracle; the flag decoding needs no characterization. **If the oracle cannot be exercised, report the pinyin filter as blocked rather than approximating it** — an approximation returns subtly different result sets, which is a regression that looks like correct behaviour |
 | L2 | **Cross-session foreign column-expression variables are narrowed by design.** The legacy holds a live object pointer to another DataWindow's expression service, which cannot be serialized | Co-resident references are supported through a session-scoped handle; references spanning sessions or service instances are **blocked with a defined error**, never given a silently wrong value. A deliberate, documented narrowing — see [`CONTRACTS.md`](CONTRACTS.md) |
 | L3 | **Encrypted-SQLite page-format parity is out of Phase-1 scope** (§8.3) | Provision the unencrypted path only and record the limitation, rather than attempting a format the target provider cannot produce |
 | L4 | **Container bring-up was not exercised** (§10.6) | Assert container correctness by definition and Compose review plus CI. **No verified bring-up is claimed** |

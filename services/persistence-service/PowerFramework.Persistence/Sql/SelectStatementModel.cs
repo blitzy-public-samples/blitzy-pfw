@@ -1194,15 +1194,47 @@ internal sealed class SelectStatementModel
     /// </summary>
     /// <returns><see langword="true"/> when a set operator matched.</returns>
     /// <remarks>
-    /// <b>This is a documented design decision, not a measurement.</b> That the statement splits into
-    /// blocks at all is proved by <c>getselectcount()</c> at <c>n_sql.sru:L13</c> and by the select
-    /// index on every clause accessor, but the native's own splitting rule lives inside pfw.dll and
-    /// is not observable here. Splitting on these four operators at parenthesis depth zero is the
-    /// reading that makes the counted surface meaningful. Worth keeping in proportion: every measured
-    /// call site addresses block <c>1</c>, either explicitly at
-    /// <c>n_cst_thread_task_sqlquery.sru:L691</c> and <c>:L698</c> by way of the caller-side proxy's
-    /// literal <c>1</c>, or implicitly through the short arity - so single-block behaviour is the only
-    /// path with direct evidence behind it.
+    /// <para>
+    /// <b>That the statement splits into blocks at all is a documented design decision, not a
+    /// measurement.</b> The splitting itself is proved by <c>getselectcount()</c> at
+    /// <c>n_sql.sru:L13</c> and by the select index on every clause accessor, but the native's own
+    /// splitting rule lives inside pfw.dll and is not observable here. Splitting on the set operators
+    /// below at parenthesis depth zero is the reading that makes the counted surface meaningful.
+    /// Worth keeping in proportion: every measured call site addresses block <c>1</c>, either
+    /// explicitly at <c>n_cst_thread_task_sqlquery.sru:L691</c> and <c>:L698</c> by way of the
+    /// caller-side proxy's literal <c>1</c>, or implicitly through the short arity - so single-block
+    /// behaviour is the only path with direct evidence behind it.
+    /// </para>
+    /// <para>
+    /// <b>WHICH OPERATORS, AND WHY ORACLE'S <c>MINUS</c> IS AMONG THEM RATHER THAN AN OMISSION.</b>
+    /// The recognised set is <c>UNION</c>, <c>UNION ALL</c>, <c>INTERSECT</c>, <c>EXCEPT</c> and
+    /// <c>MINUS</c> - five, because THIS ONE PARSER SERVES BOTH TARGET DIALECTS. The legacy dispatches
+    /// its paging rewrite on a two-valued database type, <c>DBT_MSSQL = 0</c> and
+    /// <c>DBT_ORACLE = 1</c> [<c>n_cst_thread_trans.sru:L60-L61</c>, resolved at <c>:L357-L359</c>],
+    /// and both arms drive this same clause model - the SQL Server strategies at
+    /// <c>n_cst_thread_task_sqlquery.sru:L323-L381</c> and the Oracle triple-nested row-number
+    /// strategy at <c>:L392-L395</c>. <c>MINUS</c> is Oracle's spelling of set difference, for which
+    /// <c>EXCEPT</c> is the SQL Server and standard spelling; recognising only the latter would leave
+    /// the parser able to serve one dialect and not the other, which is not a choice this file is
+    /// entitled to make.
+    /// </para>
+    /// <para>
+    /// <b>The failure mode omitting it produces is silent and total, which is why it is called out.</b>
+    /// An unrecognised operator is not skipped - it simply never becomes a block boundary, so both
+    /// <c>SELECT</c> tokens land in ONE segment. The strict increasing-clause-order check in
+    /// <see cref="Parse"/> then sees a second Column introducer after a Table introducer, rejects the
+    /// whole statement, and <see cref="Parse"/> returns <see langword="false"/>. A valid Oracle
+    /// compound query would therefore have been reported as unparseable rather than mis-parsed, and
+    /// <c>parsesql.srf</c>'s factory discards that result [see the factory's Defect 1], so the caller
+    /// would have received a live-but-empty model with no error anywhere.
+    /// </para>
+    /// <para>
+    /// Each operator is matched as a WHOLE WORD through <see cref="TryMatchWord"/> and only at
+    /// parenthesis depth zero outside every quoted or commented region, so a column, alias or
+    /// bracketed identifier that merely spells one of these words is not a boundary. That protection
+    /// is not specific to <c>MINUS</c>; it is the same protection <c>EXCEPT</c> and <c>INTERSECT</c>
+    /// have always relied on.
+    /// </para>
     /// </remarks>
     private static bool TryMatchSetOperator(string sql, int index, out int end)
     {
@@ -1230,6 +1262,14 @@ internal sealed class SelectStatementModel
         }
 
         if (TryMatchWord(sql, index, "EXCEPT", out end))
+        {
+            return true;
+        }
+
+        // Oracle's set-difference operator, the dialect counterpart of EXCEPT above. Required because
+        // one parser serves both DBT_MSSQL and DBT_ORACLE - see the remarks. Matched last only because
+        // the order of these independent single-word tests is immaterial; it is not a fallback.
+        if (TryMatchWord(sql, index, "MINUS", out end))
         {
             return true;
         }

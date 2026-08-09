@@ -6,12 +6,17 @@
   "license": "BSD-2-Clause",
   "scripts": {
     "test": "playwright test",
-    "test:list": "playwright test --list"
+    "test:list": "playwright test --list",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run test:list"
   },
   "devDependencies": {
-    "@playwright/test": "1.62.1"
+    "@playwright/test": "1.62.1",
+    "@types/node": "22.20.1",
+    "typescript": "5.9.3"
   },
   "engines": {
-    "node": ">=22.0.0"
-  }
+    "node": ">=22.12.0"
+  },
+  "packageManager": "npm@11.18.0"
 }

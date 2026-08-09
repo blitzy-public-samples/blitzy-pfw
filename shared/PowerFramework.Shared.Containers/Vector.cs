@@ -26,6 +26,21 @@
 //  left undefined, because an undefined cursor or index is exactly the kind of hole that
 //  produces an irreproducible defect in the recursion stack this type exists to carry.
 //
+//  DP-7 EVIDENCE STATUS, STATED IN THE TERMS A PARITY REPORT USES
+//  --------------------------------------------------------------------------------------------
+//  Naming the standard explicitly, because "DOCUMENTED INTERPRETATION" above says what the label
+//  means but not what it is NOT: no DOCUMENTED INTERPRETATION in this file is GOLDEN-MASTER
+//  PARITY. Golden-Master parity means the port's output was compared against a RECORDING of the
+//  legacy's output, and no recording of this type's behaviour exists anywhere in the repository.
+//  The tests covering these choices are TARGET REGRESSION GUARDS: they catch a change to this
+//  file, which is genuinely valuable, and they cannot detect a disagreement with pfw.dll.
+//
+//  Promoting any DOCUMENTED INTERPRETATION to parity evidence requires a paired recording under
+//  characterization/recordings/{legacy,dotnet}/<workflowId>/, captured against one unrecreated
+//  persistence-db volume state. Until then none of them may be reported as verified legacy
+//  behaviour in docs/PARITY.md or in any published summary. The member citations below are
+//  signature evidence, which the prototypes fully supply, and nothing more.
+//
 //  THE WHOLE OF THE LEGACY SURFACE, ENUMERATED
 //  --------------------------------------------------------------------------------------------
 //  Transcribed from n_vector.sru so that the surface below can be diffed against the source

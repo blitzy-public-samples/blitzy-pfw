@@ -56,7 +56,25 @@
     <!--
       AssemblyName and RootNamespace are deliberately left unset: the SDK already derives both as
       PowerFramework.Shared.Localization.Tests from this file's name, which is exactly the intended
-      value, and the nine test source files in this folder declare that namespace.
+      value, and every test source file in this folder declares that namespace.
+
+      The nine files, and the surface each one owns. Enumerated rather than counted, because a bare
+      count is unverifiable by inspection and drifts the moment a file is added - which is exactly how
+      this comment came to overstate the project's contents once already.
+
+        CategoriesTests.cs              CAT_MSGBOX and CAT_DWSVC as offsets from I18N_CAT_CUSTOM
+        I18nTests.cs                    the facade: silent passthrough, install and replace, dispatch
+        II18nProviderTests.cs           the one-member contract, exercised through every implementation
+        EnglishProviderTests.cs         the source filter, the category map, hit/miss, both preserved
+                                        mistranslations
+        SimplifiedChineseProviderTests.cs  the deliberate no-op, and why 1-and-unchanged is not a decline
+        I18nResourceReaderTests.cs      the XDocument/XPath substitution and its structural guards
+        I18nResourceFidelityTests.cs    pfw.i18n.xml asserted at the byte, against the read-only oracle
+        I18nXPathInjectionTests.cs      the unescaped key: malformed, always-true and union outcomes
+        FakeI18nProviders.cs            the test doubles the facade suites drive; declares no test
+
+      Eight of the nine carry tests; FakeI18nProviders.cs is a fixture source and is consumed by
+      I18nTests.cs, II18nProviderTests.cs and SimplifiedChineseProviderTests.cs.
     -->
 
   </PropertyGroup>
@@ -77,8 +95,10 @@
     The list is exhaustive by design, and matches the sibling shared library test projects:
       * No Microsoft.AspNetCore.Mvc.Testing. A shared library exposes no HTTP surface, so there is
         no in process host to spin up.
-      * No XML or XPath package. The resource reader under test uses System.Xml.Linq together with
-        System.Xml.XPath, both of which ship inside the Microsoft.NETCore.App shared framework. A
+      * No XML or XPath package. The resource reader under test uses System.Xml.Linq over
+        System.Xml, and this suite additionally uses System.Xml.XPath to cross check the document's
+        shape through a second framework API; all of them ship inside the
+        Microsoft.NETCore.App shared framework. A
         package reference here would be the first thread of coupling to a deferred capability that
         this phase must not implement even partially.
       * No mocking or fluent assertion library. The test doubles in this folder are hand written
@@ -93,56 +113,60 @@
   </ItemGroup>
 
   <!--
-    Exactly one project reference: the system under test, and nothing else.
+    Exactly two project references, and each one states a dependency this project genuinely has.
 
-    PowerFramework.Shared.Kernel arrives transitively through it, which is how these tests reach
-    RetCode.OK, RetCode.E_INVALID_OBJECT, Enums.I18N_SRC_PFW, Enums.I18N_SRC_CUSTOM, the
-    Enums.I18N_CAT_* set and Formatting.Sprintf. A direct reference to Kernel would be redundant
-    and would misstate this project's dependency shape, so it is deliberately absent, as is any
-    reference to a sibling shared library. One test assembly covers one shared library, so
-    coverage is never merged across libraries and the per project gate cannot be masked.
+    PowerFramework.Shared.Localization is the system under test.
+
+    PowerFramework.Shared.Kernel is referenced DIRECTLY because these tests compile against it
+    directly: CategoriesTests.cs opens with `using PowerFramework.Shared.Kernel;` and reads its
+    expectations out of RetCode.OK, RetCode.E_INVALID_OBJECT, Enums.I18N_SRC_PFW,
+    Enums.I18N_SRC_CUSTOM, the Enums.I18N_CAT_* set and Formatting.Sprintf rather than restating
+    literals. An earlier form of this file omitted it on the reasoning that Kernel arrives
+    transitively through the Localization edge and that a direct reference would be redundant. It
+    does arrive, and the project compiled - but the manifest then described a dependency shape the
+    source does not have, and it made this project's ability to compile a side effect of another
+    project's implementation choice. The day Localization stopped needing Kernel, or narrowed that
+    edge with PrivateAssets, these tests would break for a reason nothing in this file explains.
+    A manifest that matches the source's own imports is the whole point of declaring one.
+
+    No sibling shared library and no service project is referenced. One test assembly covers one
+    shared library, so coverage is never merged across libraries and the per project gate cannot be
+    masked; Kernel's own coverage is measured by PowerFramework.Shared.Kernel.Tests.
   -->
   <ItemGroup>
     <ProjectReference Include="../PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj" />
+    <ProjectReference Include="../PowerFramework.Shared.Kernel/PowerFramework.Shared.Kernel.csproj" />
   </ItemGroup>
 
   <!--
-    Translation resource fixture.
+    TRANSLATION RESOURCE FIXTURE : DELIBERATELY NOT DECLARED HERE, AND THAT IS LOAD BEARING.
 
-    The legacy providers load the resource table by BARE RELATIVE FILENAME from the process working
-    directory: `_doc.LoadFile("pfw.i18n.xml")` at n_cst_i18n_en.sru:159 and at
-    n_cst_i18n_cht.sru:63. The xunit.v3 test host runs with the build output directory as its
-    working directory, so linking the repository root resource to that same bare filename
-    reproduces the legacy lookup exactly and lets the reader tests assert on the relative filename
-    with zero path arithmetic in test code.
+    The reader tests in this project open pfw.i18n.xml by BARE RELATIVE FILENAME, because that is what
+    they are testing: I18nResourceReader reproduces the legacy `_doc.LoadFile("pfw.i18n.xml")` at
+    n_cst_i18n_en.sru:L159 and n_cst_i18n_cht.sru:L63, which resolves against the process working
+    directory and probes nowhere else. The xunit.v3 test host runs with the build output directory as
+    its working directory, so the table has to be sitting in this project's output for those tests to
+    pass at all.
 
-    Why a Content link to the single real file, and never a checked in duplicate:
+    It gets there through PowerFramework.Shared.Localization, which declares the Content item once and
+    flows it down the ProjectReference edge. An earlier form of this file declared its own copy of the
+    same item. Removing it is not tidying: the library is the only thing in the tree that READS the
+    table, so the library is where its delivery belongs, and with the duplicate gone THESE TESTS
+    BECOME THE REGRESSION GUARD FOR THAT DELIVERY. If someone removes the item from the library - and
+    an earlier form of this refactor did exactly that, on the mistaken reading that copying a
+    read-only file breaches constraint C-C - the reader tests fail here immediately and loudly. With a
+    duplicate present they would keep passing while every consuming service silently shipped without
+    the table, translating nothing.
 
-      * The repository root pfw.i18n.xml is part of the read-only legacy tree and is the
-        behavioural oracle for parity. MSBuild only ever COPIES it into the output directory.
-        Nothing in this project writes to, moves, renames, transforms, re encodes or reformats that
-        path, and no target that would do so may ever be added here. That makes the read-only
-        guarantee structural rather than a matter of reviewer diligence.
-
-      * One source of truth means the fixture cannot drift from the oracle. A second checked in
-        copy could later be "corrected" by a maintainer, and the two documented mistranslations
-        this resource carries must survive verbatim rather than being silently fixed.
-
-      * The copy must stay byte identical to the original: 6824 bytes, no byte order mark, no XML
-        declaration (the document opens directly with the pfw element), UTF-8 encoded Chinese, LF
-        only line endings, and a final closing element with no trailing newline. The repository
-        .gitattributes declares no eol and no text=auto rule, so no checkout normalization occurs
-        and a plain copy preserves every byte. Never introduce an encoding conversion, a newline
-        fixup or any other transform here; a size or hash mismatch in the output directory means
-        the read-only guarantee has been broken.
-
-    Content rather than None, and rather than EmbeddedResource, because the behaviour under test is
-    reading a real file from a real relative path on disk, not streaming an assembly resource.
-    PreserveNewest keeps incremental builds cheap while still refreshing the copy if the oracle is
-    ever updated upstream.
+    Two properties of the copy remain contractual wherever it is declared, and are restated here
+    because this project is what proves them. The repository root pfw.i18n.xml is a read-only DATA
+    INPUT (AAP §0.2.1.2): MSBuild only ever COPIES it, and nothing in this project or in the library
+    writes to, moves, renames, transforms, re-encodes or reformats that path, so the read-only
+    guarantee is structural rather than a matter of reviewer diligence. And the copy must stay BYTE
+    IDENTICAL to the original - 6824 bytes, no byte order mark, no XML declaration (the document opens
+    directly with the pfw element), UTF-8 encoded Chinese, LF only line endings, no trailing newline -
+    because the two documented mistranslations it carries must survive verbatim rather than being
+    silently fixed. Never add an encoding conversion or a newline fixup anywhere on that path.
   -->
-  <ItemGroup>
-    <Content Include="../../pfw.i18n.xml" Link="pfw.i18n.xml" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
 
 </Project>

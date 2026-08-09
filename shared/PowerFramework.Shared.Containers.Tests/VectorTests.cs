@@ -3,10 +3,33 @@
 //  PowerFramework.Shared.Containers.Vector
 //  --------------------------------------------------------------------------------------------
 //  SYSTEM UNDER TEST  shared/PowerFramework.Shared.Containers/Vector.cs
-//  BEHAVIOURAL ORACLE ws_objects/pfw.utility.container.pbl.src/n_vector.sru (54 lines, READ ONLY)
+//  LEGACY DECLARATION ws_objects/pfw.utility.container.pbl.src/n_vector.sru (54 lines, READ ONLY)
+//                     A DECLARATION, not an oracle: 33 prototypes and NO bodies. It settles
+//                     signatures and settles no edge behaviour. See DP-7 EVIDENCE STATUS below.
 //  SIBLING CLASS      VectorCursorTests.cs owns the cursor state machine and the stack-usage
 //                     pattern. The split is enumerated in the LEDGER below so that neither class
 //                     duplicates the other and neither leaves a member untested.
+//
+//  DP-7 EVIDENCE STATUS - READ THIS BEFORE CITING ANY ASSERTION AS LEGACY PARITY
+//  --------------------------------------------------------------------------------------------
+//  THIS SUITE IS NOT GOLDEN-MASTER PROOF. It is a target regression guard. A Golden-Master test
+//  compares the port against a RECORDING of the legacy; every expectation here was derived from
+//  the port plus a prototype list, because no legacy body exists to consult. The two are
+//  indistinguishable when they agree and silently divergent when they do not, so each assertion's
+//  tier is stated rather than inferred:
+//
+//    TIER 1  TRACEABLE - settled by a cited ws_objects/** locator: a member name, an arity, a
+//            parameter type, a return type. A prototype is a complete statement of a signature.
+//    TIER 3  TARGET-CHARACTERIZED - settled by the port, because the prototype does not settle it.
+//            Every edge behaviour is here: the inclusive one-based bounds, out-of-range returns,
+//            the copy and transfer semantics, Purge/Reverse/Reserve/Resize outcomes, and the
+//            MaxSize contract. DEFINED, REPRODUCIBLE AND COVERED - never verified.
+//
+//  THE ORACLE-CAPTURE PREREQUISITE. Promoting a TIER 3 assertion to parity evidence needs a
+//  paired recording under characterization/recordings/{legacy,dotnet}/<workflowId>/, taken against
+//  one unrecreated persistence-db volume state. Until then no TIER 3 expectation here may be
+//  reported as verified legacy behaviour. IF A RECORDING LATER CONTRADICTS ONE, THE RECORDING WINS
+//  and the test is corrected - it is not defended on the grounds that it currently passes.
 //
 //  WHY THIS CLASS EXISTS: THE SUBSTITUTION IS WHERE THE RISK IS
 //  --------------------------------------------------------------------------------------------

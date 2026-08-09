@@ -43,7 +43,8 @@
 #    GenRSAKey           :L19-L20    2  ->  POST /v1/crypto/rsa/keys
 #    Hash    unkeyed     :L21-L22    2  ->  POST /v1/crypto/hash
 #    Hash    keyed       :L23-L26    4  ->  POST /v1/crypto/hmac
-#    HashFile            :L27-L29    3  ->  DELIBERATELY NOT PROJECTED - see the hash operations
+#    HashFile unkeyed    :L27        1  ->  POST /v1/crypto/hash-file
+#    HashFile keyed      :L28-L29    2  ->  POST /v1/crypto/hmac-file
 #    SymEncrypt          :L30-L45   16  ->  POST /v1/crypto/symmetric/encrypt
 #    SymDecrypt          :L46-L61   16  ->  POST /v1/crypto/symmetric/decrypt
 #    RSAEncrypt          :L62-L65    4  ->  POST /v1/crypto/rsa/encrypt
@@ -51,13 +52,32 @@
 #    RSASign             :L70-L71    2  ->  POST /v1/crypto/rsa/sign
 #    VerifyRSASign       :L72-L73    2  ->  POST /v1/crypto/rsa/verify
 #                                  ---
-#                                   63   total cryptographic operations
-#                                   -3   the HashFile family, not projected
+#                                   63   total cryptographic overloads, ALL 63 PROJECTED
 #                                  ---
-#                                   60   projected onto 15 wire operations
+#                                        onto 17 wire operations
 #  63 is an audit, not decoration. If a future edit makes the count anything other than 63, or
 #  leaves an overload family with no landing site, this boundary has silently drifted from the
 #  oracle. Re-verify by counting the declarations, not by reading them.
+#
+#  THE HashFile FAMILY IS PROJECTED, WHICH CORRECTS AN EARLIER OMISSION (C-K)
+#    An earlier revision of this document declined to project HashFile at all, on the grounds that its
+#    only argument is a FILENAME and accepting a caller-supplied filesystem path across a service
+#    boundary is an arbitrary-file-read primitive. The first half of that reasoning is right and is
+#    retained; the conclusion was wrong. A declared legacy capability silently disappearing is not a
+#    narrowing, it is a gap - a caller reading this document could not tell whether file hashing was
+#    unsupported, forgotten, or supported by some other means, and the refactor's own rule is to NARROW
+#    A CONTRACT WITH A DEFINED ERROR RATHER THAN OMIT IT.
+#
+#    The resolution is the mechanism this document already uses for every other piece of material a
+#    caller must not send: AN OPAQUE SERVER-RESOLVED REFERENCE. `fileRef` is to a file exactly what
+#    `keyRef` is to a key. THE CALLER NEVER SENDS A PATH, A FILENAME, A DIRECTORY OR A URL; it sends a
+#    reference the server resolves against its own configured, allow-listed store. There is therefore
+#    no path traversal to defend against, because there is no path: an unknown reference is a plain
+#    `404` and a reference outside the configured store cannot be constructed by a caller at all.
+#
+#    WHAT IS NARROWED, STATED PLAINLY. The legacy hashes any file its process could open. These two
+#    operations hash any file the SERVER HAS BEEN CONFIGURED TO EXPOSE. That is a real reduction in
+#    reach and it is deliberate; it is recorded here rather than presented as equivalence.
 #
 #  RULES POSITION
 #  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
@@ -165,6 +185,55 @@ info:
     passphrase or a password could be placed, and every request schema sets
     `additionalProperties: false` so that one cannot be smuggled in either.
 
+    ## 2a. Transport security, and the single mutual-TLS edge
+
+    This section exists because the two facts either side of it are easy to read as a
+    contradiction, and they are not one: **the operations here speak REST/HTTP semantics, and the
+    channel that carries them is TLS.** "REST" names the interface shape - request/response,
+    resource paths, HTTP status codes, an OpenAPI description a stock client can consume - and says
+    nothing at all about the scheme. Nothing in this contract is designed to be served without TLS
+    in a deployed topology.
+
+    **`POST /v1/tokens` is the one mutual-TLS edge in the entire system, and it is mandatory on
+    that operation rather than an optional hardening.** The reason is structural, not a preference:
+    a caller cannot present a bearer token in order to obtain its first bearer token, so caller
+    identity on the issuance operation has to come from somewhere other than a token, and it comes
+    from the client certificate the transport presents. Mutual TLS is the documented fallback for
+    exactly the pair where a token issuer is inappropriate, and the token-issuance edge is that
+    pair. The operation therefore declares `mutualTls` and **overrides** the document-level bearer
+    requirement, and its `401`/`403` responses are part of the contract rather than implementation
+    detail:
+
+    - **`401`** - no client certificate was presented, or the certificate presented is not trusted
+      by this service. There is no bearer-token alternative on this operation to fall back to.
+    - **`403`** - the certificate is trusted but the authenticated caller is not permitted the
+      requested `subject` or `audience`; in particular the claimed `subject` does not match the
+      identity the certificate establishes. The response names neither the expected identity nor
+      any part of the stored configuration.
+
+    Every **other** operation in this document is bearer-protected (`/v1/ping` and all of C-02) or
+    deliberately anonymous (`/health` and the two `/.well-known/*` publications), and each says so
+    at its own point of use.
+
+    **The termination model, stated because it constrains deployment.** Bearer-protected and
+    anonymous operations may sit behind a TLS-terminating proxy in the ordinary way. **`POST
+    /v1/tokens` may not**: mutual TLS authenticates the client to *this* service, so an
+    intermediary that terminates TLS on that path either discards the client certificate or leaves
+    this service trusting a forwarded assertion of identity it cannot verify. Either outcome
+    defeats the sole-issuer topology. If a proxy sits in front of the issuance path at all it must
+    pass the connection through rather than terminate it.
+
+    **The local-development exception, stated explicitly rather than left implicit.** The `servers`
+    entry below is templated, and its `scheme` variable defaults to `http` so that the resolved
+    default URL is exactly the loopback address the local bring-up publishes. That default is a
+    **development convenience on the loopback interface only**. A deployed topology sets `scheme` to
+    `https`, and mutual TLS on the issuance path presupposes it: on plain HTTP there is no client
+    certificate to present, so a caller reaching `POST /v1/tokens` over `http` is running with the
+    issuance edge's caller authentication unavailable - which is acceptable on a developer's own
+    machine and is acceptable nowhere else. Consumers should likewise treat `RequireHttpsMetadata`
+    being relaxed as a development-only setting: it belongs in a development configuration file, not
+    in a base one.
+
     ## 3. Every path is versioned `v1`, and that is a constraint rather than a habit
 
     Explicitly versioned contracts are the **only permitted cross-service coupling** in this
@@ -238,18 +307,25 @@ info:
     contract must not offer, because offering it would be a new feature. Each of the four carries
     its mechanical proof at the point where it is annotated, so none has to be taken on trust.
 
-    ## 7. Two deliberate narrowings, and one impedance mismatch
+    ## 7. Three deliberate narrowings, and one impedance mismatch
 
     Each is a documented gap rather than a silent omission, and each is stated on the operation it
-    affects:
+    affects. **Every one of the 63 legacy overloads is reachable; a narrowing here restricts what an
+    operation accepts or returns, never whether it exists.**
 
     - **RSA key generation does not return the private key.** The legacy returns both keys through
       two `ref` out-parameters [n_crypto.sru:L19-L20]; reproducing that would ship freshly
       generated private key material across a network boundary. The response returns the public
       key and an opaque `keyRef` for the private key instead.
-    - **The three `HashFile` overloads are not projected** [n_crypto.sru:L27-L29]. A
-      caller-supplied server-side filename over HTTP would create a path-traversal surface the
-      in-process legacy could not have had.
+    - **File hashing takes an opaque `fileRef`, never a path.** The legacy's three `HashFile`
+      overloads take a FILENAME [n_crypto.sru:L27-L29], and accepting a caller-supplied
+      server-side path over HTTP would be an arbitrary-file-read primitive the in-process legacy
+      could not have had. The operations are nonetheless published - `POST /v1/crypto/hash-file`
+      and `POST /v1/crypto/hmac-file` - taking a server-resolved reference exactly as `keyRef`
+      works. What narrows is the REACH: the legacy hashes any file its process can open, and these
+      hash any file the server has been configured to expose. An earlier revision omitted the
+      family outright, which was a gap rather than a narrowing, because a reader could not tell
+      whether the capability was unsupported or merely forgotten.
     - **`BlobReverse` mutates its argument in place** and returns only a success boolean
       [n_crypto.sru:L13]. In-place mutation has no wire representation, so the response carries
       the reversed payload *and* the boolean.
@@ -263,16 +339,44 @@ info:
     shape, **this document is authoritative for the wire** and the prose is corrected to match it.
 
 servers:
-  # ONE ENTRY, DELIBERATELY. A `servers` entry means "where you send requests for THIS API", so
-  # listing another service's port here would be wrong, not merely redundant. Port 5104 is this
-  # service's listener per docs/ARCHITECTURE.md 4.1, inside the 5101-5105 band the attached
+  # ONE CANONICAL ENTRY, AND IT IS HTTPS. A `servers` entry means "where you send requests for THIS
+  # API", so listing another service's port here would be wrong, not merely redundant. Port 5104 is
+  # this service's listener per docs/ARCHITECTURE.md 4.1, inside the 5101-5105 band the attached
   # environment fixes; the composition root on 5105 is Gateway's document, not this one.
-  - url: http://localhost:5104
+  #
+  # WHY THE SCHEME IS https AND NOT http, WHICH IS A CORRECTION RATHER THAN A PREFERENCE:
+  #
+  #   1. THE TOKEN ENDPOINT REQUIRES MUTUAL TLS. `POST /v1/tokens` is secured with the `mutualTls`
+  #      scheme below, and mutual TLS IS TLS - a client certificate cannot be presented, requested or
+  #      validated on a plaintext listener. Published over http this document described an endpoint
+  #      that could not be called at all, so NO SERVICE COULD OBTAIN ITS FIRST TOKEN. That makes the
+  #      scheme a functional defect and not a hardening preference.
+  #   2. THIS IS THE SYSTEM'S TRUST BOOTSTRAP. Everything downstream verifies against the material
+  #      published at `/.well-known/jwks.json` and `/.well-known/openid-configuration`. Fetched over
+  #      plaintext, both are trivially substitutable on path: an attacker who replaces the published
+  #      JWK set makes every other service accept tokens the attacker signed. No amount of correctness
+  #      elsewhere recovers from that, because the other three services are behaving exactly as
+  #      designed when they trust what this endpoint told them.
+  #   3. EVERY OTHER OPERATION CARRIES A BEARER TOKEN, AND C-02 CARRIES CIPHERTEXT, DIGESTS AND
+  #      `keyRef` VALUES. Over plaintext the token is replayable by anyone on path and the crypto
+  #      calls are readable. C-G requires every newly created boundary to be authenticated from the
+  #      outset, and an authentication scheme whose credentials travel in the clear is not one.
+  #
+  # A LOCAL PLAINTEXT PROBE IS NOT SCAFFOLDED HERE. The attached environment's readiness gate uses
+  # `curl -sf http://localhost:5104/health`, and that remains workable in development because
+  # `appsettings.Development.json` may bind an additional plaintext listener FOR `/health` ONLY. It is
+  # deliberately not a `servers` entry: a second entry would make plaintext a published, selectable
+  # base URL for the whole API, including the token endpoint and the JWKS document, which is precisely
+  # the exposure above. The development exception is documented at the one place it is configured, is
+  # scoped to the anonymous readiness probe, and never carries the trust bootstrap.
+  - url: https://localhost:5104
     description: >-
       The security-service listener. Port 5104 is fixed by the port map in
       docs/ARCHITECTURE.md 4.1 and is the same value the local orchestration manifest publishes.
-      Inside the orchestration network, callers reach this service by its service name on the same
-      port rather than through localhost.
+      TLS is required: `POST /v1/tokens` authenticates with a client certificate, and the JWKS and
+      discovery documents are the verification material every other service trusts, so neither may be
+      fetched over a channel an attacker can rewrite. Inside the orchestration network, callers reach
+      this service by its service name on the same port rather than through localhost.
 
 tags:
   - name: TokenService
@@ -284,9 +388,12 @@ tags:
   - name: CryptoService
     x-contract-id: C-02
     description: >-
-      Contract C-02. The cryptographic surface of the legacy framework, republished as 15
-      stateless operations that together cover 60 of its 63 cryptographic overloads
-      [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73]. Every operation is a plain
+      Contract C-02. The cryptographic surface of the legacy framework, republished as 17
+      stateless operations that together cover ALL 63 of its cryptographic overloads
+      [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73].
+      Two of the 17 - file hashing, keyed and unkeyed - take an opaque server-resolved `fileRef`
+      in place of the legacy filename, so the capability is reachable without a caller-supplied
+      path ever crossing the boundary. Every operation is a plain
       request/response with no ordering requirement between calls and nothing to stream, which is
       the interface shape that decided REST for this service. Raw key material never crosses the
       wire from a caller.
@@ -331,7 +438,15 @@ paths:
         This operation is protected by **mutual TLS** and by nothing else, and that is a structural
         necessity rather than a preference: **a caller cannot present a bearer token in order to
         obtain its first bearer token.** Mutual TLS is the documented fallback for exactly the pair
-        where a token issuer is inappropriate, and the token-issuance edge is that pair.
+        where a token issuer is inappropriate, and the token-issuance edge is that pair. It is
+        therefore the **single mutual-TLS edge in the system**, and the requirement is mandatory on
+        this operation rather than optional hardening.
+
+        Because a client certificate exists only inside a TLS handshake, this operation presupposes
+        the `https` scheme, and it is the one path in this document that **must not be terminated by
+        an intermediary proxy**. Section 2a of the document description carries the full termination
+        model and states the loopback-only development exception under which the default `http`
+        scheme leaves this operation with no caller authentication available at all.
 
         Consequently the request body carries **no credential of any kind** - no client secret, no
         password, no API key, no client assertion and no key material. The `subject` field names
@@ -437,9 +552,13 @@ paths:
         Token bearer handler, which fetches it, caches it and handles key rollover without any
         bespoke code. Keeping the security-critical retrieval path inside framework code rather
         than hand-written code is the whole reason this contract is REST rather than gRPC.
-      security:
-        # OVERRIDES the document-level bearer requirement. Anonymous BY DESIGN - see above.
-        - {}
+      # OVERRIDES the document-level bearer requirement with an EMPTY requirement LIST. Anonymous
+      # BY DESIGN - see above. The empty list is the exact form required, and it is not
+      # interchangeable with a one-item list holding an empty requirement object: `[]` says "no
+      # requirement applies", whereas `[{}]` says "one requirement applies, and it is satisfied by
+      # nothing". Both permit anonymous access, but only `[]` says so in the shape every generator
+      # and policy checker reads, so the machine-readable contract states it that way.
+      security: []
       responses:
         '200':
           description: The current key set. Public parameters only.
@@ -491,9 +610,11 @@ paths:
         ones; this contract nevertheless states its member set exactly, because the absence above
         is a decision worth making machine-checkable rather than a gap to be filled in later
         without a version change.
-      security:
-        # OVERRIDES the document-level bearer requirement. Anonymous BY DESIGN - see above.
-        - {}
+      # OVERRIDES the document-level bearer requirement with an EMPTY requirement LIST. Anonymous
+      # BY DESIGN - a consumer's bearer handler fetches this document in order to LEARN how to
+      # authenticate, so it cannot already hold a token when it asks. See the JWKS operation above
+      # for why `[]` and `[{}]` are not interchangeable.
+      security: []
       responses:
         '200':
           description: The discovery metadata for this issuer.
@@ -546,9 +667,11 @@ paths:
         A service still completing its startup validation is not the same as one whose dependency
         has failed, and an operator needs to be able to tell them apart. `Degraded` carries the
         former and `Unhealthy` the latter; the `status` schema states the mapping.
-      security:
-        # OVERRIDES the document-level bearer requirement. Anonymous BY DESIGN - see above.
-        - {}
+      # OVERRIDES the document-level bearer requirement with an EMPTY requirement LIST. Anonymous
+      # BY DESIGN - a readiness probe must be reachable before any token exists, and the compose
+      # health gate that holds Gateway behind its three upstreams depends on it. See the JWKS
+      # operation above for why `[]` and `[{}]` are not interchangeable.
+      security: []
       responses:
         '200':
           description: >-
@@ -607,9 +730,14 @@ paths:
 
   # ================================================================================================
   #  C-02 - security.v1.CryptoService
-  #  15 operations covering 60 of the legacy surface's 63 cryptographic overloads. Every one
+  #  17 operations covering ALL 63 of the legacy surface's cryptographic overloads. Every one
   #  requires a token (inherited from the document-level requirement) and every one returns the
   #  single ProblemDetails shape on every non-2xx.
+  #
+  #  THE FILE-HASHING PAIR TAKES A REFERENCE, NEVER A PATH: /v1/crypto/hash-file and
+  #  /v1/crypto/hmac-file project the three legacy HashFile overloads through an opaque
+  #  server-resolved fileRef, resolved exactly as keyRef is. No caller-supplied filesystem path
+  #  crosses this boundary in either direction - see the FileReference schema.
   #
   #  THE CONTRACT-LEVEL SECRETS RULE, STATED ONCE HERE AND AGAIN ON EVERY KEYED OPERATION:
   #  raw key material never crosses the wire from a caller. Every keyed operation takes an opaque
@@ -644,19 +772,15 @@ paths:
         type - the hash family is the exception, and it is **preserved rather than harmonised**
         (constraint C-B). Do not "fix" this into a form-following response.
 
-        ## The `HashFile` overloads are deliberately not projected (C-G)
+        ## File hashing lives on its own operation, and it takes a reference rather than a path
 
         The legacy also declares `HashFile` in three forms - one unkeyed at `n_crypto.sru:L27` and
-        two keyed at `:L28-L29` - each taking a `readonly string filename` and hashing a file from
-        the **local filesystem**. **None of the three is projected onto this boundary.**
-
-        A caller-supplied server-side filename arriving over HTTP would create a path-traversal
-        surface that the in-process legacy could not have had: in process, the filename came from
-        the same trust domain as the code that read it. Across a boundary it does not. This is a
-        **documented gap, which is better than a partial implementation** - and it is enumerable,
-        so nothing is silently missing. Should a file-hashing capability ever be needed here, it
-        must take an opaque server-resolved reference exactly as `keyRef` does, and never a raw
-        path.
+        two keyed at `:L28-L29` - each taking a `readonly string filename`. Those are published as
+        `POST /v1/crypto/hash-file` and `POST /v1/crypto/hmac-file`, which take an opaque
+        server-resolved `fileRef` exactly as `keyRef` works. **No caller ever sends a path**, so
+        there is no traversal surface to defend: in process the filename came from the same trust
+        domain as the code that read it, and across a boundary it does not, which is why the
+        parameter changed shape rather than the capability disappearing.
 
         ## Hash type selection
 
@@ -713,15 +837,127 @@ paths:
         travels with it.
 
         As with the unkeyed operation, the response is a **string digest regardless of
-        `payloadForm`**, because all four legacy overloads return `string`. The three `HashFile`
-        overloads at `:L27-L29`, two of which are keyed, are deliberately not projected - the
-        reasoning is on the unkeyed hash operation.
+        `payloadForm`**, because all four legacy overloads return `string`. The two KEYED `HashFile`
+        overloads at `:L28-L29` are published separately on `POST /v1/crypto/hmac-file`, which takes
+        a `fileRef` in place of the legacy filename.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/HmacRequest'
+      responses:
+        '200':
+          description: The keyed digest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DigestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/hash-file:
+    post:
+      operationId: hashFile
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Compute an unkeyed digest over a server-resolved file.
+      description: |-
+        Computes an **unkeyed** digest over a file this service has been configured to expose.
+
+        Mirrors the single unkeyed `HashFile` overload at `n_crypto.sru:L27`.
+
+        ## The filename parameter became a reference, and that is the whole design
+
+        The legacy signature is `string HashFile(readonly string filename, readonly long ntype)`. A
+        caller-supplied server-side filename arriving over HTTP is an **arbitrary-file-read
+        primitive**, and no amount of path inspection makes it safe, because the path space belongs to
+        the deployment rather than to this contract. So the parameter is an opaque `fileRef` resolved
+        against this service's own configured, allow-listed store - the same mechanism `keyRef` uses -
+        and **no path, filename, directory or URL crosses this boundary in either direction.**
+
+        ## Why the family is published at all rather than omitted
+
+        An earlier revision of this document declined to project `HashFile` and recorded the omission
+        as a documented gap. That was the wrong call: a declared legacy capability that simply is not
+        there leaves a reader unable to tell unsupported from forgotten, and this refactor's rule is to
+        **narrow a contract with a defined error, never to omit it silently**. What is narrowed is the
+        REACH - the legacy hashes any file its process can open, this hashes any file the server exposes
+        - and that is stated on the `FileReference` schema rather than implied.
+
+        ## The response is a string digest
+
+        As with the in-memory hash operations, the digest is a string. There is no `payloadForm` on
+        this operation: the payload is a file, not an inline value, so there is no string-versus-blob
+        choice for the input, and the legacy overload returns `string` regardless.
+
+        ## Hash type selection
+
+        `hashType` is the same six-member legacy set, and `CRYPTO_HASH_MD5` and `CRYPTO_HASH_CRC32`
+        remain selectable here for the same preserved-weakness reason recorded on the schema.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HashFileRequest'
+      responses:
+        '200':
+          description: The digest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DigestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
+        '404':
+          $ref: '#/components/responses/RefNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/crypto/hmac-file:
+    post:
+      operationId: hmacFile
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Compute a keyed digest over a server-resolved file.
+      description: |-
+        Computes a **keyed** digest over a file this service has been configured to expose.
+
+        ## Two legacy overloads, one wire shape
+
+        `n_crypto.sru:L28-L29` declares the keyed file family twice, differing only in whether the key
+        is a `readonly string` or a `readonly blob`. **The `keyRef` indirection collapses that
+        distinction entirely**, exactly as it does for the four keyed in-memory overloads: a key has no
+        form on the wire because a key does not travel on the wire. Both overloads are reachable here
+        without loss.
+
+        ## Both parameters are references, and neither is a value
+
+        `fileRef` stands in the position of the legacy `readonly string filename` and `keyRef` in the
+        position of its `key` parameter. Neither a path nor key material crosses this boundary - see
+        `FileReference` and `KeyReference` for the resolution model and the two distinguishable
+        failures, `404` for unresolvable and `403` for not permitted.
+
+        The response is a string digest, as all three legacy `HashFile` overloads return `string`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HmacFileRequest'
       responses:
         '200':
           description: The keyed digest.
@@ -1514,7 +1750,25 @@ components:
     mutualTls:
       type: mutualTLS
       description: |-
-        A client certificate presented during the TLS handshake, trusted by this service.
+        A client certificate presented during the TLS handshake, **requested and validated by this
+        service**, and trusted only if it chains to the configured issuer.
+
+        ## This requires a TLS listener, which is why the server entry is `https`
+
+        A client certificate is exchanged during the handshake, so there is no plaintext form of this
+        scheme: on an `http` listener the certificate is never requested, never presented and never
+        validated, and the operation below cannot be called at all. The `servers` entry is therefore
+        `https` and this scheme is the reason, stated here as well as there because the two are one
+        decision recorded in two places.
+
+        Validation is not merely "a certificate was presented". The service **requires** a client
+        certificate on this endpoint, verifies the chain against its configured trust anchor, checks
+        validity dates and revocation where the deployment provides it, and maps the certificate to a
+        caller identity. A request that presents no certificate, or one that fails any of those
+        checks, is rejected with `401` before the token-issuance logic runs - it never reaches the
+        signing key. Presenting a well-formed certificate that is not authorised for the requested
+        audience or scope is `403`, which is a different outcome and is documented separately on the
+        operation.
 
         ## Used by exactly one operation, and necessarily so
 
@@ -1533,6 +1787,18 @@ components:
         key is committed to this repository, and none is embedded in a container image.**
 
         No mutual-TLS material is declared for any service that does not exist in this phase.
+
+        ## This scheme presupposes `https`, and it cannot be terminated by an intermediary
+
+        A client certificate exists only inside a TLS handshake, so this scheme is meaningful only
+        when the `scheme` server variable is `https`. It is also the one path in this document that
+        **must not sit behind a TLS-terminating proxy**: an intermediary that terminates TLS here
+        either discards the certificate or leaves this service trusting a forwarded assertion of an
+        identity it cannot itself verify, and either outcome defeats the sole-issuer topology. If a
+        proxy fronts the issuance path at all, it passes the connection through. Section 2a of the
+        document description states the whole termination model, including the deliberate
+        loopback-only development exception under which the default `http` scheme leaves this
+        operation with no caller authentication available.
 
   # ================================================================================================
   #  REUSABLE RESPONSES
@@ -1886,6 +2152,45 @@ components:
         under the default mode: ECB uses no vector at all, so the eight no-vector overloads and the
         default mode go together.
 
+    FileReference:
+      type: string
+      minLength: 1
+      title: FileReference
+      description: |-
+        An **opaque handle** to a file this service has been configured to expose, resolved exactly as
+        a `KeyReference` is. It is not a path, not a filename, not a directory and not a URL, it is
+        meaningless outside this service, and it must not be parsed, constructed or inferred by a
+        caller.
+
+        ## The rule this schema exists to enforce
+
+        > **No caller-supplied filesystem path ever crosses this boundary.**
+
+        The legacy `HashFile` family takes `readonly string filename` and hashes a file from the local
+        filesystem [n_crypto.sru:L27-L29]. In process that is unremarkable: the filename came from the
+        same trust domain as the code that opened it. Republished as a wire parameter it would be an
+        **arbitrary-file-read primitive** - a caller could name any file the service process can open,
+        and every traversal defence would then be a string-inspection guess about a path this contract
+        does not own.
+
+        An opaque reference removes the problem rather than defending against it. **There is no path to
+        traverse**, because the caller never supplies one: it supplies a token the service maps to an
+        entry in its own configured, allow-listed store.
+
+        ## Resolution, and the two distinguishable failures
+
+        Identical to `KeyReference`. An unresolvable reference returns `404`; a resolvable one the
+        caller is not permitted to use returns `403`. Neither response echoes the resolved path, the
+        file's name, its size, its location or any part of its contents, enumerates the store, or
+        suggests a nearby reference - an error that leaked a path would reintroduce exactly what the
+        indirection removes.
+
+        ## What this narrows, stated rather than glossed
+
+        The legacy hashes **any file its process can open**. This operation hashes **any file the
+        server has been configured to expose**. That is a real reduction in reach, and it is the
+        deliberate one: the contract is narrowed with a defined error rather than widened with a guess.
+
     # ==============================================================================================
     #  THE LEGACY CONSTANT SETS
     #  Values and identifier spellings are the oracle's, verbatim [enums.sru:L921-L969]. Each is a
@@ -2059,6 +2364,7 @@ components:
       format: int64
       title: CryptoRndFlags
       minimum: 0
+      maximum: 4294967295
       default: 3
       description: |-
         The character classes a generated random string may draw from. Declared `Constant Ulong` at
@@ -2083,10 +2389,24 @@ components:
         the legacy's own default. It is reproduced exactly rather than widened to 7 (C-B); a caller
         who wants symbols asks for them.
 
-        The legacy declares the argument as an unconstrained `readonly ulong`
-        [n_crypto.sru:L16] and defines no behaviour for a bit outside the three above, so this
-        contract states no `maximum`: inventing one would narrow an argument the legacy does not
-        narrow.
+        ## The stated bounds are the legacy parameter's own domain, exactly as for `CryptoRsaKeyBits`
+
+        The legacy declares the argument `readonly ulong` [n_crypto.sru:L16], and PowerBuilder's
+        `ulong` is the **32-bit unsigned** integer, so the parameter's own domain is exactly
+        `0 .. 4294967295`. `minimum` and `maximum` above carry that domain and nothing else - they are
+        a faithful statement of the declared type rather than a policy of this contract, which is the
+        same reasoning `CryptoRsaKeyBits` records for its `0 .. 65535`.
+
+        Describing the argument as "unconstrained" and therefore stating no `maximum` - which an earlier
+        revision did - was wrong in a way that matters: `format: int64` with only a lower bound made
+        values above 2^32 CONTRACT-VALID, while the implementation's parameter is a 32-bit unsigned
+        integer, so this document promised a request the service cannot represent. A contract that
+        admits requests its implementation must reject is not faithful to the legacy, it is broader than
+        the legacy.
+
+        Bits above the three named remain accepted inside that domain, because the legacy defines no
+        behaviour for them and rejecting them WOULD be an invented narrowing. The domain is stated; the
+        bit semantics are not invented.
       x-bitmask-values: [1, 2, 4]
       x-bitmask-varnames:
         [CRYPTO_RNDSTRING_NUMBER, CRYPTO_RNDSTRING_ALPHABET, CRYPTO_RNDSTRING_SYMBOL]
@@ -2097,6 +2417,7 @@ components:
       format: int64
       title: CryptoGuidFlags
       minimum: 0
+      maximum: 4294967295
       default: 3
       description: |-
         The textual form of a generated identifier. Declared `Constant Ulong` at
@@ -2114,8 +2435,17 @@ components:
         `enums.sru:L962` declares
         `CRYPTO_GUID_DEFAULT = CRYPTO_GUID_INCLUDE_BRACKET + CRYPTO_GUID_INCLUDE_SEPARATOR`, which is
         **3**, so omitting the field yields the fully decorated form. Passing `0` yields a bare
-        value with neither. As with the random-string flags, the legacy argument is an unconstrained
-        `readonly ulong` [n_crypto.sru:L18], so no `maximum` is invented here.
+        value with neither.
+
+        ## The stated bounds are the legacy parameter's own domain
+
+        As with the random-string flags, the legacy argument is `readonly ulong` [n_crypto.sru:L18] -
+        PowerBuilder's **32-bit unsigned** integer - so the domain is exactly `0 .. 4294967295` and
+        that is what `minimum` and `maximum` carry. An earlier revision called the argument
+        "unconstrained" and omitted the `maximum`, which made values above 2^32 contract-valid while the
+        implementation's parameter is 32-bit unsigned: the document promised a request the service
+        cannot represent. Bits above the two named stay accepted inside the domain, because the legacy
+        defines no behaviour for them and rejecting them would be an invented narrowing.
       x-bitmask-values: [1, 2]
       x-bitmask-varnames: [CRYPTO_GUID_INCLUDE_BRACKET, CRYPTO_GUID_INCLUDE_SEPARATOR]
       x-legacy-default-identifier: CRYPTO_GUID_DEFAULT
@@ -2166,13 +2496,46 @@ components:
       format: int64
       title: RandomSize
       minimum: 0
-      maximum: 4294967295
-      description: >-
-        The number of bytes or characters to generate. The legacy argument is `readonly ulong size`
-        [n_crypto.sru:L14-L16], which is PowerBuilder's 32-bit unsigned integer, so the bounds above
-        are exactly that declaration's own domain - a faithful statement of the parameter's type
-        rather than a policy of this contract. A request for a size the service cannot satisfy is
-        refused with 400 rather than truncated.
+      maximum: 1048576
+      x-legacy-domain-maximum: 4294967295
+      description: |-
+        The number of bytes or characters to generate.
+
+        ## The maximum is a PUBLISHED SERVICE-LEVEL CAP of 1 MiB, and it narrows the legacy domain
+
+        The legacy argument is `readonly ulong size` [n_crypto.sru:L14-L16], PowerBuilder's 32-bit
+        unsigned integer, so its own domain is `0 .. 4294967295` - recorded above as
+        `x-legacy-domain-maximum` so the narrowing is machine-readable rather than only prose. **This
+        contract accepts `0 .. 1048576`**, and the reason is a resource limit rather than a
+        cryptographic one.
+
+        ## Why a cap exists here when the legacy needed none
+
+        These operations are reachable over a network by any authenticated caller, and the request that
+        triggers the allocation is a few dozen bytes of JSON. Uncapped, a single call asking for two
+        billion bytes allocates two gigabytes; a random **string** is worse, because the implementation
+        allocates a UTF-16 buffer at two bytes per character *and* a same-length byte buffer for the
+        draw, so the cost is three bytes per requested character. A handful of concurrent requests
+        would exhaust a container's memory and terminate this service - and this service is the sole
+        token issuer, so its termination takes the whole system's authentication with it. In process
+        the legacy had no such exposure: the caller and the allocation were the same program.
+
+        ## Why 1 MiB, and what it does not break
+
+        The legitimate uses of this surface are keys, initialization vectors, nonces, salts and opaque
+        tokens. None exceeds a few hundred bytes - the largest key size the legacy's own constants name
+        is 4096 **bits**, or 512 bytes - so the cap sits roughly three orders of magnitude above any
+        evidenced need. It is a round, documented number rather than a tuned one, because no
+        throughput or latency target exists anywhere in this refactor to tune against.
+
+        ## The failure is defined, and it is never a truncation
+
+        A request above the cap is refused with `400` carrying `E_INVALID_ARGUMENT`. It is **not**
+        silently reduced to the cap: returning less material than was asked for is the one outcome a
+        caller cannot detect, and short random material is precisely the kind of defect that survives
+        every test and fails in production. `RandomProvider.MaximumRequestedLength` in the
+        implementation carries this same value and refuses before allocating, so the guard and this
+        schema cannot disagree.
 
 
     # ==============================================================================================
@@ -2606,6 +2969,40 @@ components:
           $ref: '#/components/schemas/PayloadData'
         payloadForm:
           $ref: '#/components/schemas/PayloadForm'
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
+        hashType:
+          $ref: '#/components/schemas/CryptoHashType'
+
+    HashFileRequest:
+      type: object
+      title: HashFileRequest
+      description: >-
+        An unkeyed file digest request. Mirrors the single unkeyed `HashFile` overload at
+        `n_crypto.sru:L27`, whose `readonly string filename` becomes an opaque `fileRef`. There is no
+        `payloadForm` here, because the payload is a file rather than an inline value, and there is no
+        key field, because this overload takes none.
+      additionalProperties: false
+      required: [fileRef, hashType]
+      properties:
+        fileRef:
+          $ref: '#/components/schemas/FileReference'
+        hashType:
+          $ref: '#/components/schemas/CryptoHashType'
+
+    HmacFileRequest:
+      type: object
+      title: HmacFileRequest
+      description: >-
+        A keyed file digest request. Mirrors the two keyed `HashFile` overloads at
+        `n_crypto.sru:L28-L29`, which differ only in whether the key is a `string` or a `blob` - a
+        distinction the `keyRef` indirection collapses entirely, exactly as it does for the four keyed
+        in-memory overloads. Both legacy overloads are therefore reachable through this one shape.
+      additionalProperties: false
+      required: [fileRef, keyRef, hashType]
+      properties:
+        fileRef:
+          $ref: '#/components/schemas/FileReference'
         keyRef:
           $ref: '#/components/schemas/KeyReference'
         hashType:

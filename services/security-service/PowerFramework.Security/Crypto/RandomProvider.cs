@@ -466,18 +466,59 @@ public sealed class RandomProvider
     private const string GuidClosingBracket = "}";
 
     /// <summary>
-    /// The largest length this type will allocate for, which is the largest array a .NET index can
-    /// address.
+    /// The largest length this service will generate in one call: 1 MiB, in bytes for a blob and in
+    /// characters for a string. Requests above it are refused before anything is allocated.
     /// </summary>
     /// <remarks>
-    /// The legacy parameter is a 32-bit unsigned value and so admits lengths above
-    /// <see cref="int.MaxValue"/>. Such a request cannot be satisfied on this platform at all; the
-    /// guard converts what would otherwise surface as an <see cref="OutOfMemoryException"/> from
-    /// deep inside an allocation into a named argument error at the boundary. That is a defined
-    /// error in place of an undefined failure, not a policy limit: no minimum is imposed and no
-    /// satisfiable length is rejected.
+    /// <para>
+    /// A SERVICE-LEVEL CAP, AND IT IS DELIBERATELY MUCH SMALLER THAN THE LEGACY DOMAIN. The legacy
+    /// parameter is a 32-bit unsigned value, so a caller may ask for up to 4,294,967,295. An earlier
+    /// shape here capped only at <see cref="int.MaxValue"/>, on the reasoning that a larger request
+    /// cannot be satisfied on this platform at all and the guard merely converted an
+    /// <see cref="OutOfMemoryException"/> into a named argument error. That reasoning is sound as far
+    /// as it goes and it misses the actual problem: <b>every value below</b> that ceiling was
+    /// accepted and allocated.
+    /// </para>
+    /// <para>
+    /// WHY THAT MATTERS HERE SPECIFICALLY, AND WHY IT IS NOT A PROBLEM THE LEGACY HAD. These two
+    /// operations are reachable over a network by any authenticated caller, and the request that
+    /// triggers the allocation is a few dozen bytes of JSON. A single call asking for two billion
+    /// bytes allocates two gigabytes; a random STRING is worse, because it allocates a
+    /// <c>char[]</c> at two bytes per character AND a same-length <c>byte[]</c> for the draw, so the
+    /// cost is three bytes per requested character. A handful of concurrent requests therefore
+    /// exhausts a container's memory and terminates this service - and Security is the sole token
+    /// issuer, so its termination takes the whole system's authentication with it. In process the
+    /// legacy had no such exposure: the caller and the allocation were the same program, and a
+    /// program that asks for two gigabytes has only harmed itself.
+    /// </para>
+    /// <para>
+    /// WHY 1 MiB, WHICH IS A CHOSEN NUMBER AND IS RECORDED AS ONE. The legitimate uses of this
+    /// surface are cryptographic: keys, initialization vectors, nonces, salts and opaque tokens, none
+    /// of which exceeds a few hundred bytes - the largest key size the legacy's own constants name is
+    /// 4096 BITS, or 512 bytes. 1 MiB is therefore roughly three orders of magnitude above any
+    /// evidenced need, which leaves no realistic caller to break, while bounding the worst case at
+    /// 1 MiB per blob call and 3 MiB per string call. It is a round, memorable, documented number
+    /// rather than a tuned one, because no throughput or latency target exists anywhere in this
+    /// refactor to tune against.
+    /// </para>
+    /// <para>
+    /// THE NARROWING IS DELIBERATE AND IS PUBLISHED, NOT HIDDEN. This is the refactor's standing rule
+    /// applied to a resource limit: narrow the contract with a defined error rather than leave an
+    /// undefined failure. A request above the cap is refused with a named argument error, which the
+    /// endpoint surfaces as <c>400</c> carrying <c>E_INVALID_ARGUMENT</c>; it is never truncated to
+    /// the cap, because silently returning less material than was asked for is the one outcome a
+    /// caller cannot detect. <c>OpenApi/security.v1.yaml</c>'s <c>RandomSize</c> schema carries this
+    /// same value as its <c>maximum</c> and records the legacy domain it narrows, so the published
+    /// contract and this guard cannot disagree.
+    /// </para>
+    /// <para>
+    /// It is a <see langword="const"/> rather than an injected option because the value is part of the
+    /// published contract - <c>RandomSize.maximum</c> - and a per-deployment cap would make the
+    /// contract's stated maximum untrue somewhere. Raising it is a contract change, made in both
+    /// places together.
+    /// </para>
     /// </remarks>
-    private const uint MaximumRequestedLength = int.MaxValue;
+    internal const uint MaximumRequestedLength = 1024 * 1024;
 
     /// <summary>
     /// The number of times a draw may be resampled before the injected entropy source is declared
@@ -549,7 +590,8 @@ public sealed class RandomProvider
     /// </param>
     /// <returns>A new array of exactly <paramref name="size"/> random bytes.</returns>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="size"/> exceeds the largest length this platform can allocate as an array.
+    /// <paramref name="size"/> exceeds <see cref="MaximumRequestedLength"/>, the published
+    /// service-level cap. The request is refused before anything is allocated and is never truncated.
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The injected <see cref="IEntropySource"/> failed to fill the buffer.
@@ -606,7 +648,8 @@ public sealed class RandomProvider
     /// </param>
     /// <returns>A string of exactly <paramref name="size"/> characters.</returns>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="size"/> exceeds the largest length this platform can allocate as an array.
+    /// <paramref name="size"/> exceeds <see cref="MaximumRequestedLength"/>, the published
+    /// service-level cap. The request is refused before anything is allocated and is never truncated.
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The injected <see cref="IEntropySource"/> is degenerate; see
@@ -669,7 +712,8 @@ public sealed class RandomProvider
     /// <paramref name="size"/> is zero or <paramref name="flags"/> selects no character class.
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="size"/> exceeds the largest length this platform can allocate as an array.
+    /// <paramref name="size"/> exceeds <see cref="MaximumRequestedLength"/>, the published
+    /// service-level cap. The request is refused before anything is allocated and is never truncated.
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The injected <see cref="IEntropySource"/> returned no value inside the unbiased acceptance
@@ -946,7 +990,8 @@ public sealed class RandomProvider
     /// </param>
     /// <returns>A string of exactly <paramref name="size"/> characters.</returns>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="size"/> exceeds the largest length this platform can allocate as an array.
+    /// <paramref name="size"/> exceeds <see cref="MaximumRequestedLength"/>, the published
+    /// service-level cap. The request is refused before anything is allocated and is never truncated.
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The injected <see cref="IEntropySource"/> is degenerate; see

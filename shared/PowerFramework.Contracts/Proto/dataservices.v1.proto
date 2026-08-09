@@ -317,11 +317,62 @@ message Veto {
 // decoration. PARSE IT AT THE FAR END and the contract has acquired an undocumented grammar that
 // every consumer must reimplement identically or diverge.
 //
-// So the wire carries the parts as SEPARATE FIELDS. The fused legacy spelling is reconstituted ONLY
-// AT A COMPATIBILITY EDGE - the one place that must hand a string to legacy-shaped code - and NEVER
-// travels as the identity.
+// So the wire carries the parts as SEPARATE FIELDS. The fused legacy spelling ALSO travels, in
+// `legacy_name`, because it is the only lossless round trip: a broker string may carry an arbitrary
+// namespace and a negation, and reconstructing one from the decomposed fields alone would require
+// every consumer to reimplement the composition rules identically. The decomposed fields are what a
+// consumer READS; `legacy_name` is what a compatibility edge REPLAYS.
+//
+// ============ 4. NEGATION AND ARBITRARY NAMESPACES - THE TWO GRAMMARS ARE NOT ONE (C-K) =========
+// THERE ARE TWO DIFFERENT GRAMMARS over this one string shape, and conflating them silently deletes
+// subscriptions. The SUBSCRIBE grammar is parsed at n_cst_eventful.sru:L339-L381 (symbols, priority,
+// then `name` and an optional `.`-delimited namespace, where an EMPTY namespace after the dot is
+// E_INVALID_ARGUMENT [:L381]). The FILTER grammar - used by of_Off and of_Disable - is parsed
+// separately at :L992-L1014 and understands two things the subscribe grammar does not:
+//
+//   * A LEADING `^` (SYMBOL_NOT, :L98) on the name AND/OR on the namespace means NOT EQUAL. The
+//     matcher is explicit [:L1030-L1042]:
+//         bNotName      -> bMatched = (Events[i].name <> name)
+//         bNotNamespace -> bMatched = (Events[i].ns   <> sNamespace)
+//     A negated name with nothing after the `^` is E_INVALID_ARGUMENT [:L1022-L1024].
+//   * AN ABSENT NAMESPACE CRITERION IS NOT AN EMPTY ONE. When the string contains no `.`, the parser
+//     sets bNoNamespace [:L1004-L1006] and the namespace test is SKIPPED ENTIRELY, so the filter
+//     matches subscriptions in every namespace. An empty logical name likewise means "every name"
+//     [:L1018, :L1029]. Presence and emptiness are different states and both are observable.
+//
+// ============ THE `.^persistent` READING THAT MUST NOT BE GOT BACKWARDS ==========================
+// of_Off(".^persistent") - the whole-namespace bulk form at n_cst_threading.sru:L544 - decodes as
+// name = "" (every name) and namespace = NOT "persistent". IT THEREFORE REMOVES EVERY NON-PERSISTENT
+// SUBSCRIPTION AND DELIBERATELY SPARES THE PERSISTENT ONES. The same holds for the named form at
+// :L594-L596, which appends `.^persistent` only when the caller supplied no namespace of their own.
+//
+// Reading it as "unsubscribe everything persistent" is the exact inverse, and it is the most damaging
+// single misreading available in this contract: it deletes precisely the subscriptions that were
+// registered to survive, the call still returns success, no assertion fires, and the survivors are
+// simply gone. THE AUTHORITATIVE PAIR FOR ANY FILTER IS `namespace` TOGETHER WITH `negate_namespace`.
+// `lifetime` below is a convenience projection over `namespace` and is INTENTIONALLY LOSSY - it can
+// say what a namespace IS and cannot say what a filter EXCLUDES.
 // ==============================================================================================
 message BrokerTopic {
+  // WHICH GRAMMAR THIS TOPIC WAS PARSED UNDER. It changes the meaning of the same characters: `^` is
+  // negation in a filter and an ordinary character in a subscription, while `*`, `%`, `@`, `!`, `:`
+  // and a leading `-` are symbols in a subscription and ordinary characters in a filter. A consumer
+  // that ignores this field will misread one grammar as the other.
+  TopicGrammar grammar = 11;
+
+  // THE FUSED LEGACY SPELLING, VERBATIM - "0-itemchanged", ".^persistent", "%evt.myns". Carried so a
+  // compatibility edge can replay the exact string legacy-shaped code expects, and so a
+  // characterization recording keyed on the string still matches. It is NOT the identity a consumer
+  // switches on - the decomposed fields are - and it is the only field that survives a namespace or a
+  // negation the decomposed fields could not express between them.
+  //
+  // ONE CANONICAL PARSER, AND NO CONSUMER WRITES A SECOND (C-K). The grammar is implemented once, in
+  // shared/PowerFramework.Shared.Eventful/SubscriptionTopic.cs: ParseSubscription and ParseFilter build
+  // the decomposed form from a legacy string under the two grammars, ToLegacyString composes it back,
+  // and Matches applies the name and namespace comparisons WITH THEIR NEGATIONS in one place so a call
+  // site cannot forget one. A service populating this message parses through those entry points rather
+  // than splitting the string itself - which is the whole reason the fused form is safe to carry.
+  string legacy_name = 12;
   // The ORDERING PREFIX as a number, extracted from the spelling. 0 for the ten topics that carry
   // none; 0 for "0-itemchanged" and 1 for "1-editchanged". Because unprefixed and zero-prefixed
   // topics both report 0 here, `has_sequence_prefix` below distinguishes them - the distinction is
@@ -343,6 +394,31 @@ message BrokerTopic {
   // application-defined topic, and where the two ever disagree a consumer trusts `name`.
   WellKnownName well_known = 4;
 
+  // THE NAMESPACE, AS ARBITRARY TEXT, WITH REAL PRESENCE TRACKING. The legacy namespace is whatever
+  // followed the `.` [n_cst_eventful.sru:L376-L381] - "persistent" is merely the one the framework
+  // itself uses, and an application may register any other. Declared proto3 `optional` because
+  // ABSENT AND EMPTY ARE DIFFERENT STATES: absent means the string carried no `.` at all, which in the
+  // filter grammar means "match every namespace" [:L1004-L1006], whereas the subscribe grammar rejects
+  // an empty namespace after the dot outright [:L381]. The `^` is NOT part of this value - negation
+  // travels in negate_namespace - so the text here is the namespace being compared against.
+  optional string namespace = 13;
+
+  // FILTER GRAMMAR ONLY: the name comparison is NOT EQUAL rather than equal, from a leading `^`
+  // [n_cst_eventful.sru:L1010-L1013, applied at :L1035]. Always false under the subscribe grammar,
+  // where `^` is an ordinary character. A negated name requires a non-empty name [:L1022-L1024].
+  bool negate_name = 14;
+
+  // FILTER GRAMMAR ONLY: the namespace comparison is NOT EQUAL rather than equal, from a leading `^`
+  // on the namespace [:L1014-L1017, applied at :L1040]. THIS IS THE FIELD THAT MAKES `.^persistent`
+  // MEAN "SPARE THE PERSISTENT ONES". Dropping it while keeping `namespace` inverts the filter and
+  // deletes the subscriptions that were registered to survive - see the block above.
+  bool negate_namespace = 15;
+
+  // A CONVENIENCE PROJECTION OVER `namespace`, AND INTENTIONALLY LOSSY. Persistent when `namespace` is
+  // ordinally "persistent", transient otherwise - so "myns" and the absent default both project to
+  // transient, and NO ROUND TRIP FROM THIS VALUE BACK TO A NAMESPACE EXISTS. It describes what a
+  // namespace IS; it cannot describe what a filter EXCLUDES, which is why `namespace` and
+  // `negate_namespace` are the authoritative pair and this field is for reading intent only.
   Lifetime lifetime = 5;
 
   // Capture mode, from the `%` and `*` symbols of the broker's parser [n_cst_eventful.sru:L339-L381,
@@ -383,25 +459,53 @@ message BrokerTopic {
     EVT_LOSEFOCUS = 12;         // "losefocus"         [:L76]
   }
 
-  // The lifetime namespace - encoding 2 above.
-  enum Lifetime {
-    LIFETIME_UNSPECIFIED = 0;
-    // No lifetime namespace. The subscription dies with its subscriber, which is the legacy default.
-    LIFETIME_TRANSIENT = 1;
-    // The `.^persistent` namespace [n_cst_threading.sru:L596].
-    LIFETIME_PERSISTENT = 2;
-    // The BARE `.^persistent` form [n_cst_threading.sru:L544] - a whole-namespace selector carrying
-    // no logical name, used to unsubscribe every persistent subscription at once. `name` is empty
-    // when this is set, and that emptiness is meaningful rather than missing.
-    LIFETIME_PERSISTENT_NAMESPACE_ALL = 3;
+  // Which grammar produced this topic - see the `grammar` field for why the distinction is load-bearing.
+  enum TopicGrammar {
+    // The subscribe grammar of of_On / of_Subscribe [n_cst_eventful.sru:L339-L381]. Symbols are live;
+    // `^` is an ordinary character; the namespace, if the `.` is present, must be non-empty.
+    TOPIC_GRAMMAR_SUBSCRIPTION = 0;
+
+    // The filter grammar of of_Off / of_Disable [:L992-L1014]. `^` negates; symbols are ordinary
+    // characters; an absent namespace criterion matches every namespace and an empty name matches
+    // every name.
+    TOPIC_GRAMMAR_FILTER = 1;
   }
 
-  // Which handled-state of an event a subscription captures - the `%` and `*` symbols.
+  // The lifetime PROJECTION over the namespace - see the `lifetime` field. It is not the namespace and
+  // it is not the filter; both of those are expressed by `namespace` and `negate_namespace`.
+  //
+  // THE THIRD MEMBER THIS ENUM USED TO HAVE HAS BEEN REMOVED, DELIBERATELY. It claimed that the bare
+  // `.^persistent` form was a selector for "every persistent subscription", which is the exact inverse
+  // of the matcher at [n_cst_eventful.sru:L1040]: the `^` makes it "every subscription whose namespace
+  // is NOT persistent". That state is not a lifetime at all - it is a filter, and a filter is now
+  // expressed by grammar = FILTER with negate_namespace = true and an empty name. The two values that
+  // remain match the in-process authority member for member and value for value
+  // [shared/PowerFramework.Shared.Eventful/SubscriptionOptions.cs SubscriptionLifetime].
+  enum Lifetime {
+    // No lifetime namespace, or any namespace other than "persistent". The subscription is swept away
+    // by the framework's bulk unsubscribe, which is the legacy default.
+    LIFETIME_TRANSIENT = 0;
+
+    // The namespace is ordinally "persistent" [n_cst_threading.sru:L596], so the framework's bulk
+    // unsubscribe SPARES it.
+    LIFETIME_PERSISTENT = 1;
+  }
+
+  // Which handled-state of an event a subscription captures - the `%` (SYMBOL_HANDLED) and `*`
+  // (SYMBOL_ALL) symbols [n_cst_eventful.sru:L95-L96], selected at [:L345-L351].
+  //
+  // VERBATIM FROM THE LEGACY CONSTANTS AT [n_cst_eventful.sru:L100-L106], VALUE FOR VALUE, AND NO
+  // SENTINEL. CAP_UNHANDLED = 0 is not a "nothing was specified" marker - it is the LEGACY DEFAULT,
+  // established before the topic is parsed [:L328-L336] and tested against at [:L346] and [:L349] to
+  // reject a second capture symbol. A synthetic zero would therefore have displaced a real legacy
+  // value, and the earlier numbering did exactly that: it renumbered all three, invented a DEFAULT
+  // that the legacy does not have as a distinct state, and OMITTED CAP_ALL entirely, leaving
+  // capture-all unrepresentable on the wire. These three values also match the in-process authority
+  // [Shared.Eventful/SubscriptionOptions.cs CaptureMode] exactly.
   enum CaptureMode {
-    CAPTURE_MODE_UNSPECIFIED = 0;
-    CAPTURE_MODE_DEFAULT = 1;
-    CAPTURE_MODE_HANDLED = 2;
-    CAPTURE_MODE_UNHANDLED = 3;
+    CAP_UNHANDLED = 0;  // the default: observe only dispatches nothing has handled yet
+    CAP_HANDLED = 1;    // `%` - observe only dispatches something has already handled
+    CAP_ALL = 2;        // `*` - observe every dispatch regardless of handled state
   }
 
   // The `@` and `!` priority extremes, which are keywords rather than numbers and so cannot be
@@ -548,25 +652,37 @@ message ValidationSessionState {
 // alphabets, one set of digits.
 //
 // ALL FOUR VALUES ARE DISTINCT ON THE WIRE AND MUST STAY THAT WAY. Nothing below is merged, aliased
-// or collapsed - see the case-1 note, which is exactly the temptation to resist.
+// or collapsed.
 //
-// ---- THE CASE-1 QUESTION, WHICH THIS FILE DELIBERATELY DOES NOT SETTLE --------------------------
-// The refactor plan describes `case 1` as "falling through" to `case 2`. THE SOURCE SHOWS SOMETHING
-// MORE SPECIFIC: an EMPTY `case 1` arm at [:L212] immediately followed by `case 2` at [:L213] - and
-// PowerScript CHOOSE CASE DOES NOT FALL THROUGH the way a C `switch` does. On that reading the empty
-// arm is a deliberate no-op whose purpose is to stop 1 from reaching `case else`, and a result of 1
-// returns unchanged with no restore and no coercion, consistent with the source comment at [:L210]
-// that returning 1 triggers OnDwnItemValidationError.
+// ---- THE CASE-1 QUESTION, NOW SETTLED FROM THE SOURCE -------------------------------------------
+// The refactor plan describes `case 1` as "falling through" to `case 2`. IT DOES NOT, and this file
+// no longer leaves the point open. The dispatch reads, verbatim and with exact locators:
 //
-// The two readings differ OBSERVABLY - whether a restore happens before the validation-error event
-// fires - and settling that belongs to DataServices, adjudicated against the behavioural oracle. IT
-// IS NOT THIS FILE'S TO SETTLE, and it does not need to be: THE WIRE ALPHABET IS {0,1,2,3} UNDER
-// EITHER READING. What this file must not do is let the fall-through reading tempt it into merging or
-// aliasing 1 and 2, which would destroy information the wire has to carry whichever reading wins.
+//     :L210    //*return 1触发OnDwnItemValidationError
+//     :L211    choose case rtCode
+//     :L212        case 1                       <-- an arm with NO statements
+//     :L213        case 2
+//     :L216            if bEqual then
+//     :L219                SetItem(row,Long(dwo.ID),aOrgValue)
+//     :L220                SetItemStatus(row,Long(dwo.ID),Primary!,orgStatus)
+//     :L223        case 3
+//     :L225            rtCode = 1
+//     :L226        case else
 //
-// The names below are therefore drawn from what BOTH readings agree the value does, and the disputed
-// part is confined to this comment. They are idiomatically prefixed because there is no legacy
-// identifier to preserve - the legacy cases are literal digits in a CHOOSE CASE.
+// PowerScript CHOOSE CASE DOES NOT FALL THROUGH the way a C `switch` does: an arm with no statements
+// executes nothing and control leaves the construct. So `case 1` performs NO restore and NO coercion,
+// and 1 is returned exactly as the semantic handler produced it. Two independent facts confirm that
+// this is deliberate rather than an oversight. First, the empty arm is load bearing even while empty -
+// delete it and 1 would reach `case else`, be coerced, fire the changed event and be rewritten to 2.
+// Second, the source's own comment at [:L210] states the intent: returning 1 is how
+// OnDwnItemValidationError gets raised, and it is THAT handler which restores value and status
+// [:L369-L379] after reading the stashed code. Restoring in `case 1` as well would restore twice, and
+// would do it before the validation-error handler has read the stash.
+//
+// The distinction is OBSERVABLE - whether value and status are restored before the validation-error
+// event fires - so it is stated here as settled fact with its evidence, and DataServices implements
+// these four arms as four distinct behaviours. The names below are idiomatically prefixed because
+// there is no legacy identifier to preserve: the legacy cases are literal digits in a CHOOSE CASE.
 enum ItemChangeResult {
   // 0 - falls to `case else` [:L226-L250]: the default arm coerces the edit text by the column-type
   // prefix (DwObjectRef.ColTypePrefix), fires the changed event [:L247], and then FORCIBLY REWRITES
@@ -574,10 +690,11 @@ enum ItemChangeResult {
   // that `case else` also catches any value outside {1,2,3}, not only 0.
   ITEM_CHANGE_RESULT_DEFAULT = 0;
 
-  // 1 - the EMPTY arm at [:L212]. Both readings agree on the consequence a consumer observes:
-  // RETURNING 1 TRIGGERS OnDwnItemValidationError [:L210 comment], and the validation-error handler
-  // then pre-sets its own result to 1 from the stash [:L338-L340]. The readings differ only on
-  // whether a value-and-status restore happens first.
+  // 1 - the EMPTY arm at [:L212]: nothing runs, so value and item status are left EXACTLY AS THEY
+  // ARE and 1 is returned unchanged. RETURNING 1 TRIGGERS OnDwnItemValidationError [:L210 comment],
+  // and that handler pre-sets its own result to 1 from the stash [:L338-L340] and performs the
+  // restore itself [:L369-L379]. A server that restored here would restore twice; see the settled
+  // case-1 note above.
   ITEM_CHANGE_RESULT_TRIGGER_VALIDATION_ERROR = 1;
 
   // 2 - restore the original value and item status [:L219-L220], BUT ONLY IF THE EARLIER EQUALITY
@@ -657,6 +774,12 @@ message CloseValidationSessionResponse {
 message DataWindowRow {
   // Which buffer the row sits in. common.v1.DwBuffer records that THE FILTER BUFFER'S ROW ORDER IS
   // INVERTED relative to the source, so `row` does not count the same way across buffers.
+  //
+  // ALWAYS MEANINGFUL, SO NO EXPLICIT PRESENCE - a row is in exactly one buffer, always. The zero
+  // value is DW_BUFFER_PRIMARY, matching PowerBuilder's own unassigned-`dwbuffer` default, so an
+  // untagged row reads as a Primary row. That is the right default and it is also a trap for a lazy
+  // producer: a Delete! or Filter! row MUST carry its tag explicitly, because silence means Primary
+  // and a mis-tagged Filter row would be counted in the wrong direction.
   common.v1.DwBuffer buffer = 1;
 
   // ONE-BASED row ordinal within that buffer.
@@ -727,9 +850,23 @@ message RetrieveChunk {
   int64 cumulative_row_count = 5;
 
   // The buffer these rows came from, when a single chunk carries one buffer's rows. Each row also
-  // carries its own buffer tag, so this is a convenience for the common single-buffer case and may
-  // be DW_BUFFER_UNSPECIFIED in a mixed chunk.
-  common.v1.DwBuffer buffer = 6;
+  // carries its own buffer tag, so this is a convenience for the common single-buffer case.
+  //
+  // ============ EXPLICIT PRESENCE, BECAUSE "MIXED CHUNK" IS ABSENCE AND NOT A BUFFER (C-K) ======
+  // A chunk that carries rows from more than one buffer has no single answer for this field, and the
+  // honest encoding of "no single answer" is FIELD ABSENCE - `optional`, which generates a Has*
+  // accessor - not a fourth value inside common.v1.DwBuffer. That domain has exactly three members
+  // because the legacy `dwbuffer` has exactly three [AAP §0.4.5.2]; an invented sentinel would make
+  // a non-legacy state representable on every DwBuffer-typed field in both service definitions,
+  // including the ones where it could only ever mean a producer bug, and it would move the default
+  // off Primary. common.v1.proto's DwBuffer note records that ruling in full.
+  //
+  // PRODUCERS: set this when every row in the chunk shares one buffer; LEAVE IT UNSET for a mixed
+  // chunk. Never set it to Primary as a stand-in for "mixed" - Primary is a specific buffer and a
+  // consumer is entitled to believe it. CONSUMERS: test presence first (HasBuffer in the
+  // generated C#); when it is absent, read each row's own `buffer` tag, which is always populated.
+  // ==========================================================================================
+  optional common.v1.DwBuffer buffer = 6;
 
   // Present only on a failure that the legacy would have surfaced through its error event. A chunk
   // carrying an error carries no rows.
@@ -1547,6 +1684,28 @@ message UpdateResponse {
   // A CONFLICT DOES NOT ARRIVE HERE. It arrives as the Aborted status above, which is why this field
   // and that status are not two ways of saying one thing.
   common.v1.DbError error = 5;
+
+  // ============ THE IDENTITY ROUND TRIP, RELAYED FROM C-06 UNCHANGED (C-K) ====================
+  // Persistence's C-06 UpdateService.Update returns this payload, and WITHOUT THIS FIELD IT WOULD STOP
+  // AT THE DATASERVICES BOUNDARY - a caller that inserted rows could never learn the auto-increment
+  // values the database assigned them, so no inserted DataWindow row could be reconciled with its
+  // generated identity. That is a capability the legacy has and the wire would silently have dropped:
+  // in-process, the legacy hands both value arrays straight back to the application through
+  // OnIdentityColumnDataRetrieved's two `ref` array out-parameters
+  // [n_cst_thread_task_sqlupdate.sru:L243].
+  //
+  // RELAYED UNCHANGED IS PART OF THE CONTRACT, NOT A HOPE. common.v1.IdentityColumnData carries
+  // primary_values in FORWARD collection order and filter_values in BACKWARD order, because the Filter
+  // buffer's row order is inverted relative to the source [:L235-L241]. DataServices MUST forward both
+  // arrays element for element as received, and Gateway must do the same: re-sorting either array,
+  // deduplicating it, or concatenating the two pairs values with the wrong rows - a defect that
+  // returns the right COUNT of identities and so survives every row-count assertion.
+  //
+  // ABSENT MEANS "NONE COLLECTED", NEVER AN ERROR. Collection is conditional at three levels in the
+  // legacy [:L215, :L226, :L242-L244], so an update that inserted nothing, or hit no identity column,
+  // legitimately reports no identity block at all.
+  // ==========================================================================================
+  common.v1.IdentityColumnData identity = 6;
 }
 
 
@@ -1606,7 +1765,14 @@ message DropDownSearchState {
   // `unsignedlong` at source, so uint64 here per the scalar rule. THE LEGACY DEFAULT IS
   // FILTER_DISP + FILTER_DISP_PY = 3, not FILTER_ALL [:L57] - the data column is NOT searched unless
   // the caller asks. Preserved as the legacy's default rather than the more generous one.
-  uint64 filter_type = 1;
+  //
+  // DECLARED proto3 `optional` BECAUSE THE LEGACY DEFAULT IS 3 AND A PROTOBUF NUMERIC DEFAULTS TO 0
+  // (C-B, C-K). Without presence tracking, a caller that simply did not set this field would be
+  // indistinguishable from one that asked for FILTER_NONE - so an unpopulated message would silently
+  // request "search no columns at all", which is not merely a different default but a state the legacy
+  // never starts in. With presence, ABSENT MEANS "use the legacy default of 3" and 0 means the caller
+  // explicitly asked for FILTER_NONE. The two are different requests and the wire can now say which.
+  optional uint64 filter_type = 1;
 
   // `#ShowFilteredRows` [:L58] - show the rows the filter removed.
   bool show_filtered_rows = 2;
@@ -1629,6 +1795,21 @@ message DropDownSearchState {
   //   2. The input is lower-cased and its spaces are replaced by `%` wildcards [:L316-L317] before
   //      interpolation, so a multi-word search becomes a wildcard chain. That is intended behaviour,
   //      but it means this field is NOT the user's text and must not be shown back to them as such.
+  //
+  // ============ COMPATIBILITY AND DIAGNOSTIC DATA. IT IS NOT AN EXECUTABLE INSTRUCTION. ==========
+  // THIS FIELD MUST NEVER BE HANDED TO AN EVALUATOR, A FILTER SETTER OR ANY OTHER EXPRESSION SINK BY A
+  // RECEIVER. It exists for exactly two purposes: byte-for-byte comparison against a characterization
+  // recording, and display in a diagnostic. The reason is defect 1 above - the search text is
+  // interpolated with NO quote escaping, so a crafted value can BALANCE the literal and append its own
+  // predicate, which is expression injection rather than a merely malformed string. Preserving the
+  // generated text is required for parity; executing text received over a network is not, and nothing
+  // in the legacy required it either, because in-process the string was built from local input.
+  //
+  // A RECEIVER THAT NEEDS TO APPLY A FILTER USES `search_values` BELOW and constructs the expression
+  // itself through the bound-literal path, so the untrusted value never reaches the sink as syntax.
+  // The two fields are therefore not redundant: this one records what the legacy WOULD HAVE PRODUCED,
+  // and that one carries what the filter is ABOUT.
+  // ==========================================================================================
   string filter_expression = 4;
 
   // Rows remaining and rows removed, matching `onddsfiltered`'s two count parameters.
@@ -1637,6 +1818,30 @@ message DropDownSearchState {
 
   // `of_hasfilter()` [:L74] - whether a filter is currently applied.
   bool has_filter = 7;
+
+  // THE RAW SEARCH VALUES, CARRIED SEPARATELY FROM THE EXPRESSION AND NEVER PRE-ESCAPED.
+  //
+  // This is the caller's actual input, exactly as typed, with none of the transformations
+  // `filter_expression` bakes in - not lower-cased, spaces not turned into `%` wildcards, and not
+  // wrapped in expression quotes. It is DATA, and a receiver treats it as data: it constructs any
+  // filter it needs from these values through a typed or bound-literal path, so an untrusted value is
+  // never spliced into syntax. Repeated because the legacy display, pinyin and data clauses are OR-ed
+  // together from the same input and a caller may supply more than one term.
+  //
+  // WHY BOTH THIS AND filter_expression EXIST: parity needs the exact generated text, and safe
+  // execution needs the unmodified input. One field cannot be both without either losing parity
+  // evidence or making the parity string the execution path - see the block on filter_expression.
+  repeated string search_values = 8;
+
+  // THE PINYIN FLAG MASK, a bit-or of PinyinLike.Flag values [enums.sru:L1147-L1149].
+  //
+  // `optional` for the same reason as filter_type: the call site passes 7 - all three bits
+  // [n_cst_dwsvc_dropdownsearch.sru:L323] - so a zero default would silently mean "no case-folding, no
+  // width-folding, no fuzzy sound", which changes which rows match. ABSENT means the legacy's 7.
+  //
+  // Applies only when FILTER_DISP_PY is set in filter_type, and the legacy additionally takes the
+  // pinyin path only when the input matches `[a-zA-Z]` [:L322], so a non-Latin search never reaches it.
+  optional uint64 pinyin_flags = 9;
 
   // Which columns the search covers [n_cst_dwsvc_dropdownsearch.sru:L50-L53]. A BITMASK, so these are
   // the named bits rather than a set of mutually exclusive values - `filter_type` above is the mask.
@@ -1788,18 +1993,248 @@ message ContextMenuModel {
   repeated ContextMenuItem items = 1;
 
   // The five built-in item toggles [n_cst_dwsvc_contextmenu.sru:L49-L53]. EACH DEFAULTS TO TRUE IN THE
-  // LEGACY, which matters because a protobuf bool defaults to FALSE: a consumer that sends an
-  // unpopulated model is asking for every built-in to be hidden, which is NOT the legacy's default
-  // state. Stated here because it is the kind of mismatch that produces a silently different menu.
-  bool col_auto_width = 2;  // #ColAutoWidth [:L49]
-  bool col_check = 3;       // #ColCheck     [:L50]
-  bool col_copy = 4;        // #ColCopy      [:L51]
-  bool col_paste = 5;       // #ColPaste     [:L52]
-  bool item_copy = 6;       // #ItemCopy     [:L53]
+  // LEGACY, and a protobuf bool defaults to FALSE - so ALL FIVE ARE DECLARED proto3 `optional` (C-B).
+  //
+  // WITHOUT PRESENCE THIS IS NOT A DOCUMENTATION PROBLEM, IT IS A SILENTLY DIFFERENT MENU. A consumer
+  // that sends a model with items but no toggles would be read as requesting every built-in HIDDEN,
+  // which inverts all five legacy defaults at once; nothing would fail, the menu would simply be
+  // missing automatic column width, the three check operations, copy and paste. With presence, ABSENT
+  // means "the legacy default, true" and an explicit false means the caller genuinely hid it. Noting
+  // the mismatch in a comment - which is what this contract did before - leaves the wrong behaviour
+  // reachable by an unpopulated message; `optional` makes the right behaviour the default.
+  optional bool col_auto_width = 2;  // #ColAutoWidth [:L49] - legacy default TRUE
+  optional bool col_check = 3;       // #ColCheck     [:L50] - legacy default TRUE
+  optional bool col_copy = 4;        // #ColCopy      [:L51] - legacy default TRUE
+  optional bool col_paste = 5;       // #ColPaste     [:L52] - legacy default TRUE
+  optional bool item_copy = 6;       // #ItemCopy     [:L53] - legacy default TRUE
 
   // The row and column the menu was raised on.
   int64 row = 7;
   DwObjectRef dwo = 8;
+}
+
+// RowSelectState - the row-selection service, WHICH IS HEADLESS IN ITS ENTIRETY.
+//
+// Unlike the three split services above, `n_cst_dwsvc_rowselect.sru` needs no split: it has exactly
+// ONE presentational dependency in 300 lines - a rejection dialog at [:L239] - and that becomes a
+// StructuredError like every other dialog. SelectRow, IsSelected, GetRow and SetRow are DataWindow
+// state operations, not rendering, and SetRedraw is a repaint-suppression optimisation with no
+// observable effect on which rows end up selected. So the whole service ships, and the reason it was
+// absent from this contract is that it was overlooked rather than deferred.
+message RowSelectState {
+  // `#Style` [:L23], a BIT-OR of Style values. The in-source comment at [:L19] says the values are
+  // combinable ("支持组合"), so this is a mask and not a choice of one.
+  //
+  // `optional` because THE LEGACY DEFAULT IS RS_SINGLE = 1 [:L23] while a protobuf numeric defaults to
+  // 0 - and 0 is not merely a different default here, it is a value `of_setstyle` REJECTS outright
+  // with E_INVALID_ARGUMENT [:L272]. Absent therefore means the legacy's RS_SINGLE.
+  optional uint64 style = 1;
+
+  // The ONE-BASED ordinals of the currently selected rows, ascending. The legacy holds this inside the
+  // DataWindow via SelectRow/IsSelected rather than in a field of its own, so this is the wire's view
+  // of `IsSelected(row)` across every row - which is the only way a caller on the far side of a
+  // boundary can observe it.
+  repeated int64 selected_rows = 2;
+
+  // The current row - `GetRow()`. ONE-BASED, and 0 means no current row, which is the value the legacy
+  // tests for at [:L212] and [:L232] before re-selecting.
+  int64 current_row = 3;
+
+  // `of_hasmultiselected()` [:L36] returning `_bHasMultiSelected` [:L30].
+  //
+  // NOT DERIVABLE FROM selected_rows, WHICH IS WHY IT IS CARRIED. It records that the CURRENT SELECTION
+  // WAS PRODUCED BY A MULTI-SELECT GESTURE - a shift-range or a control-toggle - and the legacy uses it
+  // to decide whether a subsequent control-click should first re-select the focus row [:L196-L198]. A
+  // single selected row can therefore have this true, and an empty selection can too.
+  bool has_multi_selected = 4;
+
+  // `_inChangeRowFocus` [:L29]. TRUE WHILE THE SERVICE IS ITSELF MOVING THE ROW FOCUS, which is how
+  // the row-focus-changed handler recognises its own re-entry and returns 0 immediately [:L207]. It is
+  // cross-event state of the same kind as the validation session's four fields, so it is observable
+  // and it travels.
+  bool in_change_row_focus = 5;
+
+  // [:L20-L21]. COMBINABLE, per the source comment at [:L19] - so this is a bitmask, and the two bits
+  // are 1 and 2 rather than an ordered pair of alternatives.
+  //
+  // THERE IS NO ZERO MEMBER, DELIBERATELY: `of_setstyle` rejects 0 with E_INVALID_ARGUMENT [:L272], so
+  // a "none" state does not exist in the legacy and is not invented here. The enum is consequently
+  // declared with its bits only and the field above is `optional` to express absence.
+  enum Style {
+    // Reserved so the mask enum is a legal proto3 enum. IT IS NOT A LEGACY VALUE AND IT IS NOT A LEGAL
+    // REQUEST: `of_setstyle(0)` returns E_INVALID_ARGUMENT [:L272], and a service must reject it the
+    // same way rather than substituting a default.
+    RS_UNSPECIFIED = 0;
+    RS_SINGLE = 1;    // single selection - the legacy default   [:L20]
+    RS_MULTIPLE = 2;  // multiple selection                      [:L21]
+  }
+}
+
+// ---- The eight headless-model operations ----
+//
+// ============ WHY THESE OPERATIONS EXIST, AND WHY THE METHOD COUNT GREW (C-K) ===================
+// The four models above are the headless halves this section says SHIP on C-03. A message that no RPC
+// and no field references does not ship - it compiles. Each model therefore gets a READ and an APPLY
+// operation, so the capability is reachable, and the pairing is deliberate: the legacy surface for each
+// service is a set of property setters plus a computed product, which is exactly an apply and a read.
+// The alternative - one generic operation with a oneof over four models - was rejected because it would
+// couple four independently-versioned services into one method signature.
+//
+// The C-03 method count therefore goes from eight to sixteen, which departs from the eight this file's
+// service comment previously asserted. That count was written when the models were unreachable; the
+// count that matters is the one docs/CONTRACTS.md must now record, and the RPCs are named below so the
+// two cannot diverge again.
+//
+// EVERY ONE OF THESE IS HEADLESS. No request and no response below carries window geometry, a DPI
+// conversion, a font metric, a pixel coordinate, a window handle or IME state - the enumerated
+// exclusion list at the top of this section holds without exception (C-D).
+
+message GetDropDownSearchStateRequest {
+  string datawindow_handle = 1;
+  // Empty means "the whole service state"; a column name narrows it to that column's filter.
+  string column_name = 2;
+}
+
+message GetDropDownSearchStateResponse {
+  DropDownSearchState state = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+// Applies the search configuration and returns the state it produced, INCLUDING THE GENERATED FILTER
+// EXPRESSION as compatibility and diagnostic data. `of_filter` and the `#FilterType`,
+// `#ShowFilteredRows` setters [n_cst_dwsvc_dropdownsearch.sru:L50-L58], plus `of_clearfilter`.
+message ApplyDropDownSearchRequest {
+  string datawindow_handle = 1;
+  string column_name = 2;
+
+  // The search terms AS TYPED. Not pre-escaped, not lower-cased, not wildcard-expanded - the service
+  // performs the legacy's own transformations [:L316-L317] so that the generated expression matches the
+  // oracle byte for byte, and it binds these as literals rather than splicing them as syntax.
+  repeated string search_values = 3;
+
+  // Absent means the legacy default 3, not 0 - see DropDownSearchState.filter_type.
+  optional uint64 filter_type = 4;
+
+  // Absent means the legacy's 7 - see DropDownSearchState.pinyin_flags.
+  optional uint64 pinyin_flags = 5;
+
+  optional bool show_filtered_rows = 6;
+
+  // Clear any current filter instead of applying one - `of_clearfilter`. When true the search values
+  // are ignored.
+  bool clear = 7;
+}
+
+message ApplyDropDownSearchResponse {
+  DropDownSearchState state = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+message GetColumnSortStateRequest {
+  string datawindow_handle = 1;
+}
+
+message GetColumnSortStateResponse {
+  ColumnSortState state = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+// Applies a sort and returns the generated sort expression. THE COLUMN ORDER IS THE SORT ORDER - a
+// multi-column sort is ordered and the generated expression is position-dependent, so a service must
+// preserve the sequence as received.
+message ApplyColumnSortRequest {
+  string datawindow_handle = 1;
+  repeated ColumnSortState.ColumnSort columns = 2;
+
+  // Sort in place without re-retrieving. The legacy sorts the existing rows; this flag is carried so a
+  // caller can ask for the expression WITHOUT applying it, which is what a characterization run needs.
+  bool expression_only = 3;
+}
+
+message ApplyColumnSortResponse {
+  ColumnSortState state = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+message GetContextMenuModelRequest {
+  string datawindow_handle = 1;
+
+  // The row and column the menu is being raised on, matching `oninitcontextmenu(row, dwo)`
+  // [se_cst_dw.sru:L11]. The built-in items depend on which column was hit, so this is not optional
+  // context - it selects which items the model contains.
+  int64 row = 2;
+  DwObjectRef dwo = 3;
+}
+
+message GetContextMenuModelResponse {
+  ContextMenuModel model = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+// Applies an application-supplied item model - `of_additem`, `of_insertitem`, `of_addseparator`,
+// `of_insertseparator` and the five `#Col*`/`#ItemCopy` toggles - and returns the model as the service
+// holds it afterwards, with the computed logical text widths filled in.
+message ApplyContextMenuModelRequest {
+  string datawindow_handle = 1;
+  ContextMenuModel model = 2;
+
+  // Replace the current items rather than appending to them. False reproduces `of_additem`'s
+  // accumulate-then-show behaviour; true reproduces a rebuild.
+  bool replace = 3;
+}
+
+message ApplyContextMenuModelResponse {
+  ContextMenuModel model = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+message GetRowSelectStateRequest {
+  string datawindow_handle = 1;
+}
+
+message GetRowSelectStateResponse {
+  RowSelectState state = 1;
+  common.v1.RetCode.Value ret_code = 2;
+  StructuredError error = 3;
+}
+
+// `of_setstyle` [n_cst_dwsvc_rowselect.sru:L37] together with the selection changes it performs.
+//
+// THREE LEGACY BEHAVIOURS THE RESPONSE MUST BE ABLE TO REPORT (C-B): setting the style it already has
+// returns OK and changes nothing [:L271]; a style of 0 returns E_INVALID_ARGUMENT [:L272]; and a
+// successful change CLEARS THE SELECTION and then re-selects the current row UNLESS the style is
+// exactly RS_MULTIPLE [:L276-L282] - and only when the service is enabled [:L276].
+message ApplyRowSelectStyleRequest {
+  string datawindow_handle = 1;
+
+  // The style mask. Absent means "leave the style alone and just report", which is how a caller reads
+  // state through this operation; 0 is a REQUEST and it is rejected, per RowSelectState.Style.
+  optional uint64 style = 2;
+
+  // Rows to select explicitly, ONE-BASED - the SelectRow calls a click gesture would have produced. A
+  // caller that only wants to change the style leaves this empty.
+  repeated int64 select_rows = 3;
+
+  // Move the current row - `SetRow`. 0 leaves it alone. The legacy's own row-focus move sets
+  // `_inChangeRowFocus` around the call [:L253-L261] so its handler recognises the re-entry, and a
+  // service reproduces that guard rather than exposing it as a caller-settable flag.
+  int64 set_current_row = 4;
+}
+
+message ApplyRowSelectStyleResponse {
+  RowSelectState state = 1;
+  common.v1.RetCode.Value ret_code = 2;
+
+  // The rejection dialog at [:L239] - "row {} / data change rejected" via CAT_DWSVC and Sprintf, shown
+  // with StopSign! - re-expressed as a structured result. It is the service's ONLY presentational
+  // dependency, and this is where it goes.
+  StructuredError error = 3;
 }
 
 
@@ -2554,8 +2989,23 @@ message AddVariableRequest {
 }
 
 message AddVariableResponse {
-  // The ONE-BASED index in the global variable table.
-  int32 index = 1;
+  // ============ NO INDEX IS RETURNED, BECAUSE THE LEGACY DOES NOT RETURN ONE (C-B) ==============
+  // Field 1 held an `index` and it has been REMOVED and RESERVED. All seven `of_addvar` overloads are
+  // declared `public function long` [:L153-L159] and every one of them ends in `return RetCode.OK` -
+  // the string overload does not even have a body of its own, it delegates to
+  // of_AddVarExp(name, "'" + value + "'") [:L154]. Adding a variable yields a return CODE, not a
+  // position.
+  //
+  // Returning an index here would have invented observable behaviour with no legacy and no AAP
+  // authority, and worse, it would have been believable: variables ARE held in a one-based table and
+  // `vardata.index` does point into it, so a consumer would reasonably have started keying on the
+  // returned value. Callers address a variable BY NAME, which is the only handle the legacy gives them.
+  // ONLY of_addexp genuinely returns a position - it is declared `public function integer` and returns
+  // `nIndex` [:L172, :L1583] - so AddExpressionResponse keeps its index and these three do not.
+  // ==========================================================================================
+  reserved 1;
+  reserved "index";
+
   common.v1.RetCode.Value ret_code = 2;
   // A DUPLICATE DEFINITION IS AN ERROR IN THE LEGACY, raised at [:L1607] and [:L2122]; it is reported
   // here rather than silently overwriting.
@@ -2594,7 +3044,12 @@ message AddVariableExpressionRequest {
 }
 
 message AddVariableExpressionResponse {
-  int32 index = 1;
+  // NO INDEX, FOR THE SAME REASON AS AddVariableResponse (C-B). `of_addvarexp` is declared
+  // `public function long` [:L173] and its body ends `return RetCode.OK` after appending to GlobalVars
+  // and calling _of_ResetColumns. Field 1 held an invented index and is reserved.
+  reserved 1;
+  reserved "index";
+
   common.v1.RetCode.Value ret_code = 2;
   ExpressionError error = 3;
 }
@@ -2646,7 +3101,12 @@ message AddForeignVariableRequest {
 }
 
 message AddForeignVariableResponse {
-  int32 index = 1;
+  // NO INDEX, FOR THE SAME REASON AS AddVariableResponse (C-B). `of_addforeignvar` is declared
+  // `public function long` [:L201] and returns `RetCode.OK` after wiring the link array both ways.
+  // Field 1 held an invented index and is reserved.
+  reserved 1;
+  reserved "index";
+
   common.v1.RetCode.Value ret_code = 2;
   // AN UNDEFINED FOREIGN VARIABLE IS A LEGACY ERROR [:L2133], and an unreachable handle is the
   // narrowing's defined error. Both arrive here.
@@ -2799,8 +3259,19 @@ message CalcEmptyResponse {
 // ============= TWO ANOMALIES HERE, BOTH CARRIED RATHER THAN TIDIED (C-B) ========================
 // 1. IT IS DECLARED PUBLIC DESPITE THE PRIVATE-CONVENTION UNDERSCORE PREFIX. Every other `_of_*` member
 //    in this object is private or protected; this one is `public function boolean _of_calcitem`. Callers
-//    may depend on it, and the name APPEARS IN RECORDINGS, so dropping the underscore would break a name
-//    the oracle uses. The method is therefore exposed with its odd name intact.
+//    may depend on it, and the name APPEARS IN RECORDINGS.
+//
+//    THE NAME CANNOT BE CARRIED AS THE RPC IDENTIFIER, AND SAYING OTHERWISE WOULD BE FALSE. A protobuf
+//    identifier must begin with a letter, so an `rpc _of_calcitem` does not compile - the leading
+//    underscore is not a style choice this contract is free to make. The RPC is therefore named
+//    `CalcItem`, and the legacy spelling travels as MACHINE-READABLE METADATA on the method:
+//
+//        option (common.v1.legacy_name) = "_of_calcitem";
+//
+//    A compatibility adapter or a recording comparator reads it off the descriptor - see
+//    common.v1.proto Section 11 - so it keys on the legacy name rather than on the protobuf one. The
+//    metadata is the mechanism; the underscore is not silently dropped and it is not silently claimed
+//    to have survived either.
 // 2. IT RETURNS `boolean`, NOT `long` - unlike every other calculation entry point, which returns a
 //    RetCode. So it cannot report WHY it failed, only that it did. That is a real expressive limit of
 //    the legacy API and it is reproduced: CalcItemResponse's primary result is a bool.
@@ -2897,6 +3368,102 @@ message GetServiceStateResponse {
   bool trace = 2;
 
   common.v1.RetCode.Value ret_code = 3;
+}
+
+// ---- The engine-state snapshot: the seven structures, made REACHABLE ----
+//
+// ============ WHY THIS OPERATION EXISTS AT ALL (C-K) ============================================
+// Section 9 opens by saying the seven structures ARE the contract. They were declared and then
+// referenced by nothing - no field, no request, no response - so the state they describe could not
+// actually cross the boundary, and four of the seven were unreachable declarations that merely
+// compiled. In particular NONE of the following could be observed by a consumer: the REVERSE DEPENDENCY
+// INDEX that makes dirty-propagation work (ColumnData.indexes / .var_indexes), the DUPLICATE-EXPRESSION
+// LINKS that select which of several expressions a column change drives (ColumnExpData.dup_exps), the
+// relative and relative-INPUT column sets, the four per-expression flags, the tri-state CALCULATION
+// CACHE, and the generated COMPUTE NAME.
+//
+// EVERY ONE OF THOSE IS BEHAVIOURALLY LOAD-BEARING RATHER THAN INFORMATIONAL. Section 9 argues the case
+// per field; the consequence for the boundary is this operation. It is a READ - the engine's state is
+// mutated through the typed operations above, never by posting a snapshot back - so there is no
+// corresponding Apply, and that asymmetry is deliberate: a settable snapshot would let a caller
+// construct a dependency graph the parser never produced.
+//
+// IT IS A SNAPSHOT, NOT A SUBSCRIPTION. Values are consistent as of one instant; a consumer that needs
+// to follow subsequent change subscribes to EventStream below.
+message GetExpressionStateRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+
+  // Narrow to one column's expressions. Empty means the whole table, which is what a characterization
+  // capture takes.
+  string column_name = 3;
+
+  // Include the global variable table and the per-expression bindings. Separated because the bindings
+  // carry every variable's CURRENT VALUE and a caller diagnosing dependency structure alone does not
+  // need them - and on a large table they dominate the payload.
+  bool include_bindings = 4;
+}
+
+message GetExpressionStateResponse {
+  // The expression table, in engine order. The ONE-BASED position of an entry here is the index
+  // `of_addexp` returned and the index every by-index operation addresses, so ORDER IS IDENTITY and a
+  // service must not re-sort or compact it.
+  repeated ColumnExpData expressions = 1;
+
+  // THE REVERSE DEPENDENCY INDEX, per column: `columndata` [:L44-L48]. This is the graph that makes
+  // dirty-propagation work, and Section 9 records why it must be transmitted rather than recomputed -
+  // a consumer cannot rebuild it, because it is the parser's own output over expressions whose
+  // unexpanded text the consumer may not hold.
+  //
+  // Keyed by ONE-BASED column ordinal, which is how the legacy indexes ColumnDatas.
+  map<int64, ColumnData> columns = 2;
+
+  // The grammar sentinels [:L95, :L120-L121, :L1252-L1253], so a consumer decodes FuncData and VarData
+  // without hardcoding the literals - and so that a change to any of them is visible on the wire
+  // instead of silently breaking every consumer's private copy.
+  ExpressionSentinels sentinels = 3;
+
+  // The global variable table [:L65-L71]. Present when include_bindings is set.
+  repeated GlobalVarData global_vars = 4;
+
+  // The three-part binding per expression, in the same order as `expressions`. Present when
+  // include_bindings is set. ExpressionBinding is where the $ versus $$ round trip actually lives: the
+  // unexpanded text, the bind-time snapshot and the live environment together.
+  repeated ExpressionBinding bindings = 5;
+
+  common.v1.RetCode.Value ret_code = 6;
+  ExpressionError error = 7;
+}
+
+// ---- The engine's event stream ----
+//
+// The three events below are declared on the engine itself and, before this stream existed, had no way
+// to leave the service: the messages compiled and nothing emitted them. In-process the legacy triggers
+// them on the DataWindow, where the application is already listening; across a boundary the application
+// is not, so a SERVER STREAM carries them.
+//
+// A SERVER STREAM RATHER THAN THE BIDIRECTIONAL SHAPE C-04's OTHER TWO STREAMS USE, and the difference
+// is not stylistic. InvokeMethodChannel and TraceChannel are inverted because the engine needs an ANSWER
+// from its client. These three are notifications: the engine reports that a recalculation happened and
+// expects nothing back. Giving them a request direction would invent a reply the legacy has no place
+// for.
+//
+// ORDERING: each event carries the same monotonic sequencing token as C-03's notification group, and the
+// same rule applies - THE TOKEN IS FOR DETECTION ONLY. A gap or a reversal is a hard error, never an
+// invitation to reorder.
+message EventStreamRequest {
+  string session_id = 1;
+  string datawindow_handle = 2;
+
+  // Narrow to one column. Empty means every column in the session.
+  string column_name = 3;
+}
+
+message EventStreamResponse {
+  ColumnExpEvent event = 1;
+
+  // Monotonic per stream, starting at 1. Detection only - see above.
+  int64 sequence = 2;
 }
 
 // ---- The three events declared on columnexp ITSELF ----
@@ -3185,9 +3752,13 @@ message TraceRecord {
 //  published JWKS, which is framework code and must not be duplicated here (C-G).
 // ==============================================================================================
 
-// C-03 - the DataWindow event surface, the retrieval/validation/update triple, and the event gate.
+// C-03 - the DataWindow event surface, the retrieval/validation/update triple, the event gate, and the
+// four headless models.
 //
-// EXACTLY EIGHT METHODS, spelled to match docs/CONTRACTS.md section 6.1 so the two cannot diverge.
+// SIXTEEN METHODS: the eight core ones, spelled to match docs/CONTRACTS.md section 6.1 so the two cannot
+// diverge, plus the eight read/apply operations that make Section 8's headless halves reachable. The
+// count was eight while those four models were declared but referenced by nothing; Section 8's
+// operations block records why the pairing is a read and an apply rather than one generic method.
 service DataWindowService {
   // SERVER STREAM of buffer-shaped chunks, reproducing the legacy's progressive delivery with a
   // per-delivery row count - `ondatareceived(ref n_cst_thread_task_sqlbase_ds data, long rowcount)` in
@@ -3213,7 +3784,20 @@ service DataWindowService {
   // common.v1.ConflictDetail carrying the current row state - the canonical mapping to HTTP 409, which
   // Gateway's REST projection surfaces unchanged. The caller implements an explicit retry-or-surface
   // policy; THERE IS NO SILENT OVERWRITE ANYWHERE. See UpdateResponse.
-  rpc Update(UpdateRequest) returns (UpdateResponse);
+  //
+  // THE BINDING BELOW IS THE MACHINE-READABLE HALF OF THAT SENTENCE (C-K). The detail cannot ride on
+  // the status itself - a status carries only a code and a message - so it travels as a binary
+  // trailer, and the option declares the key, the status code and the payload type on the descriptor
+  // so a client discovers all three without reading this comment. THE SAME KEY AND THE SAME PAYLOAD
+  // TYPE AS C-06 USES, deliberately: Gateway relays what DataServices relays from Persistence, and one
+  // decoding path must serve the whole chain. common.v1.proto Section 11 has the retrieval steps.
+  rpc Update(UpdateRequest) returns (UpdateResponse) {
+    option (common.v1.rich_error) = {
+      trailer_key: "powerframework-rich-error-v1-bin"
+      grpc_status_code: 10
+      payload_type: "common.v1.RichErrorTrailer"
+    };
+  }
 
   // Reads the event-gate bitmask, and the per-bit predicate `of_iseventdisabled` [:L109].
   rpc GetEventGate(GetEventGateRequest) returns (GetEventGateResponse);
@@ -3228,6 +3812,43 @@ service DataWindowService {
   // COUNTERPART in the legacy, annotated rather than harmonised (C-B). A zero mask yields
   // E_INVALID_ARGUMENT [:L530]. See DisableEventResponse for the full note.
   rpc EnableEvent(EnableEventRequest) returns (EnableEventResponse);
+
+  // ---- THE FOUR HEADLESS MODELS, READ AND APPLY - see Section 8's operations block ----
+  // These eight are what make the headless halves an API rather than four compiling declarations. Every
+  // one is headless without exception: no geometry, no DPI conversion, no font metric, no pixel
+  // coordinate, no window handle, no IME state (C-D).
+
+  // The drop-down search state, including the generated filter expression as COMPATIBILITY AND
+  // DIAGNOSTIC data - never as something a receiver executes. See DropDownSearchState.filter_expression.
+  rpc GetDropDownSearchState(GetDropDownSearchStateRequest) returns (GetDropDownSearchStateResponse);
+
+  // `of_filter` / `of_clearfilter` plus the `#FilterType` and `#ShowFilteredRows` setters. Takes the
+  // search terms AS TYPED and performs the legacy's own transformations server-side, so the generated
+  // expression matches the oracle byte for byte without the caller having to build syntax.
+  rpc ApplyDropDownSearch(ApplyDropDownSearchRequest) returns (ApplyDropDownSearchResponse);
+
+  // The sort state and the generated `Sort` property string.
+  rpc GetColumnSortState(GetColumnSortStateRequest) returns (GetColumnSortStateResponse);
+
+  // Applies an ordered multi-column sort. COLUMN ORDER IS THE SORT ORDER and must be preserved.
+  rpc ApplyColumnSort(ApplyColumnSortRequest) returns (ApplyColumnSortResponse);
+
+  // The context-menu ITEM MODEL for a given row and column - labels, ids, flags, and the computed
+  // LOGICAL text widths. The pixel widths, the fonts and the rendering are the deferred half.
+  rpc GetContextMenuModel(GetContextMenuModelRequest) returns (GetContextMenuModelResponse);
+
+  // `of_additem` / `of_insertitem` / `of_addseparator` / `of_insertseparator` and the five built-in
+  // toggles, each of which defaults TRUE in the legacy and is therefore `optional` on the wire.
+  rpc ApplyContextMenuModel(ApplyContextMenuModelRequest) returns (ApplyContextMenuModelResponse);
+
+  // The row-selection state. This service is headless IN ITS ENTIRETY - see RowSelectState.
+  rpc GetRowSelectState(GetRowSelectStateRequest) returns (GetRowSelectStateResponse);
+
+  // `of_setstyle` and the selection changes it performs, including the three legacy behaviours the
+  // response must be able to report: unchanged-style returns OK, style 0 is E_INVALID_ARGUMENT, and a
+  // successful change clears the selection then re-selects the current row unless the style is exactly
+  // RS_MULTIPLE.
+  rpc ApplyRowSelectStyle(ApplyRowSelectStyleRequest) returns (ApplyRowSelectStyleResponse);
 }
 
 // C-04 - the column-expression engine.
@@ -3280,14 +3901,32 @@ service ColumnExpressionService {
   rpc CalcEmpty(CalcEmptyRequest) returns (CalcEmptyResponse);
 
   // `_of_calcitem` [:L142] - PUBLIC DESPITE ITS PRIVATE-CONVENTION UNDERSCORE PREFIX, and returning
-  // `boolean` rather than a RetCode. Both anomalies are preserved; see CalcItemResponse.
-  rpc CalcItem(CalcItemRequest) returns (CalcItemResponse);
+  // `boolean` rather than a RetCode. Both anomalies are preserved; see CalcItemRequest's block.
+  //
+  // The RPC is `CalcItem` because a protobuf identifier cannot begin with an underscore, so the legacy
+  // spelling is carried as descriptor metadata instead of being asserted to have survived verbatim.
+  // Adapters and characterization comparators MUST read the option rather than the RPC name.
+  rpc CalcItem(CalcItemRequest) returns (CalcItemResponse) {
+    option (common.v1.legacy_name) = "_of_calcitem";
+  }
 
   // The gates: `of_setenabled` [n_cst_dwsvc.sru:L89-L95], WHICH IS VETOABLE and therefore returns a
   // RetCode rather than a boolean; `of_settrace` [:L208], which is not.
   rpc SetEnabled(SetEnabledRequest) returns (SetEnabledResponse);
   rpc SetTrace(SetTraceRequest) returns (SetTraceResponse);
   rpc GetServiceState(GetServiceStateRequest) returns (GetServiceStateResponse);
+
+  // THE ENGINE-STATE SNAPSHOT - the operation that makes Section 9's seven structures reachable rather
+  // than merely declared. Carries the expression table, the REVERSE DEPENDENCY INDEX, the grammar
+  // sentinels and, on request, the global variable table and the three-part $ / $$ bindings. Read-only
+  // by design: state is mutated through the typed operations above, never by posting a snapshot back.
+  rpc GetExpressionState(GetExpressionStateRequest) returns (GetExpressionStateResponse);
+
+  // SERVER STREAM of the three events the engine declares on ITSELF [:L86-L88] - item-changed,
+  // do-item-changed with its `frominput` flag, and var-changed with its `forcecalc` flag. A server
+  // stream and not an inverted one: these are notifications the engine emits, not questions it asks.
+  // Sequencing tokens are FOR DETECTION ONLY.
+  rpc EventStream(EventStreamRequest) returns (stream EventStreamResponse);
 
   // INVERTED STREAM 1 - macro invocation. DataServices asks its CLIENT to evaluate a macro, because THE
   // LEGACY EXPECTS THE APPLICATION TO IMPLEMENT THE MACRO SWITCH
@@ -3300,4 +3939,3 @@ service ColumnExpressionService {
   // it carries a sequencing token rather than strict ordering. Gated on `#Trace` [:L98].
   rpc TraceChannel(stream TraceChannelRequest) returns (stream TraceRecord);
 }
-

@@ -32,9 +32,24 @@
     Legacy sources ported into this folder, per AAP §0.3.1 and §0.4.2.3:
 
         II18nProvider.cs                  ws_objects/pfw.ui.pbl.src/n_cst_i18n.sru
-                                          One member, ontranslate(source, category, ref text):
-                                          translation MUTATES a ref string, it does not return a
-                                          value.
+                                          One member, declared at :L9 as
+                                          "event type long ontranslate ( long source, long
+                                          category, ref string text )". It carries TWO results and
+                                          both are load bearing: the translated text is returned by
+                                          MUTATING the ref string parameter, and the long return
+                                          value reports whether the provider HANDLED the call - 1
+                                          handled, 0 not handled, per the legacy's own comment
+                                          "返回1代表已处理" (returning 1 means handled) at
+                                          n_cst_i18n_chs.sru. The two are independent, which is why
+                                          neither may be dropped: n_cst_i18n_en.sru:L51-L56 mutates
+                                          the text AND returns 1 only when the table produced a
+                                          non empty translation, whereas n_cst_i18n_chs.sru returns
+                                          1 for every framework sourced string WITHOUT touching the
+                                          text at all, because Simplified Chinese is the base locale
+                                          and the text is already correct. So "handled" does not
+                                          imply "changed", and an implementation that inferred the
+                                          return value from whether the text moved would report the
+                                          base locale as unhandled.
         I18n.cs                           ws_objects/pfw.ui.pbl.src/i18n.srf
                                           Three overloads. Preserves the SILENT PASSTHROUGH
                                           fallback: with no provider installed the text is returned
@@ -49,9 +64,14 @@
                                           be revived: reviving it is the silent correction AAP
                                           §0.8.2 forbids.
         SimplifiedChineseProvider.cs      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_chs.sru
-                                          A genuine no op, because Simplified Chinese is the base
-                                          locale. The three provider shape is reproduced including
-                                          this one.
+                                          A genuine no op ON THE TEXT, because Simplified Chinese is
+                                          the base locale - but NOT a no op on the return value: its
+                                          whole body is "if source = Enums.I18N_SRC_PFW then return
+                                          1" followed by "return 0", so it claims HANDLED for every
+                                          framework sourced string while leaving the text exactly as
+                                          supplied. It owns no resource document and needs none
+                                          (pfw.i18n.xml declares no lang="chs" section). The three
+                                          provider shape is reproduced including this one.
         TraditionalChineseProvider.cs     ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_cht.sru
         I18nResourceReader.cs             pfw.i18n.xml, read at n_cst_i18n_en.sru:L158-L159 and
                                           n_cst_i18n_cht.sru:L62-L63.
@@ -135,15 +155,24 @@
       In particular NO reference to any Documents XML object family: AAP §0.2.1.3 Correction 6
       records that the concrete providers read the translation table with the DEFERRED Documents XML
       parser (n_cst_i18n_en.sru:L13 declares n_xmldoc, n_cst_i18n_cht.sru uses n_xmlqueryresult), and
-      the resolution is to SUBSTITUTE System.Xml.Linq.XDocument.Load plus XPathSelectElements so that
-      Localization acquires no Documents coupling and the XML family stays deferred. Nor may any of
+      the resolution is to SUBSTITUTE the framework XML API - System.Xml.Linq.XDocument.Load plus a
+      traversal of the loaded document - so that Localization acquires no Documents coupling and the
+      XML family stays deferred. Correction 6 names XPathSelectElements for the query half, and that
+      was the reader's mechanism until an interpolated expression was found to let a crafted argument
+      SELECT a translation the caller never asked for; the query is now a data comparison, which is
+      recorded at I18nResourceReader.Lookup with the measurement showing it changed nothing
+      observable. Either spelling satisfies Correction 6, whose subject is the DEPENDENCY. Nor may any of
       the four deferred services (DesignSystem, Documents, Integration, ScriptBridge) be named: AAP
       §0.2.2.2 forbids implementing them even as a stub, so they have no project to reference.
       Relative path only: never an absolute path, and never a package standing in for a project.
 
-      Left deliberately public rather than hidden behind PrivateAssets. The sibling test project
-      takes no direct Kernel reference of its own and reaches RetCode, Enums and Predicates
-      transitively through this edge, so narrowing it would break that project.
+      Left deliberately public rather than hidden behind PrivateAssets, because Kernel's types are
+      part of this library's own surface: II18nProvider.OnTranslate and the I18n overloads return
+      RetCode values and take Enums.I18N_SRC_* and Enums.I18N_CAT_* arguments, so a consumer cannot
+      call this library without them. Narrowing the edge would make the public signatures
+      unreachable. Note that the sibling test project declares its own direct Kernel reference
+      rather than leaning on this edge, so this decision rests on the public surface alone and not
+      on keeping that project compiling.
     -->
     <ProjectReference Include="..\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
   </ItemGroup>
@@ -152,12 +181,13 @@
     ZERO PackageReference elements, and zero is the correct count (AAP §0.7.3 C-A, §0.5.3).
 
     The substitution named in AAP §0.2.1.3 Correction 6 and §0.4.2.3 is System.Xml.Linq.XDocument
-    with XPathSelectElements, and both ship inside the Microsoft.NETCore.App shared framework that
-    net10.0 already targets, so the reader needs no package at all. Nothing else here performs I/O,
+    over System.Xml, and both ship inside the Microsoft.NETCore.App shared framework that net10.0
+    already targets, so the reader needs no package at all. Nothing else here performs I/O,
     networking, logging, serialization or database access, so no ASP.NET reference, no web SDK and no
     third party package belongs in this project; §0.5.3 additionally rules out adding a localization
     or resource framework, because the three providers are ported logic with exact legacy semantics
-    (including the two mistranslations and the no op Simplified Chinese provider) rather than a
+    (including the two mistranslations and the handled without mutation Simplified Chinese provider)
+    rather than a
     resource strategy to be re-expressed.
 
     Do not add a package "to be safe": an unnecessary reference drags a NuGet audit surface onto a
@@ -171,24 +201,79 @@
   -->
 
   <!--
+    TRANSLATION TABLE DELIVERY. This is the item that puts pfw.i18n.xml where the reader looks for it,
+    and it belongs in THIS project because this project is the only thing in the tree that reads it.
+
+    WHY IT IS REQUIRED, not a convenience. I18nResourceReader loads the table by BARE RELATIVE
+    FILENAME - DefaultResourceFileName is the literal "pfw.i18n.xml" - which reproduces the legacy
+    `_doc.LoadFile("pfw.i18n.xml")` at n_cst_i18n_en.sru:L159 and n_cst_i18n_cht.sru:L63 exactly: it
+    resolves against the process working directory and probes nowhere else. In the legacy the table
+    sits beside the executable and IS found, so EnglishProvider and TraditionalChineseProvider return
+    real translations - including the two mistranslations at pfw.i18n.xml:L4 and :L49 that AAP §0.8.2
+    requires be preserved verbatim. Without this item the file is absent from every consuming
+    service's output, both providers find nothing, and every lookup returns its input unchanged. That
+    is NOT the preserved silent-passthrough behaviour: AAP §0.4.2.3 scopes passthrough to the case of
+    NO PROVIDER INSTALLED, whereas this would be an installed provider silently translating nothing.
+    Reproducing the mistranslations and losing every translation are the same code path with and
+    without this line, so the line is what makes the parity requirement reachable at run time.
+
+    WHY IT IS DECLARED HERE AND NOWHERE ELSE. A Content item carrying CopyToOutputDirectory flows
+    through a ProjectReference to every consuming project, so this one declaration delivers the table
+    to PowerFramework.Gateway, to PowerFramework.DataServices and to the sibling test project without
+    any of them naming the file. Verified by measurement, not assumed: the table appears in a
+    referencing application's bin/<config>/net10.0 and in its `dotnet publish` output, byte identical
+    in both. Declaring it per consumer instead would be three or more copies of one decision, and the
+    day a fourth consumer appeared it would be missing the table with no build error to say so.
+
+    CopyToPublishDirectory is stated explicitly alongside CopyToOutputDirectory rather than left to
+    the SDK's default, because publish is the boundary that matters: the container image is produced
+    by `dotnet publish -c Release`, and a table that reached bin but not the publish output would fail
+    only at run time inside a container, in the silent way described above.
+
+    THIS DOES NOT BREACH THE READ ONLY RULE, and the distinction is exact. pfw.i18n.xml is listed in
+    AAP §0.2.1.2 as a read-only DATA INPUT, not in the §0.2.2.1 read-only legacy boundary. Constraint
+    C-C forbids editing, deleting, moving, renaming or reformatting it; MSBuild here only ever COPIES
+    it, and nothing in this project writes to, transforms or re-encodes that path. No target that
+    would do so may ever be added. The root .dockerignore independently corroborates the intent by
+    re-including the file (!pfw.i18n.xml) so it survives into the Docker build context, which would be
+    pointless if it were never meant to reach a runtime.
+
+    THE COPY MUST STAY BYTE IDENTICAL: 6824 bytes, no byte order mark, no XML declaration (the
+    document opens directly with the pfw element), UTF-8 encoded Chinese, LF only line endings, and a
+    final closing element with no trailing newline. The repository .gitattributes declares no eol and
+    no text=auto rule, so no checkout normalization occurs and a plain copy preserves every byte;
+    confirmed by comparing the copied file with the original. Never introduce an encoding conversion,
+    a newline fixup or any other transform: a size or hash mismatch in an output directory means the
+    read-only guarantee has been broken, and the two mistranslations this table carries must survive
+    verbatim rather than being silently corrected.
+
+    Content rather than None, because the file is data a running service must find on disk; and
+    rather than EmbeddedResource, because the behaviour being reproduced is a read of a real file at a
+    real relative path, which is the legacy resolution semantics the reader exists to preserve.
+    PreserveNewest keeps incremental builds cheap while still refreshing the copy if the table is ever
+    updated upstream.
+  -->
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)../../pfw.i18n.xml"
+             Link="pfw.i18n.xml"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Also deliberately absent, each for a stated reason, so the omissions read as decisions:
 
-      * Any item naming pfw.i18n.xml. The translation table is a repository root data file that the
-        root .dockerignore explicitly re-includes (!pfw.i18n.xml) so it survives into the build
-        context, and the sibling test project links its own copy with CopyToOutputDirectory. How the
-        table reaches a running service - linked content here, embedded resource, or a path supplied
-        through configuration - is a delivery decision that belongs with I18nResourceReader.cs and
-        the consuming services' settings, not with this project file, and stating it here would
-        pre-empt it. Note the file is READ ONLY legacy data either way (AAP §0.2.1.2): it is read as
-        the resource table and never edited.
       * OutputType. This is a class library and must stay one; the SDK default of Library is correct.
         The Exe value belongs ONLY to the hand authored xunit.v3 test projects, which fail to build
         without it. Setting it here would turn a library into an application and break every
         consumer.
-      * EnableDefaultCompileItems, and any explicit Compile, Content, None, EmbeddedResource or
-        Remove item. SDK style projects glob the .cs files in this directory automatically and they
-        all sit flat here, so there is nothing to add and nothing to exclude. An explicit list would
-        be worse than redundant: it would silently drop any file added later.
+      * EnableDefaultCompileItems, and any explicit Compile, None, EmbeddedResource or Remove item.
+        SDK style projects glob the .cs files in this directory automatically and they all sit flat
+        here, so there is nothing to add and nothing to exclude. An explicit list would be worse than
+        redundant: it would silently drop any file added later. The single Content item above is the
+        one exception and is not a compile item at all: it delivers a data file that lives outside
+        this directory and that the SDK's globs therefore cannot reach, for the reasons recorded
+        there.
       * InternalsVisibleTo. The legacy objects are global classes whose whole surface is called from
         other objects, so every ported type and member is public and the sibling test project and the
         consuming services reach all of it without one.

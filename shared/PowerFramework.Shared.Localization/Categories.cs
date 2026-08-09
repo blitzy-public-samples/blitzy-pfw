@@ -177,8 +177,10 @@
 //                                      and CAT_DWSVC to "dwsvc" for the XPath query built at
 //                                      n_cst_i18n_en.sru:L50, the Traditional Chinese provider
 //                                      does the same at :L44-L48, and the Simplified Chinese
-//                                      provider has NO such switch at all because it is a genuine
-//                                      no-op - Simplified Chinese is the base locale. Hoisting the
+//                                      provider has NO such switch at all because it never looks a
+//                                      category up: it reports handled without mutating the text
+//                                      for framework source and not handled otherwise, Simplified
+//                                      Chinese being the base locale. Hoisting the
 //                                      map here would move behaviour out of the objects that own
 //                                      it and hand the providers a shared table the legacy does
 //                                      not have, which is exactly the kind of harmonisation this
@@ -291,7 +293,9 @@ public static class Categories
     /// provider the category resolves to the <c>msgbox</c> element of the translation table
     /// [n_cst_i18n_en.sru:L43]; the Traditional Chinese provider carries the matching arm
     /// [n_cst_i18n_cht.sru:L44]; the Simplified Chinese provider carries none, because Simplified
-    /// Chinese is the base locale and its translate body is a genuine no-op.
+    /// Chinese is the base locale and its translate body never resolves a category at all - it
+    /// reports handled without mutating the text for framework source, and not handled otherwise
+    /// [n_cst_i18n_chs.sru:L19-L27].
     /// </para>
     /// <para>
     /// NO IN-SCOPE CONSUMER IN THIS PHASE, AND DECLARED ANYWAY. Both consumers named above are

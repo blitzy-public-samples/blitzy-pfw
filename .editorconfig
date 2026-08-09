@@ -9,7 +9,7 @@
 # a warnings-as-errors build. The mechanism, in order:
 #
 #     Directory.Build.props    sets TreatWarningsAsErrors=true, EnableNETAnalyzers=true and
-#                              AnalysisLevel=latest for all sixteen projects, and deliberately
+#                              AnalysisLevel=latest for every project in the solution, and deliberately
 #                              declares NO suppression of its own
 #     this file                scopes the naming suppressions to the individual files that
 #                              genuinely declare the preserved identifiers
@@ -17,7 +17,7 @@
 # Directory.Build.props states that delegation explicitly in its warning-policy section, and it
 # also forbids NoWarn, WarningsNotAsErrors and any project-wide or repository-wide analyzer
 # suppression, precisely because such a suppression would silently widen the exception from a
-# handful of constant catalogues to all sixteen projects. Do not move any suppression from BAND 3
+# handful of constant catalogues to every project in the solution. Do not move any suppression from BAND 3
 # into that file, and do not widen a BAND 3 glob. The narrowness IS the design.
 #
 # THERE IS NO LEGACY SOURCE EQUIVALENT TO TRANSLATE
@@ -413,15 +413,16 @@ dotnet_diagnostic.IDE1006.severity = none
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 
-# Preserved verbatim: the event broker's tri-valued veto - PREVENT_ONCE=1 and PREVENT_DEEP=2, with
-# continue as the third state. The tri-state must never be flattened to a boolean, and both names
-# are carried on the wire contract, so both are recording-visible.
-# Source: ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L111-L112.
-# These spellings travel in serialized payloads, log records and characterization recordings, so a
-# rename would silently invalidate every stored comparison.
-[shared/PowerFramework.Shared.Eventful/VetoResult.cs]
-dotnet_diagnostic.CA1707.severity = none
-dotnet_diagnostic.IDE1006.severity = none
+# NO ENTRY FOR shared/PowerFramework.Shared.Eventful/VetoResult.cs, AND THAT IS DELIBERATE.
+# The tri-valued veto it models is a preserved legacy behaviour - PREVENT_ONCE=1 and PREVENT_DEEP=2
+# with continue as the third state [ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:
+# L111-L112] - but preserving a BEHAVIOUR is not the same as preserving an IDENTIFIER SPELLING, and
+# only the latter needs a suppression here. That file declares its members as Continue, PreventOnce
+# and PreventDeep: ordinary PascalCase, carrying no underscore, raising neither CA1707 nor IDE1006.
+# An entry for it would therefore suppress diagnostics that cannot fire, which is exactly the kind
+# of unnecessary exception the narrowness rule above exists to prevent - and a dead suppression is
+# worse than none, because it advertises a constraint the file does not actually have and would keep
+# covering the file if a genuine violation were introduced later. Do not add one back.
 
 # Preserved verbatim: the localization category offsets - CAT_MSGBOX and CAT_DWSVC, each declared
 # as an offset from I18N_CAT_CUSTOM. CAT_DWSVC is reached from inside the DataWindow validation
@@ -444,10 +445,18 @@ dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 
 # Preserved verbatim: the item-change return alphabet {0,1,2,3} and its named members. The
-# alphabet is its own enumeration on the wire and is never mapped onto the return-code algebra:
-# case 1 falls through to case 2, case 3 keeps the value and rewrites the result to 1, and the
-# default arm coerces by column-type prefix and then forcibly returns 2.
-# Source: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L182-L253.
+# alphabet is its own enumeration on the wire and is never mapped onto the return-code algebra.
+# Four arms, all distinct. PowerScript `choose case` does NOT fall through the way a C switch
+# does, which is why an empty arm runs nothing at all rather than continuing into the next one:
+#   case 1     an EMPTY arm at :L212 - nothing runs, 1 is returned unchanged so the DataWindow
+#              raises ItemValidationError, as the source's own comment at :L210 says
+#   case 2     restores value AND status, but only when the pre-check found the value unchanged
+#   case 3     keeps the value, does not move focus, and rewrites the result to 1
+#   case else  coerces by the first five characters of the column type, fires the changed event,
+#              and then forcibly returns 2
+# Source: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L182-L253, the dispatch at
+# :L211-L252. Case 1 must NOT restore anything: the legacy leaves value and status untouched
+# there, and the restore belongs to the validation-error handler that 1 goes on to trigger.
 # These spellings travel in serialized payloads, log records and characterization recordings, so a
 # rename would silently invalidate every stored comparison.
 [services/dataservices-service/PowerFramework.DataServices/Domain/ItemChangeProtocol.cs]

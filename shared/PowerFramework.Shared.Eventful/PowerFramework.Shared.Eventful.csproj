@@ -66,7 +66,7 @@
     and §0.5.4.1 makes central package management mandatory rather than optional.
 
     DELIBERATELY NOT DECLARED HERE, because every one is inherited by MSBuild directory walk up from
-    the repository root Directory.Build.props, the single point of control for all sixteen projects
+    the repository root Directory.Build.props, the single point of control for every project
     (there is no intervening Directory.Build.props under shared/):
 
         TargetFramework net10.0, LangVersion, Nullable enable, ImplicitUsings enable,

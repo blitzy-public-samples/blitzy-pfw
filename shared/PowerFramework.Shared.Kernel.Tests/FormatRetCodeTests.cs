@@ -412,6 +412,38 @@ public sealed class FormatRetCodeTests
     }
 
     // ==========================================================================================
+    //  THE NON-NULL RENDERING HELPER, AND WHY IT IS AN ASSERTION RATHER THAN A CAST
+    // ==========================================================================================
+    //  Formatting.FormatRetCode returns string? because the oracle's fallback concatenation
+    //  propagates null, so a null CODE yields a null RESULT [Formatting.cs DECISION 4]. Every test
+    //  in this file except the null one supplies a code that HAS a value, and for those the result
+    //  is never null - each of the 35 arms returns a literal and the fallback concatenates a
+    //  rendered long onto a literal, so there is no path to null with a value in hand.
+    //
+    //  That "never null for a non-null code" claim is itself worth checking rather than assumed
+    //  away, which is why this helper asserts instead of using the null-forgiving operator. A `!`
+    //  would silence the compiler and prove nothing; Assert.NotNull turns the same line into a
+    //  standing check that the nullable return type widened the CONTRACT without widening the
+    //  BEHAVIOUR. Every value-bearing call in this file therefore goes through here, so the check
+    //  runs once per theory row rather than once in a test of its own.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Renders a code that HAS a value and asserts the result is not <see langword="null"/> before
+    /// handing it back as a non-nullable string.
+    /// </summary>
+    /// <param name="code">A return code with a value. Never <see langword="null"/> by construction.</param>
+    /// <returns>The rendered text.</returns>
+    private static string Render(long code)
+    {
+        string? rendered = Formatting.FormatRetCode(code);
+
+        Assert.NotNull(rendered);
+
+        return rendered;
+    }
+
+    // ==========================================================================================
     //  THE 35 RECOGNISED ARMS  [formatretcode.srf:L11-L80]
     // ==========================================================================================
 
@@ -446,7 +478,7 @@ public sealed class FormatRetCodeTests
     [MemberData(nameof(RecognisedArmRows))]
     public void RecognisedCodeRendersWithoutAnyFallbackDecoration(long code, string expectedName)
     {
-        string actual = Formatting.FormatRetCode(code);
+        string actual = Render(code);
 
         Assert.Equal(expectedName, actual);
         Assert.DoesNotContain("UNKNOWN", actual, StringComparison.Ordinal);
@@ -506,14 +538,14 @@ public sealed class FormatRetCodeTests
         foreach ((string identifier, long code, _) in UnrecognisedDeclaredCodes)
         {
             Assert.True(
-                renderings.Add(Formatting.FormatRetCode(code)),
+                renderings.Add(Render(code)),
                 $"{identifier} rendered a fallback string that another code had already produced, so the fallback has stopped carrying the value.");
         }
 
         foreach ((long code, _) in OutOfAlgebraProbes)
         {
             Assert.True(
-                renderings.Add(Formatting.FormatRetCode(code)),
+                renderings.Add(Render(code)),
                 $"The probe {code} rendered a fallback string that another code had already produced, so the fallback has stopped carrying the value.");
         }
     }
@@ -534,7 +566,7 @@ public sealed class FormatRetCodeTests
     [Fact]
     public void FallbackTextFollowsTheOracleGrammarExactly()
     {
-        string actual = Formatting.FormatRetCode(RetCode.E_RETRY);
+        string actual = Render(RetCode.E_RETRY);
 
         Assert.Equal("UNKNOWN (-33)", actual);
 
@@ -633,7 +665,7 @@ public sealed class FormatRetCodeTests
         string expectedName,
         string unreachableSpelling)
     {
-        string actual = Formatting.FormatRetCode(code);
+        string actual = Render(code);
 
         Assert.Equal(expectedName, actual);
         Assert.NotEqual(unreachableSpelling, actual);
@@ -665,7 +697,7 @@ public sealed class FormatRetCodeTests
     /// arm literal equals any of the three spellings;</item>
     /// <item>an unrecognised code returns a fallback string, and every fallback string begins
     /// <c>UNKNOWN (</c> while none of the three spellings does;</item>
-    /// <item>a null code returns the empty string, which is none of the three.</item>
+    /// <item>a null code returns <see langword="null"/>, which is none of the three.</item>
     /// </list>
     /// <para>
     /// Those three checks are exhaustive over every possible input, so this fact is a proof rather
@@ -692,18 +724,19 @@ public sealed class FormatRetCodeTests
             Assert.DoesNotContain("UNKNOWN (", unreachable, StringComparison.Ordinal);
             foreach ((_, long code, _) in UnrecognisedDeclaredCodes)
             {
-                Assert.StartsWith("UNKNOWN (", Formatting.FormatRetCode(code), StringComparison.Ordinal);
+                Assert.StartsWith("UNKNOWN (", Render(code), StringComparison.Ordinal);
                 Assert.NotEqual(unreachable, Formatting.FormatRetCode(code));
             }
 
             foreach ((long code, _) in OutOfAlgebraProbes)
             {
-                Assert.StartsWith("UNKNOWN (", Formatting.FormatRetCode(code), StringComparison.Ordinal);
+                Assert.StartsWith("UNKNOWN (", Render(code), StringComparison.Ordinal);
                 Assert.NotEqual(unreachable, Formatting.FormatRetCode(code));
             }
 
-            // Case 3 - the null result is the empty string, which is not one of the three.
-            Assert.NotEqual(unreachable, string.Empty);
+            // Case 3 - a null code returns null, and null is not one of the three spellings.
+            Assert.NotNull(unreachable);
+            Assert.NotEqual(unreachable, Formatting.FormatRetCode(null));
         }
 
         // And the three inputs a reader will reach for first.
@@ -804,21 +837,21 @@ public sealed class FormatRetCodeTests
 
         foreach ((long code, string expectedName) in RecognisedArms)
         {
-            string actual = Formatting.FormatRetCode(code);
+            string actual = Render(code);
             Assert.Equal(expectedName, actual);
             Assert.Contains(actual, armNames);
         }
 
         foreach ((_, long code, string expectedName, _) in AliasCollapsedIdentifiers)
         {
-            string actual = Formatting.FormatRetCode(code);
+            string actual = Render(code);
             Assert.Equal(expectedName, actual);
             Assert.Contains(actual, armNames);
         }
 
         foreach ((_, long code, string expectedText) in UnrecognisedDeclaredCodes)
         {
-            string actual = Formatting.FormatRetCode(code);
+            string actual = Render(code);
             Assert.Equal(expectedText, actual);
             Assert.DoesNotContain(actual, armNames);
             Assert.StartsWith("UNKNOWN (", actual, StringComparison.Ordinal);
@@ -827,53 +860,101 @@ public sealed class FormatRetCodeTests
     }
 
     // ==========================================================================================
-    //  THE ONE PORT-INTRODUCED SURFACE
+    //  THE NULL CODE, AND THE ONE PLACE THE RESULT IS NULL
     // ==========================================================================================
 
     /// <summary>
-    /// A null code renders as the empty string. THIS CHARACTERIZES THE PORT AND IS NOT A LEGACY
-    /// BEHAVIOUR CLAIM.
+    /// A null code renders as <see langword="null"/>, which is what the oracle's own fallback
+    /// concatenation produces. This is a LEGACY BEHAVIOUR claim, derived from the oracle's readable
+    /// body.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The oracle's parameter is <c>readonly long rtcode</c> [formatretcode.srf:L7] - non-nullable
-    /// in its declaration - while the port's is <c>long?</c>, because PowerScript has null for value
-    /// types and the plan preserves nullable value semantics rather than collapsing them. So this
-    /// input exists on the .NET surface in a way it did not on the legacy one, and nothing in the
-    /// oracle settles what it should produce.
+    /// The oracle's parameter is <c>readonly long rtcode</c> [formatretcode.srf:L7], and PowerScript
+    /// has null for value types, so a caller can pass a null long and the plan preserves that rather
+    /// than collapsing it. Traced through the oracle's own body, three documented PowerScript rules
+    /// settle the answer with nothing left to choose:
+    /// </para>
+    /// <list type="number">
+    ///   <item>no arm between <c>:L11</c> and <c>:L80</c> can match a null, so control reaches
+    ///     <c>case else</c> at <c>:L81-L82</c>;</item>
+    ///   <item><c>String(null)</c> yields null; and</item>
+    ///   <item>concatenating a null string with <c>+</c> yields null, so the whole
+    ///     <c>"UNKNOWN (" + String(rtCode) + ")"</c> expression is null.</item>
+    /// </list>
+    /// <para>
+    /// So the legacy returns a NULL STRING - not the text <c>"UNKNOWN ()"</c>, and not the empty
+    /// string. <see cref="Formatting.FormatRetCode"/> returns <see langword="null"/> to match, which
+    /// is why its return type is <c>string?</c>; see its DECISION 4.
     /// </para>
     /// <para>
-    /// What the oracle DOES imply, traced through: a null reaches <c>case else</c> at L81-L82,
-    /// <c>String(null)</c> yields null, and PowerScript concatenation with null yields null - so the
-    /// legacy's observable result would be a NULL STRING, not the text "UNKNOWN ()".
-    /// <see cref="Formatting.FormatRetCode"/> returns the empty string instead, which its own
-    /// DECISION 4 records explicitly as an inferred CHOICE: a null-returning <c>string</c> would
-    /// mean widening the return type and pushing a null check onto every call site, and
-    /// "UNKNOWN ()" would assert a rendered value the legacy demonstrably never produces.
+    /// AN EARLIER REVISION OF THIS TEST ASSERTED <c>string.Empty</c> HERE, having derived the null
+    /// in its own remarks and then declined to assert it. That is the worst of the available
+    /// positions: it made a known semantic change permanently green, and it would have failed the
+    /// moment the production code was corrected - so the test would have read as the authority and
+    /// the correction as the regression. The empty string is also exactly the null flattening
+    /// AAP 0.4.5.4 forbids, one type over from the integer case it names. The cost the old reasoning
+    /// was avoiding turned out not to exist either: <c>FormatRetCode</c> has no caller anywhere in
+    /// this repository outside this suite, so widening the return type propagated a null check to
+    /// nothing at all.
     /// </para>
     /// <para>
-    /// This test therefore pins the port's choice so it cannot drift silently, and says plainly that
-    /// it is a choice, so a later characterization run against the behavioural oracle can overturn
-    /// it deliberately. No call site in the repository passes a null code, so the corpus does not
-    /// adjudicate it. If the choice is revisited, THIS TEST is the artifact to change - not a
-    /// behavioural expectation elsewhere.
+    /// THE EXACT BOUNDARY OF THE CLAIM, so it is not overstated: no call site in the corpus passes a
+    /// null code, so this is what the oracle WOULD return rather than a recorded observation of it
+    /// returning that. For a function whose body is readable, a trace through three documented
+    /// language rules is the strongest evidence available short of running the legacy - which is
+    /// why the derivation is spelled out above rather than replaced by a bare assertion.
     /// </para>
     /// </remarks>
     [Fact]
-    public void NullCodeRendersAsTheEmptyStringWhichIsAPortChoiceAndNotLegacyBehaviour()
+    public void FormatRetCodeNullPropagatesNullThroughTheFallbackConcatenation()
     {
         long? absentCode = null;
 
-        string actual = Formatting.FormatRetCode(absentCode);
+        string? actual = Formatting.FormatRetCode(absentCode);
 
-        Assert.Equal(string.Empty, actual);
+        Assert.Null(actual);
 
-        // Specifically NOT the shapes a reader might expect instead. Each of these would be a
-        // different answer to the same open question, and pinning their absence is what makes the
-        // choice visible rather than accidental.
+        // Specifically NOT the shapes a reader might reach for instead. Each is a DIFFERENT answer
+        // that the oracle does not produce, and each has been a real temptation: the empty string is
+        // what this file used to assert, "UNKNOWN ()" is what a fallback that ignored the null
+        // propagation would render, and "OK" is what treating an absent code as a zero would give.
+        Assert.NotEqual(string.Empty, actual);
         Assert.NotEqual("UNKNOWN ()", actual);
         Assert.NotEqual("UNKNOWN (0)", actual);
         Assert.NotEqual("OK", actual);
+    }
+
+    /// <summary>
+    /// Null is the ONLY input that renders as <see langword="null"/>: every code that has a value
+    /// renders as a non-null string, across an arm name, an alias collapse and the fallback alike.
+    /// </summary>
+    /// <remarks>
+    /// The complement of the fact above, and what stops the nullable return type from being read as
+    /// "this may return null at any time". The 35 arms each return a string literal and the fallback
+    /// concatenates a rendered long onto a literal, so there is no path to null with a value in hand
+    /// - and this walks the whole declared code space plus the out-of-algebra probes to say so.
+    /// </remarks>
+    [Fact]
+    public void EveryCodeWithAValueRendersANonNullNonEmptyString()
+    {
+        foreach ((long code, _) in RecognisedArms)
+        {
+            Assert.NotNull(Formatting.FormatRetCode(code));
+            Assert.NotEmpty(Render(code));
+        }
+
+        foreach ((_, long code, _) in UnrecognisedDeclaredCodes)
+        {
+            Assert.NotNull(Formatting.FormatRetCode(code));
+            Assert.NotEmpty(Render(code));
+        }
+
+        foreach ((long code, _) in OutOfAlgebraProbes)
+        {
+            Assert.NotNull(Formatting.FormatRetCode(code));
+            Assert.NotEmpty(Render(code));
+        }
     }
 
     /// <summary>

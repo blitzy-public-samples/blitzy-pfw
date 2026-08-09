@@ -493,4 +493,3 @@ public class AssertionFailure : Exception
     /// </remarks>
     public new IList<string> StackTrace { get; } = new List<string>();
 }
-

@@ -60,10 +60,12 @@
            shared-code path.
       C-A  No Compile item, no analyzer and no source generator of this project's own. Generated
            Protobuf and gRPC code lands under obj/ and is compiled automatically.
-      C-B  Exactly three package references. Grpc.Tools and Google.Protobuf arrive transitively
-           through Grpc.AspNetCore and must not be referenced explicitly (AAP 0.5.1), and
+      C-B  Exactly ONE package reference, Grpc.AspNetCore. Grpc.Tools and Google.Protobuf arrive
+           transitively through it and must not be referenced explicitly (AAP 0.5.1);
            Grpc.AspNetCore.Server.Reflection, Swashbuckle.AspNetCore and Scalar.AspNetCore are
-           deliberately excluded (AAP 0.5.3).
+           deliberately excluded (AAP 0.5.3); and the two OpenAPI packages belong to the REST
+           services rather than to this boundary project, for the reasons recorded in full beneath
+           the package item group below.
       C-D  No deferred capability is anticipated here. This project holds no item, property,
            condition or commented-out placeholder awaiting a Phase-2 service, and no contract
            definition for one; AAP 0.2.2.2 names the four that are out of scope, and in this
@@ -90,48 +92,72 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
-  <ItemGroup Label="Package references : exactly three, all versionless">
+  <ItemGroup Label="Package references : exactly one, versionless">
 
     <!--
       gRPC server and client support, and the Grpc.Tools build integration that compiles the
       Protobuf items below. Grpc.Tools and Google.Protobuf arrive transitively (Google.Protobuf
       resolves to 3.31.1 because Grpc.AspNetCore 2.83.0 constrains it), so referencing either
       explicitly would be scope creep against C-B and would risk pinning a conflicting version.
+
+      This is the ONLY package this project needs, because it is the only one it has any use for:
+      Grpc.Tools is what turns the Protobuf items below into compiled types. See the block beneath
+      this item for the two packages that were removed and why they were never this project's to
+      hold.
     -->
     <PackageReference Include="Grpc.AspNetCore" />
 
-    <!--
-      OpenAPI document generation and object model for the REST half of the boundary.
-
-      NOTE FOR CONSUMING SERVICES, measured on this toolchain rather than assumed. This package
-      ships build/Microsoft.AspNetCore.OpenApi.targets, which is what sets InterceptorsNamespaces
-      for its XML-comment source generator, and it ships no buildTransitive folder. Those targets
-      therefore apply only to a project that references the package DIRECTLY, while the generator
-      itself does flow onward through a ProjectReference. A service that calls AddOpenApi() while
-      relying on this project's reference instead of declaring its own consequently fails with
-      CS9137 ("the interceptors feature is not enabled in this namespace"). The fix is the
-      reference the plan already prescribes, never an InterceptorsNamespaces workaround: Gateway,
-      Security and the DataServices REST projection each reference Microsoft.AspNetCore.OpenApi
-      directly (AAP 0.5.1). Both real shapes were verified to build warning-clean against this
-      project: a web service with the direct reference plus AddOpenApi(), and one with neither,
-      which is the Persistence shape.
-    -->
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
-
-    <!--
-      MANDATORY DIRECT REFERENCE, not a preference (AAP 0.5.2). Microsoft.AspNetCore.OpenApi
-      10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, which raises the high-severity NuGet
-      audit advisory NU1903. This direct reference is the mechanism by which central package
-      management overrides that transitive version with the 2.11.0 pin. Advancing to the 3.x line
-      instead BREAKS the build: the 10.0.x OpenAPI source generator is compiled against the 2.x
-      object model and emits two CS0200 "cannot assign, read only" errors from the SDK's own
-      generated XML-comment support file. 2.11.0 is the highest published 2.x and the only value
-      that is simultaneously non-vulnerable and compatible. If NU1903 ever reappears, restore this
-      reference; never suppress the advisory in its place.
-    -->
-    <PackageReference Include="Microsoft.OpenApi" />
-
   </ItemGroup>
+
+  <!--
+    THE TWO OPENAPI PACKAGES ARE DELIBERATELY ABSENT, AND MUST NOT BE ADDED BACK HERE.
+
+    Microsoft.AspNetCore.OpenApi and Microsoft.OpenApi were both referenced by an earlier form of
+    this file. Neither belongs to it, on two independent grounds.
+
+    FIRST, THIS PROJECT COMPILES AGAINST NEITHER. It contains no .cs file of its own: its entire
+    output is the Protobuf types Grpc.Tools generates, plus the two OpenAPI documents carried as
+    EmbeddedResource. An embedded resource is opaque bytes to the compiler - embedding a YAML
+    document requires no object model to read it with, exactly as embedding a PNG would require no
+    imaging library. So both references were unused compile time surface.
+
+    SECOND, AND MORE IMPORTANTLY, THEY LEAKED. AAP 0.5.1 assigns Microsoft.AspNetCore.OpenApi to
+    "Gateway, Security, DataServices REST projection" and Microsoft.OpenApi to "all REST services";
+    this project appears in neither consumer list, and AAP 0.4.2.3 states that it "carries no
+    behaviour; it is the boundary definition, not a shared-code back door". Because all four
+    services reach this project by ProjectReference, a package declared here arrives in ALL of them
+    - including Persistence, which is gRPC only and produces no OpenAPI document at all. That
+    widened the dependency and NuGet audit surface of a service that has no use for either package,
+    on the strength of a reference the boundary project did not need.
+
+    WHERE EACH ONE LIVES INSTEAD, and why the removal costs nothing:
+      Microsoft.AspNetCore.OpenApi is referenced DIRECTLY by PowerFramework.Gateway,
+        PowerFramework.Security and PowerFramework.DataServices. That is not merely tidier, it is
+        required, and measured on this toolchain rather than assumed: the package ships
+        build/Microsoft.AspNetCore.OpenApi.targets, which is what sets InterceptorsNamespaces for
+        its XML-comment source generator, and it ships no buildTransitive folder. Those targets
+        therefore apply only to a project referencing the package directly, while the generator
+        itself does flow onward through a ProjectReference - so a service calling AddOpenApi() while
+        leaning on a reference inherited from here fails with CS9137, "the interceptors feature is
+        not enabled in this namespace". The direct reference in each REST service is the fix; an
+        InterceptorsNamespaces workaround is not.
+      Microsoft.OpenApi is referenced directly by those same three services and by
+        PowerFramework.Contracts.Tests. Its purpose is unchanged and still mandatory (AAP 0.5.2):
+        Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, which
+        raises the high-severity NuGet advisory NU1903, and a DIRECT reference is the mechanism by
+        which central package management substitutes the 2.11.0 pin for it. Advancing to the 3.x
+        line instead breaks the build with two CS0200 "cannot assign, read only" errors from the
+        SDK's own generated XML-comment support file, because the 10.0.x source generator is
+        compiled against the 2.x object model. The override is needed wherever the vulnerable
+        transitive version is pulled in - which is wherever Microsoft.AspNetCore.OpenApi is
+        referenced. Removing that package from here removes the transitive 2.0.0 from here too, so
+        there is nothing left to override and no advisory to clear. Verified at restore: no NU1903
+        anywhere in the tree after both removals.
+
+    If NU1903 ever appears against this project, the cause is a newly added package pulling
+    Microsoft.OpenApi transitively; add the direct pin in the project that pulled it, and never
+    suppress the advisory.
+  -->
 
   <ItemGroup Label="Protobuf contracts : the gRPC half of the published boundary">
 

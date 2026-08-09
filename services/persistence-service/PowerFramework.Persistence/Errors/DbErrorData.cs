@@ -84,7 +84,7 @@
 //  site that can supply a genuinely non-Primary buffer or a non-zero row, because it forwards the
 //  DataWindow runtime's own `dberror` arguments untouched; every other site hardcodes the pair.
 //
-//  THE DwBuffer SENTINEL, AND A CORRECTION THAT CHANGES THE IMPLEMENTATION (C-K)
+//  THE DwBuffer DOMAIN, AND WHY Buffer NEEDS NO CANONICALISATION AT ALL (C-K)
 //  --------------------------------------------------------------------------------------------
 //  Buffer is typed as the GENERATED PowerFramework.Contracts.Common.V1.DwBuffer, reached through
 //  this project's ProjectReference to shared/PowerFramework.Contracts. No local buffer enum is
@@ -92,36 +92,35 @@
 //  versioned contracts project is the only sanctioned cross-boundary vocabulary in this system.
 //
 //  The generated enum was READ rather than assumed, from
-//  shared/PowerFramework.Contracts/obj/**/CommonV1.cs after compiling that project, and it has
-//  FOUR members, not three - protobuf's C# generator strips the DW_BUFFER_ prefix and PascalCases
-//  what is left [common.v1.proto:L619-L629]:
+//  shared/PowerFramework.Contracts/obj/**/CommonV1.cs after compiling that project. It has exactly
+//  THREE members, matching the legacy domain member for member - protobuf's C# generator strips the
+//  DW_BUFFER_ prefix and PascalCases what is left [common.v1.proto Section 6]:
 //
-//      DW_BUFFER_UNSPECIFIED = 0   ->   DwBuffer.Unspecified = 0
-//      DW_BUFFER_PRIMARY     = 1   ->   DwBuffer.Primary     = 1
-//      DW_BUFFER_DELETE      = 2   ->   DwBuffer.Delete      = 2
-//      DW_BUFFER_FILTER      = 3   ->   DwBuffer.Filter      = 3
+//      DW_BUFFER_PRIMARY = 0   ->   DwBuffer.Primary = 0
+//      DW_BUFFER_DELETE  = 1   ->   DwBuffer.Delete  = 1
+//      DW_BUFFER_FILTER  = 2   ->   DwBuffer.Filter  = 2
 //
-//  PRIMARY IS THEREFORE NOT THE ZERO MEMBER, and that single fact decides how Buffer is written.
-//  A plain `public DwBuffer Buffer { get; init; }` would make default(DbErrorData).Buffer observe
-//  as Unspecified, which contradicts the cleared state the legacy actually produces. Buffer
-//  consequently uses the same canonicalising backing field as the two strings, mapping BOTH
-//  Primary and the sentinel onto one stored representation that observes as Primary.
+//  PRIMARY IS THE ZERO MEMBER, and that single fact decides how Buffer is written: a plain
+//  `public DwBuffer Buffer { get; init; }` is correct and sufficient, because default(DbErrorData)
+//  then observes as Primary, which is exactly the cleared state the legacy produces. No backing
+//  field, no accessor bridging and no fold are needed, so none is written.
 //
-//  Folding Unspecified into Primary is faithful rather than a liberty, on four counts:
-//    1. The contract says so. UNSPECIFIED "is a protocol-level 'field absent', never a legacy
-//       buffer: a request carrying it is malformed, and a response must never populate it"
-//       [common.v1.proto:L620-L624]. Canonicalising on the way in makes it structurally
-//       impossible for this service to hold, and therefore to emit, that value.
-//    2. The legacy domain has exactly three values and no fourth [common.v1.proto:L606-L609,
-//       counted from the literals Primary! 36, Filter! 18, Delete! 2]. A four-state in-process
-//       value could represent something the legacy cannot.
-//    3. PowerBuilder initialises an unassigned `dwbuffer` to Primary!, so in the legacy "no buffer
-//       was supplied" and "the default buffer" are the SAME state. The sentinel exists only
-//       because proto3 requires a zero first enumerator; it has no legacy counterpart to preserve.
-//    4. It keeps one canonical cleared state, exactly as the string canonicalisation does, so
-//       every spelling of "empty" compares equal instead of some of them comparing equal.
+//  THIS IS THE POINT THE CONTRACT AND THIS FILE AGREE ON, and it is worth stating because an earlier
+//  reading of it produced the opposite implementation. PowerBuilder initialises an unassigned
+//  `dwbuffer` to Primary!, so in the legacy "no buffer was supplied" and "the default buffer" are the
+//  SAME state - the framework's own synthesized error passes Primary! together with row 0 to mean
+//  "not attributable to any one row" [n_cst_thread_task_sqlupdate.sru:L190]. A synthetic zero
+//  sentinel would have split that single legacy state into two, shifted all three real members up by
+//  one, and broken every numeric bridge and stored characterization comparison that reads them
+//  (AAP 0.4.5.3). The contract therefore carries no sentinel, and this record needs no fold: one
+//  legacy state, one wire value, one in-process value.
 //
-//  Delete and Filter are stored and returned untouched. Filter in particular must not be treated
+//  Where a FIELD genuinely has to say "no buffer", the contract declares that field proto3
+//  `optional` - RetrieveChunk.buffer in dataservices.v1.proto is the one such field - so absence is
+//  presence-tracked rather than encoded as a magic value. DbError.buffer is deliberately NOT one of
+//  those fields, because the legacy structure always carries a buffer.
+//
+//  All three values are stored and returned untouched. Filter in particular must not be treated
 //  as a leftover buffer: the legacy walks it BACKWARDS during the identity round trip because its
 //  row order is inverted relative to the source [n_cst_thread_task_sqlupdate.sru:L235-L238], so a
 //  Row paired with Filter does not count the way a Row paired with Primary does.
@@ -165,6 +164,8 @@
 //  one: the repository publishes no latency budget, no throughput target and no availability
 //  commitment, so there is no baseline against which such a claim could be made.
 // ==============================================================================================
+
+using System.Diagnostics.CodeAnalysis;
 
 using PowerFramework.Contracts.Common.V1;
 
@@ -264,7 +265,7 @@ public readonly record struct DbErrorData
     // ------------------------------------------------------------------------------------------
     //  THE CANONICALISING BACKING FIELDS, AND WHY THEY ARE NOT AUTO-PROPERTIES
     //  ----------------------------------------------------------------------------------------
-    //  These three fields exist to make ONE state - the cleared state - have ONE representation,
+    //  These two fields exist to make ONE state - the cleared state - have ONE representation,
     //  so that every spelling of "empty" compares equal to every other. The mechanism matters:
     //  the compiler-generated equality of a record struct compares the type's FIELDS, not its
     //  properties, so two instances agree only if their stored values agree. Storing null for
@@ -274,13 +275,21 @@ public readonly record struct DbErrorData
     //      DbErrorData.Empty
     //      new DbErrorData()
     //      new DbErrorData { SqlErrText = "", SqlSyntax = "", Buffer = DwBuffer.Primary }
-    //      new DbErrorData { Buffer = DwBuffer.Unspecified }
     //      FromTransaction(0, "")
+    //      FromTransaction(0, null)
     //
-    //  Without the canonicalisation the last four would each store a distinct value and compare
+    //  Without the canonicalisation the two spellings that pass an empty string would store it
+    //  verbatim, each in its own shape, and would therefore compare
     //  UNEQUAL to the first two, which would break every "no error was recorded" check written
     //  against this type - and it would break them silently, because each instance individually
     //  reads back exactly as expected.
+    //
+    //  BUFFER IS NOT ONE OF THEM, AND THAT IS THE POINT (C-K). DwBuffer.Primary IS the generated
+    //  enum's zero member [common.v1.proto Section 6], matching PowerBuilder's unassigned `dwbuffer`,
+    //  so a plain auto-property already stores the cleared state as all-bits-zero and compares equal
+    //  to `default` with no help. A third canonicalising field would be dead weight here, and the
+    //  fold it would have to perform - mapping some other value onto Primary - would mean the wire
+    //  contract had a state the legacy does not, which it does not have.
     //
     //  There is a second, independent reason for the two string fields. Under the repository's
     //  inherited nullable context and warnings-as-errors setting, a plain non-nullable
@@ -301,14 +310,6 @@ public readonly record struct DbErrorData
 
     /// <summary>Stores <see langword="null"/> for the empty statement, projected by the accessor.</summary>
     private readonly string? _sqlSyntax;
-
-    /// <summary>
-    /// Stores <see langword="null"/> for the cleared buffer, projected by the accessor as
-    /// <see cref="DwBuffer.Primary"/>. Necessary because the generated enum's zero member is
-    /// <see cref="DwBuffer.Unspecified"/> rather than <see cref="DwBuffer.Primary"/>
-    /// [common.v1.proto:L619-L629].
-    /// </summary>
-    private readonly DwBuffer? _buffer;
 
     // ------------------------------------------------------------------------------------------
     //  MEMBER 1 of 5 - dberrordata.srs:L4  `long sqldbcode`
@@ -353,9 +354,16 @@ public readonly record struct DbErrorData
     /// </summary>
     /// <value>
     /// <para>
-    /// Never <see langword="null"/>: the empty text observes as <see cref="string.Empty"/>,
+    /// <b>Reads as non-null, accepts null.</b> The empty text observes as <see cref="string.Empty"/>,
     /// matching the legacy cleared state in which PowerBuilder initialises a <c>string</c> to
-    /// <c>""</c> [n_cst_threading_task_sqlbase.sru:L55, L65].
+    /// <c>""</c> [n_cst_threading_task_sqlbase.sru:L55, L65]. The <see cref="AllowNullAttribute"/>
+    /// below is what makes the asymmetry expressible under the repository's nullable context: the
+    /// initializer legitimately takes <see langword="null"/> and canonicalises it, while the getter
+    /// still promises a non-null value on every instance however it was produced. Without the
+    /// attribute a caller holding a nullable provider string - which every ADO.NET provider message
+    /// is - would have to pre-coerce or suppress at the call site, which would defeat the whole
+    /// point of canonicalising here, and under <c>TreatWarningsAsErrors</c> the alternative is a
+    /// build failure rather than a warning.
     /// </para>
     /// <para>
     /// <b>Opaque display text - do not parse it to classify an error.</b> It may not be English:
@@ -364,6 +372,7 @@ public readonly record struct DbErrorData
     /// Use <see cref="SqlDbCode"/> for classification.
     /// </para>
     /// </value>
+    [AllowNull]
     public string SqlErrText
     {
         get => _sqlErrText ?? string.Empty;
@@ -380,7 +389,10 @@ public readonly record struct DbErrorData
     /// </summary>
     /// <value>
     /// <para>
-    /// Never <see langword="null"/>; the empty statement observes as <see cref="string.Empty"/>.
+    /// <b>Reads as non-null, accepts null</b>, on the same terms as <see cref="SqlErrText"/> and for
+    /// the same reason: the empty statement observes as <see cref="string.Empty"/>, and
+    /// <see cref="AllowNullAttribute"/> lets a caller hand the initializer a nullable provider value
+    /// without pre-coercing it.
     /// </para>
     /// <para>
     /// <b>In-process this member may carry interpolated literal values, and that is why it must
@@ -399,6 +411,7 @@ public readonly record struct DbErrorData
     /// self-conversion on this type. Do not hand-roll a mapping that bypasses it.
     /// </para>
     /// </value>
+    [AllowNull]
     public string SqlSyntax
     {
         get => _sqlSyntax ?? string.Empty;
@@ -416,16 +429,14 @@ public readonly record struct DbErrorData
     /// </summary>
     /// <value>
     /// <para>
-    /// <b>Observes as <see cref="DwBuffer.Primary"/> in the cleared state, and can never observe
-    /// as <see cref="DwBuffer.Unspecified"/>.</b> The generated enum's zero member is
-    /// <see cref="DwBuffer.Unspecified"/>, not <see cref="DwBuffer.Primary"/>
-    /// [common.v1.proto:L619-L629], whereas PowerBuilder initialises an unassigned
-    /// <c>dwbuffer</c> to <c>Primary!</c>. The accessor bridges that difference, and the
-    /// initializer folds both <see cref="DwBuffer.Primary"/> and
-    /// <see cref="DwBuffer.Unspecified"/> onto the one stored cleared value. The sentinel is "a
-    /// protocol-level field absent, never a legacy buffer", which "a response must never
-    /// populate" [common.v1.proto:L620-L624], so refusing to hold it is the contract's own rule
-    /// enforced structurally rather than by review.
+    /// <b>Observes as <see cref="DwBuffer.Primary"/> in the cleared state, with no accessor logic
+    /// required to make that so.</b> <see cref="DwBuffer.Primary"/> IS the generated enum's zero
+    /// member [common.v1.proto Section 6], matching PowerBuilder's initialisation of an unassigned
+    /// <c>dwbuffer</c> to <c>Primary!</c>, so a plain auto-property is exact: <c>default</c> reads
+    /// as <c>Primary!</c> and compares equal to <see cref="Empty"/>. The published contract carries
+    /// no synthetic "unspecified" member for this domain, because inserting one would shift all
+    /// three real values and break every stored numeric comparison (AAP 0.4.5.3); a field that must
+    /// express absence declares itself proto3 <c>optional</c> instead, and this one does not need to.
     /// </para>
     /// <para>
     /// <b><see cref="DwBuffer.Filter"/> is not a leftover buffer.</b> Its row order is INVERTED
@@ -441,11 +452,7 @@ public readonly record struct DbErrorData
     /// [n_cst_thread_task_sqlbase_ds.sru:L159]. Every other site hardcodes <c>Primary!</c>.
     /// </para>
     /// </value>
-    public DwBuffer Buffer
-    {
-        get => _buffer ?? DwBuffer.Primary;
-        init => _buffer = value is DwBuffer.Primary or DwBuffer.Unspecified ? null : value;
-    }
+    public DwBuffer Buffer { get; init; }
 
     // ------------------------------------------------------------------------------------------
     //  MEMBER 5 of 5 - dberrordata.srs:L8  `long row`
@@ -557,7 +564,10 @@ public readonly record struct DbErrorData
     /// </param>
     /// <param name="sqlErrText">
     /// The provider's message text, taken from the transaction object's <c>SQLErrText</c>. An
-    /// empty or <see langword="null"/> value canonicalises to <see cref="string.Empty"/>.
+    /// empty or <see langword="null"/> value canonicalises to <see cref="string.Empty"/>, so the
+    /// parameter is declared nullable to match: an ADO.NET provider's message is a nullable
+    /// reference, and forcing every caller to pre-coerce it before reaching the canonicalisation
+    /// would make the canonicalisation pointless.
     /// </param>
     /// <returns>The payload shape those sites raise.</returns>
     /// <remarks>
@@ -581,7 +591,7 @@ public readonly record struct DbErrorData
     /// error the legacy does not report.
     /// </para>
     /// </remarks>
-    public static DbErrorData FromTransaction(long sqlDbCode, string sqlErrText) => new()
+    public static DbErrorData FromTransaction(long sqlDbCode, string? sqlErrText) => new()
     {
         SqlDbCode = sqlDbCode,
         SqlErrText = sqlErrText,
@@ -599,16 +609,19 @@ public readonly record struct DbErrorData
     /// <param name="sqlDbCode">The provider's numeric code.</param>
     /// <param name="sqlErrText">
     /// The provider's message text. Empty or <see langword="null"/> canonicalises to
-    /// <see cref="string.Empty"/>.
+    /// <see cref="string.Empty"/>, which is why the parameter is nullable - see
+    /// <see cref="FromTransaction"/> for the reasoning.
     /// </param>
     /// <param name="sqlSyntax">
     /// The failing statement text. Empty or <see langword="null"/> canonicalises to
-    /// <see cref="string.Empty"/>. See <see cref="SqlSyntax"/> for why this value must not be
-    /// echoed to a network peer without passing through the redactor.
+    /// <see cref="string.Empty"/>, and the parameter is nullable on the same terms. See
+    /// <see cref="SqlSyntax"/> for why this value must not be echoed to a network peer without
+    /// passing through the redactor.
     /// </param>
     /// <param name="buffer">
-    /// The buffer the offending row sits in. <see cref="DwBuffer.Unspecified"/> and
-    /// <see cref="DwBuffer.Primary"/> both canonicalise to <see cref="DwBuffer.Primary"/>.
+    /// The buffer the offending row sits in. <see cref="DwBuffer.Primary"/> is the domain's zero
+    /// value, so it is also what the cleared state reads as - the legacy makes no distinction
+    /// between "the default buffer" and "no buffer was supplied".
     /// </param>
     /// <param name="row">The one-based row ordinal, or <c>0</c> for "no particular row".</param>
     /// <returns>The payload shape those sites raise.</returns>
@@ -631,8 +644,8 @@ public readonly record struct DbErrorData
     /// </remarks>
     public static DbErrorData FromStatement(
         long sqlDbCode,
-        string sqlErrText,
-        string sqlSyntax,
+        string? sqlErrText,
+        string? sqlSyntax,
         DwBuffer buffer,
         long row) => new()
         {
@@ -693,4 +706,3 @@ public static class DbErrorMessages
     /// </remarks>
     public const string NoUpdatableTable = "没有可更新的表";
 }
-
