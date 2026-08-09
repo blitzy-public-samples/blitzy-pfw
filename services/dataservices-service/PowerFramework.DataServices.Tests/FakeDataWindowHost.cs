@@ -2363,6 +2363,18 @@ public class FakeDataWindowHost : DataWindowServiceHost
     public int SetItemStatusResult { get; set; } = 1;
 
     /// <summary>
+    /// The value <see cref="SelectRow(long, bool)"/> answers. Defaults to <c>1</c>, the DataWindow's
+    /// success code.
+    /// </summary>
+    /// <remarks>
+    /// Settable for completeness only. Every ported call site DISCARDS the code, exactly as the oracle
+    /// does [<c>n_cst_dwsvc_rowselect.sru:L51</c> and fourteen further sites], so no suite is expected
+    /// to depend on it - but a suite that wants to prove the discard can set it to <c>-1</c> and observe
+    /// that nothing changes.
+    /// </remarks>
+    public int SelectRowResult { get; set; } = 1;
+
+    /// <summary>
     /// The code <see cref="DataWindowServiceHost.FilterCore"/> returns. Defaults to <c>1</c>, WHICH IS
     /// SUCCESS - the ported override tests <c>if rtCode = 1</c> [<c>se_cst_dw.sru:L407</c>] and is
     /// deliberately not mapped onto a return code whose success is zero.
@@ -2482,6 +2494,29 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// suite should be explicit about which it means.
     /// </remarks>
     public Func<long, IDataWindowObject, string, long?>? ItemErrorHandler { get; set; }
+
+    /// <summary>
+    /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnDoItemChange"/>. Answering
+    /// anything OTHER THAN <c>0</c> REFUSES the change.
+    /// </summary>
+    /// <remarks>
+    /// The test seam for the refusal path at
+    /// <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L238</c>, whose test is
+    /// <c>&lt;&gt; 0</c> - a two-state accept-or-reject read, NOT the four-value item-change alphabet
+    /// and NOT the return-code algebra. When unset the inherited no-op answers <c>0</c> and every change
+    /// is accepted.
+    /// </remarks>
+    public Func<long, IDataWindowObject, string, long>? DoItemChangeHandler { get; set; }
+
+    /// <summary>
+    /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnDoItemChanged"/>.
+    /// </summary>
+    /// <remarks>
+    /// An <see cref="Action"/> rather than a <see cref="Func{T, TResult}"/> because the legacy event is
+    /// declared with no <c>type</c> clause [<c>se_cst_dw.sru:L26</c>] and therefore has no code to
+    /// return; giving it one would invent a veto the notification does not have.
+    /// </remarks>
+    public Action<long, IDataWindowObject>? DoItemChangedHandler { get; set; }
 
     /// <summary>
     /// Scripts <see cref="LoseFocus"/>, whose value the raw handler returns verbatim
@@ -3327,6 +3362,187 @@ public class FakeDataWindowHost : DataWindowServiceHost
         return StoreItem(row, columnId, value);
     }
 
+    // ==============================================================================================
+    //  ROW SELECTION AND NAME-KEYED ITEM ACCESS
+    //  --------------------------------------------------------------------------------------------
+    //  These satisfy the members the contract acquired for
+    //  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru, which addresses columns BY
+    //  NAME - it takes `sColName = dwo.Name` once at :L188 and threads that string through every read
+    //  and write - and which is the only in-scope source that touches row selection at all.
+    //
+    //  SELECTION IS MODELLED AS REAL STATE RATHER THAN RECORDED AND DISCARDED, because the ported
+    //  logic READS BACK what it writes: :L80 is `SelectRow(row, Not IsSelected(row))`, a toggle, and
+    //  :L224's GetSelectedRow walks the very set that :L63 through :L78 built. A record-only double
+    //  would make the toggle answer the same way twice and would make the walk find nothing, so the
+    //  set is genuine and the CallLog records the calls IN ADDITION to applying them.
+    //
+    //  ROW 0 MEANS EVERY ROW, which is the load-bearing part: `SelectRow(0,false)` is the oracle's
+    //  clear-the-whole-selection idiom at :L51, :L63, :L90, :L103, :L174 and :L282, and
+    //  `SelectRow(GetRow(),true)` at :L176 and :L278 passes 0 when the DataWindow is empty and
+    //  therefore selects everything. A double that treated 0 as out of range would leave all eight
+    //  sites doing nothing and nothing would report it.
+    // ==============================================================================================
+
+    private readonly SortedSet<long> _selectedRows = [];
+
+    /// <summary>
+    /// The rows currently selected, in ascending order - the state
+    /// <see cref="SelectRow(long, bool)"/> maintains and <see cref="IsSelected(long)"/> and
+    /// <see cref="GetSelectedRow(long)"/> read.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so a suite can assert the OUTCOME of a gesture as well as the call sequence that produced
+    /// it. Ascending, because <see cref="GetSelectedRow(long)"/> must walk in row order.
+    /// </remarks>
+    public IReadOnlyCollection<long> SelectedRows => _selectedRows;
+
+    /// <summary>
+    /// Arranges an initial selection without recording anything - test setup, not an observed call.
+    /// </summary>
+    /// <param name="rows">The one-based rows to mark selected. Replaces any existing selection.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="rows"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// Needed because two of the eight preconditions of the range propagation are selection state -
+    /// <c>IsSelected(row)</c> at <c>n_cst_dwsvc_rowselect.sru:L193</c> and the walk at <c>:L224</c> - so
+    /// a suite has to be able to establish a multi-row selection before the click it is testing rather
+    /// than by performing the gestures that would produce one.
+    /// </remarks>
+    public void ArrangeSelectedRows(params long[] rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        _selectedRows.Clear();
+        foreach (long row in rows)
+        {
+            _selectedRows.Add(row);
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Applies the change to the real selection set AND records the call. Row <c>0</c> applies to every
+    /// row of the primary buffer, which is the oracle's whole-selection idiom; a row outside the buffer
+    /// is applied verbatim and is not rejected, because a DataWindow answers such a call with its error
+    /// code rather than raising and the ported call sites discard the code anyway.
+    /// </remarks>
+    public override int SelectRow(long row, bool select)
+    {
+        CallLog.Record("SelectRow", row, select);
+
+        if (row == 0L)
+        {
+            // Row 0 means EVERY row.
+            if (select)
+            {
+                long rowCount = BufferOf(DwBuffer.Primary).Count;
+                for (long candidate = OneBasedRows.FirstRow; candidate <= rowCount; candidate++)
+                {
+                    _selectedRows.Add(candidate);
+                }
+            }
+            else
+            {
+                _selectedRows.Clear();
+            }
+
+            return SelectRowResult;
+        }
+
+        if (select)
+        {
+            _selectedRows.Add(row);
+        }
+        else
+        {
+            _selectedRows.Remove(row);
+        }
+
+        return SelectRowResult;
+    }
+
+    /// <inheritdoc/>
+    public override bool IsSelected(long row)
+    {
+        RecordRead("IsSelected", row);
+        return _selectedRows.Contains(row);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Searches STRICTLY AFTER <paramref name="startRow"/> and answers <c>0</c> when there is no further
+    /// selected row - which is what terminates the oracle's walk, since <c>:L224</c> feeds its own answer
+    /// back in and <c>:L225</c> exits on a non-positive one. A double that could answer
+    /// <paramref name="startRow"/> itself would spin for ever on the first selected row.
+    /// </remarks>
+    public override long GetSelectedRow(long startRow)
+    {
+        RecordRead("GetSelectedRow", startRow);
+
+        foreach (long candidate in _selectedRows)
+        {
+            if (candidate > startRow)
+            {
+                return candidate;
+            }
+        }
+
+        return 0L;
+    }
+
+    /// <inheritdoc/>
+    public override string? GetItemString(long row, string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        RecordRead("GetItemString", row, column);
+        return FakeItemValue.AsString(ReadNamedItem(row, column));
+    }
+
+    /// <inheritdoc/>
+    public override decimal? GetItemDecimal(long row, string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        RecordRead("GetItemDecimal", row, column);
+        return FakeItemValue.AsDecimal(ReadNamedItem(row, column));
+    }
+
+    /// <inheritdoc/>
+    public override double? GetItemNumber(long row, string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        RecordRead("GetItemNumber", row, column);
+        return FakeItemValue.AsDouble(ReadNamedItem(row, column));
+    }
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, string? value)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        CallLog.RecordOverload("SetItem", "string?", row, column, value);
+        return StoreNamedItem(row, column, value);
+    }
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, decimal? value)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        CallLog.RecordOverload("SetItem", "decimal?", row, column, value);
+        return StoreNamedItem(row, column, value);
+    }
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, long? value)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        CallLog.RecordOverload("SetItem", "long?", row, column, value);
+        return StoreNamedItem(row, column, value);
+    }
+
     /// <inheritdoc/>
     /// <remarks>
     /// Answers <c>display</c> and <c>value</c> joined by a TAB, which is the shape the oracle splits with
@@ -3494,6 +3710,30 @@ public class FakeDataWindowHost : DataWindowServiceHost
     }
 
     /// <inheritdoc/>
+    public override long OnDoItemChange(long row, IDataWindowObject dwo, string data)
+    {
+        CallLog.Record("Event OnDoItemChange", row, dwo, data);
+        return DoItemChangeHandler is null
+            ? base.OnDoItemChange(row, dwo, data)
+            : DoItemChangeHandler(row, dwo, data);
+    }
+
+    /// <inheritdoc/>
+    public override void OnDoItemChanged(long row, IDataWindowObject dwo)
+    {
+        CallLog.Record("Event OnDoItemChanged", row, dwo);
+
+        if (DoItemChangedHandler is null)
+        {
+            base.OnDoItemChanged(row, dwo);
+        }
+        else
+        {
+            DoItemChangedHandler(row, dwo);
+        }
+    }
+
+    /// <inheritdoc/>
     /// <remarks>
     /// MAY ANSWER <see langword="null"/>, and the coercion at <c>se_cst_dw.sru:L344</c> is deliberately
     /// NOT performed here - it belongs to the code under test, at the point the oracle performs it.
@@ -3539,6 +3779,49 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// out-of-range answer of <c>-1</c> is the one thing that is enforced, and it is enforced because a
     /// real DataWindow enforces it.
     /// </remarks>
+    /// <summary>
+    /// Resolves a column NAME to its id and reads the primary-buffer value, or answers
+    /// <see langword="null"/> when either the column or the row is unknown.
+    /// </summary>
+    /// <remarks>
+    /// NULL FOR AN UNKNOWN COLUMN OR ROW RATHER THAN A RAISE, because null is an ORDINARY outcome on this
+    /// path: the ported comparisons at <c>n_cst_dwsvc_rowselect.sru:L205</c>, <c>:L211</c>, <c>:L217</c>,
+    /// <c>:L232</c>, <c>:L234</c> and <c>:L236</c> all treat a null item as "not equal", so a double that
+    /// raised would make a legitimate branch unreachable.
+    /// </remarks>
+    private object? ReadNamedItem(long row, string column)
+    {
+        FakeDataWindowObjectDefinition? definition = FindObject(column);
+        if (definition is null)
+        {
+            return null;
+        }
+
+        List<FakeBufferRow> primary = BufferOf(DwBuffer.Primary);
+        if (!OneBasedRows.IsInRange(row, primary.Count))
+        {
+            return null;
+        }
+
+        return primary[OneBasedRows.ToListIndex(row)].Values
+            .TryGetValue(definition.Id, out object? value)
+            ? value
+            : null;
+    }
+
+    /// <summary>
+    /// Resolves a column NAME to its id and stores the value in the primary buffer.
+    /// </summary>
+    /// <returns>
+    /// <see cref="SetItemResult"/> on success, or <c>-1</c> when the column or row is unknown - the same
+    /// failure code <see cref="StoreItem(long, long, object?)"/> answers for an out-of-range row.
+    /// </returns>
+    private int StoreNamedItem(long row, string column, object? value)
+    {
+        FakeDataWindowObjectDefinition? definition = FindObject(column);
+        return definition is null ? -1 : StoreItem(row, definition.Id, value);
+    }
+
     private int StoreItem(long row, long columnId, object? value)
     {
         List<FakeBufferRow> primary = BufferOf(DwBuffer.Primary);

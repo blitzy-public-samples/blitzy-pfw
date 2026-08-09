@@ -1,0 +1,985 @@
+// ==============================================================================================
+//  SqlRedactor - the outbound statement redactor
+//  --------------------------------------------------------------------------------------------
+//  SOURCE FILE    NONE. This file has NO legacy counterpart. Almost every other file in this
+//                 refactor is a port; this one is a CONTROL THE LEGACY DOES NOT HAVE, listed in
+//                 the migration plan with Source = "- no source equivalent" and Key Changes =
+//                 "Required addition". Because there is nothing to copy, the reason it exists has
+//                 to be written down here, and every factual claim below carries the
+//                 ws_objects/** locator it was measured from.
+//
+//  ORACLE STATUS  Every ws_objects/** path named in this file is READ ONLY (constraint C-C). Each
+//                 was read as specification and cited by locator; nothing here edits, moves,
+//                 reformats or deletes any of them, and in particular NO legacy file was edited to
+//                 remove the interpolation this file guards against. The required posture is
+//                 never-replicate-and-document, and this file is the "document plus control" half
+//                 of it.
+//
+//  ============================ 1. WHAT THIS FILE PROTECTS =====================================
+//  Exactly one field: the third member of the legacy database-error structure,
+//      global type dberrordata from structure
+//          long     sqldbcode    [ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L4]
+//          string   sqlerrtext   [:L5]
+//          string   sqlsyntax    [:L6]   <-- THIS ONE
+//          dwbuffer buffer       [:L7]
+//          long     row          [:L8]
+//      end type
+//  In this codebase that member is Errors/DbErrorData.SqlSyntax, and on the wire it is
+//  common.v1.DbError.sqlsyntax (field 3).
+//
+//  ============================ 2. WHY IT NEEDS PROTECTING =====================================
+//  THE STATEMENT PLACED IN sqlsyntax IS THE SAME STRING THAT WAS EXECUTED, and it has had its
+//  parameter values substituted into it as SQL literals. Measured, not inferred, on the command
+//  path [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlcommand.sru]:
+//
+//      :L80   sSQL = _sSQL                                        the template, with ? placeholders
+//      :L82   _of_SQLBindParams(ref sSQL,TransObject.of_GetDBType())
+//                                                                 substitutes VALUES as literals
+//      :L92   rtCode = transObject.of_Exec(sSQL)                   executes THAT string
+//      :L110  Event OnDBError(transObject.SQLDBCode,transObject.SQLErrText,sSQL,Primary!,0)
+//                                                                 reports THE SAME string
+//
+//  and again on the paging/count path [n_cst_thread_task_sqlquery.sru]:
+//
+//      :L830  sqlParser.ModifyColumn(Enums.SQL_MS_REPLACE,"1 AS _")
+//      :L834  sSQL = "SELECT COUNT(1) AS CNT FROM (" + sqlParser.GetSQL() + ") pfwPagedSQL_Tbl"
+//      :L837  _of_SQLBindParams(ref sSQL,TransObject.of_GetDBType(),sDwArgs)
+//      :L843  rtCode = TransObject.of_Query(sSQL,ref dsTmp,sError)  executes
+//      :L855  Event OnDBError(TransObject.SQLDBCode,TransObject.SQLErrText,sSQL,Primary!,1)
+//                                                                  reports the same
+//
+//  TWO INDEPENDENT INTERPOLATION ROUTES END IN THIS FIELD, and both are always-on rather than
+//  exceptional:
+//
+//    ROUTE 1 - the framework's own bind emulation. `_of_SQLBindParams` flattens the parameter list
+//              into the statement text itself, as shown above. Nothing turns it off.
+//    ROUTE 2 - the PowerBuilder runtime with binding disabled. The framework parses the connection
+//              parameter string for the flag,
+//                  RegExpFind(_transData.DBParm,"DisableBind\s*=\s*(0|1)",2,true) = "1"
+//              [n_cst_thread_task_sqlbase.sru:L128-L129], and DisableBind=1 MEANS THE RUNTIME DOES
+//              NOT USE BIND VARIABLES - it interpolates literals instead, then reports the
+//              interpolated text through the DataStore's own native `dberror` event, which the
+//              framework forwards verbatim into this payload:
+//                  event dberror;return #ParentTask.Event OnDBError(sqldbcode,sqlerrtext,sqlsyntax,buffer,row)
+//              [n_cst_thread_task_sqlbase_ds.sru:L159].
+//
+//  AND THERE IS NO LOGGING OR REDACTION SEAM ANYWHERE ON THIS PATH - which is a stronger statement
+//  than "the legacy logger performs no redaction". A search for n_logger, of_Log and LogWrite
+//  across BOTH legacy libraries concerned - ws_objects/pfw.thread.ext.pbl.src/ and
+//  ws_objects/pfw.utility.sqlite.pbl.src/ - returns ZERO hits. Whatever the host application does
+//  with sqlsyntax, it receives it raw. The one measured consumer puts it in a dialog:
+//      event ondberror;...MessageBox("DBError","code: " + String(code) + ", error: " + sqlErrorText
+//                                    + ", sql: " + sqlSyntax)
+//  [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L513]. THIS FILE IS THAT MISSING SEAM. It is not
+//  a repair of a broken control; it is the first control of its kind on this path.
+//
+//  ============================ 3. THE INVARIANT (READ TWICE) ==================================
+//  REDACT ON THE WAY OUT, NEVER ON THE WAY IN.
+//
+//  This type operates only on a COPY of a statement that is about to be logged or placed in a
+//  response. It must never be applied to a statement that will be executed, nor to a statement on
+//  its way into Sql/, Sql/Paging/, Data/, Tasks/ or a database command. Two reasons, and the first
+//  is the one that would break the test suite silently:
+//
+//    (a) The parity criterion for Sql/Paging/SqlServerPagingRewriter.cs and
+//        Sql/Paging/OraclePagingRewriter.cs is BYTE-EXACT GENERATED SQL, asserted on the rewriters'
+//        own output. Redaction running inside or before a rewriter would make those assertions
+//        meaningless while leaving them green.
+//    (b) The legacy proves one string serves both purposes - executed at
+//        [n_cst_thread_task_sqlquery.sru:L843], reported at [:L855]. This implementation keeps the
+//        executed one PRISTINE and masks only the reported one. That split is the whole design.
+//
+//  The enterprise baseline this refactor holds itself to states two things at once: "structured
+//  logging with redaction applied to the one field known to carry interpolated literal values" AND
+//  "parameterized SQL in the implementation even where the legacy interpolates, WITH THE OBSERVABLE
+//  GENERATED STATEMENT PRESERVED". Both hold simultaneously only because this type is confined to
+//  the outbound diagnostic path.
+//
+//  C-B SELF-AUDIT - WHY A NEW CONTROL IS PERMITTED IN A REFACTOR WHOSE WATCHWORD IS "CHANGE
+//  NOTHING". The plan allows the implementation to be safer than the legacy WHERE THE CHANGE IS
+//  UNOBSERVABLE, and classifies this file as a required addition on exactly that basis. Redaction
+//  changes a DIAGNOSTIC field and nothing else. It is not licence to alter the statement that is
+//  executed, nor SqlDbCode, SqlErrText, Buffer or Row - all four pass through untouched, and this
+//  file contains no code that could alter them. Nothing else is scrubbed anywhere.
+//
+//  ============================ 4. WHAT SURVIVES REDACTION ====================================
+//  Everything that is not a literal VALUE: identifiers, table and column names, keywords,
+//  operators, parentheses, commas, aliases, and the paging sentinels. That is intentional - those
+//  are the parts that carry diagnostic value and no row data. The sentinels in particular are how a
+//  reader tells WHICH paging strategy ran, so they must remain legible. All six of them, with the
+//  legacy line that emits each:
+//
+//      pfwPagedSQL_OutterTbl        [n_cst_thread_task_sqlquery.sru:L333, also :L350, :L362]
+//      pfwPagedSQL_RN               [:L355, also :L356, :L381-:L383, :L394-:L395]
+//      pfwPagedSQL_Tbl              [:L356, :L382, and the count wrapper at :L834]
+//      pfwPagedSQL_TblInnerInner    [:L394]
+//      pfwPagedSQL_TblInner         [:L394]
+//      pfwPagedSQL_TblOuter         [:L394]
+//
+//  Note pfwPagedSQL_Tbl is a SIXTH sentinel beyond the five the migration plan lists; it is the
+//  count-wrapper alias at :L834. None of the six needs special handling: the scan masks only
+//  literals, never identifiers or keywords, so all six survive by construction. A test proves it
+//  rather than trusting the argument.
+//
+//  ============================ 5. THE LITERAL GRAMMAR TO MASK ================================
+//  Measured from `_of_paramtostring` [n_cst_thread_task_sqlbase.sru:L262-L339]. This is exactly what
+//  the framework interpolates, so it is exactly what has to be masked:
+//
+//    string    '...' with each embedded ' DOUBLED to ''         [:L272 array, :L318 scalar]
+//              via ReplaceAll(param,"'","''",true)
+//    time      'hh:mm:ss'                                        [:L279, :L320]
+//    date      'yyyy-mm-dd', or on Oracle
+//              to_date('yyyy-mm-dd','yyyy-mm-dd')                [:L286-L289, :L322-L325]
+//    datetime  'yyyy-mm-dd hh:mm:ss', or on Oracle
+//              to_date('...','yyyy-mm-dd hh24:mi:ss')            [:L297-L300, :L328-L331]
+//    numeric   BARE AND UNQUOTED - the `case else` arm           [:L306-L312, :L333-L334]
+//    null      the bare keyword NULL                             [:L315]
+//    array     a comma-separated list of the above, for IN (...)  [:L271-L312]
+//
+//  The Oracle arms are genuinely reachable: the database type is resolved from the connection's own
+//  DBMS string, DBT_MSSQL = 0 and DBT_ORACLE = 1
+//  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61, resolved at :L356-L359].
+//
+//  THE '' DOUBLING IS NOT COSMETIC. A scanner that does not consume '' as an escaped quote
+//  DESYNCHRONISES and then treats the remainder of the statement as being inside or outside a
+//  literal incorrectly - which would either leak the tail of a statement or mask all of it. It is
+//  handled explicitly below, and a test asserts the tail after an escaped quote is untouched.
+//
+//  ============================ 6. THE STRATEGY, AND THE ONE REJECTED ========================
+//  CHOSEN: mask literal VALUES in a single left-to-right scan, with no SQL grammar and no regular
+//  expression backtracking. Outside a literal, characters are copied through unchanged, which is
+//  what preserves every identifier, keyword, operator and sentinel.
+//
+//  THIS MIRRORS THE ORACLE'S OWN MECHANISM RATHER THAN INVENTING ONE. The legacy already contains a
+//  single-forward-scan literal scanner over SQL text - `_of_replacencharliteral`
+//  [n_cst_thread_task_sqlbase_ds.sru:L59 declaration, :L89-L147 body], reached from
+//  `event sqlpreview` for PreviewUpdate!/PreviewInsert! when national-character binding is on
+//  [:L168-L172]. Its shape is the shape reproduced here:
+//      boolean bQuoted                              [:L108]   a single in-literal flag
+//      if nLen <= 0 then return ""                  [:L111]   empty input yields the empty string
+//      for nPos = 1 to nLen                         [:L113]   one forward pass, no backtracking
+//      if Mid(sql,nPos,1) = "'" ... bQuoted = Not bQuoted
+//                                                   [:L114, :L123]  toggles on the SINGLE quote only
+//      if Mid(sql,nPos + 1,1) = "'" then nPos ++ ; continue
+//                                                   [:L117-L121]    '' consumed as an escape
+//  Three design points below are settled by that function rather than by preference: the empty-input
+//  convention, the escape handling, and the fact that the single quote is this codebase's ONLY
+//  literal delimiter.
+//
+//  REJECTED: a structural split into statement-plus-parameters, which the contract inventory does
+//  permit as an alternative shape. Rejected for a mechanical reason, not a stylistic one: the
+//  interpolation happens INSIDE the legacy bind emulation (`_of_SQLBindParams`) and INSIDE the
+//  PowerBuilder runtime when DisableBind=1, so AT THE POINT THE DIAGNOSTIC IS RAISED THERE IS NO
+//  SEPARATED PARAMETER LIST LEFT TO RETURN - only the already-flattened text exists. A split would
+//  also have forced a SIXTH field onto common.v1.DbError and broken its deliberate field-for-field
+//  mirror of dberrordata.srs:L3-L9, which is why the published contract chose the single redacted
+//  field too. The two decisions agree, and they agree for the same reason.
+//
+//  ============================ 7. WHY NUMERIC LITERALS ARE MASKED TOO =======================
+//  Because the only evidenced schema in the entire repository keeps sensitive values in NUMERIC
+//  columns. The sole DDL is
+//      CREATE TABLE IF NOT EXISTS COMPANY(
+//          ID INTEGER PRIMARY KEY NOT NULL, NAME TEXT NOT NULL, AGE INT NOT NULL,
+//          ADDRESS CHAR(50), SALARY REAL, BIRTH TEXT)
+//  [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469]. AGE and SALARY are numeric, and the
+//  legacy emits numeric parameters BARE AND UNQUOTED [n_cst_thread_task_sqlbase.sru:L306-L312,
+//  :L333-L334]. A string-only mask would therefore leave a real age and a real salary in plain view.
+//
+//  THE VISIBLE CONSEQUENCE, STATED AS A DELIBERATE CHOICE SO IT IS NOT READ AS A BUG: structural
+//  numbers are masked as well as data ones, because nothing in a flattened statement distinguishes
+//  them. In the redacted copy, COUNT(1), the "1 AS _" column stub
+//  [n_cst_thread_task_sqlquery.sru:L830], TOP n, FETCH NEXT n ROWS ONLY and the BETWEEN bounds of a
+//  row-number window all read as masked. That is harmless HERE and only here: the redacted text is
+//  never executed, and it is never the subject of the paging-rewriter parity comparisons, which
+//  assert on the rewriters' own unredacted output. Preferring a leak-free diagnostic over a
+//  prettier one is the correct trade at this boundary.
+//
+//  ============================ 8. CHARACTERIZATION NOTE TO HAND ONWARD =====================
+//  The .NET side redacts this field and THE LEGACY SIDE DOES NOT - the oracle surfaces the complete
+//  statement raw [w_test_sqlite.srw:L513]. Any paired characterization recording that captures the
+//  statement field must therefore MASK OR EXCLUDE IT ON BOTH SIDES, because the parity model
+//  requires non-deterministic and non-comparable values to be masked from the master and the
+//  candidate alike; masking one side only would make every such recording fail for a reason that is
+//  by design. This belongs in the parity, secrets and characterization documentation, and is
+//  recorded here so the owners of those documents can pick it up. This file does not edit them.
+//
+//  ============================ 9. CONSTRAINT SELF-AUDIT =====================================
+//  C-F  This file IS the control that stops interpolated literal values leaking through the
+//       diagnostic field into logs and responses, and it is the reason a wire DbError cannot be
+//       produced without a redactor - see ToDbError. No value from any known hardcoded-secret site
+//       appears here in any form; every example in these comments and in the tests is SYNTHETIC,
+//       and nothing was pasted from a captured log.
+//  C-A  This type and ISqlRedactor are Persistence-internal and are NOT promoted into
+//       PowerFramework.Contracts. That project carries boundary definitions only, never behaviour;
+//       the only cross-service coupling permitted is the published contract.
+//  C-K  The reason this file exists, the strategy it uses, what the strategy leaves visible, the
+//       rejected alternative and the reason for rejecting it are all recorded above.
+//  C-H  Being a pure function of its input, this file is exercised by a table-driven theory in
+//       PowerFramework.Persistence.Tests, which the application project makes possible with
+//       <InternalsVisibleTo Include="PowerFramework.Persistence.Tests" />.
+//
+//  NAMING. This folder is OUTSIDE every .editorconfig section that relaxes the underscore and
+//  naming analyzers - those sections are scoped file by file, and none of them names this path.
+//  With TreatWarningsAsErrors inherited from Directory.Build.props, any SCREAMING_SNAKE identifier
+//  declared here would FAIL THE BUILD, so every member below is PascalCase. This file also declares
+//  no preserved legacy constant of its own: where a return code or a provider code is needed it is
+//  consumed from PowerFramework.Shared.Kernel.RetCode or from the generated contract enums.
+//
+//  PURITY. No input or output, no clock, no TimeProvider, no logging call, no mutable static state
+//  and nothing asynchronous. This is a string function, which is what lets it be table-driven
+//  tested and registered as a singleton.
+//
+//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so NO
+//  user-specified rule governs this file. That is a finding, not latitude: nothing is invented or
+//  back-filled from convention in its place. The enterprise-standard baseline applies instead, and
+//  the binding constraints are the plan's own non-rule inventory, of which C-A, C-B, C-C, C-F, C-H
+//  and C-K bite here and are each discharged at the point they are cited.
+//
+//  No performance property is asserted anywhere in this file, and no decision here is justified by
+//  one. The single forward scan is chosen because it is SIMPLE AND NON-BACKTRACKING, which makes it
+//  reviewable and exhaustively testable - not because of any throughput or latency property. The
+//  repository publishes no latency budget, no throughput target and no availability commitment, so
+//  there is no baseline against which such a claim could be made.
+// ==============================================================================================
+
+using System.Diagnostics.CodeAnalysis;
+using System.Text;
+using PowerFramework.Contracts.Common.V1;
+
+namespace PowerFramework.Persistence.Errors;
+
+/// <summary>
+/// Removes literal values from SQL statement text on its way OUT of this service - into a log
+/// record or into a response - leaving identifiers, keywords, operators and the paging sentinels
+/// intact.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The abstraction exists for two concrete reasons.</b> First, so composition can register a
+/// single instance for the lifetime of the process and hand it to every consumer of the diagnostic
+/// path. Second, so those consumers are testable against a pass-through double: a test that wants
+/// to assert on an unmasked statement supplies its own implementation rather than reaching into
+/// this one.
+/// </para>
+/// <para>
+/// <b>Deliberately one member.</b> The statement text is the only thing that needs redacting; the
+/// remaining four members of a <see cref="DbErrorData"/> carry no interpolated values and must pass
+/// through untouched (constraint C-B). Widening this interface would invite scrubbing them.
+/// <see cref="SqlRedactor.Redact(in DbErrorData)"/> is offered as a convenience on the concrete
+/// type rather than here, precisely so the abstraction cannot grow into a general-purpose sanitizer.
+/// </para>
+/// <para>
+/// <b>Implementations must be pure and thread-safe.</b> They are consumed from the error path of
+/// concurrent requests and are expected to be registered as a singleton. Nothing about this
+/// contract permits state that varies between calls.
+/// </para>
+/// </remarks>
+public interface ISqlRedactor
+{
+    /// <summary>
+    /// Returns a copy of <paramref name="statement"/> with every literal value replaced by a
+    /// placeholder.
+    /// </summary>
+    /// <param name="statement">
+    /// The statement text to mask. This is always a COPY destined for a log record or a response -
+    /// never a statement that is about to be executed. <see langword="null"/> and the empty string
+    /// are both accepted and both yield <see cref="string.Empty"/>, matching the empty-string
+    /// convention of <see cref="DbErrorData.SqlSyntax"/> and the legacy scanner's own
+    /// <c>if nLen &lt;= 0 then return ""</c>
+    /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds.sru:L111].
+    /// </param>
+    /// <returns>
+    /// The masked text; never <see langword="null"/>. Implementations must be idempotent, so that
+    /// <c>Redact(Redact(s))</c> equals <c>Redact(s)</c> and a value that has already crossed this
+    /// seam is not masked a second time.
+    /// </returns>
+    string Redact([AllowNull] string statement);
+}
+
+/// <summary>
+/// The single sanctioned implementation of <see cref="ISqlRedactor"/>: a one-pass, non-backtracking
+/// scanner that replaces quoted literals and unquoted numeric literals with a placeholder and copies
+/// everything else through unchanged.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Sealed on purpose.</b> No derivation is permitted, which is what guarantees that no subclass
+/// can introduce a <c>ToDbError</c> overload that omits the redactor - the property constraint C-F
+/// depends on there being exactly one way to produce a wire error message.
+/// </para>
+/// <para>
+/// <b>Configuration wiring, stated here because two other files depend on this contract.</b> The
+/// constructor takes PLAIN PARAMETERS and deliberately not an options type. That is a compilation
+/// ordering requirement, not a preference: <c>Errors/</c> is the foundational folder of this project
+/// and must take ZERO intra-project dependencies so that it compiles before
+/// <c>Configuration/</c> exists. The wiring is therefore:
+/// </para>
+/// <para>
+/// <c>appsettings.json</c> declares <c>Persistence:Errors:RedactSqlStatements</c>, defaulted to
+/// <see langword="true"/>; <c>Configuration/PersistenceOptions.cs</c> binds it; and
+/// <c>Program.cs</c> passes the bound flag into this constructor when registering
+/// <see cref="ISqlRedactor"/> as a singleton. Nothing in this file reads configuration itself, and
+/// nothing in this file references <c>Microsoft.Extensions.Options</c> - the application project does
+/// not even reference that package.
+/// </para>
+/// <para>
+/// <b>Redaction is opt-out, never opt-in.</b> <see cref="Enabled"/> defaults to
+/// <see langword="true"/>, so a consumer that constructs this type with no arguments gets the safe
+/// behaviour, and a consumer that omits the configuration key gets the safe behaviour too.
+/// Disabling it has to be an explicit configured act.
+/// </para>
+/// <para>
+/// <b>Thread-safe by having no mutable state.</b> Both fields are readonly and are set once in the
+/// constructor; every method is a pure function of its arguments and those two values.
+/// </para>
+/// </remarks>
+public sealed class SqlRedactor : ISqlRedactor
+{
+    /// <summary>
+    /// The placeholder written in place of every masked literal: <c>&lt;redacted&gt;</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two properties make this value correct rather than arbitrary, and both are required.</b>
+    /// It contains no single quote, so it can sit inside the quotes of a masked string literal
+    /// without terminating it or needing to be escaped. And it contains no digit, so a second pass
+    /// over already-masked text cannot mistake part of it for a numeric literal. Together those two
+    /// give idempotence: <c>Redact(Redact(s))</c> equals <c>Redact(s)</c>, which matters because a
+    /// value may legitimately cross this seam twice - once into a log record and once into a
+    /// response - and masking a placeholder again would corrupt it.
+    /// </para>
+    /// <para>
+    /// <b>Why not a bare <c>?</c>.</b> A question mark is the legacy's own parameter marker: the
+    /// command template is a string with <c>?</c> placeholders that
+    /// <c>_of_SQLBindParams</c> substitutes into
+    /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlcommand.sru:L80-L82]. Reusing it here
+    /// would make a redacted value indistinguishable from a placeholder the framework failed to
+    /// bind, which is exactly the ambiguity a diagnostic must not have. The angle-bracketed word is
+    /// unmistakable and is not a SQL identifier character sequence either.
+    /// </para>
+    /// </remarks>
+    public const string DefaultPlaceholder = "<redacted>";
+
+    private readonly bool _enabled;
+    private readonly string _placeholder;
+
+    /// <summary>
+    /// Creates a redactor.
+    /// </summary>
+    /// <param name="enabled">
+    /// <see langword="true"/> - the default - to mask literals; <see langword="false"/> to return
+    /// statement text unchanged. Bound from <c>Persistence:Errors:RedactSqlStatements</c> by
+    /// <c>Program.cs</c>. The default is deliberately the safe one, so that a missing configuration
+    /// key cannot silently disable the control.
+    /// </param>
+    /// <param name="placeholder">
+    /// The text written in place of each masked literal. Defaults to
+    /// <see cref="DefaultPlaceholder"/>.
+    /// </param>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="placeholder"/> is <see langword="null"/>, empty or white space; or it
+    /// contains a single quote, which would terminate the string literal it is written inside; or it
+    /// contains a digit, which would let a second pass mask it again and so break idempotence.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// <b>The placeholder is validated eagerly and fatally, rather than being silently corrected.</b>
+    /// This mirrors the fail-fast posture the legacy takes on a structural fault, and it is the right
+    /// choice here for a specific reason: a placeholder that breaks idempotence or quoting produces
+    /// text that still LOOKS redacted, so the fault would otherwise be discovered only by reading a
+    /// leaked log line. Failing at construction means it is discovered at startup.
+    /// </para>
+    /// </remarks>
+    public SqlRedactor(bool enabled = true, string placeholder = DefaultPlaceholder)
+    {
+        if (string.IsNullOrWhiteSpace(placeholder))
+        {
+            throw new ArgumentException(
+                "The redaction placeholder must be a non-empty, non-whitespace value.",
+                nameof(placeholder));
+        }
+
+        if (placeholder.Contains('\'', StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The redaction placeholder must not contain a single quote: it is written inside "
+                + "the quotes of a masked string literal and would terminate it.",
+                nameof(placeholder));
+        }
+
+        for (int index = 0; index < placeholder.Length; index++)
+        {
+            if (char.IsAsciiDigit(placeholder[index]))
+            {
+                throw new ArgumentException(
+                    "The redaction placeholder must not contain a digit: a second redaction pass "
+                    + "would mask the digit as a numeric literal, which would break idempotence.",
+                    nameof(placeholder));
+            }
+        }
+
+        _enabled = enabled;
+        _placeholder = placeholder;
+    }
+
+    /// <summary>
+    /// Whether this instance masks literals. <see langword="true"/> unless explicitly configured
+    /// otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so that a startup diagnostic can report the configured posture, and so that a test
+    /// can assert the default is the safe one without inspecting private state.
+    /// </remarks>
+    public bool Enabled => _enabled;
+
+    /// <summary>
+    /// The text this instance writes in place of each masked literal.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so that a test can compose an expected value from it rather than restating a literal
+    /// that would then have to be kept in step with <see cref="DefaultPlaceholder"/>.
+    /// </remarks>
+    public string Placeholder => _placeholder;
+
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// <b>The scan, in full.</b> One left-to-right pass. Outside a literal every character is copied
+    /// through unchanged, which is what preserves identifiers, keywords, operators, parentheses and
+    /// the six paging sentinels. Two things start a mask:
+    /// </para>
+    /// <para>
+    /// A single quote opens a string literal. Its content is consumed to the closing quote, with
+    /// <c>''</c> treated as an escaped quote and the scan continuing - the same escape handling the
+    /// legacy's own scanner performs at
+    /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds.sru:L117-L121]. The output
+    /// keeps the opening and closing quotes with the placeholder between them, so a reader can still
+    /// see that a string literal was present and where.
+    /// </para>
+    /// <para>
+    /// A numeric literal - a digit run with an optional sign, decimal point and exponent - is masked
+    /// only when it is not part of an identifier. See
+    /// <see cref="TryMeasureNumericLiteral(string, int, out int)"/> for the exact rule; it is what
+    /// keeps <c>pfwPagedSQL_TblInner</c>, <c>pfwPagedSQL_RN</c> and identifiers such as
+    /// <c>sqlite3</c> undamaged.
+    /// </para>
+    /// <para>
+    /// <b>The bare keyword <c>NULL</c> needs no special case and none is written.</b> The legacy
+    /// emits it unquoted [n_cst_thread_task_sqlbase.sru:L315], and it is a run of letters, so the two
+    /// rules above never touch it. Adding an explicit branch for it would be dead code that implied
+    /// the scan was keyword-aware, which it is not.
+    /// </para>
+    /// <para>
+    /// <b>Two delimiters this scanner deliberately does NOT honour, each for a measured reason.</b>
+    /// The double quote is not treated as a literal delimiter: in this codebase's dialects it opens
+    /// an IDENTIFIER, <c>_of_paramtostring</c> never emits one for any parameter type
+    /// [n_cst_thread_task_sqlbase.sru:L262-L339], and the legacy's own scanner toggles on the single
+    /// quote alone [n_cst_thread_task_sqlbase_ds.sru:L114, :L123]. Masking double-quoted text would
+    /// therefore destroy quoted column names while protecting nothing. The backslash is not treated
+    /// as an escape either: SQL escapes a quote by doubling it, and honouring a backslash would
+    /// desynchronise the scan on any statement that legitimately contains one.
+    /// </para>
+    /// <para>
+    /// <b>A national-character prefix survives, which is required.</b> When the connection has
+    /// national-character binding on, the framework rewrites each opening quote to <c>N'</c>
+    /// [n_cst_thread_task_sqlbase_ds.sru:L125-L130, reached from :L168-L172], so <c>N'...'</c>
+    /// genuinely reaches this seam. The <c>N</c> is a letter and is copied through as an identifier
+    /// character before the quote opens the literal, giving <c>N'&lt;redacted&gt;'</c> - the prefix is
+    /// preserved and the value is masked.
+    /// </para>
+    /// <para>
+    /// <b>An unterminated literal fails CLOSED.</b> If an opening quote has no partner, everything
+    /// from it to the end of the input is treated as literal content and masked, and no closing quote
+    /// is emitted because none was present. Leaking the tail of a malformed statement would be the
+    /// worse of the two available failures, and the result is still idempotent.
+    /// </para>
+    /// </remarks>
+    public string Redact([AllowNull] string statement)
+    {
+        // Order matters. The empty result is returned BEFORE the enabled check, for two reasons that
+        // both point the same way: the declared return type is non-nullable so a null input can never
+        // be echoed back, and the legacy scanner sets the same convention with
+        // `if nLen <= 0 then return ""` [n_cst_thread_task_sqlbase_ds.sru:L111]. For an input that is
+        // already empty the two branches agree anyway, so nothing is lost by checking this first.
+        if (string.IsNullOrEmpty(statement))
+        {
+            return string.Empty;
+        }
+
+        // Disabled: return the very same instance, so a caller can assert the text is unchanged
+        // byte for byte rather than merely equal.
+        if (!_enabled)
+        {
+            return statement;
+        }
+
+        StringBuilder masked = new(statement.Length);
+        int position = 0;
+
+        while (position < statement.Length)
+        {
+            char current = statement[position];
+
+            if (current == '\'')
+            {
+                position = AppendMaskedStringLiteral(statement, position, masked);
+                continue;
+            }
+
+            if (TryMeasureNumericLiteral(statement, position, out int afterLiteral))
+            {
+                masked.Append(_placeholder);
+                position = afterLiteral;
+                continue;
+            }
+
+            masked.Append(current);
+            position++;
+        }
+
+        return masked.ToString();
+    }
+
+    /// <summary>
+    /// Returns a copy of <paramref name="error"/> whose <see cref="DbErrorData.SqlSyntax"/> has been
+    /// masked. The other four members are copied through untouched.
+    /// </summary>
+    /// <param name="error">
+    /// The payload to mask. Taken by <see langword="in"/> because the legacy structure is a
+    /// <c>readonly</c> parameter wherever it is passed by reference - the mapping the migration plan
+    /// fixes for PowerBuilder's <c>readonly</c> is C#'s <see langword="in"/>.
+    /// </param>
+    /// <returns>
+    /// A payload identical to the input except for the statement text. When redaction is disabled, or
+    /// when the statement is already empty - which six of the nine legacy raise sites make it - the
+    /// result compares equal to the input.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Exactly one member changes, and that is the whole point (constraint C-B).</b>
+    /// <see cref="DbErrorData.SqlDbCode"/>, <see cref="DbErrorData.SqlErrText"/>,
+    /// <see cref="DbErrorData.Buffer"/> and <see cref="DbErrorData.Row"/> are not inspected, not
+    /// normalised and not scrubbed. That includes the one Chinese diagnostic the legacy synthesizes
+    /// into this payload, <see cref="DbErrorMessages.NoUpdatableTable"/>
+    /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L190], which passes through
+    /// character for character - a test asserts it.
+    /// </para>
+    /// <para>
+    /// <b>Why the <c>with</c> expression is exact rather than merely convenient.</b> Every member of
+    /// <see cref="DbErrorData"/> is declared with an <c>init</c> accessor, so a non-destructive
+    /// mutation changes the named member and copies the rest by definition. There is no opportunity
+    /// for a member to be dropped or defaulted by omission, which a hand-written five-argument
+    /// reconstruction would allow.
+    /// </para>
+    /// <para>
+    /// <b>Not part of <see cref="ISqlRedactor"/>, deliberately.</b> The abstraction stays at one
+    /// member so it cannot grow into a general-purpose payload sanitizer; this overload is a
+    /// convenience on the concrete type for callers that already hold one.
+    /// </para>
+    /// </remarks>
+    public DbErrorData Redact(in DbErrorData error) => error with { SqlSyntax = Redact(error.SqlSyntax) };
+
+
+    // ------------------------------------------------------------------------------------------
+    //  THE SCAN PRIMITIVES
+    //  ----------------------------------------------------------------------------------------
+    //  Three of the four are static: they depend on nothing but their arguments. Only the string
+    //  literal writer needs the instance, because it writes the configured placeholder.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Consumes the string literal opening at <paramref name="openQuoteIndex"/>, writes
+    /// <c>'</c> + placeholder + <c>'</c> to <paramref name="masked"/>, and returns the index just
+    /// past the literal.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="openQuoteIndex">
+    /// The index of the opening single quote. The caller has already established that the character
+    /// there is a quote and that the scan is outside a literal.
+    /// </param>
+    /// <param name="masked">The output under construction.</param>
+    /// <returns>
+    /// The index of the first character after the closing quote, or the length of
+    /// <paramref name="statement"/> when the literal is unterminated.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The quotes are kept and only the content is replaced.</b> That is what lets a reader see
+    /// that a string literal stood at this position, which is diagnostically useful and leaks
+    /// nothing: the fact that a comparison was against a string is structure, not data.
+    /// </para>
+    /// <para>
+    /// <b>The doubled quote is consumed as an escape, exactly as the oracle's own scanner does it.</b>
+    /// The legacy writes a string parameter as <c>'...'</c> after
+    /// <c>ReplaceAll(param,"'","''",true)</c>
+    /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L272 for the array form and
+    /// :L318 for the scalar form], and its own literal scanner skips the pair and continues rather
+    /// than treating the first of them as a terminator
+    /// [n_cst_thread_task_sqlbase_ds.sru:L115-L121]. Failing to do the same would desynchronise the
+    /// scan at the first apostrophe in any piece of data - after which every following literal and
+    /// non-literal region would be classified the wrong way round.
+    /// </para>
+    /// <para>
+    /// <b>An unterminated literal consumes the remainder of the input.</b> This is the fail-closed
+    /// direction: an opening quote with no partner means the rest of the text is literal content as
+    /// far as the scanner can tell, so it is masked rather than emitted. No closing quote is written,
+    /// because none was present and inventing one would misrepresent the text.
+    /// </para>
+    /// </remarks>
+    private int AppendMaskedStringLiteral(string statement, int openQuoteIndex, StringBuilder masked)
+    {
+        masked.Append('\'');
+        masked.Append(_placeholder);
+
+        int cursor = openQuoteIndex + 1;
+
+        while (cursor < statement.Length)
+        {
+            if (statement[cursor] != '\'')
+            {
+                cursor++;
+                continue;
+            }
+
+            // A doubled quote is an escaped quote INSIDE the literal, not the end of it. Skip both
+            // characters and keep consuming [n_cst_thread_task_sqlbase_ds.sru:L117-L121].
+            if (cursor + 1 < statement.Length && statement[cursor + 1] == '\'')
+            {
+                cursor += 2;
+                continue;
+            }
+
+            masked.Append('\'');
+            return cursor + 1;
+        }
+
+        // Unterminated: everything to the end was literal content. Fail closed, no closing quote.
+        return statement.Length;
+    }
+
+    /// <summary>
+    /// Measures an unquoted numeric literal starting at <paramref name="start"/>, if there is one
+    /// that is not part of an identifier.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="start">The candidate start index. The caller has established it is in range.</param>
+    /// <param name="afterLiteral">
+    /// On success, the index of the first character after the literal; otherwise
+    /// <paramref name="start"/>.
+    /// </param>
+    /// <returns><see langword="true"/> when a maskable numeric literal was measured.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The grammar accepted</b> is an optional sign, then either a digit run with an optional
+    /// decimal point and fractional digits or a leading decimal point followed by digits, then an
+    /// optional exponent introduced by <c>e</c> or <c>E</c> with an optional sign of its own. Only
+    /// ASCII digits count, because only ASCII digits can form a SQL numeric literal.
+    /// </para>
+    /// <para>
+    /// <b>Two guards keep identifiers intact, and they are the reason the paging sentinels survive
+    /// without being special-cased.</b> The first rejects a run whose preceding character is an
+    /// identifier character or a qualifying dot; the second rejects a run whose following character is
+    /// an identifier character. Between them, a digit that is part of a name is never masked -
+    /// <c>sqlite3</c>, <c>T1.col</c>, <c>COMPANY_2</c> and every <c>pfwPagedSQL_*</c> sentinel are
+    /// left exactly as written. The exponent is measured BEFORE the second guard runs, so
+    /// <c>1.5e10</c> is judged as one run rather than as <c>1.5</c> followed by an identifier.
+    /// </para>
+    /// <para>
+    /// <b>The sign is absorbed only when it is unambiguously a sign.</b> See
+    /// <see cref="IsUnarySignPosition(string, int)"/>. Absorbing it hides whether a masked value was
+    /// negative, which is one more bit of data withheld; refusing to absorb it when the character
+    /// could equally be a subtraction operator is what keeps <c>salary-1</c> reading as
+    /// <c>salary-&lt;redacted&gt;</c> instead of losing the operator. Where the distinction cannot be
+    /// made without SQL grammar - after a keyword, which is indistinguishable from an identifier to a
+    /// scanner with no vocabulary - the conservative branch is taken and the sign is left visible. The
+    /// magnitude, which is the part that carries data, is masked either way.
+    /// </para>
+    /// </remarks>
+    private static bool TryMeasureNumericLiteral(string statement, int start, out int afterLiteral)
+    {
+        afterLiteral = start;
+
+        int cursor = start;
+        bool signAbsorbed = false;
+
+        if (statement[cursor] is '+' or '-')
+        {
+            if (!IsUnarySignPosition(statement, cursor))
+            {
+                return false;
+            }
+
+            signAbsorbed = true;
+            cursor++;
+
+            if (cursor >= statement.Length)
+            {
+                return false;
+            }
+        }
+
+        if (char.IsAsciiDigit(statement[cursor]))
+        {
+            cursor = ConsumeAsciiDigits(statement, cursor);
+
+            // A decimal point belongs to the literal whether or not fractional digits follow it:
+            // "5." is a well-formed numeric literal, and leaving a dangling point outside the mask
+            // would suggest a qualifier that is not there.
+            if (cursor < statement.Length && statement[cursor] == '.')
+            {
+                cursor = ConsumeAsciiDigits(statement, cursor + 1);
+            }
+        }
+        else if (statement[cursor] == '.'
+            && cursor + 1 < statement.Length
+            && char.IsAsciiDigit(statement[cursor + 1]))
+        {
+            cursor = ConsumeAsciiDigits(statement, cursor + 1);
+        }
+        else
+        {
+            return false;
+        }
+
+        // The exponent is optional and, if the characters after 'e' do not form one, the 'e' is left
+        // alone - it is then either an identifier start, which the following guard catches, or a
+        // syntax error in text this scanner is not entitled to interpret.
+        if (cursor < statement.Length && (statement[cursor] == 'e' || statement[cursor] == 'E'))
+        {
+            int exponentDigits = cursor + 1;
+
+            if (exponentDigits < statement.Length && statement[exponentDigits] is '+' or '-')
+            {
+                exponentDigits++;
+            }
+
+            if (exponentDigits < statement.Length && char.IsAsciiDigit(statement[exponentDigits]))
+            {
+                cursor = ConsumeAsciiDigits(statement, exponentDigits);
+            }
+        }
+
+        // GUARD 1 - the run must not be the tail of an identifier. Skipped when a sign was absorbed,
+        // because IsUnarySignPosition has already inspected what precedes it and a sign can never be
+        // part of an identifier.
+        if (!signAbsorbed && start > 0)
+        {
+            char preceding = statement[start - 1];
+
+            if (IsIdentifierPart(preceding) || preceding == '.')
+            {
+                return false;
+            }
+        }
+
+        // GUARD 2 - the run must not be the head of an identifier.
+        if (cursor < statement.Length && IsIdentifierPart(statement[cursor]))
+        {
+            return false;
+        }
+
+        afterLiteral = cursor;
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the index of the first character at or after <paramref name="start"/> that is not an
+    /// ASCII digit.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="start">Where to begin. May be past the end, in which case it is returned.</param>
+    /// <returns>The index just past the digit run.</returns>
+    private static int ConsumeAsciiDigits(string statement, int start)
+    {
+        int cursor = start;
+
+        while (cursor < statement.Length && char.IsAsciiDigit(statement[cursor]))
+        {
+            cursor++;
+        }
+
+        return cursor;
+    }
+
+    /// <summary>
+    /// Decides whether the sign character at <paramref name="signIndex"/> is a unary sign belonging
+    /// to the number that follows it, rather than a binary operator between two operands.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="signIndex">The index of the <c>+</c> or <c>-</c>.</param>
+    /// <returns>
+    /// <see langword="true"/> when the nearest preceding non-white-space character cannot end an
+    /// operand, or when the sign is the first non-white-space character in the statement.
+    /// </returns>
+    /// <remarks>
+    /// This is the classic operand-boundary test and it needs no SQL vocabulary: a sign that follows
+    /// an operator, a comma or an opening parenthesis is unary, while one that follows a name, a
+    /// number, a closing bracket or a closing quote is binary. The only case it decides
+    /// conservatively is a sign after a keyword, which a scanner with no vocabulary cannot tell from a
+    /// sign after a column name; that costs the sign's visibility and nothing else, since the digits
+    /// are masked either way.
+    /// </remarks>
+    private static bool IsUnarySignPosition(string statement, int signIndex)
+    {
+        for (int index = signIndex - 1; index >= 0; index--)
+        {
+            char candidate = statement[index];
+
+            if (char.IsWhiteSpace(candidate))
+            {
+                continue;
+            }
+
+            return !CanEndOperand(candidate);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is a character that can appear inside an unquoted SQL
+    /// identifier.
+    /// </summary>
+    /// <param name="candidate">The character to classify.</param>
+    /// <returns><see langword="true"/> for a letter, a digit, an underscore or a dollar sign.</returns>
+    /// <remarks>
+    /// Letters are tested with the full Unicode predicate rather than the ASCII one, so a name written
+    /// in a non-Latin script is recognised as a name and its digits are left alone. Numeric literals,
+    /// by contrast, are measured with the ASCII digit predicate only, since a non-ASCII digit cannot
+    /// form a SQL numeric literal. The two predicates are deliberately different.
+    /// </remarks>
+    private static bool IsIdentifierPart(char candidate) =>
+        char.IsLetterOrDigit(candidate) || candidate == '_' || candidate == '$';
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is a character that can terminate an operand, and so
+    /// makes a following <c>+</c> or <c>-</c> a binary operator.
+    /// </summary>
+    /// <param name="candidate">The character to classify.</param>
+    /// <returns>
+    /// <see langword="true"/> for an identifier character or for any of the closing delimiters
+    /// <c>)</c>, <c>]</c>, <c>'</c>, <c>"</c>, <c>`</c> and <c>.</c>.
+    /// </returns>
+    /// <remarks>
+    /// The three bracket and quote styles are all included because the dialects reachable here spell
+    /// a delimited identifier differently - double quotes in the ANSI and Oracle forms, square
+    /// brackets in the SQL Server form - and a scanner that recognised only one of them would
+    /// misclassify a sign after the others.
+    /// </remarks>
+    private static bool CanEndOperand(char candidate) =>
+        IsIdentifierPart(candidate)
+        || candidate == ')'
+        || candidate == ']'
+        || candidate == '\''
+        || candidate == '"'
+        || candidate == '`'
+        || candidate == '.';
+}
+
+
+/// <summary>
+/// The ONLY sanctioned conversion from the in-process <see cref="DbErrorData"/> to the published
+/// <see cref="DbError"/> wire message.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why the conversion lives here and not on <see cref="DbErrorData"/>.</b> That type deliberately
+/// has no self-conversion, and its own documentation says so and points here
+/// [see <c>Errors/DbErrorData.cs</c>, the <c>SqlSyntax</c> value section]. The reason is a security
+/// property rather than tidiness: if the payload could convert itself, an unredacted statement could
+/// reach a network peer through a one-line call that looked entirely innocent at the call site. Making
+/// the redactor a required argument of the only available conversion removes that path
+/// STRUCTURALLY - constraint C-F becomes a compile-time property instead of something a reviewer has
+/// to notice.
+/// </para>
+/// <para>
+/// <b>This is what makes the published contract's own promise true.</b> The protocol definition
+/// describes <c>common.v1.DbError.sqlsyntax</c> as redacted statement text carrying placeholders only
+/// and never interpolated literals. That is a promise about producers, and this method is the producer
+/// it is a promise about. <c>Grpc/*</c> and <c>Program.cs</c> must route every database error through
+/// here and must NOT hand-roll a mapping, because a hand-rolled one would reintroduce exactly the leak
+/// the split exists to prevent while satisfying the compiler perfectly.
+/// </para>
+/// </remarks>
+public static class DbErrorDataExtensions
+{
+    /// <summary>
+    /// Projects <paramref name="error"/> onto a wire <see cref="DbError"/>, masking the statement text
+    /// with <paramref name="redactor"/> and copying the other four members through unchanged.
+    /// </summary>
+    /// <param name="error">The in-process payload to project.</param>
+    /// <param name="redactor">
+    /// The redactor to mask the statement with. MANDATORY BY DESIGN - there is deliberately no
+    /// overload that omits it, and <see cref="SqlRedactor"/> is sealed so none can be introduced by
+    /// derivation. A caller that genuinely needs unmasked text for its own diagnostics reads
+    /// <see cref="DbErrorData.SqlSyntax"/> directly rather than going through the wire type.
+    /// </param>
+    /// <returns>
+    /// A message whose five fields correspond to the five members of the legacy structure in the
+    /// legacy's own order [ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L4-L8], with field 3
+    /// masked.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="redactor"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Field order is preserved, and it is not cosmetic.</b> The assignments below run in the order
+    /// the oracle forwards the five values positionally in a single expression -
+    /// <c>Event OnDBError(sqldbcode,sqlerrtext,sqlsyntax,buffer,row)</c>
+    /// [n_cst_thread_task_sqlbase_ds.sru:L159] - which is also the order the structure declares them
+    /// [dberrordata.srs:L4-L8], the order the record declares them, and the order the protocol
+    /// definition numbers them 1 to 5. Keeping all four in step is what lets the correspondence be
+    /// checked by reading rather than by testing.
+    /// </para>
+    /// <para>
+    /// <b>The generated property names are protobuf's, not this codebase's.</b> The legacy field
+    /// spellings <c>sqldbcode</c>, <c>sqlerrtext</c> and <c>sqlsyntax</c> are each a single lower-case
+    /// token, so the C# generator PascalCases them whole - <c>Sqldbcode</c>, <c>Sqlerrtext</c>,
+    /// <c>Sqlsyntax</c> - rather than splitting them at word boundaries the way it would split
+    /// <c>sql_db_code</c>. The apparent mismatch with the record's <c>SqlDbCode</c>,
+    /// <c>SqlErrText</c> and <c>SqlSyntax</c> is therefore correct on both sides and must not be
+    /// "fixed" by renaming either: the protocol field names are kept verbatim from the oracle
+    /// deliberately, and the record's are the C# spellings of the same tokens.
+    /// </para>
+    /// <para>
+    /// <b>Neither string can be <see langword="null"/> here, which matters because the generated
+    /// setters reject null.</b> <see cref="DbErrorData.SqlErrText"/> and
+    /// <see cref="DbErrorData.SqlSyntax"/> project a stored <see langword="null"/> to
+    /// <see cref="string.Empty"/> on read, and <see cref="ISqlRedactor.Redact(string)"/> is contracted
+    /// never to return <see langword="null"/>. The empty statement is the ordinary case rather than an
+    /// edge one: six of the nine legacy raise sites pass <c>""</c> for it.
+    /// </para>
+    /// <para>
+    /// <b>Nothing but the statement is touched (constraint C-B).</b> The provider code, the message
+    /// text - including the one hardcoded Chinese diagnostic the legacy synthesizes,
+    /// <see cref="DbErrorMessages.NoUpdatableTable"/> - the buffer and the row ordinal are copied
+    /// verbatim. In particular the row ordinal stays ONE-BASED, because that is legacy contract and
+    /// not an off-by-one to normalise, and the buffer is copied as-is including
+    /// <see cref="DwBuffer.Filter"/>, whose row order is inverted relative to the source.
+    /// </para>
+    /// </remarks>
+    public static DbError ToDbError(this DbErrorData error, ISqlRedactor redactor)
+    {
+        ArgumentNullException.ThrowIfNull(redactor);
+
+        return new DbError
+        {
+            // 1 - long sqldbcode [dberrordata.srs:L4]
+            Sqldbcode = error.SqlDbCode,
+
+            // 2 - string sqlerrtext [:L5] - opaque display text, copied verbatim, never scrubbed
+            Sqlerrtext = error.SqlErrText,
+
+            // 3 - string sqlsyntax [:L6] - THE ONE FIELD THAT IS MASKED, and the only reason this
+            //     method requires a redactor at all
+            Sqlsyntax = redactor.Redact(error.SqlSyntax),
+
+            // 4 - dwbuffer buffer [:L7]
+            Buffer = error.Buffer,
+
+            // 5 - long row [:L8] - one-based, preserved as such
+            Row = error.Row,
+        };
+    }
+}
+

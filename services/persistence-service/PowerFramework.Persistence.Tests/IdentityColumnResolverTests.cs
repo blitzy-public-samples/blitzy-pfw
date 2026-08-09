@@ -1,0 +1,1238 @@
+// ==============================================================================================
+//  IdentityColumnResolverTests.cs - THE IDENTITY ROUND-TRIP PARITY MATRICES
+//  --------------------------------------------------------------------------------------------
+//  UNDER TEST     services/persistence-service/PowerFramework.Persistence/Concurrency/
+//                     IdentityColumnResolver.cs
+//  ORACLE         ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru      (READ ONLY)
+//                 ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlupdate.sru   (READ ONLY)
+//  FIXTURE        ws_objects/pfw.tests.pbl.src/dw_sqlite.srd                            (READ ONLY)
+//
+//  THE HEADLINE ASSERTION IN THIS FILE IS AN ORDER ASSERTION, NOT A COUNT ASSERTION. The refactor
+//  plan names the Filter buffer's backward collection loop
+//  [n_cst_thread_task_sqlupdate.sru:L237] the single most dangerous line in the whole migration,
+//  precisely because reversing it keeps the COUNT of collected values identical while pairing every
+//  value with the WRONG ROW. A count-only assertion therefore cannot detect the regression, and
+//  FilterValuesAreCollectedInDescendingRowOrder plus
+//  BackwardCollectionRoundTripsThroughAForwardApplier exist to detect it. Do not weaken either into
+//  a count or a set comparison.
+//
+//  NO DATABASE AND NO DataWindow IS INVOLVED ANYWHERE IN THIS FILE. Both surfaces the subject reads
+//  through are injected and are faked by RecordingIdentitySource below, which records every
+//  interaction so the tests can assert not just the answers but WHICH questions were asked, in what
+//  order, and THROUGH WHICH OVERLOAD.
+//
+//  THE FIXTURE IS TEST DATA, NOT PRODUCTION DATA. COMPANY, its six columns and their one-based ids
+//  appear here because dw_sqlite.srd is the sole updatable DataWindow in the repository; the
+//  production code under test names no table, no column and no column count.
+// ==============================================================================================
+
+using PowerFramework.Persistence.Concurrency;
+
+namespace PowerFramework.Persistence.Tests;
+
+/// <summary>
+/// One row of a faked buffer: its own status, read the legacy way at column index zero, and the
+/// numeric value its identity column holds.
+/// </summary>
+/// <param name="Status">The ROW's status, which the row guard tests against <c>NewModified!</c>.</param>
+/// <param name="Value">
+/// The identity column's value. <see langword="null"/> models a null item, which the subject must
+/// preserve rather than coerce to zero.
+/// </param>
+internal readonly record struct FakeIdentityRow(ItemStatus Status, long? Value);
+
+/// <summary>
+/// One recorded status read: the row, the column index it was addressed by, and the buffer.
+/// </summary>
+internal readonly record struct StatusRead(long Row, int ColumnIndex, DwBuffer Buffer);
+
+/// <summary>
+/// One recorded read through the TWO-ARGUMENT numeric accessor.
+/// </summary>
+internal readonly record struct TwoArgumentValueRead(long Row, int ColumnNumber);
+
+/// <summary>
+/// One recorded read through the FOUR-ARGUMENT numeric accessor, carrying the two arguments the
+/// short overload does not have.
+/// </summary>
+internal readonly record struct FourArgumentValueRead(
+    long Row,
+    int ColumnNumber,
+    DwBuffer Buffer,
+    bool OriginalValue);
+
+/// <summary>
+/// A fake implementing BOTH injected surfaces on one type - which is what the legacy actually is, a
+/// single <c>Data</c> carrier - and recording every interaction.
+/// </summary>
+/// <remarks>
+/// Rows are held in zero-based lists whose element at index <c>n</c> is ONE-BASED ROW <c>n + 1</c>.
+/// That conversion happens HERE, in the test double, and deliberately nowhere in the subject: it is
+/// the boundary between the legacy one-based row domain and C# storage, and keeping it in one visible
+/// place is what makes the R9 assertions below meaningful.
+/// </remarks>
+internal sealed class RecordingIdentitySource : IIdentityColumnMetadata, IIdentityValueSource
+{
+    /// <summary>The answer to the update-table describe.</summary>
+    internal string UpdateTable { get; set; } = string.Empty;
+
+    /// <summary>The answer to the column-count describe. Zero models a describe that failed.</summary>
+    internal int ColumnCount { get; set; }
+
+    /// <summary>
+    /// Identity answers keyed by the FULL describe property - <c>#1.Identity</c>, not <c>1</c> -
+    /// because the caller composes the property. An absent key answers <c>"no"</c>.
+    /// </summary>
+    internal Dictionary<string, string> IdentityAnswers { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Database-name answers keyed by the FULL describe property - <c>#1.DBName</c>. An absent key
+    /// answers the empty string.
+    /// </summary>
+    internal Dictionary<string, string> DbNameAnswers { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>The inserted count, which is also the precondition at <c>:L215</c>.</summary>
+    internal long InsertedCount { get; set; }
+
+    /// <summary>The updated count.</summary>
+    internal long UpdatedCount { get; set; }
+
+    /// <summary>The deleted count.</summary>
+    internal long DeletedCount { get; set; }
+
+    /// <summary>The Primary buffer's rows, element <c>n</c> being one-based row <c>n + 1</c>.</summary>
+    internal List<FakeIdentityRow> PrimaryRows { get; } = [];
+
+    /// <summary>The Filter buffer's rows, element <c>n</c> being one-based row <c>n + 1</c>.</summary>
+    internal List<FakeIdentityRow> FilterRows { get; } = [];
+
+    /// <summary>Every describe property asked for, in order - the evidence that a stage ran at all.</summary>
+    internal List<string> DescribeReads { get; } = [];
+
+    /// <summary>Every status read, in order, with the column index it was addressed by.</summary>
+    internal List<StatusRead> StatusReads { get; } = [];
+
+    /// <summary>Every read through the two-argument accessor, in order.</summary>
+    internal List<TwoArgumentValueRead> TwoArgumentValueReads { get; } = [];
+
+    /// <summary>Every read through the four-argument accessor, in order.</summary>
+    internal List<FourArgumentValueRead> FourArgumentValueReads { get; } = [];
+
+    /// <summary>How many times the inserted count was read. The oracle reads it TWICE.</summary>
+    internal int InsertedCountReads { get; private set; }
+
+    public string DescribeUpdateTable()
+    {
+        DescribeReads.Add(UpdateWhereBuilder.UpdateTableProperty);
+
+        return UpdateTable;
+    }
+
+    public int GetColumnCount()
+    {
+        DescribeReads.Add(UpdateWhereBuilder.ColumnCountProperty);
+
+        return ColumnCount;
+    }
+
+    public string DescribeColumnIdentity(string identityProperty)
+    {
+        DescribeReads.Add(identityProperty);
+
+        return IdentityAnswers.TryGetValue(identityProperty, out string? answer)
+            ? answer
+            : UpdateWhereBuilder.NoLiteral;
+    }
+
+    public string DescribeColumnDbName(string dbNameProperty)
+    {
+        DescribeReads.Add(dbNameProperty);
+
+        return DbNameAnswers.TryGetValue(dbNameProperty, out string? answer)
+            ? answer
+            : string.Empty;
+    }
+
+    public long GetInsertedCount()
+    {
+        InsertedCountReads++;
+
+        return InsertedCount;
+    }
+
+    public long GetUpdatedCount() => UpdatedCount;
+
+    public long GetDeletedCount() => DeletedCount;
+
+    public long RowCount() => PrimaryRows.Count;
+
+    public long FilteredCount() => FilterRows.Count;
+
+    public ItemStatus GetItemStatus(long row, int columnIndex, DwBuffer buffer)
+    {
+        StatusReads.Add(new StatusRead(row, columnIndex, buffer));
+
+        return RowsOf(buffer)[ToZeroBased(row, buffer)].Status;
+    }
+
+    public long? GetItemNumber(long row, int columnNumber)
+    {
+        TwoArgumentValueReads.Add(new TwoArgumentValueRead(row, columnNumber));
+
+        // The two-argument form means "the Primary buffer's CURRENT value", which is exactly what
+        // PowerBuilder's argument defaulting does.
+        return PrimaryRows[ToZeroBased(row, DwBuffer.Primary)].Value;
+    }
+
+    public long? GetItemNumber(long row, int columnNumber, DwBuffer buffer, bool originalValue)
+    {
+        FourArgumentValueReads.Add(
+            new FourArgumentValueRead(row, columnNumber, buffer, originalValue));
+
+        return RowsOf(buffer)[ToZeroBased(row, buffer)].Value;
+    }
+
+    private List<FakeIdentityRow> RowsOf(DwBuffer buffer) =>
+        buffer switch
+        {
+            DwBuffer.Primary => PrimaryRows,
+            DwBuffer.Filter => FilterRows,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(buffer),
+                buffer,
+                "This fake models the Primary and Filter buffers only, which are the two the "
+                    + "identity round trip reads."),
+        };
+
+    /// <summary>
+    /// Converts a ONE-BASED legacy row number into this fake's zero-based storage index, throwing
+    /// when the subject addresses a row outside the buffer.
+    /// </summary>
+    /// <remarks>
+    /// THE THROW IS THE POINT. It turns any one-based off-by-one in the subject - a row 0, or a row
+    /// <c>count + 1</c> - into an immediate, loud failure instead of a silently shifted result.
+    /// </remarks>
+    private int ToZeroBased(long row, DwBuffer buffer)
+    {
+        List<FakeIdentityRow> rows = RowsOf(buffer);
+
+        if (row < ItemStatusMachine.FirstRowNumber || row > rows.Count)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(row),
+                row,
+                $"Row numbers are ONE-BASED: {buffer} holds rows "
+                    + $"{ItemStatusMachine.FirstRowNumber} through {rows.Count}. A row of 0 or of "
+                    + "count + 1 means the subject rebased a one-based row number.");
+        }
+
+        return (int)(row - ItemStatusMachine.FirstRowNumber);
+    }
+}
+
+/// <summary>
+/// The discovery matrix, the two collection directions with the backward-collection round trip, the
+/// three-level conditional gating, the emit guard, the accessor-arity asymmetry, the column-zero
+/// status guard, the counts placement and the R9 one-based audit.
+/// </summary>
+public sealed class IdentityColumnResolverTests
+{
+    #region The sole evidenced fixture, transcribed from dw_sqlite.srd
+
+    /// <summary>The update table name [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>].</summary>
+    private const string FixtureTable = "COMPANY";
+
+    /// <summary>
+    /// The six column names in declaration order, whose ids are therefore 1..6
+    /// [<c>dw_sqlite.srd:L8-L13, L21-L26</c>]. Only <c>id</c> carries
+    /// <c>key=yes identity=yes</c> [<c>:L8</c>].
+    /// </summary>
+    private static readonly string[] FixtureColumns =
+        ["id", "name", "age", "address", "salary", "birth"];
+
+    /// <summary>
+    /// A source preloaded with the fixture: six columns, <c>id</c> the sole identity column, and its
+    /// database name the UNQUALIFIED <c>id</c> exactly as the definition declares it [<c>:L8</c>].
+    /// </summary>
+    private static RecordingIdentitySource FixtureSource()
+    {
+        RecordingIdentitySource source = new()
+        {
+            UpdateTable = FixtureTable,
+            ColumnCount = FixtureColumns.Length,
+        };
+
+        // Ids 1..6 in declaration order. R9: one-based, matching the .srd's own id= attributes.
+        for (int ordinal = ItemStatusMachine.FirstColumnNumber;
+            ordinal <= FixtureColumns.Length;
+            ordinal++)
+        {
+            source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(ordinal)] =
+                FixtureColumns[ordinal - ItemStatusMachine.FirstColumnNumber];
+        }
+
+        source.IdentityAnswers[IdentityColumnResolver.DescribeIdentityProperty(1)] =
+            UpdateWhereBuilder.YesLiteral;
+
+        return source;
+    }
+
+    private static void MarkIdentity(RecordingIdentitySource source, int ordinal, string dbName)
+    {
+        source.IdentityAnswers[IdentityColumnResolver.DescribeIdentityProperty(ordinal)] =
+            UpdateWhereBuilder.YesLiteral;
+        source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(ordinal)] = dbName;
+    }
+
+    private static FakeIdentityRow NewRow(long? value) =>
+        new(ItemStatus.NewModified, value);
+
+    #endregion
+
+    #region Discovery - the full selection-ordering matrix
+
+    /// <summary>
+    /// No column marked as an identity column at all yields
+    /// <see cref="IdentityColumnResolver.NoIdentityColumn"/>, which gates collection off entirely
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L226</c>].
+    /// </summary>
+    [Fact]
+    public void DiscoveryFindsNothingWhenNoColumnIsMarkedIdentity()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+
+        Assert.Equal(
+            IdentityColumnResolver.NoIdentityColumn,
+            IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// A single identity column whose database name carries the update table's qualifier is chosen by
+    /// the PREFIX arm [<c>:L221</c>].
+    /// </summary>
+    [Fact]
+    public void DiscoveryTakesAPrefixMatchingColumn()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+        MarkIdentity(source, 4, "COMPANY.id");
+
+        Assert.Equal(4, IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// A single identity column whose database name does NOT carry the qualifier is still chosen -
+    /// by the FALLBACK arm <c>or nIdentityColumn = 0</c> [<c>:L221</c>].
+    /// </summary>
+    [Fact]
+    public void DiscoveryTakesANonMatchingColumnThroughTheFallbackArm()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+        MarkIdentity(source, 3, "id");
+
+        Assert.Equal(3, IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// ★ THE ORDERING TEST. A non-matching column seen FIRST is claimed by the fallback arm, and a
+    /// prefix-matching column seen LATER OVERWRITES it, because the prefix arm assigns
+    /// unconditionally [<c>:L221-L222</c>]. This is what makes the rule "first wins WITH a prefix
+    /// override" rather than "first match wins".
+    /// </summary>
+    [Fact]
+    public void DiscoveryLetsALaterPrefixMatchOverrideAnEarlierFallbackPick()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+        MarkIdentity(source, 2, "id");
+        MarkIdentity(source, 5, "company.salary");
+
+        Assert.Equal(5, IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// Two non-matching identity columns: THE FIRST IS KEPT, because the fallback arm only assigns
+    /// while nothing is set [<c>:L221</c>].
+    /// </summary>
+    [Fact]
+    public void DiscoveryKeepsTheFirstOfTwoNonMatchingColumns()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+        MarkIdentity(source, 2, "id");
+        MarkIdentity(source, 5, "salary");
+
+        Assert.Equal(2, IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// Two PREFIX-MATCHING identity columns: THE LAST ONE WINS, because each assigns
+    /// unconditionally [<c>:L222</c>]. The third of the three reachable orderings.
+    /// </summary>
+    [Fact]
+    public void DiscoveryLetsTheLastOfTwoPrefixMatchesWin()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+        MarkIdentity(source, 2, "company.id");
+        MarkIdentity(source, 5, "COMPANY.SALARY");
+
+        Assert.Equal(5, IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// C-B - the identity test is an ORDINAL string comparison against the literal <c>"yes"</c>
+    /// [<c>:L220</c>], so a differently cased or non-boolean answer fails it and the column is
+    /// skipped. Widening this would change the candidate set and so could change which column wins.
+    /// </summary>
+    [Theory]
+    [InlineData("Yes")]
+    [InlineData("YES")]
+    [InlineData("no")]
+    [InlineData("!")]
+    [InlineData("?")]
+    [InlineData("")]
+    [InlineData("true")]
+    public void DiscoveryAcceptsOnlyTheExactLowerCaseYesLiteral(string answer)
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+        source.IdentityAnswers[IdentityColumnResolver.DescribeIdentityProperty(2)] = answer;
+        source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(2)] = "COMPANY.id";
+
+        Assert.Equal(
+            IdentityColumnResolver.NoIdentityColumn,
+            IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// A column count of zero - which is what the <c>Long()</c> coercion answers for a failed
+    /// describe - makes the scan visit nothing, matching <c>for nIndex = 1 to 0</c> [<c>:L219</c>].
+    /// </summary>
+    [Fact]
+    public void DiscoveryVisitsNothingWhenTheColumnCountIsZero()
+    {
+        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 0 };
+        MarkIdentity(source, 1, "COMPANY.id");
+
+        Assert.Equal(
+            IdentityColumnResolver.NoIdentityColumn,
+            IdentityColumnResolver.DiscoverIdentityColumn(source));
+
+        // The update table and the column count are read [:L217-L218]; no per-column property is.
+        Assert.Equal(
+            [UpdateWhereBuilder.UpdateTableProperty, UpdateWhereBuilder.ColumnCountProperty],
+            source.DescribeReads);
+    }
+
+    /// <summary>
+    /// FIXTURE PARITY, AND THE FINDING THAT MAKES THE FALLBACK ARM THE MEASURED PATH. The sole
+    /// updatable DataWindow in the repository declares <c>update="COMPANY"</c>
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>] and gives its identity column the
+    /// UNQUALIFIED database name <c>id</c> [<c>:L8</c>]. <c>Left("id", 8)</c> is <c>"id"</c>, which
+    /// does not equal <c>"company."</c>, so the prefix arm FAILS on the fixture and column 1 is taken
+    /// by the fallback. The fallback is therefore the exercised path, not a rare branch.
+    /// </summary>
+    [Fact]
+    public void DiscoveryOnTheFixtureTakesColumnOneThroughTheFallbackArm()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        Assert.Equal(1, IdentityColumnResolver.DiscoverIdentityColumn(source));
+
+        // Prove it really was the fallback: the prefix does not match the fixture's database name.
+        string prefix = IdentityColumnResolver.BuildColumnDbNamePrefix(FixtureTable);
+        Assert.NotEqual(
+            prefix,
+            IdentityColumnResolver.LegacyLeft("id", prefix.Length).ToLowerInvariant());
+    }
+
+    /// <summary>
+    /// R9 - every describe property the scan composes addresses a ONE-BASED ordinal within
+    /// <c>1..count</c>: no <c>#0</c> and no <c>#7</c> for a six-column definition [<c>:L219</c>].
+    /// </summary>
+    [Fact]
+    public void DiscoveryComposesOnlyOneBasedOrdinalsWithinTheColumnCount()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        IdentityColumnResolver.DiscoverIdentityColumn(source);
+
+        List<string> expected =
+        [
+            UpdateWhereBuilder.UpdateTableProperty,
+            UpdateWhereBuilder.ColumnCountProperty,
+        ];
+
+        for (int ordinal = ItemStatusMachine.FirstColumnNumber;
+            ordinal <= FixtureColumns.Length;
+            ordinal++)
+        {
+            expected.Add(IdentityColumnResolver.DescribeIdentityProperty(ordinal));
+
+            // Only the marked column reaches the database-name read; the others short-circuit.
+            if (ordinal == 1)
+            {
+                expected.Add(IdentityColumnResolver.DescribeDbNameProperty(ordinal));
+            }
+        }
+
+        Assert.Equal(expected, source.DescribeReads);
+        Assert.DoesNotContain("#0.Identity", source.DescribeReads);
+        Assert.DoesNotContain("#7.Identity", source.DescribeReads);
+    }
+
+    #endregion
+
+    #region Collection direction - the headline regression guards
+
+    /// <summary>
+    /// The Primary buffer is collected ASCENDING [<c>:L228-L233</c>], so the resulting sequence is in
+    /// increasing row order.
+    /// </summary>
+    [Fact]
+    public void PrimaryValuesAreCollectedInAscendingRowOrder()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        // Rows 1..4, of which 1, 3 and 4 are NewModified! and row 2 is not.
+        source.PrimaryRows.AddRange(
+        [
+            NewRow(101L),
+            new FakeIdentityRow(ItemStatus.DataModified, 999L),
+            NewRow(103L),
+            NewRow(104L),
+        ]);
+
+        IReadOnlyList<long?> collected = IdentityColumnResolver.CollectPrimaryValues(source, 1);
+
+        Assert.Equal<long?>([101L, 103L, 104L], collected);
+    }
+
+    /// <summary>
+    /// ★★ THE SINGLE MOST IMPORTANT TEST IN THIS FILE. The Filter buffer is collected DESCENDING
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L237</c>], because the
+    /// buffer's row order is INVERTED relative to the data source that produced the changeset - which
+    /// the oracle states in its own comment one line above, at [<c>:L235</c>].
+    /// </summary>
+    /// <remarks>
+    /// WHY THIS ASSERTS THE ORDER AND NOT THE COUNT, AND WHY IT MUST STAY THAT WAY. Reversing the
+    /// subject's loop would return the SAME THREE VALUES and therefore the SAME COUNT, while pairing
+    /// every one of them with the wrong row once the write-back applies them forward. A count
+    /// assertion, a set comparison or an <c>OrderBy</c> anywhere in this test would silently accept
+    /// that regression. If a future edit makes this test fail, the correct response is to restore the
+    /// descending loop, NOT to relax the assertion.
+    /// </remarks>
+    [Fact]
+    public void FilterValuesAreCollectedInDescendingRowOrder()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        // Rows 1..5 of the Filter buffer; rows 2, 3 and 5 qualify. Values are deliberately chosen so
+        // that the value encodes its own row number: row n holds 200 + n.
+        source.FilterRows.AddRange(
+        [
+            new FakeIdentityRow(ItemStatus.NotModified, 201L),
+            NewRow(202L),
+            NewRow(203L),
+            new FakeIdentityRow(ItemStatus.DataModified, 204L),
+            NewRow(205L),
+        ]);
+
+        IReadOnlyList<long?> collected = IdentityColumnResolver.CollectFilterValues(source, 1);
+
+        // DESCENDING: row 5 first, then row 3, then row 2.
+        Assert.Equal<long?>([205L, 203L, 202L], collected);
+
+        // And the rows really were visited high to low, which is the property the values alone could
+        // not prove if two rows happened to share a value.
+        Assert.Equal(
+            [5L, 4L, 3L, 2L, 1L],
+            source.StatusReads.Where(read => read.Buffer == DwBuffer.Filter)
+                .Select(read => read.Row));
+    }
+
+    /// <summary>
+    /// ★★ THE ROUND-TRIP PROOF: COLLECT BACKWARD + APPLY FORWARD PUTS EVERY VALUE ON THE ROW THE
+    /// ORACLE WOULD HAVE PUT IT ON, and reversing the collection corrupts the assignment while
+    /// leaving the count untouched.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The applier stub below is the shape of the write-back half
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlupdate.sru:L151-L165</c>]: it
+    /// walks the Filter buffer's qualifying rows ASCENDING, consuming the collected list from its
+    /// first element onward. It is a stub on purpose - the real applier belongs to
+    /// <c>Tasks/TaskProxies/</c> - and it exists here only to close the argument that the backward
+    /// collection is correct.
+    /// </para>
+    /// <para>
+    /// The second half of the test is the negative control. It feeds the REVERSED collection through
+    /// the same forward applier and asserts that the number of assignments is IDENTICAL while the
+    /// pairing is wrong. That is the concrete demonstration of why a row-count assertion cannot catch
+    /// this defect, and it is why the positive assertion above compares sequences.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void BackwardCollectionRoundTripsThroughAForwardApplier()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        // The data source that produced the changeset held its filtered rows in the opposite order,
+        // so the row that is LAST here is the one whose identity belongs FIRST on the far side.
+        source.FilterRows.AddRange([NewRow(301L), NewRow(302L), NewRow(303L)]);
+
+        IReadOnlyList<long?> collected = IdentityColumnResolver.CollectFilterValues(source, 1);
+        Assert.Equal<long?>([303L, 302L, 301L], collected);
+
+        Dictionary<long, long?> applied = ApplyForward(source.FilterRows, collected);
+
+        // Row 1 receives the FIRST collected element, which came from row 3, and so on. Every value
+        // lands on the row the inversion says it belongs to.
+        Assert.Equal<long?>(303L, applied[1L]);
+        Assert.Equal<long?>(302L, applied[2L]);
+        Assert.Equal<long?>(301L, applied[3L]);
+
+        // NEGATIVE CONTROL: the same count, an entirely wrong pairing.
+        IReadOnlyList<long?> reversed = [.. collected.Reverse()];
+        Dictionary<long, long?> misapplied = ApplyForward(source.FilterRows, reversed);
+
+        Assert.Equal(applied.Count, misapplied.Count);
+        Assert.NotEqual(applied[1L], misapplied[1L]);
+        Assert.NotEqual(applied[3L], misapplied[3L]);
+    }
+
+    /// <summary>
+    /// The write-back half's traversal shape, reduced to what this argument needs: visit the
+    /// qualifying rows ASCENDING and consume the collected values in order.
+    /// </summary>
+    private static Dictionary<long, long?> ApplyForward(
+        List<FakeIdentityRow> rows,
+        IReadOnlyList<long?> values)
+    {
+        Dictionary<long, long?> applied = [];
+        int next = 0;
+
+        for (long row = ItemStatusMachine.FirstRowNumber; row <= rows.Count; row++)
+        {
+            if (!ItemStatusMachine.IsNewRow(rows[(int)(row - ItemStatusMachine.FirstRowNumber)].Status))
+            {
+                continue;
+            }
+
+            // `if i > n then exit` [n_cst_threading_task_sqlupdate.sru:L158] - more qualifying rows
+            // than collected values bails out rather than indexing past the end.
+            if (next >= values.Count)
+            {
+                break;
+            }
+
+            applied[row] = values[next];
+            next++;
+        }
+
+        return applied;
+    }
+
+    #endregion
+
+    #region The three asymmetries - arity, buffer and count
+
+    /// <summary>
+    /// C-B - asymmetry 2 of 3. Primary values are read through the TWO-ARGUMENT accessor
+    /// [<c>:L231</c>] and Filter values through the FOUR-ARGUMENT one naming
+    /// <see cref="DwBuffer.Filter"/> and the original-value flag <see langword="false"/>
+    /// [<c>:L239</c>]. Proven through the recording fake, because the two overloads are the only
+    /// evidence a consumer has of which form the port issues.
+    /// </summary>
+    [Fact]
+    public void PrimaryUsesTheTwoArgumentAccessorAndFilterUsesTheFourArgumentOne()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 2;
+        source.PrimaryRows.AddRange([NewRow(401L), NewRow(402L)]);
+        source.FilterRows.AddRange([NewRow(501L)]);
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
+
+        Assert.NotNull(outcome.Identity);
+
+        // Exactly two short-form reads, both naming the discovered one-based column and no buffer.
+        Assert.Equal(
+            [new TwoArgumentValueRead(1L, 1), new TwoArgumentValueRead(2L, 1)],
+            source.TwoArgumentValueReads);
+
+        // Exactly one long-form read, naming Filter and the CURRENT value.
+        FourArgumentValueRead filterRead = Assert.Single(source.FourArgumentValueReads);
+        Assert.Equal(new FourArgumentValueRead(1L, 1, DwBuffer.Filter, false), filterRead);
+    }
+
+    /// <summary>
+    /// C-B - asymmetry 3 of 3. The Filter scan is bounded by the FILTERED count and the Primary scan
+    /// by the ROW count [<c>:L228</c> then <c>:L236</c>], and each reads only its own buffer's status
+    /// [<c>:L230</c>, <c>:L238</c>]. Buffers of different sizes prove the two bounds are not shared.
+    /// </summary>
+    [Fact]
+    public void EachScanIsBoundedByItsOwnBufferCountAndReadsOnlyItsOwnBuffer()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 1;
+        source.PrimaryRows.AddRange([NewRow(1L), NewRow(2L)]);
+        source.FilterRows.AddRange([NewRow(3L), NewRow(4L), NewRow(5L), NewRow(6L)]);
+
+        IdentityColumnResolver.Resolve(source, source);
+
+        Assert.Equal(
+            [1L, 2L],
+            source.StatusReads.Where(read => read.Buffer == DwBuffer.Primary)
+                .Select(read => read.Row));
+
+        Assert.Equal(
+            [4L, 3L, 2L, 1L],
+            source.StatusReads.Where(read => read.Buffer == DwBuffer.Filter)
+                .Select(read => read.Row));
+
+        // No third buffer is ever touched: Delete! plays no part in the identity round trip.
+        Assert.DoesNotContain(DwBuffer.Delete, source.StatusReads.Select(read => read.Buffer));
+    }
+
+    #endregion
+
+    #region The column-zero row-status guard
+
+    /// <summary>
+    /// C-B - both scans select rows by the ROW's own status, addressed at column index zero
+    /// [<c>:L230</c>, <c>:L238</c>], and the equality is against <c>NewModified!</c> ALONE, so
+    /// <see cref="ItemStatus.New"/>, <see cref="ItemStatus.DataModified"/> and
+    /// <see cref="ItemStatus.NotModified"/> rows are all excluded from both buffers.
+    /// </summary>
+    [Fact]
+    public void OnlyNewModifiedRowsAreCollectedFromEitherBuffer()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        source.PrimaryRows.AddRange(
+        [
+            new FakeIdentityRow(ItemStatus.NotModified, 11L),
+            new FakeIdentityRow(ItemStatus.DataModified, 12L),
+            new FakeIdentityRow(ItemStatus.New, 13L),
+            NewRow(14L),
+        ]);
+        source.FilterRows.AddRange(
+        [
+            new FakeIdentityRow(ItemStatus.New, 21L),
+            new FakeIdentityRow(ItemStatus.NotModified, 22L),
+        ]);
+
+        Assert.Equal<long?>([14L], IdentityColumnResolver.CollectPrimaryValues(source, 1));
+        Assert.Empty(IdentityColumnResolver.CollectFilterValues(source, 1));
+    }
+
+    /// <summary>
+    /// EVERY status read addresses the ROW rather than a column, and NO BARE ZERO is handed to a
+    /// column-status accessor: each recorded index satisfies
+    /// <see cref="ItemStatusMachine.AddressesRowStatus"/> and equals the named sentinel
+    /// <see cref="ItemStatusMachine.RowStatusColumn"/>.
+    /// </summary>
+    [Fact]
+    public void EveryStatusReadAddressesTheRowThroughTheNamedSentinel()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 3;
+        source.PrimaryRows.AddRange([NewRow(1L), NewRow(2L)]);
+        source.FilterRows.AddRange([NewRow(3L)]);
+
+        IdentityColumnResolver.Resolve(source, source);
+
+        Assert.NotEmpty(source.StatusReads);
+        Assert.All(
+            source.StatusReads,
+            read =>
+            {
+                Assert.Equal(ItemStatusMachine.RowStatusColumn, read.ColumnIndex);
+                Assert.True(ItemStatusMachine.AddressesRowStatus(read.ColumnIndex));
+                Assert.False(ItemStatusMachine.TryGetColumnNumber(read.ColumnIndex, out _));
+            });
+    }
+
+    #endregion
+
+    #region The three conditional levels
+
+    /// <summary>
+    /// LEVEL 1 - an inserted count of zero short-circuits the ENTIRE identity block
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L215</c>]: no describe is
+    /// issued, no status is read, no value is read, and no payload is produced - YET THE COUNTS ARE
+    /// STILL REPORTED [<c>:L247</c>].
+    /// </summary>
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    public void AZeroInsertedCountSkipsDiscoveryAndCollectionButStillReportsCounts(long inserted)
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = inserted;
+        source.UpdatedCount = 7L;
+        source.DeletedCount = 3L;
+        source.PrimaryRows.AddRange([NewRow(1L)]);
+        source.FilterRows.AddRange([NewRow(2L)]);
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
+
+        Assert.Null(outcome.Identity);
+        Assert.Empty(source.DescribeReads);
+        Assert.Empty(source.StatusReads);
+        Assert.Empty(source.TwoArgumentValueReads);
+        Assert.Empty(source.FourArgumentValueReads);
+
+        Assert.Equal(new UpdateRowCounts(inserted, 7L, 3L), outcome.Counts);
+    }
+
+    /// <summary>
+    /// LEVEL 2 - rows were inserted but NO identity column exists [<c>:L226</c>], so discovery runs
+    /// and collection does not. The counts are still reported.
+    /// </summary>
+    [Fact]
+    public void AMissingIdentityColumnSkipsCollectionButStillReportsCounts()
+    {
+        RecordingIdentitySource source = new()
+        {
+            UpdateTable = FixtureTable,
+            ColumnCount = 6,
+            InsertedCount = 4L,
+            UpdatedCount = 1L,
+            DeletedCount = 2L,
+        };
+        source.PrimaryRows.AddRange([NewRow(1L)]);
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
+
+        Assert.Null(outcome.Identity);
+        Assert.NotEmpty(source.DescribeReads);
+        Assert.Empty(source.StatusReads);
+        Assert.Equal(new UpdateRowCounts(4L, 1L, 2L), outcome.Counts);
+    }
+
+    /// <summary>
+    /// C-B - the inserted count is read TWICE, once for the precondition [<c>:L215</c>] and once for
+    /// the counts triple [<c>:L247</c>], and it is deliberately not hoisted into a single read.
+    /// </summary>
+    [Fact]
+    public void TheInsertedCountIsReadTwicePerResolve()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 1L;
+        source.PrimaryRows.AddRange([NewRow(1L)]);
+
+        IdentityColumnResolver.Resolve(source, source);
+
+        Assert.Equal(2, source.InsertedCountReads);
+    }
+
+    #endregion
+
+    #region The emit guard
+
+    /// <summary>
+    /// LEVEL 3 - both arrays empty emits NOTHING AT ALL [<c>:L242-L244</c>]. No empty payload is
+    /// synthesised, because the oracle's guard is on the CALL rather than on the contents.
+    /// </summary>
+    [Fact]
+    public void BothArraysEmptyEmitsNothing()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 2L;
+        source.PrimaryRows.AddRange([new FakeIdentityRow(ItemStatus.DataModified, 1L)]);
+        source.FilterRows.AddRange([new FakeIdentityRow(ItemStatus.NotModified, 2L)]);
+
+        Assert.Null(IdentityColumnResolver.CollectIdentityData(source, 1));
+        Assert.Null(IdentityColumnResolver.Resolve(source, source).Identity);
+    }
+
+    /// <summary>
+    /// The guard is an <c>OR</c>, so ONE non-empty array is enough - and the other travels EMPTY,
+    /// neither null-collapsed nor merged into the first [<c>:L242</c>].
+    /// </summary>
+    [Fact]
+    public void APrimaryOnlyPayloadIsEmittedWithAnEmptyFilterArray()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.PrimaryRows.AddRange([NewRow(601L), NewRow(602L)]);
+
+        ResolvedIdentityColumnData? payload = IdentityColumnResolver.CollectIdentityData(source, 1);
+
+        Assert.NotNull(payload);
+        Assert.Equal<long?>([601L, 602L], payload.PrimaryValues);
+        Assert.NotNull(payload.FilterValues);
+        Assert.Empty(payload.FilterValues);
+    }
+
+    /// <summary>
+    /// The mirror case: everything inserted was filtered out, so the Primary array is empty and the
+    /// Filter array carries the whole payload - still emitted, still separate [<c>:L242</c>].
+    /// </summary>
+    [Fact]
+    public void AFilterOnlyPayloadIsEmittedWithAnEmptyPrimaryArray()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.FilterRows.AddRange([NewRow(701L), NewRow(702L)]);
+
+        ResolvedIdentityColumnData? payload = IdentityColumnResolver.CollectIdentityData(source, 1);
+
+        Assert.NotNull(payload);
+        Assert.NotNull(payload.PrimaryValues);
+        Assert.Empty(payload.PrimaryValues);
+
+        // Still DESCENDING, even when it is the only array present.
+        Assert.Equal<long?>([702L, 701L], payload.FilterValues);
+    }
+
+    /// <summary>
+    /// Collection is attempted on BOTH buffers before the guard is evaluated, in the oracle's own
+    /// order - Primary [<c>:L228-L233</c>] then Filter [<c>:L234-L241</c>].
+    /// </summary>
+    [Fact]
+    public void BothBuffersAreScannedBeforeTheGuardIsEvaluated()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.PrimaryRows.AddRange([new FakeIdentityRow(ItemStatus.NotModified, 1L)]);
+        source.FilterRows.AddRange([new FakeIdentityRow(ItemStatus.NotModified, 2L)]);
+
+        Assert.Null(IdentityColumnResolver.CollectIdentityData(source, 1));
+
+        Assert.Equal(
+            [DwBuffer.Primary, DwBuffer.Filter],
+            source.StatusReads.Select(read => read.Buffer));
+    }
+
+    /// <summary>
+    /// Reaching the collector with no discovered column is a caller fault, not a quiet null: the
+    /// oracle gates on the ordinal BEFORE collecting [<c>:L226</c>], so a structural fault fails fast.
+    /// </summary>
+    [Theory]
+    [InlineData(IdentityColumnResolver.NoIdentityColumn)]
+    [InlineData(-1)]
+    public void CollectionRejectsANonColumnOrdinal(int ordinal)
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => IdentityColumnResolver.CollectIdentityData(source, ordinal));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => IdentityColumnResolver.CollectPrimaryValues(source, ordinal));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => IdentityColumnResolver.CollectFilterValues(source, ordinal));
+    }
+
+    #endregion
+
+    #region The counts triple
+
+    /// <summary>
+    /// C-B - the triple reports the carrier's three getters UNMODIFIED and is NOT accumulated here:
+    /// resolving twice reports the same values rather than doubled ones, because accumulation across
+    /// firings belongs to the caller-side handler's <c>+=</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlupdate.sru:L66-L68</c>].
+    /// </summary>
+    [Fact]
+    public void CountsAreReportedPerInvocationAndNeverAccumulated()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 5L;
+        source.UpdatedCount = 11L;
+        source.DeletedCount = 2L;
+        source.PrimaryRows.AddRange([NewRow(1L)]);
+
+        UpdateRowCounts first = IdentityColumnResolver.Resolve(source, source).Counts;
+        UpdateRowCounts second = IdentityColumnResolver.Resolve(source, source).Counts;
+
+        Assert.Equal(new UpdateRowCounts(5L, 11L, 2L), first);
+        Assert.Equal(first, second);
+    }
+
+    /// <summary>
+    /// The triple's member ORDER is the oracle's argument order - inserted, updated, deleted
+    /// [<c>:L247</c>] - which a positional deconstruction proves.
+    /// </summary>
+    [Fact]
+    public void CountsPreserveTheOraclesArgumentOrder()
+    {
+        RecordingIdentitySource source = new() { InsertedCount = 1L, UpdatedCount = 2L, DeletedCount = 3L };
+
+        (long inserted, long updated, long deleted) = IdentityColumnResolver.ReadCounts(source);
+
+        Assert.Equal(1L, inserted);
+        Assert.Equal(2L, updated);
+        Assert.Equal(3L, deleted);
+    }
+
+    #endregion
+
+    #region R9 - the one-based audit
+
+    /// <summary>
+    /// R9 - a single row in each buffer is addressed as row 1 in BOTH directions: never row 0 and
+    /// never row 2. The fake throws on either, so the assertion is that this does not throw plus the
+    /// exact recorded row numbers.
+    /// </summary>
+    [Fact]
+    public void ASingleRowIsAddressedAsRowOneInBothDirections()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 1L;
+        source.PrimaryRows.AddRange([NewRow(11L)]);
+        source.FilterRows.AddRange([NewRow(22L)]);
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
+
+        Assert.NotNull(outcome.Identity);
+        Assert.Equal<long?>([11L], outcome.Identity.PrimaryValues);
+        Assert.Equal<long?>([22L], outcome.Identity.FilterValues);
+        Assert.All(source.StatusReads, read => Assert.Equal(1L, read.Row));
+    }
+
+    /// <summary>
+    /// R9 - six rows in each buffer produce row numbers strictly inside <c>1..6</c> in both
+    /// directions, and the two sequences are exact reverses of one another. Six because the sole
+    /// evidenced fixture has six columns [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L21-L26</c>],
+    /// which makes it the natural width for this audit.
+    /// </summary>
+    [Fact]
+    public void SixRowsProduceOneBasedIndicesInsideTheCountInBothDirections()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.InsertedCount = 6L;
+
+        for (long value = 1L; value <= 6L; value++)
+        {
+            source.PrimaryRows.Add(NewRow(value));
+            source.FilterRows.Add(NewRow(100L + value));
+        }
+
+        IdentityColumnResolver.Resolve(source, source);
+
+        long[] primaryRows =
+            [.. source.StatusReads.Where(read => read.Buffer == DwBuffer.Primary).Select(read => read.Row)];
+        long[] filterRows =
+            [.. source.StatusReads.Where(read => read.Buffer == DwBuffer.Filter).Select(read => read.Row)];
+
+        Assert.Equal([1L, 2L, 3L, 4L, 5L, 6L], primaryRows);
+        Assert.Equal([6L, 5L, 4L, 3L, 2L, 1L], filterRows);
+
+        // Neither 0 nor count + 1 is ever touched, in either direction.
+        Assert.All(
+            primaryRows.Concat(filterRows),
+            row => Assert.InRange(row, ItemStatusMachine.FirstRowNumber, 6L));
+    }
+
+    /// <summary>
+    /// R9 - an empty buffer visits nothing in either direction, matching <c>for nIndex = 1 to 0</c>
+    /// and <c>for nIndex = 0 to 1 step -1</c>, both of which PowerScript executes zero times.
+    /// </summary>
+    [Fact]
+    public void EmptyBuffersVisitNothingInEitherDirection()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        Assert.Empty(IdentityColumnResolver.CollectPrimaryValues(source, 1));
+        Assert.Empty(IdentityColumnResolver.CollectFilterValues(source, 1));
+        Assert.Empty(source.StatusReads);
+    }
+
+    #endregion
+
+    #region The payload shape, and null preservation
+
+    /// <summary>
+    /// The payload's three members are in the oracle's <c>IdColData</c> field order - id, Primary,
+    /// Filter [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlupdate.sru:L10-L14</c>] -
+    /// which a positional deconstruction proves, and the id is the ONE-BASED column ordinal.
+    /// </summary>
+    [Fact]
+    public void ThePayloadPreservesTheOraclesFieldOrderAndTheOneBasedColumnId()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        MarkIdentity(source, 4, "COMPANY.id");
+        source.InsertedCount = 1L;
+        source.PrimaryRows.AddRange([NewRow(801L)]);
+        source.FilterRows.AddRange([NewRow(901L), NewRow(902L)]);
+
+        ResolvedIdentityColumnData payload =
+            Assert.IsType<ResolvedIdentityColumnData>(
+                IdentityColumnResolver.Resolve(source, source).Identity);
+
+        (long id, IReadOnlyList<long?> primary, IReadOnlyList<long?> filter) = payload;
+
+        Assert.Equal(4L, id);
+        Assert.Equal<long?>([801L], primary);
+        Assert.Equal<long?>([902L, 901L], filter);
+
+        // The id is the ONE-BASED describe ordinal, so it addresses a real column.
+        Assert.InRange(id, ItemStatusMachine.FirstColumnNumber, FixtureColumns.Length);
+    }
+
+    /// <summary>
+    /// C-B - a null numeric value is PRESERVED, not coerced to zero, so that a null cannot be
+    /// confused with a legitimate identity value of zero. The condition is reported by
+    /// <see cref="ResolvedIdentityColumnData.ContainsNullValue"/> rather than resolved here, because
+    /// choosing a wire encoding is the boundary's decision.
+    /// </summary>
+    [Fact]
+    public void NullNumericValuesArePreservedAndReported()
+    {
+        RecordingIdentitySource source = FixtureSource();
+        source.PrimaryRows.AddRange([NewRow(0L), NewRow(null)]);
+
+        ResolvedIdentityColumnData payload =
+            Assert.IsType<ResolvedIdentityColumnData>(
+                IdentityColumnResolver.CollectIdentityData(source, 1));
+
+        // Zero and null are DISTINCT, which is exactly what coercion would have destroyed.
+        Assert.Equal<long?>([0L, null], payload.PrimaryValues);
+        Assert.True(payload.ContainsNullValue);
+    }
+
+    /// <summary>
+    /// A null in the FILTER array is reported too, and a payload with no null anywhere reports false.
+    /// </summary>
+    [Fact]
+    public void ContainsNullValueInspectsBothArrays()
+    {
+        RecordingIdentitySource withFilterNull = FixtureSource();
+        withFilterNull.PrimaryRows.AddRange([NewRow(1L)]);
+        withFilterNull.FilterRows.AddRange([NewRow(null)]);
+
+        ResolvedIdentityColumnData? flagged =
+            IdentityColumnResolver.CollectIdentityData(withFilterNull, 1);
+        Assert.NotNull(flagged);
+        Assert.True(flagged.ContainsNullValue);
+
+        RecordingIdentitySource withoutNull = FixtureSource();
+        withoutNull.PrimaryRows.AddRange([NewRow(1L)]);
+        withoutNull.FilterRows.AddRange([NewRow(2L)]);
+
+        ResolvedIdentityColumnData? clean =
+            IdentityColumnResolver.CollectIdentityData(withoutNull, 1);
+        Assert.NotNull(clean);
+        Assert.False(clean.ContainsNullValue);
+    }
+
+    #endregion
+
+    #region The describe vocabulary and the PowerScript Left() accommodation
+
+    /// <summary>
+    /// The two describe properties are composed exactly as the oracle composes them,
+    /// <c>"#" + String(ordinal) + ".Identity"</c> [<c>:L220</c>] and <c>... + ".DBName"</c>
+    /// [<c>:L221</c>], with the ordinal passed through UNCHANGED because the describe vocabulary is
+    /// itself one-based.
+    /// </summary>
+    [Theory]
+    [InlineData(1, "#1.Identity", "#1.DBName")]
+    [InlineData(6, "#6.Identity", "#6.DBName")]
+    [InlineData(42, "#42.Identity", "#42.DBName")]
+    public void DescribePropertiesAreComposedFromTheOneBasedOrdinal(
+        int ordinal,
+        string expectedIdentity,
+        string expectedDbName)
+    {
+        Assert.Equal(expectedIdentity, IdentityColumnResolver.DescribeIdentityProperty(ordinal));
+        Assert.Equal(expectedDbName, IdentityColumnResolver.DescribeDbNameProperty(ordinal));
+    }
+
+    /// <summary>
+    /// R9 - an ordinal below <see cref="ItemStatusMachine.FirstColumnNumber"/> is rejected rather than
+    /// composed, because <c>#0.Identity</c> addresses no column and a zero here almost always means a
+    /// one-based ordinal was rebased.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void DescribePropertyCompositionRejectsANonColumnOrdinal(int ordinal)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => IdentityColumnResolver.DescribeIdentityProperty(ordinal));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => IdentityColumnResolver.DescribeDbNameProperty(ordinal));
+    }
+
+    /// <summary>
+    /// The prefix is <c>Lower(updateTable) + "."</c> [<c>:L217</c>], and an empty table name still
+    /// yields the bare separator rather than an empty string - which is what makes the truncation
+    /// length at least one.
+    /// </summary>
+    [Theory]
+    [InlineData("COMPANY", "company.")]
+    [InlineData("company", "company.")]
+    [InlineData("CoMpAnY", "company.")]
+    [InlineData("dbo.COMPANY", "dbo.company.")]
+    [InlineData("", ".")]
+    public void ThePrefixIsTheLowerCasedTableNameFollowedByADot(string table, string expected)
+    {
+        Assert.Equal(expected, IdentityColumnResolver.BuildColumnDbNamePrefix(table));
+    }
+
+    /// <summary>
+    /// <see cref="IdentityColumnResolver.LegacyLeft"/> reproduces PowerScript <c>Left</c>, including
+    /// the behaviour the oracle actually depends on: A REQUEST LONGER THAN THE STRING ANSWERS THE
+    /// WHOLE STRING rather than throwing, which is the fixture's own happy path -
+    /// <c>Left("id", 8)</c> against the prefix <c>"company."</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("COMPANY.id", 8, "COMPANY.")]
+    [InlineData("id", 8, "id")]
+    [InlineData("id", 2, "id")]
+    [InlineData("id", 1, "i")]
+    [InlineData("id", 0, "")]
+    [InlineData("id", -3, "")]
+    [InlineData("", 8, "")]
+    [InlineData(null, 8, "")]
+    public void LegacyLeftMatchesPowerScriptIncludingTheShortStringCase(
+        string? text,
+        int length,
+        string expected)
+    {
+        Assert.Equal(expected, IdentityColumnResolver.LegacyLeft(text, length));
+    }
+
+    /// <summary>
+    /// The short-string case is not hypothetical: the fixture's unqualified database name is shorter
+    /// than the prefix built from its own update table, so a direct <c>Substring</c> port would throw
+    /// on the measured path.
+    /// </summary>
+    [Fact]
+    public void TheFixtureItselfExercisesTheShortStringCase()
+    {
+        string prefix = IdentityColumnResolver.BuildColumnDbNamePrefix(FixtureTable);
+
+        Assert.True(prefix.Length > "id".Length);
+        Assert.Equal("id", IdentityColumnResolver.LegacyLeft("id", prefix.Length));
+    }
+
+    #endregion
+
+    #region Argument validation - structural faults fail fast
+
+    /// <summary>
+    /// Every entry point rejects a null surface, because a missing injected surface is a structural
+    /// fault in the caller and the plan requires structural faults fail fast rather than degrade.
+    /// </summary>
+    [Fact]
+    public void EveryEntryPointRejectsANullSurface()
+    {
+        RecordingIdentitySource source = FixtureSource();
+
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.DiscoverIdentityColumn(null!));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.CollectPrimaryValues(null!, 1));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.CollectFilterValues(null!, 1));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.CollectIdentityData(null!, 1));
+        Assert.Throws<ArgumentNullException>(() => IdentityColumnResolver.ReadCounts(null!));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.Resolve(null!, source));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.Resolve(source, null!));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.BuildColumnDbNamePrefix(null!));
+    }
+
+    #endregion
+}

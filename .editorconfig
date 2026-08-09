@@ -494,6 +494,27 @@ dotnet_diagnostic.IDE1006.severity = none
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 
+# Preserved verbatim: the row-selection styles RS_SINGLE=1 (单选, "single select") and
+# RS_MULTIPLE=2 (多选, "multiple select"), declared on the row-select service itself rather than in
+# the framework-wide constant catalogue - a search of enums.sru for either name returns nothing, so
+# in the .NET tree they belong to this file and Configuration/DataServicesOptions.cs deliberately
+# spells the default as the numeric literal 1 rather than referencing them.
+# Source: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L20-L21, declared
+# under the comment at :L19 that the style "supports combination", with the default assigned at
+# :L25.
+# These spellings travel in serialized payloads, log records and characterization recordings, so a
+# rename would silently invalidate every stored comparison. THE COMBINATION IS NOT A BITMASK AT THE
+# POINT OF USE, and suppressing the naming diagnostic here must not be read as licence to tidy that
+# away: every one of the seven consumption sites is an equality or inequality (:L45, :L49, :L52,
+# :L92, :L106, :L175, :L277) and not one is a bit test, so RS_SINGLE + RS_MULTIPLE equals neither
+# constant and reaches a THIRD behavioural path - which is the value the oracle's own fixture sets
+# at ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw. The three broker topic constants in
+# the same file are private, and CA1707 reports externally-visible declarations only, so they need
+# nothing further.
+[services/dataservices-service/PowerFramework.DataServices/Services/RowSelectService.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
 # Preserved verbatim: the SQL clause-modification styles SQL_MS_REPLACE=1, SQL_MS_APPEND=2 and
 # SQL_MS_PREPEND=3, together with the validation that a zero index or an empty clause yields
 # E_INVALID_ARGUMENT. The style value is carried on the query contract.

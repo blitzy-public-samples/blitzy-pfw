@@ -934,6 +934,93 @@ public abstract class DataWindowServiceHost
     /// </remarks>
     public abstract int SetRedraw(bool enable);
 
+    // ==========================================================================================
+    //  ROW SELECTION - ROW STATE, NOT RENDERING
+    //  ----------------------------------------------------------------------------------------
+    //  ADDED AS A MEASURED EXTENSION OF THE CONSUMED SURFACE, NOT AS A GUESS. The census in the
+    //  file header was taken over se_cst_dw.sru and n_cst_dwsvc.sru only, and neither touches row
+    //  selection at all. The third in-scope source does:
+    //  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru calls
+    //  `#DataWindow.SelectRow` at :L51 :L53 :L63 :L66 :L71 :L78 :L80 :L90 :L93 :L103 :L107 :L174
+    //  :L176 :L278 and :L282, `#DataWindow.IsSelected` at :L80 and :L193, and
+    //  `#DataWindow.GetSelectedRow` at :L224. AAP 0.4.2.5's criterion is consumption, and these
+    //  three are consumed.
+    //
+    //  WHY THEY BELONG HERE AND NOT BEHIND THE DEFERRED /v1/design/** ROUTE. Selection is a
+    //  ROW-STATE FLAG that the data model carries, exactly like an item status: it decides which
+    //  rows a subsequent operation applies to, and n_cst_dwsvc_rowselect.sru:L224 iterates it to
+    //  PROPAGATE A DATA CHANGE across the selection. Highlighting a selected row is a rendering
+    //  consequence of the flag, not the flag itself. No member below carries geometry, colour,
+    //  font, DPI or a window handle, so constraint C-D is not engaged - which is also why AAP
+    //  0.2.1.3 Correction 4 measured RowSelect as having exactly ONE presentational reference, and
+    //  that one is a dialog rather than anything here.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Selects or deselects a row - the port of <c>SelectRow(row, select)</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L51</c> and fourteen further sites).
+    /// </summary>
+    /// <param name="row">
+    /// The one-based row number, or <c>0</c> TO MEAN EVERY ROW. The zero form is load-bearing rather
+    /// than incidental: <c>SelectRow(0,false)</c> is the legacy's clear-the-whole-selection idiom and
+    /// appears at <c>:L51</c>, <c>:L63</c>, <c>:L90</c>, <c>:L103</c>, <c>:L174</c> and <c>:L282</c>.
+    /// An implementation that treated <c>0</c> as out of range would leave every one of those six
+    /// sites doing nothing, and nothing would report it.
+    /// </param>
+    /// <param name="select"><see langword="true"/> to select, <see langword="false"/> to deselect.</param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    /// <remarks>
+    /// Returns the raw legacy integer and is NOT mapped onto <c>RetCode</c>, for the same reason
+    /// <see cref="SetRow(long)"/> is not: success here is <c>1</c> while <c>RetCode.OK</c> is
+    /// <c>0</c>. Every ported call site DISCARDS this value, exactly as the oracle does, so the code
+    /// exists on the contract for fidelity rather than for branching.
+    /// </remarks>
+    public abstract int SelectRow(long row, bool select);
+
+    /// <summary>
+    /// Whether a row is currently selected - the port of <c>IsSelected(row)</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L80</c>, <c>:L193</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <returns><see langword="true"/> when the row is selected.</returns>
+    /// <remarks>
+    /// Both uses are decisions rather than reports. <c>:L80</c> TOGGLES with
+    /// <c>SelectRow(row, Not IsSelected(row))</c>, so the answer must reflect writes made through
+    /// <see cref="SelectRow(long, bool)"/> in the same instant; and <c>:L193</c> is one of the eight
+    /// guards that decide whether a range check-box propagation runs at all.
+    /// </remarks>
+    public abstract bool IsSelected(long row);
+
+    /// <summary>
+    /// Finds the next selected row at or after a starting point - the port of
+    /// <c>GetSelectedRow(startRow)</c> (<c>n_cst_dwsvc_rowselect.sru:L224</c>).
+    /// </summary>
+    /// <param name="startRow">
+    /// The row to search AFTER, one-based, or <c>0</c> to start from the beginning. The legacy
+    /// iterates by feeding its own previous answer back in, starting from an uninitialised
+    /// <c>long</c> - which in PowerScript is <c>0</c>.
+    /// </param>
+    /// <returns>
+    /// The one-based number of the next selected row, or <c>0</c> when there is none. THE ZERO
+    /// TERMINATES THE LOOP: <c>:L225</c> is <c>if nRow &lt;= 0 then exit</c>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// SEARCHES STRICTLY AFTER <paramref name="startRow"/>, NOT AT IT. This is the whole reason the
+    /// legacy loop terminates: it assigns the answer back into the same variable it passes in
+    /// [<c>:L224</c>], so an implementation that could return <paramref name="startRow"/> itself
+    /// would spin on the first selected row for ever. The behaviour is asserted rather than assumed
+    /// because it is invisible at the call site.
+    /// </para>
+    /// <para>
+    /// Row numbers cross this member in the legacy's one-based numbering and are never rebased. AAP
+    /// 0.4.5.4 names one-based to zero-based translation the single most dangerous mechanical hazard
+    /// in this refactor, and this member - a loop cursor that is both an input and an output - is the
+    /// one most likely to be rebased by accident.
+    /// </para>
+    /// </remarks>
+    public abstract long GetSelectedRow(long startRow);
+
     /// <summary>
     /// The object currently holding input focus - the port of the PowerScript system function
     /// <c>GetFocus()</c> as used at <c>se_cst_dw.sru:L553</c>.
@@ -1132,6 +1219,136 @@ public abstract class DataWindowServiceHost
     /// column.
     /// </remarks>
     public abstract int SetItem(long row, long columnId, object? value);
+
+    // ==========================================================================================
+    //  NAME-KEYED ITEM ACCESS - THE THIRD SOURCE'S OWN CALLING CONVENTION
+    //  ----------------------------------------------------------------------------------------
+    //  A SECOND MEASURED EXTENSION, AND IT CORRECTS A STATEMENT IN THE HEADER. DECISION 2 records
+    //  that "there is not one `#DataWindow.GetItem*` call anywhere in either source", and that is
+    //  still true OF THE TWO SOURCES IT WAS MEASURED OVER. The third in-scope source contradicts
+    //  it: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru reads
+    //  `#DataWindow.GetItemDecimal` at :L205 and :L232, `#DataWindow.GetItemNumber` at :L211 and
+    //  :L234, and `#DataWindow.GetItemString` at :L217 and :L236, and writes
+    //  `#DataWindow.SetItem` at :L248, :L250 and :L252. All nine are ON THE HOST, not on a
+    //  datawindowchild, and all nine address the column BY NAME rather than by id.
+    //
+    //  WHY BY NAME AND NOT BY ID. The name is what the oracle has in hand: :L188 takes
+    //  `sColName = dwo.Name` once and then threads that string through every read and write. Making
+    //  these members id-keyed would force a name-to-id resolution the legacy never performs, at nine
+    //  sites, each of which could fail differently - so the contract takes the string the oracle
+    //  takes. The id-keyed SetItem overloads above are NOT duplicates of these: they serve
+    //  se_cst_dw's coercion table, which genuinely holds `Long(dwo.ID)` [se_cst_dw.sru:L233-L243].
+    //  Both calling conventions exist in the legacy and both are therefore carried.
+    //
+    //  ONLY THE THREE TYPES ACTUALLY CONSUMED. The reads are decimal, number and string; the writes
+    //  are decimal, long and string. No date, datetime or time member appears here, because
+    //  n_cst_dwsvc_rowselect.sru's three-arm type switch [:L203-L222, :L230-L237, :L246-L253] has
+    //  exactly three arms - COL_TYPE_DECIMAL, COL_TYPE_INTEGER and a default that reads text - and
+    //  adding the other three would fabricate surface no ported call site reaches.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Reads a <c>string</c>-typed item by column NAME - the port of
+    /// <c>#DataWindow.GetItemString(row, colName)</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L217</c>, <c>:L236</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name, as taken from <see cref="IDataWindowObject.Name"/>.</param>
+    /// <returns>The item text, or <see langword="null"/> when the item is null.</returns>
+    /// <remarks>
+    /// NULLABLE BECAUSE THE COMPARISONS THAT CONSUME IT MUST BE ABLE TO SEE A NULL. Both uses are
+    /// equality tests against a check-box on or off string, and a null item is not equal to either -
+    /// so at <c>:L217</c> a null selects the on value and at <c>:L236</c> it does not skip the row.
+    /// Substituting the empty string for a null would make a null item indistinguishable from an
+    /// empty one, and AAP 0.4.5.4 forbids collapsing null in either direction.
+    /// </remarks>
+    public abstract string? GetItemString(long row, string column);
+
+    /// <summary>
+    /// Reads a <c>decimal</c>-typed item by column NAME - the port of
+    /// <c>#DataWindow.GetItemDecimal(row, colName)</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L205</c>, <c>:L232</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <returns>The item value, or <see langword="null"/> when the item is null.</returns>
+    /// <remarks>
+    /// Reached only on the <c>COL_TYPE_DECIMAL</c> arm. Both call sites immediately wrap the result
+    /// in <c>String(...)</c> and compare the TEXT, never the number, so the ported call sites format
+    /// it explicitly rather than relying on any implicit conversion - the formatting is part of the
+    /// observable behaviour and belongs at the call site where the oracle puts it.
+    /// </remarks>
+    public abstract decimal? GetItemDecimal(long row, string column);
+
+    /// <summary>
+    /// Reads a numeric item by column NAME - the port of
+    /// <c>#DataWindow.GetItemNumber(row, colName)</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L211</c>, <c>:L234</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <returns>The item value, or <see langword="null"/> when the item is null.</returns>
+    /// <remarks>
+    /// <para>
+    /// RETURNS <see cref="double"/> AND NOT AN INTEGER, EVEN THOUGH THE ARM THAT REACHES IT IS
+    /// NAMED <c>COL_TYPE_INTEGER</c>. PowerBuilder's <c>GetItemNumber</c> yields a <c>double</c>
+    /// whatever the column's declared width, and the mismatch between the arm's name and the
+    /// function's type is the legacy's own. It matters observably: the value is stringified and
+    /// compared as text at <c>:L211</c> and <c>:L234</c>, so a widening or narrowing here changes
+    /// which comparisons match. This mirrors
+    /// <see cref="IDataWindowChild.GetItemNumber(long, string)"/>, which carries the same note.
+    /// </para>
+    /// <para>
+    /// The corresponding WRITE is <see cref="SetItem(long, string, long?)"/>, because <c>:L250</c>
+    /// writes <c>Long(sVal)</c> - the legacy reads wide and writes narrow on the same arm, and both
+    /// halves are reproduced as they are.
+    /// </para>
+    /// </remarks>
+    public abstract double? GetItemNumber(long row, string column);
+
+    /// <summary>
+    /// Writes a <c>string</c> value into one item by column NAME - the port of
+    /// <c>#DataWindow.SetItem(nRow, sColName, sVal)</c> (<c>n_cst_dwsvc_rowselect.sru:L252</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="value">The value to write, or <see langword="null"/> to write a null item.</param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    /// <remarks>
+    /// The DEFAULT arm of the three-arm write switch, so it serves every column type that is neither
+    /// decimal nor integer - which is why it is reached for a check box over a character column, the
+    /// ordinary case in the primary fixture.
+    /// </remarks>
+    public abstract int SetItem(long row, string column, string? value);
+
+    /// <summary>
+    /// Writes a <c>decimal</c> value into one item by column NAME - the port of
+    /// <c>#DataWindow.SetItem(nRow, sColName, Dec(sVal))</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L248</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="value">
+    /// The value to write, or <see langword="null"/> when the source text did not parse as a number -
+    /// which is what PowerScript's <c>Dec</c> yields for unparseable text, and is therefore a real
+    /// outcome rather than a defensive case.
+    /// </param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    public abstract int SetItem(long row, string column, decimal? value);
+
+    /// <summary>
+    /// Writes an integer value into one item by column NAME - the port of
+    /// <c>#DataWindow.SetItem(nRow, sColName, Long(sVal))</c>
+    /// (<c>n_cst_dwsvc_rowselect.sru:L250</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="value">
+    /// The value to write, or <see langword="null"/> when the source text did not parse - the
+    /// behaviour of PowerScript's <c>Long</c> on unparseable text.
+    /// </param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    public abstract int SetItem(long row, string column, long? value);
 
     /// <summary>
     /// Reads one entry of a column's code table - the port of
@@ -1531,6 +1748,85 @@ public abstract class DataWindowServiceHost
     {
         return 0L;
     }
+
+    // ==========================================================================================
+    //  THE TWO se_cst_dw SEMANTIC EVENTS THAT AN ATTACHED SERVICE RAISES THROUGH #DataWindow
+    //  ----------------------------------------------------------------------------------------
+    //  These are declared BY se_cst_dw itself [se_cst_dw.sru:L24 `event type long ondoitemchange
+    //  (long row, dwobject dwo, string data)` and :L26 `event ondoitemchanged (long row, dwobject
+    //  dwo)`], so the file header's ownership statement correctly assigns the 22-event chain to
+    //  Domain/DataWindowEventChain.cs. EXACTLY TWO OF THE NINE ESCAPE THAT BOUNDARY, and they do so
+    //  because an ATTACHED SERVICE raises them on its host rather than the chain raising them on
+    //  itself: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L238 is
+    //  `#DataWindow.Event OnDoItemChange(nRow,dwo,sVal)` and :L254 is
+    //  `#DataWindow.Event OnDoItemChanged(nRow,dwo)`. A service holds its host through the base's
+    //  DataWindow property, which is typed as THIS contract, so the two must be declared here or
+    //  the ported call sites cannot exist at all.
+    //
+    //  THE OTHER SEVEN ARE DELIBERATELY ABSENT. oninitcontextmenu, oncontextmenu, onddsgetfilter,
+    //  oncolumnexpinvokemethod, onitemchanged, onddsfiltered and oncolumnexptrace [:L11-L14, :L25,
+    //  :L28, :L32] are raised by the CHAIN on itself, never by a service on its host, so none of
+    //  them is consumed through this contract and adding them would fabricate surface (C-B).
+    //  `ondwnchanging` is likewise absent: it is a raw pbm_dwn* handler on the chain [:L21].
+    //
+    //  SIGNATURE-COMPATIBLE WITH Domain/ItemChangeProtocol.cs's IItemChangeEventSink ON PURPOSE.
+    //  That internal interface declares OnDoItemChange and OnDoItemChanged with exactly these
+    //  parameter lists and return types, so Domain/DataWindowEventChain.cs can satisfy it with
+    //  these INHERITED members and there is no second definition to keep in step. A derived chain
+    //  that supplies its own body must use `override`; declaring a new member of the same name
+    //  would report CS0108 and, with warnings promoted to errors repository wide, fail the build -
+    //  which is the desired outcome, because two definitions of one legacy event is the defect
+    //  worth failing over.
+    //
+    //  WHY VIRTUAL WITH A NO-OP DEFAULT RATHER THAN ABSTRACT. A PowerBuilder event with no script
+    //  attached yields its type's initial value and performs nothing, which is exactly this. Making
+    //  them abstract would force every host - including every test double - to supply a body for an
+    //  event the legacy allows to be unhandled.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Raised to ask whether one item's value may change - the port of
+    /// <c>Event OnDoItemChange(row, dwo, data)</c> (declared <c>se_cst_dw.sru:L24</c>; raised by an
+    /// attached service at <c>n_cst_dwsvc_rowselect.sru:L238</c>).
+    /// </summary>
+    /// <param name="row">The one-based row whose item is changing.</param>
+    /// <param name="dwo">The column the change applies to.</param>
+    /// <param name="data">The proposed new value, as text.</param>
+    /// <returns>
+    /// <c>0</c> TO ACCEPT. ANY NON-ZERO VALUE IS A REJECTION - the test at
+    /// <c>n_cst_dwsvc_rowselect.sru:L238</c> is <c>&lt;&gt; 0</c>, so this is NOT the four-value
+    /// item-change alphabet and NOT the return-code algebra: it is a two-state accept-or-reject read
+    /// of whatever code the handler produced.
+    /// </returns>
+    /// <remarks>
+    /// The rejection is observable and must not be swallowed. Its consumer stops the propagation it
+    /// was performing and surfaces a message naming the offending row
+    /// [<c>:L238-L241</c>]; Services/RowSelectService.cs reproduces that as a structured error result
+    /// because a headless service has no dialog. The four-value alphabet that the CHAIN layers on top
+    /// of this event lives in Domain/ItemChangeProtocol.cs and is a separate mechanism.
+    /// </remarks>
+    public virtual long OnDoItemChange(long row, IDataWindowObject dwo, string data)
+    {
+        return 0L;
+    }
+
+    /// <summary>
+    /// Raised after one item's value has changed - the port of
+    /// <c>Event OnDoItemChanged(row, dwo)</c> (declared <c>se_cst_dw.sru:L26</c>; raised by an
+    /// attached service at <c>n_cst_dwsvc_rowselect.sru:L254</c>).
+    /// </summary>
+    /// <param name="row">The one-based row whose item changed.</param>
+    /// <param name="dwo">The column that changed.</param>
+    /// <remarks>
+    /// RETURNS NOTHING, AND THAT IS THE LEGACY DECLARATION RATHER THAN A SIMPLIFICATION.
+    /// <c>se_cst_dw.sru:L26</c> declares it without a <c>type</c> clause, unlike <c>:L24</c> which
+    /// declares <c>type long</c> - so there is no code to test and its raiser at <c>:L254</c>
+    /// discards nothing. Giving it a return value here would invent a veto the notification does not
+    /// have.
+    /// </remarks>
+    public virtual void OnDoItemChanged(long row, IDataWindowObject dwo)
+    {
+    }
 }
 
 
@@ -1543,10 +1839,15 @@ public abstract class DataWindowServiceHost
 /// <para>
 /// PORTED FROM <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru</c> (864 lines), which
 /// is the common base of the five services <c>se_cst_dw</c> attaches
-/// [<c>se_cst_dw.sru:L80-L84</c>]. Only the HOST-FACING half belongs here. The other half - the
-/// <c>_of_evaluate</c>, <c>_of_lookupdisplay</c>, <c>_of_getitemprop</c>, <c>_of_getcolumnvaluemap</c>
-/// and object-enumeration helpers declared at <c>:L46-L82</c> - belongs to Expressions/ and
-/// Services/, which consume this type rather than being consumed by it.
+/// [<c>se_cst_dw.sru:L80-L84</c>]. Only the HOST-FACING half belongs here, PLUS the thin
+/// property-reading helpers the legacy declares <c>protected</c> on this very base and shares
+/// between services - see THE SHARED PROPERTY-READING HELPER LAYER below for the eight that are
+/// carried and the exact criterion that admits them. What stays out is the half that needs machinery
+/// this type does not have: <c>_of_lookupdisplay</c> [<c>:L271</c>] and <c>_of_evaluate</c>
+/// [<c>:L199</c>] need the DataWindow expression evaluator, and <c>_of_getcolumnvaluemap</c>
+/// [<c>:L560</c>] needs an <see cref="IDataWindowChild"/> plus an ordered map. Those three belong to
+/// Expressions/, which consumes this type rather than being consumed by it, along with the
+/// object-enumeration helpers at <c>:L633-L805</c>.
 /// </para>
 /// <para>
 /// THE ATTACHMENT PARAMETER IS DELIBERATELY GENERALISED. The legacy hook is
@@ -1968,6 +2269,428 @@ public abstract class DataWindowServiceBase
     protected IDataWindowObject? GetDataWindowObject(in long columnNumber)
     {
         return GetDataWindowObject("#" + columnNumber.ToString(CultureInfo.InvariantCulture));
+    }
+
+    // ==========================================================================================
+    //  THE SHARED PROPERTY-READING HELPER LAYER
+    //  ----------------------------------------------------------------------------------------
+    //  WHY THESE EIGHT ARE HERE. The legacy declares them `protected` on n_cst_dwsvc itself
+    //  [n_cst_dwsvc.sru:L47-L73], which is the type this class ports, and it declares them there
+    //  because MORE THAN ONE attached service consumes them. Reproducing them inside a single
+    //  service would leave the other four to duplicate the same Describe-and-Evaluate composition,
+    //  and the composition is not trivial: the tab-delimited property-versus-expression split at
+    //  :L189-L196 has to come out byte-identical everywhere or two services will disagree about
+    //  whether the same cell is protected.
+    //
+    //  THE ADMISSION CRITERION IS DEPENDENCY, NOT SIZE. Every member below composes a string and
+    //  hands it to DataWindowServiceHost.Describe. Not one of them needs the DataWindow expression
+    //  evaluator, an IDataWindowChild, an ordered map or any presentational primitive - so each is
+    //  fully portable here, and each is fully testable against a Describe test double with no
+    //  DataWindow, no database and no UI (constraint C-H). The three helpers that DO need that
+    //  machinery are named in this class's own remarks and stay in Expressions/.
+    //
+    //  NAMES ARE PascalCase, FOLLOWING GetDataWindowObject ABOVE. The `_of_` prefix is PowerBuilder's
+    //  protected-member convention, not part of any wire payload, log record or characterization
+    //  recording - so AAP 0.4.5.3, which preserves CONSTANT identifier spellings because they travel
+    //  in serialized output, does not reach these. Keeping the prefix would instead have raised CA1707
+    //  on eight externally-visible members and forced a naming-analyzer suppression onto this file for
+    //  no parity benefit.
+    //
+    //  THE FIRST-CLASS OVERLOADS ONLY. The legacy declares a column-NUMBER twin of almost every one
+    //  of these, each a one-line `_of_X("#" + String(colNum))` delegation [:L244, :L268, :L351,
+    //  :L394, :L397, :L452, :L541]. None is carried, because no in-scope ported call site uses one:
+    //  n_cst_dwsvc_rowselect.sru threads `sColName = dwo.Name` [:L188] through every call. The
+    //  delegation is trivially recoverable from GetDataWindowObject's own "#" composition if a later
+    //  service needs it, and AAP 0.4.2.5's consumption criterion forbids adding it before then.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Whether the DataWindow as a whole accepts edits - the port of <c>_of_iseditable()</c>
+    /// (<c>n_cst_dwsvc.sru:L295</c>, body <c>:L312</c>).
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the DataWindow is editable.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// THE TEST IS AGAINST THE STRING <c>"no"</c> AND NOT AGAINST NOT-<c>"yes"</c>. <c>:L312</c> is
+    /// <c>return (#DataWindow.Describe("DataWindow.ReadOnly") = "no")</c>, so ANY answer other than
+    /// that exact text - including the <c>"!"</c> invalid-expression sentinel and the <c>"?"</c>
+    /// undetermined sentinel a DataWindow returns for an unanswerable Describe - reads as NOT
+    /// editable. Inverting the test to <c>!= "yes"</c> would turn both sentinels into "editable" and
+    /// silently open every guard that depends on this one.
+    /// </remarks>
+    protected bool IsEditable()
+    {
+        // n_cst_dwsvc.sru:L312 - ordinal comparison, because the oracle compares a fixed
+        // machine-generated token rather than user text; a culture-sensitive compare could match
+        // differently under a Turkish-style casing rule.
+        return string.Equals(
+            RequireHost().Describe("DataWindow.ReadOnly"),
+            "no",
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Reads one of a column's properties, resolving a property EXPRESSION when the DataWindow
+    /// reports one - the port of <c>_of_getcolumnprop(colName, prop)</c>
+    /// (<c>n_cst_dwsvc.sru:L314</c>, body <c>:L332-L346</c>).
+    /// </summary>
+    /// <param name="colName">The column name.</param>
+    /// <param name="prop">The property name, for example <c>"protect"</c> or <c>"visible"</c>.</param>
+    /// <returns>
+    /// The property's value as text, or the empty string when either argument is empty.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE TAB IS THE WHOLE MECHANISM. A DataWindow answers a property Describe either with a plain
+    /// value or with <c>value</c> TAB <c>expression"</c> when the property is conditionally computed.
+    /// <c>:L339</c> looks for the tab; with no tab the plain value is returned as-is [<c>:L341</c>],
+    /// and with a tab the text AFTER the tab is taken, an OPENING DOUBLE QUOTE IS PREPENDED, and the
+    /// result is evaluated [<c>:L343-L344</c>].
+    /// </para>
+    /// <para>
+    /// ONLY AN OPENING QUOTE IS ADDED, AND THAT IS DELIBERATE RATHER THAN A BUG. The DataWindow's own
+    /// answer already ends with the closing quote - <c>_of_getpropexp</c> [<c>:L806</c>, body
+    /// <c>:L825-L831</c>] confirms it by stripping exactly one trailing character with
+    /// <c>Len(prop) - nPos - 1</c>. Adding a second closing quote here would produce
+    /// <c>Evaluate("expr"",0)</c> and every conditional property in the DataWindow would start
+    /// answering with the invalid-expression sentinel.
+    /// </para>
+    /// <para>
+    /// EVALUATED AT ROW <c>0</c>, unlike <see cref="GetItemProperty(in long, in string, in string)"/>
+    /// which evaluates at a specific row [<c>:L195</c>]. That is the only difference between the two
+    /// bodies, and it is the difference between a COLUMN-level and an ITEM-level answer. The two are
+    /// not interchangeable and neither is expressed in terms of the other, exactly as in the oracle.
+    /// </para>
+    /// </remarks>
+    protected string GetColumnProperty(in string colName, in string prop)
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // n_cst_dwsvc.sru:L336 - both-arguments guard, returning the empty string rather than
+        // raising. IsNullOrEmpty rather than Length, so a null reads as empty exactly as
+        // PowerScript's always-present possibly-empty string does.
+        if (string.IsNullOrEmpty(colName) || string.IsNullOrEmpty(prop))
+        {
+            return string.Empty;
+        }
+
+        // :L338
+        string exp = host.Describe(colName + "." + prop);
+
+        // :L339 - Pos returns a ONE-BASED index and 0 when absent; IndexOf returns ZERO-BASED and
+        // -1. The translation is the comparison below, and it is the kind of off-by-one AAP 0.4.5.4
+        // names as the refactor's most dangerous mechanical hazard, so it is written out rather than
+        // folded into an expression.
+        int tabIndex = exp.IndexOf('\t', StringComparison.Ordinal);
+
+        // :L341 - no tab, so the plain value IS the answer.
+        if (tabIndex < 0)
+        {
+            return exp;
+        }
+
+        // :L343 - the text after the tab, with one OPENING quote prepended and no closing quote
+        // added. PowerScript's Mid(exp, nPos + 1) with a one-based nPos starts at the character
+        // after the tab, which is the zero-based index tabIndex + 1.
+        string quoted = "\"" + exp[(tabIndex + 1)..];
+
+        // :L344 - evaluated at row 0. Composed as a string because Describe's Evaluate form is the
+        // DataWindow's own expression entry point, exactly as the oracle composes it.
+        return host.Describe("Evaluate(" + quoted + ",0)");
+    }
+
+    /// <summary>
+    /// Reads one of a single ITEM's properties, resolving a property EXPRESSION at that row when the
+    /// DataWindow reports one - the port of <c>_of_getitemprop(row, colName, prop)</c>
+    /// (<c>n_cst_dwsvc.sru:L164</c>, body <c>:L183-L197</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number the expression is evaluated at.</param>
+    /// <param name="colName">The column name.</param>
+    /// <param name="prop">The property name, for example <c>"protect"</c> or <c>"visible"</c>.</param>
+    /// <returns>
+    /// The property's value as text, or the empty string when either name is empty.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// Identical to <see cref="GetColumnProperty(in string, in string)"/> except that the expression
+    /// is evaluated at <paramref name="row"/> rather than at row <c>0</c> [<c>:L195</c>] - which is
+    /// what makes a per-row protect or visible expression answer differently for different rows.
+    /// Note that <paramref name="row"/> is NOT validated: the oracle guards the two NAMES and not the
+    /// row [<c>:L186</c>], so a row outside the buffer reaches Describe and comes back as the
+    /// DataWindow's own sentinel rather than as an exception. Adding a range check here would convert
+    /// a sentinel into a throw, which constraint C-B forbids.
+    /// </remarks>
+    protected string GetItemProperty(in long row, in string colName, in string prop)
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // n_cst_dwsvc.sru:L186
+        if (string.IsNullOrEmpty(colName) || string.IsNullOrEmpty(prop))
+        {
+            return string.Empty;
+        }
+
+        // :L188
+        string exp = host.Describe(colName + "." + prop);
+
+        // :L189
+        int tabIndex = exp.IndexOf('\t', StringComparison.Ordinal);
+
+        // :L192
+        if (tabIndex < 0)
+        {
+            return exp;
+        }
+
+        // :L194 - see GetColumnProperty for why only an OPENING quote is prepended.
+        string quoted = "\"" + exp[(tabIndex + 1)..];
+
+        // :L195 - evaluated AT THIS ROW. Invariant-culture formatting, which PowerScript's
+        // String(long) has no parameter for and does implicitly: a culture with digit-group
+        // separators would compose Evaluate("expr",1,234) and resolve nothing.
+        return host.Describe(
+            "Evaluate(" + quoted + "," + row.ToString(CultureInfo.InvariantCulture) + ")");
+    }
+
+    /// <summary>
+    /// Whether a COLUMN is protected - the port of <c>_of_iscolumnprotected(colName)</c>
+    /// (<c>n_cst_dwsvc.sru:L374</c>, body <c>:L391</c>).
+    /// </summary>
+    /// <param name="colName">The column name.</param>
+    /// <returns><see langword="true"/> when the column's protect property reads <c>"1"</c>.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// THE TEST IS EQUALITY WITH THE STRING <c>"1"</c>, not truthiness and not a numeric parse. Every
+    /// other answer - <c>"0"</c>, the empty string from the guard, and both DataWindow sentinels -
+    /// reads as NOT protected, which is the permissive direction. That asymmetry is the legacy's and
+    /// is reproduced: an unanswerable Describe leaves the column editable rather than locking it.
+    /// </remarks>
+    protected bool IsColumnProtected(in string colName)
+    {
+        // n_cst_dwsvc.sru:L391
+        return string.Equals(GetColumnProperty(colName, "protect"), "1", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether a COLUMN accepts edits - the port of <c>_of_iscolumneditable(colName)</c>
+    /// (<c>n_cst_dwsvc.sru:L400</c>, body <c>:L417-L426</c>).
+    /// </summary>
+    /// <param name="colName">The column name.</param>
+    /// <returns><see langword="true"/> when all four conditions below hold.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// FOUR GUARDS, IN THE ORACLE'S ORDER, EACH SHORT-CIRCUITING TO <see langword="false"/>:
+    /// </para>
+    /// <para>
+    /// 1. <c>:L419</c> the DataWindow itself must be editable - see <see cref="IsEditable"/>.
+    /// </para>
+    /// <para>
+    /// 2. <c>:L421</c> the tab sequence must be neither <c>"0"</c> nor <c>"32766"</c>. Both are
+    /// magic values with distinct meanings in PowerBuilder - zero removes the column from the tab
+    /// order entirely, and 32766 is the conventional read-only-but-tabbable value - and BOTH are
+    /// compared AS TEXT, so <c>"00"</c> and <c>"32766 "</c> would not match. Reproduced as written.
+    /// </para>
+    /// <para>
+    /// 3. <c>:L423</c> the edit must not be display-only, tested as the string <c>"yes"</c>.
+    /// </para>
+    /// <para>
+    /// 4. <c>:L425</c> the column must not be protected.
+    /// </para>
+    /// <para>
+    /// NOTE THAT GUARDS 2 AND 3 GO STRAIGHT TO <c>Describe</c> AND DO NOT USE
+    /// <see cref="GetColumnProperty(in string, in string)"/>, so a tab sequence or display-only
+    /// setting expressed as a conditional EXPRESSION is NOT evaluated here - the raw
+    /// <c>value</c>-TAB-<c>expression</c> text is compared and therefore matches neither magic value.
+    /// That inconsistency with guard 4, which does resolve expressions, is the legacy's own and is
+    /// preserved rather than harmonised (constraint C-B).
+    /// </para>
+    /// </remarks>
+    protected bool IsColumnEditable(in string colName)
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // n_cst_dwsvc.sru:L419
+        if (!IsEditable())
+        {
+            return false;
+        }
+
+        // :L420-L421 - the raw Describe, deliberately NOT routed through GetColumnProperty.
+        string prop = host.Describe(colName + ".TabSequence");
+        if (string.Equals(prop, "0", StringComparison.Ordinal)
+            || string.Equals(prop, "32766", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // :L422-L423
+        prop = host.Describe(colName + ".Edit.DisplayOnly");
+        if (string.Equals(prop, "yes", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // :L425
+        if (IsColumnProtected(colName))
+        {
+            return false;
+        }
+
+        // :L427
+        return true;
+    }
+
+    /// <summary>
+    /// Whether one ITEM is protected - the port of <c>_of_isitemprotected(row, colName)</c>
+    /// (<c>n_cst_dwsvc.sru:L223</c>, body <c>:L241</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="colName">The column name.</param>
+    /// <returns><see langword="true"/> when the item's protect property reads <c>"1"</c>.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// Distinct from <see cref="IsColumnProtected(in string)"/> because a protect expression can
+    /// answer differently per row - which is exactly why the range check-box propagation at
+    /// <c>n_cst_dwsvc_rowselect.sru:L201</c> and <c>:L229</c> tests the ITEM, once for the clicked
+    /// row and again for every selected row it visits.
+    /// </remarks>
+    protected bool IsItemProtected(in long row, in string colName)
+    {
+        // n_cst_dwsvc.sru:L241
+        return string.Equals(GetItemProperty(row, colName, "protect"), "1", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether one ITEM is visible - the port of <c>_of_isitemvisible(row, colName)</c>
+    /// (<c>n_cst_dwsvc.sru:L247</c>, body <c>:L265</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="colName">The column name.</param>
+    /// <returns><see langword="true"/> when the item's visible property reads <c>"1"</c>.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// THE FAIL-CLOSED DIRECTION IS THE OPPOSITE OF <see cref="IsItemProtected(in long, in string)"/>,
+    /// AND THAT MATTERS AT THE CALL SITE. Both test for the string <c>"1"</c>, so an unanswerable
+    /// Describe reads as NOT protected and NOT visible; at
+    /// <c>n_cst_dwsvc_rowselect.sru:L227</c> the invisible answer SKIPS the row, whereas the
+    /// not-protected answer at <c>:L229</c> lets it through. One sentinel therefore has opposite
+    /// effects two lines apart. Both are reproduced exactly as the oracle has them.
+    /// </remarks>
+    protected bool IsItemVisible(in long row, in string colName)
+    {
+        // n_cst_dwsvc.sru:L265
+        return string.Equals(GetItemProperty(row, colName, "visible"), "1", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Maps a DataWindow column type string onto one of the <c>COL_TYPE_*</c> constants - the port of
+    /// <c>_of_convertcoltype(colType)</c> (<c>n_cst_dwsvc.sru:L486</c>, body <c>:L503-L518</c>).
+    /// </summary>
+    /// <param name="colType">
+    /// The raw type text, for example <c>"char(50)"</c>, <c>"decimal(2)"</c> or <c>"long"</c>.
+    /// </param>
+    /// <returns>
+    /// One of <see cref="COL_TYPE_STRING"/>, <see cref="COL_TYPE_INTEGER"/>,
+    /// <see cref="COL_TYPE_DECIMAL"/>, <see cref="COL_TYPE_DATETIME"/>, <see cref="COL_TYPE_DATE"/>,
+    /// <see cref="COL_TYPE_TIME"/> or <see cref="COL_TYPE_UNKNOWN"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE MATCH IS ON THE FIRST FIVE CHARACTERS, AND THE ORDER OF THE ARMS IS LOAD-BEARING.
+    /// <c>:L503</c> switches on <c>Left(colType,5)</c> over seven arms: <c>"char"</c>/<c>"char("</c>
+    /// to string, <c>"numbe"</c>/<c>"long"</c>/<c>"ulong"</c> to integer,
+    /// <c>"decim"</c>/<c>"real"</c> to decimal, <c>"datet"</c> to datetime, <c>"date"</c> to date,
+    /// <c>"time"</c> to time, and anything else to unknown.
+    /// </para>
+    /// <para>
+    /// <c>"datet"</c> MUST BE TESTED BEFORE <c>"date"</c>, and the five-character truncation is why.
+    /// <c>"datetime"</c> truncates to exactly <c>"datet"</c> while <c>"date"</c> is shorter than the
+    /// truncation length and stays <c>"date"</c>, so the two are distinguishable - but only if the
+    /// longer token is not shadowed. The C# switch below preserves the oracle's arm order verbatim
+    /// for that reason.
+    /// </para>
+    /// <para>
+    /// PowerScript's <c>Left(s, 5)</c> returns the WHOLE string when it is shorter than five
+    /// characters rather than raising, which is why <c>"long"</c>, <c>"real"</c>, <c>"date"</c> and
+    /// <c>"time"</c> are spelled at their natural length in the arms above. The C# equivalent is a
+    /// length-clamped slice, not <c>Substring(0, 5)</c>, which would throw.
+    /// </para>
+    /// </remarks>
+    protected static long ConvertColumnType(in string colType)
+    {
+        // n_cst_dwsvc.sru:L503 - Left(colType,5), clamped so a shorter string is returned whole
+        // exactly as PowerScript's Left does. Ordinal comparison throughout: these are
+        // machine-generated tokens, never user text.
+        string prefix = colType.Length <= 5 ? colType : colType[..5];
+
+        return prefix switch
+        {
+            // :L504-L505
+            "char" or "char(" => COL_TYPE_STRING,
+
+            // :L506-L507
+            "numbe" or "long" or "ulong" => COL_TYPE_INTEGER,
+
+            // :L508-L509
+            "decim" or "real" => COL_TYPE_DECIMAL,
+
+            // :L510-L511 - BEFORE "date", see the remarks.
+            "datet" => COL_TYPE_DATETIME,
+
+            // :L512-L513
+            "date" => COL_TYPE_DATE,
+
+            // :L514-L515
+            "time" => COL_TYPE_TIME,
+
+            // :L516-L517
+            _ => COL_TYPE_UNKNOWN,
+        };
+    }
+
+    /// <summary>
+    /// The <c>COL_TYPE_*</c> classification of a named column - the port of
+    /// <c>_of_getcolumntype(name)</c> (<c>n_cst_dwsvc.sru:L521</c>, body <c>:L538</c>).
+    /// </summary>
+    /// <param name="name">The column name.</param>
+    /// <returns>
+    /// The classification, or <see cref="COL_TYPE_UNKNOWN"/> when the DataWindow cannot answer.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// A one-line composition in the oracle:
+    /// <c>_of_ConvertColType(#DataWindow.Describe(name+".ColType"))</c>. It reads the type from the
+    /// DataWindow rather than from <see cref="IDataWindowObject.ColType"/> even where a handle is in
+    /// hand, and that is preserved: the two are separate paths in the legacy and a Describe answers
+    /// with a sentinel where a handle would have raised. Both DataWindow sentinels truncate to
+    /// themselves and fall through to <see cref="COL_TYPE_UNKNOWN"/>, which is the same arm an
+    /// unrecognised type reaches - so an unanswerable column and an exotic one are deliberately
+    /// indistinguishable here, exactly as in the oracle.
+    /// </remarks>
+    protected long GetColumnType(in string name)
+    {
+        // n_cst_dwsvc.sru:L538
+        return ConvertColumnType(RequireHost().Describe(name + ".ColType"));
     }
 
     /// <summary>
