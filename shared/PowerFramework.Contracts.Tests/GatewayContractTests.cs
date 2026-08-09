@@ -700,6 +700,157 @@ public sealed class GatewayContractTests
     }
 
     [Fact]
+    public void NoOperationPromisesAFourTwentyTwoInProseThatItsResponsesDoNotDeclare()
+    {
+        OpenApiDocument document = Document;
+
+        // A PROSE PROMISE IS AS BINDING AS A RESPONSE KEY, AND THIS IS THE GAP THAT PROVED IT.
+        //
+        // The assertion above already forbids a literal "422" response key, and it passed while the
+        // foreign-variable operation's own description told the reader, in bold, that a cross-session
+        // reference "returns 422 with a defined error" and then explained why 422 rather than 400. The
+        // machine surface said 400 and the human surface said 422. A consumer reads the description -
+        // that is what a description is for - and branches on a status the runtime never returns, so the
+        // handler for the outcome that actually occurs is the one that never runs.
+        //
+        // The check is deliberately narrow: it looks for the STATUS TOKEN, not for the digits. "422"
+        // inside a larger number, a byte count or an identifier is not a status promise, so the sweep
+        // matches the token with a word boundary and reports the operation that carries it.
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] promising = Operations(document)
+            .Where(static entry => MentionsStatusToken(entry.Operation.Summary, "422")
+                || MentionsStatusToken(entry.Operation.Description, "422"))
+            .ToArray();
+
+        Assert.True(
+            promising.Length == 0,
+            "These operations mention the status 422 in prose while the document declares no 422 "
+                + "response anywhere: "
+                + string.Join(
+                    ", ",
+                    promising.Select(static entry => $"{entry.Method} {entry.Route}"))
+                + ". The status mapping in docs/CONTRACTS.md 12.1 sanctions eight statuses and 422 is "
+                + "not one of them; a cross-session foreign reference is a 400 carrying its own retCode "
+                + "and the CATEGORY_FOREIGN_REFERENCE_BLOCKED category. Prose and responses have to "
+                + "agree, because a consumer branches on whichever it read.");
+    }
+
+    [Fact]
+    public void TheUnsignedSixtyFourBitMemberIsNotDeclaredWithASignedFormat()
+    {
+        OpenApiDocument document = Document;
+
+        IOpenApiSchema anyValue = document.Components!.Schemas!["AnyValue"];
+        Assert.NotNull(anyValue.Properties);
+
+        IOpenApiSchema unsigned = anyValue.Properties["uint64Value"];
+        IOpenApiSchema signed = anyValue.Properties["int64Value"];
+
+        // SIGNEDNESS IS PART OF THE TYPE, NOT A LABEL ON IT.
+        //
+        // `AnyValue.uint64Value` mirrors a protobuf `uint64`, whose domain runs to
+        // 18446744073709551615 - more than twice Int64.MaxValue. Declared `format: int64` a generator
+        // emits a signed 64-bit model, and every value in the upper half of the legacy `unsignedlong`
+        // domain is then rejected by validation or wrapped to a negative number. Silently, on the one
+        // member that exists to carry a value the sender could not express as signed.
+        Assert.Equal("uint64", unsigned.Format, StringComparer.Ordinal);
+        Assert.Equal("int64", signed.Format, StringComparer.Ordinal);
+
+        // AND THE DOMAIN IS STATED AS A BOUND, SO IT IS CHECKABLE WITHOUT TRUSTING THE FORMAT NAME.
+        // The upper bound is UINT64 MAX, which is 9223372036854775807 more than Int64.MaxValue - the
+        // exact span a signed declaration would have lost.
+        Assert.Equal("0", unsigned.Minimum, StringComparer.Ordinal);
+        Assert.Equal("18446744073709551615", unsigned.Maximum, StringComparer.Ordinal);
+
+        // BOTH STILL ACCEPT THE STRING ENCODING THE CANONICAL PROTOBUF JSON MAPPING EMITS.
+        foreach (IOpenApiSchema schema in (IOpenApiSchema[])[unsigned, signed])
+        {
+            Assert.NotNull(schema.Type);
+            Assert.True(schema.Type.Value.HasFlag(JsonSchemaType.String));
+            Assert.True(schema.Type.Value.HasFlag(JsonSchemaType.Integer));
+        }
+    }
+
+    [Fact]
+    public void TheProjectedEventStreamPublishesItsOrderingDisciplineRatherThanImplyingIt()
+    {
+        OpenApiDocument document = Document;
+
+        // THE ENUMERATION ALONE IS NOT ENOUGH, WHICH IS WHY THIS TEST EXISTS BESIDE THE PROTO ONE.
+        //
+        // ProtoDescriptorTests already pins the two OrderingDiscipline members and their numbers. That
+        // proves the vocabulary exists; it says nothing about whether a consumer of THIS document can
+        // tell which discipline governs the stream it is reading - and the two disciplines have
+        // OPPOSITE rules for an out-of-order arrival. Under SEQUENCED the token carries reorder
+        // authority; under SYNCHRONOUS a gap is a hard error that fails the session. An implementation
+        // applying the wrong rule either reorders a chain that must not be reordered or fails a stream
+        // that may be, and both look correct from inside the consumer.
+        //
+        // So the discipline has to be readable from the projected message itself.
+        IOpenApiSchema discipline = document.Components!.Schemas!["OrderingDiscipline"];
+        Assert.Equal(
+            ["ORDERING_DISCIPLINE_UNSPECIFIED", "ORDERING_DISCIPLINE_SYNCHRONOUS", "ORDERING_DISCIPLINE_SEQUENCED"],
+            discipline.Enum!.Select(static node => node!.GetValue<string>()).ToArray());
+
+        IOpenApiSchema stream = document.Components.Schemas["EventStreamResponse"];
+
+        // AS A REQUIRED MEMBER, so it cannot be omitted by a server and defaulted by a consumer.
+        Assert.NotNull(stream.Properties);
+        Assert.True(stream.Properties.ContainsKey("discipline"));
+        Assert.NotNull(stream.Required);
+        Assert.Contains("discipline", stream.Required);
+
+        // AND AS A SPECIFICATION EXTENSION ON THE SCHEMA, so a generated document and a reader of the
+        // authored contract name the discipline in the same place with the same spelling.
+        Assert.NotNull(stream.Extensions);
+        Assert.True(
+            stream.Extensions!.TryGetValue("x-ordering-discipline", out IOpenApiExtension? declared),
+            "EventStreamResponse declares no x-ordering-discipline extension. The projected stream is "
+                + "pattern (a) and the reader has to be able to see that from the schema.");
+
+        JsonNodeExtension disciplineExtension = Assert.IsType<JsonNodeExtension>(declared);
+        Assert.Equal(
+            "ORDERING_DISCIPLINE_SEQUENCED",
+            disciplineExtension.Node.GetValue<string>(),
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether a block of contract prose mentions an HTTP status as a status, rather than as digits
+    /// inside some larger number or identifier.
+    /// </summary>
+    /// <param name="prose">The summary or description to search. A null or empty value mentions nothing.</param>
+    /// <param name="status">The three-digit status token to look for.</param>
+    /// <returns><see langword="true"/> when the token appears delimited by non-digits.</returns>
+    /// <remarks>
+    /// Deliberately a token test rather than a substring test. A substring test would fire on a byte
+    /// count, a line number or an identifier that happens to contain the digits, and a control that
+    /// reports false positives gets relaxed rather than fixed.
+    /// </remarks>
+    private static bool MentionsStatusToken(string? prose, string status)
+    {
+        if (string.IsNullOrEmpty(prose))
+        {
+            return false;
+        }
+
+        for (int index = prose.IndexOf(status, StringComparison.Ordinal);
+             index >= 0;
+             index = prose.IndexOf(status, index + 1, StringComparison.Ordinal))
+        {
+            bool digitBefore = index > 0 && char.IsAsciiDigit(prose[index - 1]);
+            int after = index + status.Length;
+            bool digitAfter = after < prose.Length && char.IsAsciiDigit(prose[after]);
+
+            if (!digitBefore && !digitAfter)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    [Fact]
     public void TheStatusSurfaceStaysWithinTheSetTheSpecificationSanctions()
     {
         OpenApiDocument document = Document;
@@ -1074,17 +1225,27 @@ public sealed class GatewayContractTests
         Assert.Equal("501", body.Properties["status"].Const);
         Assert.Equal("reserved for Phase 2", body.Properties["marker"].Const);
 
-        // THE MEMBER IS `deferredService`, NOT `service`.
+        // TWO MEMBERS NAME THE DEFERRED SERVICE, THEY CARRY THE IDENTICAL DOMAIN, AND BOTH ARE PINNED.
         //
-        // `service` already means the RESPONDING service on PingResponse and an UPSTREAM service on
-        // UpstreamHealth, so a third meaning on the same word would make a body ambiguous in exactly the
-        // place a client branches on it. The name also matches the `x-deferred-service` extension each
-        // reserved operation carries, so the wire member and the routing metadata read the same.
-        Assert.Equal(
-            ["DesignSystem", "Documents", "Integration", "ScriptBridge"],
-            body.Properties["deferredService"].Enum!
-                .Select(static node => node!.GetValue<string>())
-                .ToArray());
+        // `deferredService` is the unambiguous spelling: `service` already means the RESPONDING service
+        // on PingResponse and an UPSTREAM service on UpstreamHealth, so a third meaning on the same word
+        // makes a body ambiguous in exactly the place a client branches on it, and the name matches the
+        // `x-deferred-service` extension each reserved operation carries.
+        //
+        // `service` IS RETAINED ANYWAY, AND ASSERTING IT IS THE POINT OF THIS PAIR. It is the member
+        // this document published for v1 first. The revision that introduced `deferredService` also
+        // removed it, which is a silent break of an unversioned wire member: every v1 consumer reading
+        // `service` stopped seeing the deferred-service name while the version number went on promising
+        // it had not changed. A better name is not a reason to break a published one - that is a v2
+        // decision - so both are emitted with the same value and both are asserted, in both directions.
+        foreach (string member in (string[])["service", "deferredService"])
+        {
+            Assert.Equal(
+                ["DesignSystem", "Documents", "Integration", "ScriptBridge"],
+                body.Properties[member].Enum!
+                    .Select(static node => node!.GetValue<string>())
+                    .ToArray());
+        }
 
         // THE RETURN CODE IS THE LEGACY'S OWN, NOT A PARALLEL VOCABULARY.
         //
@@ -1101,7 +1262,7 @@ public sealed class GatewayContractTests
         Assert.Equal(-2001, (long)RetCode.Types.Value.ENoImplementation);
 
         Assert.NotNull(body.Required);
-        foreach (string required in (string[])["status", "deferredService", "marker", "route", "retCode"])
+        foreach (string required in (string[])["status", "service", "deferredService", "marker", "route", "retCode"])
         {
             Assert.Contains(required, body.Required);
         }
@@ -1171,15 +1332,31 @@ public sealed class GatewayContractTests
             // it anonymous, which is why the distinction between null and empty is load-bearing here.
             Assert.Null(operation.Security);
 
-            // AND THE DECLARED RESPONSE SET IS EXACTLY {501} - THE C-D AUDIT, MADE EXECUTABLE.
+            // AND THE DECLARED RESPONSE SET IS EXACTLY {401, 501} - THE C-D AUDIT, MADE EXECUTABLE.
             //
-            // C-D permits a reserved route to declare its four paths, its 501 responses and the
-            // machine-readable body, and nothing else. A second declared status - even a 401 - would say
-            // the route evaluates something before answering, which is the "stub them out" reading the
-            // requirements forbid. The 401 an unauthenticated caller actually receives comes from the
-            // authentication middleware, a cross-cutting concern declared once at the security scheme;
-            // it is not a response this route produces, and the two are deliberately not conflated.
-            Assert.Equal(["501"], operation.Responses!.Keys.ToArray());
+            // C-D permits a reserved route to declare its four paths, its not-implemented response and
+            // the machine-readable body, and nothing else. What C-D constrains is what the route
+            // IMPLEMENTS, and 501 is still the only outcome its handler produces - so the audit is that
+            // there is NO 2xx and no projected-capability status here, not that the response map has one
+            // entry.
+            //
+            // THE 401 IS DECLARED BECAUSE THE OPERATION REALLY RETURNS IT. `.RequireAuthorization()` is
+            // applied to every reserved route, so an unauthenticated caller receives 401 before the
+            // handler is reached. Declaring only 501 tells a generated client and a conformance tool
+            // that this operation cannot answer 401, which is false about the deployed surface; the
+            // token requirement asserted immediately above is precisely what makes it true. A
+            // cross-cutting origin is a reason to declare the status ONCE as a shared component - which
+            // is how `#/components/responses/Unauthorized` is used here - not a reason to omit it.
+            string[] declared = operation.Responses!.Keys.OrderBy(
+                static key => key,
+                StringComparer.Ordinal).ToArray();
+
+            Assert.Equal(["401", "501"], declared);
+
+            // NO SUCCESS STATUS, WHICH IS THE PART THAT WOULD MEAN AN IMPLEMENTATION EXISTS.
+            Assert.DoesNotContain(
+                declared,
+                static key => key.StartsWith('2') || key.StartsWith("2XX", StringComparison.OrdinalIgnoreCase));
         }
     }
 

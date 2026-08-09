@@ -1,19 +1,24 @@
-<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
-     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
-     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
-     without splitting the locator from what it proves, and a wrapped command is a command that does
-     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
-       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
-     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
-     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
-     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
-     and are never edited, so a command that reports them would fail for reasons this refactor must not
-     "fix".
+<!-- Markdown lint policy for this file. Rationale is in docs/BUILD.md section 14. MD013 is 120 rather
+     than the 80-character default, and is disabled for tables and code blocks: an evidence row carrying
+     a legacy locator and a quoted finding cannot be wrapped without splitting the locator from what it
+     proves, and a wrapped command is a command that does not run. Prose IS wrapped, and is held to the
+     120 limit.
 
-     Declared inline, per file, so the policy travels with the document and applies to the six files
-     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
-     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+     THE POLICY IS SELF-DECLARED, SO IT NEEDS NO COMMAND, NO FILE LIST AND NO GLOB. The directive on the
+     next line travels with the document: any markdownlint-compatible tool already provisioned on a
+     reader's machine honours it, with no flags to remember and no external configuration file to locate.
+     It applies to the seven documents this refactor authored and CANNOT reach the five read-only legacy
+     Chinese documents in this folder, which are the behavioural oracle, are never edited, and carry
+     pre-existing violations of their own (hard tabs, unlabelled code fences and others) that this
+     refactor must not "fix". That unreachability is precisely why a per-file directive was chosen over a
+     repository-root configuration artifact the plan does not provide for.
+
+     NO LINT COMMAND IS PUBLISHED, AND THAT IS A SUPPLY-CHAIN CONTROL RATHER THAN AN OMISSION. The entire
+     approved npm dependency set for this repository is the exact, locked one declared under tests/e2e,
+     and no Markdown linter appears in it. A documented on-demand package-runner invocation would
+     therefore instruct an unpinned version to be resolved and executed from the network outside that
+     lockfile every time somebody followed the documentation, which the deterministic-automation baseline
+     forbids. Lint with tooling that is already installed; the directive below is what it reads. -->
 <!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
 
 # PowerFramework → .NET 10 — Secrets Remediation Register
@@ -591,20 +596,55 @@ than a later addition. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.1 works through 
 | --- | --- |
 | **Name** | `SECURITY_JWT_SIGNING_KEY` |
 | **Held by** | Security, and no other component |
+| **Kind of material** | An **RSA private key**, not a random symmetric secret. Security signs with `RS256` and publishes an RSA key set, so the two are not interchangeable: a random value has no modulus and no private exponent, cannot be imported as an RSA key, and cannot produce an `RS256` signature |
+| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — this is the shape the template carries, because an environment file has no line continuation so a multi-line PEM block cannot be expressed there. PEM is **also** accepted, for the deployment path where the value arrives from a secret store that can carry newlines: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. Validated at startup against `Security:SigningKeyFormat` (`PemOrPkcs8Base64`) and `Security:SigningKeyMinimumSizeBits` (2048) |
 | **Supplied by** | Configuration injection from the orchestration secret layer, bound through the options pattern |
 | **Appears in source?** | **No** |
 | **Appears in `appsettings.json` or `appsettings.Development.json`?** | **No** |
 | **Appears in any container definition?** | **No** |
-| **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform |
+| **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform. The command is in `orchestration/.env.example` §1 |
+| **Rotated how?** | Replace the value and restart Security. The other three services re-fetch the published key set through their stock bearer handlers, so no other service is reconfigured. Tokens minted under the withdrawn key stop verifying once it is gone; they live five minutes, so a brief overlap is the whole migration |
 
 The **name** of the variable is recorded here because consumers need to know what to set. **Its value
 is not recorded here, is not recorded anywhere else in this repository, and no placeholder resembling a
 value appears in this document** — an example key is indistinguishable from a real one to a reader, and
 placeholder keys have a long history of reaching production unchanged.
 
-The template `orchestration/.env.example` will carry the variable roster with empty values for exactly
-this reason: it tells an operator what to fill in without shipping anything to fill it in with. That
-file is not yet present in the tree; it is created at the orchestration boundary.
+The template `orchestration/.env.example` carries the variable roster with the one signing entry left
+empty for exactly this reason: it tells an operator what to fill in without shipping anything to fill it
+in with. **That file, and the `orchestration/` directory holding it, are present in the tree** — an
+earlier revision of this section said otherwise. What is still **planned and absent** at this boundary is
+`orchestration/docker-compose.yml`, which will consume the template, and `orchestration/README.md`.
+
+#### What kind of key this is: RSA, not random bytes
+
+`appsettings.json` sets `Security:SigningAlgorithm` to **RS256** and
+`shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` publishes an **RSA-only** key set —
+`kty` `RSA` with the modulus and exponent members, no symmetric member anywhere in the schema. RS256 signs
+with an RSA private key, so random symmetric bytes cannot sign it and cannot be published as an RSA JWK.
+**An earlier revision of this document prescribed `openssl rand -base64 32` for this variable; that
+instruction was incompatible with the published contract and is corrected here.**
+
+| Property | Value |
+| --- | --- |
+| **Generation** | `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key` |
+| **Accepted form** | The key **material itself**, as a value rather than a path. In the template that is the single-line base64-of-DER form, because the Compose dotenv format has no line continuation and a PEM block cannot be written there; a secret store that can carry newlines may instead supply PEM, which Security tries first. An earlier revision of this document described the variable as a path to a mounted PEM file — that is not what the template declares, and the two statements are reconciled here in favour of the template, which is the artifact an operator actually fills in |
+| **Minimum size** | 2048 bits. The legacy crypto surface leaves 1024-bit RSA legal and that weak default is preserved for the **operations** C-02 publishes (§5); it is not adopted for this system's own new signing identity, which is not a legacy behaviour to reproduce |
+| **Public half** | **Derived, never configured.** Security computes the public JWK from the private key and publishes it under the `kid` in `Security:SigningKeyId`. There is no public-key variable, and there must not be one: two independently configured halves of one key pair is a way to publish material that does not verify what is being signed |
+| **Rotation** | Replace the file and restart. No code change, no rebuild, no redeploy of any other service — the verifiers re-fetch the published key set |
+
+**The transport identity is a separate set of files.** `POST /v1/tokens` authenticates its caller with a
+client certificate (§4.3), so Security additionally needs a server certificate and a client-CA to trust.
+The **server** certificate is not Security-specific: all three TLS listeners terminate with the same
+default material, supplied once through `TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH`, which bind
+to `Kestrel:Certificates:Default:Path` and `:KeyPath`. What is Security-specific is the trust anchor it
+validates presented client certificates against, `SECURITY_MTLS_CLIENT_CA_PATH`, and the client
+certificate each calling service presents — `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` and
+`DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH`. All are paths, all mounted from the
+orchestration secret layer, and none is material.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 carries the full generation command set and is the canonical
+copy; [`BUILD.md`](BUILD.md) §8 and `orchestration/.env.example` §1 restate it, and the three must agree
+word for word.
 
 > #### ⚠ Where the filled-in environment file must live — read before generating a key
 >
@@ -614,16 +654,28 @@ file is not yet present in the tree; it is created at the orchestration boundary
 > tooling prevents that, so the control has to be the path itself.
 >
 > **The documented path is an environment file kept OUTSIDE the working tree**, referenced explicitly.
-> The commands below describe the intended bring-up; `orchestration/` does not exist yet, so they are the
-> specification for that work rather than steps a reader can run today:
+> The copy step below runs today — `orchestration/.env.example` is present. The `docker compose` step
+> does not: `orchestration/docker-compose.yml` is **planned and absent**, so that line is the
+> specification for that work rather than a step a reader can run:
 >
 > ```bash
-> mkdir -p "$HOME/.config/powerframework" && chmod 700 "$HOME/.config/powerframework"
+> install -d -m 700 "$HOME/.config/powerframework"
 > cp orchestration/.env.example "$HOME/.config/powerframework/pfw.env"
 > chmod 600 "$HOME/.config/powerframework/pfw.env"
-> # populate SECURITY_JWT_SIGNING_KEY in that file -- openssl rand -base64 32
+> # populate SECURITY_JWT_SIGNING_KEY in that file -- it is an RSA PRIVATE key, not random bytes:
+> #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
 > cd orchestration && docker compose --env-file "$HOME/.config/powerframework/pfw.env" up --build -d
 > ```
+>
+> **The shape of that material is part of the secret handling rule, not an implementation detail.**
+> Security signs with `RS256` over a closed `RS256`/`RS384`/`RS512` allow-list and imports the value as
+> an RSA private key, so symmetric random bytes are rejected at startup and the host refuses to start.
+> Two consequences follow for this register. First, the correct remedy is to generate an asymmetric key,
+> never to relax the algorithm to an HMAC family — the JWK set is anonymous verification material, so an
+> HMAC key there would publish the signing secret and make all three verifiers co-signers, which is the
+> sole-issuer property in §4.2 gone. Second, a PEM private key is a **multi-line** artifact and an
+> environment file holds one line per value, which is why the documented form is a single-line base64 of
+> the DER encoding; where a secret store can carry newlines, the PEM form is accepted unchanged.
 >
 > The attached environment's own instruction is the in-tree form, `cp .env.example .env` followed by
 > `docker compose --env-file .env up`. It remains supported and [`BUILD.md`](BUILD.md) §8 records it —
@@ -681,19 +733,41 @@ leaving abstract:
 > absent or untrusted certificate and `403` for a trusted certificate whose caller is not permitted the
 > requested subject or audience.
 
-Two consequences belong in a secrets register specifically:
+**The settings are scaffolded rather than merely described, and that is a correction.** An earlier
+revision of `orchestration/.env.example` listed them among its deliberate omissions on the reasoning that
+nothing should be scaffolded before the pair adopts it. The reasoning was sound and its premise was
+wrong: the pair has adopted it, since the published contract has required mutual TLS on issuance from the
+moment it was authored. Without the settings the stack starts and then cannot issue a single credential,
+so their absence was a functional defect rather than restraint. The seven variables now present are
+Security's own server certificate and key, the trust anchor it validates presented client certificates
+against, and a client certificate and key for each of the two services that request tokens — Gateway and
+DataServices. **Persistence has none**, because it reads Security's anonymous key set and calls nothing
+else there, and provisioning a credential for a caller that never authenticates would create material
+nothing consumes and nobody rotates.
 
-- **Certificate and key paths are secret-layer material, exactly like the signing key.** They point at
-  files mounted from the orchestration secret layer. **No certificate and no private key is committed
-  to this repository, and none is embedded in a container image.** The eight in-source sites in §2 are
-  the standing illustration of what committing such material costs.
+Three consequences belong in a secrets register specifically:
+
+- **Every mutual-TLS setting is a PATH, and there is nowhere to put material.** The paths name files
+  mounted read-only from the orchestration secret layer. There is no certificate body, no private key
+  body and no passphrase key anywhere — not in the template, not in an `appsettings.json`, not in a
+  container definition and not on a bound options type — so **no certificate and no private key is
+  committed to this repository, and none is embedded in a container image.** The eight in-source sites in
+  §2 are the standing illustration of what committing such material costs. The development generation
+  recipe deliberately produces unencrypted key files protected by filesystem permissions rather than by a
+  passphrase, because a passphrase would then need somewhere to live.
+- **A half-configured pair is refused at startup.** Each caller's certificate and key are validated as a
+  pair: a certificate cannot complete a handshake without its key and a key has nothing to present
+  without its certificate, so both-or-neither is enforced with a named error rather than discovered at
+  the first token request. No path is echoed into that error — a path is not itself a credential, but a
+  startup log is the wrong place to publish where one is mounted.
 - **The issuance path must not sit behind a TLS-terminating proxy.** Mutual TLS authenticates the
   client to Security itself, so an intermediary that terminates TLS there either discards the
   certificate or leaves Security trusting a forwarded assertion of identity it cannot verify. Both
   outcomes defeat the sole-issuer topology this section exists to protect.
-  [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the deployment model, including the loopback-only
-  plain-HTTP development exception under which issuance has no caller authentication available at
-  all.
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the deployment model. **There is no plain-HTTP
+  development exception on this service**, in any environment: on a plaintext listener the client
+  certificate is never requested, never presented and never validated, so issuance would not be weakly
+  authenticated but uncallable.
 
 ### 4.4 No secret is scaffolded for any deferred service
 
@@ -905,7 +979,7 @@ risk **without the behaviour changing**.
 | 5 | **No key-derivation function is reachable at all**, and there is no salt concept — so a passphrase is used as **raw key bytes** | Established by **absence**: no PBKDF2, scrypt, bcrypt, Argon2 or salt constant exists in `enums.sru`, and no signature in `n_crypto.sru:L30-L61` accepts an iteration count or a salt. Whatever the caller supplies as key material *is* the key |
 | 6 | **No authenticated encryption** — no GCM, CCM or Poly1305 — so ciphertext carries **no integrity tag** | Established by **absence**: the mode set is exactly ECB, CBC and CFB at `enums.sru:L943-L945`. A caller needing ciphertext integrity must obtain it separately, for instance through the keyed-hash operations |
 | 7 | **1024-bit RSA remains a legal key size**, and the legacy demonstration uses it | The 1024-bit constant is a declared, first-class value alongside 2048 and 4096 at `enums.sru:L965-L967`. It is annotated as a legacy-compatibility value and is **not** removed from the accepted set |
-| 8 | **The same six-member hash set governs the RSA signature hash**, so MD5 — and even CRC32, which is a checksum rather than a cryptographic hash — are legal **signature**-hash selectors | The declaring comment at `enums.sru:L927` names the set's consumers as `Hash`, **`RSASign` and `VerifyRSASign`**: one set, three consumers. All four signature overloads accept it as a hash-type argument [`n_crypto.sru:L70-L73`]. The weakness is the *scope* of an otherwise ordinary constant set, and narrowing it would refuse input the legacy accepts |
+| 8 | **The same hash set is declared for the RSA signature hash**, so MD5 is a legal **signature**-hash selector and remains one | The declaring comment at `enums.sru:L927` names the set's consumers as `Hash`, **`RSASign` and `VerifyRSASign`**: one set, three consumers. All four signature overloads accept it as a hash-type argument [`n_crypto.sru:L70-L73`]. The weakness is the *scope* of an otherwise ordinary constant set, and it is annotated rather than corrected. CRC32 is the sole exception, and not on strength grounds: there is no HMAC-over-checksum or RSA-over-checksum construction to implement at all, so the keyed and signing operations publish a narrowed `CryptoKeyedHashType` while the unkeyed digests keep the full set — see `docs/CONTRACTS.md`, narrowing N1 |
 
 Items **3, 4, 5 and 6** rest on absence, and §1.3 requires that to be said rather than glossed. Here the
 absence is exactly the right kind of evidence: **a capability the legacy cannot express is a capability

@@ -205,8 +205,9 @@
 //
 //  ============================ 9. CONSTRAINT SELF-AUDIT =====================================
 //  C-F  This file IS the control that stops interpolated literal values leaking through the
-//       diagnostic field into logs and responses, and it is the reason a wire DbError cannot be
-//       produced without a redactor - see ToDbError. No value from any known hardcoded-secret site
+//       diagnostic field into logs and responses, and it is ABSOLUTE rather than defaulted: there is
+//       no enabled flag, no configuration key and no pass-through mode, and ToDbError applies the
+//       sealed policy itself instead of accepting one. No value from any known hardcoded-secret site
 //       appears here in any form; every example in these comments and in the tests is SYNTHETIC,
 //       and nothing was pasted from a captured log.
 //  C-A  This type and ISqlRedactor are Persistence-internal and are NOT promoted into
@@ -255,11 +256,19 @@ namespace PowerFramework.Persistence.Errors;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The abstraction exists for two concrete reasons.</b> First, so composition can register a
-/// single instance for the lifetime of the process and hand it to every consumer of the diagnostic
-/// path. Second, so those consumers are testable against a pass-through double: a test that wants
-/// to assert on an unmasked statement supplies its own implementation rather than reaching into
-/// this one.
+/// <b>The abstraction exists for the LOG path, and for that path only.</b> It lets composition
+/// register a single instance for the lifetime of the process and hand it to every consumer that
+/// writes statement text into a log record, and it lets those consumers be driven from a test
+/// without reaching into the concrete scanner.
+/// </para>
+/// <para>
+/// <b>IT CANNOT REACH THE WIRE, AND THAT IS THE POINT.</b>
+/// <see cref="DbErrorDataExtensions.ToDbError(in DbErrorData)"/> - the only conversion from the
+/// in-process payload to the published <see cref="DbError"/> message - accepts NO redactor of any
+/// kind and applies <see cref="SqlRedactor.Instance"/> unconditionally. So an implementation of this
+/// interface that returned its input unchanged could affect a log line at worst; it can never put an
+/// unmasked statement onto the network. Redaction at the outward projection is a property of the
+/// projection itself rather than of whatever instance a caller happened to inject.
 /// </para>
 /// <para>
 /// <b>Deliberately one member.</b> The statement text is the only thing that needs redacting; the
@@ -303,34 +312,47 @@ public interface ISqlRedactor
 /// </summary>
 /// <remarks>
 /// <para>
+/// <b>THERE IS NO WAY TO TURN THIS OFF, AND THAT IS THE WHOLE CONTROL.</b> This type has no
+/// enabled flag, no pass-through mode and no configuration key. Every construction of it masks, and
+/// <see cref="Instance"/> is the shared one the outward projection uses. Redaction of outbound
+/// statement text is an ABSOLUTE boundary rather than a default: the field it protects carries the
+/// fully interpolated statement that was executed (section 2 of the file header), so a deployment
+/// able to switch masking off by setting one configuration value is a deployment able to write
+/// customer data into its own logs and responses. There is nothing to switch.
+/// </para>
+/// <para>
+/// <b>What replaced the flag, recorded so the removal is not re-litigated (C-K).</b> An earlier
+/// shape of this type took a <c>bool enabled</c> constructor argument bound from
+/// <c>Persistence:Errors:RedactSqlStatements</c> and returned the original statement instance when it
+/// was false. Two independent defects followed from it and both are now structurally impossible: an
+/// environment variable could disable the only control on this path, and the wire projection accepted
+/// any <see cref="ISqlRedactor"/> so a pass-through implementation could be injected in front of it.
+/// The configuration key is gone from <c>appsettings.json</c> as part of the same change, so no bound
+/// option is left dangling. A caller that genuinely needs the unmasked text for its own local
+/// diagnostics reads <see cref="DbErrorData.SqlSyntax"/> directly and does not go through the wire
+/// type - which is a visible, reviewable act at the call site rather than a silent configuration
+/// setting.
+/// </para>
+/// <para>
 /// <b>Sealed on purpose.</b> No derivation is permitted, which is what guarantees that no subclass
-/// can introduce a <c>ToDbError</c> overload that omits the redactor - the property constraint C-F
-/// depends on there being exactly one way to produce a wire error message.
+/// can weaken <see cref="Redact(string)"/> and then be handed to
+/// <see cref="DbErrorDataExtensions.ToDbError(in DbErrorData)"/> through
+/// <see cref="Instance"/>'s declared type.
 /// </para>
 /// <para>
-/// <b>Configuration wiring, stated here because two other files depend on this contract.</b> The
-/// constructor takes PLAIN PARAMETERS and deliberately not an options type. That is a compilation
-/// ordering requirement, not a preference: <c>Errors/</c> is the foundational folder of this project
-/// and must take ZERO intra-project dependencies so that it compiles before
-/// <c>Configuration/</c> exists. The wiring is therefore:
+/// <b>No intra-project dependency, which is a compilation-ordering requirement rather than a
+/// preference.</b> <c>Errors/</c> is the foundational folder of this project and takes ZERO
+/// intra-project dependencies, so it compiles before <c>Configuration/</c> exists. Nothing in this
+/// file reads configuration, and nothing here references
+/// <c>Microsoft.Extensions.Options</c> - the application project does not even reference that
+/// package. The only constructor argument is the placeholder token, and it is validated eagerly so a
+/// token that could not do its job is rejected at construction rather than discovered in a leaked log
+/// line.
 /// </para>
 /// <para>
-/// <c>appsettings.json</c> declares <c>Persistence:Errors:RedactSqlStatements</c>, defaulted to
-/// <see langword="true"/>; <c>Configuration/PersistenceOptions.cs</c> binds it; and
-/// <c>Program.cs</c> passes the bound flag into this constructor when registering
-/// <see cref="ISqlRedactor"/> as a singleton. Nothing in this file reads configuration itself, and
-/// nothing in this file references <c>Microsoft.Extensions.Options</c> - the application project does
-/// not even reference that package.
-/// </para>
-/// <para>
-/// <b>Redaction is opt-out, never opt-in.</b> <see cref="Enabled"/> defaults to
-/// <see langword="true"/>, so a consumer that constructs this type with no arguments gets the safe
-/// behaviour, and a consumer that omits the configuration key gets the safe behaviour too.
-/// Disabling it has to be an explicit configured act.
-/// </para>
-/// <para>
-/// <b>Thread-safe by having no mutable state.</b> Both fields are readonly and are set once in the
-/// constructor; every method is a pure function of its arguments and those two values.
+/// <b>Thread-safe by having no mutable state.</b> The single field is readonly and is set once in the
+/// constructor; every method is a pure function of its arguments and that value. That is what makes
+/// <see cref="Instance"/> safe to share across concurrent requests.
 /// </para>
 /// </remarks>
 public sealed class SqlRedactor : ISqlRedactor
@@ -360,18 +382,30 @@ public sealed class SqlRedactor : ISqlRedactor
     /// </remarks>
     public const string DefaultPlaceholder = "<redacted>";
 
-    private readonly bool _enabled;
     private readonly string _placeholder;
 
     /// <summary>
-    /// Creates a redactor.
+    /// The shared redactor: the unconditional policy that
+    /// <see cref="DbErrorDataExtensions.ToDbError(in DbErrorData)"/> applies, and the instance
+    /// composition registers for <see cref="ISqlRedactor"/> on the log path.
     /// </summary>
-    /// <param name="enabled">
-    /// <see langword="true"/> - the default - to mask literals; <see langword="false"/> to return
-    /// statement text unchanged. Bound from <c>Persistence:Errors:RedactSqlStatements</c> by
-    /// <c>Program.cs</c>. The default is deliberately the safe one, so that a missing configuration
-    /// key cannot silently disable the control.
-    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the policy the outward projection owns.</b> It is reached by the projection
+    /// directly rather than being passed in, so no caller - and no dependency-injection
+    /// registration - can substitute something weaker for it. Sharing one instance is safe because
+    /// the type holds no mutable state.
+    /// </para>
+    /// <para>
+    /// A caller that needs a non-default placeholder for its own log formatting constructs its own
+    /// instance; that choice cannot affect the wire projection, which always uses this one.
+    /// </para>
+    /// </remarks>
+    public static SqlRedactor Instance { get; } = new();
+
+    /// <summary>
+    /// Creates a redactor. Masking is unconditional; the only choice is the placeholder token.
+    /// </summary>
     /// <param name="placeholder">
     /// The text written in place of each masked literal. Defaults to
     /// <see cref="DefaultPlaceholder"/>.
@@ -390,7 +424,7 @@ public sealed class SqlRedactor : ISqlRedactor
     /// leaked log line. Failing at construction means it is discovered at startup.
     /// </para>
     /// </remarks>
-    public SqlRedactor(bool enabled = true, string placeholder = DefaultPlaceholder)
+    public SqlRedactor(string placeholder = DefaultPlaceholder)
     {
         if (string.IsNullOrWhiteSpace(placeholder))
         {
@@ -418,19 +452,8 @@ public sealed class SqlRedactor : ISqlRedactor
             }
         }
 
-        _enabled = enabled;
         _placeholder = placeholder;
     }
-
-    /// <summary>
-    /// Whether this instance masks literals. <see langword="true"/> unless explicitly configured
-    /// otherwise.
-    /// </summary>
-    /// <remarks>
-    /// Exposed so that a startup diagnostic can report the configured posture, and so that a test
-    /// can assert the default is the safe one without inspecting private state.
-    /// </remarks>
-    public bool Enabled => _enabled;
 
     /// <summary>
     /// The text this instance writes in place of each masked literal.
@@ -497,21 +520,15 @@ public sealed class SqlRedactor : ISqlRedactor
     /// </remarks>
     public string Redact([AllowNull] string statement)
     {
-        // Order matters. The empty result is returned BEFORE the enabled check, for two reasons that
-        // both point the same way: the declared return type is non-nullable so a null input can never
-        // be echoed back, and the legacy scanner sets the same convention with
-        // `if nLen <= 0 then return ""` [n_cst_thread_task_sqlbase_ds.sru:L111]. For an input that is
-        // already empty the two branches agree anyway, so nothing is lost by checking this first.
+        // The empty result, and the ONLY early return in this method. The declared return type is
+        // non-nullable so a null input can never be echoed back, and the legacy scanner sets the same
+        // convention with `if nLen <= 0 then return ""`
+        // [n_cst_thread_task_sqlbase_ds.sru:L111]. There is deliberately no second early return: the
+        // scan below always runs for every non-empty input, because there is no mode in which this
+        // type hands a statement back unmasked.
         if (string.IsNullOrEmpty(statement))
         {
             return string.Empty;
-        }
-
-        // Disabled: return the very same instance, so a caller can assert the text is unchanged
-        // byte for byte rather than merely equal.
-        if (!_enabled)
-        {
-            return statement;
         }
 
         StringBuilder masked = new(statement.Length);
@@ -887,11 +904,20 @@ public sealed class SqlRedactor : ISqlRedactor
 /// <b>Why the conversion lives here and not on <see cref="DbErrorData"/>.</b> That type deliberately
 /// has no self-conversion, and its own documentation says so and points here
 /// [see <c>Errors/DbErrorData.cs</c>, the <c>SqlSyntax</c> value section]. The reason is a security
-/// property rather than tidiness: if the payload could convert itself, an unredacted statement could
-/// reach a network peer through a one-line call that looked entirely innocent at the call site. Making
-/// the redactor a required argument of the only available conversion removes that path
-/// STRUCTURALLY - constraint C-F becomes a compile-time property instead of something a reviewer has
-/// to notice.
+/// property rather than tidiness: the conversion has to live beside the redactor so that the redactor
+/// is applied by the conversion itself, with no seam in between for anything to be substituted at.
+/// </para>
+/// <para>
+/// <b>THE REDACTION POLICY IS NOT A PARAMETER, AND THAT IS THE CONTROL (C-F).</b> This class takes no
+/// <see cref="ISqlRedactor"/>, offers no overload that accepts one, and applies
+/// <see cref="SqlRedactor.Instance"/> - which has no disabled mode and is sealed. So there is no
+/// argument to get wrong, no dependency-injection registration that can weaken this path, and no
+/// pass-through implementation that can be placed in front of it. An earlier shape did take an
+/// <see cref="ISqlRedactor"/> argument, on the reasoning that a mandatory parameter made the control
+/// structural; it did not, because ANY implementation satisfied it. Making the projection own the
+/// policy is what makes the guarantee real, and it is why the only remaining way to emit unmasked
+/// statement text is to read <see cref="DbErrorData.SqlSyntax"/> yourself and hand it somewhere -
+/// which is visible at the call site.
 /// </para>
 /// <para>
 /// <b>This is what makes the published contract's own promise true.</b> The protocol definition
@@ -906,21 +932,18 @@ public static class DbErrorDataExtensions
 {
     /// <summary>
     /// Projects <paramref name="error"/> onto a wire <see cref="DbError"/>, masking the statement text
-    /// with <paramref name="redactor"/> and copying the other four members through unchanged.
+    /// unconditionally and copying the other four members through unchanged.
     /// </summary>
-    /// <param name="error">The in-process payload to project.</param>
-    /// <param name="redactor">
-    /// The redactor to mask the statement with. MANDATORY BY DESIGN - there is deliberately no
-    /// overload that omits it, and <see cref="SqlRedactor"/> is sealed so none can be introduced by
-    /// derivation. A caller that genuinely needs unmasked text for its own diagnostics reads
-    /// <see cref="DbErrorData.SqlSyntax"/> directly rather than going through the wire type.
+    /// <param name="error">
+    /// The in-process payload to project. Taken by <see langword="in"/> because the legacy structure is
+    /// a <c>readonly</c> parameter wherever it is passed by reference - the mapping the migration plan
+    /// fixes for PowerBuilder's <c>readonly</c> is C#'s <see langword="in"/>.
     /// </param>
     /// <returns>
     /// A message whose five fields correspond to the five members of the legacy structure in the
     /// legacy's own order [ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L4-L8], with field 3
-    /// masked.
+    /// masked by <see cref="SqlRedactor.Instance"/>.
     /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="redactor"/> is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
     /// <b>Field order is preserved, and it is not cosmetic.</b> The assignments below run in the order
@@ -958,10 +981,8 @@ public static class DbErrorDataExtensions
     /// <see cref="DwBuffer.Filter"/>, whose row order is inverted relative to the source.
     /// </para>
     /// </remarks>
-    public static DbError ToDbError(this DbErrorData error, ISqlRedactor redactor)
+    public static DbError ToDbError(this in DbErrorData error)
     {
-        ArgumentNullException.ThrowIfNull(redactor);
-
         return new DbError
         {
             // 1 - long sqldbcode [dberrordata.srs:L4]
@@ -970,9 +991,10 @@ public static class DbErrorDataExtensions
             // 2 - string sqlerrtext [:L5] - opaque display text, copied verbatim, never scrubbed
             Sqlerrtext = error.SqlErrText,
 
-            // 3 - string sqlsyntax [:L6] - THE ONE FIELD THAT IS MASKED, and the only reason this
-            //     method requires a redactor at all
-            Sqlsyntax = redactor.Redact(error.SqlSyntax),
+            // 3 - string sqlsyntax [:L6] - THE ONE FIELD THAT IS MASKED. The policy is reached
+            //     directly and is not a parameter, so this line cannot be weakened from a call site
+            //     or from a container registration.
+            Sqlsyntax = SqlRedactor.Instance.Redact(error.SqlSyntax),
 
             // 4 - dwbuffer buffer [:L7]
             Buffer = error.Buffer,
@@ -982,4 +1004,3 @@ public static class DbErrorDataExtensions
         };
     }
 }
-

@@ -101,8 +101,9 @@
 //
 //  This file declares NO SCREAMING_SNAKE and no underscore-bearing identifier. That is a build
 //  requirement rather than a style preference: Directory.Build.props sets TreatWarningsAsErrors,
-//  and the root .editorconfig scopes its CA1707 and IDE1006 suppressions to the ten individual
-//  files that genuinely carry preserved legacy constant identifiers. This file is deliberately not
+//  and the root .editorconfig scopes its CA1707 and IDE1006 suppressions to the individual files on
+//  its BAND 3 roster - the single source of truth for that list - that genuinely carry preserved
+//  legacy constant identifiers. This file is deliberately not
 //  one of them, so a SCREAMING_SNAKE declaration here would be a build ERROR. The return-code
 //  identifiers are REFERENCED from RetCode and never redeclared; CA1707 reports declarations only,
 //  never uses, so referencing them needs no suppression. The string literals "E_INVALID_ARGUMENT"

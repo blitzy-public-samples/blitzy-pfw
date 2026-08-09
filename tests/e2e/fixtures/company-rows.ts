@@ -36,30 +36,45 @@
  * time. The three sibling legacy browser-asset directories under `tests/` are
  * read-only oracle assets that this module never touches or names.
  *
- * THREE PRESERVED TYPE MISMATCHES — DEFECTS TO REPRODUCE, NEVER CORRECT
- * ---------------------------------------------------------------------
- * The DataWindow and the DDL disagree in three places, and the disagreements
- * are preserved rather than reconciled (C-B):
+ * FOUR PRESERVED TYPE MISMATCHES — DEFECTS TO REPRODUCE, NEVER CORRECT
+ * --------------------------------------------------------------------
+ * The DataWindow and the DDL disagree in FOUR places, and every one of the
+ * disagreements is preserved rather than reconciled (C-B):
  *
- * | Column    | DataWindow declares | The table declares |
- * | --------- | ------------------- | ------------------ |
- * | `address` | `char(200)`         | `CHAR(50)`         |
- * | `salary`  | `decimal(2)`        | `REAL`             |
- * | `birth`   | `date`              | `TEXT`             |
+ * | # | Column    | DataWindow declares | The table declares |
+ * | - | --------- | ------------------- | ------------------ |
+ * | 1 | `name`    | `char(100)`         | `TEXT NOT NULL`    |
+ * | 2 | `address` | `char(200)`         | `CHAR(50)`         |
+ * | 3 | `salary`  | `decimal(2)`        | `REAL`             |
+ * | 4 | `birth`   | `date`              | `TEXT`             |
+ *
+ * THREE OF THE FOUR ARE NAMED AS DEFECTS TO PRESERVE; `name` IS THE FOURTH AND
+ * IS UNNAMED, and its absence from that list is not permission to reconcile it.
+ * It was found by diffing the two declarations column for column, and the
+ * authoritative inventory on the .NET side records all four in exactly these
+ * terms — `Data/CompanyEntity.cs` heads its table "FOUR DECLARATION DIVERGENCES
+ * BETWEEN THE DDL AND THE DATAWINDOW - ALL FOUR PRESERVED" and marks `name` as
+ * "(4th, unnamed)". This fixture must agree with it, because the two are the
+ * only two descriptions of the same schema in the repository and a suite that
+ * counted three would be asserting against a schema the port does not model.
+ *
+ * The four are numbered here in DDL order, which is the order every table in
+ * this module uses and the order `CompanyEntity.cs` lists them in.
  *
  * Each is recorded on its column below as a `mismatchNote`. An implementation
  * that declared consistent types on both sides would diverge from the oracle
  * on the first value that exercised the difference.
  *
- * NO CODE PATH HERE ASSERTS A LENGTH LIMIT OF 50 OR 200, and none may be
- * added. Two independent reasons. First, the mismatch must never become the
- * accidental subject of a happy-path spec, so every address this module
- * produces or transcribes is 50 characters or fewer and the disagreement is
- * simply never reached. Second, and more decisively: SQLite gives a declared
- * type containing `CHAR` TEXT affinity, so the declared `CHAR(50)` length
- * CONSTRAINS NOTHING — the engine neither truncates at 50 nor pads to 50.
- * A truncation assertion would therefore assert behaviour the engine does not
- * exhibit. The disagreement is between two DECLARATIONS, and only the
+ * NO CODE PATH HERE ASSERTS A LENGTH LIMIT OF 50, 100 OR 200, and none may be
+ * added. Two independent reasons. First, a mismatch must never become the
+ * accidental subject of a happy-path spec, so every name and every address this
+ * module produces or transcribes stays well inside the smaller of the two
+ * declared bounds and the disagreements are simply never reached. Second, and
+ * more decisively: SQLite gives a declared type containing `CHAR` TEXT affinity
+ * and gives `TEXT` no length constraint at all, so neither `CHAR(50)` nor the
+ * unbounded `TEXT` on `NAME` CONSTRAINS ANYTHING — the engine neither truncates
+ * nor pads. A truncation assertion would therefore assert behaviour the engine
+ * does not exhibit. Each disagreement is between two DECLARATIONS, and only the
  * DataWindow's bound has any effect.
  *
  * DETERMINISM IS A HARD PREREQUISITE, NOT A PREFERENCE
@@ -166,7 +181,7 @@ export const COMPANY_TABLE_NAME = 'COMPANY';
  * One column of the `COMPANY` table, described from BOTH oracles at once.
  *
  * Carrying the DDL type and the DataWindow type as separate members is what
- * makes the three preserved mismatches visible in the data rather than hidden
+ * makes the four preserved mismatches visible in the data rather than hidden
  * in prose. A single `type` member would have forced a choice between the two
  * oracles, and choosing either one would have silently reconciled a
  * disagreement this suite exists to preserve.
@@ -200,11 +215,17 @@ export interface CompanyColumn {
   /** `updatewhereclause=yes`. True for all six — see {@link MARKED_COLUMNS}. */
   readonly updateWhereClause: boolean;
   /**
-   * Present only on the three columns whose two oracles disagree.
+   * Present on each of the FOUR columns whose two oracles disagree — `name`,
+   * `address`, `salary` and `birth`.
    *
-   * The property is OMITTED on the other three rather than set to `undefined`,
-   * which `exactOptionalPropertyTypes` requires and which also reads correctly:
-   * those columns have no mismatch, rather than an unknown one.
+   * The property is OMITTED on the other two, `id` and `age`, rather than set to
+   * `undefined`, which `exactOptionalPropertyTypes` requires and which also
+   * reads correctly: those columns have no mismatch, rather than an unknown one.
+   *
+   * Presence of this member is the MACHINE-READABLE form of the inventory in
+   * this module's header, so the two cannot drift: filtering
+   * {@link COMPANY_COLUMNS} on it yields the four, and a spec that needs the
+   * count reads it from here rather than from the prose.
    */
   readonly mismatchNote?: string;
 }
@@ -240,10 +261,7 @@ export const COMPANY_COLUMNS: readonly CompanyColumn[] = Object.freeze([
     updatable: true,
     updateWhereClause: true,
   }),
-  // `NAME TEXT NOT NULL` [`:L465`] / `char(100)` [`dw_sqlite.srd:L9`].
-  // The DataWindow bounds a column the DDL leaves unbounded. That is a
-  // difference in the same direction as the storage engine's own permissiveness
-  // rather than a contradiction, so it is not one of the three mismatches.
+  // `NAME TEXT NOT NULL` [`:L465`] / `char(100)` [`dw_sqlite.srd:L9`]. MISMATCH 1.
   Object.freeze({
     name: 'name',
     dbName: 'name',
@@ -254,6 +272,16 @@ export const COMPANY_COLUMNS: readonly CompanyColumn[] = Object.freeze([
     isIdentity: false,
     updatable: true,
     updateWhereClause: true,
+    mismatchNote:
+      'PRESERVED DEFECT: the DataWindow declares char(100) while the DDL ' +
+      'declares TEXT NOT NULL, so the DataWindow bounds a column the table ' +
+      'leaves unbounded. It is the FOURTH divergence and the only one not named ' +
+      'as a defect to preserve, which is exactly why it is recorded here: ' +
+      'CompanyEntity.cs marks it "(4th, unnamed)" and declares no MaxLength, so ' +
+      'the port already models the DDL side. Reproduce, never reconcile. As with ' +
+      'address, the bound is not assertable against the engine — SQLite gives ' +
+      'TEXT no length constraint at all — so only the DataWindow declaration ' +
+      'has any effect, and no code path here asserts a limit of 100.',
   }),
   // `AGE INT NOT NULL` [`:L466`] / `number` [`dw_sqlite.srd:L10`].
   Object.freeze({
@@ -267,7 +295,7 @@ export const COMPANY_COLUMNS: readonly CompanyColumn[] = Object.freeze([
     updatable: true,
     updateWhereClause: true,
   }),
-  // `ADDRESS CHAR(50)` [`:L467`] / `char(200)` [`dw_sqlite.srd:L11`]. MISMATCH 1.
+  // `ADDRESS CHAR(50)` [`:L467`] / `char(200)` [`dw_sqlite.srd:L11`]. MISMATCH 2.
   Object.freeze({
     name: 'address',
     dbName: 'address',
@@ -286,7 +314,7 @@ export const COMPANY_COLUMNS: readonly CompanyColumn[] = Object.freeze([
       'containing CHAR a TEXT affinity: the engine neither truncates at 50 nor ' +
       'pads to 50. Assert no length limit on either number.',
   }),
-  // `SALARY REAL` [`:L468`] / `decimal(2)` [`dw_sqlite.srd:L12`]. MISMATCH 2.
+  // `SALARY REAL` [`:L468`] / `decimal(2)` [`dw_sqlite.srd:L12`]. MISMATCH 3.
   Object.freeze({
     name: 'salary',
     dbName: 'salary',
@@ -303,7 +331,7 @@ export const COMPANY_COLUMNS: readonly CompanyColumn[] = Object.freeze([
       'return an identical value and the observed result is the ' +
       'specification. This is why SALARY_COMPARISON_TOLERANCE exists.',
   }),
-  // `BIRTH TEXT` [`:L469`] / `date` [`dw_sqlite.srd:L13`]. MISMATCH 3.
+  // `BIRTH TEXT` [`:L469`] / `date` [`dw_sqlite.srd:L13`]. MISMATCH 4.
   Object.freeze({
     name: 'birth',
     dbName: 'birth',
@@ -358,7 +386,7 @@ export const MARKED_COLUMNS: readonly CompanyColumnName[] = Object.freeze([
  * would compare differently from the oracle.
  *
  * `birth` is a STRING, never a `Date`. The column is `TEXT` [`:L469`] — that is
- * preserved mismatch 3 — so its ordering and comparison semantics follow from
+ * preserved mismatch 4 — so its ordering and comparison semantics follow from
  * the text actually written. Modelling it as a `Date` would impose date
  * semantics the storage does not have, and would drag host-timezone behaviour
  * into a value that must be byte-stable. See {@link BIRTH_FORMAT}.
@@ -370,17 +398,35 @@ export interface CompanyRow {
    * Assigned by the engine on insert — `INTEGER PRIMARY KEY` is SQLite's rowid
    * alias — and returned to the caller afterwards. Present on a retrieved row;
    * never supplied on an inserted one. See {@link CompanyRowInput}.
+   *
+   * IT IS A 64-BIT VALUE, AND `number` IS A 53-BIT-SAFE CARRIER FOR IT. The
+   * published contract declares the identity as `int64` — `identity_column_id`,
+   * `primary_values` and `filter_values` on `common.v1.IdentityColumnData` are
+   * all `int64`, and SQLite's rowid is a signed 64-bit integer — while a
+   * JavaScript `number` is an IEEE-754 double that represents integers exactly
+   * only up to {@link Number.MAX_SAFE_INTEGER}. Above that, parsing silently
+   * ROUNDS: `9007199254740993` becomes `9007199254740992`, and
+   * `Number.isInteger` reports `true` for the rounded result, so a plain integer
+   * check cannot tell a faithful value from a corrupted one.
+   *
+   * `number` is kept as the declared type because every value this fixture ever
+   * sees is a small seeded rowid, and a `bigint` field would infect every
+   * comparison in every spec for a range no test reaches. What is NOT acceptable
+   * is failing to NOTICE the range being exceeded, so the boundary is guarded
+   * instead: read an identity off a response through {@link toIdentity}, which
+   * refuses an unsafe value rather than rounding it, or through
+   * {@link toIdentityBigInt} when the full 64-bit width genuinely matters.
    */
   readonly id: number;
-  /** `NAME TEXT NOT NULL` [`:L465`]. Required. */
+  /** `NAME TEXT NOT NULL` [`:L465`]. Required. Preserved mismatch 1. */
   readonly name: string;
   /** `AGE INT NOT NULL` [`:L466`]. Required. */
   readonly age: number;
-  /** `ADDRESS CHAR(50)` [`:L467`]. Nullable. Preserved mismatch 1. */
+  /** `ADDRESS CHAR(50)` [`:L467`]. Nullable. Preserved mismatch 2. */
   readonly address: string | null;
-  /** `SALARY REAL` [`:L468`]. Nullable. Preserved mismatch 2. */
+  /** `SALARY REAL` [`:L468`]. Nullable. Preserved mismatch 3. */
   readonly salary: number | null;
-  /** `BIRTH TEXT` [`:L469`], in {@link BIRTH_FORMAT}. Nullable. Mismatch 3. */
+  /** `BIRTH TEXT` [`:L469`], in {@link BIRTH_FORMAT}. Nullable. Mismatch 4. */
   readonly birth: string | null;
 }
 
@@ -541,7 +587,7 @@ export const EXPECTED_SEED_RETRIEVE_ORDER: readonly string[] = Object.freeze([
  *
  * WHY A TOLERANCE IS NECESSARY RATHER THAN TIDY. `SALARY` is `REAL`
  * [`w_test_sqlite.srw:L468`] while the DataWindow declares `decimal(2)` — that
- * is preserved mismatch 2 — so a value's round trip through storage is not
+ * is preserved mismatch 3 — so a value's round trip through storage is not
  * guaranteed to return an identical double. Three of the four oracle salaries
  * are not exactly representable to begin with, so even before storage they are
  * held as the nearest double rather than the decimal written in the source.
@@ -678,6 +724,121 @@ function requireInteger(parameterName: string, value: number, minimum: number, m
 }
 
 /**
+ * The canonical decimal form of a 64-bit integer, as JSON carries it.
+ *
+ * Optional leading `-`, then one or more digits, anchored at both ends. No
+ * leading `+`, no exponent, no whitespace, no thousands separator and no decimal
+ * point: proto3's JSON mapping encodes `int64` as a plain decimal STRING, and
+ * anything else arriving in that position means the boundary is not the boundary
+ * this fixture was written against.
+ */
+const INT64_DECIMAL_TEXT = /^-?\d+$/;
+
+/**
+ * The inclusive 64-bit signed range, as `bigint` — what `int64` actually admits.
+ *
+ * Written as literals rather than computed, so the bound is readable and cannot
+ * drift through an arithmetic slip.
+ */
+const INT64_MINIMUM = -9223372036854775808n;
+
+/** @see {@link INT64_MINIMUM} */
+const INT64_MAXIMUM = 9223372036854775807n;
+
+/**
+ * Reads a 64-bit identity value off a JSON boundary as a `bigint`, LOSSLESSLY.
+ *
+ * Accepts the two forms the boundary can present. A STRING is the canonical
+ * proto3 JSON encoding of an `int64` and is parsed exactly, so the full 64-bit
+ * range round-trips with no loss whatever. A `number` is accepted only when it is
+ * already a safe integer, because by the time a JSON parser has produced a
+ * `number` outside that range the digits are gone and no amount of care here can
+ * recover them — a value that has been rounded cannot be un-rounded, so the only
+ * honest response is to refuse it.
+ *
+ * @param value - The raw identity value as it came off the wire.
+ * @param parameterName - Names the value in any error, so a failure identifies
+ *   the field rather than just the file.
+ * @returns The exact value.
+ * @throws TypeError if the value is neither a safe-integer `number` nor a
+ *   canonical decimal string, which includes the case of a `number` that has
+ *   already lost precision.
+ * @throws RangeError if the value lies outside the signed 64-bit range.
+ */
+export function toIdentityBigInt(value: unknown, parameterName = 'identity'): bigint {
+  let parsed: bigint;
+
+  if (typeof value === 'bigint') {
+    parsed = value;
+  } else if (typeof value === 'number') {
+    // `Number.isSafeInteger`, NOT `Number.isInteger`. The weaker check is what
+    // makes an already-rounded value look acceptable: 9007199254740993 parses to
+    // 9007199254740992, and `Number.isInteger` says `true` about the result.
+    if (!Number.isSafeInteger(value)) {
+      throw new TypeError(
+        `${parameterName} arrived as the number ${String(value)}, which is not a safe integer. ` +
+          'The contract declares the identity as int64 (common.v1.IdentityColumnData carries ' +
+          'identity_column_id, primary_values and filter_values as int64), and a JSON number ' +
+          'outside \u00b12^53-1 has already been rounded by the parser, so the original digits ' +
+          'cannot be recovered. Have the boundary emit the canonical decimal STRING form for ' +
+          'int64 and pass that instead.',
+      );
+    }
+    parsed = BigInt(value);
+  } else if (typeof value === 'string' && INT64_DECIMAL_TEXT.test(value)) {
+    parsed = BigInt(value);
+  } else {
+    throw new TypeError(
+      `${parameterName} must be a safe-integer number or a canonical decimal int64 string; ` +
+        `received ${typeof value} ${JSON.stringify(value) ?? String(value)}.`,
+    );
+  }
+
+  if (parsed < INT64_MINIMUM || parsed > INT64_MAXIMUM) {
+    throw new RangeError(
+      `${parameterName} is ${parsed.toString()}, which lies outside the signed 64-bit range ` +
+        `${INT64_MINIMUM.toString()}..${INT64_MAXIMUM.toString()} that int64 admits.`,
+    );
+  }
+
+  return parsed;
+}
+
+/**
+ * Reads a 64-bit identity value off a JSON boundary as the `number` that
+ * {@link CompanyRow.id} declares, REFUSING anything `number` cannot carry.
+ *
+ * This is the conversion every spec should use on an identity that came back from
+ * Gateway, and it is the reason {@link CompanyRow.id} can stay a `number` without
+ * that being a silent narrowing: the range is checked rather than assumed, so a
+ * value the type cannot represent produces a named failure at the boundary
+ * instead of a wrong number that compares equal to nothing.
+ *
+ * @param value - The raw identity value as it came off the wire, as a number, a
+ *   canonical decimal `int64` string, or a `bigint`.
+ * @param parameterName - Names the value in any error.
+ * @returns The value as a `number`, guaranteed exact.
+ * @throws TypeError if the value is not one of the accepted forms, or is a
+ *   `number` that has already lost precision.
+ * @throws RangeError if the value is a valid `int64` but lies beyond
+ *   {@link Number.MAX_SAFE_INTEGER}, so `number` cannot represent it exactly.
+ *   Use {@link toIdentityBigInt} for that case rather than widening this one.
+ */
+export function toIdentity(value: unknown, parameterName = 'identity'): number {
+  const exact = toIdentityBigInt(value, parameterName);
+
+  if (exact < BigInt(Number.MIN_SAFE_INTEGER) || exact > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(
+      `${parameterName} is ${exact.toString()}, a valid int64 that a JavaScript number cannot ` +
+        `represent exactly (the safe range ends at ${String(Number.MAX_SAFE_INTEGER)}). Returning ` +
+        'it as a number would round it silently. Use toIdentityBigInt for values this large.',
+    );
+  }
+
+  return Number(exact);
+}
+
+/**
  * Formats a `birth` value in {@link BIRTH_FORMAT} from its three parts.
  *
  * Pure zero-padding over integer arithmetic. NO DATE OBJECT IS CONSTRUCTED AND
@@ -692,7 +853,7 @@ function requireInteger(parameterName: string, value: number, minimum: number, m
  * so an obvious mistake fails at the call site. CALENDAR VALIDITY IS NOT
  * CHECKED — `formatBirth(2001, 2, 30)` returns `'2001-02-30'` rather than
  * throwing. That is not an oversight. `BIRTH` is a `TEXT` column
- * [`w_test_sqlite.srw:L469`] — preserved mismatch 3 — so the storage accepts
+ * [`w_test_sqlite.srw:L469`] — preserved mismatch 4 — so the storage accepts
  * any text and applies no date semantics of its own. A fixture that rejected a
  * date the column would happily store would be enforcing a rule the system
  * under test does not have, which is precisely the kind of well-meant
@@ -941,17 +1102,36 @@ function requireInputPatch(parameterName: string, value: unknown): void {
   }
 }
 
-/** Rejects anything that is not a usable retrieved row. */
+/**
+ * Rejects anything that is not a usable retrieved row.
+ *
+ * THE KEY CHECK IS `Number.isSafeInteger`, NOT `Number.isInteger`, and the
+ * difference is the whole point of this guard. The identity is an `int64` on the
+ * wire, so a value beyond \u00b12^53-1 has already been rounded by the time a
+ * JSON parser hands it over as a `number` — and `Number.isInteger` reports `true`
+ * about the ROUNDED result, so the weaker check waves through precisely the value
+ * that is wrong. A row admitted here becomes the `original` half of an update
+ * payload, whose `WHERE` clause carries that key: a rounded key silently
+ * addresses a DIFFERENT ROW, or none, and the spec then reports a phantom
+ * concurrency conflict rather than a corrupted identity. Refusing at the boundary
+ * is what turns that into a named failure at the call site.
+ *
+ * A row whose identity genuinely exceeds the safe range is not a fixture
+ * limitation to be worked around here — see {@link toIdentity} and
+ * {@link toIdentityBigInt}, which are the conversions that own that decision.
+ */
 function requireRow(parameterName: string, value: unknown): void {
   if (typeof value !== 'object' || value === null) {
     throw new TypeError(`${parameterName} must be a CompanyRow object; received ${typeof value}.`);
   }
   const candidate = value as { readonly id?: unknown };
-  if (!Number.isInteger(candidate.id)) {
+  if (!Number.isSafeInteger(candidate.id)) {
     throw new TypeError(
-      `${parameterName}.id must be an integer: an update is keyed on the row's ` +
+      `${parameterName}.id must be a safe integer: an update is keyed on the row's ` +
         'identity, so only a retrieved row can be updated. Insert first, then ' +
-        'use the key the engine assigned.',
+        'use the key the engine assigned. If the value came off a response and ' +
+        'exceeds \u00b12^53-1, read it through toIdentity or toIdentityBigInt ' +
+        'rather than trusting a JSON number the parser has already rounded.',
     );
   }
 }
@@ -1116,4 +1296,3 @@ export function asStaleUpdate(
  * {@link withChanges} — and it must preserve the delete-plus-insert consequence
  * rather than assert an in-place update.
  */
-

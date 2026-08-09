@@ -229,20 +229,29 @@
 //
 //  EXPOSURE NOTE FOR THE ENDPOINT AUTHOR, which is the reason this paragraph exists in code rather
 //  than only in a document. `HashFile` is reproduced faithfully because it is one of the 63 ported
-//  declarations. But the published cryptographic service contract enumerates unkeyed hash, keyed
-//  HMAC, symmetric encryption and decryption, RSA operations, RSA key generation, random generation
-//  and encoding conversions - IT DOES NOT ENUMERATE A FILE-HASH OPERATION. A caller-supplied
-//  filesystem path reachable from a network endpoint is an arbitrary-file-read oracle: a caller
-//  could confirm the existence of a path, and could digest a file it cannot otherwise read, which
-//  an in-process library called by its own application could never have been.
+//  declarations, AND IT IS PUBLISHED: the cryptographic contract projects all 63 legacy overloads onto
+//  17 operations, of which `POST /v1/crypto/hash-file` is operation 2 and `POST /v1/crypto/hmac-file`
+//  is operation 4 [shared/PowerFramework.Contracts/OpenApi/security.v1.yaml, the overload census].
 //
-//  THIS FILE REGISTERS NO ROUTE AND OPENS NO LISTENER, so it creates no such exposure by itself.
-//  Two things follow for whoever writes the endpoint layer. Publishing this member is a decision to
-//  be taken knowingly, and the safe default is not to publish it. And no path validation is added
-//  HERE, because a path filter would change observable behaviour for the in-process callers the
-//  legacy had; any such policy belongs at the boundary that chooses to expose the operation, where
-//  it can be expressed as an authorization and allow-list concern rather than smuggled into a
-//  digest routine.
+//  WHAT THE CONTRACT DOES NOT PUBLISH IS A PATH, AND THAT IS THE WHOLE OF THE ANSWER. A
+//  caller-supplied filesystem path reachable from a network endpoint would be an arbitrary-file-read
+//  oracle - a caller could confirm that a path exists and could digest a file it cannot otherwise
+//  read, neither of which an in-process library called by its own application could ever have been.
+//  So the wire carries an OPAQUE SERVER-RESOLVED `fileRef`, exactly as it carries `keyRef` for key
+//  material and for the same reason: the endpoint resolves the reference against its own configured,
+//  allow-listed store, an unknown reference is a plain 404, and a reference outside that store cannot
+//  be constructed by a caller at all. There is no path to traverse because there is no path.
+//
+//  WHAT THAT NARROWS, STATED HERE TOO SO A READER OF THIS FILE SEES IT: the legacy hashes any file its
+//  process could open, and the published operations hash any file the deployment has been CONFIGURED to
+//  expose. That is a real reduction in reach and it is deliberate.
+//
+//  THIS FILE REGISTERS NO ROUTE AND OPENS NO LISTENER, and it still takes a resolved path rather than a
+//  reference - deliberately, because the resolution is the ENDPOINT's job. Two things follow for whoever
+//  writes that layer. The reference-to-path resolution and its allow-list live there, where they can be
+//  expressed as authorization and configuration. And no path validation is added HERE, because a path
+//  filter would change observable behaviour for the in-process callers the legacy had and would smuggle
+//  a policy decision into a digest routine.
 //
 //  ==============================================================================================
 //  THE DIGEST OUTPUT ENCODING IS NOT A DECISION OF THIS FILE - IT IS DECISION D4

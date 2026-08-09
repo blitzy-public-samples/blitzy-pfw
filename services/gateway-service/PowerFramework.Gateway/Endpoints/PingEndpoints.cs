@@ -122,7 +122,8 @@
 //     endpoint file would be a second source of truth, and the deliberately unallocated Phase-2 slot in
 //     that same band is never referenced or reassigned from here either.
 //   * It declares no SCREAMING_SNAKE constant. The repository-root .editorconfig scopes its CA1707 and
-//     IDE1006 suppressions to seven named files that genuinely carry preserved legacy identifiers, and
+//     IDE1006 suppressions to the individually named files that genuinely carry preserved legacy
+//     identifiers - its BAND 3 roster is the single source of truth for which those are - and
 //     no Gateway file is among them; with TreatWarningsAsErrors=true from Directory.Build.props such a
 //     declaration would be a build ERROR here. Legacy constants are CONSUMED from
 //     PowerFramework.Shared.Kernel - which is safe, because CA1707 reports declarations only - and

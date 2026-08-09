@@ -292,8 +292,10 @@ interface TokenRequestBody {
  * - What still has **not** been observed is a running service answering this
  *   request, because the issuing service is not yet built out. So the spellings
  *   are contract-confirmed rather than merely guessed, but they are not yet
- *   run-confirmed — which is exactly why the response side stays tolerant and
- *   why this remains a single, clearly marked edit point.
+ *   run-confirmed — which is why this remains a single, clearly marked edit
+ *   point. It is **not** a reason for the response side to be tolerant: the
+ *   response side parses the published `TokenResponse` and nothing else, for the
+ *   reasons set out where it does so.
  *
  * The scope array is copied into a fresh mutable array so that the frozen
  * default cannot be handed to a serializer that might mutate it, and so a
@@ -373,7 +375,7 @@ function assertUsableTokenRequest(body: TokenRequestBody): void {
 }
 
 // ---------------------------------------------------------------------------
-// Response handling — tolerant about shape, loud about mismatch, silent about
+// Response handling — strict about shape, loud about mismatch, silent about
 // every value
 // ---------------------------------------------------------------------------
 
@@ -381,32 +383,127 @@ function assertUsableTokenRequest(body: TokenRequestBody): void {
 type JsonObject = Record<string, unknown>;
 
 /**
- * The response members that may carry the issued token, in the order they are
- * tried.
+ * ===========================================================================
+ * THE RESPONSE IS PARSED AS THE PUBLISHED `TokenResponse` AND AS NOTHING ELSE
+ * ===========================================================================
  *
- * The first name is the one the published response schema actually declares —
- * it is required there, and it is the RFC 6749 §5.1 spelling, chosen so that a
- * stock client library parses the response with no bespoke code. It is
- * therefore not a guess.
+ * `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` declares
+ * `TokenResponse` with `additionalProperties: false`, four required members and
+ * one optional one. These constants are that declaration, restated once:
  *
- * The two after it are **belt and braces, and they are temporary.** The
- * spellings are contract-confirmed but not yet run-confirmed: the issuing
- * service is not built out, so no implementation has been observed answering
- * this request. The two alternatives cover the only plausible ways an
- * implementation could differ from its own contract — the camel-cased form and
- * the bare form — so that a spelling mismatch surfaces as a passing test rather
- * than as a day of debugging a `401` from a downstream service that was handed
- * `undefined`.
+ * - `access_token` — string, `minLength: 1`
+ * - `token_type`   — string, `const: Bearer`
+ * - `expires_in`   — integer, `format: int64`, `minimum: 1`
+ * - `scope`        — string, space-delimited **granted** set, possibly empty
+ * - `issued_at`    — optional integer, `format: int64`
  *
- * **Once a running service has been observed answering, narrow this to the
- * single real member.** Tolerance that outlives its justification stops being
- * caution and becomes a way for two spellings to both look correct.
+ * **An earlier form of this fixture accepted `accessToken` and `token` as well,
+ * and that tolerance was wrong in a way worth stating so it is not reintroduced.**
+ * The justification offered for it was that the spellings were
+ * contract-confirmed but not run-confirmed — but tolerating three spellings does
+ * not resolve that uncertainty, it hides it. A service answering with
+ * `accessToken` violates its own published contract, and the suite whose job is
+ * to verify the boundary would have reported that violation as a pass. Worse, it
+ * validated none of the other three members at all: a response carrying an
+ * expired-on-arrival `expires_in`, a `token_type` of `Basic`, or no granted
+ * `scope` would have been accepted silently, and the resulting `401` from
+ * Gateway would have pointed at Gateway rather than at the issuer that caused
+ * it.
+ *
+ * A later form narrowed the parse to the single `access_token` member instead.
+ * That was the right direction and still short of the contract: it read one of
+ * the four required members and left the other three unchecked, so the same
+ * class of issuer defect stayed invisible. The inventory below is the whole
+ * declaration, which is what makes the check exact rather than merely stricter.
+ *
+ * So the parse is exact in both directions: every required member must be
+ * present and well-formed, and no member outside this inventory may appear,
+ * because the contract forbids one. A contract violation fails **here**, at the
+ * issuer, naming the member — which is the whole reason a contract is published.
  */
-const TOKEN_FIELD_CANDIDATES: readonly string[] = Object.freeze([
-  'access_token',
-  'accessToken',
-  'token',
+const ACCESS_TOKEN_MEMBER: string = 'access_token';
+
+const TOKEN_TYPE_MEMBER: string = 'token_type';
+
+const EXPIRES_IN_MEMBER: string = 'expires_in';
+
+const SCOPE_MEMBER: string = 'scope';
+
+const ISSUED_AT_MEMBER: string = 'issued_at';
+
+/** The four members `TokenResponse` marks required, in the order it declares them. */
+const TOKEN_RESPONSE_REQUIRED_MEMBERS: readonly string[] = Object.freeze([
+  ACCESS_TOKEN_MEMBER,
+  TOKEN_TYPE_MEMBER,
+  EXPIRES_IN_MEMBER,
+  SCOPE_MEMBER,
 ]);
+
+/**
+ * Every member `TokenResponse` permits — the four required plus the one optional.
+ *
+ * Used to enforce `additionalProperties: false`. A member outside this set is a
+ * contract violation on a credential-bearing response, which is the one place an
+ * unreviewed field is least acceptable.
+ */
+const TOKEN_RESPONSE_PERMITTED_MEMBERS: readonly string[] = Object.freeze([
+  ...TOKEN_RESPONSE_REQUIRED_MEMBERS,
+  ISSUED_AT_MEMBER,
+]);
+
+/**
+ * One issued token, exactly as the published `TokenResponse` describes it.
+ *
+ * The whole response is carried rather than just the token string, for two
+ * reasons that are both about not lying to a caller:
+ *
+ * 1. **The scheme is the issuer's to state, not this fixture's to assume.**
+ *    {@link bearerHeaders} presents `token_type` as it was issued. The contract
+ *    fixes that value as the constant `Bearer` and {@link BEARER_SCHEME} is
+ *    checked against it during the parse — so the header is built from a value
+ *    that has been *verified* to equal the constant, rather than from the
+ *    constant while the issued value went unread. Those look identical while the
+ *    contract holds and differ the moment it does not, and the second is the
+ *    only case worth writing a test for.
+ * 2. **The granted scope set is not the requested one.** The contract says so
+ *    explicitly, and a narrowing is a `200`. A caller handed only the token
+ *    string cannot tell whether it received what it asked for, so the granted
+ *    set travels with the credential that carries it.
+ *
+ * The token itself is a **credential**: use it for the request in hand and let it
+ * fall out of scope. Nothing in this module caches, logs, writes or reports it.
+ */
+export interface ServiceToken {
+  /** The signed token, exactly as issued — never trimmed, re-encoded or adjusted. */
+  readonly accessToken: string;
+
+  /**
+   * The credential scheme the issuer stated, verified during the parse to be the
+   * contract's constant. Presented verbatim by {@link bearerHeaders}.
+   */
+  readonly tokenType: string;
+
+  /** The token lifetime in seconds from issuance; at least 1 by contract. */
+  readonly expiresInSeconds: number;
+
+  /** The granted scope set exactly as issued, space-delimited and possibly empty. */
+  readonly scope: string;
+
+  /**
+   * The granted scope set split on whitespace — empty when nothing was granted.
+   *
+   * Frozen, because a caller comparing what it asked for against what it got has
+   * no business mutating the record of the second.
+   */
+  readonly grantedScopes: readonly string[];
+
+  /**
+   * The issuance time in seconds since the Unix epoch, when the issuer supplied
+   * it. Optional by contract, so `undefined` here means "not stated" rather than
+   * "zero".
+   */
+  readonly issuedAtEpochSeconds?: number;
+}
 
 /**
  * The one-line reminder of how the stack is started, appended to every
@@ -553,9 +650,12 @@ function callerAuthenticationHint(status: number): string {
 
   return SECURITY_CLIENT_CERTIFICATE === undefined
     ? `${preamble} No client certificate is configured for this suite, so none` +
-        ' was presented. Configure the client-certificate settings the endpoint' +
-        ' table documents, or run against the documented loopback bring-up,' +
-        ' where there is no handshake and none is required.'
+        ' was presented. Issuance requires one on every topology: Security' +
+        ' publishes POST /v1/tokens only on its mutual-TLS listener, so there is' +
+        ' no address — local or deployed — that mints a token without a' +
+        ' certificate. Generate the local set and configure the' +
+        ' client-certificate settings the endpoint table documents; a spec that' +
+        ' needs a token skips itself until then.'
     : `${preamble} A client certificate IS configured, so either the issuer` +
         ' does not trust it or the request context did not present it — a' +
         " context built outside the runner's configuration carries none, which" +
@@ -614,7 +714,7 @@ async function postTokenRequest(
  * nothing, derives nothing and reads no signing key: it asks the sole issuer
  * over the published contract and returns what the issuer produced.
  *
- * The returned value is a **credential**. The caller should place it in a
+ * The returned value carries a **credential**. The caller should place it in a
  * per-request header with {@link bearerHeaders} and let it fall out of scope
  * afterwards. It is deliberately **not cached** anywhere in this module — a
  * fresh token per call. There is no performance argument to answer, because the
@@ -631,16 +731,17 @@ async function postTokenRequest(
  *                presented on the mutual-TLS issuance edge.
  * @param overrides optional per-call overrides; omit for the suite's ordinary
  *                  token
- * @returns the token, as a non-empty string
+ * @returns the issued token together with the scheme, lifetime and granted scope
+ *          set the issuer stated
  * @throws Error when the request cannot be sent, when the issuer refuses, or
- *         when the response carries no recognisable token member. Every message
- *         names the method, the URL and the status or cause, and none of them
- *         quotes a response value.
+ *         when the response is not a conforming `TokenResponse`. Every message
+ *         names the method, the URL and the status, cause or member at fault,
+ *         and none of them quotes a response value.
  */
 export async function acquireServiceToken(
   request: APIRequestContext,
   overrides?: TokenRequest,
-): Promise<string> {
+): Promise<ServiceToken> {
   const url: string = securityUrl(TOKEN_PATH);
   const body: TokenRequestBody = buildTokenRequestBody(overrides);
 
@@ -686,49 +787,154 @@ export async function acquireServiceToken(
     );
   }
 
-  const token: string | undefined = extractToken(payload);
-
-  if (token === undefined) {
-    throw new Error(
-      `POST ${url} answered HTTP ${response.status()} but carried no usable ` +
-        `token. Members tried, in order: ` +
-        `[${TOKEN_FIELD_CANDIDATES.join(', ')}]. Response carried ` +
-        `[${formatKeyNames(topLevelKeyNames(payload))}] (${NAMES_ONLY_NOTE}). ` +
-        'If the real member name is absent from the list tried, correct the ' +
-        'candidate list in this fixture rather than working around it in a spec.',
-    );
-  }
-
-  return token;
+  return parseTokenResponse(payload, url);
 }
 
 /**
- * Reads the token out of a parsed response body.
+ * Parses a success body as the published `TokenResponse`, or throws.
  *
- * Each candidate must be a string with non-whitespace content. A present but
- * empty member is treated as absent rather than returned, because an empty
- * credential would produce a syntactically valid `Authorization` header that
- * every service refuses — a `401` whose cause is three layers away from the
- * response that actually caused it.
+ * Every check below is a clause of the published schema rather than a preference
+ * of this fixture, and each failure names the member and the rule while quoting
+ * **no value** — the body of a token endpoint is a credential by definition, and
+ * a thrown message reaches the console, the reporter and the CI log.
  *
- * The value is returned exactly as issued. A credential is never trimmed,
+ * The order is deliberate: the member set is checked first, so that a response
+ * carrying an alias like `accessToken` is diagnosed as the contract violation it
+ * is rather than as a missing `access_token` with no explanation of what arrived
+ * instead.
+ *
+ * `access_token` is returned exactly as issued. A credential is never trimmed,
  * re-encoded or otherwise adjusted on its way through: if an issuer ever
  * surrounds a token with whitespace, that is a defect to see rather than one to
- * paper over.
+ * paper over. It is checked for non-whitespace content because an empty
+ * credential produces a syntactically valid `Authorization` header that every
+ * service refuses — a `401` whose cause is three layers away from the response
+ * that caused it.
  *
- * @param payload the parsed response body
- * @returns the token, or `undefined` when no candidate member carries one
+ * @param payload the parsed success body
+ * @param url the token-endpoint URL, so a message locates the issuer
+ * @returns the issued token and its metadata
+ * @throws Error when the body is not a conforming `TokenResponse`
  */
-function extractToken(payload: JsonObject): string | undefined {
-  for (const field of TOKEN_FIELD_CANDIDATES) {
-    const candidate: unknown = payload[field];
+function parseTokenResponse(payload: JsonObject, url: string): ServiceToken {
+  const present: readonly string[] = topLevelKeyNames(payload);
+  const arrived: string = formatKeyNames(present);
 
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      return candidate;
-    }
+  const unexpected: readonly string[] = present.filter(
+    (name: string): boolean => !TOKEN_RESPONSE_PERMITTED_MEMBERS.includes(name),
+  );
+
+  if (unexpected.length > 0) {
+    throw new Error(
+      `POST ${url} answered with member(s) the published TokenResponse does ` +
+        `not permit: [${formatKeyNames(unexpected)}]. The schema sets ` +
+        'additionalProperties: false, so this is a contract violation at the ' +
+        `issuer. Permitted members are ` +
+        `[${TOKEN_RESPONSE_PERMITTED_MEMBERS.join(', ')}]; the response ` +
+        `carried [${arrived}] (${NAMES_ONLY_NOTE}). If the contract changed, ` +
+        'change it in security.v1.yaml and here together — never work around ' +
+        'it in a spec.',
+    );
   }
 
-  return undefined;
+  const missing: readonly string[] = TOKEN_RESPONSE_REQUIRED_MEMBERS.filter(
+    (name: string): boolean => !present.includes(name),
+  );
+
+  if (missing.length > 0) {
+    throw new Error(
+      `POST ${url} answered without required member(s) ` +
+        `[${formatKeyNames(missing)}] of the published TokenResponse. ` +
+        `Required members are [${TOKEN_RESPONSE_REQUIRED_MEMBERS.join(', ')}]; ` +
+        `the response carried [${arrived}] (${NAMES_ONLY_NOTE}). The RFC 6749 ` +
+        'section 5.1 spellings are the contract, and a camel-cased or bare ' +
+        'alias is a violation of it rather than an accepted variant.',
+    );
+  }
+
+  const accessToken: unknown = payload[ACCESS_TOKEN_MEMBER];
+
+  if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
+    throw new Error(
+      `POST ${url} answered with a '${ACCESS_TOKEN_MEMBER}' that is not a ` +
+        'non-empty string. The schema declares a string with minLength 1, and ' +
+        'an empty credential would build an Authorization header every service ' +
+        `refuses (${NAMES_ONLY_NOTE}).`,
+    );
+  }
+
+  const tokenType: unknown = payload[TOKEN_TYPE_MEMBER];
+
+  if (tokenType !== BEARER_SCHEME) {
+    throw new Error(
+      `POST ${url} answered with a '${TOKEN_TYPE_MEMBER}' that is not the ` +
+        `contract's constant '${BEARER_SCHEME}'. The schema fixes it as a ` +
+        'const because no other credential type is issued, so a different ' +
+        'scheme is not a variant to accommodate: presenting a bearer header ' +
+        'for a non-bearer credential would be refused downstream and would ' +
+        `report the refusal at the wrong service (${NAMES_ONLY_NOTE}).`,
+    );
+  }
+
+  const expiresIn: unknown = payload[EXPIRES_IN_MEMBER];
+
+  if (
+    typeof expiresIn !== 'number' ||
+    !Number.isInteger(expiresIn) ||
+    expiresIn < 1
+  ) {
+    throw new Error(
+      `POST ${url} answered with an '${EXPIRES_IN_MEMBER}' that is not an ` +
+        'integer of at least 1. The schema declares an int64 with minimum 1, ' +
+        'and a token that is already expired on arrival produces a downstream ' +
+        '401 that looks exactly like an authorization defect in the service ' +
+        `that refused it (${NAMES_ONLY_NOTE}).`,
+    );
+  }
+
+  const scope: unknown = payload[SCOPE_MEMBER];
+
+  if (typeof scope !== 'string') {
+    throw new Error(
+      `POST ${url} answered with a '${SCOPE_MEMBER}' that is not a string. ` +
+        'The schema declares the GRANTED set as a space-delimited string, ' +
+        'which may legitimately be empty; a non-string means the granted set ' +
+        `cannot be read at all (${NAMES_ONLY_NOTE}).`,
+    );
+  }
+
+  const issuedAtRaw: unknown = payload[ISSUED_AT_MEMBER];
+
+  if (
+    issuedAtRaw !== undefined &&
+    (typeof issuedAtRaw !== 'number' || !Number.isInteger(issuedAtRaw))
+  ) {
+    throw new Error(
+      `POST ${url} answered with an '${ISSUED_AT_MEMBER}' that is present but ` +
+        'not an integer. The member is optional, so omitting it is correct and ' +
+        'supplying a non-integer is not: the schema declares an int64 of ' +
+        `seconds since the Unix epoch (${NAMES_ONLY_NOTE}).`,
+    );
+  }
+
+  // Split on any run of whitespace, and drop the empty segments a leading,
+  // trailing or doubled separator produces. An empty granted set is a legitimate
+  // outcome the contract names explicitly, so it yields an empty list rather
+  // than a list holding one empty string.
+  const grantedScopes: readonly string[] = Object.freeze(
+    scope.split(/\s+/u).filter((entry: string): boolean => entry.length > 0),
+  );
+
+  return {
+    accessToken,
+    tokenType,
+    expiresInSeconds: expiresIn,
+    scope,
+    grantedScopes,
+    ...(issuedAtRaw === undefined
+      ? {}
+      : { issuedAtEpochSeconds: issuedAtRaw as number }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -745,9 +951,17 @@ function extractToken(payload: JsonObject): string | undefined {
 export const AUTHORIZATION_HEADER: string = 'Authorization';
 
 /**
- * The credential scheme, which the published response schema fixes as a
- * constant. No other credential type is issued, so this is a fixed token rather
- * than something read from a response.
+ * The credential scheme the published response schema fixes as a `const`.
+ *
+ * **This is the value the issued `token_type` is CHECKED AGAINST, not the value
+ * the header is built from.** The distinction is the point of it: an earlier form
+ * of this fixture wrote this constant straight into the `Authorization` header
+ * and never read `token_type` at all, so an issuer answering with a different
+ * scheme would have had a bearer header built for it anyway — and the resulting
+ * downstream `401` would have accused the wrong service. Now the parse asserts
+ * `token_type === BEARER_SCHEME` and {@link bearerHeaders} presents the issued
+ * value, so the two agree because they were compared rather than because one was
+ * ignored.
  */
 export const BEARER_SCHEME: string = 'Bearer';
 
@@ -767,24 +981,33 @@ export const BEARER_SCHEME: string = 'Bearer';
  * never interfere, and nothing a spec does to the result is visible to any other
  * spec.
  *
+ * **The scheme presented is the one the ISSUER stated**, taken from the parsed
+ * `token_type` rather than from {@link BEARER_SCHEME}. The parse has already
+ * proven the two are equal — the contract fixes `token_type` as a `const` — so
+ * this reads the issued value on principle rather than out of doubt: a fixture
+ * that writes the scheme it expected, while never reading the one it was given,
+ * cannot notice the day they differ.
+ *
  * An empty or whitespace-only token **throws** rather than producing a header.
  * A header carrying an empty credential is the worst available outcome: the
  * request looks authenticated at the call site, is refused as unauthenticated by
  * the service, and the resulting `401` reads exactly like a genuine
  * authorization defect. Failing here names the real problem instead. If an
  * unauthenticated request is what a spec wants, that must be said out loud with
- * {@link anonymousHeaders}.
+ * {@link anonymousHeaders}. An empty scheme throws for the same reason: it would
+ * yield a header whose value begins with a space.
  *
- * The token never appears in the throw message — there is nothing useful to say
- * about a value that is empty, and a message shape that interpolated the token
- * at all would be one edit away from doing it on a non-empty one.
+ * Neither the token nor the scheme appears in a throw message — there is nothing
+ * useful to say about a value that is empty, and a message shape that
+ * interpolated the token at all would be one edit away from doing it on a
+ * non-empty one.
  *
  * @param token a token from {@link acquireServiceToken}
- * @returns a new headers object presenting the token
- * @throws Error when the token is empty or contains only whitespace
+ * @returns a new headers object presenting the token under the issued scheme
+ * @throws Error when the token or the scheme is empty or whitespace-only
  */
-export function bearerHeaders(token: string): Record<string, string> {
-  if (token.trim().length === 0) {
+export function bearerHeaders(token: ServiceToken): Record<string, string> {
+  if (token.accessToken.trim().length === 0) {
     throw new Error(
       'bearerHeaders was given an empty token, and refuses to build an ' +
         'Authorization header with an empty credential: the request would look ' +
@@ -795,7 +1018,18 @@ export function bearerHeaders(token: string): Record<string, string> {
     );
   }
 
-  return { [AUTHORIZATION_HEADER]: `${BEARER_SCHEME} ${token}` };
+  if (token.tokenType.trim().length === 0) {
+    throw new Error(
+      'bearerHeaders was given a token whose scheme is empty, and refuses to ' +
+        'build an Authorization header that would begin with a space. The ' +
+        'published contract fixes token_type as the constant ' +
+        `'${BEARER_SCHEME}', and acquireServiceToken enforces it, so an empty ` +
+        'scheme here means the value was assembled somewhere other than by the ' +
+        'parse.',
+    );
+  }
+
+  return { [AUTHORIZATION_HEADER]: `${token.tokenType} ${token.accessToken}` };
 }
 
 /**

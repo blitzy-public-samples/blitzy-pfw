@@ -124,7 +124,8 @@
 //  verbatim, but only for the SCREAMING_SNAKE constant catalogues whose exact text travels in
 //  serialized payloads, log records and characterization recordings - and it pays for that with
 //  narrowly scoped analyzer suppressions in the repository-root .editorconfig, one section per
-//  declaring file. Those sections name ten files. This one is not among them, and .editorconfig is
+//  declaring file, and its BAND 3 roster is the single source of truth for which files those are.
+//  This one is not among them, and .editorconfig is
 //  not this file's to change, so under the inherited TreatWarningsAsErrors a camelCase public
 //  member would be a build failure rather than a style note.
 //

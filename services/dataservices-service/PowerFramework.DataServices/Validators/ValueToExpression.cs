@@ -68,7 +68,8 @@
 //     is illegal (CS0542, a member may not share the name of its enclosing type), and the legacy
 //     spelling `dwValueToExp` is camelCase, which under the repository's promoted warnings would
 //     fail the build for a public member: the root .editorconfig scopes its naming-analyzer
-//     suppressions to TEN named files and this is not one of them. The legacy spelling therefore
+//     suppressions to the NAMED files on its BAND 3 roster - the single source of truth for that
+//     list - and this is not one of them. The legacy spelling therefore
 //     lives in the VALUE of `FunctionName` and never in an identifier, which is the same split the
 //     five sibling producers in this folder use.
 //

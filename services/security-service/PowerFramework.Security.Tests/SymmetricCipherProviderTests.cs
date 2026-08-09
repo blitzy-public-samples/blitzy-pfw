@@ -88,6 +88,23 @@ public sealed class SymmetricCipherProviderTests
     ];
 
     /// <summary>
+    /// The modes whose behaviour this port can reproduce faithfully, which is where the round-trip
+    /// matrices below run.
+    /// </summary>
+    /// <remarks>
+    /// CFB is absent, and its absence is asserted rather than assumed - see the blocked-cell tests.
+    /// It remains a PUBLISHED mode and stays in <see cref="AllCipherModes"/>, because the identifier
+    /// set is preserved exactly; what cannot be reproduced is its feedback width, which the legacy
+    /// never published and which the closed binary does not reveal. Splitting the two lists is how
+    /// this file keeps "the mode exists" and "the mode is usable" from being confused for each other.
+    /// </remarks>
+    private static readonly long[] ReproducibleCipherModes =
+    [
+        Enums.CRYPTO_SYMCRYPT_MODE_ECB,
+        Enums.CRYPTO_SYMCRYPT_MODE_CBC,
+    ];
+
+    /// <summary>
     /// The system under test, with its one real dependency rather than a substitute.
     /// </summary>
     /// <remarks>
@@ -98,19 +115,67 @@ public sealed class SymmetricCipherProviderTests
     private readonly SymmetricCipherProvider _provider = new(new EncodingProvider());
 
     /// <summary>
-    /// The full 15-cell cipher-type-by-cipher-mode grid, which is the parity matrix the plan names.
+    /// The 10 reproducible cells of the 15-cell cipher-type-by-cipher-mode grid: five types by the two
+    /// modes this port can reproduce. This is the parity matrix the plan names.
     /// </summary>
     /// <returns>One row per cell: cipher type, then cipher mode.</returns>
-    public static TheoryData<ushort, long> TypeAndModeGrid()
+    /// <remarks>
+    /// THE FIVE OMITTED CELLS ARE THE CFB ROW, AND THEY ARE NOT SIMPLY DROPPED - they are covered by
+    /// <see cref="BlockedCipherCells"/>, which asserts that each is REFUSED with a defined reason.
+    /// Every cell of the grid is therefore still exercised; what differs is which outcome is asserted.
+    /// A round-trip assertion could never have validated the CFB row anyway: both candidate feedback
+    /// widths round-trip perfectly against themselves, so those five cells passed while proving
+    /// nothing about the oracle.
+    /// </remarks>
+    public static TheoryData<ushort, long> SupportedTypeAndModeGrid()
     {
         TheoryData<ushort, long> data = new();
 
         foreach (ushort ntype in AllCipherTypes)
         {
-            foreach (long mode in AllCipherModes)
+            foreach (long mode in ReproducibleCipherModes)
             {
                 data.Add(ntype, mode);
             }
+        }
+
+        return data;
+    }
+
+    /// <summary>
+    /// Every cell this port refuses, with the reason it refuses it: the whole CFB row in both vector
+    /// shapes, plus CBC without a vector.
+    /// </summary>
+    /// <returns>
+    /// One row per blocked cell: cipher type, cipher mode, whether a vector is supplied, and the
+    /// expected reason.
+    /// </returns>
+    public static TheoryData<ushort, long, bool, SymmetricCellParity> BlockedCipherCells()
+    {
+        TheoryData<ushort, long, bool, SymmetricCellParity> data = new();
+
+        foreach (ushort ntype in AllCipherTypes)
+        {
+            // The feedback width is unprovable whether or not a vector accompanies the call, so both
+            // shapes are listed: a vector does not disclose the width.
+            data.Add(
+                ntype,
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB,
+                true,
+                SymmetricCellParity.BlockedFeedbackWidthUnprovable);
+            data.Add(
+                ntype,
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB,
+                false,
+                SymmetricCellParity.BlockedFeedbackWidthUnprovable);
+
+            // CBC is reproducible WITH a vector; without one, the vector the oracle substituted is
+            // unobservable, so only this shape is blocked.
+            data.Add(
+                ntype,
+                Enums.CRYPTO_SYMCRYPT_MODE_CBC,
+                false,
+                SymmetricCellParity.BlockedSynthesizedVectorUnprovable);
         }
 
         return data;
@@ -256,7 +321,7 @@ public sealed class SymmetricCipherProviderTests
     /// has its own tests below.
     /// </remarks>
     [Theory]
-    [MemberData(nameof(TypeAndModeGrid))]
+    [MemberData(nameof(SupportedTypeAndModeGrid))]
     public void TextShapedFamilyRoundTripsAcrossEveryTypeAndMode(ushort ntype, long mode)
     {
         const string plain = "The quick brown fox jumps over the lazy dog, 0123456789.";
@@ -281,7 +346,7 @@ public sealed class SymmetricCipherProviderTests
     /// cipher, so the padding of DECISION H3 is exercised in every cell.
     /// </remarks>
     [Theory]
-    [MemberData(nameof(TypeAndModeGrid))]
+    [MemberData(nameof(SupportedTypeAndModeGrid))]
     public void ByteShapedFamilyRoundTripsAcrossEveryTypeAndMode(ushort ntype, long mode)
     {
         byte[] plain = SyntheticBytes(37, seed: 11);
@@ -305,7 +370,7 @@ public sealed class SymmetricCipherProviderTests
     /// the ciphertext is non-empty and the round trip recovers nothing, which is correct.
     /// </remarks>
     [Theory]
-    [MemberData(nameof(TypeAndModeGrid))]
+    [MemberData(nameof(SupportedTypeAndModeGrid))]
     public void EmptyPayloadRoundTripsInBothFamilies(ushort ntype, long mode)
     {
         string key = SyntheticText(32);
@@ -335,7 +400,7 @@ public sealed class SymmetricCipherProviderTests
     /// way in, because the binary call is handed those same bytes explicitly.
     /// </remarks>
     [Theory]
-    [MemberData(nameof(TypeAndModeGrid))]
+    [MemberData(nameof(SupportedTypeAndModeGrid))]
     public void TextShapedCipherTextDecodesToTheByteShapedCipherText(ushort ntype, long mode)
     {
         const string plain = "parity across the two payload shapes";
@@ -365,7 +430,7 @@ public sealed class SymmetricCipherProviderTests
     /// overloads would silently lose access to its own data.
     /// </remarks>
     [Theory]
-    [MemberData(nameof(TypeAndModeGrid))]
+    [MemberData(nameof(SupportedTypeAndModeGrid))]
     public void TextKeyAndBinaryKeySpellingsOfTheSameMaterialAgree(ushort ntype, long mode)
     {
         byte[] plain = SyntheticBytes(24, seed: 5);
@@ -419,7 +484,14 @@ public sealed class SymmetricCipherProviderTests
     [MemberData(nameof(CipherTypes))]
     public void EveryOneOfTheThirtyTwoOverloadsRoundTrips(ushort ntype)
     {
+        // TWO MODES, CHOSEN BY WHETHER THE OVERLOAD CARRIES A VECTOR. The vector-bearing arms use the
+        // chaining mode, which is fully reproducible when a vector is supplied. The vector-less arms
+        // use the codebook mode, because a vector-consuming mode through an arm that supplies none is
+        // refused under DECISION D3 - the vector the oracle substituted there is unobservable. The
+        // refusal itself is asserted by the blocked-cell theories; this test's job is to prove all 32
+        // DECLARATIONS are reachable and round-trip, so each is exercised in a cell it can serve.
         const long mode = Enums.CRYPTO_SYMCRYPT_MODE_CBC;
+        const long vectorlessMode = Enums.CRYPTO_SYMCRYPT_MODE_ECB;
         const string text = "every overload, once";
         byte[] bytes = SyntheticBytes(29, seed: 17);
         string key = SyntheticText(32);
@@ -429,7 +501,7 @@ public sealed class SymmetricCipherProviderTests
 
         // L30 / L46 and L31 / L47 - text payload, text key, no vector.
         Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, key, ntype), key, ntype));
-        Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, key, ntype, mode), key, ntype, mode));
+        Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, key, ntype, vectorlessMode), key, ntype, vectorlessMode));
 
         // L32 / L48 and L33 / L49 - text payload, text key, text vector.
         Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, key, iv, ntype), key, iv, ntype));
@@ -437,7 +509,7 @@ public sealed class SymmetricCipherProviderTests
 
         // L34 / L50 and L35 / L51 - text payload, binary key, no vector.
         Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, keyBytes, ntype), keyBytes, ntype));
-        Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, keyBytes, ntype, mode), keyBytes, ntype, mode));
+        Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, keyBytes, ntype, vectorlessMode), keyBytes, ntype, vectorlessMode));
 
         // L36 / L52 and L37 / L53 - text payload, binary key, binary vector.
         Assert.Equal(text, _provider.SymDecrypt(_provider.SymEncrypt(text, keyBytes, ivBytes, ntype), keyBytes, ivBytes, ntype));
@@ -445,7 +517,7 @@ public sealed class SymmetricCipherProviderTests
 
         // L38 / L54 and L39 / L55 - binary payload, text key, no vector.
         Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, key, ntype), key, ntype));
-        Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, key, ntype, mode), key, ntype, mode));
+        Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, key, ntype, vectorlessMode), key, ntype, vectorlessMode));
 
         // L40 / L56 and L41 / L57 - binary payload, text key, text vector.
         Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, key, iv, ntype), key, iv, ntype));
@@ -453,7 +525,7 @@ public sealed class SymmetricCipherProviderTests
 
         // L42 / L58 and L43 / L59 - binary payload, binary key, no vector.
         Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, keyBytes, ntype), keyBytes, ntype));
-        Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, keyBytes, ntype, mode), keyBytes, ntype, mode));
+        Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, keyBytes, ntype, vectorlessMode), keyBytes, ntype, vectorlessMode));
 
         // L44 / L60 and L45 / L61 - binary payload, binary key, binary vector.
         Assert.Equal(bytes, _provider.SymDecrypt(_provider.SymEncrypt(bytes, keyBytes, ivBytes, ntype), keyBytes, ivBytes, ntype));
@@ -507,29 +579,57 @@ public sealed class SymmetricCipherProviderTests
     }
 
     /// <summary>
-    /// A cipher-block-chaining or feedback call with NO vector uses the all-zero vector of
-    /// DECISION D3.
+    /// The eight mode-supplied-vector-omitted arms REFUSE a vector-consuming mode instead of
+    /// inventing a vector for it.
     /// </summary>
     /// <param name="ntype">The cipher type.</param>
     /// <remarks>
-    /// KNOWN WEAK DEFAULT, ASSERTED AS PRESERVED. The zero vector is CONSTRUCTED HERE FROM A LENGTH,
-    /// exactly as the production path constructs it, so this file contains no literal resembling key
-    /// material either. Run for both CBC and CFB, which are the two modes that consume a vector.
+    /// <para>
+    /// THIS TEST REPLACES ONE THAT ASSERTED A GUESS AS CORRECTNESS, and the difference is the point.
+    /// Its predecessor checked that the vector-less arm produced the same ciphertext as an explicit
+    /// all-zero vector - a statement about two code paths in THIS port agreeing with each other,
+    /// which they trivially did because one called the other. It said nothing about what the closed
+    /// binary produced, yet it read like a parity assertion.
+    /// </para>
+    /// <para>
+    /// What the oracle substituted is unobservable: <c>n_crypto</c> is declared
+    /// <c>native "pfw.dll"</c> [n_crypto.sru:L8] with no PowerScript body for any of the 32 symmetric
+    /// overloads. A wrong vector round-trips perfectly against itself, so no test here could ever
+    /// have caught it, while the ciphertext would be undecryptable by the legacy. Refusing is the
+    /// correct behaviour, and this asserts it.
+    /// </para>
+    /// <para>
+    /// ECB IS ASSERTED TO STILL WORK IN THE SAME TEST, because a refusal that caught the default mode
+    /// would be a worse regression than the one being fixed: ECB is the default [enums.sru:L946], it
+    /// consumes no vector, and every mode-omitting arm depends on it.
+    /// </para>
     /// </remarks>
     [Theory]
     [MemberData(nameof(CipherTypes))]
-    public void OmittingTheVectorUsesTheAllZeroVector(ushort ntype)
+    public void OmittingTheVectorIsRefusedForAVectorConsumingMode(ushort ntype)
     {
         byte[] plain = SyntheticBytes(21, seed: 23);
         byte[] key = SyntheticBytes(32, seed: 31);
-        byte[] zeroVector = new byte[LegacyDefaults.GetSymmetricCipherMetrics(ntype).IvLengthBytes];
 
-        foreach (long mode in new[] { Enums.CRYPTO_SYMCRYPT_MODE_CBC, Enums.CRYPTO_SYMCRYPT_MODE_CFB })
-        {
-            Assert.Equal(
-                _provider.SymEncrypt(plain, key, zeroVector, ntype, mode),
-                _provider.SymEncrypt(plain, key, ntype, mode));
-        }
+        SymmetricParityUnavailableException refusal =
+            Assert.Throws<SymmetricParityUnavailableException>(
+                () => _provider.SymEncrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC));
+
+        Assert.Equal(SymmetricCellParity.BlockedSynthesizedVectorUnprovable, refusal.Reason);
+        Assert.Equal(Enums.CRYPTO_SYMCRYPT_MODE_CBC, refusal.Mode);
+
+        // The decrypting mirror of the same four arms refuses identically, so the guessed vector is
+        // unreachable from either direction.
+        Assert.Equal(
+            SymmetricCellParity.BlockedSynthesizedVectorUnprovable,
+            Assert.Throws<SymmetricParityUnavailableException>(
+                () => _provider.SymDecrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC)).Reason);
+
+        // The mode that consumes no vector is UNAFFECTED, and so is the arm omitting the mode
+        // entirely, which resolves to that same mode by default.
+        Assert.Equal(
+            _provider.SymEncrypt(plain, key, ntype),
+            _provider.SymEncrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_ECB));
     }
 
     /// <summary>
@@ -749,50 +849,88 @@ public sealed class SymmetricCipherProviderTests
     // ==========================================================================================
 
     /// <summary>
-    /// The resolved CFB feedback width is the cipher's full block width, except for DES where this
-    /// platform admits only the single-byte width.
+    /// Every blocked cell is refused, with the reason naming WHICH missing evidence blocks it.
     /// </summary>
+    /// <param name="ntype">The cipher type.</param>
+    /// <param name="mode">The cipher mode.</param>
+    /// <param name="supplyVector">Whether the call supplies an initialization vector.</param>
+    /// <param name="expected">The reason the refusal must carry.</param>
     /// <remarks>
-    /// PINNED RATHER THAN VERIFIED. No round-trip test can detect a wrong choice here, because CFB8
-    /// and full-block CFB each round-trip perfectly against themselves, so this assertion exists to
-    /// make a change visible in a diff and to record what the port currently does. Byte-exact
-    /// agreement with the closed binary is verifiable ONLY against the behavioural oracle. The
-    /// reasoned basis for full-block is that the framework attributes OpenSSL
-    /// [w_about.srw:L118] and OpenSSL's plain CFB aliases are full-block; the DES row is a
-    /// platform limit, not a choice.
+    /// <para>
+    /// THESE ASSERTIONS REPLACE TWO THAT PINNED A GUESSED FEEDBACK WIDTH. Their own remarks conceded
+    /// the problem - "PINNED RATHER THAN VERIFIED", because "no round-trip test can detect a wrong
+    /// choice here" - and that concession is exactly why pinning was the wrong response. An assertion
+    /// recording what the port currently does, when what it does is a guess, converts the guess into
+    /// a fixture that future work is obliged to preserve. The width was inferred from the framework's
+    /// OpenSSL attribution [w_about.srw:L118], and an inference from an attribution is not a
+    /// measurement of a closed binary.
+    /// </para>
+    /// <para>
+    /// The refusal is asserted on BOTH directions of every cell, because ciphertext that cannot be
+    /// produced must not be decryptable either - a one-sided block would leave the guessed parameter
+    /// reachable through the inverse operation.
+    /// </para>
     /// </remarks>
-    [Fact]
-    public void CipherFeedbackWidthIsFullBlockExceptForDataEncryptionStandard()
+    [Theory]
+    [MemberData(nameof(BlockedCipherCells))]
+    public void EveryBlockedCellIsRefusedWithItsReason(
+        ushort ntype,
+        long mode,
+        bool supplyVector,
+        SymmetricCellParity expected)
     {
-        Assert.Equal(8, SymmetricCipherProvider.ResolveCfbFeedbackSizeBits((ushort)Enums.CRYPTO_SYMCRYPT_TYPE_DES));
-        Assert.Equal(64, SymmetricCipherProvider.ResolveCfbFeedbackSizeBits((ushort)Enums.CRYPTO_SYMCRYPT_TYPE_3DES));
-        Assert.Equal(128, SymmetricCipherProvider.ResolveCfbFeedbackSizeBits((ushort)Enums.CRYPTO_SYMCRYPT_TYPE_AES128));
-        Assert.Equal(128, SymmetricCipherProvider.ResolveCfbFeedbackSizeBits((ushort)Enums.CRYPTO_SYMCRYPT_TYPE_AES192));
-        Assert.Equal(128, SymmetricCipherProvider.ResolveCfbFeedbackSizeBits((ushort)Enums.CRYPTO_SYMCRYPT_TYPE_AES256));
+        byte[] plain = SyntheticBytes(21, seed: 23);
+        byte[] key = SyntheticBytes(32, seed: 31);
+        byte[] vector = SyntheticBytes(16, seed: 13);
+
+        SymmetricParityUnavailableException encrypting =
+            Assert.Throws<SymmetricParityUnavailableException>(() => supplyVector
+                ? _provider.SymEncrypt(plain, key, vector, ntype, mode)
+                : _provider.SymEncrypt(plain, key, ntype, mode));
+
+        SymmetricParityUnavailableException decrypting =
+            Assert.Throws<SymmetricParityUnavailableException>(() => supplyVector
+                ? _provider.SymDecrypt(plain, key, vector, ntype, mode)
+                : _provider.SymDecrypt(plain, key, ntype, mode));
+
+        Assert.Equal(expected, encrypting.Reason);
+        Assert.Equal(expected, decrypting.Reason);
+        Assert.Equal(mode, encrypting.Mode);
+        Assert.Equal(mode, decrypting.Mode);
     }
 
     /// <summary>
-    /// The resolved feedback width equals the cipher's block width for every type except DES.
+    /// A blocked cell is NOT reported as a cryptographic failure, so it cannot be mistaken for a
+    /// wrong key or a failed padding check.
     /// </summary>
-    /// <param name="ntype">The cipher type.</param>
     /// <remarks>
-    /// Stated as a rule over the catalogue's own sizing table rather than as five numbers, so that
-    /// adding a cipher type to the catalogue cannot leave the rule behind.
+    /// The distinction is load-bearing rather than cosmetic. Handlers on this surface routinely absorb
+    /// <see cref="CryptographicException"/>, because a padding failure is an ordinary runtime outcome
+    /// of a wrong key - the parity suite's own recovery helper is one such handler. Had the refusal
+    /// derived from that type, every one of them would have swallowed it, and a deliberate, documented
+    /// capability limit would have surfaced as an unremarkable decryption miss.
     /// </remarks>
-    [Theory]
-    [MemberData(nameof(CipherTypes))]
-    public void FeedbackWidthFollowsTheCatalogueBlockLength(ushort ntype)
+    [Fact]
+    public void ABlockedCellIsNotReportedAsACryptographicFailure()
     {
-        SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
-        int resolved = SymmetricCipherProvider.ResolveCfbFeedbackSizeBits(ntype);
+        byte[] plain = SyntheticBytes(21, seed: 23);
+        byte[] key = SyntheticBytes(32, seed: 31);
+        byte[] vector = SyntheticBytes(16, seed: 13);
 
-        if (metrics.CipherType == Enums.CRYPTO_SYMCRYPT_TYPE_DES)
-        {
-            Assert.Equal(8, resolved);
-            return;
-        }
+        SymmetricParityUnavailableException refusal =
+            Assert.Throws<SymmetricParityUnavailableException>(() => _provider.SymEncrypt(
+                plain,
+                key,
+                vector,
+                (ushort)Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB));
 
-        Assert.Equal(metrics.BlockLengthBytes * 8, resolved);
+        Assert.IsNotType<CryptographicException>(refusal, exactMatch: false);
+        Assert.IsType<NotSupportedException>(refusal, exactMatch: false);
+
+        // The message explains the refusal without naming key, vector or payload content - none of
+        // which is what went wrong.
+        Assert.Contains("feedback width", refusal.Message, StringComparison.Ordinal);
     }
 
     // ==========================================================================================
@@ -922,7 +1060,7 @@ public sealed class SymmetricCipherProviderTests
     /// catalogue rather than against a literal spelling.
     /// </remarks>
     [Theory]
-    [MemberData(nameof(TypeAndModeGrid))]
+    [MemberData(nameof(SupportedTypeAndModeGrid))]
     public void TextShapedPayloadIsPrintableAndSurvivesATextField(ushort ntype, long mode)
     {
         string cipher = _provider.SymEncrypt(
@@ -1234,7 +1372,8 @@ public sealed class SymmetricCipherProviderTests
         Parallel.For(0, 240, index =>
         {
             ushort ntype = AllCipherTypes[index % AllCipherTypes.Length];
-            long mode = AllCipherModes[index / AllCipherTypes.Length % AllCipherModes.Length];
+            long mode = ReproducibleCipherModes[
+            index / AllCipherTypes.Length % ReproducibleCipherModes.Length];
             byte[] plain = SyntheticBytes(17 + index % 23, seed: index);
 
             try

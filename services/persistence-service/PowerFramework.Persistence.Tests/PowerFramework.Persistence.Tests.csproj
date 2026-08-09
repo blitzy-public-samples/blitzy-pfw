@@ -6,13 +6,26 @@
     decomposition. Persistence is the only service that generates or executes SQL and the only
     one holding a storage provider, so this project is where the retrieval / validation / update
     triple, the two paging rewriters, the SQLite URI grammar and the optimistic-concurrency
-    contract are held to legacy parity.
+    contract are to be held to legacy parity.
+
+    WHAT IS HERE TODAY, AND WHAT IS NOT. Stated because "is where X is held to parity" reads as a
+    claim about existing coverage, and for three of those four it is not one yet.
+      PRESENT: buffer and item-status tests, the changeset and full-state codecs, the SELECT
+      statement model, UpdateWhereBuilder, IdentityColumnResolver, SqlRedactor, DbErrorData and
+      CompanyEntity - so parts of the update / concurrency contract are genuinely covered.
+      PLANNED, WITH NO TEST REFERENCING THEM: the two paging rewriters and PagingRewriteDispatcher
+      (docs/PARITY.md section 6.2 lists the eleven required matrix rows), and the SQLite URI
+      grammar - whose subject, Data/SqliteConnectionFactory, DOES NOT EXIST IN THE TREE at all.
+      NOT RUNNABLE AT PRESENT: this project does not build, because the application project it
+      references reports CS5001 for an entry point that has not been authored. NO TEST IN THIS
+      PROJECT HAS RUN, and there is no coverage report for this service.
 
     THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE.
     Constraint C-H requires 80 percent line coverage per in-scope service, evaluated per service
-    so that one service's coverage cannot mask another's. The Cobertura report this project emits
-    is the artifact that gate reads, which is why coverlet.collector below is load-bearing and
-    must never be trimmed as an unused reference.
+    so that one service's coverage cannot mask another's. The Cobertura report this project will
+    emit is the artifact that gate reads, which is why coverlet.collector below is load-bearing and
+    must never be trimmed as an unused reference. The gate itself is not enforced yet: the CI
+    workflow that would read the report is planned and absent.
 
     HAND-AUTHORED ON PURPOSE, NOT TEMPLATED.
     `dotnet new xunit3` does not exist in SDK 10.0.302 (it exits 103 and suggests searching
@@ -44,10 +57,14 @@
 
     NO InternalsVisibleTo HERE EITHER.
     That attribute points the other way: the application project grants this assembly access, so
-    sibling test files can drive internal members (the internal URI composition inside
-    SqliteConnectionFactory, the internal pfwPagedSQL_Tbl sentinel inside SqlServerPagingRewriter)
-    and can bind WebApplicationFactory to the implicitly generated internal Program class with no
-    `public partial` shim.
+    sibling test files CAN drive internal members - the internal SelectStatementModel and
+    ItemStatusMachine that present tests already drive, and, once the matrix of docs/PARITY.md
+    section 6.2 is written, the internal pfwPagedSQL_Tbl sentinel inside SqlServerPagingRewriter. It
+    will likewise let WebApplicationFactory bind to the implicitly generated internal Program class
+    with no `public partial` shim, once a Program exists to bind to. Two of those three are
+    capability rather than current fact, and the earlier wording did not distinguish them.
+    Note that Data/SqliteConnectionFactory, named in an earlier revision of this comment, is not in
+    the tree; its URI composition cannot be driven from here because there is nothing to drive.
 
     Validated command, from AAP section 0.8.3 and the attached environment's setup instructions,
     which must keep working with no extra argument (constraints C-I and C-L). The literal command

@@ -302,7 +302,8 @@
 //  the legacy accepted.
 //
 //  NO SCREAMING-SNAKE IDENTIFIER IS DECLARED IN THIS FILE. The repository scopes its
-//  naming-analyzer suppressions to seven named files, of which LegacyDefaults.cs is the only one
+//  naming-analyzer suppressions to the files on its BAND 3 roster - the single source of truth for
+//  that list - of which LegacyDefaults.cs is the only one
 //  inside this service, so a preserved-spelling constant declared here would be a BUILD ERROR
 //  under warnings-as-errors rather than a style remark. All 30 legacy CRYPTO_ constants are
 //  REFERENCED through the shared kernel and NONE is redeclared, re-lettered or shadowed: every
@@ -1817,4 +1818,3 @@ public sealed class RsaProvider
 
     #endregion
 }
-

@@ -248,6 +248,7 @@ using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
@@ -593,9 +594,16 @@ public enum CrossDataWindowStatus
     /// not, by the application; the framework's own posture on a structural fault is to terminate
     /// [ws_objects/pfw.pbl.src/pfw.sra:L111-L144]. Across a service boundary an escaping exception
     /// from a host callback would tear down the stream that OTHER calculations are also using, so it is
-    /// caught at the call site and reported here. The fault is neither swallowed nor renamed: the
-    /// exception's own text travels on the error, and <see cref="ExpressionValueResult.Succeeded"/> is
+    /// caught at the call site and reported here. <see cref="ExpressionValueResult.Succeeded"/> is
     /// false, so nothing downstream can mistake it for an answer.
+    /// </remarks>
+    /// <remarks>
+    /// THE FAULT IS NEITHER SWALLOWED NOR PUT ON THE WIRE (CWE-209). The reached host is arbitrary
+    /// application code this service does not own, and its exception message can carry a file path, a
+    /// connection string fragment, a SQL statement or a configuration key. So the error a caller receives
+    /// carries FIXED TEXT plus a correlation identifier, and the exception itself is logged server-side
+    /// against that identifier - see <see cref="ExpressionSession.Faulted"/>. The diagnostic is kept in
+    /// full; it simply is not delivered to the caller.
     /// </remarks>
     HostFaulted = 4,
 
@@ -1358,11 +1366,54 @@ public sealed class ExpressionSession
     /// <summary>The trace seam, or <see langword="null"/> when nothing is subscribed.</summary>
     private readonly IExpressionTraceSink? _traceSink;
 
+    /// <summary>
+    /// The server-side sink for host-fault detail, or <see langword="null"/> when none was supplied.
+    /// </summary>
+    /// <remarks>
+    /// THE ONLY PLACE AN EXCEPTION'S OWN TEXT MAY GO (see <see cref="Faulted"/>). It is optional so that
+    /// every constructor stays usable from a plain unit test, and a null logger is not a licence to put
+    /// the detail on the wire instead - the wire payload is the same either way, and the detail is simply
+    /// lost when nobody is listening.
+    /// </remarks>
+    private readonly ILogger? _logger;
+
     /// <summary>Monotonic source of the per-session part of an allocated handle.</summary>
     private long _handleOrdinal;
 
+    /// <summary>
+    /// Monotonic source of the per-session part of a host-fault correlation identifier.
+    /// </summary>
+    /// <remarks>
+    /// DELIBERATELY AN ORDINAL AND NOT A GUID OR A TIMESTAMP. The identifier appears in a wire payload
+    /// that a paired characterization recording compares byte for byte, so a random or clock-derived
+    /// value would have to be masked on both sides. An ordinal scoped to a session identifier the caller
+    /// chose is reproducible by construction.
+    /// </remarks>
+    private long _faultOrdinal;
+
     /// <summary>Monotonic source of <see cref="ExpressionTraceRecord.SequenceNumber"/>.</summary>
     private long _traceSequence;
+
+    /// <summary>How many records have been handed to the sink.</summary>
+    private long _traceDeliveryAttempted;
+
+    /// <summary>How many the sink accepted without throwing.</summary>
+    private long _traceDeliveryDelivered;
+
+    /// <summary>How many the sink threw on, and therefore how many diagnostics were lost.</summary>
+    private long _traceDeliveryFailed;
+
+    /// <summary>
+    /// The type name of the most recent sink failure, or <see langword="null"/> when there has been none.
+    /// </summary>
+    /// <remarks>
+    /// THE TYPE ONLY, NEVER THE MESSAGE. A sink is supplied from outside this type and its exception
+    /// message is arbitrary content that can carry a path, a URL or a credential; this field is readable
+    /// by anything holding the session, so admitting a message here would publish that content (C-F). A
+    /// type name is authored by whoever wrote the throwing code and identifies the fault without quoting
+    /// it - the same allowlist reasoning the ingress applies to an ordinary request fault.
+    /// </remarks>
+    private string? _lastTraceDeliveryFailureType;
 
     /// <summary>Whether the session is open. Cleared exactly once, by <see cref="Close"/>.</summary>
     private bool _isOpen = true;
@@ -1394,6 +1445,12 @@ public sealed class ExpressionSession
     /// the expiry path is reachable in a test without waiting.
     /// </param>
     /// <param name="traceSink">The trace seam. When <see langword="null"/>, nothing is emitted.</param>
+    /// <param name="logger">
+    /// Where a reached service's own exception is recorded. OPTIONAL AND TRAILING so every existing
+    /// construction site stays source-compatible, and so a unit test can construct a session without a
+    /// logging container. When omitted the fault detail is simply not recorded anywhere - it is never
+    /// substituted onto the wire payload instead. See <see cref="Faulted"/>.
+    /// </param>
     /// <exception cref="ArgumentException">
     /// <paramref name="sessionId"/> is null, empty or whitespace.
     /// </exception>
@@ -1402,7 +1459,8 @@ public sealed class ExpressionSession
         SessionLifetimeOptions? lifetime = null,
         ColumnExpressionOptions? columnExpression = null,
         TimeProvider? timeProvider = null,
-        IExpressionTraceSink? traceSink = null)
+        IExpressionTraceSink? traceSink = null,
+        ILogger? logger = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
 
@@ -1418,6 +1476,7 @@ public sealed class ExpressionSession
 
         _timeProvider = timeProvider ?? TimeProvider.System;
         _traceSink = traceSink;
+        _logger = logger;
 
         CreatedAt = _timeProvider.GetUtcNow();
         _lastAccessedAt = CreatedAt;
@@ -1460,6 +1519,45 @@ public sealed class ExpressionSession
     /// correctly receives nothing.
     /// </remarks>
     public bool TraceEnabled { get; set; }
+
+    /// <summary>
+    /// How the trace sink has been behaving: how many records were handed to it, how many it accepted, how
+    /// many it threw on, and the type of the most recent failure.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS EXISTS. The trace is fire-and-forget by design - it is ordering pattern (a), and a
+    /// diagnostic sink is not permitted to break the thing it is observing - so
+    /// <see cref="EmitTrace"/> absorbs whatever the sink throws and the calculation still succeeds. That
+    /// much is correct. What was wrong was DISCARDING the failure as well as absorbing it: a sink that
+    /// throws on every record loses every trace, and nothing anywhere reported that the diagnostic channel
+    /// had stopped working. An invisibly failing diagnostic is worse than a disabled one, because it looks
+    /// enabled.
+    /// </para>
+    /// <para>
+    /// So delivery is reported INDEPENDENTLY of the calculation. A caller reads
+    /// <see cref="ExpressionTraceDeliveryReport.Failed"/> to learn that records are being lost and
+    /// <see cref="ExpressionTraceDeliveryReport.LastFailureType"/> to learn what kind of fault is losing
+    /// them, without a single calculation result changing.
+    /// </para>
+    /// <para>
+    /// A COUNTER RATHER THAN A LOG, DELIBERATELY. This type takes no logger and is not going to: it is a
+    /// pure domain type whose only injected dependencies are a clock and a sink, which is what makes every
+    /// behaviour on it assertable with no host. The report is the seam through which a host surfaces this
+    /// on its own operator channel, and a counter additionally answers the question a log answers badly -
+    /// "is this still happening, and how often" - without any sampling or retention policy.
+    /// </para>
+    /// <para>
+    /// The counters are cumulative for the life of the session and are never reset. Attempted counts only
+    /// records actually handed to a sink, so with no sink registered, or with tracing off, all four members
+    /// stay at their initial values.
+    /// </para>
+    /// </remarks>
+    public ExpressionTraceDeliveryReport TraceDelivery => new(
+        Attempted: Volatile.Read(ref _traceDeliveryAttempted),
+        Delivered: Volatile.Read(ref _traceDeliveryDelivered),
+        Failed: Volatile.Read(ref _traceDeliveryFailed),
+        LastFailureType: Volatile.Read(ref _lastTraceDeliveryFailureType));
 
     /// <summary>When the session was opened, from the injected clock.</summary>
     public DateTimeOffset CreatedAt { get; }
@@ -1745,6 +1843,69 @@ public sealed class ExpressionSession
         lock (_gate)
         {
             return _isOpen && _timeProvider.GetUtcNow() - _lastAccessedAt > IdleTimeout;
+        }
+    }
+
+    /// <summary>
+    /// Validates that the session may be used and records the activity - ALL UNDER ONE ACQUISITION OF THE
+    /// GATE.
+    /// </summary>
+    /// <returns>
+    /// <see cref="ExpressionSessionAcquisition.Acquired"/> when the session was open, unexpired and has
+    /// now had its activity recorded; <see cref="ExpressionSessionAcquisition.Closed"/> when it had
+    /// already been closed; <see cref="ExpressionSessionAcquisition.Expired"/> when it had gone idle past
+    /// its timeout, in which case IT IS CLOSED BEFORE THIS RETURNS.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THREE SEPARATE CALLS COULD NOT BE MADE ATOMIC BY ORDERING THEM. Asking <see cref="IsOpen"/>, then
+    /// <see cref="HasExpired"/>, then <see cref="Touch"/> takes and releases the gate three times, and a
+    /// close landing in either interval produced an outcome no single state of the session justified: the
+    /// checks passed, the touch silently did nothing, and the caller received a CLOSED session reported as
+    /// a successful lookup. On THIS session type the consequence is sharper than a stale read - closing
+    /// clears every host registration and every calculation stack, so the caller would then resolve
+    /// handles against emptied state rather than being told the session had gone.
+    /// </para>
+    /// <para>
+    /// Under one acquisition there is no interval. A concurrent <see cref="Close"/> either precedes the
+    /// acquisition, which is refused, or follows it, and the next acquisition is refused - both outcomes
+    /// the session's own state justifies, and neither is "success with a closed session".
+    /// </para>
+    /// <para>
+    /// Expiry is decided AND acted on together, so no second observer can look at a session this method
+    /// found stale and conclude anything different. The registry still removes it and releases its slot.
+    /// </para>
+    /// </remarks>
+    public ExpressionSessionAcquisition Acquire()
+    {
+        lock (_gate)
+        {
+            if (!_isOpen)
+            {
+                return ExpressionSessionAcquisition.Closed;
+            }
+
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+
+            if (IdleTimeout > TimeSpan.Zero && now - _lastAccessedAt > IdleTimeout)
+            {
+                // Terminal under this lock, and it releases exactly what Close() releases - the stacks and
+                // the registrations - so an expired session cannot be reached through a handle afterwards.
+                foreach (HostRegistration registration in _hosts.Values)
+                {
+                    registration.CalcStack.Clear();
+                }
+
+                _hosts.Clear();
+                _order.Clear();
+                _isOpen = false;
+
+                return ExpressionSessionAcquisition.Expired;
+            }
+
+            _lastAccessedAt = now;
+
+            return ExpressionSessionAcquisition.Acquired;
         }
     }
 
@@ -2086,8 +2247,10 @@ public sealed class ExpressionSession
     /// WHAT DOES CHANGE IS THE SHAPE OF THE FAULT, AND ONLY BECAUSE IT MUST. In-process the fault
     /// propagates as a PowerBuilder runtime error; across a service boundary an escaping exception would
     /// tear down a stream shared with other calculations, so it is caught and reported as
-    /// <see cref="CrossDataWindowStatus.HostFaulted"/> with the exception's own text. The value is still
-    /// absent and the caller still fails - the outcome is preserved, the delivery channel is not.
+    /// <see cref="CrossDataWindowStatus.HostFaulted"/> - with fixed text and a correlation identifier
+    /// rather than the exception's own text, which is recorded server-side instead (CWE-209, see
+    /// <see cref="Faulted"/>). The value is still absent and the caller still fails - the outcome is
+    /// preserved, the delivery channel is not.
     /// </para>
     /// <para>
     /// A CONTEXT REFERENCE CANNOT BE STATICALLY EXPANDED [:L1417] AND A CONTEXT FUNCTION MACRO IS NOT
@@ -2237,15 +2400,30 @@ public sealed class ExpressionSession
         IExpressionTraceSink? sink = _traceSink;
         if (sink is not null)
         {
+            Interlocked.Increment(ref _traceDeliveryAttempted);
+
             try
             {
                 sink.Emit(record);
+                Interlocked.Increment(ref _traceDeliveryDelivered);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                // ABSORBED ON PURPOSE. The calculation has already produced its value; a failing
-                // diagnostic sink must not turn a successful calculation into a failed request. The
-                // record is returned regardless so the caller retains it.
+                // STILL ABSORBED, AND NO LONGER DISCARDED - the two are different things, and only the
+                // first was ever intended. The calculation has already produced its value, so a failing
+                // diagnostic sink must not turn a successful calculation into a failed request; the record
+                // is returned regardless. But a sink that throws on every record silently loses EVERY
+                // trace, and a diagnostic channel that fails invisibly is worse than one that is switched
+                // off, because it looks switched on.
+                //
+                // So the failure is COUNTED and its exception TYPE is retained on
+                // TraceDelivery. Only the type: a sink's exception message is arbitrary upstream content
+                // and can carry a path, a URL or a credential, and this record is readable by anything
+                // holding the session (C-F).
+                Interlocked.Increment(ref _traceDeliveryFailed);
+                Interlocked.Exchange(
+                    ref _lastTraceDeliveryFailureType,
+                    exception.GetType().FullName ?? exception.GetType().Name);
             }
         }
 
@@ -2464,11 +2642,29 @@ public sealed class ExpressionSession
     /// The message carried when a reached service's own call threw - see
     /// <see cref="CrossDataWindowStatus.HostFaulted"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// FIXED TEXT WITH NO EXCEPTION DETAIL IN IT (CWE-209). The three substitutions are the handle, the
+    /// session identifier and a correlation identifier this service minted - all three values the caller
+    /// already holds or was just given. The exception's type name and message are deliberately absent:
+    /// they are host-internal and can carry a file path, a connection string fragment, a SQL statement, a
+    /// configuration key or any other text the throwing code chose, and an authenticated caller is not
+    /// thereby entitled to it.
+    /// </para>
+    /// <para>
+    /// THE DETAIL IS NOT DISCARDED, IT IS MOVED. <see cref="Faulted"/> logs the original exception
+    /// server-side against the same correlation identifier this message carries, so an operator joins the
+    /// two in one lookup and the caller carries nothing it should not have. That is the whole design: the
+    /// identifier is the seam between a safe payload and a complete diagnostic.
+    /// </para>
+    /// </remarks>
     private const string HostFaultedTemplate =
         "Cross-DataWindow expression reference FAILED: the expression service behind DataWindow handle "
-        + "[{1}] in expression session [{2}] raised [{3}]: {4}. The handle resolved and the service was "
-        + "reached, so this is NOT the cross-session narrowing; the fault is reported instead of being "
-        + "allowed to escape and abort calculations sharing the same stream.";
+        + "[{1}] in expression session [{2}] raised an internal error. The handle resolved and the "
+        + "service was reached, so this is NOT the cross-session narrowing; the fault is reported "
+        + "instead of being allowed to escape and abort calculations sharing the same stream. The fault "
+        + "detail is recorded server-side under correlation id [{3}]; quote that identifier to have it "
+        + "looked up.";
 
     /// <summary>
     /// Resolves a handle to a co-resident service, producing the DEFINED ERROR for each way that can
@@ -2562,20 +2758,55 @@ public sealed class ExpressionSession
     }
 
     /// <summary>
-    /// A host-faulted resolution: the handle resolved, the call threw, and the exception's own text is
-    /// carried rather than swallowed or renamed.
+    /// A host-faulted resolution: the handle resolved, the call threw, and the fault is reported with
+    /// FIXED SAFE TEXT while the exception itself is recorded server-side under a correlation id.
     /// </summary>
     /// <param name="handle">The handle that did resolve.</param>
     /// <param name="exception">The exception the host raised.</param>
     /// <returns>The resolution.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHY THE EXCEPTION NO LONGER TRAVELS (CWE-209). This error reaches an authenticated caller through
+    /// two wire fields - the rendered <c>text</c> and the structured <c>format_arguments</c> - and the
+    /// host that threw is arbitrary application code reached across a session boundary. Its exception
+    /// message can contain a file path, a connection string, a SQL fragment, a configuration key or a
+    /// stack-shaped type name, none of which the caller asked for and none of which this service can
+    /// vet. Carrying it "rather than swallowing it" put the fidelity of a diagnostic ahead of the
+    /// boundary, and the two are not actually in tension: the diagnostic is kept, just not HERE.
+    /// </para>
+    /// <para>
+    /// THE CORRELATION ID IS DETERMINISTIC, WHICH IS WHY IT CAN BE ON THE WIRE AT ALL. It is the session
+    /// identifier the caller chose plus a monotonic per-session ordinal - no GUID, no clock read - so a
+    /// paired characterization recording compares it directly instead of masking it. The same identifier
+    /// goes into the log record and into the payload, and that is the only thing joining them.
+    /// </para>
+    /// <para>
+    /// BOTH FIELDS ARE SANITISED, NOT JUST THE RENDERED ONE. <c>FormatArguments</c> is what a client
+    /// re-renders from, so leaving the type and message there while cleaning the text would have moved
+    /// the leak rather than closed it.
+    /// </para>
+    /// </remarks>
     private ForeignVariableResolution Faulted(DataWindowHandle handle, Exception exception)
     {
+        string faultId = NextFaultId();
+
+        // THE ONE PLACE THE EXCEPTION'S OWN TEXT IS ALLOWED TO GO. Logged with the exception object so a
+        // configured provider records the type, message and stack in full, joined to the payload by the
+        // identifier below. A null logger means the detail is lost, never that it is sent instead.
+        _logger?.LogError(
+            exception,
+            "Cross-DataWindow expression host faulted. Correlation id {FaultId}, DataWindow handle "
+                + "{Handle}, expression session {SessionId}. The caller received fixed text carrying "
+                + "this correlation id and no exception detail.",
+            faultId,
+            handle.Value,
+            SessionId);
+
         ImmutableArray<string> arguments =
         [
             handle.Value,
             SessionId,
-            exception.GetType().FullName ?? exception.GetType().Name,
-            exception.Message,
+            faultId,
         ];
 
         ExpressionParseError error = new()
@@ -2610,6 +2841,40 @@ public sealed class ExpressionSession
             ReturnCode = RetCode.E_INTERNAL_ERROR,
         };
     }
+
+    /// <summary>
+    /// Mints the next host-fault correlation identifier for this session.
+    /// </summary>
+    /// <returns>
+    /// <see cref="SessionId"/>, then <c>"/fault/"</c>, then a monotonic per-session ordinal starting at
+    /// one - for example <c>"session-7/fault/1"</c>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE SHAPE IS PART OF THE CONTRACT, because the identifier travels on the wire and an operator has
+    /// to be able to grep for it. It mirrors the allocated-handle shape (<c>sessionId/ordinal</c>) with an
+    /// interposed segment, so a fault id can never be mistaken for a handle even though both are opaque.
+    /// </para>
+    /// <para>
+    /// <see cref="Interlocked.Increment(ref long)"/> RATHER THAN THE SESSION LOCK. A fault can be minted
+    /// from a resolution path that already holds no lock and from one that does, so taking
+    /// <c>_gate</c> here would make the ordering of the two a correctness question. An interlocked
+    /// increment is sufficient - uniqueness is all that is required of the ordinal, not any relationship
+    /// to the handle sequence.
+    /// </para>
+    /// <para>
+    /// NO CLOCK AND NO RANDOMNESS, deliberately. See <c>_faultOrdinal</c>: this value is compared byte
+    /// for byte by a paired characterization recording, so it has to be reproducible from the same
+    /// sequence of calls under the same caller-chosen session identifier.
+    /// </para>
+    /// </remarks>
+    private string NextFaultId()
+    {
+        long ordinal = Interlocked.Increment(ref _faultOrdinal);
+
+        return SessionId + "/fault/" + ordinal.ToString(CultureInfo.InvariantCulture);
+    }
+
 
     /// <summary>
     /// Projects a failed resolution onto a value result. THE VALUE IS ALWAYS
@@ -2699,6 +2964,61 @@ public sealed class ExpressionSession
 /// refusal and a duplicate identifier are both ordinary answers a caller acts on, and the whole
 /// framework this ports from communicates failure through return codes rather than by throwing.
 /// </remarks>
+/// <summary>
+/// The outcome of one atomic attempt to take an expression session into use.
+/// </summary>
+/// <remarks>
+/// Three outcomes rather than a boolean, because the two refusals have different consequences for the
+/// registry: a session that was merely closed has already been accounted for, whereas one this attempt
+/// found EXPIRED has just been closed by the attempt itself and its registry slot still needs releasing.
+/// Collapsing them would either leak a slot or double-release one.
+/// </remarks>
+public enum ExpressionSessionAcquisition
+{
+    /// <summary>
+    /// The session was open and unexpired, and its activity stamp has been advanced. The only outcome on
+    /// which a caller may use the session.
+    /// </summary>
+    Acquired = 0,
+
+    /// <summary>The session had already been closed. The attempt changed nothing.</summary>
+    Closed = 1,
+
+    /// <summary>
+    /// The session had gone idle past its timeout. It was CLOSED by the attempt - registrations dropped
+    /// and stacks cleared - under the same lock that decided it.
+    /// </summary>
+    Expired = 2,
+}
+
+/// <summary>
+/// How the expression trace sink has been behaving, reported independently of any calculation result.
+/// </summary>
+/// <param name="Attempted">
+/// How many records have been handed to a sink. Zero when no sink is registered or tracing is off.
+/// </param>
+/// <param name="Delivered">How many the sink accepted without throwing.</param>
+/// <param name="Failed">
+/// How many the sink threw on, and therefore HOW MANY DIAGNOSTIC RECORDS WERE LOST. A non-zero value
+/// means the trace is incomplete even though every calculation succeeded.
+/// </param>
+/// <param name="LastFailureType">
+/// The type name of the most recent sink failure, or <see langword="null"/> when there has been none.
+/// THE TYPE ONLY: a sink's exception message is arbitrary content that can carry a path, a URL or a
+/// credential, and this report is readable by anything holding the session (C-F).
+/// </param>
+/// <remarks>
+/// A sink failure never changes a calculation - the trace is fire-and-forget and must not break the thing
+/// it observes - so it needs somewhere else to be visible. This is that somewhere. Reading
+/// <paramref name="Failed"/> is how a caller learns the diagnostic channel has stopped working, which
+/// previously nothing anywhere reported.
+/// </remarks>
+public sealed record ExpressionTraceDeliveryReport(
+    long Attempted,
+    long Delivered,
+    long Failed,
+    string? LastFailureType);
+
 public sealed record ExpressionSessionOpenResult(ExpressionSession? Session, long ReturnCode)
 {
     /// <summary>
@@ -2764,6 +3084,16 @@ public sealed class ExpressionSessionRegistry
     private readonly IExpressionTraceSink? _traceSink;
 
     /// <summary>
+    /// The host-fault log sink, shared with every session it opens.
+    /// </summary>
+    /// <remarks>
+    /// Shared rather than per-session so that one registration covers every session's faults, and so the
+    /// category a deployment sees is stable across sessions. See <see cref="ExpressionSession.Faulted"/>
+    /// for what is recorded through it and what is deliberately kept off the wire.
+    /// </remarks>
+    private readonly ILogger? _logger;
+
+    /// <summary>
     /// How many sessions are open, tracked separately so the ceiling needs no enumeration.
     /// </summary>
     private int _openCount;
@@ -2774,14 +3104,19 @@ public sealed class ExpressionSessionRegistry
     /// <param name="options">The service options. Only two of its groups are read.</param>
     /// <param name="timeProvider">The clock. Defaults to <see cref="TimeProvider.System"/>.</param>
     /// <param name="traceSink">The trace seam. When <see langword="null"/>, nothing is emitted.</param>
+    /// <param name="logger">
+    /// Where every session's host-fault detail is recorded. Optional and trailing, so the container
+    /// supplies it when one is configured and a unit test need not.
+    /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="options"/> is <see langword="null"/>, or its value is.
     /// </exception>
     public ExpressionSessionRegistry(
         IOptions<DataServicesOptions> options,
         TimeProvider? timeProvider = null,
-        IExpressionTraceSink? traceSink = null)
-        : this(GetValue(options), timeProvider, traceSink)
+        IExpressionTraceSink? traceSink = null,
+        ILogger<ExpressionSessionRegistry>? logger = null)
+        : this(GetValue(options), timeProvider, traceSink, logger)
     {
     }
 
@@ -2803,7 +3138,8 @@ public sealed class ExpressionSessionRegistry
     public ExpressionSessionRegistry(
         DataServicesOptions options,
         TimeProvider? timeProvider = null,
-        IExpressionTraceSink? traceSink = null)
+        IExpressionTraceSink? traceSink = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -2811,6 +3147,7 @@ public sealed class ExpressionSessionRegistry
         _lifetime = options.Sessions?.ExpressionSession ?? new SessionLifetimeOptions();
         _timeProvider = timeProvider ?? TimeProvider.System;
         _traceSink = traceSink;
+        _logger = logger;
     }
 
     /// <summary>
@@ -2912,7 +3249,8 @@ public sealed class ExpressionSessionRegistry
             _lifetime,
             _columnExpression,
             _timeProvider,
-            _traceSink);
+            _traceSink,
+            _logger);
 
         if (!_sessions.TryAdd(sessionId, session))
         {
@@ -2934,11 +3272,20 @@ public sealed class ExpressionSessionRegistry
     /// <see langword="true"/> when an OPEN, UNEXPIRED session was found.
     /// </returns>
     /// <remarks>
+    /// <para>
     /// AN EXPIRED SESSION IS CLOSED HERE RATHER THAN RETURNED, which is the property that makes idle
     /// expiry safe: a handle whose session has gone stale must be BLOCKED, and returning the session so
     /// the caller could resolve through it would answer from exactly the state the expiry was supposed to
     /// release. A successful lookup touches the session, so a session in active use never expires
     /// underneath the calculation using it.
+    /// </para>
+    /// <para>
+    /// THE VALIDATION IS ONE ATOMIC STEP, not three. <see cref="ExpressionSession.Acquire"/> tests open
+    /// state, tests expiry and records activity under a SINGLE acquisition of the session's gate. Asking
+    /// separately took the gate three times, and a close landing in either interval returned a CLOSED
+    /// session as a successful lookup - which on this session type means the caller then resolves handles
+    /// against state the close has already emptied, instead of being told the session is gone.
+    /// </para>
     /// </remarks>
     public bool TryGet(string? sessionId, out ExpressionSession? session)
     {
@@ -2954,13 +3301,14 @@ public sealed class ExpressionSessionRegistry
             return false;
         }
 
-        if (!found.IsOpen || found.HasExpired())
+        if (found.Acquire() != ExpressionSessionAcquisition.Acquired)
         {
+            // Closed, or expired-and-now-closed. The registry drops it and gives the slot back either
+            // way; its close is idempotent, so doing so for an already-closed session is safe.
             Close(sessionId);
             return false;
         }
 
-        found.Touch();
         session = found;
 
         return true;
@@ -3065,4 +3413,3 @@ public sealed class ExpressionSessionRegistry
         return options.Value;
     }
 }
-

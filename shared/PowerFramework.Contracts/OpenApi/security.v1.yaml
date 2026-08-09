@@ -5,7 +5,12 @@
 #    C-01  security.v1.TokenService    POST /v1/tokens
 #                                      GET  /.well-known/jwks.json
 #                                      GET  /.well-known/openid-configuration
-#    C-02  security.v1.CryptoService   15 operations under /v1/crypto/**
+#    C-02  security.v1.CryptoService   17 operations under /v1/crypto/**, covering ALL 63 of the
+#                                      legacy surface's cryptographic overloads. An earlier revision of
+#                                      this header said 15, from a superseded accounting that declined
+#                                      to project the three HashFile overloads; both are projected, at
+#                                      /v1/crypto/hash-file and /v1/crypto/hmac-file, so the count is
+#                                      17. Verify by counting operationId occurrences, never prose.
 #    C-10  Health and readiness        GET  /health   (anonymous by design)
 #                                      GET  /v1/ping  (token required, 401 without one)
 #
@@ -223,16 +228,41 @@ info:
     defeats the sole-issuer topology. If a proxy sits in front of the issuance path at all it must
     pass the connection through rather than terminate it.
 
-    **The local-development exception, stated explicitly rather than left implicit.** The `servers`
-    entry below is templated, and its `scheme` variable defaults to `http` so that the resolved
-    default URL is exactly the loopback address the local bring-up publishes. That default is a
-    **development convenience on the loopback interface only**. A deployed topology sets `scheme` to
-    `https`, and mutual TLS on the issuance path presupposes it: on plain HTTP there is no client
-    certificate to present, so a caller reaching `POST /v1/tokens` over `http` is running with the
-    issuance edge's caller authentication unavailable - which is acceptable on a developer's own
-    machine and is acceptable nowhere else. Consumers should likewise treat `RequireHttpsMetadata`
-    being relaxed as a development-only setting: it belongs in a development configuration file, not
-    in a base one.
+    **How the one `servers` entry and the local bring-up fit together, stated explicitly rather than
+    left implicit.** There is exactly one `servers` entry below, it is fixed rather than templated,
+    and it is `https` - there is no `scheme` variable to override, deliberately, because a selectable
+    plaintext base URL would apply to the token endpoint and the key set as well as to the readiness
+    probe. An earlier revision of this document described a templated entry whose `scheme` defaulted
+    to `http`; that is not what it declares, and the accompanying claim that a caller could reach
+    `POST /v1/tokens` over plain HTTP with caller authentication merely unavailable is withdrawn
+    (C-G, C-K).
+
+    **What the local bring-up actually does is serve everything on ONE TLS listener, not split the
+    listeners.** The service declares exactly one Kestrel endpoint - `https://+:5104`,
+    `Http1AndHttp2`, `ClientCertificateMode` `AllowCertificate` - in its BASE settings file, so it
+    applies to every environment including Development, and that one listener carries
+    `POST /v1/tokens`, all of C-02, `/health`, `/v1/ping` and the two `/.well-known/*` publications
+    alike. `AllowCertificate` is what makes the single listener sufficient: Kestrel REQUESTS a client
+    certificate during the handshake and hands whatever it receives to the application WITHOUT
+    demanding one, so the issuance operation can require and validate it per operation while the
+    readiness probe and the two anonymous documents stay reachable with no certificate at all.
+    `RequireCertificate` at the LISTENER was measured and rejected: it aborts the handshake for any
+    client presenting none, which takes the anonymous `/health` probe with it and the readiness chain
+    that gates Gateway could then never open. **There is therefore no address at which this service
+    mints a token without a client certificate** - in development or anywhere else. A caller without
+    one is refused by the token operation, which is a different thing from an unauthenticated mint.
+
+    An earlier revision described a second, cleartext endpoint carrying `/health` and C-02 so the
+    attached environment's `curl -sf http://localhost:5104/health` gate could satisfy verbatim. That
+    listener is **withdrawn**: it contradicted the one-port-per-service map, and it placed an
+    unauthenticated listener on the one service that holds the system's signing key. What changes
+    instead is one character of the gate, which becomes
+    `curl -sf https://localhost:5104/health`. Nothing about this service is reachable over plain HTTP
+    in any environment, so the key set and the discovery document are never fetched over cleartext and
+    the on-path key-substitution exposure that a cleartext bootstrap would carry does not arise at all.
+    `RequireHttpsMetadata` is correspondingly never relaxed against this authority - not in a
+    development settings file either. `docs/ARCHITECTURE.md` sections 4.1 and 9.3.1 carry the listener
+    map and the full certificate bootstrap.
 
     ## 3. Every path is versioned `v1`, and that is a constraint rather than a habit
 
@@ -299,7 +329,7 @@ info:
     | 5 | **No key-derivation function is reachable at all**, and there is no salt concept, so key material is used as raw key bytes | `KeyReference`, and every keyed operation |
     | 6 | **No authenticated encryption** - the mode set is exactly ECB, CBC and CFB, so ciphertext carries no integrity tag | `CryptoSymCryptMode`, and both symmetric operations |
     | 7 | **1024-bit RSA remains a legal key size** [enums.sru:L965] and is not removed from the accepted set | `CryptoRsaKeyBits` |
-    | 8 | **The same six-member hash set governs the RSA signature hash**, so MD5 and even CRC32 - not a cryptographic hash at all - are legal signature-hash selectors [enums.sru:L927] | `CryptoHashType`, and both RSA signature operations |
+    | 8 | **The same hash set governs the RSA signature hash**, so MD5 - not merely legacy but broken for signatures - is a legal signature-hash selector [enums.sru:L927]. CRC32 is declared by the same oracle comment but is excluded from the keyed and signing operations, because no such construction exists to implement | `CryptoHashType`, `CryptoKeyedHashType`, and both RSA signature operations |
 
     Items 3, 4, 5 and 6 are established by **absence**: there is no constant to select and no
     signature that accepts one. Absence is weaker evidence than presence in general, but it is
@@ -362,13 +392,24 @@ servers:
   #      calls are readable. C-G requires every newly created boundary to be authenticated from the
   #      outset, and an authentication scheme whose credentials travel in the clear is not one.
   #
-  # A LOCAL PLAINTEXT PROBE IS NOT SCAFFOLDED HERE. The attached environment's readiness gate uses
-  # `curl -sf http://localhost:5104/health`, and that remains workable in development because
-  # `appsettings.Development.json` may bind an additional plaintext listener FOR `/health` ONLY. It is
-  # deliberately not a `servers` entry: a second entry would make plaintext a published, selectable
-  # base URL for the whole API, including the token endpoint and the JWKS document, which is precisely
-  # the exposure above. The development exception is documented at the one place it is configured, is
-  # scoped to the anonymous readiness probe, and never carries the trust bootstrap.
+  # THERE IS NO PLAINTEXT LISTENER ON THIS SERVICE, IN ANY ENVIRONMENT, INCLUDING FOR `/health`.
+  # An earlier revision of this comment contemplated binding an additional plaintext endpoint for the
+  # anonymous readiness probe alone, so that the attached environment's `curl -sf
+  # http://localhost:5104/health` gate would work unchanged. That is withdrawn, and the reason is worth
+  # stating because the idea is superficially safe: a second listener on this service is a second place
+  # a request can arrive, and the whole reason this document publishes one `https` server is that a
+  # caller must not be able to reach this API over a channel an attacker can rewrite. A plaintext
+  # endpoint that serves only `/health` today is one route registration away from serving more, and
+  # nothing in the transport itself enforces the restriction. The service binds exactly one endpoint,
+  # `https://+:5104`, with client-certificate negotiation enabled so that `POST /v1/tokens` can require
+  # one while every other operation does not.
+  #
+  # THE OPERATIONAL CONSEQUENCE, STATED SO IT IS NOT DISCOVERED AT A FAILING GATE. The readiness probe
+  # for THIS service is an HTTPS request - `curl -sf --cacert <ca> https://localhost:5104/health` - and
+  # the Compose health check for it must be written that way. The other three services keep their
+  # plaintext probes. `orchestration/.env.example` section 1 carries the certificate-generation recipe
+  # and the trust-anchor path; docs/ARCHITECTURE.md section 9.4 records the deviation from the attached
+  # environment's documented gate and why the requirements' own TLS mandate for this listener wins.
   - url: https://localhost:5104
     description: >-
       The security-service listener. Port 5104 is fixed by the port map in
@@ -444,9 +485,16 @@ paths:
 
         Because a client certificate exists only inside a TLS handshake, this operation presupposes
         the `https` scheme, and it is the one path in this document that **must not be terminated by
-        an intermediary proxy**. Section 2a of the document description carries the full termination
-        model and states the loopback-only development exception under which the default `http`
-        scheme leaves this operation with no caller authentication available at all.
+        an intermediary proxy**. The service has exactly ONE listener - `https://+:5104`,
+        `Http1AndHttp2`, `ClientCertificateMode` `AllowCertificate` - and this operation is published
+        on it, as is every other path in this document. `AllowCertificate` means Kestrel REQUESTS a
+        certificate and hands whatever it receives to the application without demanding one, so the
+        requirement is enforced HERE, per operation, rather than at the listener: a caller that
+        presents none completes the handshake and is refused **by this operation**, while `/health`,
+        the key set and the discovery document stay anonymously reachable on the same listener. There
+        is consequently no address, on any topology, at which a token is minted without a client
+        certificate - and no cleartext listener anywhere on which this operation could be reached.
+        Section 2a of the document description carries the full termination model.
 
         Consequently the request body carries **no credential of any kind** - no client secret, no
         password, no API key, no client assertion and no key material. The `subject` field names
@@ -662,11 +710,19 @@ paths:
         reading Gateway's aggregate sees this service named individually with its own state, so an
         operator can tell *which* upstream is not ready rather than receiving one opaque verdict.
 
-        ## The report distinguishes "not ready" from "unhealthy"
+        ## The report distinguishes "not ready" from "unhealthy", in the BODY and not in the code
 
         A service still completing its startup validation is not the same as one whose dependency
         has failed, and an operator needs to be able to tell them apart. `Degraded` carries the
-        former and `Unhealthy` the latter; the `status` schema states the mapping.
+        former and `Unhealthy` the latter, and the `status` member is where that distinction lives.
+
+        **Only `Healthy` is answered with 200.** `Degraded` means *not ready*, so it is answered with
+        503 alongside `Unhealthy`. The reason is mechanical: what an orchestrator observes is the
+        status **code**, so a service answering 200 immediately after saying it was not ready would
+        satisfy a `service_healthy` condition and open the dependency gate early - defeating the one
+        readiness property the gate exists to enforce while every document still claimed it held.
+        A probe that tears down on any non-2xx is a *liveness* concern, which is a different question
+        from readiness and is not what this path answers.
       # OVERRIDES the document-level bearer requirement with an EMPTY requirement LIST. Anonymous
       # BY DESIGN - a readiness probe must be reachable before any token exists, and the compose
       # health gate that holds Gateway behind its three upstreams depends on it. See the JWKS
@@ -675,19 +731,21 @@ paths:
       responses:
         '200':
           description: >-
-            The service is `Healthy` or `Degraded`. Both are reported as 200 so that a probe
-            treating any non-2xx as a failure does not tear down a service that is merely still
-            completing startup validation.
+            The service is `Healthy`, which is the only verdict answered with 200. `Degraded` and
+            `Unhealthy` both mean not ready and are answered with 503; see that response.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthReport'
         '503':
           description: >-
-            The service is `Unhealthy`. The failing check is named in the problem `detail`, and
-            `retCode` carries the corresponding legacy return code. This response uses the single
-            problem shape that every non-2xx in this document uses; the readiness detail travels
-            inside it rather than in a second error schema.
+            The service is **not ready** - either `Degraded` or `Unhealthy`. The `status` member of
+            the report distinguishes the two; the status CODE does not, because the orchestration
+            readiness gate observes the code and a not-ready service answering 200 would open that
+            gate early. The not-ready component is named in the problem `detail`, and `retCode`
+            carries the corresponding legacy return code. This response uses the single problem shape
+            that every non-2xx in this document uses; the readiness detail travels inside it rather
+            than in a second error schema.
           content:
             application/problem+json:
               schema:
@@ -744,7 +802,7 @@ paths:
   #  keyRef in the position the legacy took key bytes; where the legacy took an initialization
   #  vector, the wire takes an ivRef resolved the same way.
   #
-  #  ALL FIFTEEN ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate. A GET with
+  #  ALL SEVENTEEN ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate. A GET with
   #  the payload in the query string would place plaintext, ciphertext and digests into request
   #  lines, and therefore into access logs, proxy caches and browser history - none of which the
   #  in-process legacy had. These operations are also not idempotent in any useful sense: the three
@@ -784,9 +842,9 @@ paths:
 
         ## Hash type selection
 
-        `hashType` is the six-member legacy set. Note that `CRYPTO_HASH_MD5` and
-        `CRYPTO_HASH_CRC32` are both members and both remain selectable; the schema records why
-        neither is removed.
+        `hashType` is `CryptoKeyedHashType` - the legacy set **minus** `CRYPTO_HASH_CRC32`,
+        because there is no standard construction that keys a checksum. `CRYPTO_HASH_MD5` remains
+        selectable and is a preserved weakness; the schema records both decisions and their reasons.
       requestBody:
         required: true
         content:
@@ -901,8 +959,9 @@ paths:
 
         ## Hash type selection
 
-        `hashType` is the same six-member legacy set, and `CRYPTO_HASH_MD5` and `CRYPTO_HASH_CRC32`
-        remain selectable here for the same preserved-weakness reason recorded on the schema.
+        `hashType` is `CryptoKeyedHashType`, exactly as on the in-memory keyed operation:
+        `CRYPTO_HASH_MD5` remains selectable as a preserved weakness, and `CRYPTO_HASH_CRC32` is
+        excluded because keying a checksum is not a defined construction.
       requestBody:
         required: true
         content:
@@ -1246,16 +1305,19 @@ paths:
 
         ## KNOWN LEGACY WEAKNESS - the signature hash set includes MD5 and CRC32
 
-        `enums.sru:L927` comments the six-member hash set as governing
+        `enums.sru:L927` comments the hash set as governing
         `n_crypto::Hash/RSASign/VerifyRSASign:[ntype]`, and `n_crypto.sru:L70-L71` types the
-        `readonly long ntype` parameter accordingly. **The same six-member set therefore governs the
-        RSA signature hash**, which means `CRYPTO_HASH_MD5` = 0 and even `CRYPTO_HASH_CRC32` = 5 -
-        which is a checksum and not a cryptographic hash at all - are **legal signature-hash
-        selectors**.
+        `readonly long ntype` parameter accordingly, so the legacy **declared** one set for digests
+        and signatures alike. `CRYPTO_HASH_MD5` = 0 is therefore a **legal signature-hash selector**,
+        and it stays legal: signing under MD5 produces a signature with no meaningful collision
+        resistance, and the contract neither prevents it nor pretends it is safe (C-B). It records it.
 
-        This is preserved and the enum is **not restricted for this operation** (C-B). Signing under
-        MD5 or CRC32 produces a signature with no meaningful collision resistance. The contract
-        neither prevents it nor pretends it is safe; it records it.
+        `CRYPTO_HASH_CRC32` = 5 is the one member the oracle's declaration covers that this operation
+        does **not** accept, and the reason is not a policy judgement about its strength. There is no
+        RSA-over-CRC32 construction to implement: a checksum has no digest-algorithm identifier for a
+        signature scheme to name. Implementing this cell would mean inventing an encoding and then
+        claiming it as parity, which nothing in this repository could confirm. `hashType` is
+        consequently `CryptoKeyedHashType`, and that schema carries the full reasoning.
 
         ## The key travels as a reference
 
@@ -1316,9 +1378,11 @@ paths:
 
         ## KNOWN LEGACY WEAKNESS - the same MD5-and-CRC32-inclusive hash set applies
 
-        The `ntype` parameter at `:L72-L73` takes the same six-member set as the signing operation,
-        for the same reason and with the same consequence [`enums.sru:L927`]. Verification under
-        MD5 or CRC32 is legal here, is preserved, and is not restricted.
+        The `ntype` parameter at `:L72-L73` takes the same set as the signing operation, for the
+        same reason and with the same consequence [`enums.sru:L927`]. Verification under MD5 is
+        legal here and is preserved. `hashType` is `CryptoKeyedHashType`, so `CRYPTO_HASH_CRC32` is
+        excluded on both halves of the signature pair - necessarily, since a signature that cannot be
+        produced cannot be verified either.
 
         `keyRef` stands in the position of the legacy `readonly string pubkey`.
       requestBody:
@@ -1790,15 +1854,17 @@ components:
 
         ## This scheme presupposes `https`, and it cannot be terminated by an intermediary
 
-        A client certificate exists only inside a TLS handshake, so this scheme is meaningful only
-        when the `scheme` server variable is `https`. It is also the one path in this document that
-        **must not sit behind a TLS-terminating proxy**: an intermediary that terminates TLS here
-        either discards the certificate or leaves this service trusting a forwarded assertion of an
-        identity it cannot itself verify, and either outcome defeats the sole-issuer topology. If a
-        proxy fronts the issuance path at all, it passes the connection through. Section 2a of the
-        document description states the whole termination model, including the deliberate
-        loopback-only development exception under which the default `http` scheme leaves this
-        operation with no caller authentication available.
+        A client certificate exists only inside a TLS handshake, so this scheme is meaningful only over
+        `https` - which is the single fixed scheme of the `servers` entry above; there is no `scheme`
+        variable to set. It is also the one path in this document that **must not sit behind a
+        TLS-terminating proxy**: an intermediary that terminates TLS here either discards the
+        certificate or leaves this service trusting a forwarded assertion of an identity it cannot
+        itself verify, and either outcome defeats the sole-issuer topology. If a proxy fronts the
+        issuance path at all, it passes the connection through. Section 2a of the document description
+        states the whole termination model: one TLS listener with `ClientCertificateMode`
+        `AllowCertificate`, on which the certificate requirement is enforced per operation rather than
+        at the listener, and no cleartext endpoint anywhere - so that no topology offers an
+        unauthenticated mint.
 
   # ================================================================================================
   #  REUSABLE RESPONSES
@@ -2243,13 +2309,74 @@ components:
         **not a cryptographic hash at all** - are legal **signature-hash** selectors. A signature
         produced under either has no meaningful collision resistance.
 
-        **The set is not restricted for the signature operations** (C-B). MD5 and SHA-1 likewise
-        remain legal for plain digests. Preserving the set exactly is required; annotating it is the
-        whole remediation.
+        **The identifier set is not reduced** (C-B). MD5 and SHA-1 likewise remain legal for plain
+        digests. Preserving the set exactly is required; annotating it is the remediation.
+
+        ## WHERE THIS FULL SET APPLIES, AND WHERE IT DOES NOT
+
+        This schema governs the **unkeyed digest** operations, where every member including
+        `CRYPTO_HASH_CRC32` is genuinely usable - a checksum is a legitimate thing to compute.
+
+        The **keyed** and **signature** operations use `CryptoKeyedHashType` instead, which is this
+        set minus `CRYPTO_HASH_CRC32`. That is a capability narrowing, not a different identifier
+        set: the values that remain keep these exact names and numbers. See that schema for why.
       enum: [0, 1, 2, 3, 4, 5]
       x-enum-varnames:
         [CRYPTO_HASH_MD5, CRYPTO_HASH_SHA1, CRYPTO_HASH_SHA256,
           CRYPTO_HASH_SHA384, CRYPTO_HASH_SHA512, CRYPTO_HASH_CRC32]
+      x-applies-to-operations: [hash, hashFile]
+
+    CryptoKeyedHashType:
+      type: integer
+      format: int64
+      title: CryptoKeyedHashType
+      description: |-
+        The digest algorithm selector for the operations that **key** a digest or **sign** with one:
+        `hmac`, `hmacFile`, `rsaSign` and `rsaVerify`.
+
+        - `0` = `CRYPTO_HASH_MD5` [`enums.sru:L928`]
+        - `1` = `CRYPTO_HASH_SHA1` [`:L929`]
+        - `2` = `CRYPTO_HASH_SHA256` [`:L930`]
+        - `3` = `CRYPTO_HASH_SHA384` [`:L931`]
+        - `4` = `CRYPTO_HASH_SHA512` [`:L932`]
+
+        ## THIS IS A CAPABILITY NARROWING OF `CryptoHashType`, NOT A SEPARATE SET
+
+        Same identifiers, same numbering, same oracle locators - `CRYPTO_HASH_CRC32` = 5 is the one
+        member absent. The full set remains published on `CryptoHashType` and still governs the
+        unkeyed digest operations, so **no identifier is removed from the contract and none is
+        renumbered** (C-B).
+
+        ## WHY `CRYPTO_HASH_CRC32` IS EXCLUDED HERE
+
+        The oracle's comment at `enums.sru:L927` reads
+        `//Hash types (n_crypto::Hash/RSASign/VerifyRSASign:[ntype])` and `n_crypto.sru:L70-L73`
+        types the sign and verify `readonly long ntype` accordingly, so the legacy **declared** one
+        set for all of these operations and published no narrower one.
+
+        But **there is no such construction to implement**. CRC32 is a checksum, not a hash function:
+        it has no compression-function structure for HMAC to key, and no digest-algorithm identifier
+        for a signature scheme to name. Standard HMAC-CRC32 and RSA-over-CRC32 do not exist - not as
+        an unavailable option on this platform, but as constructions that were never defined. Making
+        this cell work would require **inventing** a keying and encoding scheme and then claiming it
+        as parity, and since `n_crypto` is `native "pfw.dll"` [`n_crypto.sru:L8`] with no PowerScript
+        body, nothing in this repository could confirm the invention matched. The governing rule
+        applies exactly: a contract is narrowed with a defined error, never widened with a guess.
+
+        ## WHAT THIS FIXES, STATED PLAINLY
+
+        Previously these four operations advertised the full six-member set while the implementation
+        refused the sixth deterministically. A request naming `5` was schema-valid, was accepted by
+        the client, and then failed inside the provider - the contract promised something no layer
+        could deliver. The narrowing moves that refusal to the earliest point at which it can be
+        detected: schema validation, before a request is sent.
+      enum: [0, 1, 2, 3, 4]
+      x-enum-varnames:
+        [CRYPTO_HASH_MD5, CRYPTO_HASH_SHA1, CRYPTO_HASH_SHA256,
+          CRYPTO_HASH_SHA384, CRYPTO_HASH_SHA512]
+      x-narrows: CryptoHashType
+      x-excluded-identifiers: [CRYPTO_HASH_CRC32]
+      x-applies-to-operations: [hmac, hmacFile, rsaSign, rsaVerify]
 
     CryptoSymCryptType:
       type: integer
@@ -2269,6 +2396,33 @@ components:
         DES in particular has a 56-bit effective key and is unfit for new use. **Neither is removed
         and neither is renumbered** (C-B). There is deliberately no default: all 32 symmetric
         declarations take this argument, so a caller always states it.
+
+        ## PLATFORM DIVERGENCE - WEAK AND DEGENERATE DES AND 3DES KEYS ARE REFUSED HERE
+
+        Published because it is a real, reachable behavioural difference rather than a theoretical
+        one, and a caller cannot discover it from the identifier set alone.
+
+        This platform's cryptographic library **refuses** the known weak and semi-weak DES keys, and
+        refuses 3DES keys whose adjacent sub-keys coincide, raising from the key assignment rather
+        than encrypting. An OpenSSL-based implementation - which the framework's attribution
+        [`w_about.srw:L118`] suggests the closed binary used - **does not**. The legacy would
+        therefore have encrypted where this port fails.
+
+        **The interaction that makes it reachable.** Key material shorter than the cipher requires is
+        right-padded with zero bytes, so short keys normalize into precisely the buffers this
+        platform rejects:
+
+        | cipher | supplied key length refused after padding |
+        |---|---|
+        | `CRYPTO_SYMCRYPT_TYPE_DES` | an **empty** key, which pads to the all-zero weak key |
+        | `CRYPTO_SYMCRYPT_TYPE_3DES` | **any key shorter than 16 bytes**, because sub-keys two and three both pad to all-zero and so coincide |
+        | the three AES types | none at any length - AES has no weak-key concept |
+
+        So a 3DES caller with a fifteen-character passphrase is refused here where the legacy would
+        have encrypted. **No workaround is applied and no key is silently substituted** - either
+        would change behaviour. The failure is loud rather than silent, and it surfaces as HTTP `500`
+        with a `ProblemDetails` body, distinctly from the `501` capability refusals tabulated on
+        `CryptoSymCryptMode`: this one is a property of the *key material supplied*, not of the port.
 
         A width note (C-K): `n_crypto` types this argument as a 16-bit `readonly uint`
         [n_crypto.sru:L30-L61] while `enums.sru` declares the constants as `Long`. The wire carries
@@ -2319,9 +2473,57 @@ components:
         a mode and nothing else. The scheme is PKCS#5-family and it is fixed, so this contract
         carries **no padding field for symmetric operations** - offering one would imply a choice the
         legacy never had.
+
+        ## CAPABILITY NARROWING - TWO CELLS ARE BLOCKED BECAUSE THEIR PARAMETERS ARE UNPROVABLE
+
+        **The identifier set above is complete and is not reduced.** All three modes remain declared,
+        numbered exactly as the oracle numbers them, and a request naming any of them is
+        schema-valid. What follows is a separate, **capability** statement: two cells of the grid are
+        refused at runtime, and they are published here so a caller learns it from the contract
+        rather than from a failed request.
+
+        | mode | `iv` supplied | status |
+        |---|---|---|
+        | `CRYPTO_SYMCRYPT_MODE_ECB` | either | **supported** - consumes no vector, has no feedback width |
+        | `CRYPTO_SYMCRYPT_MODE_CBC` | yes | **supported** - every parameter is caller-supplied |
+        | `CRYPTO_SYMCRYPT_MODE_CBC` | no | **BLOCKED** - `SYMMETRIC_VECTOR_UNPROVABLE` |
+        | `CRYPTO_SYMCRYPT_MODE_CFB` | either | **BLOCKED** - `SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE` |
+
+        **Why.** `n_crypto` is declared `native "pfw.dll"` [`n_crypto.sru:L8`] and its 86 lines are
+        declarations only - there is no PowerScript body for any of the 32 symmetric overloads, so
+        the behaviour exists solely inside a closed, Windows-only binary. Two parameters that binary
+        chose are therefore unobservable: the **CFB feedback width**, which the legacy publishes with
+        no feedback-size argument even though full-block and 8-bit CFB produce entirely different
+        ciphertext, and the **initialization vector** substituted when a mode is supplied without one
+        by the eight overloads at `n_crypto.sru:L31, L35, L39, L43` and mirrors `:L47, L51, L55, L59`.
+
+        **Why blocking rather than choosing.** Either wrong choice is undetectable: encrypting and
+        decrypting under the same wrong assumption round-trips perfectly, so the caller receives
+        ciphertext that passes every available check and **that the legacy cannot decrypt**. That is
+        data loss presented as success. The governing rule is that a contract is narrowed with a
+        defined error, never widened with a guess.
+
+        **What it costs: nothing the oracle demonstrates.** The only code in the repository that
+        invokes this surface is the framework's own demo, and all six of its call sites pass an
+        explicit vector with CBC - DES at `u_cst_tabpage_utility_crypto.sru:L504, L547`, AES256 at
+        `:L592, L607`, 3DES at `:L622, L637`. It never selects CFB and never uses a vector-less arm.
+        A caller needing CBC supplies a vector through one of the 24 overloads that take one.
+
+        **How a refusal appears.** HTTP `501` with a `ProblemDetails` body whose `reason` is one of
+        the two codes tabulated above. It is deliberately **not** `400`: the request is well-formed
+        and would have succeeded, and the limitation is this port's rather than the caller's.
       enum: [0, 1, 2]
       x-enum-varnames:
         [CRYPTO_SYMCRYPT_MODE_ECB, CRYPTO_SYMCRYPT_MODE_CBC, CRYPTO_SYMCRYPT_MODE_CFB]
+      x-blocked-cells:
+        - mode: 2
+          modeName: CRYPTO_SYMCRYPT_MODE_CFB
+          ivSupplied: any
+          reason: SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE
+        - mode: 1
+          modeName: CRYPTO_SYMCRYPT_MODE_CBC
+          ivSupplied: false
+          reason: SYMMETRIC_VECTOR_UNPROVABLE
       x-legacy-default-identifier: CRYPTO_SYMCRYPT_MODE_DEFAULT
 
     CryptoRsaPadding:
@@ -2850,14 +3052,16 @@ components:
             The overall verdict, and the field that carries the distinction contract C-10 requires
             between "not ready" and "unhealthy":
 
-            - `Healthy` - fully ready. Reported with HTTP 200.
+            - `Healthy` - fully ready. Reported with HTTP 200, and the only verdict that is.
             - `Degraded` - **not ready**, but not failed either. A service still completing its
-              startup validation reports this. Reported with HTTP 200, so a probe that tears down on
-              any non-2xx does not kill a service that is merely still starting.
+              startup validation reports this. Reported with HTTP **503**, because not ready is not
+              ready: the orchestration readiness gate observes the status code, so answering 200 here
+              would open the dependency gate on a service that had just said it was not usable.
             - `Unhealthy` - **failed**. Reported with HTTP 503.
 
             An operator reading an aggregate needs to tell the middle state from the last one, which
-            is why two states are not collapsed into one.
+            is why two states are not collapsed into one - and why the distinction is carried by THIS
+            member rather than by the status code the two share.
         service:
           type: string
           const: security
@@ -2972,7 +3176,7 @@ components:
         keyRef:
           $ref: '#/components/schemas/KeyReference'
         hashType:
-          $ref: '#/components/schemas/CryptoHashType'
+          $ref: '#/components/schemas/CryptoKeyedHashType'
 
     HashFileRequest:
       type: object
@@ -3006,7 +3210,7 @@ components:
         keyRef:
           $ref: '#/components/schemas/KeyReference'
         hashType:
-          $ref: '#/components/schemas/CryptoHashType'
+          $ref: '#/components/schemas/CryptoKeyedHashType'
 
     SymEncryptRequest:
       type: object
@@ -3090,9 +3294,9 @@ components:
       description: >-
         An RSA signature request, covering both legacy `RSASign` overloads at
         `n_crypto.sru:L70-L71`. `keyRef` stands in the position of the legacy
-        `readonly string prikey`. Note that `hashType` accepts the full six-member set, which
-        includes MD5 and CRC32 - a preserved legacy weakness annotated on the `CryptoHashType`
-        schema and on the operation.
+        `readonly string prikey`. `hashType` is `CryptoKeyedHashType`: MD5 remains selectable as a
+        preserved legacy weakness, while CRC32 is excluded because no RSA-over-checksum construction
+        exists to implement. Both decisions are annotated on that schema and on the operation.
       additionalProperties: false
       required: [data, payloadForm, keyRef, hashType]
       properties:
@@ -3103,7 +3307,7 @@ components:
         keyRef:
           $ref: '#/components/schemas/KeyReference'
         hashType:
-          $ref: '#/components/schemas/CryptoHashType'
+          $ref: '#/components/schemas/CryptoKeyedHashType'
 
     RsaVerifyRequest:
       type: object
@@ -3130,7 +3334,7 @@ components:
         keyRef:
           $ref: '#/components/schemas/KeyReference'
         hashType:
-          $ref: '#/components/schemas/CryptoHashType'
+          $ref: '#/components/schemas/CryptoKeyedHashType'
 
     GenRsaKeyRequest:
       type: object

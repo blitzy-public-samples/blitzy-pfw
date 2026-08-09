@@ -118,6 +118,7 @@ using System.Globalization;
 
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.DataServices.Domain;
+using PowerFramework.DataServices.Validators;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.DataServices.Expressions;
@@ -1615,6 +1616,30 @@ public sealed class MacroInvoker
     /// determinism the containerised target requires, which is also what makes the fragment comparable
     /// between a legacy recording and a target recording at all.
     /// </para>
+    /// <para>
+    /// AND THE TEMPORAL TEXT IS SINGLE-SOURCED, NOT RESTATED - DECISION 5 APPLIED TO THE FORMAT. This
+    /// method carries no temporal format string of its own. It calls
+    /// <see cref="DateTimeValidator.FormatExpressionValue(DateTime)"/>,
+    /// <see cref="DateValidator.FormatValue(DateOnly)"/> and
+    /// <see cref="TimeValidator.Format(TimeOnly)"/> - the same three culture-pinned formatters
+    /// <c>Validators/ValueToExpression.cs</c> composes its <c>DateTime('...')</c>,
+    /// <c>Date('...')</c> and <c>Time('...')</c> literals around. Both paths render the same legacy
+    /// <c>String(aVal)</c> conversion into the same expression language, so a macro result and a
+    /// validated cell value MUST produce identical literal text; two independent format strings would
+    /// let them drift, and the drift would be invisible until a recording compared them.
+    /// </para>
+    /// <para>
+    /// CONCRETELY, THAT IS WHOLE SECONDS. Those formatters emit <c>yyyy-MM-dd HH:mm:ss</c>,
+    /// <c>yyyy-MM-dd</c> and <c>HH:mm:ss</c>. This method previously emitted six fractional digits for
+    /// <c>datetime</c> and <c>time</c>, which rendered <c>.000000</c> onto every whole-second value and
+    /// disagreed with the validator path on a value both can carry. Fractional precision is an
+    /// UNVERIFIED-FROM-REPOSITORY characterization item, recorded once on
+    /// <see cref="DateTimeValidator.ExpressionValueFormat"/> and
+    /// <see cref="TimeValidator.CanonicalFormat"/> rather than duplicated here: nothing in the tree
+    /// shows a formatted temporal literal, so the precision must be pinned against the behavioural
+    /// oracle. When it is, changing it on those constants changes this path with it - which is the
+    /// point of routing through them.
+    /// </para>
     /// </remarks>
     public static bool TryRender(object? value, out string rendered, out string? classNameToken)
     {
@@ -1658,9 +1683,10 @@ public sealed class MacroInvoker
                 return true;
 
             case "datetime":
-                // [:L2276]
+                // [:L2276] The inner text comes from the canonical formatter, NOT from a format
+                // string of this file's own - see the CULTURE paragraph in the remarks.
                 rendered = "DateTime('"
-                    + ((DateTime)value!).ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture)
+                    + DateTimeValidator.FormatExpressionValue((DateTime)value!)
                     + "')";
 
                 return true;
@@ -1668,7 +1694,7 @@ public sealed class MacroInvoker
             case "date":
                 // [:L2278]
                 rendered = "Date('"
-                    + ((DateOnly)value!).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                    + DateValidator.FormatValue((DateOnly)value!)
                     + "')";
 
                 return true;
@@ -1676,7 +1702,7 @@ public sealed class MacroInvoker
             case "time":
                 // [:L2280]
                 rendered = "Time('"
-                    + ((TimeOnly)value!).ToString("HH:mm:ss.ffffff", CultureInfo.InvariantCulture)
+                    + TimeValidator.Format((TimeOnly)value!)
                     + "')";
 
                 return true;
@@ -2347,4 +2373,3 @@ public sealed class MacroInvoker
         }
     }
 }
-

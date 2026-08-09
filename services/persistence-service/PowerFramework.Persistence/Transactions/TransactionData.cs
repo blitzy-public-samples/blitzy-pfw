@@ -1228,10 +1228,11 @@ public readonly partial record struct TransactionData
     /// </para>
     /// <para>
     /// <b>The offending statement text reaches diagnostics only through
-    /// <c>Errors/SqlRedactor.cs</c>.</b> There is deliberately no self-conversion on the error
-    /// payload type and no hand-rolled mapping that bypasses the redactor. This property is the
-    /// signal that tells that layer whether the statement it is about to publish can contain data at
-    /// all.
+    /// <c>Errors/SqlRedactor.cs</c>, which masks it unconditionally.</b> There is deliberately no
+    /// self-conversion on the error payload type, no hand-rolled mapping that bypasses the redactor,
+    /// and no redactor argument on the outward projection that could be replaced by a pass-through.
+    /// This property is the signal that tells that layer whether the statement it is about to publish
+    /// can contain data at all.
     /// </para>
     /// <para>
     /// ==========================================================================================

@@ -1,19 +1,24 @@
-<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
-     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
-     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
-     without splitting the locator from what it proves, and a wrapped command is a command that does
-     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
-       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
-     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
-     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
-     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
-     and are never edited, so a command that reports them would fail for reasons this refactor must not
-     "fix".
+<!-- Markdown lint policy for this file. Rationale is in docs/BUILD.md section 14. MD013 is 120 rather
+     than the 80-character default, and is disabled for tables and code blocks: an evidence row carrying
+     a legacy locator and a quoted finding cannot be wrapped without splitting the locator from what it
+     proves, and a wrapped command is a command that does not run. Prose IS wrapped, and is held to the
+     120 limit.
 
-     Declared inline, per file, so the policy travels with the document and applies to the six files
-     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
-     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+     THE POLICY IS SELF-DECLARED, SO IT NEEDS NO COMMAND, NO FILE LIST AND NO GLOB. The directive on the
+     next line travels with the document: any markdownlint-compatible tool already provisioned on a
+     reader's machine honours it, with no flags to remember and no external configuration file to locate.
+     It applies to the seven documents this refactor authored and CANNOT reach the five read-only legacy
+     Chinese documents in this folder, which are the behavioural oracle, are never edited, and carry
+     pre-existing violations of their own (hard tabs, unlabelled code fences and others) that this
+     refactor must not "fix". That unreachability is precisely why a per-file directive was chosen over a
+     repository-root configuration artifact the plan does not provide for.
+
+     NO LINT COMMAND IS PUBLISHED, AND THAT IS A SUPPLY-CHAIN CONTROL RATHER THAN AN OMISSION. The entire
+     approved npm dependency set for this repository is the exact, locked one declared under tests/e2e,
+     and no Markdown linter appears in it. A documented on-demand package-runner invocation would
+     therefore instruct an unpinned version to be resolved and executed from the network outside that
+     lockfile every time somebody followed the documentation, which the deterministic-automation baseline
+     forbids. Lint with tooling that is already installed; the directive below is what it reads. -->
 <!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
 
 # PowerFramework → .NET 10 — Cross-Service Contract Inventory
@@ -289,13 +294,32 @@ its expansion mode, and must invert two streams. They are given proportionately 
 | 2 | `GET /.well-known/jwks.json` | `getJsonWebKeySet` | **anonymous** | Publishes the verification material — public members only, never a private one |
 | 3 | `GET /.well-known/openid-configuration` | `getOpenIdConfiguration` | **anonymous** | Discovery metadata, so a consumer's stock bearer handler self-configures |
 
-**The listener is HTTPS, and that is a functional requirement rather than a hardening preference.**
-The published server is `https://localhost:5104`. Row 1 authenticates with a client certificate, and
-a client certificate cannot be presented on a plaintext listener at all — published over `http` the
-token endpoint would be uncallable and no service could obtain its first token. Rows 2 and 3 are the
-verification material every other service trusts, so a channel an attacker can rewrite would let that
-attacker choose the keys used to validate every token in the system. Anonymous does not mean
+**Row 1's listener is HTTPS, and that is a functional requirement rather than a hardening preference.**
+A client certificate cannot be presented on a plaintext listener at all, so published over `http` the
+token endpoint would be uncallable and no service could obtain its first token. `security.v1.yaml`
+therefore declares exactly one `servers` entry and it is `https`.
+
+**The service declares exactly ONE listener, and every row above is published on it.**
+`https://+:5104`, `Http1AndHttp2`, `ClientCertificateMode` **`AllowCertificate`** — in the base
+settings file, so it applies to every environment including Development. `AllowCertificate` is what
+makes one listener sufficient: Kestrel *requests* a client certificate during the handshake and hands
+whatever it receives to the application **without demanding one**, so row 1 requires and validates it
+*per operation* while rows 2 and 3, `/health`, `/v1/ping` and all of C-02 stay reachable with no
+certificate at all. `RequireCertificate` at the listener was measured and rejected: it aborts the
+handshake for any client presenting none, which takes the anonymous `/health` probe with it so the
+readiness chain gating Gateway could never open. An earlier revision answered the same constraint with a
+second, cleartext endpoint carrying everything except row 1; that endpoint is **withdrawn**, because it
+contradicted the one-port-per-service map and placed an unauthenticated listener on the one service
+holding the system's signing key. The consequence that matters is unchanged: there is no address, on any
+topology, at which a token is minted without a client certificate.
+
+Rows 2 and 3 are the verification material every other service trusts, so a channel an attacker can
+rewrite would let that attacker choose the keys used to validate every token in the system. With one
+TLS-only listener that channel does not exist in any environment — the cleartext-loopback exposure an
+earlier revision accepted in development is withdrawn along with the listener that carried it, and
+`RequireHttpsMetadata` is correspondingly never relaxed against this authority. Anonymous does not mean
 unprotected: it means no credential is *required to read* material that is public by design.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 carries the listener map and §9.3.1 the certificate bootstrap.
 
 The issuance request carries the caller identity, the intended audience, and the requested scope
 set; the response carries the token, its type, its expiry, and the granted scope set — which may be
@@ -356,21 +380,28 @@ that a consumer's **stock bearer handler** fetches `/.well-known/jwks.json` and 
 document with **zero bespoke code**. That keeps the security-critical retrieval path inside framework
 code rather than hand-written code, on three services rather than one.
 
-**"REST" here names HTTP semantics, not a scheme.** In a deployed topology this contract is served
-over **HTTPS**; the `http://localhost:5104` address that the schema's templated `servers` entry
-resolves to by default is what the local bring-up publishes on the loopback interface, and the schema
-declares that explicitly as a development convenience through a `scheme` variable enumerating `https`
-and `http`. Two consequences a deployment has to honour:
+**"REST" here names HTTP semantics, not a scheme — and for this one contract the scheme is fixed.**
+The schema publishes exactly **one** canonical server entry, `https://localhost:5104`, with no scheme
+variable and no plaintext alternative, and the service's own listener is `https://+:5104` in every
+environment; a local bring-up changes only the host. That is deliberate rather than incidental: a
+second, plaintext entry would make `http` a *published, selectable* base URL for the whole API,
+including the token endpoint and the JWK set, which is precisely the exposure the next two bullets
+describe. A development plaintext listener, if one is ever bound at all, is scoped to the anonymous
+`/health` probe and is documented at the one place it is configured — never as a `servers` entry. Two
+consequences a deployment has to honour:
 
 - **The issuance path must not be terminated by an intermediary.** Mutual TLS authenticates the
   client to Security itself, so a proxy that terminates TLS on `POST /v1/tokens` either discards the
   client certificate or leaves Security trusting a forwarded assertion it cannot verify — either of
   which defeats the sole-issuer topology. Bearer-protected and anonymous operations may sit behind a
   terminating proxy in the ordinary way.
-- **On plain HTTP, issuance has no caller authentication at all**, because there is no client
-  certificate to present. That is acceptable on a developer's loopback interface and nowhere else,
-  which is why consumers keep `RequireHttpsMetadata` relaxed only in a development configuration file
-  — never in a base one. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the full model.
+- **On plain HTTP, issuance would have no caller authentication at all**, because there would be no
+  client certificate to present. That is why no configuration in this repository puts this service on
+  plaintext, in any environment: consumers keep an https authority and `RequireHttpsMetadata` true in
+  base *and* development settings, and there is no `RequireHttpsMetadata: false` anywhere in the tree.
+  A deployment that genuinely does run Security on plaintext has to state that relaxation explicitly,
+  and gets a named startup failure until it does. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the
+  full model.
 
 **Rejected alternative — gRPC for Security** (recorded per C-K). Choosing gRPC here would force a
 custom key-set retrieval implementation into each of the three consuming services. That is a net
@@ -421,43 +452,52 @@ at `:L10`) which are not part of this contract. The object is bound to a closed 
 `:L8`; the operations themselves are substituted from the base class library, and no third-party
 cryptography package is introduced.
 
-**63 is the legacy overload count, not the projected wire surface. The two numbers are different and
+**63 is the legacy overload count, not the published wire surface. The two numbers are different and
 neither substitutes for the other:**
 
 | | Count | What it counts |
 | --- | ---: | --- |
 | Legacy overloads | **63** | Distinct PowerScript declarations across the nine groups above, summing the final column |
-| Not projected | **−3** | The three `HashFile` overloads [`n_crypto.sru:L27-L29`] |
-| Projected overloads | **60** | Legacy overloads that have a landing site on the wire |
-| Wire operations | **15** | The `POST /v1/crypto/**` operations they collapse onto |
+| Projected overloads | **63** | Legacy overloads that have a landing site on the wire — every one of them |
+| Not projected | **0** | Nothing is excluded. Every overload family, the three `HashFile` declarations [`n_crypto.sru:L27-L29`] included, has a landing site |
+| Wire operations | **17** | The `POST /v1/crypto/**` operations they collapse onto |
 
 Overloads collapse onto operations because what varies across a legacy overload group — string versus
 blob payload, present versus absent initialization vector, present versus absent explicit mode — is
 expressed on the wire as **fields of one request body** rather than as separate endpoints. So 16
-`SymEncrypt` overloads become one `POST /v1/crypto/symmetric/encrypt`, and the 60-to-15 ratio is that
+`SymEncrypt` overloads become one `POST /v1/crypto/symmetric/encrypt`, and the 63-to-17 ratio is that
 collapse, not a loss of capability.
 
-**The three `HashFile` overloads are the one deliberate exclusion, and the reason is C-G.** A
-caller-supplied *server-side filename* arriving over HTTP would create a path-traversal surface the
-in-process legacy could not have had, because in-process the filename came from the same address space
-as the caller. Excluding them is therefore required by the no-new-attack-surface constraint rather
-than an oversight, and it is the only place in this contract where a legacy operation has no wire
-landing site. The exclusion and its accounting are recorded in
-[`OpenApi/security.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/security.v1.yaml), which
-carries the same 63 / −3 / 60 / 15 arithmetic as an audit: **if a future edit makes the legacy count
-anything other than 63, or leaves an overload family with no landing site, the boundary has silently
-drifted from the oracle.** Re-verify by counting declarations, never by reading the prose.
+**The `HashFile` family IS projected, and the way it is projected is what removes the path-traversal
+concern.** A caller-supplied *server-side filename* arriving over HTTP would create an attack surface
+the in-process legacy could not have had, because in-process the filename came from the same address
+space as the caller (C-G). Excluding the family was one way to answer that, and an earlier revision of
+this document took it; the published contract takes the better one. The two operations
+`POST /v1/crypto/hash-file` and `POST /v1/crypto/hmac-file` accept an **opaque server-resolved
+`fileRef`, never a path** — the same discipline `keyRef` follows for the same reason
+([§5.2](#52-the-contract-level-secrets-rule)) — so no caller-supplied path reaches a filesystem call and
+the capability is preserved rather than dropped. **There is consequently no excluded operation anywhere
+in C-02.**
+
+**The accounting to audit against, and where it lives.**
+[`OpenApi/security.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/security.v1.yaml) is the
+authority and carries the same 63-to-17 arithmetic: **if a future edit makes the legacy count anything
+other than 63, or leaves an overload family with no landing site, the boundary has silently drifted from
+the oracle.** Re-verify by counting `operationId` occurrences in that file and declarations in
+`n_crypto.sru`, never by reading prose — including this prose. An earlier revision of this section, and
+of that file's own header, recorded a superseded 63 / −3 / 60 / 15 accounting from before the file family
+was projected; both are corrected, and only one inventory now exists.
 
 **The shape is what decided the transport.** Every one of the 63 operations is a stateless
 request/response with no ordering requirement between calls and nothing to stream. REST fits that
 shape without remainder.
 
-**The 63 legacy overloads map onto 17 published operations, and all 63 are covered.** The table
-below is derived from `OpenApi/security.v1.yaml` itself, so it is what the document exposes rather
-than what it intends to. A legacy *overload* becomes a request FIELD, not an operation, wherever the
-overloads differ only in argument shape — string versus blob, with or without an initialization
-vector, with or without an explicit mode — because those are PowerScript's way of expressing optional
-and alternative parameters and a JSON request expresses them directly.
+**The 17 operations, enumerated.** The table below is derived from `OpenApi/security.v1.yaml` itself,
+so it is what the document exposes rather than what it intends to, and every one of the 63 legacy
+overloads lands in exactly one row of it. A legacy *overload* becomes a request FIELD, not an
+operation, wherever the overloads differ only in argument shape — string versus blob, with or without
+an initialization vector, with or without an explicit mode — because those are PowerScript's way of
+expressing optional and alternative parameters and a JSON request expresses them directly.
 
 | # | Operation | `operationId` | Legacy group it covers |
 | --- | --- | --- | --- |
@@ -535,7 +575,7 @@ mode" is added alongside it.
 | 5 | **No key-derivation function is reachable at all**, and there is no salt concept — so a passphrase is used as raw key bytes | Established by **absence**: no PBKDF2, scrypt, bcrypt, Argon2 or salt constant exists in `enums.sru`, and no `n_crypto` signature accepts an iteration count or a salt (`n_crypto.sru:L30-L61`) | Whatever the caller supplies as key material *is* the key. The contract does not derive, stretch, or salt |
 | 6 | **No authenticated encryption** — no GCM, CCM or Poly1305 — so ciphertext carries no integrity tag | Established by **absence**: the mode set is exactly ECB, CBC and CFB at `enums.sru:L943-L945` | Ciphertext integrity is not protected by this contract. A caller needing it must obtain it separately, e.g. through the keyed-hash operations |
 | 7 | **1024-bit RSA remains a legal key size**, and the legacy demonstration uses it | `Enums.CRYPTO_RSA_BITS_1024 = 1024` is a declared, first-class value alongside 2048 and 4096 at `enums.sru:L965-L967` | 1024 is accepted. It is annotated as a legacy-compatibility value, and it is not removed from the accepted set |
-| 8 | **The same six-member hash set governs the RSA signature hash**, so `CRYPTO_HASH_MD5` = 0 and even `CRYPTO_HASH_CRC32` = 5 — which is a checksum, not a cryptographic hash at all — are legal signature-hash selectors | The declaring comment at `enums.sru:L927` names the set's consumers as `Hash`, **`RSASign` and `VerifyRSASign`** — one set, three consumers. All four signature overloads take it as `readonly long ntype` [`n_crypto.sru:L70-L73`] | The full six-member set is accepted on the signature operations. Selecting CRC32 produces a "signature" over a checksum, and the annotation says so rather than the contract narrowing the set |
+| 8 | **The same hash set is declared for the RSA signature hash**, so `CRYPTO_HASH_MD5` = 0 is a legal signature-hash selector | The declaring comment at `enums.sru:L927` names the set's consumers as `Hash`, **`RSASign` and `VerifyRSASign`** — one set, three consumers. All four signature overloads take it as `readonly long ntype` [`n_crypto.sru:L70-L73`] | MD5 is accepted on the signature operations and is annotated rather than removed. `CRYPTO_HASH_CRC32` = 5 is the one declared member the **keyed and signing** operations do not accept, because no HMAC-over-checksum or RSA-over-checksum construction exists to implement — see the capability-narrowing row below. It remains accepted on the two **unkeyed** digest operations |
 
 Items **3, 4, 5 and 6** are established by **absence** — there is no constant to select, and no
 signature that accepts one. Absence is weaker evidence than presence in general, but here it is
@@ -560,6 +600,46 @@ The identifier sets that rule covers, verified value by value:
 | Hash type | `CRYPTO_HASH_MD5` = 0, `CRYPTO_HASH_SHA1` = 1, `CRYPTO_HASH_SHA256` = 2, `CRYPTO_HASH_SHA384` = 3, `CRYPTO_HASH_SHA512` = 4, `CRYPTO_HASH_CRC32` = 5 | `enums.sru:L928-L933` |
 | Symmetric cipher | `CRYPTO_SYMCRYPT_TYPE_DES` = 0, `..._3DES` = 1, `..._AES128` = 2, `..._AES192` = 3, `Enums.CRYPTO_SYMCRYPT_TYPE_AES256` = 4 | `enums.sru:L936-L940` |
 | Symmetric mode | `CRYPTO_SYMCRYPT_MODE_ECB` = 0, `..._CBC` = 1, `..._CFB` = 2, `..._DEFAULT` = ECB | `enums.sru:L943-L946` |
+
+#### C-02 capability narrowings — declared by the legacy, not reproducible here
+
+Distinct from the weaknesses above, and the distinction matters. A **weakness** is behaviour the legacy
+had that this port reproduces and annotates. A **narrowing** is behaviour the legacy *declared* but whose
+parameters live only inside the closed binary: `n_crypto` is `native "pfw.dll"` [`n_crypto.sru:L8`] and its
+86 lines are declarations only — there is no PowerScript body for any of its 63 operations, and a
+Linux container cannot execute the binary. Where a parameter cannot be observed, the contract is
+**narrowed with a defined error rather than widened with a guess**.
+
+| # | Cell | Missing evidence | Published as |
+|---|---|---|---|
+| N1 | `hmac`, `hmacFile`, `rsaSign`, `rsaVerify` with `CRYPTO_HASH_CRC32` | None needed — the construction itself does not exist. A checksum has no compression function for HMAC to key and no algorithm identifier for a signature scheme to name, so HMAC-CRC32 and RSA-over-CRC32 were never defined | `CryptoKeyedHashType` — the same identifiers minus the checksum. Refused at schema validation, and by the calling client at request construction |
+| N2 | Any mode `CRYPTO_SYMCRYPT_MODE_CFB` | The **feedback width**. The legacy publishes one unqualified CFB value with no feedback-size argument, and full-block versus 8-bit feedback produce entirely different ciphertext | `x-blocked-cells` on `CryptoSymCryptMode`, reason `SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE`. HTTP `501` |
+| N3 | `CRYPTO_SYMCRYPT_MODE_CBC` through one of the eight overloads that supply a mode but no vector [`n_crypto.sru:L31, L35, L39, L43, L47, L51, L55, L59`] | The **initialization vector** the binary substituted | `x-blocked-cells` on `CryptoSymCryptMode`, reason `SYMMETRIC_VECTOR_UNPROVABLE`. HTTP `501` |
+
+**Why refusing beats choosing.** Both symmetric guesses are undetectable by any test this repository can
+run: encrypt and decrypt under the same wrong assumption and the plaintext returns intact. The caller
+would receive ciphertext that passes every available check and **that the legacy cannot decrypt** — data
+loss presented as success.
+
+**What the narrowing costs: nothing the oracle demonstrates.** The only code in the repository that
+invokes the symmetric surface is the framework's own demo, and all six of its call sites pass an explicit
+vector with CBC — DES at `u_cst_tabpage_utility_crypto.sru:L504, L547`, AES256 at `:L592, L607`, 3DES at
+`:L622, L637`. It never selects CFB and never uses a vector-less arm. Every cell the oracle exercises
+remains fully supported.
+
+**The identifier sets are unreduced.** All three modes and all six hash types remain declared, numbered
+exactly as the oracle numbers them. Only the *capability* is withdrawn, on the cells named above.
+
+#### C-02 platform divergence — weak and degenerate DES and 3DES keys
+
+Not a narrowing and not reproducible either way: this platform's cryptographic library refuses the known
+weak and semi-weak DES keys and refuses 3DES keys whose adjacent sub-keys coincide, raising from the key
+assignment rather than encrypting. An OpenSSL-based implementation — which the framework's attribution
+[`w_about.srw:L118`] suggests the binary used — does not. Because short key material is right-padded with
+zero bytes, an **empty** DES key and **any 3DES key shorter than 16 bytes** normalize into buffers this
+platform rejects, so a 3DES caller with a fifteen-character passphrase is refused here where the legacy
+would have encrypted. No workaround is applied and no key is substituted; the failure is loud, surfaces
+as HTTP `500`, and is published on the `CryptoSymCryptType` schema.
 | RSA padding | `CRYPTO_RSA_PADDING_PKCS1` = 0, `CRYPTO_RSA_PADDING_OAEP` = 1, `..._DEFAULT` = PKCS#1 | `enums.sru:L949-L951` |
 | Encoding | `CRYPTO_ENCODING_BASE64` = 0, `CRYPTO_ENCODING_HEX` = 1 | `enums.sru:L924-L925` |
 | Random-string classes | `CRYPTO_RNDSTRING_NUMBER` = 1, `..._ALPHABET` = 2, `..._SYMBOL` = 4, `..._DEFAULT` = number + alphabet | `enums.sru:L954-L957` |
@@ -785,22 +865,25 @@ outcomes are observable and all three are preserved. **An implementation that tr
 contract exists to prevent, and the reason the four arms are spelled out one by one rather than
 grouped.
 
-> **The case-1 question, which this document deliberately does not settle.** It is tempting to
-> describe the empty `case 1` arm as "falling through" to `case 2`, and earlier drafts of this document
-> did. **That is a C-family reading, and PowerScript `CHOOSE CASE` does not fall through the way a C
-> `switch` does.** On the source-literal reading the empty arm is a deliberate no-op whose purpose is
-> to stop 1 from reaching `case else`, so a result of 1 returns unchanged with **no restore and no
-> coercion** — which is consistent with the source comment at [`:L210`] that returning 1 is what
-> triggers `OnDwnItemValidationError`.
+> **The case-1 question, settled from the source.** It is tempting to describe the empty `case 1` arm as
+> "falling through" to `case 2`, and earlier drafts of this document did. **That is a C-family reading,
+> and PowerScript `CHOOSE CASE` does not fall through the way a C `switch` does.** The empty arm is a
+> deliberate no-op whose purpose is to stop 1 from reaching `case else`, so a result of 1 returns
+> unchanged with **no restore and no coercion**.
 >
-> The two readings **differ observably**: whether a restore happens before the validation-error event
-> fires. Settling that is DataServices' to do, adjudicated against the behavioural oracle, and it is
-> recorded as unsettled in `dataservices.v1.proto` rather than guessed at. It does not need settling
-> for the contract to be correct, because **the wire alphabet is `{0,1,2,3}` under either reading**.
+> The distinction is **observable** — whether a restore happens before the validation-error event fires —
+> so it was settled rather than left open, and settled from the dispatch text itself. Two facts decide
+> it. The source comment at [`:L210`] states the intent: returning 1 is what triggers
+> `OnDwnItemValidationError`, and it is *that* handler which restores value and status [`:L369-L379`]
+> after reading the stashed code, so restoring in `case 1` would restore twice and would do it before
+> the stash has been read. And the empty arm is load-bearing **while empty**: delete it and 1 reaches
+> `case else`, is coerced, fires the changed event and is rewritten to 2.
 >
-> What must not happen is letting the fall-through reading tempt an implementation into merging or
-> aliasing 1 and 2. **The two values are distinct on the wire and must stay that way** — collapsing
-> them destroys information the wire has to carry whichever reading ultimately wins.
+> `dataservices.v1.proto`'s `ItemChangeResult` carries the same reading with the verbatim dispatch text
+> and its locators, and [`PARITY.md`](PARITY.md) §7 teaches it. Two consequences remain worth stating.
+> **An implementation must not merge or alias 1 and 2** — they are distinct on the wire and the
+> distinction is exactly the restore. And the wire alphabet is `{0,1,2,3}` with all four values carried
+> separately, which is what makes the settled reading assertable rather than merely documented.
 
 Two adjacent orderings are also contract, and both are ordering guarantees the stream must honour:
 
@@ -852,6 +935,23 @@ those messages exist **for detection only**. An out-of-order arrival within a pa
 **hard error** that fails the session — never a reorder opportunity. A consumer that buffered and
 re-sorted them would reconstruct an order the server never sent and produce a result the legacy
 could not.
+
+**The operational rule for pattern (a) is the opposite one, and that is why it needs stating too.**
+Under (a) the same monotonic token is *reorder authority*: a gap or a reversal is a delivery artifact
+a consumer MAY buffer on and re-sort, because these events carry no cross-event state and no handler
+reads what a predecessor stashed. So the two patterns give the identical field two contradictory
+meanings — reorder on it under (a), fail the session on it under (b) — and a consumer cannot infer
+which applies from the token's shape.
+
+**Which is why the discipline travels as data rather than as prose.** The assignment in the table
+above is published on the wire as `dataservices.v1.OrderingDiscipline`, whose three members are
+`ORDERING_DISCIPLINE_UNSPECIFIED` (0, a fault on any stream carrying the type),
+`ORDERING_DISCIPLINE_SYNCHRONOUS` (1, pattern (b)) and `ORDERING_DISCIPLINE_SEQUENCED` (2, pattern
+(a)). It is carried as `EventStreamRequest.discipline` and `EventStreamResponse.discipline` on C-04's
+sequenced stream, and C-09's REST projection of that stream both marks the schema with
+`x-ordering-discipline` and declares `discipline` a **required** response member. This table remains
+the authority for the assignment; the enum is how a running consumer reads that assignment without
+having read this document.
 
 Conformance tests are written per workflow against this table; the workflow corpus and the recording
 model are the subject of [`PARITY.md`](PARITY.md).
@@ -966,7 +1066,8 @@ contract, with the rendering half named as a reserved Gateway extension point
 referenced them, so none was reachable and none could be called; three defaults would additionally
 have been silently wrong. Both problems are closed, and the closure has two parts:
 
-- **Eight reachable operations**, methods 9 through 16 of [§6.1](#61-method-surface-and-the-reason-for-each-choice) — a read and an apply for each model.
+- **Eight reachable operations**, methods 9 through 16 of
+  [§6.1](#61-method-surface-and-the-reason-for-each-choice) — a read and an apply for each model.
 - **Presence, not zero, for every field whose legacy default is non-zero.** Protobuf 3 gives an
   absent scalar the zero value, which would have turned the drop-down filter type from its legacy
   default of **3** into 0, and the five built-in `ContextMenu` toggles from **true** into false. Those
@@ -1844,6 +1945,38 @@ ordered**: one for the primary buffer and one for the filter buffer, each in the
 order, rather than one merged array. Merging them would destroy the only evidence a consumer has of
 which order each was collected in.
 
+**The identity field is `repeated`, because one `Update` can report one block per update table.**
+`_of_Update` fires the identity callback at most once [`:L243`] — but the task that drives it calls it
+**once per table**:
+
+```
+if _bMultiTableUpdate then
+    nCount = UpperBound(Tables)                    [:L358]
+    for nIndex = 1 to nCount                       [:L364]
+        rtCode = _of_UpdatePrepare(data,nIndex)     [:L365]
+        rtCode = _of_Update(data)                  [:L367]
+    next
+```
+
+and the caller-side proxy **appends** every firing to an ordered array rather than replacing anything
+— `IDCOLDATA _idColDatas[]` [`n_cst_threading_task_sqlupdate.sru:L45`], `nIndex = UpperBound(_idColDatas) + 1`
+[`:L73-L76`] — then **replays every element** when it writes the generated values back onto the
+caller's DataWindow [`:L128`, `:L142-L195`]. Each block carries **its own column ordinal**, because
+`_of_UpdatePrepare` re-describes the one carrier per table [`:L98-L145`], so the discovered identity
+column legitimately differs between tables.
+
+> A singular field would keep the **first** block and drop the rest — and the response would still look
+> correct, because the counts are summed across tables [`n_cst_threading_task_sqlupdate.sru:L66-L68`]
+> and so would not disagree with a truncated identity payload. That is the same class of defect as the
+> inverted iteration above: **right count, wrong data**.
+
+So the ordering obligation has **two levels and both bind**: the *blocks* travel in the order the
+tables were declared on `PrepareUpdate`, and within each block the two arrays travel element for
+element as collected. C-03's relay declares the identical repeated shape, so the cardinality cannot be
+narrowed on the way to Gateway. An **empty** list is the "none collected" reading — the emit guard is a
+guard on the *call*, not on the contents [`:L242-L244`] — so absence is expressed by the list being
+shorter, never by a placeholder block.
+
 ### 9.8 On concurrency mismatch: `Aborted`, and no silent overwrite
 
 > **On an optimistic-concurrency mismatch the contract returns gRPC `Aborted`** — the canonical
@@ -2116,7 +2249,11 @@ expiry time in seconds which is multiplied by 1000 and falls back to the built-i
 milliseconds [`:L53`] when it is zero or negative. A third setting names the transaction class
 [`:L83`].
 
-> **The clock is seamed for deterministic tests.**
+> **The clock must be seamed for deterministic tests.**
+
+Stated as a requirement on the implementation, not as a description of it: the transaction-pool type this
+paragraph specifies is not in the tree yet, and [`docs/PARITY.md`](PARITY.md) §5.1 carries that seam's
+status as planned rather than present.
 
 Three distinct clock reads must be substitutable, and a parity test needs to know about all three:
 the idle start time above [`:L97`], the last-successful-connection stamp
@@ -2651,7 +2788,7 @@ this document, and each of those changed the schema, this document, or both:
 | 8 | Item-change `case 1` "falls through" to `case 2` | **It does not.** `case 1` is an EMPTY arm at `se_cst_dw.sru:L212` and PowerScript `choose case` does not fall through, so 1 returns with value and status **untouched** and the restore belongs to the validation-error handler it triggers. Four distinct arms — [§6.5](#65-the-item-change-alphabet-is-its-own-enumeration) |
 | 9 | The SQL Server paging arm has three strategies | **Four generated forms**, a two-by-two of unique-index columns against the native-paging flag, enumerated branch by branch with the property that betrays a collapsed branch — [§8.4](#84-paging-parity-is-byte-exact-generated-sql) |
 | 10 | C-02 maps 60 of the 63 legacy overloads onto 15 operations | **All 63 onto 17 operations.** The two file-hash forms were unpublished; they are now published, taking an opaque server-resolved reference exactly as `keyRef` does and never a caller-supplied path — [§5.1](#51-method-surface) |
-| 11 | The Security listener is published over plain HTTP | **HTTPS.** Token issuance authenticates with a client certificate, which cannot be presented on a plaintext listener at all, so over `http` the endpoint was uncallable — [§4.1](#41-method-surface) |
+| 11 | The Security listener is published over plain HTTP | **The service has exactly ONE listener and it is HTTPS in every environment.** `https://+:5104`, `Http1AndHttp2`, `ClientCertificateMode` `AllowCertificate`, declared in the base settings file. Token issuance authenticates with a client certificate, which cannot be presented on a plaintext listener at all; `AllowCertificate` lets Kestrel request one without demanding it, so `POST /v1/tokens` enforces it **per operation** while `/health`, the key set and the discovery document stay anonymously reachable on the same port. There is no cleartext endpoint anywhere, so no address on any topology mints a token without a certificate — [§4.1](#41-method-surface) |
 | 12 | The topic contract carries three decomposed fields | **Every encoding is its own field**, including the namespace with explicit presence and the two *filter* negation flags — and the negated-namespace filter spares the named namespace rather than selecting it, the reverse of how it reads — [§6.7](#67-the-three-encoding-topic-string-and-why-naive-serialization-fails) |
 | 13 | The transaction response mirrors the nine-field descriptor with `logpass` removed | **Three slots are `reserved` on the response** — `logpass`, `dbparm` and `userparm` — with a typed flag allowlist carrying the one behaviourally significant value the parameter string held — [§11.2](#112-the-transaction-descriptor-mirrors-the-legacy-structure-field-for-field) |
 

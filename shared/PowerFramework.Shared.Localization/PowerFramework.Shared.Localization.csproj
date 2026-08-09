@@ -131,7 +131,7 @@
          PowerFramework.Shared.Localization.dll. -->
     <RootNamespace>PowerFramework.Shared.Localization</RootNamespace>
     <AssemblyName>PowerFramework.Shared.Localization</AssemblyName>
-    <Description>PowerFramework shared localization surface: the I18N entry points with their silent passthrough fallback, the translation categories, and the English, Simplified Chinese and Traditional Chinese providers read from pfw.i18n.xml. Ported from the pfw.ui and pfw.ui.controls.ext i18n objects, mistranslations included.</Description>
+    <Description>PowerFramework shared localization surface: the I18N entry points with their silent passthrough fallback, the translation categories, the English and Traditional Chinese providers which are the two that read pfw.i18n.xml, and the Simplified Chinese provider which reads nothing at all because chs is the base locale and the table carries no chs section. Ported from the pfw.ui and pfw.ui.controls.ext i18n objects, mistranslations included.</Description>
   </PropertyGroup>
 
   <ItemGroup Label="Project references: exactly one, and it must stay that way">

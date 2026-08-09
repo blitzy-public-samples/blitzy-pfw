@@ -155,7 +155,8 @@ public sealed class SelectStatementModelTests
     /// TIER 1 - TRACEABLE. <c>enums.sru:L718-L720</c> declares replace as 1, append as 2 and prepend
     /// as 3. The constants are CONSUMED from <c>PowerFramework.Shared.Kernel.Enums</c> rather than
     /// redeclared here, because the repository-root <c>.editorconfig</c> scopes its CA1707 and IDE1006
-    /// relaxations to ten named files and neither the model nor this suite is among them - a
+    /// relaxations to the named files on its BAND 3 roster, the single source of truth for that list,
+    /// and neither the model nor this suite is among them - a
     /// SCREAMING_SNAKE identifier declared locally would be a build error under warnings-as-errors.
     /// Asserted against literals rather than against the constants themselves, since comparing a
     /// constant to itself would pass for any value.

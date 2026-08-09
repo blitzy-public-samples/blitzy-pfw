@@ -76,8 +76,9 @@
 //      catch-all segment matches the empty remainder.
 //
 //  D3  GET AND POST ARE MAPPED SEPARATELY, AND EVERY OTHER METHOD IS MAPPED TOO. The contract
-//      declares two operations per path with DISTINCT operation identifiers (for example
-//      reservedDesignSystemGet and reservedDesignSystemPost at :L2185 and :L2233). One MapMethods
+//      declares two operations per path with DISTINCT operation identifiers - `reservedDesignSystem`
+//      for the GET, which is the identifier v1 published first, and `reservedDesignSystemPost` for the
+//      POST, which is the one added later and therefore the only one carrying a suffix. One MapMethods
 //      call covering both verbs would produce one endpoint, one endpoint name and therefore one
 //      duplicated operation identifier across the two generated operations, which is invalid
 //      OpenAPI - so GET and POST are mapped as separate operations. The contract also requires that
@@ -91,20 +92,34 @@
 //
 //  D4  THE HANDLER IS TYPED `IResult`, DELIBERATELY. A concrete JsonHttpResult<T> return type is an
 //      endpoint metadata provider and would contribute an inferred 200 response to the generated
-//      document. The contract's response set for these operations is exactly {501} - a second
+//      document. The set of responses these operations DECLARE is exactly {501} - a second declared
 //      status would suggest the route evaluates something before answering, and a 2xx would suggest
 //      a deferred service had been built. Returning IResult suppresses that inference, and the sole
 //      declared response is supplied explicitly by Produces<ReservedRouteBody>(501).
+//      "DECLARED" IS DOING WORK IN THAT SENTENCE, AND D5 IS WHY. The 401 an unauthenticated caller
+//      observably receives is NOT declared here and must not be: it is produced by the security
+//      scheme before this handler is reached, so declaring it would attribute to the route an
+//      outcome the route does not compute. gateway.v1.yaml publishes that 401 once, machine-readably,
+//      in its document-level `x-cross-cutting-responses` block, and states on each of the eight
+//      operations that 501 is the AUTHENTICATED outcome - so the difference between what is declared
+//      and what is observable is documented rather than left for a consumer to discover.
 //
 //  D5  AUTHENTICATED, WITH THE GUARD ANSWERING FIRST. gateway.v1.yaml sets a document-level bearer
-//      requirement (:L347-L348) that exactly one operation overrides - anonymous GET /health - and
-//      states at :L159-L160 that the reserved families are explicitly NOT among the exceptions, "so
-//      an unauthenticated caller cannot enumerate the deferred roster". Every mapping below is
-//      therefore authorized, which means an anonymous request is answered 401 by the authentication
-//      middleware and never reaches the 501. That ordering is asserted from the outside by
+//      requirement that exactly one operation overrides - anonymous GET /health - and states that the
+//      reserved families are explicitly NOT among the exceptions, "so an unauthenticated caller
+//      cannot enumerate the deferred roster". Every mapping below is therefore authorized, which
+//      means an anonymous request is answered 401 by the authentication middleware and never reaches
+//      the 501. That ordering is asserted from the outside by
 //      tests/e2e/specs/deferred-routes.spec.ts, which requires 401 and explicitly NOT 501 for an
-//      anonymous probe. The 401 is deliberately not a declared response of these operations: it is a
-//      cross-cutting concern of the security scheme rather than something the route produces.
+//      anonymous probe.
+//      THE 401 IS DELIBERATELY NOT A DECLARED RESPONSE OF THESE OPERATIONS - it is a cross-cutting
+//      concern of the security scheme rather than something the route produces - AND THE CONTRACT NOW
+//      SAYS SO IN A FORM A CONSUMER AND A GENERATOR CAN BOTH READ. gateway.v1.yaml carries an
+//      `x-cross-cutting-responses` declaration at document level naming the status, the scheme that
+//      produces it, the fact that it is evaluated before the route handler, and that the reserved
+//      families do not enumerate it. Without that declaration the contract asserted a single-status
+//      result set with nothing anywhere to reconcile it against the 401 this mapping guarantees, and a
+//      consumer could reasonably have concluded the status was impossible on these paths.
 //
 //  D6  WHAT THE `route` MEMBER CARRIES: the request path, and never the query string. Two contract
 //      statements bear on it. The ReservedPath parameter says its value "is echoed in the `route`
@@ -192,7 +207,8 @@ public static class DeferredCapabilityEndpoints
 
     /// <summary>
     /// Operation-identifier prefix, so that a stem composed with the deferred service name reproduces
-    /// the contract's own spelling - for example <c>reserved</c> + <c>DesignSystem</c> + <c>Get</c>.
+    /// the contract's own spelling - for example <c>reserved</c> + <c>DesignSystem</c> + <c>Post</c>,
+    /// and <c>reserved</c> + <c>DesignSystem</c> with NO suffix for the GET.
     /// </summary>
     private const string OperationIdPrefix = "reserved";
 
@@ -232,12 +248,24 @@ public static class DeferredCapabilityEndpoints
     /// suffix that completes each operation identifier.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Mapped one at a time rather than as a single two-verb endpoint, because the contract gives the
     /// two operations distinct identifiers and one endpoint can carry only one name. See decision D3.
+    /// </para>
+    /// <para>
+    /// THE GET SUFFIX IS EMPTY, AND THAT ASYMMETRY IS A COMPATIBILITY OBLIGATION RATHER THAN AN
+    /// OVERSIGHT. The GET operation was published first, in this contract's `v1`, as
+    /// <c>reservedDesignSystem</c> and its three siblings. When the POST was added a later revision
+    /// suffixed BOTH verbs, which renamed four already-published operations - and an operationId is not
+    /// decoration: it is the method name a generated client exposes, so four method names disappeared
+    /// from every regenerated client under a version number promising nothing had changed. The original
+    /// identifiers are therefore restored and only the NEW operation carries a suffix. The result reads
+    /// slightly irregular and is correct; a symmetric pair would be a break.
+    /// </para>
     /// </remarks>
     private static readonly (string Method, string OperationIdSuffix)[] DeclaredMethods =
     [
-        (HttpMethods.Get, "Get"),
+        (HttpMethods.Get, ""),
         (HttpMethods.Post, "Post"),
     ];
 
@@ -349,7 +377,8 @@ public static class DeferredCapabilityEndpoints
     /// <param name="httpMethod">The single HTTP method this operation is declared for.</param>
     /// <param name="operationIdSuffix">
     /// The suffix completing the operation identifier, so that the prefix, the deferred service name
-    /// and this suffix compose to the contract's own spelling.
+    /// and this suffix compose to the contract's own spelling. EMPTY for the GET, which was published
+    /// first and keeps its original unsuffixed identifier - see <see cref="DeclaredMethods"/>.
     /// </param>
     /// <remarks>
     /// One method per call, because the contract gives the two operations distinct identifiers and an
@@ -447,6 +476,12 @@ public static class DeferredCapabilityEndpoints
             new ReservedRouteBody
             {
                 Status = StatusCodes.Status501NotImplemented,
+
+                // BOTH SERVICE MEMBERS CARRY THE SAME VALUE, ON PURPOSE. `service` is the member this
+                // contract published for v1 first; `deferredService` is the unambiguous spelling added
+                // later. Emitting both keeps a consumer written against the original contract working
+                // without asking new code to use an ambiguous name. See ReservedRouteBody.
+                Service = deferredService,
                 DeferredService = deferredService,
                 Marker = ReservedMarker,
 
@@ -602,15 +637,20 @@ public static class DeferredCapabilityEndpoints
 /// is legible from the contract while nothing is implemented behind it.
 /// </para>
 /// <para>
-/// Four of the five members are constants fixed by the contract; only <see cref="Route"/> varies. The
+/// Five of the six members are constants fixed by the contract; only <see cref="Route"/> varies. The
 /// member names are pinned explicitly rather than left to a serializer naming policy, so the wire
 /// shape cannot drift if the composition root's JSON options change.
 /// </para>
 /// <para>
-/// The service member is spelled <c>deferredService</c> rather than <c>service</c> deliberately:
-/// <c>service</c> already names the responding service on the ping body and an upstream service on the
-/// health body, and a third meaning on the same word would make this body ambiguous in exactly the
-/// place a client branches on it.
+/// TWO MEMBERS NAME THE DEFERRED SERVICE AND THEY CARRY THE IDENTICAL VALUE. <see cref="Service"/> is
+/// the member this contract published for <c>v1</c> first. <see cref="DeferredService"/> was introduced
+/// later for a real reason - <c>service</c> already names the responding service on the ping body and an
+/// upstream service on the health body, and a third meaning on the same word makes this body ambiguous
+/// in exactly the place a client branches on it - and the revision that introduced it also REMOVED
+/// <c>service</c>. That was a silent break of an unversioned wire member: every <c>v1</c> consumer
+/// reading <c>service</c> stopped seeing the deferred-service name, under a version number promising it
+/// had not changed. Both are therefore emitted. New code should read <see cref="DeferredService"/>;
+/// retiring <see cref="Service"/> is a <c>v2</c> decision rather than a tidying one.
 /// </para>
 /// <para>
 /// The body carries the deferred service's name, the reserved marker and the legacy return code, and
@@ -627,12 +667,29 @@ public sealed record ReservedRouteBody
     public required int Status { get; init; }
 
     /// <summary>
+    /// The deferred service this route will eventually reach, under the member name this contract
+    /// published for <c>v1</c> first: <c>DesignSystem</c>, <c>Documents</c>, <c>Integration</c> or
+    /// <c>ScriptBridge</c>.
+    /// </summary>
+    /// <remarks>
+    /// RETAINED FOR WIRE COMPATIBILITY, NOT DUPLICATED BY ACCIDENT. It carries the identical value as
+    /// <see cref="DeferredService"/>. A consumer written against the original <c>v1</c> body reads this
+    /// member, and removing it - which a later revision did - broke those consumers without a version
+    /// change to signal it. New code should prefer <see cref="DeferredService"/>, whose name cannot be
+    /// confused with the responding service on the ping body or the upstream service on the health body.
+    /// </remarks>
+    [JsonPropertyName("service")]
+    public required string Service { get; init; }
+
+    /// <summary>
     /// The deferred service this route will eventually reach: <c>DesignSystem</c>, <c>Documents</c>,
     /// <c>Integration</c> or <c>ScriptBridge</c>.
     /// </summary>
     /// <remarks>
     /// The name is the whole of what this member carries, and that is the point. docs/DEFERRED.md is
     /// the authoritative roster and records which legacy objects each deferred service is assigned.
+    /// The unambiguous spelling, and the one new code should read; <see cref="Service"/> beside it is
+    /// the same value under the originally published name.
     /// </remarks>
     [JsonPropertyName("deferredService")]
     public required string DeferredService { get; init; }

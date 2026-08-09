@@ -25,7 +25,7 @@
 //       "Locale": "en",
 //       "CapabilityFlags": 3847,
 //       "Upstreams": {                              <-- UpstreamAddresses, nested
-//         "DataServices": "https://localhost:5102",
+//         "DataServices": "https://localhost:5102",   <-- https, because h2 needs ALPN
 //         "Security":     "https://localhost:5104"
 //       }
 //     }
@@ -38,19 +38,36 @@
 //
 //   THE BEARER SHAPE IS SPLIT ACROSS TWO FILES, AND THE SPLIT IS A SECURITY BOUNDARY RATHER THAN
 //   TIDINESS. The base appsettings.json above carries only settings that are safe in EVERY
-//   environment, because that is exactly where base settings load. The two that are not - the
-//   plain-HTTP loopback authority and its matching issuer, together with the RequireHttpsMetadata
-//   relaxation those require - live in appsettings.Development.json and nowhere else:
+//   environment, because that is exactly where base settings load. It deliberately declares NO
+//   authority and NO issuer, because either would be one topology's address presented as an estate
+//   default. The loopback pair lives in appsettings.Development.json and nowhere else:
 //
 //     "Authentication": { "Schemes": { "Bearer": {  <-- appsettings.Development.json ONLY
-//       "Authority": "http://localhost:5104",
-//       "RequireHttpsMetadata": false,
-//       "ValidIssuers": [ "http://localhost:5104" ]
+//       "Authority":    "https://localhost:5104",
+//       "ValidIssuers": [ "https://localhost:5104" ]
 //     } } }
+//
+//   ONLY THE HOST CHANGES THERE, AND RequireHttpsMetadata IS NOT OVERRIDDEN. Security's listener is
+//   TLS in every environment - its issuance path authenticates the caller with a client certificate,
+//   which cannot be presented on a plaintext listener at all, and the key set fetched beneath this
+//   authority is the system's trust bootstrap - so the loopback form is https and the base file's
+//   RequireHttpsMetadata of true stays inherited. A false there would relax nothing that needs
+//   relaxing: the setting only PERMITS a plaintext metadata address, it does not make one exist.
 //
 //   So an environment that configures nothing gets the strict shape and fails to start naming the
 //   missing authority, instead of inheriting a relaxation it never asked for. The binding contract is
 //   unchanged either way: the same keys, the same spellings, the same path.
+//
+//   THE SCHEME IS https EVEN ON LOOPBACK, AND THAT IS A CORRECTION WORTH KNOWING ABOUT. An earlier
+//   revision put a plain-HTTP loopback authority here together with a RequireHttpsMetadata relaxation
+//   to permit it. Security's listener is TLS in development as well as deployed, and functionally so:
+//   `POST /v1/tokens` authenticates its caller with a CLIENT CERTIFICATE, which cannot be requested or
+//   presented on a plaintext listener at all, so on plain http no service in the system - this one
+//   included - could obtain a first token. RequireHttpsMetadata therefore stays true in every
+//   environment and appears in the base file only. A developer's Security instance presents a
+//   SELF-SIGNED certificate, trusted through the host trust store; the relaxation this system grants
+//   is an untrusted issuer, never cleartext, and there is no setting anywhere in Gateway that turns
+//   certificate validation off.
 //
 //   The JWT settings live under the stock "Authentication:Schemes:Bearer" path because that is the
 //   path the framework's own JWT bearer handler binds itself, which is precisely the "zero bespoke
@@ -232,6 +249,74 @@ public sealed class GatewayOptions : IValidatableObject
     /// </remarks>
     public UpstreamAddresses Upstreams { get; set; } = new();
 
+    /// <summary>
+    /// The addresses Gateway probes to build its C-10 readiness aggregate, bound from
+    /// <c>Gateway:HealthProbes</c>. THREE entries, one per upstream, and every one of them is
+    /// health observation only.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A SEPARATE GROUP FROM <see cref="Upstreams"/> BECAUSE IT CARRIES A DIFFERENT KIND OF
+    /// PERMISSION, AND THE SEPARATION IS THE WHOLE POINT. <see cref="Upstreams"/> says "Gateway may
+    /// call this service" and has exactly two members, because Gateway calls exactly two services.
+    /// This group says "Gateway may read this service's anonymous readiness probe" and has three,
+    /// because contract C-10 requires the aggregate to name Persistence, DataServices and Security
+    /// each with its own state - <c>OpenApi/gateway.v1.yaml</c> bounds
+    /// <c>AggregateHealthReport.upstreams</c> at exactly three items and closes
+    /// <c>UpstreamHealth.service</c> over exactly those three names. Without the Persistence entry
+    /// the published aggregate is unbuildable; with Persistence in <see cref="Upstreams"/> the
+    /// layering would be broken. Two groups is what satisfies both at once.
+    /// </para>
+    /// <para>
+    /// THE PERSISTENCE ENTRY IS NOT A FUNCTIONAL DEPENDENCY AND MUST NEVER BECOME ONE. It addresses
+    /// <c>GET /health</c> and nothing else. Gateway holds no Persistence client, opens no channel to
+    /// it, and issues no contract call against it: DataServices - not Gateway - calls the service that
+    /// owns SQL generation and storage, and the same document that requires the three-way aggregate
+    /// also states that Gateway never calls Persistence. Reading a service's anonymous readiness
+    /// probe is not reaching into its internals; it is reading the one endpoint C-10 publishes to
+    /// every caller precisely so that a readiness verdict can be composed. Anything beyond
+    /// <c>/health</c> on any address in this group is a layering breach.
+    /// </para>
+    /// <para>
+    /// Each address is validated by the same rules as an upstream address - present, absolute, http or
+    /// https, no embedded credential, no query, no fragment - in
+    /// <see cref="Validate(ValidationContext)"/>. Reachability is deliberately not checked, because
+    /// whether an upstream currently answers is precisely what the probe reports at request time
+    /// rather than something a startup validator should decide.
+    /// </para>
+    /// </remarks>
+    public HealthProbeAddresses HealthProbes { get; set; } = new();
+
+    /// <summary>
+    /// The client identity Gateway presents on the single mutual-TLS edge in the system, bound from
+    /// <c>Gateway:MutualTls</c>. Paths only - never material.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS EXISTS AT ALL, WHICH IS A FUNCTIONAL REASON AND NOT A HARDENING PREFERENCE.
+    /// <c>POST /v1/tokens</c> on the Security service is protected by <c>mutualTls</c> and by nothing
+    /// else, because <b>a caller cannot present a bearer token in order to obtain its first bearer
+    /// token</b>. Gateway is one of the two services that request tokens, so without a client
+    /// certificate to present it cannot obtain one, and every authenticated call it would make is
+    /// unreachable. The contract has required this since it was authored; this group is what makes it
+    /// configurable.
+    /// </para>
+    /// <para>
+    /// PATHS, NOT MATERIAL, AND THAT IS ENFORCED BY THE MEMBER SET RATHER THAN BY A CONVENTION. There
+    /// is no property here for a certificate body, a private key body or a passphrase, so there is
+    /// nowhere for one to be placed. Both values name files mounted from the orchestration secret
+    /// layer: no certificate and no key is committed to this repository or embedded in an image.
+    /// </para>
+    /// <para>
+    /// OPTIONAL AS A GROUP. Both members default to empty, which means "this deployment presents no
+    /// client certificate" - the loopback development posture in which no token is requested. When
+    /// either is set both must be, which <see cref="Validate(ValidationContext)"/> enforces: a
+    /// certificate without its key cannot complete a handshake and a key without its certificate has
+    /// nothing to present, so half a client identity is unusable rather than merely weaker.
+    /// </para>
+    /// </remarks>
+    public MutualTlsClientOptions MutualTls { get; set; } = new();
+
     // NO FURTHER PROPERTY BELONGS ON THIS TYPE, AND EACH ABSENCE IS A DECISION
     //
     //   * No connection string, and no storage, SQLite or EF Core setting. Exactly one service in
@@ -239,10 +324,13 @@ public sealed class GatewayOptions : IValidatableObject
     //     would advertise a capability Gateway must not have. Gateway does not even reach that
     //     service (see UpstreamAddresses below), let alone open a database.
     //
-    //   * No signing key, symmetric secret, password, token, private key, certificate path or
-    //     certificate password. Exactly one signing secret exists in this system and it belongs to
+    //   * No signing key, symmetric secret, password, token, private key body, certificate body or
+    //     certificate passphrase. Exactly one signing secret exists in this system and it belongs to
     //     the Security service, which is the sole token issuer; every other service holds
     //     verification material only. See JwtBearerVerificationOptions below.
+    //     MutualTls above carries two PATHS and no material, which is the distinction that matters:
+    //     a path names a file mounted from the orchestration secret layer, and there is no property
+    //     anywhere on this surface into which a certificate, a key or a passphrase could be placed.
     //
     //   * No option, flag, address, URL or enumeration member for any capability deferred out of
     //     this phase. Those capabilities have no project, no container and no implementation
@@ -316,6 +404,70 @@ public sealed class GatewayOptions : IValidatableObject
         {
             yield return security;
         }
+
+        // The probe group is validated by the same rules and for the same reason: contract C-10
+        // requires the aggregate to name all THREE upstreams individually, so all three addresses
+        // must be present and well formed or the aggregate cannot be produced at all.
+        HealthProbeAddresses? probes = HealthProbes;
+
+        if (probes is null)
+        {
+            yield return new ValidationResult(
+                $"'{SectionName}:{nameof(HealthProbes)}' is required. Contract C-10 makes Gateway the "
+                    + "single aggregator and requires its report to name Persistence, DataServices and "
+                    + "Security each with its own state, so a missing probe group leaves the aggregate "
+                    + "unbuildable.",
+                [nameof(HealthProbes)]);
+
+            yield break;
+        }
+
+        ValidationResult? persistenceProbe = AddressValidation.Check(
+            probes.Persistence,
+            $"{SectionName}:{nameof(HealthProbes)}:{nameof(HealthProbeAddresses.Persistence)}",
+            nameof(HealthProbes));
+
+        if (persistenceProbe is not null)
+        {
+            yield return persistenceProbe;
+        }
+
+        ValidationResult? dataServicesProbe = AddressValidation.Check(
+            probes.DataServices,
+            $"{SectionName}:{nameof(HealthProbes)}:{nameof(HealthProbeAddresses.DataServices)}",
+            nameof(HealthProbes));
+
+        if (dataServicesProbe is not null)
+        {
+            yield return dataServicesProbe;
+        }
+
+        ValidationResult? securityProbe = AddressValidation.Check(
+            probes.Security,
+            $"{SectionName}:{nameof(HealthProbes)}:{nameof(HealthProbeAddresses.Security)}",
+            nameof(HealthProbes));
+
+        if (securityProbe is not null)
+        {
+            yield return securityProbe;
+        }
+
+        // The mutual-TLS caller material is OPTIONAL AS A GROUP and INSEPARABLE WHEN PRESENT. Half a
+        // client identity is not a weaker identity, it is an unusable one: a certificate with no
+        // private key cannot complete a handshake, and a key with no certificate has nothing to
+        // present. Reporting the halves separately would let a deployment start with one of them set
+        // and discover the fault only when the first token was requested.
+        MutualTlsClientOptions? mutualTls = MutualTls;
+
+        if (mutualTls is not null)
+        {
+            foreach (ValidationResult result in mutualTls.Validate(
+                $"{SectionName}:{nameof(MutualTls)}",
+                nameof(MutualTls)))
+            {
+                yield return result;
+            }
+        }
     }
 
     /// <summary>
@@ -347,18 +499,42 @@ public sealed class GatewayOptions : IValidatableObject
     public sealed class UpstreamAddresses
     {
         /// <summary>
-        /// The DataServices service's gRPC address. Defaults to the local topology's port 5102.
+        /// The DataServices service's gRPC address. Defaults to the local topology's port
+        /// <b>5102</b> over <b>https</b>, which is that service's single listener.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// gRPC is the transport on this edge because the interface it carries is an ordered event
         /// chain with typed veto semantics, which needs compile-time contract enforcement and
         /// bidirectional streaming rather than a resource-shaped REST surface. The default names the
         /// local orchestration topology over https, matching the base appsettings.json, and is
         /// overridden per environment through <c>Gateway__Upstreams__DataServices</c> - by
-        /// appsettings.Development.json for the loopback plain-HTTP bring-up, and by the orchestration
-        /// manifest for a deployed one. The default is https so that a missing override cannot silently
+        /// appsettings.Development.json for the loopback bring-up, and by the orchestration manifest
+        /// for a deployed one. The default is https so that a missing override cannot silently
         /// downgrade the edge; the host name comes from configuration rather than from a scheme
         /// invented here.
+        /// </para>
+        /// <para>
+        /// THE SCHEME IS THE LOAD-BEARING HALF OF THIS VALUE, NOT THE PORT. DataServices serves the
+        /// C-03 and C-04 gRPC contracts, which REQUIRE HTTP/2, and the anonymous <c>/health</c> plus
+        /// <c>/v1/ping</c>, which the readiness gate probes with HTTP/1.1 (C-L). A <b>cleartext</b>
+        /// Kestrel endpoint cannot carry both: configured for both versions without TLS it disables
+        /// HTTP/2 outright and says so at startup, and configured for <c>Http2</c> alone it answers an
+        /// HTTP/1.1 <c>GET</c> with <c>400</c>. With TLS the ambiguity does not arise, because ALPN
+        /// selects the version per connection - so DataServices declares ONE endpoint,
+        /// <c>https://+:5102</c> with <c>Protocols</c> <c>Http1AndHttp2</c>, and this address names it.
+        /// </para>
+        /// <para>
+        /// A cleartext <c>http://…:5102</c> here therefore fails every RPC on this edge with the
+        /// HTTP/2 error <c>HTTP_1_1_REQUIRED</c> before the request reaches a method, which surfaces as
+        /// a transport fault naming no operation. An earlier revision of this file answered the same
+        /// constraint with a second, undeclared h2c port outside the fixed 5101-5105 band; that band is
+        /// the one the attached environment fixes and the reserved 5103 DesignSystem slot is the only
+        /// spare in it, so the parallel band was withdrawn in favour of TLS on the assigned port. This
+        /// value and <see cref="GatewayOptions.HealthProbes"/>'s DataServices entry consequently name
+        /// the SAME listener; they stay separate members because one is a call edge and the other is an
+        /// observation, which is a topology distinction rather than an addressing one.
+        /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
         public string DataServices { get; set; } = "https://localhost:5102";
@@ -388,6 +564,150 @@ public sealed class GatewayOptions : IValidatableObject
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
         public string Security { get; set; } = "https://localhost:5104";
+    }
+
+    /// <summary>
+    /// The three anonymous readiness endpoints Gateway composes into its C-10 aggregate, bound from
+    /// <c>Gateway:HealthProbes</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EVERY ADDRESS HERE IS READ-ONLY OBSERVATION OF ONE ENDPOINT. Each names the base address of a
+    /// service whose <c>GET /health</c> Gateway reads; nothing in this group authorises a contract
+    /// call, and Gateway holds no client for a service it does not call. The distinction between this
+    /// group and <see cref="UpstreamAddresses"/> is the difference between reading a published
+    /// readiness verdict and invoking a capability, and it is deliberately expressed in the type
+    /// system rather than in a comment on a shared group.
+    /// </para>
+    /// <para>
+    /// THE PORTS ARE THE ASSIGNED PORTS, BECAUSE EACH SERVICE HAS EXACTLY ONE LISTENER. A readiness
+    /// probe is an HTTP/1.1 <c>GET</c>, and Persistence on 5101, DataServices on 5102 and Security on
+    /// 5104 each serve it on the same TLS endpoint that carries their contract traffic - ALPN selects
+    /// HTTP/1.1 for the probe and HTTP/2 for gRPC on the one connection-by-connection basis.
+    /// </para>
+    /// <para>
+    /// All three default to the local topology over https for the same reason the upstream addresses
+    /// do: a missing override must not silently downgrade a probe onto a channel an attacker can
+    /// rewrite, since a forged readiness verdict opens the dependency gate early. The loopback
+    /// plain-http topology is an override in appsettings.Development.json.
+    /// </para>
+    /// </remarks>
+    public sealed class HealthProbeAddresses
+    {
+        /// <summary>
+        /// The Persistence service's base address, probed for readiness ONLY. Port 5101.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// THE ONE ADDRESS IN THIS FILE THAT WOULD BE A LAYERING BREACH IF IT WERE ANYWHERE ELSE.
+        /// Contract C-10 requires Gateway's aggregate to name Persistence with its own state, and the
+        /// same contract states that Gateway never calls Persistence. Both are satisfied because this
+        /// value addresses exactly one anonymous endpoint - <c>GET /health</c> - and Gateway has no
+        /// Persistence client, no channel and no generated stub with which it could do anything else.
+        /// </para>
+        /// <para>
+        /// Do not move this member to <see cref="UpstreamAddresses"/>, and do not add a Persistence
+        /// client that reads it. Either change would put SQL generation one hop from the ingress while
+        /// looking like configuration rather than the design breach it is.
+        /// </para>
+        /// </remarks>
+        [Required(AllowEmptyStrings = false)]
+        public string Persistence { get; set; } = "https://localhost:5101";
+
+        /// <summary>
+        /// The DataServices service's REST base address, probed for readiness. Port 5102.
+        /// </summary>
+        /// <remarks>
+        /// The same listener <see cref="UpstreamAddresses.DataServices"/> names, and deliberately a
+        /// separate member rather than a shared one: this address authorises exactly one anonymous
+        /// <c>GET /health</c> for the C-10 aggregate, while that one carries the C-03 and C-04 call
+        /// edge. Collapsing the two would make an observation indistinguishable from an invocation in
+        /// configuration, which is the distinction the two groups exist to keep.
+        /// </remarks>
+        [Required(AllowEmptyStrings = false)]
+        public string DataServices { get; set; } = "https://localhost:5102";
+
+        /// <summary>
+        /// The Security service's base address, probed for readiness. Port 5104.
+        /// </summary>
+        /// <remarks>
+        /// The same address <see cref="UpstreamAddresses.Security"/> carries, and duplicated
+        /// deliberately rather than aliased: the two express different permissions and a deployment
+        /// that terminated the probe somewhere else - at a sidecar, say - must be able to say so
+        /// without also redirecting token issuance.
+        /// </remarks>
+        [Required(AllowEmptyStrings = false)]
+        public string Security { get; set; } = "https://localhost:5104";
+    }
+
+    /// <summary>
+    /// The client identity Gateway presents to the Security service's mutual-TLS token endpoint,
+    /// bound from <c>Gateway:MutualTls</c>. Two paths, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THERE IS NO MEMBER HERE THAT COULD HOLD KEY MATERIAL, AND THAT IS THE DESIGN. Both members are
+    /// filesystem paths naming material mounted from the orchestration secret layer. No certificate
+    /// body, no private key body and no passphrase member exists, so none can be configured, logged or
+    /// captured in a recording.
+    /// </para>
+    /// <para>
+    /// The pair is optional and inseparable: unset means this deployment requests no token, and
+    /// setting one member without the other is refused with a named error rather than deferred to the
+    /// first handshake.
+    /// </para>
+    /// </remarks>
+    public sealed class MutualTlsClientOptions
+    {
+        /// <summary>
+        /// Path to the PEM-encoded client certificate Gateway presents. Empty means none.
+        /// </summary>
+        public string CertificatePath { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Path to the PEM-encoded key file for <see cref="CertificatePath"/>. Empty means none.
+        /// </summary>
+        public string CertificateKeyPath { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Whether this deployment presents a client certificate at all.
+        /// </summary>
+        public bool IsConfigured =>
+            !string.IsNullOrWhiteSpace(CertificatePath) || !string.IsNullOrWhiteSpace(CertificateKeyPath);
+
+        /// <summary>
+        /// Checks that the pair is either wholly absent or wholly present.
+        /// </summary>
+        /// <param name="configurationKeyPrefix">
+        /// The configuration path of this group, quoted into each message so an operator can find the
+        /// offending key without reading source.
+        /// </param>
+        /// <param name="memberName">The property name on the parent to attribute a failure to.</param>
+        /// <returns>One result per problem found, or an empty sequence when the group is usable.</returns>
+        /// <remarks>
+        /// No path is ever echoed into a message. A path is not itself a credential, but it names the
+        /// location of one, and a startup log is exactly the wrong place to publish where a private key
+        /// is mounted. The configuration key is sufficient for an operator to find the setting.
+        /// </remarks>
+        internal IEnumerable<ValidationResult> Validate(string configurationKeyPrefix, string memberName)
+        {
+            bool hasCertificate = !string.IsNullOrWhiteSpace(CertificatePath);
+            bool hasKey = !string.IsNullOrWhiteSpace(CertificateKeyPath);
+
+            if (hasCertificate == hasKey)
+            {
+                yield break;
+            }
+
+            yield return new ValidationResult(
+                $"'{configurationKeyPrefix}:{nameof(CertificatePath)}' and "
+                    + $"'{configurationKeyPrefix}:{nameof(CertificateKeyPath)}' must be configured "
+                    + "together or not at all. A client certificate cannot complete a TLS handshake "
+                    + "without its key, and a key has nothing to present without its certificate, so "
+                    + "half of this pair is unusable rather than merely weaker. Neither path is quoted "
+                    + "here, because a startup log must not record where key material is mounted.",
+                [memberName]);
+        }
     }
 }
 

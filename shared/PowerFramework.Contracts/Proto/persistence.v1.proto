@@ -659,6 +659,36 @@ message QuerySpec {
   // `UpperBound(_sPagedUniqueIndexColumns) > 0` [:L323] into a unique-index inner-join wrapper
   // instead of the plain form, so this is not a hint - it changes the generated statement, and
   // therefore changes what byte-exact statement parity is being compared against.
+  //
+  // ======== EACH ELEMENT IS AN IDENTIFIER SPLICED INTO SQL, AND IT IS VALIDATED (CWE-89) ==========
+  //
+  // The first arm concatenates every element into the select list, into the join predicate and into the
+  // ORDER BY, unquoted and unescaped [:L331, :L333, :L336]. An identifier cannot be carried as a bind
+  // parameter - the emitted identifier text IS the observable output byte-exact parity is measured
+  // against - so the server VALIDATES each element instead, and rejects the whole request rather than
+  // building a statement from a value it cannot vouch for.
+  //
+  // WHAT IS ACCEPTED: one to three period-separated unquoted SQL name segments, each beginning with an
+  // ASCII letter or underscore and continuing with ASCII letters, digits, `_`, `$` or `#`, each at most
+  // 128 characters. Anything carrying whitespace, a quote, a bracket, a parenthesis, a comma, a
+  // semicolon, an operator or a comment marker is refused, as is the empty string. WHERE THE STATEMENT
+  // ENUMERATES ITS COLUMNS an element must additionally name one of them, compared case-insensitively
+  // and by either the qualified or the unqualified spelling; where the select list is `*`, carries a
+  // `t.*` term, or carries an expression term, the statement cannot enumerate its columns and only the
+  // lexical rule applies - `SELECT * FROM COMPANY` [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14] is
+  // exactly that case.
+  //
+  // ON REJECTION: common.v1.RetCode.Value.E_INVALID_ARGUMENT - the SAME code the paging-bounds guard
+  // uses, so no new value enters a v1 consumer's branch set - with its own diagnostic text. The text
+  // NEVER echoes the rejected identifier. The rejection is evaluated after the paging-bounds, parse and
+  // dialect guards and only for the dialect that splices these values, so no outcome the legacy defines
+  // is displaced: the second arm ignores the collection entirely [:L386-L395] and a request carrying a
+  // malformed element still reaches it and is still answered.
+  //
+  // AND FOR EVERY IDENTIFIER THE LEGACY COULD SPLICE INTO EXECUTABLE SQL, THE GENERATED STATEMENT IS
+  // UNCHANGED BYTE FOR BYTE. What is refused is a crafted value, a value naming no column of an
+  // enumerated statement, and the empty string - which the legacy already turned into the malformed
+  // predicate "pfwPagedSQL_OutterTbl. = " and so never executed either.
   repeated string paged_unique_index_columns = 17;
 
   // of_addparam [n_cst_thread_task_sqlbase.sru:L67], in append order. Bound before execution;
@@ -775,6 +805,16 @@ message SetPagedUniqueIndexColumnsRequest {
   // REPLACES the collection wholesale [:L405-L406]. An empty list on THIS call clears it, which is
   // the one place an empty repeated field means "clear" rather than "leave alone" - because here it
   // is the entire payload of a dedicated call rather than one field of a merge spec.
+  //
+  // EVERY ELEMENT IS AN IDENTIFIER SPLICED INTO SQL AND IS SUBJECT TO THE SAME VALIDATION AND THE SAME
+  // E_INVALID_ARGUMENT REJECTION AS QuerySpec.paged_unique_index_columns - see that field for the
+  // accepted shape, the membership rule, and why the check exists (CWE-89). The rule is identical on
+  // both entry points on purpose: two spellings of one setting must not have two trust boundaries, or
+  // the stricter one is merely the longer route to the same statement.
+  //
+  // CLEARING IS ALWAYS VALID. An empty LIST is the documented clear and is not an empty IDENTIFIER; it
+  // is the elements that are validated, so a list of zero elements passes and a list containing "" does
+  // not.
   repeated string columns = 2;
 }
 
@@ -1285,6 +1325,47 @@ message UpdateCounts {
 // cannot diverge. The relay obligation is part of that contract: a forwarding service transmits both
 // arrays element for element in the order received, and re-sorting, deduplicating or concatenating
 // them is a contract violation rather than an optimisation.
+//
+// ============ THE FIELD IS REPEATED, BECAUSE ONE CALL CAN PRODUCE N ORDERED BLOCKS ============
+// ONE Update CAN EMIT ONE IDENTITY BLOCK PER UPDATE TABLE, and a singular field cannot carry that.
+// The evidence is the multi-table arm of the worker's own task loop:
+//
+//     if _bMultiTableUpdate then
+//         nCount = UpperBound(Tables)                                        [:L358]
+//         for nIndex = 1 to nCount                                           [:L364]
+//             rtCode = _of_UpdatePrepare(data,nIndex)                        [:L365]
+//             rtCode = _of_Update(data)                                      [:L367]
+//         next
+//
+// `_of_Update` fires OnIdentityColumnDataRetrieved AT MOST ONCE per call [:L243], so the loop yields
+// up to one block per table, IN TABLE ORDER - and the caller-side proxy accumulates exactly that:
+//
+//     IDCOLDATA _idColDatas[]                     [n_cst_threading_task_sqlupdate.sru:L45]
+//     nIndex = UpperBound(_idColDatas) + 1        [:L73]   append, never replace
+//     _idColDatas[nIndex].id = id                 [:L74]
+//     _idColDatas[nIndex].primaryValues = primaryValues   [:L75]
+//     _idColDatas[nIndex].filterValues = filterValues     [:L76]
+//
+// and then REPLAYS EVERY BLOCK when it writes the values back onto the caller's DataWindow:
+//
+//     nCount = UpperBound(_idColDatas)            [:L128]
+//     for nIndex = 1 to nCount                    [:L142, :L157, :L175, :L191]
+//         dw.SetItem(nRow,_idColDatas[nIndex].id,_idColDatas[nIndex].primaryValues[i])
+//
+// So the source cardinality is 0..N and each element carries its OWN column ordinal. A singular field
+// would have silently dropped every block after the first, which is a data-loss defect that returns a
+// plausible-looking response: the first table's identities would arrive, the rest would vanish, and no
+// count in this message would disagree.
+//
+// ORDER IS CONTRACT AT THIS LEVEL TOO, not only inside each block. The blocks travel in the order the
+// tables were declared on PrepareUpdate, because that is the order the legacy accumulated them in and
+// the order it replays them in. A forwarding service transmits the BLOCKS in the order received as
+// well as the arrays within each - re-ordering, merging or de-duplicating the blocks pairs identity
+// values with the wrong column.
+//
+// AN EMPTY LIST MEANS "NONE COLLECTED" AND IS NOT AN ERROR, for the same three-level conditional
+// reason an absent singular block did [:L215, :L226, :L242-L244]. A single-table update that collected
+// identities therefore carries exactly one element, which is the shape every existing caller expects.
 
 message UpdateResponse {
   // ============ THE OUTCOME IS THE RECONCILED ONE, AND IT CANNOT BE RECONSTRUCTED (C-B) ========
@@ -1315,9 +1396,11 @@ message UpdateResponse {
   // OnUpdated [:L247]. Present when status.ret_code is OK.
   UpdateCounts counts = 2;
 
-  // OnIdentityColumnDataRetrieved [:L243]. OPTIONAL - absent means "none collected", never an error.
-  // Defined in common.v1.proto Section 10 because C-03 relays this exact payload to Gateway.
-  common.v1.IdentityColumnData identity = 3;
+  // OnIdentityColumnDataRetrieved [:L243], ONE ELEMENT PER UPDATE TABLE THAT COLLECTED ANY, IN THE
+  // ORDER THE TABLES WERE DECLARED. Empty means "none collected", never an error. Defined in
+  // common.v1.proto Section 10 because C-03 relays this exact payload to Gateway. See the block above
+  // for the loop that produces N of them and the accumulator that orders them.
+  repeated common.v1.IdentityColumnData identity = 3;
 }
 
 // C-06 UpdateService - the update third of the retrieval / validation / update triple.

@@ -1,29 +1,41 @@
-<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
-     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
-     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
-     without splitting the locator from what it proves, and a wrapped command is a command that does
-     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
-       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
-     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
-     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
-     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
-     and are never edited, so a command that reports them would fail for reasons this refactor must not
-     "fix".
+<!-- Markdown lint policy for this file. Rationale is in docs/BUILD.md section 14. MD013 is 120 rather
+     than the 80-character default, and is disabled for tables and code blocks: an evidence row carrying
+     a legacy locator and a quoted finding cannot be wrapped without splitting the locator from what it
+     proves, and a wrapped command is a command that does not run. Prose IS wrapped, and is held to the
+     120 limit.
 
-     Declared inline, per file, so the policy travels with the document and applies to the six files
-     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
-     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+     THE POLICY IS SELF-DECLARED, SO IT NEEDS NO COMMAND, NO FILE LIST AND NO GLOB. The directive on the
+     next line travels with the document: any markdownlint-compatible tool already provisioned on a
+     reader's machine honours it, with no flags to remember and no external configuration file to locate.
+     It applies to the seven documents this refactor authored and CANNOT reach the five read-only legacy
+     Chinese documents in this folder, which are the behavioural oracle, are never edited, and carry
+     pre-existing violations of their own (hard tabs, unlabelled code fences and others) that this
+     refactor must not "fix". That unreachability is precisely why a per-file directive was chosen over a
+     repository-root configuration artifact the plan does not provide for.
+
+     NO LINT COMMAND IS PUBLISHED, AND THAT IS A SUPPLY-CHAIN CONTROL RATHER THAN AN OMISSION. The entire
+     approved npm dependency set for this repository is the exact, locked one declared under tests/e2e,
+     and no Markdown linter appears in it. A documented on-demand package-runner invocation would
+     therefore instruct an unpinned version to be resolved and executed from the network outside that
+     lockfile every time somebody followed the documentation, which the deterministic-automation baseline
+     forbids. Lint with tooling that is already installed; the directive below is what it reads. -->
 <!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
 
 # PowerFramework → .NET 10 — Build Reference
 
 This document is the authoritative reference for **building, testing and packaging** the four-service
-.NET 10 decomposition of PowerFramework. It exists to explain one command:
+.NET 10 decomposition of PowerFramework. It exists to explain one command — quoted here in the **template**
+form the attached environment specifies, with `<service-name>` standing for one of four values:
 
-```bash
+```text
 cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test --collect:"XPlat Code Coverage"
 ```
+
+**That block is fenced `text`, not `bash`, deliberately.** `<` and `>` are redirection operators in a
+shell, so the template does not parse as bash and is not copy-runnable as written — every block in this
+document that carries `<service-name>` is fenced `text` for that reason, and every block fenced `bash` is
+one that runs verbatim. §5.2 gives the four concrete, runnable commands, and §5.1 gives a runnable form
+parameterised by a real shell variable.
 
 Everything else here — central package management, the two mandatory package pins, the hand-authored
 test projects, the one-solution-file-per-directory rule — exists so that this single command **will**
@@ -73,17 +85,36 @@ protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the p
 [`PARITY.md`](PARITY.md), `orchestration/.env.example`, the Playwright specs under `tests/e2e/specs/`
 and the read-only legacy tree — **is present in the tree today**.
 
-**This matters most in this document**, because the commands in later sections divide into three kinds,
-and conflating them is how a build reference becomes misleading:
+### The status vocabulary this documentation set uses
 
-1. **Runs clean today.** `dotnet restore` (audit-clean), and the build and test of the shared libraries
-   and the contracts project — `0 Warning(s)`, `0 Error(s)`, and **1,034 tests passing** across the three
-   shared test projects.
-2. **Runs today and fails for one known reason.** Any build that includes the four service *application*
-   projects, each of which reports `CS5001` because its entry point is not yet authored. The failure is
-   that and nothing else: zero warnings, and no other diagnostic.
-3. **Describes the intended workflow once the artifacts above exist.** The compose bring-up, the health
-   probes and the Playwright run. Where a command belongs to this kind, the surrounding text says so.
+**This matters most in this document**, because conflating a command that runs with one that describes an
+intention is how a build reference becomes misleading. Four labels are used, here and in
+[`ARCHITECTURE.md`](ARCHITECTURE.md), [`PARITY.md`](PARITY.md), [`SECRETS.md`](SECRETS.md) and
+`orchestration/.env.example`, and they mean exactly this:
+
+| Label | Meaning |
+| --- | --- |
+| **Present and verified** | The artifact is in the tree **and** a command was run over it in this repository, with its output quoted |
+| **Present but unexercised** | The artifact is in the tree; no run stands behind the claim. Static review only |
+| **Validated only on a throwaway skeleton** | The **command shape** was proven against a one-test skeleton project outside this repository. It is evidence about the command and the toolchain, never about this repository's code |
+| **Planned — not yet present** | No artifact exists. The text is the specification the work will be built against |
+
+Applied to the commands in this document:
+
+1. **Present and verified.** `dotnet restore` (audit-clean), and the build and test of the six shared and
+   contracts projects — `0 Warning(s)`, `0 Error(s)`, and **6,645 tests passing, 0 failing**, measured by
+   running `dotnet test <project> -c Release` once per test project. §5.5 lists the six with their
+   individual counts.
+2. **Present but unexercised, failing for one known reason.** Any build that includes the four service
+   *application* projects, each of which reports `CS5001` because its entry point is not yet authored. The
+   failure is that and nothing else: zero warnings, and no other diagnostic. Because the four service
+   *test* projects reference those application projects, **no service test has been run either** — not
+   one of the four service test suites currently builds.
+3. **Validated only on a throwaway skeleton.** The per-service `restore` → `build -c Release` →
+   `test --collect` command *shape*, and the coverage collector's Cobertura output. §13 quotes exactly what
+   that run produced and says plainly what it was run against.
+4. **Planned — not yet present.** The Compose bring-up, the health probes, the CI pipeline, the container
+   images and the Playwright run. Where a command belongs to this kind, the surrounding text says so.
 
 ---
 
@@ -146,16 +177,21 @@ misused filter surfaces on this SDK, and §13 summarises that distinction.
 
 ### 1.3 What was not verified — stated plainly
 
-**No verified container bring-up is claimed anywhere in this document.** Docker was unavailable in the
-environment where this migration was planned, so the Compose bring-up of §8 and its ordered health
-probes **could not be exercised**. The container definitions and the Compose manifest are authored in
-the same change set this document describes.
+**No verified container bring-up is claimed anywhere in this document**, and the reason is stronger than
+an unavailable tool: **there is nothing to bring up.** No service `Dockerfile` exists, no
+`orchestration/docker-compose.yml` exists, no `.github/workflows/ci.yml` exists, and no service
+application has an entry point. Docker was additionally unavailable in the environment where this
+migration was planned, so the Compose bring-up of §8 and its ordered health probes could not have been
+exercised even had the artifacts existed.
 
-Container correctness is therefore asserted by **container-definition and Compose manifest review plus
-CI**, and this document says so rather than implying an end-to-end run that did not happen. §8 restates
-the limitation at the point of use, so a reader who arrives there directly still sees it.
+**Container correctness is therefore not asserted at present, by review or by anything else.** When the
+container definitions and the Compose manifest are authored, correctness will rest on
+definition-and-manifest review plus the CI pipeline of §10 — that is the intended assurance mechanism, and
+naming it is not the same as reporting that it has run. Neither the review nor the pipeline has happened,
+because neither has anything to act on. §8.2 restates this at the point of use, so a reader who arrives
+there directly still sees it.
 
-The distinction matters and is held throughout: §1.2 is claimed, §1.3 is disclaimed.
+The distinction matters and is held throughout: §1.2 is claimed and quotes its output, §1.3 is disclaimed.
 
 ### 1.4 No performance claim appears in this document
 
@@ -263,8 +299,9 @@ measuring coverage against a **Debug** build without being told.
 
 Both forms are therefore documented, and which is which is stated:
 
-```bash
+```text
 # THE VERBATIM DOCUMENTED FORM - preserved exactly as the environment specifies it (C-L).
+# Fenced `text` because <service-name> is a placeholder, not shell syntax; see the note in the intro.
 # Note: the test step builds and measures DEBUG.
 cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test --collect:"XPlat Code Coverage"
 ```
@@ -328,9 +365,11 @@ assumed.
    because those exact spellings appear in serialized payloads, in log records and in characterization
    recordings, where a rename would silently invalidate every stored comparison. Under this gate the
    naming analyzer would turn each of them into a **build error**, so `CA1707` and `IDE1006` are set to
-   `none` in `.editorconfig` — **scoped by file glob to the ten files that genuinely carry those
-   identifiers**, deliberately not applied globally. Adding a new file with such identifiers requires
-   adding its own scoped section; it will otherwise fail the build. See [`docs/PARITY.md`](PARITY.md) for why
+   `none` in `.editorconfig` — **scoped by file glob to the individually named files that genuinely carry
+   those identifiers**, deliberately not applied globally. That file's BAND 3 roster is the single source
+   of truth for which files those are, which is why no count is restated here or in any of the source
+   comments that point at it. Adding a new file with such identifiers requires adding its own scoped
+   section AND an entry on that roster; it will otherwise fail the build. See [`docs/PARITY.md`](PARITY.md) for why
    the spellings are preserved.
 
 ### 3.2 Repository-root `Directory.Packages.props` — central package management is mandatory
@@ -496,15 +535,29 @@ of the read-only oracle (§1.5), and `.dockerignore` keeps them out of every ima
 
 ## 5. Per-service build and test — the primary path
 
-This is the primary build path. It is what CI runs (§10), and it is the path that must work from a clean
-checkout for each service independently (C-I).
+This is the primary build path, and it is the path that must work from a clean checkout for each service
+independently (C-I). It is also the path the **planned** CI workflow of §10 will run — that workflow does
+not exist yet, so nothing in this section is evidence that a pipeline has executed it.
 
 ### 5.1 The verbatim command
 
-Preserved exactly as the attached environment specifies it (C-L):
+Preserved exactly as the attached environment specifies it (C-L), and therefore fenced `text`: the
+placeholder is not shell syntax, and a block that cannot be run must not claim it can.
+
+```text
+cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test --collect:"XPlat Code Coverage"
+```
+
+The same command with `<service-name>` replaced by a real shell variable, which **does** run verbatim —
+set the variable to any one of the four directory names in §5.2:
 
 ```bash
-cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test --collect:"XPlat Code Coverage"
+set -euo pipefail
+service=gateway-service   # or dataservices-service, persistence-service, security-service
+cd "services/$service"
+dotnet restore
+dotnet build -c Release
+dotnet test --collect:"XPlat Code Coverage"
 ```
 
 Recall Finding 2 (§2): the `dotnet test` step in this form builds and measures **Debug**, not the Release
@@ -517,16 +570,28 @@ Service directory names, project names and ports are identical to those in
 .NET section to it is planned and not yet done, so it cannot currently be used to cross-check this
 table.
 
-| Service directory | Application project | Test project | Port |
-| --- | --- | --- | --- |
-| `services/persistence-service` | `PowerFramework.Persistence` | `PowerFramework.Persistence.Tests` | **5101** |
-| `services/dataservices-service` | `PowerFramework.DataServices` | `PowerFramework.DataServices.Tests` | **5102** |
-| *(reserved)* | — | — | **5103** — commented-out Phase-2 slot |
-| `services/security-service` | `PowerFramework.Security` | `PowerFramework.Security.Tests` | **5104** |
-| `services/gateway-service` | `PowerFramework.Gateway` | `PowerFramework.Gateway.Tests` | **5105** |
+| Service directory | Application project | Test project | Port | Listener |
+| --- | --- | --- | --- | --- |
+| `services/persistence-service` | `PowerFramework.Persistence` | `PowerFramework.Persistence.Tests` | **5101** | `https://+:5101`, `Http1AndHttp2` |
+| `services/dataservices-service` | `PowerFramework.DataServices` | `PowerFramework.DataServices.Tests` | **5102** | `https://+:5102`, `Http1AndHttp2` |
+| *(reserved)* | — | — | **5103** | commented-out Phase-2 slot |
+| `services/security-service` | `PowerFramework.Security` | `PowerFramework.Security.Tests` | **5104** | `https://+:5104`, `Http1AndHttp2`, `ClientCertificateMode: AllowCertificate` |
+| `services/gateway-service` | `PowerFramework.Gateway` | `PowerFramework.Gateway.Tests` | **5105** | plaintext, supplied by the orchestration layer |
 
 Port 5103 is left reserved rather than reassigned; see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
 reasoning and for the transport chosen per service.
+
+**ONE PORT PER SERVICE, AND THE COLUMN ABOVE IS THE WHOLE LISTENER MAP.** Each service declares exactly
+one Kestrel endpoint, and the three that serve gRPC or terminate a client-certificate handshake do so
+over TLS with `Http1AndHttp2`, because ALPN then selects the protocol version per connection and the one
+port carries the gRPC contracts and the HTTP/1.1 `/health` and `/v1/ping` probes together. A *cleartext*
+endpoint cannot do that — with `Http1AndHttp2` it disables HTTP/2 outright and loses every gRPC call,
+and with `Http2` it answers a plain `GET /health` with `400` so the readiness gate never opens. An
+earlier revision of this document described a second listener per service on a parallel 5151–5155 band
+plus a third for the token endpoint; that band was **withdrawn**, because it contradicted the fixed port
+map and left every caller holding two addresses for one service to keep in step. None of this affects
+the build commands in this section; [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 carries the map with its
+measurements, and it is the map a *caller* must configure against.
 
 ```bash
 # Gateway - the composition root and sole ingress
@@ -551,10 +616,20 @@ cd services/security-service && dotnet restore && dotnet build -c Release && dot
 ### 5.3 The release-configuration variant
 
 Use this when coverage must be measured against the Release build (§2, Finding 2). It is recorded
-**alongside** the verbatim form of §5.1, never in place of it:
+**alongside** the verbatim form of §5.1, never in place of it. Template form first, then the runnable
+form:
+
+```text
+cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test -c Release --collect:"XPlat Code Coverage"
+```
 
 ```bash
-cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test -c Release --collect:"XPlat Code Coverage"
+set -euo pipefail
+service=gateway-service   # or dataservices-service, persistence-service, security-service
+cd "services/$service"
+dotnet restore
+dotnet build -c Release
+dotnet test -c Release --collect:"XPlat Code Coverage"
 ```
 
 ### 5.4 Where the coverage report lands
@@ -566,8 +641,39 @@ services/<service-name>/<project>.Tests/TestResults/<run-guid>/coverage.cobertur
 ```
 
 `coverage.cobertura.xml` is the exact artifact the 80%-per-service gate of §10 reads. Its emission by
-`coverlet.collector` was confirmed empirically (§1.2). For what the coverage number is expected to cover
-and which values are masked for determinism, see [`docs/PARITY.md`](PARITY.md).
+`coverlet.collector` was confirmed **on a throwaway skeleton** (§1.2 and §13), not against a service in
+this repository. For what the coverage number is expected to cover and which values are masked for
+determinism, see [`docs/PARITY.md`](PARITY.md).
+
+### 5.5 What has actually been run in this repository, and what has not
+
+The six shared and contracts test projects build and pass. The four **service** test projects do not build
+at all, because each references its service application project and every one of those reports `CS5001`
+for a missing entry point (§1). So the number below is a shared-layer number and it is not a service
+number; there is no service coverage figure yet, and the §10 gate has nothing to read.
+
+Measured by running `dotnet test <project> -c Release` once per project, after
+`dotnet build PowerFramework.slnx -c Release`:
+
+| # | Test project | Passed | Failed |
+| --- | --- | ---: | ---: |
+| 1 | `shared/PowerFramework.Shared.Kernel.Tests` | 1,750 | 0 |
+| 2 | `shared/PowerFramework.Shared.Diagnostics.Tests` | 607 | 0 |
+| 3 | `shared/PowerFramework.Shared.Eventful.Tests` | 777 | 0 |
+| 4 | `shared/PowerFramework.Shared.Localization.Tests` | 524 | 0 |
+| 5 | `shared/PowerFramework.Shared.Containers.Tests` | 202 | 0 |
+| 6 | `shared/PowerFramework.Contracts.Tests` | 2,785 | 0 |
+| | **Total** | **6,645** | **0** |
+
+| # | Test project | State |
+| --- | --- | --- |
+| 7 | `services/gateway-service/PowerFramework.Gateway.Tests` | **Does not build** — its application project reports `CS5001` |
+| 8 | `services/dataservices-service/PowerFramework.DataServices.Tests` | **Does not build** — same reason |
+| 9 | `services/persistence-service/PowerFramework.Persistence.Tests` | **Does not build** — same reason |
+| 10 | `services/security-service/PowerFramework.Security.Tests` | **Does not build** — same reason |
+
+The whole-solution build itself reports `0 Warning(s)` and exactly **4 errors**, one `CS5001` per service
+application project, and no other diagnostic of any kind.
 
 ---
 
@@ -627,8 +733,16 @@ builds Debug. Add `-c Release` when that matters.
 
 ### 7.1 One image per service, multi-stage, non-root
 
-Each service has its own container definition at `services/<service-name>/Dockerfile`, and each produces
-**one image per service** — four images, matching the four independently deployable services (C-J).
+> **None of the four `Dockerfile`s has been authored yet** — the "Current state" section above lists them
+> as planned, and this whole section is therefore the **specification that work will be built against**,
+> not a description of files a reader can open. Everything below is written in the present tense because it
+> states what each definition must do; nothing below should be read as a report of what one currently does.
+> §7.2 in particular is a constraint the manifest and the definitions have to agree on, and it is the one
+> most easily got wrong.
+
+Each service is to have its own container definition at `services/<service-name>/Dockerfile`, each
+producing **one image per service** — four images, matching the four independently deployable services
+(C-J).
 
 Every image is **multi-stage**: an SDK image (`mcr.microsoft.com/dotnet/sdk:10.0`) for restore and build,
 and an ASP.NET runtime image (`mcr.microsoft.com/dotnet/aspnet:10.0`) for the final stage. The final
@@ -678,20 +792,89 @@ One hand-authored Compose manifest brings all four services up together (C-J). F
 ```bash
 set -euo pipefail
 # The environment file is kept OUTSIDE the working tree -- see the warning below for why.
-mkdir -p "$HOME/.config/powerframework" && chmod 700 "$HOME/.config/powerframework"
+install -d -m 700 "$HOME/.config/powerframework"
 cp orchestration/.env.example "$HOME/.config/powerframework/pfw.env"
 chmod 600 "$HOME/.config/powerframework/pfw.env"
-# Populate SECURITY_JWT_SIGNING_KEY in that file before bringing the stack up:
-#   openssl rand -base64 32
+# Populate SECURITY_JWT_SIGNING_KEY in that file before bringing the stack up. It is an RSA
+# PRIVATE key, not random bytes -- Security signs with RS256 -- so generate it as one and paste
+# the single-line output as the value:
+#   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
 cd orchestration
 docker compose --env-file "$HOME/.config/powerframework/pfw.env" up --build -d
 ```
 
 The template is `orchestration/.env.example`. It declares the JWT signing key by the variable name
 **`SECURITY_JWT_SIGNING_KEY`** and nothing else as a signing secret, because Security is the sole token
-issuer — the other three services hold verification material only. **No value for it appears in this
-document, in `.env.example`, in any `appsettings.json` or in any container definition.** Generate one
-locally. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling rule.
+issuer — the other three services hold verification material only. Its value is an **RSA private key in
+base64-encoded PKCS#8 DER on one line** — PEM is accepted too and is tried first, for a secret store that
+can carry newlines — validated at startup against `Security:SigningKeyFormat` (`PemOrPkcs8Base64`) and
+`Security:SigningKeyMinimumSizeBits` (2048); the template carries the generation command. **No
+value for it appears in this document, in `.env.example`, in any `appsettings.json` or in any container
+definition.** Generate one locally.
+
+Alongside it the template declares five **mutual-TLS path** variables — the trust anchor Security
+validates presented client certificates against, and a client certificate and key for each of the two
+services that request tokens. Security's own **server** certificate is not among them, because it is not
+Security-specific: all three TLS listeners terminate with the same default material, supplied once through
+`TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH`. Those seven paths point at material mounted
+from the secret layer, never material, and the mutual-TLS five are required rather than optional:
+`POST /v1/tokens` is
+protected by mutual TLS and by nothing else, because a caller cannot present a bearer token in order to
+obtain its first bearer token. Persistence has no pair, because it reads Security's anonymous key set and
+calls nothing else there. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling
+rule.
+
+**The signing key is an RSA private key, not random bytes.**
+This is worth stating in a build document because getting it wrong produces a stack that starts and then
+fails on its first token, with a cause nowhere near the symptom. Security's `appsettings.json` sets
+`Security:SigningAlgorithm` to **RS256**, and
+`shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` publishes an **RSA-only** key set at
+`/.well-known/jwks.json` — `kty` `RSA` with the modulus and exponent members, and no symmetric member in
+the schema at all. RS256 signs with an RSA private key, so a random symmetric string cannot sign it and
+cannot be published as an RSA JWK. **An earlier revision of this section prescribed
+`openssl rand -base64 32` for this variable. That instruction was wrong, produced material the configured
+algorithm cannot use, and is corrected here.** No HMAC key-length guidance belongs on this variable
+either, for the same reason.
+
+Two identities are generated, because the signing identity and the transport identity are different keys
+with different lifetimes:
+
+```bash
+set -euo pipefail
+install -d -m 700 "$HOME/.config/powerframework/secrets"
+cd "$HOME/.config/powerframework/secrets"
+
+# 1. The RS256 signing identity -> SECURITY_JWT_SIGNING_KEY (a PATH to this PKCS#8 PEM file).
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key
+
+# 2. The mutual-TLS identities for POST /v1/tokens -> SECURITY_MTLS_CERT_PATH,
+#    SECURITY_MTLS_KEY_PATH, SECURITY_MTLS_CLIENT_CA_PATH. Full command set, including the
+#    per-caller client certificates, is in ARCHITECTURE.md section 9.3.1.
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=powerframework-local-ca" \
+        -keyout mtls-ca.key -out mtls-ca.crt
+
+chmod 600 ./*.key
+```
+
+**The variable carries the key material itself, not a path to it.** The Compose dotenv format has no line
+continuation, so the template's shape is the single-line base64-of-DER form rather than a PEM block; a
+secret store that can carry newlines may supply PEM instead, and Security tries PEM first. An earlier
+revision of this section described the variable as a mounted file path — the template is the authority and
+it declares a value. **The public half is derived, never configured**: Security computes the public JWK
+from the private key and publishes it under the `kid` in `Security:SigningKeyId`, so there is no
+public-key variable to set and there must not be one.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 and [`SECRETS.md`](SECRETS.md) §4.1 carry the identical
+procedure; a change to one is a change to all three.
+
+**The material is asymmetric, and the wrong shape fails closed rather than quietly.** Security's
+algorithm is `RS256` over a closed `RS256`/`RS384`/`RS512` allow-list, and it imports the configured
+value as an RSA private key — PEM first, then a base64 of the DER encoding. Symmetric random bytes
+cannot be imported that way, so a key produced by `openssl rand` makes the host **refuse to start**,
+with a message that names the variable and never echoes the value. Do not answer that failure by
+switching the algorithm to an HMAC family: the JWK set Security publishes is anonymous verification
+material, so an HMAC key there would publish the signing secret itself and make all three verifiers
+co-signers. `.env.example` §1 carries the full note, including the PEM alternative and why the
+single-line form is what an environment file can hold.
 
 > ### ⚠️ Why the filled-in environment file is written outside the working tree
 >
@@ -724,28 +907,41 @@ locally. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full 
 > material is the orchestration secret layer, injected as environment configuration and never written
 > into the repository at all.
 
-### 8.1 The readiness model
+### 8.1 The readiness model — the specification, not an observed behaviour
+
+Every bullet below describes what the **planned** manifest and the **planned** endpoints must do. None of
+it has been observed: there is no Compose manifest, no service entry point and therefore no running
+service to probe (§8.2).
 
 - `/health` is **anonymous on all four services**.
 - `/v1/ping` **requires a JWT on all four** and returns `401` without one.
-- **Gateway reports healthy only after Persistence, DataServices and Security do.** This is expressed
-  with `depends_on` using a **health condition**, so Compose gates Gateway behind its three upstreams
-  rather than merely behind their container start.
+- **Gateway reports healthy only after Persistence, DataServices and Security do.** This is to be
+  expressed with `depends_on` using a **health condition**, so Compose gates Gateway behind its three
+  upstreams rather than merely behind their container start.
+- The `curl` health gates address each service's **single** listener over **HTTP/1.1** — 5101, 5102,
+  5104 and 5105 — which is the same listener its gRPC surface is served on, because ALPN selects the
+  protocol version per connection. There is no separate gRPC or mutual-TLS port to probe. Three of the
+  four gates are therefore `https` — `curl -sf https://localhost:5101/health` and likewise for 5102 and
+  5104 — and only Gateway's ingress on 5105 is `http`; see
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1.
 
 For the port map, the transport chosen per service and the reasoning behind the reserved 5103 slot, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md). For bring-up detail and the readiness gates step by step, see
-`orchestration/README.md`. Neither is duplicated here.
+[`ARCHITECTURE.md`](ARCHITECTURE.md). Bring-up detail and the readiness gates step by step belong in
+`orchestration/README.md`, which is **planned and not yet present**; nothing is duplicated here.
 
 ### 8.2 This path is unexercised — restated at the point of use
 
-**The Compose bring-up above has not been verified.** Docker was unavailable in the environment where
-this migration was planned, so neither the bring-up nor its ordered health probes could be exercised, and
-the container definitions and the Compose manifest are authored in the same change set this document
-describes.
+**The Compose bring-up above cannot be run today, and has not been verified.** The manifest it invokes
+does not exist, the four `Dockerfile`s it would build do not exist, and none of the four service
+applications has an entry point to start. Docker was additionally unavailable in the environment where this
+migration was planned, so neither the bring-up nor its ordered health probes could have been exercised in
+any case.
 
-Correctness of this path is asserted by **container-definition and Compose manifest review plus CI**.
-Treat the commands in this section as the intended and reviewed path, not as a transcript of a successful
-run. §1.3 states the same limitation for a reader who started at the top.
+**Correctness of this path is not asserted at present.** Once the manifest and the container definitions
+are authored, it will rest on definition-and-manifest review plus the CI pipeline of §10; neither has
+occurred, because neither has anything to act on. Treat the commands in this section as the **intended**
+path — the specification the work will be written against — and not as a transcript of a successful run, or
+as a path that has been reviewed. §1.3 states the same limitation for a reader who started at the top.
 
 ---
 
@@ -939,8 +1135,11 @@ merely reintroduce a warning — under `TreatWarningsAsErrors` it fails the rest
 
 ### 11.3 The pinned dependency set
 
-Sourced from `Directory.Packages.props`. **Registry is nuget.org for every entry; there are no private or
-internal feeds** in this refactor.
+Transcribed from `Directory.Packages.props` and `tests/e2e/package.json` — **both authored by this
+refactor**, so this table reports what those manifests pin rather than a version inherited from anywhere.
+No version here came from a **pre-existing** manifest, because the repository had none: see the note
+following the table. **Registry is nuget.org for every .NET entry and npmjs.org for the three npm ones;
+there are no private or internal feeds** in this refactor.
 
 | Package | Version | Purpose | Consumed by |
 | --- | --- | --- | --- |
@@ -989,10 +1188,17 @@ files:
   to the `Microsoft.NETCore.App` shared framework on `net10.0` rather than to a package, so it appears
   in no lock file.
 
-**No version above was taken from a repository dependency manifest, because there is none.** The
-repository contains zero `*.csproj`, zero `packages.config`, zero `package.json` and no lock file of any
-kind outside the tree this refactor creates. The only version facts the repository asserts about itself are
-the legacy ones:
+**No version above was inherited from a PRE-EXISTING dependency manifest, because the repository had
+none.** Before this refactor there was no `*.csproj`, no `packages.config`, no `package.json` and no lock
+file of any kind anywhere in the tree — the legacy estate is PowerBuilder libraries and native binaries,
+which declare no managed dependency. Every manifest and every lock file that exists today
+(`Directory.Packages.props`, the twenty project files, `tests/e2e/package.json` and its
+`package-lock.json`) **was created by this refactor**, so each pin above was chosen and verified here
+rather than carried forward. That is why §11.1 records how the two mandatory pins were arrived at: there
+was no prior decision to defer to.
+
+The only version facts the repository asserts about **itself**, independent of this refactor, are the
+legacy ones:
 
 | Legacy version fact | Locator |
 | --- | --- |
@@ -1093,8 +1299,12 @@ legacy document itself is not edited.
   a throwaway skeleton project, not against this repository's services** — the single passing test is the
   giveaway — and it is quoted here as evidence that the command and the coverage collector work, not as a
   result for these four services.
-- **In this repository today**, restore is audit-clean, and the shared libraries and the contracts project
-  build with `0 Warning(s)` and `0 Error(s)` and run **1,034 passing tests** with zero failures.
+- **In this repository today**, restore is audit-clean, and the five shared libraries plus the contracts
+  project build with `0 Warning(s)` and `0 Error(s)`. Their **six** test projects run **6,645 passing tests,
+  zero failing**. That figure is tied to the command that produced it rather than quoted loose: it is the sum
+  of six separate runs of `dotnet test <project> -c Release`, one per test project, and §5.5 lists the six
+  projects with their individual counts so the sum is checkable rather than asserted. Any total quoted
+  without naming the command that produced it should be treated as stale.
 - `dotnet new sln` emits `.slnx` (§2, Finding 1).
 - Bare `dotnet test` builds Debug after a Release build, and `-c Release` changes that (§2, Finding 2).
 - A second solution file in a service directory breaks the bare commands with `MSB1011` (§3.4).
@@ -1108,9 +1318,16 @@ legacy document itself is not edited.
 - **That the four services build.** They do not, yet: each application project reports `CS5001` for a
   missing entry point, because `Program.cs` is not yet authored for any of them. Nothing in this document
   should be read as evidence that a service compiles, starts, or serves a request.
-- **The container bring-up.** Docker was unavailable in the environment where this migration was planned,
-  so the Compose path of §8 and its ordered health probes were never run. Correctness there rests on
-  container-definition and Compose manifest review plus CI (§1.3, §8.2).
+- **That any service test has run.** Each of the four service test projects references its application
+  project, so none of them builds either. The 6,645 passing tests of §5.5 are entirely shared-layer; there
+  is no service test result and no service coverage figure in existence.
+- **The container bring-up, and any review of it.** No `Dockerfile`, no Compose manifest and no CI
+  workflow exists, so the §8 path could not be run and there was nothing to review; Docker was
+  additionally unavailable where this migration was planned. Definition-and-manifest review plus CI is the
+  **intended** assurance mechanism for that path, not a step that has been taken (§1.3, §8.2).
+- **That CI enforces anything.** `.github/workflows/ci.yml` is planned and absent, so the 80%-per-service
+  coverage gate of §10 is specified and unenforced. `coverage.cobertura.xml` is the artifact it will read;
+  its emission was proven on a throwaway skeleton, not against a service here.
 - Anything about build or runtime performance. No such objective is published in this repository, so none
   is asserted (§1.4, §11.5).
 
@@ -1169,21 +1386,30 @@ repository-root configuration file:
 3. **It adds no repository-root artifact.** The plan enumerates the root files this refactor creates,
    and a lint configuration is not among them.
 
-**Verifying.** From the repository root:
+**Verifying, and why no command is published for it.** The head-of-file directive *is* the verification
+mechanism: a markdownlint-compatible tool that is already provisioned reads it and reports zero issues,
+with no flags, no file list and no external configuration file to locate.
 
-```bash
-npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                      docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
-```
+**No linter command line appears in this documentation set, and that is a supply-chain control rather
+than an omission.** The entire approved npm dependency set for this repository is the exact, locked
+manifest under `tests/e2e` (§11.3), and **no Markdown linter is in it**. Publishing an on-demand
+package-runner invocation for one would instruct an unpinned version to be resolved from the network and
+executed outside that lockfile every time somebody followed this document — the same failure mode §9
+warns against for the end-to-end runner, and the reason that section insists on `npm test` over a
+package-runner invocation. The two cases differ only in that Playwright at least *is* pinned and locked;
+a linter that is in no manifest at all has no version to resolve to but "whatever is newest today". If a
+deployment wants the check automated, it adds an exact, locked development dependency in its own manifest
+and invokes the local binary through a package script — which is a change to that manifest and to the
+`NOTICE` licence inventory derived from it (§13), not a documentation line.
 
-Expected output is `Summary: 0 issues in 0 files`.
+**No file list and no glob is needed, which is the stronger property.** A repository-root configuration
+file or a glob such as `docs/*.md` would also reach the five read-only legacy documents, which carry **55
+pre-existing violations** of their own — 21 `MD040` unlabelled code fences, 16 `MD010` hard tabs, and the
+remainder across `MD032`, `MD031`, `MD041`, `MD029` and `MD009`. Those are **out of scope and are
+deliberately not fixed**, because the files are read-only. A sweep that reported them would report a
+failure that must not be acted on, which is worse than no check at all. One of the legacy files is not
+even UTF-8 — `docs/Blink交互.md` is GBK-encoded — so tooling that assumes UTF-8 across `docs/` will fault
+on it. A per-file directive cannot reach any of them.
 
-**Name the files; do not glob.** `npx markdownlint-cli2 "docs/*.md"` also sweeps the five read-only
-legacy documents, which carry **55 pre-existing violations** of their own — 21 `MD040` unlabelled code
-fences, 16 `MD010` hard tabs, and the remainder across `MD032`, `MD031`, `MD041`, `MD029` and `MD009`.
-Those are **out of scope and are deliberately not fixed**, because the files are read-only. A glob
-therefore reports a failure that must not be acted on, which is worse than no check at all. One of the
-legacy files is not even UTF-8 — `docs/Blink交互.md` is GBK-encoded — so tooling that assumes UTF-8
-across `docs/` will fault on it.
-
-[`docs/PARITY.md`](PARITY.md) carries the same directive and joins the command above.
+[`docs/PARITY.md`](PARITY.md) carries the same directive; its §11 restates this policy for readers who
+arrive there first.

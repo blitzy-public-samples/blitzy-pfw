@@ -65,7 +65,8 @@
 //  --------------------------------------------------------------------------------------------
 //  Directory.Build.props sets TreatWarningsAsErrors, Nullable and EnableNETAnalyzers for every
 //  project including this one, and the repository-root .editorconfig scopes its CA1707 / IDE1006
-//  naming suppressions BY FILE GLOB to ten implementation files - RetCode.cs among them - and to
+//  naming suppressions BY FILE GLOB to the implementation files on its BAND 3 roster - RetCode.cs
+//  among them, that roster being the single source of truth for the list - and to
 //  no test file at all. Consequently this file REFERENCES SCREAMING_SNAKE members freely (naming
 //  analyzers report declarations, never uses) but DECLARES nothing non-conventional: every table,
 //  helper, member-data provider, test method, parameter and tuple element below is conventional

@@ -114,9 +114,10 @@
 //                  <see cref="ResolveHandler"/>.
 //
 //  THE NAMING RULING - BUILD BREAKING IF IGNORED
-//      The repository root .editorconfig scopes its naming-analyzer suppressions to seven named files
-//      (RetCode.cs, Enums.cs, VetoResult.cs, Categories.cs, EventGate.cs, ItemChangeProtocol.cs,
-//      ClauseModifier.cs and friends). THIS FILE IS NOT IN THAT LIST, and Directory.Build.props sets
+//      The repository root .editorconfig scopes its naming-analyzer suppressions to a roster of
+//      individually named files, published in one place - the BAND 3 roster in that file - rather than
+//      restated here, because a count copied into a comment falls out of step the moment a section is
+//      added. THIS FILE IS NOT ON THAT ROSTER, and Directory.Build.props sets
 //      TreatWarningsAsErrors true. Every member declared here is therefore PascalCase, and every legacy
 //      identifier spelling - `of_on`, `_of_trigger`, `EVENTDATA`, `_nDeep`, `_sFirstName` and the rest -
 //      appears in documentation only. No widening of that glob list was requested.

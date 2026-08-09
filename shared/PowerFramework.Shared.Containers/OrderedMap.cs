@@ -289,8 +289,9 @@
 //      overload is excluded by DECISION 8.
 //    * SCREAMING_SNAKE and legacy lowercase identifiers. The plan preserves legacy constant
 //      spellings only in the files that carry legacy constants, and the repository-root
-//      .editorconfig scopes its naming-analyzer suppressions to a closed list of ten file globs
-//      that does not include this one. With TreatWarningsAsErrors inherited from
+//      .editorconfig scopes its naming-analyzer suppressions to the closed BAND 3 roster of file
+//      globs - the single source of truth for that list - which does not include this one. With
+//      TreatWarningsAsErrors inherited from
 //      Directory.Build.props such an identifier here would be a build ERROR. The legacy lowercase
 //      spellings are recorded in the doc comments; every identifier below is PascalCase.
 // ==============================================================================================

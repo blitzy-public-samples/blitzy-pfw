@@ -33,9 +33,16 @@
 //       stops being readable. Sentinels_* and DigitBearingIdentifiers_* are the guard.
 //
 //  A third property is asserted structurally rather than behaviourally: there must be NO way to
-//  produce a wire DbError without passing through a redactor. That is constraint C-F expressed as a
-//  compile-time property, and ToDbError_HasExactlyOneOverload_AndItRequiresARedactor asserts nobody
-//  has since added an escape hatch.
+//  produce a wire DbError carrying an unmasked statement. That is constraint C-F expressed as a
+//  compile-time property, and it is stronger than it first appears, because a MANDATORY REDACTOR
+//  ARGUMENT WAS NOT ENOUGH. Any implementation of the abstraction satisfied such a parameter,
+//  including one that masks nothing, so the boundary was one argument away from being bypassed at
+//  every call site. The policy therefore lives INSIDE the projection: ToDbError takes only the
+//  payload and applies the sealed SqlRedactor.Instance itself. Three tests hold that line -
+//  SqlRedactor_ExposesNoDisableSwitchOfAnyKind (no mode to switch),
+//  ToDbError_HasExactlyOneOverload_TakesOnlyThePayload_AndAcceptsNoInjectablePolicy (no seam to
+//  inject at), and ToDbError_MasksEvenThoughAPassThroughImplementationExists (the outcome, proven
+//  with a pass-through redactor alive in the same assembly).
 //
 //  C-F: EVERY INPUT IN THIS FILE IS SYNTHETIC. No statement here was captured from a log, and no
 //  value from any known hardcoded-secret site appears in any form. The names, ages and salaries are
@@ -514,42 +521,64 @@ public sealed class SqlRedactorTests
     }
 
     /// <summary>
-    /// The empty result is produced even when redaction is disabled, because the declared return type
-    /// is non-nullable and a null can never be echoed back.
+    /// THERE IS NO DISABLED MODE TO CONSTRUCT. The type exposes exactly one constructor, its only
+    /// parameter is the placeholder token, and it carries no boolean of any kind - so no
+    /// configuration value and no call site can put this type into a pass-through state.
     /// </summary>
+    /// <remarks>
+    /// Asserted structurally rather than behaviourally because that is the only way to state
+    /// "the switch does not exist". A behavioural test can only exercise the modes that DO exist.
+    /// </remarks>
     [Fact]
-    public void Redact_NullOrEmpty_ReturnsEmptyEvenWhenDisabled()
+    public void SqlRedactor_ExposesNoDisableSwitchOfAnyKind()
     {
-        SqlRedactor disabled = new(enabled: false);
+        ConstructorInfo[] constructors = typeof(SqlRedactor).GetConstructors();
 
-        Assert.Equal(string.Empty, disabled.Redact(null));
-        Assert.Equal(string.Empty, disabled.Redact(string.Empty));
+        ConstructorInfo only = Assert.Single(constructors);
+        ParameterInfo parameter = Assert.Single(only.GetParameters());
+
+        Assert.Equal(typeof(string), parameter.ParameterType);
+        Assert.Equal("placeholder", parameter.Name);
+
+        // No boolean anywhere on the public or non-public surface: no `enabled` field, no `Enabled`
+        // property, no SetEnabled method. A single one of those returning false would reopen the leak.
+        const BindingFlags all = BindingFlags.Public
+            | BindingFlags.NonPublic
+            | BindingFlags.Instance
+            | BindingFlags.Static
+            | BindingFlags.DeclaredOnly;
+
+        Assert.DoesNotContain(typeof(SqlRedactor).GetFields(all), field => field.FieldType == typeof(bool));
+        Assert.DoesNotContain(typeof(SqlRedactor).GetProperties(all), property => property.PropertyType == typeof(bool));
+        Assert.DoesNotContain(
+            typeof(SqlRedactor).GetMethods(all),
+            method => method.GetParameters().Any(parameter => parameter.ParameterType == typeof(bool)));
     }
 
     /// <summary>
-    /// A disabled redactor returns the very same instance, so the statement is unchanged byte for
-    /// byte rather than merely equal.
+    /// Masking is unconditional: every construction of the type masks, including the shared
+    /// <see cref="SqlRedactor.Instance"/> the outward projection uses.
     /// </summary>
     [Fact]
-    public void Redact_Disabled_ReturnsTheInputInstanceUnchanged()
+    public void Redact_MasksUnconditionally_ForEveryConstructionIncludingTheSharedInstance()
     {
         const string statement = "SELECT * FROM COMPANY WHERE NAME = 'Alice' AND SALARY > 12345";
-        SqlRedactor disabled = new(enabled: false);
+        const string expected = "SELECT * FROM COMPANY WHERE NAME = '" + Mask + "' AND SALARY > " + Mask;
 
-        string result = disabled.Redact(statement);
-
-        Assert.Same(statement, result);
+        Assert.Equal(expected, Subject.Redact(statement));
+        Assert.Equal(expected, SqlRedactor.Instance.Redact(statement));
+        Assert.Equal(expected, new SqlRedactor().Redact(statement));
     }
 
     /// <summary>
-    /// Redaction is opt-out: the parameterless construction is the safe one. A missing configuration
-    /// key must never silently disable the control.
+    /// The shared instance is a real, singleton-safe <see cref="SqlRedactor"/> carrying the default
+    /// placeholder - it is what the wire projection reaches for, so its identity and posture matter.
     /// </summary>
     [Fact]
-    public void Enabled_DefaultsToTrue()
+    public void Instance_IsASharedRedactorWithTheDefaultPlaceholder()
     {
-        Assert.True(Subject.Enabled);
-        Assert.False(new SqlRedactor(enabled: false).Enabled);
+        Assert.Same(SqlRedactor.Instance, SqlRedactor.Instance);
+        Assert.Equal(SqlRedactor.DefaultPlaceholder, SqlRedactor.Instance.Placeholder);
     }
 
     // ==========================================================================================
@@ -669,18 +698,22 @@ public sealed class SqlRedactorTests
         Assert.Equal(DbErrorData.Empty, Subject.Redact(DbErrorData.Empty));
     }
 
-    /// <summary>A disabled redactor leaves the whole payload equal to the input.</summary>
+    /// <summary>
+    /// A payload whose statement carries no literal at all survives byte for byte, which is what
+    /// makes "unchanged" a meaningful observation elsewhere: the payload changes when there is a
+    /// literal to mask, and only then.
+    /// </summary>
     [Fact]
-    public void RedactPayload_Disabled_LeavesEveryMemberAlone()
+    public void RedactPayload_StatementWithNoLiteral_LeavesEveryMemberAlone()
     {
         DbErrorData original = DbErrorData.FromStatement(
             19,
             "NOT NULL constraint failed: COMPANY.NAME",
-            "INSERT INTO COMPANY (NAME) VALUES ('Alice')",
+            "INSERT INTO COMPANY (NAME) SELECT NAME FROM COMPANY_STAGING",
             DwBuffer.Delete,
             3);
 
-        DbErrorData redacted = new SqlRedactor(enabled: false).Redact(original);
+        DbErrorData redacted = Subject.Redact(original);
 
         Assert.Equal(original, redacted);
     }
@@ -704,7 +737,7 @@ public sealed class SqlRedactorTests
             DwBuffer.Filter,
             7);
 
-        DbError message = error.ToDbError(Subject);
+        DbError message = error.ToDbError();
 
         Assert.Equal(19, message.Sqldbcode);
         Assert.Equal("NOT NULL constraint failed: COMPANY.NAME", message.Sqlerrtext);
@@ -720,7 +753,7 @@ public sealed class SqlRedactorTests
     [Fact]
     public void ToDbError_ClearedPayload_EqualsADefaultMessage()
     {
-        DbError message = DbErrorData.Empty.ToDbError(Subject);
+        DbError message = DbErrorData.Empty.ToDbError();
 
         Assert.Equal(new DbError(), message);
         Assert.Equal(string.Empty, message.Sqlsyntax);
@@ -733,49 +766,30 @@ public sealed class SqlRedactorTests
     [Fact]
     public void ToDbError_NoUpdatableTable_CarriesTheChineseDiagnosticVerbatim()
     {
-        DbError message = DbErrorData.NoUpdatableTable().ToDbError(Subject);
+        DbError message = DbErrorData.NoUpdatableTable().ToDbError();
 
         Assert.Equal(DbErrorMessages.NoUpdatableTable, message.Sqlerrtext);
         Assert.Equal(-1, message.Sqldbcode);
         Assert.Equal(string.Empty, message.Sqlsyntax);
     }
 
-    /// <summary>A null redactor is a programming error and is reported as one.</summary>
-    [Fact]
-    public void ToDbError_NullRedactor_Throws()
-    {
-        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(
-            () => DbErrorData.Empty.ToDbError(null!));
-
-        Assert.Equal("redactor", failure.ParamName);
-    }
-
     /// <summary>
-    /// The mapping accepts any <see cref="ISqlRedactor"/>, which is what makes a consumer testable
-    /// against a pass-through double.
+    /// THE STRUCTURAL ASSERTION BEHIND C-F, IN ITS STRONGER FORM: there is exactly ONE
+    /// <c>ToDbError</c>, it takes ONLY the payload, and NO overload anywhere accepts an
+    /// <see cref="ISqlRedactor"/> or any other delegate or interface that could stand in for the
+    /// policy.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A mandatory redactor PARAMETER was the earlier shape of this control, and it was not a control
+    /// at all: any implementation satisfied it, including one that masked nothing, so the wire boundary
+    /// was one argument away from being bypassed at every call site. The policy therefore moved INTO
+    /// the projection. What has to be asserted now is an absence - that no seam has been reintroduced -
+    /// and an absence can only be asserted structurally.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public void ToDbError_AcceptsAnAlternativeRedactorImplementation()
-    {
-        DbErrorData error = DbErrorData.FromStatement(
-            1,
-            "syntax error",
-            "SELECT * FROM COMPANY WHERE NAME = 'Alice'",
-            DwBuffer.Primary,
-            0);
-
-        DbError message = error.ToDbError(new PassThroughRedactor());
-
-        Assert.Equal("SELECT * FROM COMPANY WHERE NAME = 'Alice'", message.Sqlsyntax);
-    }
-
-    /// <summary>
-    /// THE STRUCTURAL ASSERTION BEHIND C-F: there is exactly ONE <c>ToDbError</c>, and it requires a
-    /// redactor. An overload that omitted it would reintroduce the leak the split exists to prevent
-    /// while satisfying the compiler perfectly, so its absence is asserted rather than assumed.
-    /// </summary>
-    [Fact]
-    public void ToDbError_HasExactlyOneOverload_AndItRequiresARedactor()
+    public void ToDbError_HasExactlyOneOverload_TakesOnlyThePayload_AndAcceptsNoInjectablePolicy()
     {
         MethodInfo[] overloads = typeof(DbErrorDataExtensions)
             .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
@@ -783,17 +797,61 @@ public sealed class SqlRedactorTests
             .ToArray();
 
         MethodInfo only = Assert.Single(overloads);
-        ParameterInfo[] parameters = only.GetParameters();
+        ParameterInfo receiver = Assert.Single(only.GetParameters());
 
-        Assert.Equal(2, parameters.Length);
-        Assert.Equal(typeof(DbErrorData), parameters[0].ParameterType);
-        Assert.Equal(typeof(ISqlRedactor), parameters[1].ParameterType);
-        Assert.False(parameters[1].IsOptional);
+        // `this in DbErrorData` - the receiver is by-reference because the payload is a readonly
+        // record struct, which is the plan's mapping for the legacy `readonly` parameter.
+        Assert.Equal(typeof(DbErrorData).MakeByRefType(), receiver.ParameterType);
+        Assert.True(receiver.IsIn);
+
+        // NOTHING on this holder accepts a redactor, a delegate or any other substitutable policy.
+        Assert.DoesNotContain(
+            typeof(DbErrorDataExtensions).GetMethods(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly),
+            method => method.GetParameters().Any(parameter =>
+                parameter.ParameterType == typeof(ISqlRedactor)
+                || typeof(Delegate).IsAssignableFrom(parameter.ParameterType)));
     }
 
     /// <summary>
-    /// <see cref="SqlRedactor"/> is sealed, so no subclass can introduce an unredacted mapping by
-    /// derivation, and <see cref="DbErrorDataExtensions"/> is a static class.
+    /// The wire projection masks REGARDLESS of what any <see cref="ISqlRedactor"/> in the process
+    /// does. A pass-through implementation exists in this file and is deliberately handed nowhere:
+    /// there is no argument through which it could reach the projection.
+    /// </summary>
+    /// <remarks>
+    /// This is the behavioural half of the finding's remedy. The structural test above proves the
+    /// parameter is gone; this one proves the outcome - that the statement on the wire is masked even
+    /// though a pass-through redactor is available in the same assembly and satisfies the same
+    /// interface the log path consumes.
+    /// </remarks>
+    [Fact]
+    public void ToDbError_MasksEvenThoughAPassThroughImplementationExists()
+    {
+        const string statement = "SELECT * FROM COMPANY WHERE NAME = 'Alice' AND AGE = 30";
+
+        DbErrorData error = DbErrorData.FromStatement(
+            1,
+            "syntax error",
+            statement,
+            DwBuffer.Primary,
+            0);
+
+        // The pass-through is a legitimate ISqlRedactor. It can serve the log path, and it returns the
+        // statement untouched - which is exactly what must NOT be able to reach the wire.
+        ISqlRedactor passThrough = new PassThroughRedactor();
+        Assert.Equal(statement, passThrough.Redact(statement));
+
+        DbError message = error.ToDbError();
+
+        Assert.Equal($"SELECT * FROM COMPANY WHERE NAME = '{Mask}' AND AGE = {Mask}", message.Sqlsyntax);
+        Assert.DoesNotContain("Alice", message.Sqlsyntax, StringComparison.Ordinal);
+        Assert.DoesNotContain("30", message.Sqlsyntax, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <see cref="SqlRedactor"/> is sealed, so no subclass can weaken the policy the projection
+    /// reaches through <see cref="SqlRedactor.Instance"/>, and <see cref="DbErrorDataExtensions"/> is
+    /// a static class.
     /// </summary>
     [Fact]
     public void RedactorIsSealed_AndTheMappingHolderIsStatic()

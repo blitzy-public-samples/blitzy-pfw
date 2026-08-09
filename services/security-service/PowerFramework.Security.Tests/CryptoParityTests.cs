@@ -251,6 +251,21 @@ public sealed class CryptoParityTests
     ];
 
     /// <summary>
+    /// The published modes this port can reproduce faithfully. The feedback mode is excluded because
+    /// its feedback width is unprovable from this repository (DECISION D3).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="AllCipherModes"/> keeps all three, because the identifier set is preserved exactly
+    /// and the set-completeness assertions read it. This list answers the separate question of which
+    /// cells a parity matrix can meaningfully walk.
+    /// </remarks>
+    private static readonly long[] ReproducibleCipherModes =
+    [
+        Enums.CRYPTO_SYMCRYPT_MODE_ECB,
+        Enums.CRYPTO_SYMCRYPT_MODE_CBC,
+    ];
+
+    /// <summary>
     /// The two published RSA padding identifiers [enums.sru:L949-L950].
     /// </summary>
     /// <remarks>
@@ -1031,7 +1046,8 @@ public sealed class CryptoParityTests
 
         foreach (ushort ntype in AllCipherTypes)
         {
-            foreach (long mode in AllCipherModes)
+            // Reproducible cells only; the blocked cells have their own refusal theory.
+            foreach (long mode in ReproducibleCipherModes)
             {
                 data.Add(ntype, mode);
             }
@@ -1059,10 +1075,25 @@ public sealed class CryptoParityTests
 
         for (int shapeIndex = 0; shapeIndex < AllCipherShapes.Length; shapeIndex++)
         {
+            CipherShape shape = AllCipherShapes[shapeIndex];
+
             foreach (ushort ntype in AllCipherTypes)
             {
                 foreach (long mode in AllCipherModes)
                 {
+                    // THE SHAPE DECIDES WHETHER THE MODE IS EVEN REACHABLE, so the filter is per
+                    // (shape, mode) pair rather than per mode. A shape that supplies no mode argument
+                    // runs in the default mode and is always reachable; a shape that does supply one
+                    // is reachable only where the cell is reproducible, and whether a vector
+                    // accompanies it is part of that question. The classification is delegated to the
+                    // catalogue so this matrix and the production guard cannot disagree on the set.
+                    if (shape.SuppliesMode
+                        && LegacyDefaults.ClassifySymmetricCell(mode, shape.SuppliesIv)
+                            != SymmetricCellParity.Supported)
+                    {
+                        continue;
+                    }
+
                     data.Add(shapeIndex, ntype, mode);
                 }
             }
@@ -1472,6 +1503,18 @@ public sealed class CryptoParityTests
     /// treats it as a bad value for this call, the other as a capability the scheme does not have -
     /// and this test records which provider chose which so that a future change to either becomes a
     /// build-visible difference instead of a silent one.
+    /// </para>
+    /// <para>
+    /// THESE REFUSALS ARE NOW PUBLISHED RATHER THAN MERELY CORRECT, WHICH IS WHAT CHANGED AROUND THIS
+    /// TEST. The behaviour asserted here was always right, but the contract used to advertise the full
+    /// six-member set on all four keyed and signing operations - so a request naming the checksum was
+    /// schema-valid, was accepted by the calling client, and only then failed here. The promise and
+    /// the implementation disagreed, and this test was the only place the truth was recorded. The
+    /// wire contract now narrows those four operations to a `CryptoKeyedHashType` schema that omits
+    /// the checksum, and the calling client refuses it at request construction, so the refusal happens
+    /// at the earliest point it can be detected. The full six-member set remains published for the two
+    /// unkeyed digest operations, where computing a checksum is well defined - as the first assertion
+    /// below still proves.
     /// </para>
     /// </remarks>
     [Fact]
@@ -2092,17 +2135,30 @@ public sealed class CryptoParityTests
     /// collapsed.
     /// </summary>
     /// <remarks>
-    /// Sixteen shapes by five published cipher types by three published modes is 240 rows, and each
-    /// row exercises one encrypt declaration and its mirrored decrypt declaration - so the matrix
-    /// reaches all thirty-two declarations on every one of the fifteen grid cells. Asserting the
-    /// count here means a future edit that narrows the data source fails a test rather than quietly
-    /// reducing coverage.
+    /// <para>
+    /// Sixteen shapes by five published cipher types by three published modes would be 240 rows, and
+    /// each row exercises one encrypt declaration and its mirrored decrypt declaration. The matrix
+    /// carries 180 of those 240, because DECISION D3 blocks 60 (shape, cipher, mode) combinations and
+    /// a round-trip row cannot be built for a cell the port refuses.
+    /// </para>
+    /// <para>
+    /// THE 60 ARE DERIVED HERE SO THE LITERAL CANNOT BE FUDGED. Eight of the sixteen shapes supply a
+    /// mode argument; the other eight run in the default mode and are never blocked. Of the eight,
+    /// four also supply a vector: for those, only the feedback mode is blocked, giving
+    /// 4 x 5 x 1 = 20 rows. The remaining four supply no vector: for those, both the feedback mode and
+    /// the chaining mode are blocked, giving 4 x 5 x 2 = 40 rows. 20 + 40 = 60, and 240 - 60 = 180.
+    /// </para>
+    /// <para>
+    /// The blocked combinations are not lost coverage - they are asserted as REFUSALS by the
+    /// mode-without-vector theory and the blocked-cell theories. Asserting these counts means a future
+    /// edit that narrows a data source fails a test rather than quietly reducing coverage.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheParityMatrixHasTheRowCountTheDeclarationListImplies()
     {
-        Assert.Equal(240, ShapeByTypeAndModeMatrix().Count);
-        Assert.Equal(15, TypeAndModeGrid().Count);
+        Assert.Equal(180, ShapeByTypeAndModeMatrix().Count);
+        Assert.Equal(10, TypeAndModeGrid().Count);
         Assert.Equal(5, CipherTypeRows().Count);
         Assert.Equal(6, PublishedDigestVectors().Count);
         Assert.Equal(6, PublishedEmptyInputDigests().Count);
@@ -2267,76 +2323,60 @@ public sealed class CryptoParityTests
     }
 
     /// <summary>
-    /// The eight mode-without-vector declarations behave exactly as the fully-specified declaration
-    /// does with an all-zero vector, which is DECISION D3.
+    /// The eight mode-without-vector arms REFUSE a vector-consuming mode, in every payload and key
+    /// spelling, rather than substituting a vector of their own choosing.
     /// </summary>
-    /// <param name="ntype">The published cipher type.</param>
+    /// <param name="ntype">The published cipher type under test.</param>
     /// <remarks>
     /// <para>
-    /// The eight arms at [n_crypto.sru:L31, :L35, :L39, :L43] and their mirrors [:L47, :L51, :L55,
-    /// :L59] accept a mode but declare no vector parameter, so a caller can ask for CBC or CFB - both
-    /// of which require a vector - with no way to supply one. DECISION D3 resolves that with an
-    /// ALL-ZERO VECTOR OF THE CIPHER'S BLOCK LENGTH, and this test is the assertion that makes the
-    /// resolution observable: the no-vector arm is required to equal the vector-taking arm given a
-    /// vector of zero bytes, in both non-default modes and both payload families.
+    /// THE PREDECESSOR OF THIS TEST IS THE CLEAREST EXAMPLE IN THE SUITE OF SELF-CONSISTENCY
+    /// MASQUERADING AS PARITY. It asserted that the vector-supplying shape and the vector-omitting
+    /// shape produced identical ciphertext when the supplied vector happened to be all zero - which
+    /// was true by construction, because the omitting shape synthesised exactly that vector and then
+    /// called the same core. Sixteen assertions per cipher type, none of which could ever have failed
+    /// while the synthesised vector matched the one the test itself built, and none of which said
+    /// anything about the closed binary.
     /// </para>
     /// <para>
-    /// ANNOTATION, REQUIRED BY CONSTRAINT C-K. D3 is a REASONED CHOICE, not a measurement. It is also
-    /// a genuine weakness that is preserved rather than corrected: a fixed, publicly known vector
-    /// destroys CBC's semantic security, so identical plaintexts under one key produce identical
-    /// cipher text and an observer learns when a value has not changed. Correcting it by generating a
-    /// random vector would produce cipher text the legacy could not decrypt, there being no parameter
-    /// in which to transmit one - so the weakness is asserted here as CORRECT behaviour under
-    /// constraint C-B.
-    /// </para>
-    /// <para>
-    /// The vector itself is COMPUTED from the block length, never written down: the byte spelling
-    /// comes from the catalogue's own zero-vector factory and the text spelling from a repeated zero
-    /// character of the same length.
+    /// The vector the oracle substituted is unobservable - <c>n_crypto</c> is
+    /// <c>native "pfw.dll"</c> [n_crypto.sru:L8] with no PowerScript body - and a wrong choice would
+    /// round-trip perfectly while producing ciphertext the legacy could not read. The refusal is the
+    /// behaviour, and it is asserted across the same shape matrix the old test walked, so the coverage
+    /// of those eight arms is retained rather than reduced.
     /// </para>
     /// </remarks>
     [Theory]
     [MemberData(nameof(CipherTypeRows))]
-    public void TheModeWithoutVectorArmsUseTheAllZeroVectorOfDecisionD3(ushort ntype)
+    public void TheModeWithoutVectorArmsRefuseAVectorConsumingMode(ushort ntype)
     {
-        SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
-        CipherMaterial zeroVectorMaterial = CreateCipherMaterial(ntype, zeroVector: true);
-
-        Assert.Equal(
-            LegacyDefaults.CreateZeroInitializationVector(metrics.BlockLengthBytes),
-            zeroVectorMaterial.BinaryIv);
-
+        CipherMaterial material = CreateCipherMaterial(ntype, zeroVector: false);
         byte[] plainBytes = LegacyDefaults.KeyMaterialEncoding.GetBytes(CipherPayloadText);
 
-        // Only the two modes that consume a vector can distinguish D3 from the default arm; the
-        // catalogue itself is the authority on which those are.
+        // The catalogue remains the authority on which modes consume a vector; those are exactly the
+        // modes these eight arms cannot serve.
         foreach (long mode in AllCipherModes.Where(LegacyDefaults.ModeUsesInitializationVector))
         {
+            SymmetricCellParity expected = mode == Enums.CRYPTO_SYMCRYPT_MODE_CFB
+                ? SymmetricCellParity.BlockedFeedbackWidthUnprovable
+                : SymmetricCellParity.BlockedSynthesizedVectorUnprovable;
+
             foreach (bool binaryKey in (bool[])[false, true])
             {
                 Assert.Equal(
-                    EncryptThroughShape(
-                        Shape(binaryPayload: false, binaryKey, suppliesIv: true, suppliesMode: true),
-                        zeroVectorMaterial,
-                        CipherPayloadText,
-                        mode),
-                    EncryptThroughShape(
+                    expected,
+                    Assert.Throws<SymmetricParityUnavailableException>(() => EncryptThroughShape(
                         Shape(binaryPayload: false, binaryKey, suppliesIv: false, suppliesMode: true),
-                        zeroVectorMaterial,
+                        material,
                         CipherPayloadText,
-                        mode));
+                        mode)).Reason);
 
                 Assert.Equal(
-                    EncryptThroughShape(
-                        Shape(binaryPayload: true, binaryKey, suppliesIv: true, suppliesMode: true),
-                        zeroVectorMaterial,
-                        plainBytes,
-                        mode),
-                    EncryptThroughShape(
+                    expected,
+                    Assert.Throws<SymmetricParityUnavailableException>(() => EncryptThroughShape(
                         Shape(binaryPayload: true, binaryKey, suppliesIv: false, suppliesMode: true),
-                        zeroVectorMaterial,
+                        material,
                         plainBytes,
-                        mode));
+                        mode)).Reason);
             }
         }
     }
@@ -2758,6 +2798,25 @@ public sealed class CryptoParityTests
     /// constraint C-F sweep of it come back empty.
     /// </para>
     /// <para>
+    /// EVERY ASSERTION BELOW IS A BOOLEAN WITH A FIXED MESSAGE, AND THAT IS A C-F REQUIREMENT RATHER
+    /// THAN A STYLE CHOICE. An earlier form of this test wrote the same four shape checks as
+    /// <c>Assert.DoesNotContain('\n', key)</c> and <c>Assert.Contains('\n', key)</c>, and the
+    /// distinctness check as <c>Assert.NotEqual(derPrivateKey, pemPrivateKey)</c>. Those overloads
+    /// treat a string as <c>IEnumerable&lt;char&gt;</c> and a failure formats the COLLECTION - so a
+    /// failing run would have printed the generated RSA signing material itself into the console, the
+    /// xunit reporter and the retained CI log, which is exactly what REGION 8's own header promises
+    /// does not happen. (This paragraph deliberately describes that material without spelling any PEM
+    /// armour marker, so a repository-wide credential sweep of this file still comes back empty.)
+    /// The keys are generated per run and are not long-lived secrets, but "the leaked credential was
+    /// short-lived" is not a defence a security-critical suite gets to rely on, and a test file that
+    /// leaks key material only when it fails is the worst possible time for it to start.
+    /// </para>
+    /// <para>
+    /// Each replacement therefore evaluates the predicate FIRST and hands <c>Assert</c> only a boolean
+    /// plus a message written in full here - so the diagnostic says which spelling was wrong and in
+    /// which direction, and there is no code path on which any part of a key can be rendered.
+    /// </para>
+    /// <para>
     /// That arity three produces the unarmoured spelling is a PROVIDER DEFAULT and is annotated as
     /// such: the legacy's own default for the omitted <c>pemformat</c> argument [n_crypto.sru:L19
     /// against :L20] is not observable from the repository. What is asserted without qualification is
@@ -2768,13 +2827,37 @@ public sealed class CryptoParityTests
     [Fact]
     public void TheTwoGeneratedSpellingsAreDistinctAndArityThreeIsUnarmoured()
     {
-        Assert.DoesNotContain('\n', SharedRsaKeys.DerPrivateKey);
-        Assert.DoesNotContain('\n', SharedRsaKeys.DerPublicKey);
+        Assert.False(
+            SharedRsaKeys.DerPrivateKey.Contains('\n', StringComparison.Ordinal),
+            "The unarmoured private-key spelling carries a line separator, so it is not the "
+                + "single-line encoded blob arity three is expected to produce. Key content is "
+                + "deliberately absent from this message.");
 
-        Assert.Contains('\n', SharedRsaKeys.PemPrivateKey);
-        Assert.Contains('\n', SharedRsaKeys.PemPublicKey);
+        Assert.False(
+            SharedRsaKeys.DerPublicKey.Contains('\n', StringComparison.Ordinal),
+            "The unarmoured public-key spelling carries a line separator, so it is not the "
+                + "single-line encoded blob arity three is expected to produce. Key content is "
+                + "deliberately absent from this message.");
 
-        Assert.NotEqual(SharedRsaKeys.DerPrivateKey, SharedRsaKeys.PemPrivateKey);
+        Assert.True(
+            SharedRsaKeys.PemPrivateKey.Contains('\n', StringComparison.Ordinal),
+            "The armoured private-key spelling carries no line separator, so it is not the multi-line "
+                + "delimiter-wrapped block arity four is expected to produce. Key content is "
+                + "deliberately absent from this message.");
+
+        Assert.True(
+            SharedRsaKeys.PemPublicKey.Contains('\n', StringComparison.Ordinal),
+            "The armoured public-key spelling carries no line separator, so it is not the multi-line "
+                + "delimiter-wrapped block arity four is expected to produce. Key content is "
+                + "deliberately absent from this message.");
+
+        Assert.False(
+            string.Equals(
+                SharedRsaKeys.DerPrivateKey,
+                SharedRsaKeys.PemPrivateKey,
+                StringComparison.Ordinal),
+            "The two arities produced the SAME private-key text, so the armouring argument is being "
+                + "ignored rather than honoured. Neither spelling is reproduced here.");
 
         // The unarmoured spelling is the payload encoding of raw key bytes, so it decodes cleanly
         // through the shared encoding provider; the armoured one does not, because it is not a bare

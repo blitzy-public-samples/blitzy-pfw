@@ -156,7 +156,8 @@
 //        consumer's exactly-seven test [pfw.sra:L119]. A fixture that broke that way would look like
 //        a production defect.
 //      * A SCREAMING_SNAKE constant. The repository root .editorconfig scopes its CA1707 and IDE1006
-//        suppressions to ten named PRODUCTION files and does not extend them to test files, so under
+//        suppressions to the named PRODUCTION files on its BAND 3 roster - the single source of truth
+//        for that list - and does not extend them to test files, so under
 //        the inherited TreatWarningsAsErrors an underscored identifier here would be a build failure
 //        with no way to grant an exception. Identifiers are conventional PascalCase; the legacy
 //        vocabulary survives in the VALUES, which is where it is observable.

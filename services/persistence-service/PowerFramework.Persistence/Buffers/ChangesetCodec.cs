@@ -951,6 +951,131 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
 
+    // ------------------------------------------------------------------------------------------
+    //  THE PAYLOAD IS UNTRUSTED INPUT, AND EVERY COUNT IN IT IS AN ALLOCATION REQUEST
+    //  ----------------------------------------------------------------------------------------
+    //  This is the one place the receive path is not merely a mirror of the send path. A payload
+    //  arrives over C-05's Query stream from a peer, so every length and count it declares is a
+    //  number chosen by whoever produced the bytes - and three of them are handed STRAIGHT to an
+    //  allocation:
+    //
+    //      the per-row column count   -> four arrays of that length, allocated before a single
+    //                                    column has been read
+    //      a blob length              -> BinaryReader.ReadBytes allocates `new byte[count]` up
+    //                                    front, BEFORE discovering the stream is shorter
+    //      the per-segment row count  -> the iteration bound of the row loop
+    //
+    //  A NON-NEGATIVE CHECK IS NOT A BOUND. Four bytes can say 2,147,483,647 in a payload that is
+    //  twelve bytes long, and the reader would try to reserve gigabytes before failing. The failure
+    //  would be an OutOfMemoryException escaping this codec - not the -1 the legacy's callers test
+    //  for - and on a shared host it takes more than this request down with it.
+    //
+    //  THE BOUND THAT IS ALWAYS CORRECT IS THE REMAINING BYTES. Every element of every count costs
+    //  at least a known minimum number of bytes on the wire, so `count * minimumElementBytes` can
+    //  never legitimately exceed what is left in the stream. That single rule is exact - it rejects
+    //  nothing a well-formed payload can contain, because a well-formed payload always carries the
+    //  bytes it promised - and it needs no tuning. The protocol maxima below sit in front of it as a
+    //  second, coarser gate so that a hostile count is rejected on sight rather than after an
+    //  arithmetic comparison, and so the intent is legible to a reader.
+    //
+    //  All arithmetic is done in `long` (or `checked`) so the multiplication itself cannot overflow
+    //  into a small positive number and defeat the comparison - which is the classic way this kind
+    //  of guard is written and then silently bypassed.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The largest row count a single buffer segment may declare: 1,048,576.
+    /// </summary>
+    /// <remarks>
+    /// A coarse sanity gate rather than a capacity statement, and it is deliberately far above
+    /// anything the evidenced fixture produces - the sole updatable DataWindow in the repository is a
+    /// six-column <c>COMPANY</c> table [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14]. It exists
+    /// so that an absurd count is rejected by name, with a legible reason, rather than only by the
+    /// remaining-byte arithmetic. The remaining-byte rule is the tighter of the two in every real
+    /// case, because a row costs far more than one byte.
+    /// </remarks>
+    private const long MaxRowsPerBufferSegment = 1L << 20;
+
+    /// <summary>
+    /// The largest column count a single row may declare: 32,768.
+    /// </summary>
+    /// <remarks>
+    /// This is the count that matters most, because it is the one multiplied by four array
+    /// allocations before any column is read. The legacy's own documented crosstab limitation shows a
+    /// DataWindow's column count is bounded in practice
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L673</c>], and this
+    /// ceiling is far above any real one.
+    /// </remarks>
+    private const long MaxColumnsPerRow = 1L << 15;
+
+    /// <summary>
+    /// The fewest bytes one row of a buffer segment can occupy: its status ordinal plus its column
+    /// count.
+    /// </summary>
+    /// <remarks>
+    /// Measured from <see cref="WriteBufferSegment"/> and <see cref="TryReadRow"/>: a row always
+    /// writes an <see cref="int"/> status ordinal and an <see cref="int"/> column count, so four plus
+    /// four. A row with no columns is legal and costs exactly this, which is what makes the value a
+    /// true minimum rather than an estimate.
+    /// </remarks>
+    private const long MinimumBytesPerRow = sizeof(int) + sizeof(int);
+
+    /// <summary>
+    /// The fewest bytes one column entry can occupy: its number, its status ordinal, and one value tag
+    /// for each of its current and original values.
+    /// </summary>
+    /// <remarks>
+    /// Measured from the write loop in <see cref="WriteBufferSegment"/>: an <see cref="int"/> column
+    /// number, an <see cref="int"/> status ordinal, then two values each of which is at minimum a
+    /// single tag byte - which is exactly what <see cref="ValueTag.Null"/> costs.
+    /// </remarks>
+    private const long MinimumBytesPerColumn = sizeof(int) + sizeof(int) + 1 + 1;
+
+    /// <summary>
+    /// Whether <paramref name="count"/> elements of at least <paramref name="minimumBytesPerElement"/>
+    /// bytes each could still fit in what remains of <paramref name="reader"/>'s stream, and is within
+    /// <paramref name="protocolMaximum"/>.
+    /// </summary>
+    /// <param name="reader">The reader positioned immediately after the count was read.</param>
+    /// <param name="count">The declared count, which may be any <see cref="int"/> the payload chose.</param>
+    /// <param name="minimumBytesPerElement">
+    /// The fewest bytes one element can occupy on the wire. Must be positive, or the check would be
+    /// vacuous.
+    /// </param>
+    /// <param name="protocolMaximum">The coarse ceiling this kind of count is subject to.</param>
+    /// <returns>
+    /// <see langword="true"/> when the count is plausible and may be used as a loop bound or an
+    /// allocation size; <see langword="false"/> when it must be rejected BEFORE either.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// The comparison is performed in <see cref="long"/> so that
+    /// <c>count * minimumBytesPerElement</c> cannot overflow: the widest possible product is
+    /// <see cref="int.MaxValue"/> multiplied by a small constant, which a 64-bit signed integer holds
+    /// comfortably. Doing it in <see cref="int"/> is how a guard of this shape ends up wrapping to a
+    /// small positive number and admitting the very count it was written to reject.
+    /// </para>
+    /// <para>
+    /// A negative count is rejected here too, so callers need no separate sign test and cannot forget
+    /// one.
+    /// </para>
+    /// </remarks>
+    private static bool IsPlausibleCount(
+        BinaryReader reader,
+        int count,
+        long minimumBytesPerElement,
+        long protocolMaximum)
+    {
+        if (count < 0 || count > protocolMaximum)
+        {
+            return false;
+        }
+
+        long remaining = reader.BaseStream.Length - reader.BaseStream.Position;
+
+        return count * minimumBytesPerElement <= remaining;
+    }
+
     /// <summary>
     /// The discriminator written before every column value, preserving the exact runtime type so that a
     /// round trip yields the value it started as rather than a widened substitute.
@@ -1221,7 +1346,10 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
         DwBuffer dwBuffer = (DwBuffer)bufferOrdinal;
         int rowCount = reader.ReadInt32();
 
-        if (rowCount < 0)
+        // BOUNDED BEFORE IT BECOMES A LOOP BOUND. A negative count, one beyond the protocol ceiling,
+        // or one whose rows could not possibly fit in the bytes that remain is a malformed payload and
+        // answers the legacy failure code - see the guard rationale beside MaxRowsPerBufferSegment.
+        if (!IsPlausibleCount(reader, rowCount, MinimumBytesPerRow, MaxRowsPerBufferSegment))
         {
             return false;
         }
@@ -1277,7 +1405,11 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
         int columnCount = reader.ReadInt32();
 
-        if (columnCount < 0)
+        // BOUNDED BEFORE THE FOUR ALLOCATIONS BELOW, which is the whole reason this guard exists here
+        // rather than inside the loop: the arrays are sized from this number before a single column has
+        // been read, so a count of int.MaxValue in a twelve-byte payload would demand gigabytes and
+        // raise OutOfMemoryException instead of answering -1.
+        if (!IsPlausibleCount(reader, columnCount, MinimumBytesPerColumn, MaxColumnsPerRow))
         {
             return false;
         }
@@ -1538,19 +1670,41 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// </summary>
     /// <param name="reader">The reader.</param>
     /// <returns>The bytes.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">The encoded length is negative.</exception>
-    /// <exception cref="EndOfStreamException">Fewer bytes remain than the length promised.</exception>
+    /// <exception cref="EndOfStreamException">
+    /// The encoded length is negative, or fewer bytes remain than the length promised. Both are the
+    /// same fault from the format's point of view - a length that cannot be honoured - and both are
+    /// classified as a payload fault by <see cref="IsPayloadFault(Exception)"/>, so both answer the
+    /// legacy failure code.
+    /// </exception>
     /// <remarks>
+    /// <para>
     /// <see cref="BinaryReader.ReadBytes"/> answers a SHORT ARRAY at end of stream rather than
     /// throwing, so the length is verified explicitly. Without that check a truncated payload would
     /// decode into a silently shortened blob and answer success, which is the one outcome worse than
     /// answering the failure code the legacy tests for.
+    /// </para>
+    /// <para>
+    /// THE LENGTH IS CHECKED AGAINST THE REMAINING BYTES BEFORE THE READ, NOT AFTER IT, and the
+    /// ordering is the entire point. <see cref="BinaryReader.ReadBytes"/> allocates
+    /// <c>new byte[count]</c> up front and only then discovers the stream is shorter, so a declared
+    /// length of <see cref="int.MaxValue"/> reserves two gigabytes before failing. Comparing first
+    /// makes the outcome the legacy failure code instead of an <see cref="OutOfMemoryException"/>
+    /// escaping this codec, and it costs one subtraction. The post-read length check is retained
+    /// because a stream is not obliged to return everything it appears to hold.
+    /// </para>
     /// </remarks>
     private static byte[] ReadBlob(BinaryReader reader)
     {
         int length = reader.ReadInt32();
 
-        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        // A blob element is one byte, so the remaining-byte rule IS the exact bound here: a blob can
+        // never legitimately be longer than what is left. No separate protocol ceiling is needed or
+        // wanted - inventing one would cap a value the format otherwise permits.
+        if (!IsPlausibleCount(reader, length, minimumBytesPerElement: 1, protocolMaximum: int.MaxValue))
+        {
+            throw new EndOfStreamException(
+                "The changeset payload declared a blob longer than the bytes that remain.");
+        }
 
         byte[] bytes = reader.ReadBytes(length);
 

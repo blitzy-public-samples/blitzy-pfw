@@ -2,13 +2,16 @@
 //  I18nResourceFidelityTests.cs - THE ORACLE FIXTURE, ASSERTED AT THE BYTE
 //  ------------------------------------------------------------------------------------------------
 //  SUBJECT           pfw.i18n.xml, as copied into the test working directory by the Content link at
-//                    PowerFramework.Shared.Localization.Tests.csproj:145
+//                    PowerFramework.Shared.Localization.csproj:256-261 - the LIBRARY project, which
+//                    declares the item once and flows it here down the ProjectReference edge
 //  ORACLE            pfw.i18n.xml at the repository root - read-only legacy tree (C-C)
 //
 //  WHY THIS FILE EXISTS
 //  ------------------------------------------------------------------------------------------------
-//  The test project's own documentation [csproj:121-130] states that the copy must stay byte identical
-//  to the original and enumerates the properties that make it so: 6824 bytes, no byte order mark, no
+//  Both project files state that the copy must stay byte identical to the original and enumerate the
+//  properties that make it so - the library at PowerFramework.Shared.Localization.csproj:241-243, and
+//  this test project restating them at PowerFramework.Shared.Localization.Tests.csproj:239-243: 6824
+//  bytes, no byte order mark, no
 //  XML declaration, UTF-8 Chinese, LF-only line endings, and a final closing element with no trailing
 //  newline. Those were true when written and were STILL only a comment - nothing executed them, so a
 //  build step, an editor, a Git configuration or a copy target that normalised the file would have left
@@ -83,8 +86,9 @@ public class I18nResourceFidelityTests
     /// The message a fixture-guard failure carries.
     /// </summary>
     private const string FixtureMissingMessage =
-        "pfw.i18n.xml is not in the test working directory. Restore the Content item in "
-            + "PowerFramework.Shared.Localization.Tests.csproj:145 - without it this suite cannot "
+        "pfw.i18n.xml is not in the test working directory. Restore the Content item in the LIBRARY "
+            + "project, PowerFramework.Shared.Localization.csproj:256-261 - it is declared there once and "
+            + "flows here down the ProjectReference edge. Without it this suite cannot "
             + "assert anything and every lookup test in this project silently misses.";
 
     /// <summary>

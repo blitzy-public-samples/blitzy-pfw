@@ -69,7 +69,8 @@
 //     0.4.5.3). PascalCase is what the legacy already used, so unlike the preserved
 //     SCREAMING_SNAKE constants elsewhere in this refactor these names need no analyzer
 //     suppression - which matters, because the repository root .editorconfig scopes its naming
-//     suppressions to ten named files and NOT ONE of them is in this project. With
+//     suppressions to the files on its BAND 3 roster - the single source of truth for that list - and
+//     NOT ONE of them is in this project. With
 //     TreatWarningsAsErrors inherited from Directory.Build.props, a member here that needed a
 //     suppression would be a build ERROR with no way to grant it. Never introduce one.
 //

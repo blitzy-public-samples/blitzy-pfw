@@ -36,15 +36,31 @@
 //  2. WHY IT DISCLOSES NOTHING (constraints C-G and C-F). Because the endpoint is anonymous, its
 //     body is world readable by anything that can reach port 5102, so everything it reports is
 //     public. The report therefore carries an overall status token, this service's own name, the
-//     time the report was produced, and the name plus verdict of each readiness check. It carries no
-//     upstream address, no credential, no connection string, no certificate, no environment variable
-//     value, no configuration value, no host name, no other service's port, no exception text and no
-//     stack trace. Three shared framework members are available on every check result and all three
-//     are deliberately dropped rather than projected: Exception (an exception message is not authored
+//     time the report was produced, and A CLOSED TWO-MEMBER VOCABULARY of component identifiers -
+//     `self` and `components` - each with a coarse verdict. It carries no upstream address, no
+//     credential, no connection string, no certificate, no environment variable value, no
+//     configuration value, no host name, no other service's port, no exception text and no stack
+//     trace.
+//
+//     EVERY VALUE IN THE BODY IS AUTHORED IN THIS FILE. NOTHING A REGISTRATION SUPPLIED REACHES IT,
+//     AND THAT IS A CORRECTION RATHER THAN A REFINEMENT. An earlier form echoed each registered
+//     check's own Name and Description on the reasoning that the authored contract models those
+//     members and requires their authors to keep them free of internal detail. That requirement is a
+//     rule on the author of each registration, which is not something this file can enforce - so a
+//     check named for a database host, or a description carrying a provider name, a URL, an
+//     exception summary or a configuration hint, would have been published to anything able to reach
+//     the port. The vocabulary is closed here instead, which IS enforceable. Component checks are
+//     aggregated into ONE entry rather than reported individually, because the count of registered
+//     checks is itself the shape of this service's dependency graph.
+//     Three shared framework members are available on every check result and all three are
+//     deliberately dropped rather than projected: Exception (an exception message is not authored
 //     for disclosure and routinely carries connection strings, addresses and file paths), Data (an
-//     arbitrary bag a check may fill with anything at all) and Duration (see item 6). Only
-//     Description is echoed, because the authored contract models exactly that member and requires
-//     its author to keep it free of configuration values and key material.
+//     arbitrary bag a check may fill with anything at all) and Duration (see item 6).
+//     The per-check detail is NOT lost. Each check's name and verdict go to the OPERATOR channel,
+//     whose audience is authenticated by having access to this service's logs rather than by being
+//     able to reach a port - the same caller-versus-operator split the unhandled-fault handler
+//     applies. Descriptions, exceptions and data members are excluded from that record too, because a
+//     log is not exempt from C-F merely because its reader is trusted.
 //
 //  3. WHY IT DOES NOT AGGREGATE ITS UPSTREAMS. THIS IS NOT AN OVERSIGHT. DO NOT "FIX" IT.
 //     DataServices calls Persistence and Security functionally, so fanning out to them from here
@@ -104,14 +120,25 @@
 //     anonymously would invite exactly the objective that does not exist. Independent scalability is
 //     structural - one container per service - and is not this file's claim to make.
 //
-//  7. WHY Degraded IS 200 AND ONLY Unhealthy IS 503. Contract C-10 requires the response to
-//     distinguish "not ready" from "unhealthy", because a service still completing its startup
-//     validation is not the same as one whose dependency has failed and an operator must be able to
-//     tell them apart. The authored contract fixes the mapping and the reason: Healthy and Degraded
-//     are both reported with 200 "so a probe that tears down on any non-2xx does not kill a service
-//     that is merely still starting", while Unhealthy is reported with 503. This is also the shared
-//     framework's own default result status code mapping, so the two agree rather than compete.
-//     Anything that is neither Healthy nor Degraded fails CLOSED to 503.
+//  7. WHY ONLY Healthy IS 200, AND WHY Degraded IS 503 ALONGSIDE Unhealthy. Contract C-10 requires
+//     the response to distinguish "not ready" from "unhealthy", because a service still completing
+//     its startup validation is not the same as one whose dependency has failed and an operator must
+//     be able to tell them apart. THAT DISTINCTION LIVES IN THE `status` MEMBER, WHICH KEEPS ALL
+//     THREE TOKENS - it does not live in the status code, and an earlier form of this file put it
+//     there by answering 200 for Degraded as well as Healthy.
+//     THAT WAS WRONG, AND THE REASON IS MECHANICAL RATHER THAN A MATTER OF TASTE. This endpoint is
+//     what `depends_on: condition: service_healthy` waits on, and what an orchestrator observes is
+//     the STATUS CODE. `Degraded` means NOT READY. Answered 200, a service that had just said it was
+//     not ready would satisfy the gate, Gateway would start before its upstreams were usable, and
+//     the single most important readiness property in the orchestration would be silently defeated -
+//     while every document still claimed it held. The earlier reasoning was that a probe tearing down
+//     on any non-2xx must not kill a service that is merely still starting; that concern is real and
+//     belongs to a LIVENESS probe, which is a different question from readiness and is not what this
+//     path answers.
+//     So Healthy is 200; Degraded, Unhealthy and any status this build does not recognise are 503,
+//     with the verdict named in the body so the three remain distinguishable. Testing FOR the one
+//     ready state rather than against the failed ones is what makes an unrecognised value fail
+//     CLOSED.
 //
 //  8. WHY THE 503 BODY IS A PROBLEM DOCUMENT WITH A retCode. Both authored OpenAPI specifications in
 //     shared/PowerFramework.Contracts/OpenApi answer a failed /health with application/problem+json
@@ -207,6 +234,46 @@ public static class HealthEndpoints
     /// </summary>
     private const string SelfCheckName = "self";
 
+    /// <summary>
+    /// The name of the single aggregated entry standing for every registered component check.
+    /// </summary>
+    /// <remarks>
+    /// A FIXED PUBLIC IDENTIFIER, and the second and last member of this endpoint's closed vocabulary.
+    /// It is not a registered check's own name and never derived from one: the anonymous body must not
+    /// disclose what a registration chose to call itself, nor how many registrations exist. See
+    /// <see cref="ProjectChecks"/> for the full reasoning and
+    /// <see cref="WriteOperatorRecord"/> for where the per-check detail goes instead.
+    /// </remarks>
+    private const string ComponentsCheckName = "components";
+
+    /// <summary>The public note on the aggregated entry when every component check is ready.</summary>
+    /// <remarks>
+    /// FIXED PROSE, IDENTICAL FOR EVERY OCCURRENCE, so that the member is useful to a reader without
+    /// being a channel. It names no component, no provider, no host and no count.
+    /// </remarks>
+    private const string ComponentsHealthyDescription =
+        "Every registered component readiness check reports ready.";
+
+    /// <summary>The public note on the aggregated entry when any component check is not ready.</summary>
+    /// <remarks>
+    /// It states THAT a component is not ready and never WHICH, for the same reason the unhealthy self
+    /// note states that the evaluation failed and never why. The which is on the operator channel.
+    /// </remarks>
+    private const string ComponentsNotReadyDescription =
+        "At least one registered component readiness check is not ready. The component is named in this "
+        + "service's operator telemetry and is deliberately not disclosed here.";
+
+    /// <summary>
+    /// The operator-channel record carrying the per-check detail the anonymous body withholds.
+    /// </summary>
+    /// <remarks>
+    /// Three structured fields: the reporting service, the aggregate verdict, and each check's name
+    /// with its own verdict. No description, no exception and no arbitrary data member is included -
+    /// see <see cref="WriteOperatorRecord"/>.
+    /// </remarks>
+    private const string OperatorReadinessRecord =
+        "Readiness evaluated for the {Service} service: {Status}. Component checks: {ComponentChecks}.";
+
     /// <summary>The OpenAPI operation identifier, matching the authored contracts' spelling.</summary>
     private const string OperationName = "getHealth";
 
@@ -260,16 +327,21 @@ public static class HealthEndpoints
         dependency condition on upstream health. This endpoint therefore opens no channel to
         Persistence and calls nothing on Security.
 
-        **"Not ready" and "unhealthy" are different states.** `Healthy` and `Degraded` are both
-        reported with 200, so a probe that treats any non-2xx as a failure does not tear down a
-        service that is merely still completing its startup validation. `Unhealthy` is reported with
-        503 and a problem document that names the failing check and carries the legacy PowerFramework
-        return code.
+        **"Not ready" and "unhealthy" are different states, and the difference is in the body rather
+        than in the status code.** Only `Healthy` is answered with 200. `Degraded` means *not ready*
+        and is answered with 503 alongside `Unhealthy`, because the orchestration readiness gate
+        observes the status code - a not-ready service answering 200 would open that gate early. The
+        `status` member keeps all three tokens, so an operator can still tell a service completing its
+        startup validation from one whose dependency has failed. A 503 carries a problem document
+        naming the not-ready component and the legacy PowerFramework return code.
 
-        **The body is public, and is scoped accordingly.** Because the endpoint is anonymous it
-        discloses no upstream address, no credential, no connection string, no certificate, no
-        configuration value, no host name, no other service's port, no exception text and no stack
-        trace.
+        **The body is public, and is scoped accordingly.** Every value in it is authored by this
+        service: the component identifiers are a closed vocabulary - `self` and `components` - rather
+        than the names whatever registered a check chose for it, and component checks are aggregated
+        into one entry so that the number of them is not disclosed either. The body carries no upstream
+        address, no credential, no connection string, no certificate, no configuration value, no host
+        name, no other service's port, no exception text and no stack trace. The per-component detail
+        is available to an operator through this service's own telemetry.
         """;
 
     /// <summary>
@@ -304,7 +376,8 @@ public static class HealthEndpoints
            // a problem document on 503. The handler returns IResult rather than a typed result union
            // for precisely this reason - a union would have the framework infer an additional 500
            // from ProblemHttpResult's own metadata, publishing a response this operation cannot
-           // produce.
+           // produce. The SET is unchanged by decision record item 7; what changed is which verdicts
+           // reach which member of it.
            .Produces<ServiceHealthReport>(StatusCodes.Status200OK)
            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
@@ -328,9 +401,10 @@ public static class HealthEndpoints
     /// running against a response nobody will read.
     /// </param>
     /// <returns>
-    /// HTTP 200 carrying a <see cref="ServiceHealthReport"/> when the verdict is
-    /// <c>Healthy</c> or <c>Degraded</c>; HTTP 503 carrying a problem document when it is
-    /// <c>Unhealthy</c> or anything unrecognised.
+    /// HTTP 200 carrying a <see cref="ServiceHealthReport"/> when the verdict is <c>Healthy</c>; HTTP
+    /// 503 carrying a problem document when it is <c>Degraded</c>, <c>Unhealthy</c> or anything
+    /// unrecognised - <c>Degraded</c> included, because it means not ready and the orchestration gate
+    /// reads the status code (decision record item 7).
     /// </returns>
     private static async Task<IResult> ReportReadinessAsync(
         HttpContext httpContext,
@@ -366,6 +440,14 @@ public static class HealthEndpoints
 
                 status = report.Status;
                 checks = ProjectChecks(report);
+
+                // THE OPERATOR CHANNEL, WHICH IS WHERE THE DETAIL BELONGS (decision record item 2).
+                // The response above carries only this file's own fixed public vocabulary, so the
+                // registration-supplied check names - the thing an operator actually needs in order to
+                // find a failing component - would otherwise be lost entirely. They are recorded here
+                // instead, where the audience is authenticated by having access to the service's logs
+                // rather than by being able to reach a port.
+                WriteOperatorRecord(loggerFactory, report);
             }
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -388,12 +470,15 @@ public static class HealthEndpoints
             checks = [BuildSelfCheck(HealthStatus.Unhealthy)];
         }
 
-        // Fails CLOSED: anything that is neither Healthy nor Degraded is reported as unavailable,
-        // including a status value this build does not recognise. Testing for the two ready states
-        // rather than against the one failed state is what makes that true (decision record item 7).
-        if (status is not (HealthStatus.Healthy or HealthStatus.Degraded))
+        // Fails CLOSED: ONLY Healthy is reported as ready. Degraded means "not ready, but not failed",
+        // and the thing that reads this endpoint reads the STATUS CODE, so a not-ready service that
+        // answered 200 would satisfy the orchestrator's health condition and open the dependency gate
+        // early - which is the one ordering property the gate exists to enforce (decision record item
+        // 7). Testing FOR the single ready state rather than against the failed ones is what makes an
+        // unrecognised status fail closed as well.
+        if (status is not HealthStatus.Healthy)
         {
-            return BuildUnavailableProblem(checks);
+            return BuildNotReadyProblem(status, checks);
         }
 
         // The clock is a substitutable seam rather than a direct read, because the Agent Action Plan's
@@ -412,48 +497,129 @@ public static class HealthEndpoints
     }
 
     /// <summary>
-    /// Projects a shared framework health report onto the wire shape the authored contract fixes.
+    /// Projects a shared framework health report onto the wire shape the authored contract fixes,
+    /// using ONLY this file's fixed public component vocabulary.
     /// </summary>
     /// <param name="report">The evaluated report.</param>
     /// <returns>
-    /// One entry per registered check, preceded by this endpoint's own <c>self</c> entry unless a
-    /// registered check already occupies that name.
+    /// Two entries at most, both named from <see cref="SelfCheckName"/> and
+    /// <see cref="ComponentsCheckName"/>: this endpoint's own statement that the process is answering,
+    /// and - when any component check is registered - one aggregated entry standing for all of them.
     /// </returns>
     /// <remarks>
-    /// Only <c>Name</c>, <c>Status</c> and <c>Description</c> cross the boundary. The report entry's
-    /// <c>Exception</c>, <c>Data</c> and <c>Duration</c> members are dropped for the reasons in
-    /// decision record items 2 and 6. An empty or whitespace description becomes
-    /// <see langword="null"/> so that it is omitted from the body rather than serialized as noise.
+    /// <para>
+    /// NOTHING A REGISTRATION SUPPLIED CROSSES THIS BOUNDARY, AND THAT IS THE WHOLE POINT OF THE
+    /// METHOD (decision record item 2). An earlier form of this projection echoed each registered
+    /// check's own <c>Name</c> and <c>Description</c>. Both are supplied by whatever registered the
+    /// check rather than authored for disclosure, and this endpoint is ANONYMOUS - so a name like
+    /// <c>npgsql-primary-eu-west-1</c> or a description carrying a provider name, a host, a URL, a
+    /// database identifier, an exception summary or a configuration hint would have been published to
+    /// anything able to reach the port. The contract's requirement that check names stay free of
+    /// internal detail was a rule on the AUTHOR of each registration, which is not a control this
+    /// file can enforce; a closed vocabulary declared here is.
+    /// </para>
+    /// <para>
+    /// The names are therefore two fixed constants, and their <c>Status</c> is the only thing that
+    /// varies. Aggregating every component check into one entry is deliberate: reporting the COUNT of
+    /// registered checks, or one anonymous entry per check, would leak the shape of this service's
+    /// dependency graph to an unauthenticated caller - which is the same disclosure in a different
+    /// unit. The per-check detail is not lost; it goes to the operator channel through
+    /// <see cref="WriteOperatorRecord"/>.
+    /// </para>
+    /// <para>
+    /// The report entry's <c>Exception</c>, <c>Data</c> and <c>Duration</c> members are dropped for the
+    /// reasons in decision record items 2 and 6.
+    /// </para>
     /// </remarks>
     private static IReadOnlyList<ServiceHealthCheck> ProjectChecks(HealthReport report)
     {
-        List<ServiceHealthCheck> projected = new(report.Entries.Count + 1);
-        bool selfAlreadyReported = false;
+        ServiceHealthCheck self = BuildSelfCheck(HealthStatus.Healthy);
+
+        if (report.Entries.Count == 0)
+        {
+            return [self];
+        }
+
+        // The worst status across every registered check, computed here rather than taken from
+        // report.Status: the report's own aggregate can be shaped by a registration's result predicate,
+        // whereas this entry stands for the checks themselves and must say what they said.
+        HealthStatus worst = HealthStatus.Healthy;
 
         foreach (KeyValuePair<string, HealthReportEntry> entry in report.Entries)
         {
-            // The shared framework registers checks in a case insensitive dictionary, so the
-            // collision test is case insensitive too.
-            if (string.Equals(entry.Key, SelfCheckName, StringComparison.OrdinalIgnoreCase))
+            if (entry.Value.Status < worst)
             {
-                selfAlreadyReported = true;
+                worst = entry.Value.Status;
             }
-
-            projected.Add(
-                new ServiceHealthCheck(entry.Key, ToWireStatus(entry.Value.Status))
-                {
-                    Description = string.IsNullOrWhiteSpace(entry.Value.Description)
-                        ? null
-                        : entry.Value.Description,
-                });
         }
 
-        if (!selfAlreadyReported)
+        return
+        [
+            self,
+            new ServiceHealthCheck(ComponentsCheckName, ToWireStatus(worst))
+            {
+                Description = worst == HealthStatus.Healthy
+                    ? ComponentsHealthyDescription
+                    : ComponentsNotReadyDescription,
+            },
+        ];
+    }
+
+    /// <summary>
+    /// Records the per-check detail on the operator channel, which is the audience it is authored for.
+    /// </summary>
+    /// <param name="loggerFactory">The host's logging abstraction.</param>
+    /// <param name="report">The evaluated report.</param>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS EXISTS: the anonymous response deliberately carries a closed vocabulary, so without
+    /// this record the one piece of information an operator needs from a failed probe - WHICH component
+    /// is not ready - would exist nowhere. The split is the same one the system applies to an unhandled
+    /// fault: the caller learns the class of failure, the operator learns the detail.
+    /// </para>
+    /// <para>
+    /// WHAT IS RECORDED AND WHAT IS NOT. Each check's NAME and STATUS travel; its
+    /// <c>Description</c>, <c>Exception</c> and <c>Data</c> do NOT. A name is an identifier the
+    /// registration chose and is safe to hold in this service's own logs, whereas a description or an
+    /// exception message is free text that routinely carries a connection string, an address or a file
+    /// path - and a log record is not exempt from that concern merely because its reader is trusted
+    /// (constraint C-F). The names are joined into one field rather than logged per check so that a
+    /// probe polled continuously by an orchestrator produces one record per evaluation.
+    /// </para>
+    /// <para>
+    /// The level is chosen from the verdict: a not-ready evaluation is a warning an operator should
+    /// see, while a healthy one is trace-level so that continuous probing does not fill a log with
+    /// records that say nothing happened.
+    /// </para>
+    /// </remarks>
+    private static void WriteOperatorRecord(ILoggerFactory loggerFactory, HealthReport report)
+    {
+        ILogger logger = loggerFactory.CreateLogger(LoggerCategoryName);
+
+        bool ready = report.Status == HealthStatus.Healthy;
+
+        if (!ready ? !logger.IsEnabled(LogLevel.Warning) : !logger.IsEnabled(LogLevel.Trace))
         {
-            projected.Insert(0, BuildSelfCheck(HealthStatus.Healthy));
+            return;
         }
 
-        return projected;
+        List<string> named = new(report.Entries.Count);
+
+        foreach (KeyValuePair<string, HealthReportEntry> entry in report.Entries)
+        {
+            named.Add(string.Concat(entry.Key, "=", ToWireStatus(entry.Value.Status)));
+        }
+
+        string detail = string.Join(", ", named);
+
+        if (ready)
+        {
+            logger.LogTrace(OperatorReadinessRecord, ServiceIdentifier, ToWireStatus(report.Status), detail);
+        }
+        else
+        {
+            logger.LogWarning(OperatorReadinessRecord, ServiceIdentifier, ToWireStatus(report.Status), detail);
+        }
     }
 
     /// <summary>
@@ -480,36 +646,54 @@ public static class HealthEndpoints
     }
 
     /// <summary>
-    /// Builds the 503 problem document for an unhealthy verdict.
+    /// Builds the 503 problem document for any verdict that is not fully ready.
     /// </summary>
-    /// <param name="checks">The projected checks, from which the failing names are taken.</param>
+    /// <param name="status">
+    /// The evaluated status, which is <see cref="HealthStatus.Degraded"/>,
+    /// <see cref="HealthStatus.Unhealthy"/>, or a value this build does not recognise.
+    /// </param>
+    /// <param name="checks">The projected checks, from which the not-ready names are taken.</param>
     /// <returns>A problem document result carrying the legacy return code.</returns>
     /// <remarks>
+    /// <para>
     /// The authored contract requires the failing check to be named in the problem detail and the
     /// legacy PowerFramework return code to travel in the single permitted extension member, rather
-    /// than a second error schema being defined for this one response. Check NAMES are identifiers,
-    /// which the contract requires their authors to keep free of paths, type names and any other
-    /// internal detail; no description, exception or configuration value is carried here.
+    /// than a second error schema being defined for this one response. Every name that reaches this
+    /// method comes from the fixed public component vocabulary this file declares, so it is an
+    /// identifier this file chose rather than one a registration supplied; no description, exception
+    /// or configuration value is carried here (decision record item 2).
+    /// </para>
+    /// <para>
+    /// DEGRADED AND UNHEALTHY BOTH ARRIVE HERE AND ARE DISTINGUISHED IN THE BODY RATHER THAN IN THE
+    /// STATUS. Both are answered 503, because both mean "not ready" and the orchestration gate reads
+    /// the status code; the <c>status</c> member of the report still separates them, so an operator
+    /// can tell a service still completing startup validation from one whose dependency has failed.
+    /// </para>
     /// </remarks>
-    private static IResult BuildUnavailableProblem(IReadOnlyList<ServiceHealthCheck> checks)
+    private static IResult BuildNotReadyProblem(
+        HealthStatus status,
+        IReadOnlyList<ServiceHealthCheck> checks)
     {
-        List<string> failing = [];
+        string wireStatus = ToWireStatus(status);
+
+        List<string> notReady = [];
 
         foreach (ServiceHealthCheck check in checks)
         {
-            if (string.Equals(check.Status, StatusUnhealthy, StringComparison.Ordinal))
+            if (!string.Equals(check.Status, StatusHealthy, StringComparison.Ordinal))
             {
-                failing.Add(check.Name);
+                notReady.Add(check.Name);
             }
         }
 
         // The empty case is reachable and is handled rather than assumed away: an aggregate can be
-        // Unhealthy while no individual entry is, for instance when a check reports Degraded under a
-        // registration that treats degradation as failure.
-        string detail = failing.Count == 0
-            ? "The DataServices service is not ready."
-            : "The DataServices service is not ready. Readiness check(s) reporting "
-              + StatusUnhealthy + ": " + string.Join(", ", failing) + ".";
+        // Degraded or Unhealthy while every individual entry reports Healthy, for instance under a
+        // registration whose own result predicate degrades the whole on a condition no single entry
+        // reports.
+        string detail = notReady.Count == 0
+            ? "The DataServices service is not ready (" + wireStatus + ")."
+            : "The DataServices service is not ready (" + wireStatus + "). Readiness check(s) not "
+              + "reporting " + StatusHealthy + ": " + string.Join(", ", notReady) + ".";
 
         return TypedResults.Problem(
             detail: detail,
@@ -546,10 +730,11 @@ public static class HealthEndpoints
 /// </summary>
 /// <param name="Status">
 /// The overall verdict, carrying the distinction contract C-10 requires between "not ready" and
-/// "unhealthy": <c>Healthy</c> is fully ready and is reported with 200; <c>Degraded</c> is not ready
-/// but not failed, for instance a service still completing its startup validation, and is also
-/// reported with 200 so that a probe tearing down on any non-2xx does not kill it; <c>Unhealthy</c>
-/// has failed and is reported with 503.
+/// "unhealthy": <c>Healthy</c> is fully ready and is the ONLY verdict reported with 200;
+/// <c>Degraded</c> is not ready but not failed, for instance a service still completing its startup
+/// validation; <c>Unhealthy</c> has failed. The latter two are both reported with 503, because both
+/// mean not ready and the orchestration readiness gate observes the status code - this member is what
+/// keeps them distinguishable.
 /// </param>
 /// <param name="Service">
 /// The reporting service, so that Gateway's aggregate can name each upstream individually rather
@@ -559,8 +744,11 @@ public static class HealthEndpoints
 /// When this report was produced, so a consumer can detect a stale cached report.
 /// </param>
 /// <param name="Checks">
-/// The individual component checks behind the verdict, present so an operator can tell WHICH check is
-/// not yet satisfied rather than only that something is not.
+/// The components behind the verdict, named from a CLOSED public vocabulary authored by this service -
+/// never from a registration's own check name, and never one entry per registered check. See
+/// <c>HealthEndpoints.ProjectChecks</c>: an anonymous body must disclose neither what a registration
+/// called itself nor how many registrations exist, and the per-check detail an operator needs is
+/// carried on this service's operator telemetry instead.
 /// </param>
 /// <remarks>
 /// <para>
@@ -594,8 +782,8 @@ public sealed record ServiceHealthReport(
 /// One component check contributing to a <see cref="ServiceHealthReport"/>.
 /// </summary>
 /// <param name="Name">
-/// The check's stable identifier - never a file path, a provider type name or any other internal
-/// detail of this service.
+/// The component's stable identifier, drawn from this service's own closed public vocabulary - never a
+/// registration-supplied check name, a file path, a provider type name or any other internal detail.
 /// </param>
 /// <param name="Status">
 /// This check's own verdict, using the same three tokens as the overall report.
@@ -605,8 +793,9 @@ public sealed record ServiceHealthCheck(
     string Status)
 {
     /// <summary>
-    /// An optional human readable note. Carries no configuration value and no key material, and never
-    /// carries an exception message or a stack trace.
+    /// An optional human readable note. FIXED PROSE authored in this file, identical for every
+    /// occurrence of a given verdict: it carries no configuration value, no key material, no component
+    /// name and no count, and never an exception message or a stack trace.
     /// </summary>
     /// <remarks>
     /// DECLARED AS A PROPERTY WITH AN OMIT WHEN NULL RULE RATHER THAN AS A FOURTH POSITIONAL

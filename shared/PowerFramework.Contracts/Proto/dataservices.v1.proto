@@ -547,10 +547,28 @@ enum Severity {
 // do NOT (Section 11). The flag lets a consumer tell translatable text from untranslatable text
 // WITHOUT ANY MESSAGE CHANGING. Routing the untranslated ones through localization would change
 // observable output, which is exactly the silent correction the mandate forbids.
+//
+// ============ NEITHER `text` NOR `format_args` EVER CARRIES A .NET EXCEPTION'S OWN DETAIL =========
+//
+// Every message on this boundary is either a REPRODUCED LEGACY MESSAGE or a DEFINED ERROR this
+// refactor introduced for a condition the legacy could not have. A reproduced message contains what
+// the legacy showed and nothing more. A defined error contains fixed text plus values the caller
+// already holds - a handle, a session id, a column name, a return code - plus, where the fault
+// originated in code this service reached but does not own, a CORRELATION ID it minted.
+//
+// The one condition that makes this worth stating: a cross-DataWindow reference resolves and the
+// reached host's own call THROWS. That exception is arbitrary application code's, and its message can
+// carry a file path, a connection string fragment, a SQL statement, a configuration key or a
+// stack-shaped type name. It is recorded server-side against the correlation id the payload carries and
+// is NOT placed in either field (CWE-209). `format_args` matters as much as `text` here, because a
+// consumer re-renders from it - sanitising one and not the other would relocate the leak rather than
+// close it. The correlation id is deterministic (session id plus a per-session ordinal, no clock and no
+// randomness), so a paired characterization recording compares it directly instead of masking it.
 message StructuredError {
   // The message text as the legacy would have shown it, AFTER any localization the legacy itself
   // performed and AFTER Sprintf substitution. This is observable output and is reproduced verbatim -
-  // including where it is hardcoded Chinese.
+  // including where it is hardcoded Chinese. For a defined error introduced by this refactor the text
+  // is FIXED - see the CWE-209 note above.
   string text = 1;
 
   // Whether `text` was produced through the localization layer. See the note above: this REPORTS a
@@ -565,7 +583,8 @@ message StructuredError {
 
   // The Sprintf substitution arguments, in order, BEFORE substitution. Carried alongside the
   // substituted `text` so a consumer can re-render the message in another locale or another format
-  // without parsing the rendered string back apart.
+  // without parsing the rendered string back apart. SUBJECT TO THE SAME CWE-209 RULE AS `text`: a
+  // reached host's exception type and message are never among these arguments; a correlation id is.
   repeated string format_args = 4;
 
   Severity severity = 5;
@@ -1729,8 +1748,21 @@ message UpdateResponse {
   // ABSENT MEANS "NONE COLLECTED", NEVER AN ERROR. Collection is conditional at three levels in the
   // legacy [:L215, :L226, :L242-L244], so an update that inserted nothing, or hit no identity column,
   // legitimately reports no identity block at all.
+  //
+  // THE FIELD IS REPEATED BECAUSE C-06's IS, AND THE RELAY MUST NOT NARROW IT. One Update can emit one
+  // block per update table: the worker loops `for nIndex = 1 to UpperBound(Tables)` calling
+  // `_of_Update` per table [n_cst_thread_task_sqlupdate.sru:L358-L369], each call fires the callback at
+  // most once [:L243], and the caller-side proxy APPENDS each firing to an ordered array
+  // [n_cst_threading_task_sqlupdate.sru:L45, L73-L76] which it later replays in full
+  // [:L128, L142-L195]. A singular field here would have relayed the first block and dropped the rest -
+  // data loss that returns a plausible response, because no count in this message would disagree.
+  //
+  // THE RELAY IS ORDER-PRESERVING AT BOTH LEVELS: the BLOCKS travel in the order received, which is the
+  // order the tables were declared, AND each block's two arrays travel element for element as
+  // collected. Re-ordering, merging or de-duplicating either level pairs identity values with the wrong
+  // column or the wrong row.
   // ==========================================================================================
-  common.v1.IdentityColumnData identity = 6;
+  repeated common.v1.IdentityColumnData identity = 6;
 }
 
 
@@ -3473,9 +3505,18 @@ message GetExpressionStateResponse {
 // expects nothing back. Giving them a request direction would invent a reply the legacy has no place
 // for.
 //
-// ORDERING: each event carries the same monotonic sequencing token as C-03's notification group, and the
-// same rule applies - THE TOKEN IS FOR DETECTION ONLY. A gap or a reversal is a hard error, never an
-// invitation to reorder.
+// ORDERING: THIS STREAM IS PATTERN (a), ORDERING_DISCIPLINE_SEQUENCED, AND THE TOKEN THEREFORE CARRIES
+// REORDER AUTHORITY. It is the same discipline C-03's notification group is under, for the same reason:
+// these are notifications that carry NO CROSS-EVENT STATE, which is exactly the property that makes
+// reordering harmless. A consumer uses the token to detect a gap and MAY reorder on it, or may process
+// elements as they arrive.
+//
+// DO NOT TRANSPLANT THE OTHER DISCIPLINE'S RULE ONTO THIS ONE. Under pattern (b),
+// ORDERING_DISCIPLINE_SYNCHRONOUS - C-03's item-change and validation chain - the same kind of token is
+// for DETECTION ONLY and a gap or a reversal fails the session, because the validation-error handler
+// reads and clears state the preceding item-change event stashed. The two rules are opposite and the
+// discipline field below is how a consumer tells which one applies, rather than deducing it from the
+// event identity and a table it has to keep in step with.
 message EventStreamRequest {
   string session_id = 1;
   string datawindow_handle = 2;
@@ -3487,8 +3528,17 @@ message EventStreamRequest {
 message EventStreamResponse {
   ColumnExpEvent event = 1;
 
-  // Monotonic per stream, starting at 1. Detection only - see above.
+  // Monotonic per stream, starting at 1. Usable for gap detection AND for reordering, because this
+  // stream's discipline is SEQUENCED - see the ordering note above.
   int64 sequence = 2;
+
+  // WHICH DISCIPLINE GOVERNS THIS STREAM, CARRIED AS DATA RATHER THAN LEFT TO BE INFERRED. Always
+  // ORDERING_DISCIPLINE_SEQUENCED here; it is stated on the message for the same reason
+  // SequencingToken carries it on the event chain - a consumer's ordering behaviour must be driven by
+  // a field it already has rather than by a table of event identities it has to keep in step with
+  // docs/CONTRACTS.md 6.6. The two disciplines have OPPOSITE rules for an out-of-order arrival, so
+  // guessing wrong either reorders a chain that must not be reordered or fails a stream that may be.
+  OrderingDiscipline discipline = 3;
 }
 
 // ---- The three events declared on columnexp ITSELF ----
@@ -3578,9 +3628,17 @@ message ExpressionError {
 
   Category category = 5;
 
-  // The text of a CAUGHT RUNTIME EXCEPTION, where the legacy captured one - the cache-error site at
+  // The text of a CAUGHT RUNTIME EXCEPTION, where THE LEGACY captured one - the cache-error site at
   // [:L739] embeds it in its message. Carried separately so a consumer can distinguish an engine
   // diagnostic from a propagated runtime fault.
+  //
+  // ITS SCOPE IS EXACTLY THAT ONE LEGACY SITE, AND THAT BOUND IS LOAD-BEARING (CWE-209). The text here
+  // is a PowerScript exception's `ex.text` that the legacy itself rendered into observable output, so
+  // reproducing it is behaviour preservation. It is NOT a general channel for .NET exception detail: a
+  // fault raised by a reached cross-DataWindow host has no legacy counterpart at all, is recorded
+  // server-side against a correlation id, and leaves this field empty. Populating it from a managed
+  // exception would smuggle host-internal text onto the boundary through a field whose justification is
+  // that the legacy already published it.
   string caught_exception_text = 6;
 
   // The categories the 28 sites fall into. Locators are given so each category is adjudicable against

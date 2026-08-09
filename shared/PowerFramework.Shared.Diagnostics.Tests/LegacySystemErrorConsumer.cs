@@ -99,8 +99,9 @@
 //  baseline (nullable enabled, warnings are errors, warning-clean), and AAP 0.8.2 (legacy text
 //  preserved verbatim - the Chinese report labels below are byte-for-byte from pfw.sra:L129-L138).
 //
-//  Naming: the repository root .editorconfig scopes its naming-analyzer suppressions to ten named
-//  PRODUCTION files and none of them is in this project, so every identifier here is conventional
+//  Naming: the repository root .editorconfig scopes its naming-analyzer suppressions to the named
+//  PRODUCTION files on its BAND 3 roster - the single source of truth for that list - and none of
+//  them is in this project, so every identifier here is conventional
 //  PascalCase and no SCREAMING_SNAKE constant is declared.
 // ==================================================================================================
 
@@ -1089,4 +1090,3 @@ internal sealed class RecordingTerminationSink : ILegacyTerminationSink
         _exitCodes.Add(exitCode);
     }
 }
-

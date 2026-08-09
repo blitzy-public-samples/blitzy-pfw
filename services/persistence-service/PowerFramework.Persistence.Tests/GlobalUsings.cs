@@ -93,32 +93,41 @@
 //       Proto/common.v1.proto      -> PowerFramework.Contracts.Common.V1       (20 types)
 //       Proto/persistence.v1.proto -> PowerFramework.Contracts.Persistence.V1  (94 types)
 //
-//     Common.V1 is consumed today by DbErrorDataTests (DbError), ItemStatusTests and
-//     ItemStatusMachineBufferScreenTests (the ItemStatus and DwBuffer enums).
+//     Common.V1 is consumed today by DbErrorDataTests (DbError), ItemStatusTests,
+//     ItemStatusMachineBufferScreenTests and DataWindowBuffersTests (the ItemStatus and DwBuffer
+//     enums), the three ChangesetCodec suites, FullStateCodecTests and IdentityColumnResolverTests.
 //
-//     Persistence.V1 is consumed by no sibling YET, and is declared here anyway - the one place
-//     this file departs from "declare only what is already consumed". Three reasons, recorded so
-//     the departure is auditable rather than accidental (C-K). It is required by this file's own
-//     specification; it is the namespace carrying contracts C-05 Query, C-06 Update, C-07 Command
-//     and C-08 Transaction, so the planned QueryServiceTests, UpdateServiceTests and
-//     CommandAndTransactionServiceTests cannot be written without it; and an unused global using
-//     provably costs nothing here - verified by building one, which produced zero warnings and
-//     zero errors, because the unused-import diagnostics are hidden by default in this
-//     configuration. The alternative, letting every gRPC-facing test file import it locally, is
-//     exactly the repetition this file exists to remove.
+//     Persistence.V1 IS NOW CONSUMED, which retires the departure this note used to record. When
+//     this file was written no sibling referenced it and it was declared anyway - the one place the
+//     file departed from "declare only what is already consumed" - on the grounds that it carries
+//     contracts C-05 Query, C-06 Update, C-07 Command and C-08 Transaction and that the planned
+//     service suites could not be written without it. FullStateCodecTests now takes QueryDataChunk
+//     from it, so the directive stands on the same footing as every other entry in this section and
+//     needs no special justification. The reasoning is left here rather than deleted because the
+//     measurement behind it is still useful: an unused global using provably costs nothing in this
+//     configuration - verified by building one, which produced zero warnings and zero errors,
+//     because the unused-import diagnostics are hidden by default - so a future addition made ahead
+//     of its first consumer is a judgement call about clarity, not about the build.
 // --------------------------------------------------------------------------------------------------
 global using PowerFramework.Contracts.Common.V1;
 global using PowerFramework.Contracts.Persistence.V1;
 // --------------------------------------------------------------------------------------------------
 //  2. THE SUBJECT UNDER TEST
-//     Exactly the four namespaces the PowerFramework.Persistence application project actually
-//     declares today, each verified against the real folder and each genuinely consumed by at
-//     least one sibling:
+//     FOUR of the SEVEN namespaces the PowerFramework.Persistence application project declares
+//     today - the four with enough consumers to earn a whole-assembly directive. Each is verified
+//     against the real folder and each is genuinely consumed by at least one sibling; the note below
+//     records the other three and why they stay file-local.
 //
-//       Buffers   ItemStatusMachine, ItemStatusExtensions  <- ItemStatusTests,
-//                                                             ItemStatusMachineBufferScreenTests
+//       Buffers   ItemStatusMachine, ItemStatusExtensions, <- ItemStatusTests,
+//                 DataWindowBuffers, ChangesetCodec,          ItemStatusMachineBufferScreenTests,
+//                 FullStateCodec                             DataWindowBuffersTests,
+//                                                            ChangesetCodecTests,
+//                                                            ChangesetCodecTransferTests,
+//                                                            ChangesetCodecReceiveTests,
+//                                                            FullStateCodecTests
 //       Data      CompanyEntity                            <- CompanyEntityTests
-//       Errors    DbErrorData, DbErrorMessages             <- DbErrorDataTests
+//       Errors    DbErrorData, DbErrorMessages,            <- DbErrorDataTests,
+//                 SqlRedactor                                 SqlRedactorTests
 //       Sql       SelectStatementModel                     <- SelectStatementModelTests,
 //                                                             SelectStatementModelCompoundSelectTests
 //
@@ -126,23 +135,34 @@ global using PowerFramework.Contracts.Persistence.V1;
 //     InternalsVisibleTo("PowerFramework.Persistence.Tests"); SelectStatementModel,
 //     ItemStatusMachine and ItemStatusExtensions are all internal and all driven from here.
 //
-//     SEVEN FURTHER NAMESPACES ARE DELIBERATELY ABSENT, AND THIS IS THE MOST IMPORTANT MAINTENANCE
-//     NOTE IN THE FILE. Sql.Paging, Concurrency, Tasks, Tasks.TaskProxies, Transactions,
-//     Configuration and Grpc are all planned for this service and none of them exists yet. A
-//     global using naming a namespace that does not exist is not a harmless forward declaration -
-//     it is an immediate hard failure. Verified by building it: adding
-//     PowerFramework.Persistence.Sql.Paging here produces
-//       error CS0234: The type or namespace name 'Paging' does not exist in the namespace
-//                     'PowerFramework.Persistence.Sql'
-//     and takes the whole service's build down with it, this file being compiled into every
-//     compilation unit. Each of the seven is therefore added HERE, to this section, only once the
+//     FOUR FURTHER NAMESPACES ARE STILL ABSENT, AND THIS IS THE MOST IMPORTANT MAINTENANCE NOTE IN
+//     THE FILE. Tasks, Tasks.TaskProxies, Configuration and Grpc are planned for this service and
+//     none of them exists yet. A global using naming a namespace that does not exist is not a
+//     harmless forward declaration - it is an immediate hard failure with
+//       error CS0234: The type or namespace name '<X>' does not exist in the namespace
+//                     'PowerFramework.Persistence...'
+//     and it takes the whole service's build down with it, this file being compiled into every
+//     compilation unit. Each of the four is therefore added HERE, to this section, only once the
 //     corresponding application folder genuinely declares it - never in anticipation.
 //
-//     Adding one is also not automatic even then: Grpc in particular will introduce QueryService,
-//     UpdateService, CommandService and TransactionService, which are the same simple names as the
-//     generated service classes imported in section 1. Whoever adds it resolves that the way
-//     section 5 resolves RetCode - with an alias, never by dropping a namespace or renaming
-//     anything in the application project.
+//     THREE OF THE ORIGINAL SEVEN NOW EXIST, AND THEY ARE STILL NOT GLOBAL USINGS. Sql.Paging,
+//     Concurrency and Transactions are declared by the application project today - Sql.Paging by
+//     Sql/Paging/{IPagingRewriter,SqlServerPagingRewriter,OraclePagingRewriter}.cs, Concurrency by
+//     Concurrency/{UpdateWhereBuilder,IdentityColumnResolver}.cs, Transactions by
+//     Transactions/TransactionData.cs. Adding one here is now LEGAL; it is not automatic, because
+//     section 1's rule is "declare what is consumed by more than one sibling". Sql.Paging has exactly
+//     one consumer (PagedUniqueIndexColumnValidatorTests), Transactions has exactly one
+//     (TransactionDataTests), and Concurrency has two that already import it file-scoped
+//     (IdentityColumnResolverTests, UpdateWhereBuilderTests), so all three stay
+//     file-scoped until a third consumer makes the repetition worth removing. That is a threshold
+//     decision, not a prohibition - which is why this paragraph exists rather than the three simply
+//     disappearing from the note.
+//
+//     Adding one is also not automatic even when the threshold is met: Grpc in particular will
+//     introduce QueryService, UpdateService, CommandService and TransactionService, which are the same
+//     simple names as the generated service classes imported in section 1. Whoever adds it resolves
+//     that the way section 5 resolves RetCode - with an alias, never by dropping a namespace or
+//     renaming anything in the application project.
 // --------------------------------------------------------------------------------------------------
 global using PowerFramework.Persistence.Buffers;
 global using PowerFramework.Persistence.Data;

@@ -107,6 +107,12 @@ public sealed class GeneratedStubPresenceTests
 
     private const string PersistenceFileName = "persistence.v1.proto";
 
+    private const string CommonPackage = "common.v1";
+
+    private const string DataServicesPackage = "dataservices.v1";
+
+    private const string PersistencePackage = "persistence.v1";
+
     private const string CommonNamespace = "PowerFramework.Contracts.Common.V1";
 
     private const string DataServicesNamespace = "PowerFramework.Contracts.DataServices.V1";
@@ -161,12 +167,27 @@ public sealed class GeneratedStubPresenceTests
     /// <param name="MethodName">The rpc name, in its proto spelling.</param>
     /// <param name="ClientStreaming">Whether the client streams its requests.</param>
     /// <param name="ServerStreaming">Whether the server streams its responses.</param>
+    /// <param name="RequestMessage">
+    /// The fully-qualified message the method accepts, stated INDEPENDENTLY of the descriptor graph.
+    /// </param>
+    /// <param name="ResponseMessage">
+    /// The fully-qualified message the method returns, likewise stated independently.
+    /// </param>
+    /// <remarks>
+    /// THE TWO MESSAGE NAMES ARE THE POINT OF THIS RECORD, NOT DECORATION. Reading them off the
+    /// descriptor - as an earlier form of this suite did - makes every signature assertion
+    /// self-fulfilling: whatever the generator produced becomes the expectation, so a request type
+    /// swapped for another that happens to compile passes. Stating them here means the frozen contract
+    /// is the expectation and the descriptor is the subject.
+    /// </remarks>
     private sealed record RequiredMethod(
         string ContractId,
         string ServiceName,
         string MethodName,
         bool ClientStreaming,
-        bool ServerStreaming);
+        bool ServerStreaming,
+        string RequestMessage,
+        string ResponseMessage);
 
     private static readonly ServiceContract[] Roster =
     [
@@ -237,13 +258,87 @@ public sealed class GeneratedStubPresenceTests
             + "which still yields the message types and the service DESCRIPTORS and therefore still "
             + "compiles.");
 
+    /// <summary>The proto package one published definition declares.</summary>
+    /// <exception cref="FailException">The name is not one of the three published definitions.</exception>
+    private static string ProtoPackageOf(string protoFileName) => protoFileName switch
+    {
+        CommonFileName => CommonPackage,
+        DataServicesFileName => DataServicesPackage,
+        PersistenceFileName => PersistencePackage,
+        _ => throw FailException.ForFailure(
+            $"'{protoFileName}' is not one of the three published definitions, so no proto package is "
+            + "known for it. A fourth definition entering the boundary must be added to this map and to "
+            + "the file roster together."),
+    };
+
+    /// <summary>The fully-qualified proto name of one in-scope service, built from its own contract row.</summary>
+    private static string ProtoServiceFullName(ServiceContract contract) =>
+        $"{ProtoPackageOf(contract.ProtoFileName)}.{contract.ServiceName}";
+
+    /// <summary>The <c>csharp_namespace</c> the definition declaring this package sets.</summary>
+    /// <exception cref="FailException">The package is not one of the three published packages.</exception>
+    private static string CsharpNamespaceOfPackage(string protoPackage) => protoPackage switch
+    {
+        CommonPackage => CommonNamespace,
+        DataServicesPackage => DataServicesNamespace,
+        PersistencePackage => PersistenceNamespace,
+        _ => throw FailException.ForFailure(
+            $"'{protoPackage}' is not one of the three published packages "
+            + $"[{CommonPackage}, {DataServicesPackage}, {PersistencePackage}]."),
+    };
+
+    /// <summary>
+    /// The generated CLR type a fully-qualified proto message name must project to, resolved WITHOUT
+    /// consulting the descriptor graph.
+    /// </summary>
+    /// <remarks>
+    /// This is the helper that lets a signature assertion be a real assertion. Taking the expected type
+    /// from <c>MethodDescriptor.InputType.ClrType</c> makes whatever the generator produced into the
+    /// expectation, so a request type swapped for another that happens to compile passes; building it
+    /// from the FROZEN proto name instead means the swap fails.
+    /// <para>
+    /// The projection rule is protoc's own: the package maps to the declared <c>csharp_namespace</c>, and
+    /// a nested message lands under a <c>Types</c> holder class - <c>a.b.Outer.Inner</c> becomes
+    /// <c>Namespace.Outer+Types+Inner</c>. No rpc request or response is nested today, but the rule is
+    /// implemented rather than assumed away so that adding one cannot silently mis-resolve.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="FailException">The name carries no known package, or nothing was generated.</exception>
+    private static Type ExpectedGeneratedMessageType(string messageFullName, string because)
+    {
+        string protoPackage = new[] { CommonPackage, DataServicesPackage, PersistencePackage }
+            .SingleOrDefault(candidate => messageFullName.StartsWith(
+                candidate + ".",
+                StringComparison.Ordinal))
+            ?? throw FailException.ForFailure(
+                $"'{messageFullName}' does not begin with any of the three published packages "
+                + $"[{CommonPackage}, {DataServicesPackage}, {PersistencePackage}]. Every name in the "
+                + "frozen inventories is fully qualified precisely so this can never be ambiguous.");
+
+        string relativeName = messageFullName[(protoPackage.Length + 1)..];
+        string nestedPath = string.Join("+Types+", relativeName.Split('.'));
+
+        return RequireGeneratedType(
+            $"{CsharpNamespaceOfPackage(protoPackage)}.{nestedPath}",
+            because);
+    }
+
     // ==============================================================================================
-    //  THE REQUIRED METHOD SURFACE, WITH THE STREAMING DIRECTION EACH ONE'S LEGACY SHAPE FORCES
+    //  THE REQUIRED METHOD SURFACE - COMPLETE, EXPLICIT AND FROZEN
     //
-    //  Presence and direction only. What each method DOES belongs to the service projects' own tests;
-    //  what its messages CONTAIN belongs to ProtoDescriptorTests. Direction is in this file because it
-    //  is part of the generated signature on both halves, and because a direction changed to unary
-    //  would destroy the behaviour it exists to carry while still compiling everywhere.
+    //  All 77 rpcs of contracts C-03 through C-08, each with its streaming direction and BOTH of its
+    //  message names, written out rather than derived. Completeness is the property that matters here,
+    //  and it is why this list is long: a roster naming a selected subset lets a DELETED rpc delete its
+    //  own test row, so the suite reports green on a boundary that has silently lost a method. Every row
+    //  is therefore compared BOTH ways below - nothing named here may be missing from the descriptor
+    //  graph, and nothing in the descriptor graph may be absent from here.
+    //
+    //  Presence, direction and message identity only. What each method DOES belongs to the service
+    //  projects' own tests; what its messages CONTAIN belongs to ProtoDescriptorTests. Direction is in
+    //  this file because it is part of the generated signature on both halves, and because a direction
+    //  changed to unary would destroy the behaviour it exists to carry while still compiling everywhere.
+    //  The two message names are here because reading them off the descriptor makes every signature
+    //  assertion self-fulfilling - see the remarks on RequiredMethod.
     // ==============================================================================================
 
     private static readonly RequiredMethod[] RequiredMethodRoster =
@@ -258,14 +353,27 @@ public sealed class GeneratedStubPresenceTests
         // EventChain is BIDIRECTIONAL because it carries the ordered, vetoable chain of all 22 events
         // se_cst_dw declares - 9 semantic and 13 raw pbm_dwn* [se_cst_dw.sru:L11-L32] - in which a
         // handler's result feeds the next event, so neither half can be a one-shot request.
-        new("C-03", "DataWindowService", "Retrieve", false, true),
-        new("C-03", "DataWindowService", "OpenValidationSession", false, false),
-        new("C-03", "DataWindowService", "CloseValidationSession", false, false),
-        new("C-03", "DataWindowService", "EventChain", true, true),
-        new("C-03", "DataWindowService", "Update", false, false),
-        new("C-03", "DataWindowService", "GetEventGate", false, false),
-        new("C-03", "DataWindowService", "DisableEvent", false, false),
-        new("C-03", "DataWindowService", "EnableEvent", false, false),
+        //
+        // The eight headless-half accessors that follow the gate carry the three presentational
+        // DataWindow services' data model across the boundary - the filter and sort expressions, the
+        // menu item model and the row-selection state machine - while their rendering halves stay
+        // deferred behind Gateway's /v1/design/** extension point.
+        new("C-03", "DataWindowService", "Retrieve", false, true, "dataservices.v1.RetrieveRequest", "dataservices.v1.RetrieveChunk"),
+        new("C-03", "DataWindowService", "OpenValidationSession", false, false, "dataservices.v1.OpenValidationSessionRequest", "dataservices.v1.OpenValidationSessionResponse"),
+        new("C-03", "DataWindowService", "CloseValidationSession", false, false, "dataservices.v1.CloseValidationSessionRequest", "dataservices.v1.CloseValidationSessionResponse"),
+        new("C-03", "DataWindowService", "EventChain", true, true, "dataservices.v1.EventChainRequest", "dataservices.v1.EventChainResponse"),
+        new("C-03", "DataWindowService", "Update", false, false, "dataservices.v1.UpdateRequest", "dataservices.v1.UpdateResponse"),
+        new("C-03", "DataWindowService", "GetEventGate", false, false, "dataservices.v1.GetEventGateRequest", "dataservices.v1.GetEventGateResponse"),
+        new("C-03", "DataWindowService", "DisableEvent", false, false, "dataservices.v1.DisableEventRequest", "dataservices.v1.DisableEventResponse"),
+        new("C-03", "DataWindowService", "EnableEvent", false, false, "dataservices.v1.EnableEventRequest", "dataservices.v1.EnableEventResponse"),
+        new("C-03", "DataWindowService", "GetDropDownSearchState", false, false, "dataservices.v1.GetDropDownSearchStateRequest", "dataservices.v1.GetDropDownSearchStateResponse"),
+        new("C-03", "DataWindowService", "ApplyDropDownSearch", false, false, "dataservices.v1.ApplyDropDownSearchRequest", "dataservices.v1.ApplyDropDownSearchResponse"),
+        new("C-03", "DataWindowService", "GetColumnSortState", false, false, "dataservices.v1.GetColumnSortStateRequest", "dataservices.v1.GetColumnSortStateResponse"),
+        new("C-03", "DataWindowService", "ApplyColumnSort", false, false, "dataservices.v1.ApplyColumnSortRequest", "dataservices.v1.ApplyColumnSortResponse"),
+        new("C-03", "DataWindowService", "GetContextMenuModel", false, false, "dataservices.v1.GetContextMenuModelRequest", "dataservices.v1.GetContextMenuModelResponse"),
+        new("C-03", "DataWindowService", "ApplyContextMenuModel", false, false, "dataservices.v1.ApplyContextMenuModelRequest", "dataservices.v1.ApplyContextMenuModelResponse"),
+        new("C-03", "DataWindowService", "GetRowSelectState", false, false, "dataservices.v1.GetRowSelectStateRequest", "dataservices.v1.GetRowSelectStateResponse"),
+        new("C-03", "DataWindowService", "ApplyRowSelectStyle", false, false, "dataservices.v1.ApplyRowSelectStyleRequest", "dataservices.v1.ApplyRowSelectStyleResponse"),
 
         // C-04. The two INVERTED channels, both bidirectional by structural necessity.
         //
@@ -277,35 +385,381 @@ public sealed class GeneratedStubPresenceTests
         //
         // TraceChannel carries oncolumnexptrace(row, dwo, stack, expr, value) [se_cst_dw.sru:L32], the
         // diagnostic stream the client subscribes to and the engine pushes into.
-        new("C-04", "ColumnExpressionService", "InvokeMethodChannel", true, true),
-        new("C-04", "ColumnExpressionService", "TraceChannel", true, true),
+        //
+        // THE INVERSION IS VISIBLE IN THIS TABLE AND NOWHERE ELSE, WHICH IS WHY THE MESSAGE NAMES HAD TO
+        // BE WRITTEN OUT. InvokeMethodChannel's request side carries InvokeMethodResponse and its
+        // response side carries InvokeMethodRequest - the names read backwards because the engine is the
+        // party ISSUING the macro call. Derived from the descriptor that fact could never fail; stated
+        // here, swapping the two sides fails immediately.
+        //
+        // The remaining 24 rows are the real API surface of n_cst_dwsvc_columnexp: the legacy
+        // documentation describes nine methods, the 2,435-line source declares far more, and the wire
+        // contract must carry what the source has rather than what the document lists.
+        new("C-04", "ColumnExpressionService", "OpenExpressionSession", false, false, "dataservices.v1.OpenExpressionSessionRequest", "dataservices.v1.OpenExpressionSessionResponse"),
+        new("C-04", "ColumnExpressionService", "CloseExpressionSession", false, false, "dataservices.v1.CloseExpressionSessionRequest", "dataservices.v1.CloseExpressionSessionResponse"),
+        new("C-04", "ColumnExpressionService", "AddExpression", false, false, "dataservices.v1.AddExpressionRequest", "dataservices.v1.AddExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "SetExpression", false, false, "dataservices.v1.SetExpressionRequest", "dataservices.v1.SetExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "GetExpression", false, false, "dataservices.v1.GetExpressionRequest", "dataservices.v1.GetExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "RemoveExpression", false, false, "dataservices.v1.RemoveExpressionRequest", "dataservices.v1.RemoveExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "RemoveAllExpressions", false, false, "dataservices.v1.RemoveAllExpressionsRequest", "dataservices.v1.RemoveAllExpressionsResponse"),
+        new("C-04", "ColumnExpressionService", "AddVariable", false, false, "dataservices.v1.AddVariableRequest", "dataservices.v1.AddVariableResponse"),
+        new("C-04", "ColumnExpressionService", "SetVariable", false, false, "dataservices.v1.SetVariableRequest", "dataservices.v1.SetVariableResponse"),
+        new("C-04", "ColumnExpressionService", "AddVariableExpression", false, false, "dataservices.v1.AddVariableExpressionRequest", "dataservices.v1.AddVariableExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "SetVariableExpression", false, false, "dataservices.v1.SetVariableExpressionRequest", "dataservices.v1.SetVariableExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "GetVariableExpression", false, false, "dataservices.v1.GetVariableExpressionRequest", "dataservices.v1.GetVariableExpressionResponse"),
+        new("C-04", "ColumnExpressionService", "AddForeignVariable", false, false, "dataservices.v1.AddForeignVariableRequest", "dataservices.v1.AddForeignVariableResponse"),
+        new("C-04", "ColumnExpressionService", "SetRelativeColumns", false, false, "dataservices.v1.SetRelativeColumnsRequest", "dataservices.v1.SetRelativeColumnsResponse"),
+        new("C-04", "ColumnExpressionService", "SetExpressionFlag", false, false, "dataservices.v1.SetExpressionFlagRequest", "dataservices.v1.SetExpressionFlagResponse"),
+        new("C-04", "ColumnExpressionService", "Calc", false, false, "dataservices.v1.CalcRequest", "dataservices.v1.CalcResponse"),
+        new("C-04", "ColumnExpressionService", "CalcAll", false, false, "dataservices.v1.CalcAllRequest", "dataservices.v1.CalcAllResponse"),
+        new("C-04", "ColumnExpressionService", "CalcEmpty", false, false, "dataservices.v1.CalcEmptyRequest", "dataservices.v1.CalcEmptyResponse"),
+        new("C-04", "ColumnExpressionService", "CalcItem", false, false, "dataservices.v1.CalcItemRequest", "dataservices.v1.CalcItemResponse"),
+        new("C-04", "ColumnExpressionService", "SetEnabled", false, false, "dataservices.v1.SetEnabledRequest", "dataservices.v1.SetEnabledResponse"),
+        new("C-04", "ColumnExpressionService", "SetTrace", false, false, "dataservices.v1.SetTraceRequest", "dataservices.v1.SetTraceResponse"),
+        new("C-04", "ColumnExpressionService", "GetServiceState", false, false, "dataservices.v1.GetServiceStateRequest", "dataservices.v1.GetServiceStateResponse"),
+        new("C-04", "ColumnExpressionService", "GetExpressionState", false, false, "dataservices.v1.GetExpressionStateRequest", "dataservices.v1.GetExpressionStateResponse"),
+        new("C-04", "ColumnExpressionService", "EventStream", false, true, "dataservices.v1.EventStreamRequest", "dataservices.v1.EventStreamResponse"),
+        new("C-04", "ColumnExpressionService", "InvokeMethodChannel", true, true, "dataservices.v1.InvokeMethodResponse", "dataservices.v1.InvokeMethodRequest"),
+        new("C-04", "ColumnExpressionService", "TraceChannel", true, true, "dataservices.v1.TraceChannelRequest", "dataservices.v1.TraceRecord"),
 
         // C-05. Query is SERVER-STREAMING to reproduce progressive recordset delivery; chunking is a
         // first-class part of the legacy surface, whose guard rejects any size at or below 1000 with
         // RetCode.E_INVALID_ARGUMENT [n_cst_thread_task_sqlquery.sru:L410].
-        new("C-05", "QueryService", "Query", false, true),
+        //
+        // The task lifecycle pair and the seven setters are the legacy shape as found: the query task is
+        // a stateful object that is created, configured through individual setters and then executed
+        // [n_cst_thread_task_sqlquery.sru], so the contract carries that statefulness explicitly rather
+        // than collapsing it into one fat request that would lose the per-setter validation.
+        new("C-05", "QueryService", "CreateQueryTask", false, false, "persistence.v1.CreateQueryTaskRequest", "persistence.v1.CreateQueryTaskResponse"),
+        new("C-05", "QueryService", "ReleaseQueryTask", false, false, "persistence.v1.ReleaseQueryTaskRequest", "persistence.v1.ReleaseQueryTaskResponse"),
+        new("C-05", "QueryService", "Reset", false, false, "persistence.v1.ResetQueryTaskRequest", "persistence.v1.ResetQueryTaskResponse"),
+        new("C-05", "QueryService", "SetChunkSize", false, false, "persistence.v1.SetChunkSizeRequest", "persistence.v1.SetChunkSizeResponse"),
+        new("C-05", "QueryService", "SetMaxRows", false, false, "persistence.v1.SetMaxRowsRequest", "persistence.v1.SetMaxRowsResponse"),
+        new("C-05", "QueryService", "SetWhereClause", false, false, "persistence.v1.SetWhereClauseRequest", "persistence.v1.SetWhereClauseResponse"),
+        new("C-05", "QueryService", "SetOrderByClause", false, false, "persistence.v1.SetOrderByClauseRequest", "persistence.v1.SetOrderByClauseResponse"),
+        new("C-05", "QueryService", "SetPaging", false, false, "persistence.v1.SetPagingRequest", "persistence.v1.SetPagingResponse"),
+        new("C-05", "QueryService", "SetPagedUniqueIndexColumns", false, false, "persistence.v1.SetPagedUniqueIndexColumnsRequest", "persistence.v1.SetPagedUniqueIndexColumnsResponse"),
+        new("C-05", "QueryService", "Query", false, true, "persistence.v1.QueryRequest", "persistence.v1.QueryResponse"),
+        new("C-05", "QueryService", "Count", false, false, "persistence.v1.CountRequest", "persistence.v1.CountResponse"),
 
         // C-06. PrepareUpdate carries the per-table update contract, because the legacy re-derives the
         // whole thing at runtime from an ARRAY of table descriptors rather than trusting the DataWindow
         // definition - of_addupdatabletable takes the table name, the updatable columns, the key
         // columns, the identity column, updatewhere and updatekeyinplace
         // [n_cst_thread_task_sqlupdate.sru:L82], consumed by _of_updateprepare [:L98]. Update executes
-        // it [:L172] and is UNARY because its conflict outcome is one definite answer.
-        new("C-06", "UpdateService", "PrepareUpdate", false, false),
-        new("C-06", "UpdateService", "Update", false, false),
+        // it [:L172] and is UNARY because its conflict outcome is one definite answer - StatusCode.Aborted
+        // with the current row state, projected by Gateway as HTTP 409, never a silent overwrite.
+        new("C-06", "UpdateService", "CreateUpdateTask", false, false, "persistence.v1.CreateUpdateTaskRequest", "persistence.v1.CreateUpdateTaskResponse"),
+        new("C-06", "UpdateService", "ReleaseUpdateTask", false, false, "persistence.v1.ReleaseUpdateTaskRequest", "persistence.v1.ReleaseUpdateTaskResponse"),
+        new("C-06", "UpdateService", "Reset", false, false, "persistence.v1.ResetUpdateTaskRequest", "persistence.v1.ResetUpdateTaskResponse"),
+        new("C-06", "UpdateService", "PrepareUpdate", false, false, "persistence.v1.PrepareUpdateRequest", "persistence.v1.PrepareUpdateResponse"),
+        new("C-06", "UpdateService", "Update", false, false, "persistence.v1.UpdateRequest", "persistence.v1.UpdateResponse"),
 
         // C-07. Exec is the command half; the legacy rejects an empty statement with
         // RetCode.E_INVALID_SQL [n_cst_thread_task_sqlcommand.sru:L45] and executes on the worker
-        // thread [:L60].
-        new("C-07", "CommandService", "Exec", false, false),
+        // thread [:L60]. SetAutoCommit and SetSql carry their own request messages rather than sharing
+        // the transaction service's, which is why the two Set* rows name SetCommand* messages: the
+        // simple names collide across the two services and only the qualified form disambiguates them.
+        new("C-07", "CommandService", "CreateCommandTask", false, false, "persistence.v1.CreateCommandTaskRequest", "persistence.v1.CreateCommandTaskResponse"),
+        new("C-07", "CommandService", "ReleaseCommandTask", false, false, "persistence.v1.ReleaseCommandTaskRequest", "persistence.v1.ReleaseCommandTaskResponse"),
+        new("C-07", "CommandService", "Reset", false, false, "persistence.v1.ResetCommandTaskRequest", "persistence.v1.ResetCommandTaskResponse"),
+        new("C-07", "CommandService", "SetAutoCommit", false, false, "persistence.v1.SetCommandAutoCommitRequest", "persistence.v1.SetCommandAutoCommitResponse"),
+        new("C-07", "CommandService", "SetSql", false, false, "persistence.v1.SetCommandSqlRequest", "persistence.v1.SetCommandSqlResponse"),
+        new("C-07", "CommandService", "Exec", false, false, "persistence.v1.ExecRequest", "persistence.v1.ExecResponse"),
 
         // C-08. Session begin and end plus commit and rollback, mirroring of_connect
         // [n_cst_thread_trans.sru:L111], of_disconnect [:L145], of_commit [:L383] and of_rollback
-        // [:L185]. All unary: a transaction boundary is a single decision.
-        new("C-08", "TransactionService", "BeginSession", false, false),
-        new("C-08", "TransactionService", "EndSession", false, false),
-        new("C-08", "TransactionService", "Commit", false, false),
-        new("C-08", "TransactionService", "Rollback", false, false),
+        // [:L185]. All unary: a transaction boundary is a single decision. GetDatabaseType projects
+        // of_getdbtype [:L357-L359], whose enumeration declares exactly DBT_MSSQL=0 and DBT_ORACLE=1 -
+        // SQLite is absent from it, which is the two-storage-path tension recorded in the plan.
+        new("C-08", "TransactionService", "BeginSession", false, false, "persistence.v1.BeginSessionRequest", "persistence.v1.BeginSessionResponse"),
+        new("C-08", "TransactionService", "EndSession", false, false, "persistence.v1.EndSessionRequest", "persistence.v1.EndSessionResponse"),
+        new("C-08", "TransactionService", "GetTransactionData", false, false, "persistence.v1.GetTransactionDataRequest", "persistence.v1.GetTransactionDataResponse"),
+        new("C-08", "TransactionService", "SetAutoCommit", false, false, "persistence.v1.SetTransactionAutoCommitRequest", "persistence.v1.SetTransactionAutoCommitResponse"),
+        new("C-08", "TransactionService", "AutoCommit", false, false, "persistence.v1.AutoCommitRequest", "persistence.v1.AutoCommitResponse"),
+        new("C-08", "TransactionService", "Commit", false, false, "persistence.v1.CommitRequest", "persistence.v1.CommitResponse"),
+        new("C-08", "TransactionService", "Rollback", false, false, "persistence.v1.RollbackRequest", "persistence.v1.RollbackResponse"),
+        new("C-08", "TransactionService", "IsConnected", false, false, "persistence.v1.IsConnectedRequest", "persistence.v1.IsConnectedResponse"),
+        new("C-08", "TransactionService", "GetDatabaseType", false, false, "persistence.v1.GetDatabaseTypeRequest", "persistence.v1.GetDatabaseTypeResponse"),
+        new("C-08", "TransactionService", "GetSessionState", false, false, "persistence.v1.GetSessionStateRequest", "persistence.v1.GetSessionStateResponse"),
+        new("C-08", "TransactionService", "ClearState", false, false, "persistence.v1.ClearStateRequest", "persistence.v1.ClearStateResponse"),
+        new("C-08", "TransactionService", "SetBroken", false, false, "persistence.v1.SetBrokenRequest", "persistence.v1.SetBrokenResponse"),
+        new("C-08", "TransactionService", "GridSyntaxFromSql", false, false, "persistence.v1.GridSyntaxFromSqlRequest", "persistence.v1.GridSyntaxFromSqlResponse"),
+    ];
+
+    // ==============================================================================================
+    //  THE AUTHORED MESSAGE SURFACE - COMPLETE, EXPLICIT AND FROZEN
+    //
+    //  All 244 messages the three definitions AUTHOR, nested declarations included and the three
+    //  synthetic map-entry messages excluded, written out for exactly the reason the method roster is:
+    //  an inventory derived from ContractDescriptors.AllMessages() cannot detect a DELETED message,
+    //  because the deletion removes the row that would have failed. Both directions are compared below.
+    //
+    //  Fully qualified throughout, because simple names are genuinely ambiguous in this contract set -
+    //  UpdateRequest and UpdateResponse are each declared in BOTH boundary definitions, and Reset* /
+    //  SetAutoCommit* exist once per persistence task service.
+    //
+    //  The four nested names in this list are the layout as found rather than an accident:
+    //  ColumnSortState.ColumnSort is the per-column sort model, and the three ColumnExpEvent.* messages
+    //  are the payload variants of the expression event feed. protoc nests their generated CLR types
+    //  under a `Types` holder class, which is why the message-name-to-CLR-type helper below is written
+    //  against the proto shape rather than assuming a flat projection.
+    //
+    //  The map-entry exclusion is asserted in its own right further down rather than left silent: a
+    //  `map` field makes protoc synthesise a nested ...Entry message that is present in the descriptor
+    //  graph and absent from the generated code, so including one here would fail the materialisation
+    //  theory for a reason that is correct behaviour.
+    // ==============================================================================================
+
+    private static readonly string[] AuthoredMessageRoster =
+    [
+        // ---- common.v1.proto  (16 authored messages) ----
+        "common.v1.RetCode",
+        "common.v1.XmlParseStatus",
+        "common.v1.SqliteResultCode",
+        "common.v1.DecimalValue",
+        "common.v1.DateValue",
+        "common.v1.TimeValue",
+        "common.v1.DateTimeValue",
+        "common.v1.AnyValue",
+        "common.v1.ColumnValue",
+        "common.v1.DbError",
+        "common.v1.ConflictRow",
+        "common.v1.ConflictDetail",
+        "common.v1.IdentityColumnData",
+        "common.v1.RichErrorTrailer",
+        "common.v1.RichErrorBinding",
+        "common.v1.RichError",
+        // ---- dataservices.v1.proto  (142 authored messages) ----
+        "dataservices.v1.DwObjectRef",
+        "dataservices.v1.SequencingToken",
+        "dataservices.v1.Veto",
+        "dataservices.v1.BrokerTopic",
+        "dataservices.v1.StructuredError",
+        "dataservices.v1.ValidationSessionState",
+        "dataservices.v1.OpenValidationSessionRequest",
+        "dataservices.v1.OpenValidationSessionResponse",
+        "dataservices.v1.CloseValidationSessionRequest",
+        "dataservices.v1.CloseValidationSessionResponse",
+        "dataservices.v1.DataWindowRow",
+        "dataservices.v1.RetrieveRequest",
+        "dataservices.v1.RetrieveChunk",
+        "dataservices.v1.InitContextMenuEvent",
+        "dataservices.v1.ContextMenuEvent",
+        "dataservices.v1.DdsGetFilterEvent",
+        "dataservices.v1.ColumnExpInvokeMethodEvent",
+        "dataservices.v1.DoItemChangeEvent",
+        "dataservices.v1.ItemChangedEvent",
+        "dataservices.v1.DoItemChangedEvent",
+        "dataservices.v1.DdsFilteredEvent",
+        "dataservices.v1.ColumnExpTraceEvent",
+        "dataservices.v1.DwnRButtonDownEvent",
+        "dataservices.v1.DwnRButtonUpEvent",
+        "dataservices.v1.DwnRowChangeEvent",
+        "dataservices.v1.DwnRowChangingEvent",
+        "dataservices.v1.DwnLButtonDblClkEvent",
+        "dataservices.v1.DwnLButtonClkEvent",
+        "dataservices.v1.DwnChangingEvent",
+        "dataservices.v1.DwnItemChangeFocusEvent",
+        "dataservices.v1.DwnItemChangeEvent",
+        "dataservices.v1.DwnItemValidationErrorEvent",
+        "dataservices.v1.DwnKillFocusEvent",
+        "dataservices.v1.DwnLButtonUpEvent",
+        "dataservices.v1.DwnSetFocusEvent",
+        "dataservices.v1.EventNotification",
+        "dataservices.v1.OrderedDispatchReport",
+        "dataservices.v1.EventResult",
+        "dataservices.v1.EventChainRequest",
+        "dataservices.v1.EventChainResponse",
+        "dataservices.v1.EventGate",
+        "dataservices.v1.GetEventGateRequest",
+        "dataservices.v1.GetEventGateResponse",
+        "dataservices.v1.DisableEventRequest",
+        "dataservices.v1.DisableEventResponse",
+        "dataservices.v1.EnableEventRequest",
+        "dataservices.v1.EnableEventResponse",
+        "dataservices.v1.UpdateRequest",
+        "dataservices.v1.UpdateResponse",
+        "dataservices.v1.DropDownSearchState",
+        "dataservices.v1.PinyinLike",
+        "dataservices.v1.ColumnSortState",
+        "dataservices.v1.ColumnSortState.ColumnSort",
+        "dataservices.v1.ContextMenuItem",
+        "dataservices.v1.ContextMenuModel",
+        "dataservices.v1.RowSelectState",
+        "dataservices.v1.GetDropDownSearchStateRequest",
+        "dataservices.v1.GetDropDownSearchStateResponse",
+        "dataservices.v1.ApplyDropDownSearchRequest",
+        "dataservices.v1.ApplyDropDownSearchResponse",
+        "dataservices.v1.GetColumnSortStateRequest",
+        "dataservices.v1.GetColumnSortStateResponse",
+        "dataservices.v1.ApplyColumnSortRequest",
+        "dataservices.v1.ApplyColumnSortResponse",
+        "dataservices.v1.GetContextMenuModelRequest",
+        "dataservices.v1.GetContextMenuModelResponse",
+        "dataservices.v1.ApplyContextMenuModelRequest",
+        "dataservices.v1.ApplyContextMenuModelResponse",
+        "dataservices.v1.GetRowSelectStateRequest",
+        "dataservices.v1.GetRowSelectStateResponse",
+        "dataservices.v1.ApplyRowSelectStyleRequest",
+        "dataservices.v1.ApplyRowSelectStyleResponse",
+        "dataservices.v1.ColumnExpData",
+        "dataservices.v1.ColumnData",
+        "dataservices.v1.VarData",
+        "dataservices.v1.FuncData",
+        "dataservices.v1.GlobalVarData",
+        "dataservices.v1.LocalVarData",
+        "dataservices.v1.ForeignVarRef",
+        "dataservices.v1.VarValue",
+        "dataservices.v1.ExpressionSentinels",
+        "dataservices.v1.MacroResult",
+        "dataservices.v1.ExpressionBinding",
+        "dataservices.v1.ColumnRef",
+        "dataservices.v1.OpenExpressionSessionRequest",
+        "dataservices.v1.OpenExpressionSessionResponse",
+        "dataservices.v1.CloseExpressionSessionRequest",
+        "dataservices.v1.CloseExpressionSessionResponse",
+        "dataservices.v1.AddExpressionRequest",
+        "dataservices.v1.AddExpressionResponse",
+        "dataservices.v1.SetExpressionRequest",
+        "dataservices.v1.SetExpressionResponse",
+        "dataservices.v1.GetExpressionRequest",
+        "dataservices.v1.GetExpressionResponse",
+        "dataservices.v1.RemoveExpressionRequest",
+        "dataservices.v1.RemoveExpressionResponse",
+        "dataservices.v1.RemoveAllExpressionsRequest",
+        "dataservices.v1.RemoveAllExpressionsResponse",
+        "dataservices.v1.AddVariableRequest",
+        "dataservices.v1.AddVariableResponse",
+        "dataservices.v1.SetVariableRequest",
+        "dataservices.v1.SetVariableResponse",
+        "dataservices.v1.AddVariableExpressionRequest",
+        "dataservices.v1.AddVariableExpressionResponse",
+        "dataservices.v1.SetVariableExpressionRequest",
+        "dataservices.v1.SetVariableExpressionResponse",
+        "dataservices.v1.GetVariableExpressionRequest",
+        "dataservices.v1.GetVariableExpressionResponse",
+        "dataservices.v1.AddForeignVariableRequest",
+        "dataservices.v1.AddForeignVariableResponse",
+        "dataservices.v1.SetRelativeColumnsRequest",
+        "dataservices.v1.SetRelativeColumnsResponse",
+        "dataservices.v1.SetExpressionFlagRequest",
+        "dataservices.v1.SetExpressionFlagResponse",
+        "dataservices.v1.CalcRequest",
+        "dataservices.v1.CalcResponse",
+        "dataservices.v1.CalcResult",
+        "dataservices.v1.CalcAllRequest",
+        "dataservices.v1.CalcAllResponse",
+        "dataservices.v1.CalcEmptyRequest",
+        "dataservices.v1.CalcEmptyResponse",
+        "dataservices.v1.CalcItemRequest",
+        "dataservices.v1.CalcItemResponse",
+        "dataservices.v1.SetEnabledRequest",
+        "dataservices.v1.SetEnabledResponse",
+        "dataservices.v1.SetTraceRequest",
+        "dataservices.v1.SetTraceResponse",
+        "dataservices.v1.GetServiceStateRequest",
+        "dataservices.v1.GetServiceStateResponse",
+        "dataservices.v1.GetExpressionStateRequest",
+        "dataservices.v1.GetExpressionStateResponse",
+        "dataservices.v1.EventStreamRequest",
+        "dataservices.v1.EventStreamResponse",
+        "dataservices.v1.ColumnExpEvent",
+        "dataservices.v1.ColumnExpEvent.ItemChanged",
+        "dataservices.v1.ColumnExpEvent.DoItemChanged",
+        "dataservices.v1.ColumnExpEvent.VarChanged",
+        "dataservices.v1.ExpressionError",
+        "dataservices.v1.InvokeMethodRequest",
+        "dataservices.v1.InvokeMethodResponse",
+        "dataservices.v1.TraceChannelRequest",
+        "dataservices.v1.TraceRecord",
+        // ---- persistence.v1.proto  (86 authored messages) ----
+        "persistence.v1.TaskHandle",
+        "persistence.v1.SessionHandle",
+        "persistence.v1.OperationStatus",
+        "persistence.v1.PositionalParameter",
+        "persistence.v1.SqlClauseSpec",
+        "persistence.v1.QuerySpec",
+        "persistence.v1.CreateQueryTaskRequest",
+        "persistence.v1.CreateQueryTaskResponse",
+        "persistence.v1.ReleaseQueryTaskRequest",
+        "persistence.v1.ReleaseQueryTaskResponse",
+        "persistence.v1.ResetQueryTaskRequest",
+        "persistence.v1.ResetQueryTaskResponse",
+        "persistence.v1.SetChunkSizeRequest",
+        "persistence.v1.SetChunkSizeResponse",
+        "persistence.v1.SetMaxRowsRequest",
+        "persistence.v1.SetMaxRowsResponse",
+        "persistence.v1.SetWhereClauseRequest",
+        "persistence.v1.SetWhereClauseResponse",
+        "persistence.v1.SetOrderByClauseRequest",
+        "persistence.v1.SetOrderByClauseResponse",
+        "persistence.v1.SetPagingRequest",
+        "persistence.v1.SetPagingResponse",
+        "persistence.v1.SetPagedUniqueIndexColumnsRequest",
+        "persistence.v1.SetPagedUniqueIndexColumnsResponse",
+        "persistence.v1.QueryRequest",
+        "persistence.v1.QueryResponse",
+        "persistence.v1.QueryRowCount",
+        "persistence.v1.QueryDataChunk",
+        "persistence.v1.QueryChildDataChunk",
+        "persistence.v1.QueryPageCounts",
+        "persistence.v1.CountRequest",
+        "persistence.v1.CountResponse",
+        "persistence.v1.TableUpdateContract",
+        "persistence.v1.PrepareUpdateRequest",
+        "persistence.v1.PrepareUpdateResponse",
+        "persistence.v1.UpdateRequest",
+        "persistence.v1.UpdateCounts",
+        "persistence.v1.UpdateResponse",
+        "persistence.v1.CreateUpdateTaskRequest",
+        "persistence.v1.CreateUpdateTaskResponse",
+        "persistence.v1.ReleaseUpdateTaskRequest",
+        "persistence.v1.ReleaseUpdateTaskResponse",
+        "persistence.v1.ResetUpdateTaskRequest",
+        "persistence.v1.ResetUpdateTaskResponse",
+        "persistence.v1.CreateCommandTaskRequest",
+        "persistence.v1.CreateCommandTaskResponse",
+        "persistence.v1.ReleaseCommandTaskRequest",
+        "persistence.v1.ReleaseCommandTaskResponse",
+        "persistence.v1.ResetCommandTaskRequest",
+        "persistence.v1.ResetCommandTaskResponse",
+        "persistence.v1.SetCommandAutoCommitRequest",
+        "persistence.v1.SetCommandAutoCommitResponse",
+        "persistence.v1.SetCommandSqlRequest",
+        "persistence.v1.SetCommandSqlResponse",
+        "persistence.v1.ExecRequest",
+        "persistence.v1.ExecResponse",
+        "persistence.v1.ConnectionParameterFlags",
+        "persistence.v1.PoolKeepAliveSettings",
+        "persistence.v1.TransactionDescriptor",
+        "persistence.v1.TransactionDescriptorView",
+        "persistence.v1.BeginSessionRequest",
+        "persistence.v1.BeginSessionResponse",
+        "persistence.v1.EndSessionRequest",
+        "persistence.v1.EndSessionResponse",
+        "persistence.v1.GetTransactionDataRequest",
+        "persistence.v1.GetTransactionDataResponse",
+        "persistence.v1.SetTransactionAutoCommitRequest",
+        "persistence.v1.SetTransactionAutoCommitResponse",
+        "persistence.v1.AutoCommitRequest",
+        "persistence.v1.AutoCommitResponse",
+        "persistence.v1.CommitRequest",
+        "persistence.v1.CommitResponse",
+        "persistence.v1.RollbackRequest",
+        "persistence.v1.RollbackResponse",
+        "persistence.v1.IsConnectedRequest",
+        "persistence.v1.IsConnectedResponse",
+        "persistence.v1.GetDatabaseTypeRequest",
+        "persistence.v1.GetDatabaseTypeResponse",
+        "persistence.v1.GetSessionStateRequest",
+        "persistence.v1.GetSessionStateResponse",
+        "persistence.v1.ClearStateRequest",
+        "persistence.v1.ClearStateResponse",
+        "persistence.v1.SetBrokenRequest",
+        "persistence.v1.SetBrokenResponse",
+        "persistence.v1.GridSyntaxFromSqlRequest",
+        "persistence.v1.GridSyntaxFromSqlResponse",
     ];
 
     // ==============================================================================================
@@ -446,6 +900,28 @@ public sealed class GeneratedStubPresenceTests
             .Select(static candidate => candidate.ReturnType)
             .Distinct()];
 
+    /// <summary>The distinct FIRST parameter types the overloads declared under one name accept.</summary>
+    /// <remarks>
+    /// The client half of a non-client-streaming call is the one place where the request type appears
+    /// ONLY in the parameter list: a unary call returns <c>AsyncUnaryCall&lt;TResponse&gt;</c> and a
+    /// server-streaming call returns <c>AsyncServerStreamingCall&lt;TResponse&gt;</c>, so neither return
+    /// type mentions the request at all. Checking the return type alone therefore cannot see a request
+    /// message swapped for another - which is exactly the fault a frozen inventory exists to catch, so
+    /// the parameter is checked too.
+    /// <para>
+    /// Both generated overloads take the request first and differ only in how call options arrive, so a
+    /// correct client yields exactly one distinct first parameter type.
+    /// </para>
+    /// </remarks>
+    private static Type[] DeclaredFirstParameterTypesOf(Type generated, string methodName) =>
+        [.. generated
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(candidate => string.Equals(candidate.Name, methodName, StringComparison.Ordinal))
+            .Select(static candidate => candidate.GetParameters())
+            .Where(static parameters => parameters.Length > 0)
+            .Select(static parameters => parameters[0].ParameterType)
+            .Distinct()];
+
     // ==============================================================================================
     //  THEORY DATA - EVERY ROW IS ONE FACT
     //
@@ -459,9 +935,9 @@ public sealed class GeneratedStubPresenceTests
     public static TheoryData<string, string, string> ContractFiles =>
         new()
         {
-            { CommonFileName, "common.v1", CommonNamespace },
-            { DataServicesFileName, "dataservices.v1", DataServicesNamespace },
-            { PersistenceFileName, "persistence.v1", PersistenceNamespace },
+            { CommonFileName, CommonPackage, CommonNamespace },
+            { DataServicesFileName, DataServicesPackage, DataServicesNamespace },
+            { PersistenceFileName, PersistencePackage, PersistenceNamespace },
         };
 
     /// <summary>The two definitions that declare services and therefore import the shared vocabulary.</summary>
@@ -498,12 +974,15 @@ public sealed class GeneratedStubPresenceTests
         }
     }
 
-    /// <summary>Every method this phase requires, with the streaming direction its contract requires.</summary>
-    public static TheoryData<string, string, string, bool, bool> RequiredMethods
+    /// <summary>
+    /// All 77 methods this phase requires, each with its streaming direction and both of its message
+    /// names, projected straight from the frozen roster.
+    /// </summary>
+    public static TheoryData<string, string, string, bool, bool, string, string> RequiredMethods
     {
         get
         {
-            TheoryData<string, string, string, bool, bool> rows = new();
+            TheoryData<string, string, string, bool, bool, string, string> rows = new();
             foreach (RequiredMethod required in RequiredMethodRoster)
             {
                 rows.Add(
@@ -511,7 +990,39 @@ public sealed class GeneratedStubPresenceTests
                     required.ServiceName,
                     required.MethodName,
                     required.ClientStreaming,
-                    required.ServerStreaming);
+                    required.ServerStreaming,
+                    required.RequestMessage,
+                    required.ResponseMessage);
+            }
+
+            return rows;
+        }
+    }
+
+    /// <summary>Each in-scope service with the complete, ordered set of rpc names its contract freezes.</summary>
+    /// <remarks>
+    /// The method names arrive as one tab-free, comma-joined string because a theory row must stay
+    /// serializable and xunit will not serialize a string array. The test splits it again; what matters
+    /// is that the EXPECTED set is stated here rather than read from the service being examined.
+    /// </remarks>
+    public static TheoryData<string, string, string> ServiceMethodInventories
+    {
+        get
+        {
+            TheoryData<string, string, string> rows = new();
+            foreach (ServiceContract contract in Roster)
+            {
+                rows.Add(
+                    contract.ContractId,
+                    contract.ServiceName,
+                    string.Join(
+                        ",",
+                        RequiredMethodRoster
+                            .Where(required => string.Equals(
+                                required.ServiceName,
+                                contract.ServiceName,
+                                StringComparison.Ordinal))
+                            .Select(static required => required.MethodName)));
             }
 
             return rows;
@@ -527,20 +1038,20 @@ public sealed class GeneratedStubPresenceTests
     /// <c>map</c> field makes protoc synthesise a nested <c>...Entry</c> message that appears in the
     /// descriptor graph but is never projected to a CLR type, so including one here would fail the
     /// materialisation theory for a reason that is correct behaviour.
+    /// <para>
+    /// Projected from the FROZEN roster, not from <c>ContractDescriptors.AllMessages()</c>. Derived from
+    /// the descriptor graph this theory could never report a deleted message, because the deletion takes
+    /// the row that would have failed away with it.
+    /// </para>
     /// </remarks>
     public static TheoryData<string> AuthoredMessageNames
     {
         get
         {
             TheoryData<string> rows = new();
-            foreach (MessageDescriptor message in ContractDescriptors.AllMessages())
+            foreach (string messageFullName in AuthoredMessageRoster)
             {
-                if (message.IsMapEntry)
-                {
-                    continue;
-                }
-
-                rows.Add(message.FullName);
+                rows.Add(messageFullName);
             }
 
             return rows;
@@ -548,14 +1059,21 @@ public sealed class GeneratedStubPresenceTests
     }
 
     /// <summary>Every method of every published service, as (service full name, method name).</summary>
+    /// <remarks>
+    /// Projected from the frozen roster for the same reason as the message inventory above, with the
+    /// service's fully-qualified proto name reconstructed from the package its declaring definition
+    /// carries rather than read off the descriptor.
+    /// </remarks>
     public static TheoryData<string, string> ServiceMethodKeys
     {
         get
         {
             TheoryData<string, string> rows = new();
-            foreach (MethodDescriptor method in ContractDescriptors.AllMethods())
+            foreach (RequiredMethod required in RequiredMethodRoster)
             {
-                rows.Add(method.Service.FullName, method.Name);
+                rows.Add(
+                    ProtoServiceFullName(RequireRosterEntry(required.ServiceName)),
+                    required.MethodName);
             }
 
             return rows;
@@ -834,6 +1352,30 @@ public sealed class GeneratedStubPresenceTests
     }
 
     [Fact]
+    public void ThePublishedBoundaryDeclaresExactlyTheSixServicesOfThisPhase()
+    {
+        string[] declared =
+            [.. ContractDescriptors.AllServices()
+                .Select(static service => service.FullName)
+                .OrderBy(static name => name, StringComparer.Ordinal)];
+
+        string[] frozen =
+            [.. Roster
+                .Select(ProtoServiceFullName)
+                .OrderBy(static name => name, StringComparer.Ordinal)];
+
+        // THE SERVICE SET, BOTH WAYS, AND NOT COVERED BY THE RPC COMPARISON BELOW. That one compares
+        // service-qualified METHOD keys, so a seventh service carrying no rpc at all would pass it
+        // unnoticed - and an empty service is precisely the shape a capability arrives in on its first
+        // commit. A seventh service here is also a C-D violation if it belongs to a deferred capability:
+        // AAP 0.2.2.2 permits no definition, project, container or placeholder for DesignSystem,
+        // Documents, Integration or ScriptBridge, which surface only as Gateway's reserved 501 routes.
+        Assert.Equal(frozen, declared);
+
+        Assert.Equal(6, declared.Length);
+    }
+
+    [Fact]
     public void TheAssemblyPublishesOneServerBaseAndOneClientPerInScopeContractAndNoOthers()
     {
         string[] expectedServerBases = ExpectedNestedFullNames("Base");
@@ -876,7 +1418,92 @@ public sealed class GeneratedStubPresenceTests
     //  generated client and once on the generated server base - because those are three independent
     //  artifacts. A direction that survived into the descriptor but not into a generated signature would
     //  be a generator or toolchain fault, and it would compile.
+    //
+    //  The two completeness facts come FIRST, because every per-row theory below is conditional on them:
+    //  a theory can only report on the rows it is given, so without an exact both-ways comparison a
+    //  deleted rpc simply stops being tested. These two close that gap for the rpc surface, and the
+    //  message-inventory fact in section 4 closes it for the messages.
     // ==============================================================================================
+
+    [Fact]
+    public void ThePublishedBoundaryDeclaresExactlyTheRpcsTheFrozenInventoryNames()
+    {
+        string[] declared =
+            [.. ContractDescriptors.AllMethods()
+                .Select(static method => $"{method.Service.FullName}.{method.Name}")
+                .OrderBy(static key => key, StringComparer.Ordinal)];
+
+        string[] frozen =
+            [.. RequiredMethodRoster
+                .Select(static required =>
+                    $"{ProtoServiceFullName(RequireRosterEntry(required.ServiceName))}.{required.MethodName}")
+                .OrderBy(static key => key, StringComparer.Ordinal)];
+
+        // BOTH DIRECTIONS, AND THE TWO ASYMMETRIES ARE DIFFERENT FAULTS WORTH DIFFERENT MESSAGES.
+        // Missing means the boundary lost an rpc the contract promises - a caller's generated client stops
+        // compiling. Undeclared means an rpc reached the published boundary without passing through the
+        // reviewed inventory, which is how an unreviewed surface arrives.
+        string[] missing = [.. frozen.Except(declared, StringComparer.Ordinal)];
+        string[] undeclared = [.. declared.Except(frozen, StringComparer.Ordinal)];
+
+        Assert.True(
+            missing.Length == 0,
+            $"The frozen inventory names {missing.Length} rpc(s) the published boundary does not declare: "
+            + $"[{string.Join(", ", missing)}]. Either the definition lost them or the inventory is ahead "
+            + "of the contract; the contract is frozen, so the definition is the side to look at.");
+
+        Assert.True(
+            undeclared.Length == 0,
+            $"The published boundary declares {undeclared.Length} rpc(s) the frozen inventory does not "
+            + $"name: [{string.Join(", ", undeclared)}]. A new rpc must be added to the inventory in the "
+            + "same change that adds it to the definition, so that its direction and both of its message "
+            + "names are reviewed rather than inferred from whatever was generated.");
+
+        // Stated as a count as well, so the failure message carries the size of the surface a reader is
+        // being asked to trust. 77 is the whole of C-03 through C-08.
+        Assert.Equal(77, declared.Length);
+    }
+
+    [Theory]
+    [MemberData(nameof(ServiceMethodInventories))]
+    public void EachInScopeServiceDeclaresExactlyTheRpcsItsContractFreezes(
+        string contractId,
+        string serviceName,
+        string frozenMethodNames)
+    {
+        ServiceDescriptor service = ContractDescriptors.RequireService(serviceName);
+
+        string[] declared =
+            [.. service.Methods
+                .Select(static method => method.Name)
+                .OrderBy(static name => name, StringComparer.Ordinal)];
+
+        string[] frozen =
+            [.. frozenMethodNames
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .OrderBy(static name => name, StringComparer.Ordinal)];
+
+        // PER SERVICE AS WELL AS IN AGGREGATE, because the aggregate comparison above would still pass if
+        // an rpc MOVED between two services - the key set would be unchanged in size but wrong in owner,
+        // and a method on the wrong service is a different client, a different authorization boundary and
+        // a different deployable.
+        Assert.Equal(frozen, declared);
+
+        Assert.Equal(
+            RequiredMethodRoster.Count(required => string.Equals(
+                required.ServiceName,
+                serviceName,
+                StringComparison.Ordinal)),
+            service.Methods.Count);
+
+        Assert.Equal(
+            ProtoServiceFullName(RequireRosterEntry(serviceName)),
+            service.FullName);
+
+        Assert.Equal(
+            contractId,
+            RequireRosterEntry(serviceName).ContractId);
+    }
 
     [Theory]
     [MemberData(nameof(RequiredMethods))]
@@ -885,7 +1512,9 @@ public sealed class GeneratedStubPresenceTests
         string serviceName,
         string methodName,
         bool clientStreaming,
-        bool serverStreaming)
+        bool serverStreaming,
+        string requestMessage,
+        string responseMessage)
     {
         MethodDescriptor method = ContractDescriptors.RequireMethod(
             ContractDescriptors.RequireService(serviceName),
@@ -898,6 +1527,13 @@ public sealed class GeneratedStubPresenceTests
             + $"{DescribeDirection(method.IsClientStreaming, method.IsServerStreaming)}. Direction is part "
             + "of the contract rather than an implementation detail: the ordered event chain and the two "
             + "inverted channels cannot be expressed at all without it.");
+
+        // THE MESSAGE IDENTITY IS ASSERTED HERE AND NOWHERE ELSE ON THE DESCRIPTOR SIDE. A request type
+        // exchanged for a different message that happens to carry compatible fields compiles, serializes
+        // and passes every shape check below, because those check the SHAPE the direction implies rather
+        // than WHICH message fills it. Only a frozen name catches it.
+        Assert.Equal(requestMessage, method.InputType.FullName);
+        Assert.Equal(responseMessage, method.OutputType.FullName);
     }
 
     [Theory]
@@ -907,29 +1543,48 @@ public sealed class GeneratedStubPresenceTests
         string serviceName,
         string methodName,
         bool clientStreaming,
-        bool serverStreaming)
+        bool serverStreaming,
+        string requestMessage,
+        string responseMessage)
     {
         ServiceContract contract = RequireRosterEntry(serviceName);
-        MethodDescriptor method = ContractDescriptors.RequireMethod(
-            ContractDescriptors.RequireService(serviceName),
-            methodName);
 
         Type client = RequireNestedType(
             RequireServiceContainer(contract.CsharpNamespace, serviceName),
             $"{serviceName}Client",
             $"Contract {contractId} cannot be called at all without its client: {GrpcServicesDiagnosis}.");
 
+        // BOTH MESSAGE TYPES COME FROM THE FROZEN NAMES, NOT FROM THE DESCRIPTOR. That is the whole
+        // difference between this assertion and a tautology: the descriptor would supply whatever the
+        // generator produced and the comparison would then always hold.
+        Type requestType = ExpectedGeneratedMessageType(
+            requestMessage,
+            $"Contract {contractId} declares it as the request of '{serviceName}.{methodName}'.");
+
+        Type responseType = ExpectedGeneratedMessageType(
+            responseMessage,
+            $"Contract {contractId} declares it as the response of '{serviceName}.{methodName}'.");
+
         string expectedName = ExpectedClientMethodName(clientStreaming, serverStreaming, methodName);
         Type expectedCall = ExpectedClientCallType(
             clientStreaming,
             serverStreaming,
-            method.InputType.ClrType,
-            method.OutputType.ClrType);
+            requestType,
+            responseType);
 
         // An exact single-element comparison, because every overload of one generated client method
         // agrees on its return type and differs only in how call options arrive. So this reads as "the
         // name resolves, and it resolves to exactly this one call shape".
         Assert.Equal([expectedCall], DeclaredReturnTypesOf(client, expectedName));
+
+        if (!clientStreaming)
+        {
+            // THE RETURN TYPE OF A UNARY OR SERVER-STREAMING CALL DOES NOT MENTION ITS REQUEST, so the
+            // assertion above cannot see a request message swapped for another - it would still return
+            // AsyncUnaryCall<TResponse> and still pass. The first parameter is where the request type is
+            // observable on this half, and the frozen name is what it is compared against.
+            Assert.Equal([requestType], DeclaredFirstParameterTypesOf(client, expectedName));
+        }
     }
 
     [Theory]
@@ -939,12 +1594,19 @@ public sealed class GeneratedStubPresenceTests
         string serviceName,
         string methodName,
         bool clientStreaming,
-        bool serverStreaming)
+        bool serverStreaming,
+        string requestMessage,
+        string responseMessage)
     {
         ServiceContract contract = RequireRosterEntry(serviceName);
-        MethodDescriptor method = ContractDescriptors.RequireMethod(
-            ContractDescriptors.RequireService(serviceName),
-            methodName);
+
+        Type requestType = ExpectedGeneratedMessageType(
+            requestMessage,
+            $"Contract {contractId} declares it as the request of '{serviceName}.{methodName}'.");
+
+        Type responseType = ExpectedGeneratedMessageType(
+            responseMessage,
+            $"Contract {contractId} declares it as the response of '{serviceName}.{methodName}'.");
 
         Type serverBase = RequireNestedType(
             RequireServiceContainer(contract.CsharpNamespace, serviceName),
@@ -959,18 +1621,19 @@ public sealed class GeneratedStubPresenceTests
         MethodInfo handler = Assert.Single(handlers);
 
         Assert.Equal(
-            ExpectedHandlerReturnType(serverStreaming, method.OutputType.ClrType),
+            ExpectedHandlerReturnType(serverStreaming, responseType),
             handler.ReturnType);
 
         // The parameter list is where the direction becomes visible on the server half: a streamed
         // request arrives as a reader and a streamed response leaves through a writer, and the call
-        // context is always last.
+        // context is always last. Both message types are the FROZEN ones, so a handler generated over a
+        // different message fails here rather than agreeing with itself.
         Assert.Equal(
             ExpectedHandlerParameterTypes(
                 clientStreaming,
                 serverStreaming,
-                method.InputType.ClrType,
-                method.OutputType.ClrType),
+                requestType,
+                responseType),
             handler.GetParameters().Select(static parameter => parameter.ParameterType));
     }
 
@@ -1122,6 +1785,51 @@ public sealed class GeneratedStubPresenceTests
         MessageDescriptor message = ContractDescriptors.RequireMessage(messageFullName);
 
         AssertMaterialisedAsGeneratedMessage(message, $"Message '{messageFullName}'");
+
+        // AND IT MATERIALISED WHERE THE FROZEN NAME SAYS IT SHOULD. The check above proves a CLR type
+        // exists and round-trips to this descriptor; this one proves the type landed in the namespace the
+        // declaring definition's csharp_namespace commits to, which is the part a consumer's `using`
+        // depends on and the part a package rename would silently move.
+        Assert.Same(
+            ExpectedGeneratedMessageType(
+                messageFullName,
+                $"The frozen inventory names '{messageFullName}', so its generated type must appear at the "
+                + "name its package's csharp_namespace implies."),
+            message.ClrType);
+    }
+
+    [Fact]
+    public void ThePublishedBoundaryAuthorsExactlyTheMessagesTheFrozenInventoryNames()
+    {
+        string[] authored =
+            [.. ContractDescriptors.AllMessages()
+                .Where(static message => !message.IsMapEntry)
+                .Select(static message => message.FullName)
+                .OrderBy(static name => name, StringComparer.Ordinal)];
+
+        string[] frozen = [.. AuthoredMessageRoster.OrderBy(static name => name, StringComparer.Ordinal)];
+
+        string[] missing = [.. frozen.Except(authored, StringComparer.Ordinal)];
+        string[] unlisted = [.. authored.Except(frozen, StringComparer.Ordinal)];
+
+        // THE SAME BOTH-WAYS COMPARISON THE RPC SURFACE GETS, AND FOR THE SAME REASON. The per-message
+        // materialisation theory above runs one row per name in the frozen list, so a message deleted from
+        // a definition would take its own row away and the suite would still be green. Only this
+        // comparison notices.
+        Assert.True(
+            missing.Length == 0,
+            $"The frozen inventory names {missing.Length} message(s) the boundary no longer authors: "
+            + $"[{string.Join(", ", missing)}]. A message removed from a definition takes every field it "
+            + "carried with it, so this is a wire-breaking change however small the diff looks.");
+
+        Assert.True(
+            unlisted.Length == 0,
+            $"The boundary authors {unlisted.Length} message(s) the frozen inventory does not name: "
+            + $"[{string.Join(", ", unlisted)}]. Adding a message to the inventory in the same change that "
+            + "adds it to the definition is what keeps the published surface a reviewed one.");
+
+        Assert.Equal(244, authored.Length);
+        Assert.Equal(authored.Length, AuthoredMessageRoster.Distinct(StringComparer.Ordinal).Count());
     }
 
     [Fact]

@@ -1442,6 +1442,15 @@ internal static class FullStateCodec
     /// argument still throws, because that is a programming error rather than a rejected payload.
     /// </para>
     /// <para>
+    /// WHICH FAULTS COUNT AS MALFORMED IS DECIDED IN ONE PLACE - <see cref="IsPayloadFault(Exception)"/>
+    /// - AND THE LIST IS DELIBERATELY NARROW. Truncation, malformed UTF-8, a malformed 7-bit string
+    /// length, an unrecognised tag, a count that could not fit and a nonsensical numeric component are
+    /// all payload faults. An out-of-memory condition, a cancellation and a null reference are NOT:
+    /// they propagate, because the plan requires a structural fault to terminate rather than degrade
+    /// into a return code, and because swallowing an out-of-memory condition here would hide the exact
+    /// resource-exhaustion problem the count guards are placed before the allocations to prevent.
+    /// </para>
+    /// <para>
     /// THE RESTORE ORDER PER ROW IS LOAD-BEARING AND IS NOT A STYLE CHOICE. Values are written twice:
     /// first the ORIGINAL values, then the row is re-baselined so that original equals current, and only
     /// then are the current values of modified columns written - which is what makes the carrier capture
@@ -1496,7 +1505,10 @@ internal static class FullStateCodec
 
                 long rowCount = reader.ReadInt64();
 
-                if (rowCount < 0L)
+                // BOUNDED BEFORE IT BECOMES A LOOP BOUND. A negative count, one beyond the protocol
+                // ceiling, or one whose rows could not fit in the bytes that remain is a malformed
+                // image - see the guard rationale beside MaxRowsPerBuffer.
+                if (!IsPlausibleCount(reader, rowCount, MinimumBytesPerRow, MaxRowsPerBuffer))
                 {
                     return DataWindowBufferStore.DataStoreFailure;
                 }
@@ -1511,17 +1523,81 @@ internal static class FullStateCodec
 
             return DataWindowBufferStore.DataStoreSuccess;
         }
-        catch (EndOfStreamException)
+        catch (Exception failure) when (IsPayloadFault(failure))
         {
-            // A truncated image. Rejected the way SetFullState rejects a payload, not by escaping.
+            // EVERY DETERMINISTIC FAULT IN THE BYTES ANSWERS THE CODE, NOT AN EXCEPTION, because that
+            // is what the operation this reproduces does: SetFullState returns -1 on a payload it
+            // rejects and the caller at [n_cst_threading_task_sqlquery.sru:L190] stores that value and
+            // carries on. See IsPayloadFault for which faults qualify and, more importantly, which
+            // deliberately do not.
             return DataWindowBufferStore.DataStoreFailure;
         }
-        catch (InvalidDataException)
-        {
-            // A structurally invalid image - an unrecognised value tag, a negative length, or a column
-            // number outside the legacy domain.
-            return DataWindowBufferStore.DataStoreFailure;
-        }
+    }
+
+    /// <summary>
+    /// Whether an exception represents a fault in the IMAGE - which
+    /// <see cref="Apply(DataWindowBufferStore, byte[])"/> answers with a code - or a fault in this code
+    /// or the host, which it must let escape.
+    /// </summary>
+    /// <param name="failure">The exception to classify.</param>
+    /// <returns><see langword="true"/> when the exception is a payload fault.</returns>
+    /// <remarks>
+    /// <para>
+    /// CENTRALISED BECAUSE AN INCOMPLETE CATCH LIST IS THE FAILURE MODE HERE, and two members of this
+    /// list were reachable and unhandled before it existed:
+    /// </para>
+    /// <para>
+    /// <see cref="DecoderFallbackException"/> - <see cref="PayloadEncoding"/> is constructed with
+    /// <c>throwOnInvalidBytes: true</c> deliberately, so that a value which cannot round-trip is a
+    /// detected fault rather than a silent replacement character. That decision means
+    /// <see cref="BinaryReader.ReadString"/> THROWS on malformed UTF-8 rather than substituting, and a
+    /// string is reachable from any column through <see cref="FullStateValueTag.String"/>. Malformed
+    /// bytes in a string value are the plainest possible example of a bad payload, and they were
+    /// escaping.
+    /// </para>
+    /// <para>
+    /// <see cref="FormatException"/> - <see cref="BinaryReader.ReadString"/> reads its length as a
+    /// 7-bit encoded integer and raises this when the encoding is malformed, which is exactly what a
+    /// corrupted or hostile byte in that position produces.
+    /// </para>
+    /// <para>
+    /// <see cref="EndOfStreamException"/> for a truncated image, <see cref="IOException"/> for a
+    /// stream-level fault while reading one, <see cref="InvalidDataException"/> for the structural
+    /// rejections this file raises by hand, <see cref="OverflowException"/> and
+    /// <see cref="ArgumentException"/> - which covers
+    /// <see cref="ArgumentOutOfRangeException"/> - for a nonsensical numeric component that reaches a
+    /// constructor, and <see cref="NotSupportedException"/> for a value shape the format cannot
+    /// express.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY ABSENT, and each absence is the fail-fast posture the refactor plan requires rather
+    /// than an oversight: <see cref="OutOfMemoryException"/>, <see cref="StackOverflowException"/>,
+    /// <see cref="OperationCanceledException"/> and <see cref="NullReferenceException"/> all propagate.
+    /// A structural fault must terminate rather than degrade into a return code, and an out-of-memory
+    /// condition swallowed as "malformed payload" would hide the very resource-exhaustion problem the
+    /// count guards above exist to prevent - which is precisely why this list is narrow and why the
+    /// guards are placed BEFORE the allocations rather than relying on catching what they cause.
+    /// </para>
+    /// <para>
+    /// The sibling changeset codec classifies the same set for the same reasons. The two lists are
+    /// stated independently because the two formats are independent; sharing one would imply a shared
+    /// layout that does not exist.
+    /// </para>
+    /// </remarks>
+    private static bool IsPayloadFault(Exception failure)
+    {
+        // InvalidDataException is named EXPLICITLY and is not covered by IOException: it derives from
+        // SystemException, not from IOException, so a list that relied on the latter to catch it would
+        // silently let every structural rejection this file raises by hand escape.
+        return failure is EndOfStreamException
+            or IOException
+            or InvalidDataException
+            or DecoderFallbackException
+            or EncoderFallbackException
+            or FormatException
+            or OverflowException
+            or NotSupportedException
+            or ArgumentException;
     }
 
     #endregion
@@ -1567,6 +1643,106 @@ internal static class FullStateCodec
     private static readonly UTF8Encoding PayloadEncoding = new(
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
+
+    // ------------------------------------------------------------------------------------------
+    //  THE IMAGE IS UNTRUSTED INPUT, AND EVERY COUNT IN IT IS AN ALLOCATION REQUEST
+    //  ----------------------------------------------------------------------------------------
+    //  An image arrives from a peer, so every length and count it declares is a number chosen by
+    //  whoever produced the bytes. Three of them reach an allocation or an iteration bound directly:
+    //  the per-buffer row count, the per-row column count - which sizes FIVE arrays before a single
+    //  column is read - and a blob length, which BinaryReader.ReadBytes turns into `new byte[count]`
+    //  BEFORE it discovers the stream is shorter.
+    //
+    //  A NON-NEGATIVE CHECK IS NOT A BOUND: eight bytes can say long.MaxValue in a twenty-byte image.
+    //  The bound that is always exact is the REMAINING BYTES, because every element costs at least a
+    //  known minimum on the wire and a well-formed image always carries the bytes it promised. The
+    //  protocol maxima are a coarser gate in front of it, so an absurd count is rejected by name.
+    //  The arithmetic is done in `long` throughout so the product cannot overflow into a small
+    //  positive number and admit the count it was written to reject.
+    //
+    //  The sibling changeset codec states the same reasoning at greater length beside its own
+    //  constants; the two formats are independent, so each carries its own limits rather than sharing
+    //  them - a shared constant would imply a shared layout that does not exist.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The largest row count one buffer of an image may declare: 1,048,576.
+    /// </summary>
+    /// <remarks>
+    /// A coarse sanity gate, far above anything the evidenced fixture produces - the sole updatable
+    /// DataWindow in the repository is a six-column <c>COMPANY</c> table
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>]. Declared as
+    /// <see cref="long"/> because this codec writes its row counts as <see cref="long"/>, matching the
+    /// legacy's own row type.
+    /// </remarks>
+    private const long MaxRowsPerBuffer = 1L << 20;
+
+    /// <summary>
+    /// The largest column count one row of an image may declare: 32,768.
+    /// </summary>
+    /// <remarks>
+    /// This is the count that matters most: <see cref="ReadRow"/> sizes five arrays from it before
+    /// reading any column. The legacy's own documented crosstab limitation shows a DataWindow's column
+    /// count is bounded in practice [<c>n_cst_thread_task_sqlquery.sru:L673</c>], and this ceiling sits
+    /// far above any real one.
+    /// </remarks>
+    private const long MaxColumnsPerRow = 1L << 15;
+
+    /// <summary>
+    /// The fewest bytes one row of an image can occupy: its status ordinal plus its column count.
+    /// </summary>
+    /// <remarks>
+    /// Measured from <see cref="WriteRow"/>: a row writes its status through
+    /// <see cref="WriteItemStatus"/> and then an <see cref="int"/> column count. A row with no columns
+    /// is legal and costs exactly this, which makes the value a true minimum.
+    /// </remarks>
+    private const long MinimumBytesPerRow = sizeof(int) + sizeof(int);
+
+    /// <summary>
+    /// The fewest bytes one column entry of an image can occupy: its number, its status, its
+    /// original-value presence flag, and one value tag.
+    /// </summary>
+    /// <remarks>
+    /// Measured from <see cref="WriteRow"/>'s column loop: an <see cref="int"/> column number, the
+    /// status, the one-byte presence flag, then the current value - which is at minimum a single tag
+    /// byte, exactly what <see cref="FullStateValueTag.Null"/> costs. The original value is absent
+    /// whenever it equals the current one, so it contributes nothing to the minimum.
+    /// </remarks>
+    private const long MinimumBytesPerColumn = sizeof(int) + sizeof(int) + 1 + 1;
+
+    /// <summary>
+    /// Whether <paramref name="count"/> elements of at least <paramref name="minimumBytesPerElement"/>
+    /// bytes each could still fit in what remains of <paramref name="reader"/>'s stream, and is within
+    /// <paramref name="protocolMaximum"/>.
+    /// </summary>
+    /// <param name="reader">The reader positioned immediately after the count was read.</param>
+    /// <param name="count">The declared count, which may be any value the image chose.</param>
+    /// <param name="minimumBytesPerElement">The fewest bytes one element can occupy on the wire.</param>
+    /// <param name="protocolMaximum">The coarse ceiling this kind of count is subject to.</param>
+    /// <returns>
+    /// <see langword="true"/> when the count may be used as a loop bound or an allocation size;
+    /// <see langword="false"/> when it must be rejected BEFORE either.
+    /// </returns>
+    /// <remarks>
+    /// A negative count is rejected here as well, so callers need no separate sign test and cannot
+    /// forget one. The multiplication is <see cref="long"/> arithmetic and the operands are bounded by
+    /// <paramref name="protocolMaximum"/> before it happens, so it cannot overflow.
+    /// </remarks>
+    private static bool IsPlausibleCount(
+        BinaryReader reader,
+        long count,
+        long minimumBytesPerElement,
+        long protocolMaximum)
+    {
+        if (count < 0L || count > protocolMaximum)
+        {
+            return false;
+        }
+
+        long remaining = reader.BaseStream.Length - reader.BaseStream.Position;
+
+        return count * minimumBytesPerElement <= remaining;
+    }
 
     /// <summary>
     /// The fixed order the three buffers are written and read in.
@@ -1718,10 +1894,15 @@ internal static class FullStateCodec
 
         int columnCount = reader.ReadInt32();
 
-        if (columnCount < 0)
+        // BOUNDED BEFORE THE FIVE ALLOCATIONS BELOW. They are sized from this number before a single
+        // column has been read, so an unbounded count of int.MaxValue would demand gigabytes and raise
+        // OutOfMemoryException instead of answering the failure code Apply is contracted to return.
+        if (!IsPlausibleCount(reader, columnCount, MinimumBytesPerColumn, MaxColumnsPerRow))
         {
             throw new InvalidDataException(
-                "A row declares a negative column count, so the image is not one this codec wrote.");
+                "A row declares a column count that is negative, beyond the protocol maximum, or "
+                    + "larger than the bytes that remain could hold, so the image is not one this "
+                    + "codec wrote.");
         }
 
         // R9: AppendRow RETURNS the new row's ONE-BASED number - the post-add count, with no minus one -
@@ -1953,10 +2134,15 @@ internal static class FullStateCodec
             case FullStateValueTag.Bytes:
                 int length = reader.ReadInt32();
 
-                if (length < 0)
+                // BOUNDED BEFORE THE READ, NOT AFTER IT. ReadBytes allocates `new byte[length]` up
+                // front and only then discovers the stream is shorter, so a declared length of
+                // int.MaxValue reserves two gigabytes before failing. A blob element is one byte, so
+                // the remaining-byte rule is the exact bound here and no invented ceiling is wanted.
+                if (!IsPlausibleCount(reader, length, minimumBytesPerElement: 1L, protocolMaximum: int.MaxValue))
                 {
                     throw new InvalidDataException(
-                        "The image declares a negative blob length, so it is not one this codec wrote.");
+                        "The image declares a blob length that is negative or longer than the bytes "
+                            + "that remain, so it is not one this codec wrote.");
                 }
 
                 // ReadBytes may legitimately return fewer bytes than asked for at the end of a stream, so

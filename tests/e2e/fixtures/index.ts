@@ -44,11 +44,11 @@
  *
  * WHY `export *` RATHER THAN A NAME LIST
  * --------------------------------------
- * The four surfaces are disjoint — 64 exported identifiers with no name owned
+ * The four surfaces are disjoint — 65 exported identifiers with no name owned
  * by two modules — so a star re-export cannot introduce an ambiguity. It is
  * also the form `isolatedModules` accepts unconditionally: a *named* re-export
  * of an entity that turns out to be a type is rejected under that flag, and
- * ten of these names are types, so the star form carries values and types
+ * eleven of these names are types, so the star form carries values and types
  * alike without splitting the surface into two clauses that would then both
  * need maintaining. Should a collision ever arise, it is resolved here with
  * explicit named re-exports and recorded here in a comment — the sibling

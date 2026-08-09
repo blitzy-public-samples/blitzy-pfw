@@ -473,6 +473,20 @@ internal readonly record struct PagingRewriteResult
     /// </remarks>
     public const string DialectNotImplementedText = "";
 
+    /// <summary>
+    /// The diagnostic paired with <see cref="InvalidPagedUniqueIndexColumn"/>. THE ONE MESSAGE IN THIS
+    /// TYPE WITH NO ORACLE LOCATOR, because the oracle performs no such validation - see that factory.
+    /// </summary>
+    /// <remarks>
+    /// English rather than transcribed Chinese precisely BECAUSE it has no oracle counterpart: writing it
+    /// in Chinese would make an addition of this port look like transcribed legacy text. It names no
+    /// identifier and no statement, so nothing a caller supplied is reflected back.
+    /// </remarks>
+    public const string InvalidPagedUniqueIndexColumnText =
+        "A paged unique-index column was rejected: an identifier spliced into statement text must be one "
+        + "to three period-separated unquoted SQL name segments, and must name a column of the statement "
+        + "where the statement enumerates its columns.";
+
     /// <summary>Backing store for <see cref="RewrittenSql"/>, nullable so that
     /// <see langword="default"/> is representable without a null-hostile property.</summary>
     private readonly string? _rewrittenSql;
@@ -607,6 +621,501 @@ internal readonly record struct PagingRewriteResult
     /// </remarks>
     public static PagingRewriteResult DialectNotImplemented() =>
         new(RetCode.E_NO_IMPLEMENTATION, null, DialectNotImplementedText);
+
+    /// <summary>
+    /// THE ONE OUTCOME WITH NO ORACLE COUNTERPART: a paged unique-index column that would be spliced
+    /// into statement text was rejected. <see cref="RetCode.E_INVALID_ARGUMENT"/> with
+    /// <see cref="InvalidPagedUniqueIndexColumnText"/>.
+    /// </summary>
+    /// <returns>The identifier-rejection result.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHY A FIFTH SHAPE EXISTS AT ALL, WHEN THE FOUR ABOVE WERE MEASURED AS COMPLETE. The four are the
+    /// complete set of the ORACLE's returns, and that statement remains exactly true. This one is not an
+    /// oracle return: the oracle performs no validation whatever on these identifiers and concatenates
+    /// whatever it is handed <c>[:L331, :L333, :L336]</c>. AAP 0.6.4 governs precisely this situation - the
+    /// legacy interpolation sites are documented as known legacy defects while ".NET implementation uses
+    /// parameterized commands internally" - and an identifier is the one thing a bind parameter cannot
+    /// carry, so validate-and-reject is the only control available. A comment telling callers to supply
+    /// trusted names is not a trust boundary; this is.
+    /// </para>
+    /// <para>
+    /// THE CODE IS DELIBERATELY THE SAME <c>E_INVALID_ARGUMENT</c> THE FIRST GUARD USES, and the TEXT is
+    /// deliberately different. Reusing the code keeps the caller's branch set unchanged: the contract
+    /// already publishes E_INVALID_ARGUMENT as "a paging setting was rejected", and this is a paging
+    /// setting being rejected. Inventing a new code would add a value a v1 consumer has no arm for.
+    /// Reusing the oracle's Chinese <see cref="InvalidPagingSettingText"/> as the message, by contrast,
+    /// would make a bounds fault and an identifier fault indistinguishable in a log - so this carries its
+    /// own text, which the contract permits because the diagnostic is declared opaque display text that a
+    /// consumer must never parse to classify an outcome.
+    /// </para>
+    /// <para>
+    /// NO CALLER-SUPPLIED TEXT IS ECHOED. The message names neither the offending identifier nor the
+    /// statement, deliberately: the rejected value is attacker-controlled by hypothesis, and a diagnostic
+    /// that reflects it back becomes a channel of its own. Which identifier failed and why is available
+    /// through <see cref="PagedUniqueIndexColumnValidator.TryValidate"/> at the call site, where it can be
+    /// logged server-side rather than returned.
+    /// </para>
+    /// </remarks>
+    public static PagingRewriteResult InvalidPagedUniqueIndexColumn() =>
+        new(RetCode.E_INVALID_ARGUMENT, null, InvalidPagedUniqueIndexColumnText);
+}
+
+
+// ----------------------------------------------------------------------------------------------
+//  The trust boundary - identifier validation, which the oracle does not have and this must
+// ----------------------------------------------------------------------------------------------
+
+/// <summary>
+/// Validates the paged unique-index columns a caller supplies, BEFORE any of them is concatenated into
+/// statement text.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>WHY THIS TYPE EXISTS (CWE-89 / CWE-20).</b> <c>QuerySpec.paged_unique_index_columns</c> and
+/// <c>SetPagedUniqueIndexColumnsRequest.columns</c> are <c>repeated string</c> on a published contract,
+/// and the first dialect arm concatenates each element into the select list, into the join predicate and
+/// into the ORDER BY, unquoted and unescaped
+/// <c>[ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L331, :L333, :L336]</c>. An
+/// identifier CANNOT be a bind parameter - the emitted identifier text is the observable output that
+/// byte-exact parity is measured against - so parameterisation is unavailable here rather than merely
+/// omitted. Authentication does not help: every caller on this boundary is authenticated by design, and
+/// the exposure is what an authenticated caller can make the statement say. A comment instructing callers
+/// to supply names from a trusted schema source is guidance, not enforcement.
+/// </para>
+/// <para>
+/// <b>TWO CHECKS, AND THEY DO DIFFERENT JOBS.</b> The LEXICAL check is the security control: an accepted
+/// value cannot contain whitespace, a quote, a bracket, a parenthesis, a comma, a semicolon, an operator
+/// or a comment marker, so it cannot terminate the identifier it is spliced as and cannot introduce a
+/// second syntactic element. It is an ALLOW-LIST over the characters SQL Server and Oracle permit in an
+/// unquoted identifier, not a deny-list of dangerous ones - a deny-list is only ever as complete as its
+/// author's imagination. The MEMBERSHIP check is defence in depth: where the parsed statement enumerates
+/// its columns, an identifier that names none of them is rejected as unknown.
+/// </para>
+/// <para>
+/// <b>MEMBERSHIP IS ONLY ENFORCED WHERE THE STATEMENT CAN ANSWER IT, AND THAT IS NOT A WEAKENING.</b>
+/// The primary fixture's own retrieve is <c>SELECT * FROM COMPANY</c>
+/// <c>[ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14]</c>, whose select list names no column at all -
+/// so a roster containing <c>*</c>, a <c>t.*</c> term, or an expression term cannot enumerate the
+/// available columns, and treating "not in the roster" as "unknown" there would reject every legitimate
+/// request against the one statement shape the repository actually evidences. Where the roster IS
+/// exhaustive the check is enforced strictly. The lexical check applies in every case, so the security
+/// property never depends on the statement's shape.
+/// </para>
+/// <para>
+/// <b>WHAT THIS CHANGES ABOUT OBSERVABLE BEHAVIOUR, STATED PLAINLY (C-B).</b> For every identifier the
+/// oracle could splice and produce executable SQL from, the generated statement is unchanged byte for
+/// byte - the validator accepts it and the arm emits exactly what it emitted before. What changes is that
+/// three previously-reachable outcomes are now refused: a crafted identifier that would have altered the
+/// statement, an identifier naming a column the enumerated statement does not have, and the EMPTY
+/// identifier - which the arm already turned into the malformed predicate
+/// <c>"pfwPagedSQL_OutterTbl. = "</c> in both the legacy and this port, and so never yielded executable
+/// SQL in either. None of the three is a behaviour a caller could have depended on.
+/// </para>
+/// <para>
+/// <b>A PURE FUNCTION over strings.</b> No connection, no schema catalogue query, no clock, no I/O - the
+/// "authoritative metadata" is the PARSED STATEMENT the dispatcher already holds, which is what keeps
+/// this testable with no database of either dialect in existence (C-E).
+/// </para>
+/// </remarks>
+internal static class PagedUniqueIndexColumnValidator
+{
+    /// <summary>
+    /// The longest single dot-separated segment an identifier may carry.
+    /// </summary>
+    /// <remarks>
+    /// SQL Server's regular-identifier limit is 128 characters and Oracle's modern limit is the same, so
+    /// 128 admits every identifier either engine would accept while bounding the text that can be spliced.
+    /// It is a bound rather than a parity constant: no legacy site declares one, because no legacy site
+    /// checks anything.
+    /// </remarks>
+    public const int MaximumSegmentLength = 128;
+
+    /// <summary>
+    /// The most dot-separated segments an identifier may carry - a three-part
+    /// <c>database.schema.object</c> name.
+    /// </summary>
+    /// <remarks>
+    /// Three rather than two because the arm's qualifier strip explicitly tolerates a three-part name: it
+    /// splits on the FIRST period and keeps everything after it, which the port documents as legacy
+    /// behaviour and preserves. Four parts are refused because neither dialect's column reference has a
+    /// fourth level.
+    /// </remarks>
+    public const int MaximumSegments = 3;
+
+    /// <summary>
+    /// Whether an identifier is lexically acceptable to splice - THE SECURITY CONTROL.
+    /// </summary>
+    /// <param name="identifier">The caller-supplied identifier. <see langword="null"/> is invalid.</param>
+    /// <returns>
+    /// <see langword="true"/> when the value is one to <see cref="MaximumSegments"/> period-separated
+    /// segments, each non-empty, each at most <see cref="MaximumSegmentLength"/> characters, each
+    /// beginning with an ASCII letter or underscore and continuing with ASCII letters, digits,
+    /// underscores, <c>$</c> or <c>#</c>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// The trailing alphabet is the two engines' own: <c>$</c> and <c>#</c> are legal in an Oracle
+    /// identifier and <c>#</c> and <c>$</c> in a SQL Server one, so admitting both keeps every identifier
+    /// either engine accepts without admitting anything a parser could read as a second token.
+    /// </para>
+    /// <para>
+    /// ASCII-ONLY, DELIBERATELY. Both engines permit letters outside ASCII in an identifier, and admitting
+    /// them here would mean deciding what "a letter" is - a Unicode-category question whose answer varies
+    /// by framework version and would put a host-dependent decision on the path that produces text a
+    /// byte-exact comparison is run against. No identifier anywhere in the repository is non-ASCII: the
+    /// only evidenced schema declares <c>ID</c>, <c>NAME</c>, <c>AGE</c>, <c>ADDRESS</c>, <c>SALARY</c>
+    /// and <c>BIRTH</c> <c>[ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469]</c>. A deployment
+    /// needing a non-ASCII identifier gets a defined refusal rather than a silent behaviour change, which
+    /// is the direction AAP 0.1.5 requires.
+    /// </para>
+    /// </remarks>
+    public static bool IsLexicallyValid(string? identifier)
+    {
+        if (string.IsNullOrEmpty(identifier))
+        {
+            return false;
+        }
+
+        int segments = 0;
+        int segmentLength = 0;
+
+        for (int index = 0; index < identifier.Length; index++)
+        {
+            char character = identifier[index];
+
+            if (character == '.')
+            {
+                // An empty segment - a leading period, a trailing period, or two in a row.
+                if (segmentLength == 0)
+                {
+                    return false;
+                }
+
+                segments++;
+                segmentLength = 0;
+
+                continue;
+            }
+
+            bool acceptable = segmentLength == 0
+                ? IsSegmentStart(character)
+                : IsSegmentContinuation(character);
+
+            if (!acceptable)
+            {
+                return false;
+            }
+
+            segmentLength++;
+
+            if (segmentLength > MaximumSegmentLength)
+            {
+                return false;
+            }
+        }
+
+        // The final segment is not terminated by a period, so it is counted here. A zero length means the
+        // value ended on a period.
+        if (segmentLength == 0)
+        {
+            return false;
+        }
+
+        segments++;
+
+        return segments <= MaximumSegments;
+    }
+
+    /// <summary>
+    /// Validates every supplied identifier against the parsed statement.
+    /// </summary>
+    /// <param name="pagedUniqueIndexColumns">The caller's list. An empty list validates trivially.</param>
+    /// <param name="statement">
+    /// The statement, ALREADY PARSED by the dispatcher. Its select lists are the authoritative column
+    /// metadata this validator has - see the type remarks on why that is the right source and the only one
+    /// available without a connection.
+    /// </param>
+    /// <param name="rejected">
+    /// The first identifier that failed, or <see langword="null"/> when all passed. Intended for a
+    /// SERVER-SIDE log record; it is never returned to the caller, because the value is
+    /// attacker-controlled by hypothesis.
+    /// </param>
+    /// <param name="reason">
+    /// Why it failed - <see cref="MalformedReason"/> or <see cref="UnknownColumnReason"/> - or
+    /// <see langword="null"/> when all passed.
+    /// </param>
+    /// <returns><see langword="true"/> when every identifier is acceptable.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="pagedUniqueIndexColumns"/> or <paramref name="statement"/> is
+    /// <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// FIRST FAILURE WINS AND THE REST ARE NOT EXAMINED, which matches how the dispatcher's other guards
+    /// behave: one fault, one code, one diagnostic. Reporting every failure would mean assembling a
+    /// message out of caller-supplied text, which is exactly what the rejection deliberately does not do.
+    /// </remarks>
+    public static bool TryValidate(
+        IReadOnlyList<string> pagedUniqueIndexColumns,
+        SelectStatementModel statement,
+        out string? rejected,
+        out string? reason)
+    {
+        ArgumentNullException.ThrowIfNull(pagedUniqueIndexColumns);
+        ArgumentNullException.ThrowIfNull(statement);
+
+        rejected = null;
+        reason = null;
+
+        if (pagedUniqueIndexColumns.Count == 0)
+        {
+            return true;
+        }
+
+        // Built once for the whole list rather than per identifier. A null set means at least one select
+        // block cannot enumerate its columns, so membership is unenforceable - see the type remarks.
+        HashSet<string>? roster = BuildRoster(statement);
+
+        for (int index = 0; index < pagedUniqueIndexColumns.Count; index++)
+        {
+            // Widened to string? deliberately: a deserialized wire message can carry a null element
+            // despite the non-nullable type argument.
+            string? candidate = pagedUniqueIndexColumns[index];
+
+            if (!IsLexicallyValid(candidate))
+            {
+                rejected = candidate ?? string.Empty;
+                reason = MalformedReason;
+
+                return false;
+            }
+
+            if (roster is not null && !AppearsIn(roster, candidate!))
+            {
+                rejected = candidate!;
+                reason = UnknownColumnReason;
+
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The reason reported by <see cref="TryValidate"/> for a value that failed the lexical check.
+    /// </summary>
+    public const string MalformedReason = "malformed identifier";
+
+    /// <summary>
+    /// The reason reported by <see cref="TryValidate"/> for a well-formed identifier that names no column
+    /// of an enumerated select list.
+    /// </summary>
+    public const string UnknownColumnReason = "identifier names no column of the statement";
+
+    /// <summary>
+    /// Collects the column names every select block enumerates.
+    /// </summary>
+    /// <param name="statement">The parsed statement.</param>
+    /// <returns>
+    /// The set of names, or <see langword="null"/> when ANY block's select list cannot be enumerated -
+    /// because it contains <c>*</c>, a <c>t.*</c> term, or a term that is an expression rather than a
+    /// name.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// NULL MEANS "UNENFORCEABLE", NOT "EMPTY", and the distinction is the whole reason this returns a
+    /// nullable set rather than an empty one. An empty set would reject everything; null skips the
+    /// membership check and leaves the lexical check as the enforced bound.
+    /// </para>
+    /// <para>
+    /// ONE BLOCK'S OPACITY MAKES THE WHOLE ROSTER UNENFORCEABLE. A compound statement's blocks may
+    /// enumerate different lists, and the arm rewrites the statement as a whole, so a name that belongs to
+    /// only one block is still a legitimate reference. Refusing to enforce membership when any block is
+    /// opaque is the conservative direction: the lexical control is untouched either way, and the
+    /// alternative would reject legitimate requests.
+    /// </para>
+    /// </remarks>
+    private static HashSet<string>? BuildRoster(SelectStatementModel statement)
+    {
+        int blocks = statement.GetSelectCount();
+
+        if (blocks <= 0)
+        {
+            return null;
+        }
+
+        HashSet<string> roster = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int selectIndex = 1; selectIndex <= blocks; selectIndex++)
+        {
+            if (!statement.HasColumn(selectIndex))
+            {
+                return null;
+            }
+
+            if (!AddTerms(statement.GetColumn(selectIndex), roster))
+            {
+                return null;
+            }
+        }
+
+        return roster.Count == 0 ? null : roster;
+    }
+
+    /// <summary>
+    /// Splits one select list on its TOP-LEVEL commas and adds each term's name spellings to
+    /// <paramref name="roster"/>.
+    /// </summary>
+    /// <param name="selectList">The select-list text, exactly as parsed.</param>
+    /// <param name="roster">The set to add to.</param>
+    /// <returns><see langword="false"/> when the list cannot be enumerated.</returns>
+    /// <remarks>
+    /// PARENTHESIS DEPTH IS TRACKED so that a comma inside a function call does not split a term - though
+    /// a term containing a parenthesis is opaque anyway, so the depth counter exists to keep the SPLIT
+    /// honest rather than to salvage the term.
+    /// </remarks>
+    private static bool AddTerms(string selectList, HashSet<string> roster)
+    {
+        int depth = 0;
+        int start = 0;
+
+        for (int index = 0; index < selectList.Length; index++)
+        {
+            char character = selectList[index];
+
+            switch (character)
+            {
+                case '(':
+                    depth++;
+                    break;
+
+                case ')':
+                    depth--;
+                    break;
+
+                case ',' when depth == 0:
+                    if (!AddTerm(selectList[start..index], roster))
+                    {
+                        return false;
+                    }
+
+                    start = index + 1;
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        return AddTerm(selectList[start..], roster);
+    }
+
+    /// <summary>
+    /// Adds one select-list term's name spellings to <paramref name="roster"/>.
+    /// </summary>
+    /// <param name="term">One term of a select list, un-trimmed.</param>
+    /// <param name="roster">The set to add to.</param>
+    /// <returns><see langword="false"/> when the term is not a plain name and therefore opaque.</returns>
+    /// <remarks>
+    /// <para>
+    /// BOTH SPELLINGS OF AN ALIASED TERM ARE ADDED. <c>c.id AS ident</c> contributes <c>id</c> and
+    /// <c>ident</c>, because a caller naming a unique-index column may reasonably write either. Membership
+    /// is defence in depth behind the lexical control, so admitting both spellings is the right trade: a
+    /// false rejection breaks a legitimate request, while a false acceptance still cannot alter the
+    /// statement's syntax.
+    /// </para>
+    /// <para>
+    /// THE TRAILING DOT-SEGMENT IS WHAT IS STORED, matching how the arm itself treats a qualified name -
+    /// it strips the qualifier when building the join predicate <c>[:L333]</c>.
+    /// </para>
+    /// </remarks>
+    private static bool AddTerm(string term, HashSet<string> roster)
+    {
+        string trimmed = term.Trim();
+
+        if (trimmed.Length == 0)
+        {
+            // A trailing or doubled comma. The statement is odd but not opaque; nothing to add.
+            return true;
+        }
+
+        // `*` and `t.*` both mean "every column", which is exactly the roster this cannot enumerate.
+        if (trimmed == "*" || trimmed.EndsWith(".*", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        bool addedAny = false;
+
+        foreach (string token in trimmed.Split(
+            (char[]?)null,
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (string.Equals(token, "AS", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // An expression term - a function call, an operator, a quoted alias, a bracketed name. It
+            // cannot be enumerated, and one such term makes the whole roster unenforceable.
+            if (!IsLexicallyValid(token))
+            {
+                return false;
+            }
+
+            roster.Add(token);
+
+            int separator = token.IndexOf('.', StringComparison.Ordinal);
+
+            if (separator >= 0)
+            {
+                roster.Add(token[(separator + 1)..]);
+            }
+
+            addedAny = true;
+        }
+
+        return addedAny;
+    }
+
+    /// <summary>
+    /// Whether an identifier names something in the roster, by full spelling or by trailing segment.
+    /// </summary>
+    /// <param name="roster">The enumerated names.</param>
+    /// <param name="identifier">The identifier, already known to be lexically valid.</param>
+    /// <returns><see langword="true"/> when either spelling is present.</returns>
+    /// <remarks>
+    /// ORDINAL-IGNORE-CASE, because an unquoted identifier is case-insensitive in both dialects, and
+    /// ORDINAL rather than culture-aware because the comparison feeds a decision about text a byte-exact
+    /// assertion is run against.
+    /// </remarks>
+    private static bool AppearsIn(HashSet<string> roster, string identifier)
+    {
+        if (roster.Contains(identifier))
+        {
+            return true;
+        }
+
+        int separator = identifier.IndexOf('.', StringComparison.Ordinal);
+
+        return separator >= 0 && roster.Contains(identifier[(separator + 1)..]);
+    }
+
+    /// <summary>Whether a character may begin a segment: an ASCII letter or an underscore.</summary>
+    /// <param name="character">The character to classify.</param>
+    /// <returns><see langword="true"/> when it may begin a segment.</returns>
+    private static bool IsSegmentStart(char character) =>
+        character is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or '_';
+
+    /// <summary>
+    /// Whether a character may continue a segment: a segment-start character, an ASCII digit,
+    /// <c>$</c> or <c>#</c>.
+    /// </summary>
+    /// <param name="character">The character to classify.</param>
+    /// <returns><see langword="true"/> when it may continue a segment.</returns>
+    private static bool IsSegmentContinuation(char character) =>
+        IsSegmentStart(character) || character is (>= '0' and <= '9') or '$' or '#';
 }
 
 
@@ -677,6 +1186,35 @@ internal interface IPagingRewriter
     /// what keeps one published definition of the discriminator instead of two that can drift.
     /// </remarks>
     DatabaseType Dialect { get; }
+
+    /// <summary>
+    /// Whether this arm SPLICES <see cref="PagingRewriteRequest.PagedUniqueIndexColumns"/> INTO
+    /// STATEMENT TEXT, and therefore whether those identifiers are a trust boundary for it.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> for the arm that branches on
+    /// <see cref="PagingRewriteRequest.HasPagedUniqueIndexColumns"/> and concatenates each column into
+    /// the select list, the join predicate and the ORDER BY
+    /// <c>[ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L331, :L333, :L336]</c>;
+    /// <see langword="false"/> for an arm that ignores the collection entirely <c>[:L386-L395]</c>.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// WHY THE CONTRACT CARRIES THIS RATHER THAN THE DISPATCHER ASSUMING IT. An identifier cannot be a
+    /// bind parameter - the emitted identifier text IS the observable output that byte-exact parity is
+    /// measured against - so the only available control is to VALIDATE the identifier before it is
+    /// concatenated. <see cref="PagingRewriteDispatcher"/> applies that validation, and it must apply it
+    /// exactly where text is spliced and nowhere else: validating for an arm that discards the collection
+    /// would REFUSE a request that arm previously answered, which is a narrowing with no security benefit
+    /// to justify it. Declaring the coupling here keeps that decision a published property of each arm
+    /// instead of a dialect list the dispatcher would have to keep in step by hand.
+    /// </para>
+    /// <para>
+    /// It is a property and not a method because it is a fixed fact about the arm's own text generation,
+    /// not a function of any request.
+    /// </para>
+    /// </remarks>
+    bool ConsumesPagedUniqueIndexColumns { get; }
 
     /// <summary>
     /// Rewrites a parsed statement into its paged form for this dialect.
@@ -768,6 +1306,44 @@ internal static class PagingRewriteDispatcher
     /// returns <c>E_INTERNAL_ERROR</c> rather than <c>E_NO_IMPLEMENTATION</c>.
     /// </para>
     /// <para>
+    /// <b>A FIFTH STEP EXISTS THAT THE ORACLE DOES NOT HAVE, AND ITS POSITION IS CHOSEN SO THAT NO
+    /// ORACLE OUTCOME MOVES.</b> The paged unique-index columns are concatenated into statement text by
+    /// the first arm, unquoted and unescaped <c>[:L331, :L333, :L336]</c>, and an identifier cannot be a
+    /// bind parameter - so they are validated by <see cref="PagedUniqueIndexColumnValidator"/> before the
+    /// arm runs (CWE-89, and AAP 0.6.4 which requires the .NET side to close these interpolation sites
+    /// while preserving observable behaviour). It is placed LAST for three reasons, each of which is a
+    /// behaviour that would otherwise change:
+    /// </para>
+    /// <list type="number">
+    ///   <item>
+    ///     <description>
+    ///     AFTER the bounds guard and the parse, so a request that is both badly paged and carries a
+    ///     crafted identifier still reports the paging fault, and an unparseable one still reports the
+    ///     parse fault. It also NEEDS the parsed statement, which is where the column roster comes from.
+    ///     </description>
+    ///   </item>
+    ///   <item>
+    ///     <description>
+    ///     AFTER the dialect test, so an unrecognised dialect still returns <c>E_NO_IMPLEMENTATION</c>
+    ///     rather than an identifier rejection.
+    ///     </description>
+    ///   </item>
+    ///   <item>
+    ///     <description>
+    ///     GATED ON <see cref="IPagingRewriter.ConsumesPagedUniqueIndexColumns"/>, so the arm that
+    ///     IGNORES the collection entirely <c>[:L386-L395]</c> is unaffected. Validating for that arm
+    ///     would refuse a request it previously answered, with no injection to prevent - a narrowing
+    ///     with nothing to justify it.
+    ///     </description>
+    ///   </item>
+    /// </list>
+    /// <para>
+    /// The rejected identifier and the reason are DISCARDED here rather than returned. The value is
+    /// attacker-controlled by hypothesis, so echoing it into a diagnostic would make the refusal its own
+    /// channel; <see cref="PagedUniqueIndexColumnValidator.TryValidate"/> exposes both to a caller that
+    /// wants to log them server-side.
+    /// </para>
+    /// <para>
     /// <b>THE EARLY RETURNS ARE PRESERVED AS EARLY RETURNS, AND HERE IS THE FINDING BEHIND THAT
     /// (C-K).</b> In the oracle, <c>Destroy sqlParser</c> sits at <c>[:L401]</c> - AFTER the
     /// <c>choose case</c> - so the parse-failure return at <c>[:L316]</c> and the <c>case else</c>
@@ -838,6 +1414,20 @@ internal static class PagingRewriteDispatcher
                 $"No {nameof(IPagingRewriter)} was supplied for the implemented dialect '{dialect}'. " +
                 "This is a composition fault, not the legacy unrecognised-dialect arm: exactly two " +
                 "arms exist and both must be registered.");
+
+        // STEP 5 - THE TRUST BOUNDARY THE ORACLE DOES NOT HAVE. It sits HERE, after the three oracle
+        // guards and after arm selection, and it is conditional on the selected arm actually splicing
+        // these identifiers - see PagedUniqueIndexColumnValidator and the ordering note in the remarks.
+        if (rewriter.ConsumesPagedUniqueIndexColumns
+            && request.HasPagedUniqueIndexColumns
+            && !PagedUniqueIndexColumnValidator.TryValidate(
+                request.PagedUniqueIndexColumns,
+                statement,
+                out string? _,
+                out string? _))
+        {
+            return PagingRewriteResult.InvalidPagedUniqueIndexColumn();
+        }
 
         // The arm body: [:L321-L385] for the first dialect, [:L386-L395] for the second.
         return rewriter.Rewrite(in request, statement);
@@ -1013,4 +1603,3 @@ internal static class PagingDialectResolver
             : DatabaseType.DbtMssql;   // [n_cst_thread_trans.sru:L359] - the fallback for everything
     }
 }
-

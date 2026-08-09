@@ -145,9 +145,14 @@
 //        (a) `for page` needs the page's row range, and a page boundary is computed from band heights
 //            and print margins - presentation, owned by the deferred DesignSystem and reserved at
 //            /v1/design/** (AAP 0.4.4). The headless half takes the range from PageResolver, whose
-//            default treats the whole primary buffer as one page. dw_sqlite.srd:L27's
-//            `sum(salary for page)` therefore evaluates, and a caller that knows its pagination
-//            supplies it.
+//            default - UnresolvedPageResolver - resolves NOTHING, so dw_sqlite.srd:L27's
+//            `sum(salary for page)` evaluates to "!" with a structured error until a caller injects an
+//            authoritative resolver. It is deliberately NOT defaulted to the whole primary buffer:
+//            that returns the grand total where a page total was asked for, on a paginated surface,
+//            with nothing in the answer to distinguish the two - the widening 0.1.5 forbids, wearing
+//            the costume of a sensible default. A caller that knows its page size supplies
+//            FixedRowsPerPageResolver; one that means "unpaginated" says so with
+//            WholeBufferPageResolver.
 //        (b) `for group n` needs the group-band model, which is the same deferred surface. It parses,
 //            and evaluates to "!" with a structured error naming the gap. It is not silently treated
 //            as `for all`, because that would return a plausible wrong number.
@@ -1249,10 +1254,20 @@ public enum ExpressionAggregateScope
 /// this service takes the range from whoever does know it and never guesses at it.
 /// </para>
 /// <para>
-/// The default implementation treats the whole buffer as one page, which makes
-/// <c>sum(salary for page)</c> evaluate rather than fail while stating plainly that no pagination is in
-/// force. A caller that knows its own page size supplies
-/// <see cref="FixedRowsPerPageResolver"/> instead.
+/// THE DEFAULT IMPLEMENTATION RESOLVES NOTHING, ON PURPOSE. <see cref="UnresolvedPageResolver"/> is
+/// installed until a caller supplies an authoritative one, so <c>sum(salary for page)</c> answers the
+/// malformed sentinel with a structured error naming the gap rather than a number computed over the
+/// wrong set of rows. Treating the whole buffer as one page looks accommodating and is a WIDENING: on a
+/// four-row fixture it happens to be right, on a paginated report it silently returns the grand total
+/// where the page total was asked for, and nothing about the answer says which happened. AAP 0.1.5
+/// requires the narrowing with a defined error instead, which is the same treatment
+/// <see cref="ExpressionAggregateScope.Group"/> already receives for the same reason.
+/// </para>
+/// <para>
+/// A caller that knows its own page size supplies <see cref="FixedRowsPerPageResolver"/>; a caller that
+/// genuinely means "the buffer is one page" - a characterization run over an unpaginated fixture, say -
+/// says so explicitly with <see cref="WholeBufferPageResolver"/>. Both are opt-in, and being opt-in is
+/// what makes the resulting number attributable to a stated pagination rather than to a default.
 /// </para>
 /// </remarks>
 public interface IExpressionPageResolver
@@ -1276,12 +1291,53 @@ public interface IExpressionPageResolver
 }
 
 /// <summary>
-/// The default page resolver: the whole primary buffer is one page.
+/// The default page resolver: no page can be resolved, so <c>for page</c> is refused.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Stated as its own type rather than as a null check inside the evaluator so that the default is
-/// visible, replaceable and testable. See <see cref="IExpressionPageResolver"/> for why the default is
-/// this and not a computed boundary.
+/// visible, replaceable and testable, and so the refusal reads as a decision rather than as an
+/// unconfigured service. See <see cref="IExpressionPageResolver"/> for why a page boundary is not
+/// computed here at all.
+/// </para>
+/// <para>
+/// WHAT A CALLER SEES. <c>sum(salary for page)</c> evaluates to the malformed sentinel and
+/// <c>TryEvaluate</c> reports a structured error naming the deferred capability and both opt-in
+/// resolvers. The aggregate is not evaluated over any row range, because there is no range to evaluate
+/// it over - which is the whole content of the outcome.
+/// </para>
+/// </remarks>
+public sealed class UnresolvedPageResolver : IExpressionPageResolver
+{
+    /// <summary>
+    /// The shared instance. The type holds no state, so one instance serves every evaluator.
+    /// </summary>
+    public static UnresolvedPageResolver Instance { get; } = new();
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Always <see langword="false"/>, and the two out-parameters are left at the empty range so a
+    /// caller that ignored the return value still cannot read a plausible span out of them.
+    /// </remarks>
+    public bool TryGetPageRange(long row, long rowCount, out long firstRow, out long lastRow)
+    {
+        firstRow = 0L;
+        lastRow = 0L;
+
+        return false;
+    }
+}
+
+/// <summary>
+/// An opt-in page resolver for which the whole primary buffer is one page.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Retained because it is the correct model for an unpaginated surface, and a characterization run over
+/// a fixture that fits on one page needs to be able to SAY so. It is deliberately NOT the default: see
+/// <see cref="IExpressionPageResolver"/> and <see cref="UnresolvedPageResolver"/> for why a default that
+/// silently equates <c>for page</c> with <c>for all</c> is a widening rather than a convenience.
+/// </para>
 /// </remarks>
 public sealed class WholeBufferPageResolver : IExpressionPageResolver
 {
@@ -1768,7 +1824,7 @@ public sealed class DataWindowExpressionEvaluator
     private readonly Dictionary<string, DataWindowExpressionFunction> _functions =
         new(StringComparer.OrdinalIgnoreCase);
 
-    private IExpressionPageResolver _pageResolver = WholeBufferPageResolver.Instance;
+    private IExpressionPageResolver _pageResolver = UnresolvedPageResolver.Instance;
     private int _maximumRecursionDepth = DefaultMaximumRecursionDepth;
     private int _depth;
 
@@ -1779,11 +1835,19 @@ public sealed class DataWindowExpressionEvaluator
     /// <exception cref="ArgumentNullException"><paramref name="host"/> is <see langword="null"/>.</exception>
     /// <remarks>
     /// BLOCKED IS THE HONEST DEFAULT, not a degraded one. AAP 0.6.5 records pinyin first-letter matching
-    /// as the single genuine parity risk in the in-scope set: its lookup table exists only inside the
-    /// closed <c>pfw.dll</c> and the flag value <c>7</c> that
-    /// <c>n_cst_dwsvc_dropdownsearch.sru:L323</c> passes is documented nowhere. An evaluator built
-    /// without a characterized table therefore reports the gap - as a structured error, from
-    /// <see cref="PinyinFirstLetterMatcher.CreateUnavailableExpressionError"/> - rather than
+    /// as the single genuine parity risk in the in-scope set, and the risk is precisely the LOOKUP TABLE
+    /// AND THE MATCHING RULE: both exist only inside the closed <c>pfw.dll</c>, with no table, data file
+    /// or C++ source for either anywhere in the tree.
+    /// </para>
+    /// <para>
+    /// THE FLAGS ARE NOT PART OF THE RISK, WHICH NARROWS IT. The flag value <c>7</c> that
+    /// <c>n_cst_dwsvc_dropdownsearch.sru:L323</c> passes IS documented: <c>enums.sru:L1146-L1149</c> names
+    /// the three bits, so <c>7 == PY_LIKE_IGNORE_CASE | PY_LIKE_IGNORE_WIDTH | PY_LIKE_FUZZY_SOUND</c>,
+    /// carried as <c>Enums.PY_LIKE_*</c> and composed rather than hard-coded. Knowing WHICH behaviours are
+    /// switched on does not yield the table they operate over or the rule that consumes it, so the risk
+    /// stands - scoped to the native algorithm rather than resting on a documentation gap that does not
+    /// exist. An evaluator built without a characterized table therefore reports the gap - as a structured
+    /// error, from <see cref="PinyinFirstLetterMatcher.CreateUnavailableExpressionError"/> - rather than
     /// approximating a filter that would return subtly different rows.
     /// </remarks>
     public DataWindowExpressionEvaluator(DataWindowServiceHost host)
@@ -1826,8 +1890,9 @@ public sealed class DataWindowExpressionEvaluator
     /// Resolves the row range that <c>for page</c> covers.
     /// </summary>
     /// <value>
-    /// Defaults to <see cref="WholeBufferPageResolver.Instance"/>. See
-    /// <see cref="IExpressionPageResolver"/> for why this is a seam (DECISION D7a).
+    /// Defaults to <see cref="UnresolvedPageResolver.Instance"/>, which REFUSES <c>for page</c> rather
+    /// than widening it to every row. See <see cref="IExpressionPageResolver"/> for why this is a seam
+    /// and why the default resolves nothing (DECISION D7a).
     /// </value>
     /// <exception cref="ArgumentNullException">The value assigned is <see langword="null"/>.</exception>
     public IExpressionPageResolver PageResolver
@@ -6136,9 +6201,13 @@ public sealed class DataWindowExpressionEvaluator
     /// scope, so nothing that works today stops working.
     /// </para>
     /// <para>
-    /// <c>for page</c> DELEGATES TO <see cref="PageResolver"/>, whose default treats the whole buffer as one
-    /// page - so <c>dw_sqlite.srd:L27</c>'s <c>sum(salary for page)</c> evaluates. See
-    /// <see cref="IExpressionPageResolver"/> for why the page boundary itself is not computed here.
+    /// <c>for page</c> IS THE SAME DEFINED NARROWING (DECISION D7a). It delegates to
+    /// <see cref="PageResolver"/>, whose default - <see cref="UnresolvedPageResolver"/> - resolves no
+    /// range at all, so <c>dw_sqlite.srd:L27</c>'s <c>sum(salary for page)</c> answers the malformed
+    /// sentinel until a caller injects an authoritative resolver. It is deliberately NOT widened to the
+    /// whole buffer by default: that returns the grand total where a page total was asked for, and the
+    /// answer carries nothing that distinguishes the two. See <see cref="IExpressionPageResolver"/> for
+    /// why the page boundary itself is not computed here and for the two opt-in resolvers.
     /// </para>
     /// <para>
     /// The resolved range is clamped to the buffer, so a resolver that over-reports cannot make the loop
@@ -6179,7 +6248,14 @@ public sealed class DataWindowExpressionEvaluator
                 {
                     failure = invocation.Invalid(
                         Formatting.Sprintf(
-                            "{1}(... for page) could not resolve the page containing row {2}.",
+                            "{1}(... for page) could not resolve the page containing row {2}. A page "
+                                + "boundary is computed from band heights and print margins, which is "
+                                + "the deferred DesignSystem capability reserved at /v1/design/**, so "
+                                + "no page range is assumed here. The scope is refused rather than "
+                                + "widened to every row, which would answer the grand total where the "
+                                + "page total was asked for. Install an authoritative page resolver - "
+                                + "FixedRowsPerPageResolver for a known page size, or "
+                                + "WholeBufferPageResolver to state that this surface is unpaginated.",
                             invocation.Name,
                             invocation.Row.ToString(CultureInfo.InvariantCulture)));
                     return false;
@@ -6276,4 +6352,3 @@ public sealed class DataWindowExpressionEvaluator
         return true;
     }
 }
-

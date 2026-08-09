@@ -309,13 +309,20 @@ export default defineConfig({
     // are mounted from the orchestration secret layer and are not part of this
     // repository.
     //
-    // Absent is the normal case and is not an error: the documented local
-    // bring-up publishes plain HTTP on loopback, where there is no handshake and
-    // so no certificate to present, and the resolver yields nothing. `[]` then
-    // configures no certificate at all, which is exactly right — a suite that
-    // refused to start without certificates would be unrunnable on the one
-    // topology the setup instructions document. A spec that needs the issuance
-    // edge should skip itself when the fixtures layer reports none, saying so.
+    // Absent is the common case and is not an error: a developer who has not
+    // generated the local certificate set has nothing to present, so the
+    // resolver yields nothing and `[]` configures no certificate at all. That is
+    // exactly right — the readiness, capability and 401-without-a-token specs
+    // need none, and a suite that refused to start without certificates would be
+    // unrunnable for them.
+    //
+    // WHAT ABSENT DOES NOT MEAN. It does not mean the issuance edge is open on
+    // this topology. Security publishes `POST /v1/tokens` only on its mutual-TLS
+    // listener, so no address — local or deployed — mints a token without a
+    // client certificate. Absent means the issuance edge is NOT EXERCISABLE in
+    // this run, and a spec that needs a token skips itself and says so.
+    // `fixtures/service-endpoints.ts` and `fixtures/auth.ts` state the identical
+    // policy; all three must stay in agreement.
     //
     // This is the one place the runner imports from `fixtures/`, and the reason
     // is that the value must reach `use`, which only the config can populate.

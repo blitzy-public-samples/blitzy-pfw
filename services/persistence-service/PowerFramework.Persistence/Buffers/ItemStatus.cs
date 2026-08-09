@@ -173,7 +173,8 @@
 //  dialect-agnostic and schema-free (C-E).
 //
 //  NAMING (verified against the artifact). The repository-root .editorconfig scopes its CA1707 and
-//  IDE1006 relaxations to ten named files, and this is not one of them. Every member below is
+//  IDE1006 relaxations to the files on its BAND 3 roster - the single source of truth for that list
+//  - and this is not one of them. Every member below is
 //  therefore PascalCase; no member here is spelled in the preserved shouty legacy style, and under
 //  warnings-as-errors none could be. The shouty spellings that DO appear in this file appear only
 //  inside comments, where they quote the .proto's own member names for traceability.

@@ -105,8 +105,9 @@
 //  --------------------------------------------------------------------------------------------
 //  Directory.Build.props sets TreatWarningsAsErrors, Nullable and EnableNETAnalyzers for this
 //  project exactly as for the library, and the Tests project deliberately overrides none of them.
-//  The repository-root .editorconfig scopes its CA1707 and IDE1006 suppressions BY FILE GLOB to ten
-//  implementation files that carry preserved legacy constant identifiers, and to NO test file. So
+//  The repository-root .editorconfig scopes its CA1707 and IDE1006 suppressions BY FILE GLOB to the
+//  implementation files on its BAND 3 roster - the single source of truth for that list - that carry
+//  preserved legacy constant identifiers, and to NO test file. So
 //  this file REFERENCES SCREAMING_SNAKE members freely - CA1707 reports declarations, never uses -
 //  and DECLARES nothing non-conventional: every table, provider, test and local below is
 //  PascalCase or camelCase. The SCREAMING_SNAKE text inside the string literals is data, not an

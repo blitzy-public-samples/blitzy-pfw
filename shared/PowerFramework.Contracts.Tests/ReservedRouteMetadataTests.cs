@@ -215,8 +215,20 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
     private const string IntegrationService = "Integration";
     private const string ScriptBridgeService = "ScriptBridge";
 
-    /// <summary>The only status a reserved route may declare.</summary>
+    /// <summary>The only outcome a reserved route's handler produces.</summary>
     private const string NotImplementedStatus = "501";
+
+    /// <summary>
+    /// The pre-handler refusal an unauthenticated caller receives, declared beside
+    /// <see cref="NotImplementedStatus"/> on every reserved operation.
+    /// </summary>
+    /// <remarks>
+    /// It comes from the authentication middleware rather than from any code behind the route, which is
+    /// exactly why it was once left undeclared - and why leaving it undeclared was wrong. The reserved
+    /// operations require a token, so this status occurs in practice, and a response set that omits it
+    /// tells a generated client it cannot.
+    /// </remarks>
+    private const string UnauthorizedStatus = "401";
 
     /// <summary>The marker AAP 0.4.4 specifies verbatim.</summary>
     private const string PhaseTwoMarker = "reserved for Phase 2";
@@ -407,7 +419,7 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
             //  Every row above sweeps for a CAPABILITY. These five sweep for the four services
             //  THEMSELVES, and they are what make the reserved-route entries in the exemption ledger
             //  LOAD-BEARING rather than decorative: without them, `/v1/design/{path}` and
-            //  `reservedDesignSystemGet` would match no term at all, and excluding them by identity
+            //  `reservedDesignSystem` would match no term at all, and excluding them by identity
             //  would be a no-op that merely looked like a control.
             //
             //  What they catch is the most direct violation available - a schema called
@@ -567,13 +579,13 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
         DocumentsRoutePath,
         IntegrationRoutePath,
         ScriptingRoutePath,
-        "reservedDesignSystemGet",
+        "reservedDesignSystem",
         "reservedDesignSystemPost",
-        "reservedDocumentsGet",
+        "reservedDocuments",
         "reservedDocumentsPost",
-        "reservedIntegrationGet",
+        "reservedIntegration",
         "reservedIntegrationPost",
-        "reservedScriptBridgeGet",
+        "reservedScriptBridge",
         "reservedScriptBridgePost",
 
         // -------- C-01 verification material: RFC 7517, not the deferred JSON parser. --------
@@ -742,17 +754,65 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
                         + "which constraint C-D forbids outright.");
             }
 
-            // AND THE SET IS EXACTLY {501}, WHICH IS A STRICTLY STRONGER STATEMENT THAN "NO 2XX".
+            // AND 501 IS THE ONLY HANDLER RESULT, WHICH IS THE STATEMENT THIS CONTROL ACTUALLY NEEDS
+            // TO MAKE.
             //
             // A reserved route answers unconditionally, for every method and every path remainder, so
-            // a SECOND declared status of any kind - even a 400 or a 401 - would say the route
-            // evaluates something before answering. The 401 an unauthenticated caller actually meets
-            // comes from the authentication middleware, a cross-cutting concern declared once at the
-            // document's security scheme; it is not a response this route produces, and conflating the
-            // two would blur exactly the line this control exists to hold.
-            Assert.Equal(
-                [NotImplementedStatus],
-                operation.Responses.Keys.ToArray());
+            // any status describing an EVALUATED outcome - a 400, a 404, a 409 - would say the route
+            // examines the request before answering, and any 2xx would say part of a deferred service
+            // had been built. Neither may appear.
+            //
+            // 401 IS THE ONE PERMITTED COMPANION, AND EXCLUDING IT WAS THE DEFECT THIS ASSERTION USED
+            // TO CARRY. An earlier revision asserted the set was EXACTLY {501}, on the reasoning that
+            // the 401 comes from the authentication middleware and is therefore not a response the
+            // ROUTE produces. That is true about where the refusal originates and wrong about what the
+            // contract owes a consumer: these operations DO require a token - Endpoints/
+            // DeferredCapabilityEndpoints.cs calls RequireAuthorization on every one of them under a
+            // document-level bearer requirement - so an unauthenticated caller receives 401 in
+            // practice, and a response set that omits it tells a generated client and a conformance
+            // tool that the status cannot occur. Declaring it costs nothing about
+            // unconditionality: 501 remains the only outcome any handler produces.
+            string[] declared = [.. operation.Responses.Keys.Order(StringComparer.Ordinal)];
+
+            Assert.Equal([UnauthorizedStatus, NotImplementedStatus], declared);
+        }
+    }
+
+    [Fact]
+    public void TheUnauthenticatedOutcomeIsDeclaredOnceAsACrossCuttingConventionRatherThanLeftUnstated()
+    {
+        // THE OTHER HALF OF THE ROW ABOVE, AND WITHOUT IT THAT ROW WOULD BE ENFORCING A HALF-TRUTH.
+        //
+        // The reserved operations declare exactly one status, and that is correct: the route evaluates
+        // nothing, so a second declared status would say otherwise. But the endpoint layer requires
+        // authorization on every one of them, so an anonymous caller observably receives 401 and never
+        // reaches the 501 - which the end-to-end suite asserts from the outside. A contract that
+        // asserted a single-status result set with nothing anywhere to reconcile it against that 401
+        // would leave a consumer entitled to conclude the status was impossible on these paths.
+        //
+        // The reconciliation is declared ONCE, machine-readably, at document level - not restated on
+        // forty-six operations, and specifically not on these eight where it would misattribute a
+        // scheme outcome to a route. This row pins that the declaration exists and says the four things
+        // a consumer needs: which status, that the scheme produces it, that it is evaluated before the
+        // handler, and that it is not enumerated on every operation.
+        Assert.NotNull(documents.Gateway.Extensions);
+
+        Assert.True(
+            documents.Gateway.Extensions!.TryGetValue("x-cross-cutting-responses", out var declaration),
+            "gateway.v1.yaml declares no document-level 'x-cross-cutting-responses'. The reserved "
+                + "operations declare exactly one response each, so without this declaration the "
+                + "contract states a single-status result set for paths that observably answer 401 "
+                + "first, and nothing anywhere reconciles the two.");
+
+        // The reader materializes an unrecognised extension as a JSON node wrapper, so the node itself
+        // is what carries the declaration - `ToString()` on the wrapper yields its type name.
+        JsonNodeExtension node = Assert.IsType<JsonNodeExtension>(declaration);
+        string serialized = node.Node.ToJsonString();
+
+        foreach (string required in (string[])
+            ["401", "bearerAuth", "route-handler", "declaredPerOperation"])
+        {
+            Assert.Contains(required, serialized, StringComparison.Ordinal);
         }
     }
 
@@ -816,7 +876,12 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
             // THE STRUCTURED MEMBERS A CLIENT BRANCHES ON. Named individually rather than counted, so
             // that removing one fails here instead of shifting a number nobody reads.
             Assert.NotNull(schema.Properties);
-            foreach (string member in (string[])["status", "deferredService", "marker", "route", "retCode"])
+            // `service` AND `deferredService` ARE BOTH REQUIRED, AND BOTH ARE ASSERTED. They carry the
+            // identical value. `service` is the member v1 published first; `deferredService` is the
+            // unambiguous spelling added later, when `service` was also removed - which silently broke
+            // every v1 consumer reading it under a version number promising nothing had changed. Naming
+            // both here is what stops that happening again, in either direction.
+            foreach (string member in (string[])["status", "service", "deferredService", "marker", "route", "retCode"])
             {
                 Assert.True(
                     schema.Properties.ContainsKey(member),
@@ -1237,8 +1302,9 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
         // whole contract surface may carry a deferred service's name as enum data, addressed BY
         // IDENTITY, and both are catalogues rather than capability models.
         //
-        //   ReservedRouteBody   the 501 body's `deferredService` member. Its entire content is the
-        //                       name; AAP 0.4.4 requires it.
+        //   ReservedRouteBody   the 501 body's `service` and `deferredService` members, which carry the
+        //                       identical value under the originally published name and the unambiguous
+        //                       one. Their entire content is the name; AAP 0.4.4 requires it.
         //   Capability          the `/v1/capabilities` projection's `phaseOneDestination` column, which
         //                       records which Phase-1 destination each preserved legacy capability bit
         //                       maps to. AAP 0.1.4 reads that bitmask as the legacy framework's own

@@ -77,7 +77,8 @@
 //            triple exists at all rather than merely testing that it does.
 //
 //  NAMING. Every member here is PascalCase. The repository-root .editorconfig scopes its naming-analyzer
-//  suppressions to nine named implementation files and no test file is among them, so a preserved
+//  suppressions to the named implementation files on its BAND 3 roster - the single source of truth
+//  for that list - and no test file is among them, so a preserved
 //  SCREAMING_SNAKE member in this file would be a build error rather than a style debate. The legacy
 //  spellings are therefore kept in comments, and the legacy CONSTANTS are referenced through the shared
 //  types - RetCode.E_INVALID_ARGUMENT, never the bare -3.

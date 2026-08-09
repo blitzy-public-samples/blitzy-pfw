@@ -130,8 +130,9 @@
 //
 //  NAMING: NO SCREAMING_SNAKE IDENTIFIER IS DECLARED IN THIS FILE
 //  --------------------------------------------------------------------------------------------
-//  The repository-root .editorconfig switches CA1707 and IDE1006 off in exactly ten named files,
-//  each of which carries preserved legacy constant spellings. This file is deliberately NOT one
+//  The repository-root .editorconfig switches CA1707 and IDE1006 off in the individually named files
+//  on its BAND 3 roster - the single source of truth for that list, cited here rather than recounted
+//  - each of which carries preserved legacy constant spellings. This file is deliberately NOT one
 //  of them, and TreatWarningsAsErrors is on repository-wide, so an underscore-bearing identifier
 //  declared here would be a compile error rather than a style note. The three modify-style
 //  constants are therefore CONSUMED from PowerFramework.Shared.Kernel.Enums, where they are

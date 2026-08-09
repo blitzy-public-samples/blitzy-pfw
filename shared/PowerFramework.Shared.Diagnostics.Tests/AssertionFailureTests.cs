@@ -2249,7 +2249,8 @@ public class AssertionFailureTests
     /// character survives, casing included: the legacy already used PascalCase for these members, so -
     /// unlike the preserved SCREAMING_SNAKE constants elsewhere in this refactor - they need no analyzer
     /// suppression, which is fortunate because the repository root <c>.editorconfig</c> scopes its naming
-    /// suppressions to ten named production files and none of them is in this project. Under the inherited
+    /// suppressions to the named production files on its BAND 3 roster - the single source of truth for that
+    /// list - and none of them is in this project. Under the inherited
     /// <c>TreatWarningsAsErrors</c> a member here that needed one would be an unfixable build error.
     /// </para>
     /// <para>

@@ -352,11 +352,15 @@ public sealed class DataServicesOptionsTests
         // the search state machine's headless half ships, its window-positioning and IME half is
         // deferred, and the value's full consumer does not exist yet.
         //
-        // `PinyinMatchFlags` is left unconstrained for a sharper reason. The legacy call site passes a
-        // flag value of 7 whose meaning is recorded NOWHERE in the repository, and the pinyin lookup
-        // table exists only inside the closed `pfw.dll`. Constraining a flag word whose semantics cannot
-        // be established from the oracle would be asserting a contract nobody knows - this is the single
-        // genuine parity risk in the in-scope set, and it is tracked as such rather than papered over.
+        // `PinyinMatchFlags` is left unconstrained for a sharper reason, and it is NOT that the flags are
+        // unknown - they are named at `enums.sru:L1146-L1149`, so the legacy call site's literal 7 is
+        // exactly PY_LIKE_IGNORE_CASE | PY_LIKE_IGNORE_WIDTH | PY_LIKE_FUZZY_SOUND. What is unknown is
+        // what the closed `pfw.dll` DOES with any bit outside those three, because the lookup table and
+        // the matching rule live only inside that binary. `PinyinFirstLetterLike` accordingly IGNORES an
+        // undefined bit rather than rejecting it - throwing would invent a validation the oracle does not
+        // perform - so an options validator that rejected one here would contradict the matcher it
+        // configures. The native table and rule remain the single genuine parity risk in the in-scope
+        // set, tracked as such rather than papered over; the flag contract is not part of it.
         options.DropDownSearch.FilterType = 999u;
         options.DropDownSearch.PinyinMatchFlags = -1L;
 
@@ -1030,5 +1034,96 @@ public sealed class DataServicesOptionsTests
         Assert.Equal(string.Empty, jwt.Authority);
         Assert.Equal(string.Empty, jwt.Audience);
         Assert.Null(jwt.MetadataAddress);
+    }
+
+    // ==============================================================================================
+    //  THE TOKEN-ISSUANCE EDGE'S CLIENT IDENTITY
+    //
+    //  This service is one of the two that request tokens, and POST /v1/tokens is protected by mutual
+    //  TLS and by nothing else - a caller cannot present a bearer token in order to obtain its first
+    //  bearer token. Without a client identity this service obtains no credential, so every one of the
+    //  seventeen C-02 cryptographic calls is unreachable.
+    // ==============================================================================================
+
+    [Fact]
+    public void TheMutualTlsPairIsOptionalAsAGroupAndInseparableWhenPresent()
+    {
+        // BOTH EMPTY IS VALID AND IS THE DEFAULT: this deployment presents no client certificate and
+        // requests no token.
+        Assert.True(Succeeds(ValidOptions()));
+        Assert.False(new DataServicesOptions().Security.MutualTls.IsConfigured);
+
+        // BOTH SET IS VALID.
+        DataServicesOptions both = ValidOptions();
+        both.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        both.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+        Assert.True(Succeeds(both));
+        Assert.True(both.Security.MutualTls.IsConfigured);
+
+        // EITHER ONE ALONE IS REFUSED, AT STARTUP RATHER THAN AT THE FIRST TOKEN REQUEST. A certificate
+        // cannot complete a TLS handshake without its key, and a key has nothing to present without its
+        // certificate, so half a client identity is unusable rather than merely weaker.
+        foreach ((string certificate, string key) in ((string, string)[])
+            [
+                ("/run/secrets/powerframework/dataservices.crt", ""),
+                ("", "/run/secrets/powerframework/dataservices.key"),
+            ])
+        {
+            DataServicesOptions half = ValidOptions();
+            half.Security.MutualTls.CertificatePath = certificate;
+            half.Security.MutualTls.CertificateKeyPath = key;
+
+            string failure = Assert.Single(Failures(half));
+
+            Assert.Contains(
+                "DataServices:Security:MutualTls:CertificatePath",
+                failure,
+                StringComparison.Ordinal);
+
+            // NEITHER PATH IS ECHOED. A path is not itself a credential, but it names where one is
+            // mounted, and a startup log is the wrong place to publish that.
+            Assert.DoesNotContain("dataservices.crt", failure, StringComparison.Ordinal);
+            Assert.DoesNotContain("dataservices.key", failure, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheMutualTlsGroupCarriesPathsAndHasNoMemberThatCouldHoldMaterial()
+    {
+        // THE ABSENCE IS THE CONTROL, exactly as it is on the keyed cryptographic surface where a caller
+        // passes an opaque reference and never key bytes. There is no certificate body, no key body and
+        // no passphrase member here, so C-F cannot be violated by filling one in - there is no such
+        // member to fill.
+        System.Reflection.PropertyInfo[] properties = typeof(MutualTlsClientOptions).GetProperties();
+
+        foreach (var property in properties)
+        {
+            if (property.PropertyType == typeof(bool))
+            {
+                continue;
+            }
+
+            Assert.EndsWith("Path", property.Name, StringComparison.Ordinal);
+            Assert.Equal(typeof(string), property.PropertyType);
+        }
+
+        foreach (string forbidden in (string[])
+            ["Passphrase", "Password", "Pem", "Body", "Material", "Content", "SigningKey", "PrivateKey"])
+        {
+            Assert.DoesNotContain(
+                properties,
+                p => p.Name.Contains(forbidden, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    [Fact]
+    public void AMissingMutualTlsGroupIsReportedRatherThanIgnored()
+    {
+        DataServicesOptions options = ValidOptions();
+        options.Security.MutualTls = null!;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains("DataServices:Security:MutualTls", failure, StringComparison.Ordinal);
     }
 }

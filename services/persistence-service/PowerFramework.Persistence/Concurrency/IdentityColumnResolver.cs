@@ -293,8 +293,10 @@
 //  an oversight.
 //
 //  NAMING (verified against the artifact). The repository-root .editorconfig scopes its CA1707 and
-//  IDE1006 relaxations to ten named files and THIS FOLDER IS NOT AMONG THEM, so every member below
-//  is PascalCase. NO SCREAMING_SNAKE IDENTIFIER IS DECLARED IN THIS FILE - under warnings-as-errors
+//  IDE1006 relaxations to the files on its BAND 3 roster - that roster is the single source of truth
+//  for the list, so it is cited here rather than recounted - and THIS FOLDER IS NOT AMONG THEM, so
+//  every member below is PascalCase. NO SCREAMING_SNAKE IDENTIFIER IS DECLARED IN THIS FILE - under
+//  warnings-as-errors
 //  one would break the build. The shouty spellings that appear do so only inside comments, quoting
 //  the oracle and the .proto for traceability.
 //
@@ -305,6 +307,7 @@
 //  C-F, C-H, C-K and risk R9.
 // ==============================================================================================
 
+using System.Collections.Immutable;
 using System.Globalization;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Persistence.Buffers;
@@ -471,11 +474,11 @@ internal readonly record struct UpdateRowCounts(long Inserted, long Updated, lon
 
 #endregion
 
-#region The outcome - one optional identity payload plus one mandatory counts triple
+#region The outcome - the ORDERED identity blocks plus one mandatory counts triple
 
 /// <summary>
-/// Everything the success arm of the legacy update reports: the identity payload WHEN there is one,
-/// and the counts triple ALWAYS.
+/// Everything the success arm of the legacy update reports: the identity blocks it collected, in
+/// order, and the counts triple ALWAYS.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -509,27 +512,69 @@ internal readonly record struct UpdateRowCounts(long Inserted, long Updated, lon
 /// own driver code disagrees - belongs to <c>Tasks/SqlUpdateTask.cs</c>. An instance of this type
 /// therefore only ever exists on the success path, which is why <see cref="Counts"/> is not nullable.
 /// </para>
+/// <para>
+/// <b>THE IDENTITY SIDE IS A LIST, NOT AN OPTIONAL SINGLETON, AND THE CARDINALITY IS THE LEGACY'S.</b>
+/// The code block above is ONE call of <c>_of_Update</c>, and one call fires the identity callback at
+/// most once - but the task that drives it calls it ONCE PER UPDATE TABLE:
+/// </para>
+/// <code>
+/// if _bMultiTableUpdate then
+///     nCount = UpperBound(Tables)                                     [:L358]
+///     for nIndex = 1 to nCount                                        [:L364]
+///         rtCode = _of_UpdatePrepare(data,nIndex)                      [:L365]
+///         rtCode = _of_Update(data)                                   [:L367]
+///     next
+/// else
+///     rtCode = _of_Update(data)                                       [:L371]
+/// end if
+/// </code>
+/// <para>
+/// and the caller-side proxy APPENDS every firing to an ordered array rather than replacing anything -
+/// <c>IDCOLDATA _idColDatas[]</c> [<c>n_cst_threading_task_sqlupdate.sru:L45</c>],
+/// <c>nIndex = UpperBound(_idColDatas) + 1</c> [<c>:L73-L76</c>] - and then REPLAYS EVERY ELEMENT when
+/// it writes the generated values back onto the caller's DataWindow
+/// [<c>:L128</c>, <c>:L142-L195</c>]. Each element carries its OWN column ordinal, because
+/// <c>_of_UpdatePrepare</c> re-describes the carrier per table [<c>:L98-L145</c>] so the discovered
+/// column legitimately differs between them. Modelling this side as one optional payload would silently
+/// keep the first table's identities and DROP THE REST - data loss that produces a completely plausible
+/// result, since no count reported here would disagree with it.
+/// </para>
 /// </remarks>
 internal sealed record IdentityResolutionOutcome
 {
     /// <summary>
-    /// The identity payload, or <see langword="null"/> when the oracle would have fired NOTHING.
+    /// The identity blocks collected, one per update table that collected any, IN TABLE ORDER. EMPTY
+    /// when the oracle would have fired NOTHING.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// C-B - NULL IS A NORMAL OUTCOME AND NOT AN ERROR, and it arises from any of the three
+    /// C-B - EMPTY IS A NORMAL OUTCOME AND NOT AN ERROR, and it arises from any of the three
     /// conditional levels failing: no rows were inserted [<c>:L215</c>], no identity column was found
     /// [<c>:L226</c>], or both collected arrays came back empty [<c>:L242</c>]. The published
-    /// contract records the same reading from the wire side, where an absent identity block means
-    /// "none collected".
+    /// contract records the same reading from the wire side, where an empty repeated identity field
+    /// means "none collected".
     /// </para>
     /// <para>
-    /// AN EMPTY PAYLOAD IS NEVER PRODUCED IN PLACE OF NULL. The oracle's emit guard is a guard on
-    /// the CALL, not on the contents, so a payload whose two arrays are both empty has no legacy
-    /// counterpart and must not be synthesised.
+    /// AN EMPTY BLOCK IS NEVER PRODUCED IN PLACE OF NO BLOCK. The oracle's emit guard is a guard on
+    /// the CALL, not on the contents, so a block whose two arrays are both empty has no legacy
+    /// counterpart and must not be synthesised. That distinction survives here because the absence is
+    /// expressed by the LIST being shorter, never by an element with nothing in it.
+    /// </para>
+    /// <para>
+    /// ORDER IS CONTRACT AT THIS LEVEL AS WELL AS INSIDE EACH BLOCK. The elements are ordered by the
+    /// table order the update was prepared with, because that is the order the oracle accumulated them
+    /// in and the order it replays them in. <see cref="ImmutableArray{T}"/> rather than a mutable list
+    /// so that an accumulated outcome cannot be re-ordered after the fact by a consumer - which is the
+    /// one mutation that would pair identity values with the wrong column while leaving every count
+    /// intact.
+    /// </para>
+    /// <para>
+    /// A single-table update - which is every update the sole evidenced fixture performs
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>, one <c>update="COMPANY"</c>] - yields
+    /// exactly one element when it collected anything, so the common case is unchanged in substance.
     /// </para>
     /// </remarks>
-    internal ResolvedIdentityColumnData? Identity { get; init; }
+    internal ImmutableArray<ResolvedIdentityColumnData> Identity { get; init; } = [];
 
     /// <summary>
     /// The counts triple, ALWAYS present on a successful update.
@@ -543,6 +588,36 @@ internal sealed record IdentityResolutionOutcome
     /// </remarks>
     internal UpdateRowCounts Counts { get; init; }
 }
+
+#endregion
+
+#region The per-table surfaces one multi-table update is driven from
+
+/// <summary>
+/// One update table's pair of injected surfaces, as the multi-table loop sees the carrier after that
+/// table's prepare step has run.
+/// </summary>
+/// <param name="Metadata">The describe surface for this table's pass.</param>
+/// <param name="Values">The row surface for this table's pass.</param>
+/// <remarks>
+/// <para>
+/// WHY THIS IS A PAIR PER TABLE AND NOT ONE PAIR FOR THE WHOLE UPDATE, even though the legacy has a
+/// single <c>Data</c> carrier throughout. <c>_of_UpdatePrepare</c> RE-DESCRIBES that one carrier before
+/// each table's update: it resets update, key and identity to off on every column by ordinal
+/// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L103-L108</c>] and then
+/// re-enables only the ones this table declares [<c>:L110-L145</c>]. So the ANSWERS the describe
+/// surface gives change from one iteration to the next, and the discovered identity column legitimately
+/// differs per table. A single surface pair could not express that, and a test could not drive it.
+/// </para>
+/// <para>
+/// A production adapter over <see cref="DataWindowCarrier"/> implements both interfaces on one object
+/// and supplies the same object for both members, exactly as the legacy passes one <c>Data</c> - which
+/// is why the two members are permitted to be the same instance.
+/// </para>
+/// </remarks>
+internal readonly record struct IdentityTableSurfaces(
+    IIdentityColumnMetadata Metadata,
+    IIdentityValueSource Values);
 
 #endregion
 
@@ -1569,9 +1644,11 @@ internal static class IdentityColumnResolver
     /// <paramref name="values"/>.</param>
     /// <param name="values">The row surface.</param>
     /// <returns>
-    /// The outcome: <see cref="IdentityResolutionOutcome.Identity"/> is <see langword="null"/> whenever
-    /// the oracle would have fired nothing, and <see cref="IdentityResolutionOutcome.Counts"/> is
-    /// ALWAYS populated.
+    /// The outcome for THIS ONE TABLE: <see cref="IdentityResolutionOutcome.Identity"/> holds exactly
+    /// one block, or is EMPTY whenever the oracle would have fired nothing, and
+    /// <see cref="IdentityResolutionOutcome.Counts"/> is ALWAYS populated. A multi-table update is
+    /// driven through <see cref="ResolveTables(IReadOnlyList{IdentityTableSurfaces})"/>, which calls
+    /// this once per table and accumulates.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="metadata"/> or <paramref name="values"/> is <see langword="null"/>.
@@ -1643,10 +1720,117 @@ internal static class IdentityColumnResolver
 
         // `tasking.Event OnUpdated(...)` [:L247]. OUTSIDE all three levels, INSIDE the success arm:
         // this fires even when the inserted count was zero and no identity work happened.
+        //
+        // ONE CALL OF `_of_Update` FIRES THE IDENTITY CALLBACK AT MOST ONCE [:L243], so this list holds
+        // one element or none. The N-element case is produced by ResolveTables, which is the
+        // multi-table loop [:L358-L369], not by this function - and keeping the two apart is what makes
+        // "at most once per table" checkable rather than assumed.
         return new IdentityResolutionOutcome
         {
-            Identity = identity,
+            Identity = identity is null ? [] : [identity],
             Counts = ReadCounts(values),
+        };
+    }
+
+    /// <summary>
+    /// Runs the complete multi-table update loop: the identity round trip once per table, accumulated
+    /// in table order, with the counts summed across the tables the way the caller-side proxy sums
+    /// them.
+    /// </summary>
+    /// <param name="tables">
+    /// The per-table surface pairs, in the order the tables were declared. Each element is the carrier
+    /// as it stands after that table's prepare step - see <see cref="IdentityTableSurfaces"/> for why
+    /// that has to be per table rather than once.
+    /// </param>
+    /// <returns>
+    /// One outcome for the whole update: <see cref="IdentityResolutionOutcome.Identity"/> carries one
+    /// block per table that collected any, IN TABLE ORDER, and
+    /// <see cref="IdentityResolutionOutcome.Counts"/> carries the accumulated triple.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="tables"/> is <see langword="null"/>, or any element carries a
+    /// <see langword="null"/> surface.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE CALLER SIDE OF THE PROXY PAIR, AND IT IS WHERE ACCUMULATION BELONGS. The worker's
+    /// task loop drives one <c>_of_Update</c> per table
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L358-L369</c>], and the
+    /// caller-side proxy is what turns that sequence of firings into the two things a response needs:
+    /// </para>
+    /// <code>
+    /// event onidentitycolumndataretrieved(long id, ref long primaryvalues[], ref long filtervalues[]);
+    ///     nIndex = UpperBound(_idColDatas) + 1              [n_cst_threading_task_sqlupdate.sru:L73]
+    ///     _idColDatas[nIndex].id = id                       [:L74]
+    ///     _idColDatas[nIndex].primaryValues = primaryValues [:L75]
+    ///     _idColDatas[nIndex].filterValues = filterValues   [:L76]
+    ///
+    /// event onupdated(long inserted, long updated, long deleted);
+    ///     _nRowsInserted += inserted                        [:L66]
+    ///     _nRowsUpdated  += updated                         [:L67]
+    ///     _nRowsDeleted  += deleted                         [:L68]
+    /// </code>
+    /// <para>
+    /// C-B - APPEND, NEVER REPLACE, AND SUM, NEVER OVERWRITE. Both halves above are accumulating
+    /// handlers, and reproducing either as an assignment is a data-loss defect that returns a plausible
+    /// answer: identities would keep only the last table's block, and the counts would report only the
+    /// last table's rows. <see cref="Resolve"/> deliberately does neither, which is why its own remarks
+    /// say the counts are never accumulated there - accumulation is THIS function's job, exactly as it
+    /// is the proxy's and not the worker's.
+    /// </para>
+    /// <para>
+    /// THE SINGLE-TABLE ARM IS THE SAME CODE PATH. The oracle's <c>else</c> branch calls
+    /// <c>_of_Update</c> once [<c>:L371</c>], which is what a one-element <paramref name="tables"/>
+    /// produces here - so there is no separate single-table implementation to keep in step, and a
+    /// one-table update through this function is byte-for-byte the outcome
+    /// <see cref="Resolve"/> alone would have produced.
+    /// </para>
+    /// <para>
+    /// AN EMPTY TABLE LIST IS NOT THIS FUNCTION'S ERROR TO RAISE. The oracle rejects it one level up,
+    /// before any update runs - <c>if nCount = 0 then ... rtCode = RetCode.E_INVALID_ARGUMENT</c>
+    /// [<c>:L359-L362</c>] - and that arm belongs to <c>Tasks/SqlUpdateTask.cs</c> together with the
+    /// rest of the task loop. Reached with an empty list this function answers the honest empty
+    /// outcome rather than inventing a second diagnostic for the same condition.
+    /// </para>
+    /// </remarks>
+    internal static IdentityResolutionOutcome ResolveTables(IReadOnlyList<IdentityTableSurfaces> tables)
+    {
+        ArgumentNullException.ThrowIfNull(tables);
+
+        // `IDCOLDATA _idColDatas[]` [n_cst_threading_task_sqlupdate.sru:L45]. Built in order and frozen
+        // at the end, so the accumulated order cannot be disturbed afterwards.
+        ImmutableArray<ResolvedIdentityColumnData>.Builder blocks =
+            ImmutableArray.CreateBuilder<ResolvedIdentityColumnData>();
+
+        long inserted = 0L;
+        long updated = 0L;
+        long deleted = 0L;
+
+        // `for nIndex = 1 to nCount` [:L364]. The index is zero-based here only because it addresses a
+        // CLR list slot; the ORDER it walks is the legacy's table order, which is the part that is
+        // contract (R9).
+        for (int index = 0; index < tables.Count; index++)
+        {
+            IdentityTableSurfaces table = tables[index];
+
+            ArgumentNullException.ThrowIfNull(table.Metadata, nameof(tables));
+            ArgumentNullException.ThrowIfNull(table.Values, nameof(tables));
+
+            // `rtCode = _of_Update(data)` [:L367]. One firing at most, appended [:L73-L76].
+            IdentityResolutionOutcome perTable = Resolve(table.Metadata, table.Values);
+
+            blocks.AddRange(perTable.Identity);
+
+            // `+=` on all three [:L66-L68].
+            inserted += perTable.Counts.Inserted;
+            updated += perTable.Counts.Updated;
+            deleted += perTable.Counts.Deleted;
+        }
+
+        return new IdentityResolutionOutcome
+        {
+            Identity = blocks.ToImmutable(),
+            Counts = new UpdateRowCounts(inserted, updated, deleted),
         };
     }
 

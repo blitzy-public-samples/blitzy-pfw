@@ -1800,4 +1800,3 @@ public sealed class VetoResultContractTests
                 + "handler invocation the server sent [se_cst_dw.sru:L115-L117].");
     }
 }
-

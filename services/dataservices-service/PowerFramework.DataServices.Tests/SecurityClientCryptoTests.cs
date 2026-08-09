@@ -20,9 +20,11 @@
 // ==================================================================================================
 
 using System.Net;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Clients;
@@ -43,6 +45,12 @@ public sealed class SecurityClientCryptoTests
     private static (SecurityClient Client, RecordingHandler Handler) CreateClient(
         RecordingHandler handler)
     {
+        // EVERY C-02 OPERATION ACQUIRES A CREDENTIAL BEFORE IT SENDS, so this suite answers two
+        // endpoints rather than one. The credential acquisition is auto-answered and kept out of the
+        // handler's request list, which leaves each test's own request at index 0 exactly as before, and
+        // leaves the acquisition inspectable through TokenRequests for the tests that assert on it.
+        handler.AutoAnswerTokenRequests = true;
+
         HttpClient httpClient = new(handler, disposeHandler: false)
         {
             BaseAddress = new Uri("https://security.invalid/", UriKind.Absolute),
@@ -639,11 +647,14 @@ public sealed class SecurityClientCryptoTests
             "{\"payloadForm\":\"STRING\",\"data\":\"plain\"}");
         (SecurityClient client, _) = CreateClient(handler);
 
+        // A VECTOR REFERENCE IS SUPPLIED because the chaining mode without one is a blocked cell
+        // (DECISION D3): the vector the legacy substituted there is unobservable. This test is about
+        // the PATH the operation posts to, so it uses a cell that is actually reproducible.
         CryptoPayload result = await client.SymmetricDecryptAsync(
             CryptoPayload.FromString("cipher"),
             FakeKeyRef,
             Enums.CRYPTO_SYMCRYPT_TYPE_3DES,
-            ivRef: null,
+            ivRef: FakeIvRef,
             mode: Enums.CRYPTO_SYMCRYPT_MODE_CBC,
             TestContext.Current.CancellationToken);
 
@@ -789,22 +800,40 @@ public sealed class SecurityClientCryptoTests
     }
 
     [Fact]
-    public async Task RsaSignAsync_AcceptsAChecksumAsASignatureHash()
+    public async Task RsaSignAsync_RefusesAChecksumAsASignatureHashAndStillAcceptsTheWeakOnes()
     {
-        // PRESERVED LEGACY WEAKNESS 8 in its sharpest form: the SAME six-member set governs the
-        // signature hash, so CRC32 is a legal selector here.
+        // THIS TEST'S EXPECTATION WAS INVERTED, AND THE OLD ONE WAS WRONG RATHER THAN MERELY DATED.
+        // It asserted that a checksum was forwarded as a signature hash, on the reasoning that the
+        // oracle declares one hash set for digests and signatures alike [enums.sru:L927]. The
+        // declaration is real, but the construction is not: RSA-over-CRC32 does not exist, so the
+        // signing provider ALWAYS refused it. The client was therefore asserted to send a request that
+        // could only ever fail, one network round trip later, and the contract advertised it as legal.
+        //
+        // What is asserted now is the refusal, raised locally before anything is sent. The weak-but-real
+        // selector is asserted alongside it, because the narrowing must be exactly one identifier wide:
+        // MD5 is a preserved legacy weakness and must still go through (C-B).
         RecordingHandler handler = new RecordingHandler().Enqueue(
             HttpStatusCode.OK,
             "{\"payloadForm\":\"STRING\",\"data\":\"s\"}");
         (SecurityClient client, _) = CreateClient(handler);
 
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => client.RsaSignAsync(
+                CryptoPayload.FromString("x"),
+                FakeKeyRef,
+                Enums.CRYPTO_HASH_CRC32,
+                TestContext.Current.CancellationToken));
+
+        // Nothing was sent, so the enqueued response is still waiting for the call below.
+        Assert.Empty(handler.Requests);
+
         await client.RsaSignAsync(
             CryptoPayload.FromString("x"),
             FakeKeyRef,
-            Enums.CRYPTO_HASH_CRC32,
+            Enums.CRYPTO_HASH_MD5,
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(Enums.CRYPTO_HASH_CRC32, Body(handler).GetProperty("hashType").GetInt64());
+        Assert.Equal(Enums.CRYPTO_HASH_MD5, Body(handler).GetProperty("hashType").GetInt64());
     }
 
     [Fact]
@@ -1265,5 +1294,453 @@ public sealed class SecurityClientCryptoTests
         Assert.False(bare.RetCodeIsSucceeded);
         Assert.False(bare.RetCodeIsFailed);
         Assert.False(bare.RetCodeIsCancelled);
+    }
+
+    // ==============================================================================================
+    //  GROUP 10 - THE CREDENTIAL EVERY C-02 OPERATION PRESENTS
+    //  ----------------------------------------------------------------------------------------------
+    //  Every one of the seventeen crypto operations inherits the document-level bearer requirement, so
+    //  an unauthenticated crypto call is not merely unwise: once Security enforces its own contract
+    //  every one of them answers 401 and the whole cryptographic surface becomes unreachable.
+    // ==============================================================================================
+
+    [Fact]
+    public async Task EveryCryptoOperation_PresentsABearerCredential()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            "{\"digest\":\"d\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await client.HashAsync(
+            CryptoPayload.FromString("payload"),
+            Enums.CRYPTO_HASH_SHA256,
+            TestContext.Current.CancellationToken);
+
+        AuthenticationHeaderValue? credential = handler.Requests[0].Headers.Authorization;
+
+        Assert.NotNull(credential);
+        Assert.Equal("Bearer", credential.Scheme);
+        Assert.Equal(RecordingHandler.AutoAnsweredCredential, credential.Parameter);
+    }
+
+    [Fact]
+    public async Task TheCredentialIsRequestedForSecuritysOwnAudienceAndTheCryptoScope()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            "{\"digest\":\"d\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await client.HashAsync(
+            CryptoPayload.FromString("payload"),
+            Enums.CRYPTO_HASH_SHA256,
+            TestContext.Current.CancellationToken);
+
+        // Exactly one acquisition, at the published token path.
+        HttpRequestMessage acquisition = Assert.Single(handler.TokenRequests);
+        Assert.Equal(RecordingHandler.TokenPath, acquisition.RequestUri?.AbsolutePath);
+
+        // AND NO CREDENTIAL ON THE ACQUISITION ITSELF. A caller cannot present a bearer token in order
+        // to obtain its first bearer token; that edge is authenticated by the transport.
+        Assert.Null(acquisition.Headers.Authorization);
+
+        JsonElement body = JsonDocument.Parse(handler.TokenBodies[0]).RootElement;
+
+        Assert.Equal("powerframework-dataservices", body.GetProperty("subject").GetString());
+        Assert.Equal("powerframework-security", body.GetProperty("audience").GetString());
+
+        string[] scopes = [.. body.GetProperty("scopes").EnumerateArray().Select(s => s.GetString()!)];
+        Assert.Equal(["security.crypto"], scopes);
+    }
+
+    [Fact]
+    public async Task TheCredentialIsAcquiredOnceAndReusedAcrossOperations()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"digest\":\"d\"}")
+            .Enqueue(HttpStatusCode.OK, "{\"value\":\"11111111-1111-1111-1111-111111111111\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await client.HashAsync(
+            CryptoPayload.FromString("payload"),
+            Enums.CRYPTO_HASH_SHA256,
+            TestContext.Current.CancellationToken);
+
+        await client.GenerateGuidAsync(flags: null, TestContext.Current.CancellationToken);
+
+        // Two operations, two operation requests - and ONE issuance, because all seventeen resolve to a
+        // single cache key. The clock does not move in this suite, so reuse is decided by the key.
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Single(handler.TokenRequests);
+    }
+
+    [Fact]
+    public async Task TheCredentialIsNeverWrittenToAnyLogRecord()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"digest\":\"d\"}");
+        handler.AutoAnswerTokenRequests = true;
+
+        CapturingLogger logger = new();
+
+        HttpClient httpClient = new(handler, disposeHandler: false)
+        {
+            BaseAddress = new Uri("https://security.invalid/", UriKind.Absolute),
+        };
+
+        DataServicesOptions options = new();
+        options.Security.BaseAddress = "https://security.invalid/";
+
+        SecurityClient client = new(httpClient, Options.Create(options), logger, new MutableClock());
+
+        await client.HashAsync(
+            CryptoPayload.FromString("payload"),
+            Enums.CRYPTO_HASH_SHA256,
+            TestContext.Current.CancellationToken);
+
+        // The client is enabled at every level here, so this is asserted against everything it CHOSE to
+        // write rather than against whatever a configured minimum level happened to admit.
+        Assert.NotEmpty(logger.Records);
+        Assert.DoesNotContain(
+            RecordingHandler.AutoAnsweredCredential,
+            string.Join('\n', logger.Records),
+            StringComparison.Ordinal);
+    }
+
+    // ==============================================================================================
+    //  GROUP 11 - THE PAYLOAD-FORM SELECTOR ADMITS THE TWO PUBLISHED NAMES AND NOTHING ELSE
+    //  ----------------------------------------------------------------------------------------------
+    //  An enum in .NET does not restrict a numeric value to its declared members, so a form value that
+    //  names no member would have failed every "is it the string family" test and been classified as
+    //  the blob family - base64-decoding a payload the service never described that way (CWE-20).
+    // ==============================================================================================
+
+    private sealed class FormCarrier
+    {
+        public PayloadForm Form { get; init; }
+    }
+
+    [Theory]
+    [InlineData("STRING", PayloadForm.STRING)]
+    [InlineData("BLOB", PayloadForm.BLOB)]
+    public void ThePayloadFormSelector_AcceptsThePublishedNames(string wireValue, PayloadForm expected)
+    {
+        FormCarrier? carrier = JsonSerializer.Deserialize<FormCarrier>(
+            "{\"Form\":\"" + wireValue + "\"}");
+
+        Assert.NotNull(carrier);
+        Assert.Equal(expected, carrier.Form);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("1")]
+    [InlineData("7")]
+    [InlineData("\"TEXT\"")]
+    [InlineData("\"\"")]
+    public void ThePayloadFormSelector_RefusesAnythingElseIncludingIntegers(string wireValue)
+    {
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<FormCarrier>("{\"Form\":" + wireValue + "}"));
+    }
+
+    [Fact]
+    public async Task AResponseWhoseFormNamesNoPublishedValueIsRefusedRatherThanDecoded()
+    {
+        // An integer form is refused by the converter before any decoding is attempted, so the payload
+        // is NOT reinterpreted as the blob family.
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            "{\"payloadForm\":7,\"data\":\"AQIDBA==\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.SymmetricEncryptAsync(
+                CryptoPayload.FromString("payload"),
+                FakeKeyRef,
+                Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
+                ivRef: null,
+                mode: null,
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal("symmetricEncrypt", failure.OperationId);
+    }
+
+    // ==============================================================================================
+    //  GROUP 12 - THE CHECKSUM HASH IS ACCEPTED WHERE IT HAS A MEANING AND REFUSED WHERE IT DOES NOT
+    //  ----------------------------------------------------------------------------------------------
+    //  The oracle's comment at enums.sru:L927 declares ONE hash set for the unkeyed digest, the keyed
+    //  digest and the RSA signature alike, so all six identifiers were advertised on all six
+    //  operations. But there is no HMAC-CRC32 and no RSA-over-CRC32 construction to implement - a
+    //  checksum has no compression function to key and no algorithm identifier for a signature scheme
+    //  to name. The service therefore refused it, deterministically, AFTER a schema-valid request had
+    //  already crossed the network.
+    //
+    //  These tests pin the two halves of the fix: the four keyed and signing operations refuse it
+    //  locally, at construction, before anything is sent; and the two unkeyed digest operations still
+    //  accept it, because computing a checksum is perfectly well defined and removing it would narrow
+    //  the legacy surface (C-B).
+    // ==============================================================================================
+
+    [Fact]
+    public async Task TheKeyedAndSigningOperations_RefuseTheChecksumHashWithoutSendingAnything()
+    {
+        RecordingHandler handler = new();
+        (SecurityClient client, _) = CreateClient(handler);
+        CryptoPayload payload = CryptoPayload.FromString("payload");
+        long checksum = Enums.CRYPTO_HASH_CRC32;
+
+        // No response is enqueued: if any of these four reached the transport, the handler would fault
+        // rather than let the test pass. That is the assertion that the refusal is LOCAL.
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => client.HmacAsync(payload, FakeKeyRef, checksum, TestContext.Current.CancellationToken));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => client.HmacFileAsync(
+                FakeFileRef,
+                FakeKeyRef,
+                checksum,
+                TestContext.Current.CancellationToken));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => client.RsaSignAsync(
+                payload,
+                FakeKeyRef,
+                checksum,
+                TestContext.Current.CancellationToken));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => client.RsaVerifyAsync(
+                payload,
+                CryptoPayload.FromString("signature"),
+                FakeKeyRef,
+                checksum,
+                TestContext.Current.CancellationToken));
+
+        // Nothing was sent - not even a credential acquisition, since the argument check precedes it.
+        Assert.Empty(handler.Requests);
+        Assert.Empty(handler.TokenRequests);
+    }
+
+    [Theory]
+    [InlineData(Enums.CRYPTO_HASH_MD5)]
+    [InlineData(Enums.CRYPTO_HASH_SHA1)]
+    [InlineData(Enums.CRYPTO_HASH_SHA256)]
+    [InlineData(Enums.CRYPTO_HASH_SHA384)]
+    [InlineData(Enums.CRYPTO_HASH_SHA512)]
+    public async Task TheKeyedOperationAcceptsEveryIdentifierThatHasAKeyedForm(long hashType)
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            "{\"digest\":\"d\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        // THE POSITIVE HALF, AND IT IS WHAT PROVES THE NARROWING IS MINIMAL. Refusing the checksum is
+        // only correct if the other five still pass; a check that rejected too much would fail here.
+        Assert.Equal(
+            "d",
+            await client.HmacAsync(
+                CryptoPayload.FromString("payload"),
+                FakeKeyRef,
+                hashType,
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task TheUnkeyedDigestOperationsStillAcceptTheChecksumHash()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"digest\":\"checksum\"}")
+            .Enqueue(HttpStatusCode.OK, "{\"digest\":\"checksum\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        // PRESERVED DELIBERATELY (C-B). The narrowing is per-operation, not a removal of the identifier:
+        // computing a checksum digest is well defined, the legacy offers it, and this port performs it.
+        Assert.Equal(
+            "checksum",
+            await client.HashAsync(
+                CryptoPayload.FromString("payload"),
+                Enums.CRYPTO_HASH_CRC32,
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            "checksum",
+            await client.HashFileAsync(
+                FakeFileRef,
+                Enums.CRYPTO_HASH_CRC32,
+                TestContext.Current.CancellationToken));
+    }
+
+    // ==============================================================================================
+    //  GROUP 13 - THE UNREPRODUCIBLE SYMMETRIC CELLS ARE REFUSED BEFORE A REQUEST IS BUILT
+    //  ----------------------------------------------------------------------------------------------
+    //  Two parameters of the symmetric grid are not determined by anything in the repository: the
+    //  feedback mode's feedback width, which the legacy publishes with no feedback-size argument, and
+    //  the vector substituted when a mode is supplied without one. n_crypto is native "pfw.dll"
+    //  [n_crypto.sru:L8] with no PowerScript body, so neither is observable. Either wrong choice
+    //  round-trips perfectly against itself while producing ciphertext the legacy cannot decrypt, so
+    //  the cells are refused rather than guessed - and refused HERE, so the request is never sent.
+    // ==============================================================================================
+
+    [Theory]
+    [InlineData(Enums.CRYPTO_SYMCRYPT_MODE_CFB, true, "SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE")]
+    [InlineData(Enums.CRYPTO_SYMCRYPT_MODE_CFB, false, "SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE")]
+    [InlineData(Enums.CRYPTO_SYMCRYPT_MODE_CBC, false, "SYMMETRIC_VECTOR_UNPROVABLE")]
+    public async Task ABlockedSymmetricCellIsRefusedLocallyWithThePublishedReasonCode(
+        long mode,
+        bool supplyVectorRef,
+        string expectedReasonCode)
+    {
+        RecordingHandler handler = new();
+        (SecurityClient client, _) = CreateClient(handler);
+        string? ivRef = supplyVectorRef ? FakeIvRef : null;
+
+        NotSupportedException encrypting = await Assert.ThrowsAsync<NotSupportedException>(
+            () => client.SymmetricEncryptAsync(
+                CryptoPayload.FromString("payload"),
+                FakeKeyRef,
+                Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
+                ivRef,
+                mode,
+                TestContext.Current.CancellationToken));
+
+        NotSupportedException decrypting = await Assert.ThrowsAsync<NotSupportedException>(
+            () => client.SymmetricDecryptAsync(
+                CryptoPayload.FromString("payload"),
+                FakeKeyRef,
+                Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
+                ivRef,
+                mode,
+                TestContext.Current.CancellationToken));
+
+        // THE REASON CODE IS THE CONTRACT'S OWN, so a caller reads one vocabulary on both sides of the
+        // boundary even though constraint C-A forbids sharing the type that defines it.
+        Assert.Contains(expectedReasonCode, encrypting.Message, StringComparison.Ordinal);
+        Assert.Contains(expectedReasonCode, decrypting.Message, StringComparison.Ordinal);
+
+        // Refused before the transport, so no request and no credential acquisition occurred.
+        Assert.Empty(handler.Requests);
+        Assert.Empty(handler.TokenRequests);
+    }
+
+    [Fact]
+    public async Task TheReproducibleSymmetricCellsAreStillSent()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"payloadForm\":\"STRING\",\"data\":\"cipher\"}")
+            .Enqueue(HttpStatusCode.OK, "{\"payloadForm\":\"STRING\",\"data\":\"cipher\"}")
+            .Enqueue(HttpStatusCode.OK, "{\"payloadForm\":\"STRING\",\"data\":\"cipher\"}");
+        (SecurityClient client, _) = CreateClient(handler);
+        CryptoPayload payload = CryptoPayload.FromString("payload");
+
+        // THE THREE REPRODUCIBLE SHAPES, ASSERTED TOGETHER SO THE NARROWING CANNOT SILENTLY WIDEN.
+        // The codebook mode needs no vector, so both of its shapes go; chaining goes with a vector.
+        foreach ((string? ivRef, long? mode) in (( string?, long? )[])
+        [
+            (null, Enums.CRYPTO_SYMCRYPT_MODE_ECB),
+            (FakeIvRef, Enums.CRYPTO_SYMCRYPT_MODE_ECB),
+            (FakeIvRef, Enums.CRYPTO_SYMCRYPT_MODE_CBC),
+        ])
+        {
+            await client.SymmetricEncryptAsync(
+                payload,
+                FakeKeyRef,
+                Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
+                ivRef,
+                mode,
+                TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    // ==============================================================================================
+    //  GROUP 14 - AN UNDEFINED PAYLOAD FORM IS REFUSED RATHER THAN RECLASSIFIED
+    //  ----------------------------------------------------------------------------------------------
+    //  The reconstruction is the SECOND of the two controls the boundary applies to the form member.
+    //  The first is the converter, which refuses a numeric wire value outright; this one refuses a
+    //  value that names no declared member even if it somehow arrives past the converter. The two are
+    //  deliberately independent, so this row exercises the reconstruction DIRECTLY rather than through
+    //  a response - a response cannot carry an undefined value while the first control holds, and a
+    //  row that could only fail once the first control had already been removed would prove nothing
+    //  about the second.
+    //
+    //  WHAT THE REFUSAL PROTECTS. The superseded code read `form == STRING ? text : blob`, so every
+    //  value that was not the string member - including every value the contract never declared -
+    //  was decoded as base64. A payload the service described in no family would therefore have been
+    //  returned as bytes, and a caller would have consumed a reinterpretation as though it were the
+    //  answer.
+    // ==============================================================================================
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(-1)]
+    [InlineData(int.MaxValue)]
+    public void AnUndefinedPayloadFormIsRefusedInsteadOfBeingDecodedAsEitherFamily(int undefined)
+    {
+        // Guard the premise: the argument must genuinely name no member, or the row proves nothing.
+        Assert.DoesNotContain(undefined, Enum.GetValues<PayloadForm>().Select(static f => (int)f));
+
+        ArgumentOutOfRangeException refusal = Assert.Throws<ArgumentOutOfRangeException>(
+            () => CryptoPayload.FromWire((PayloadForm)undefined, "AAAA"));
+
+        // The offending value is reported as the argument, which is what lets a caller attribute the
+        // fault without parsing prose.
+        Assert.Equal((PayloadForm)undefined, refusal.ActualValue);
+
+        // The message names BOTH declared members, so a reader learns the closed vocabulary rather
+        // than only that the value was wrong.
+        Assert.Contains(nameof(PayloadForm.STRING), refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(PayloadForm.BLOB), refusal.Message, StringComparison.Ordinal);
+
+        // The DATA is never echoed. It is a plaintext, a ciphertext, a digest or a signature on this
+        // surface, and a refusal message reaches the console and the CI log (constraint C-F).
+        Assert.DoesNotContain("AAAA", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheTwoDeclaredFormsAreStillReconstructedByTheSameEntryPoint()
+    {
+        // The refutation for the row above: the refusal is narrow, not a blanket rejection.
+        Assert.Equal("text", CryptoPayload.FromWire(PayloadForm.STRING, "text").AsString());
+
+        CryptoPayload blob = CryptoPayload.FromWire(PayloadForm.BLOB, Convert.ToBase64String([1, 2, 3]));
+
+        Assert.Equal<byte[]>([1, 2, 3], blob.AsBlob().ToArray());
+    }
+}
+
+/// <summary>
+/// A logger that records what was written, so a test can assert on the ABSENCE of a value.
+/// </summary>
+/// <remarks>
+/// Enabled at every level deliberately: a recorder that respected a minimum level could drop the very
+/// record a leak would appear in and the test would then pass by observing nothing.
+/// </remarks>
+internal sealed class CapturingLogger : ILogger<SecurityClient>
+{
+    /// <summary>Every rendered record, in order.</summary>
+    public List<string> Records { get; } = [];
+
+    /// <inheritdoc/>
+    public IDisposable BeginScope<TState>(TState state)
+        where TState : notnull
+        => NullLogger.Instance.BeginScope(state);
+
+    /// <inheritdoc/>
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    /// <inheritdoc/>
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        ArgumentNullException.ThrowIfNull(formatter);
+        Records.Add(formatter(state, exception));
     }
 }

@@ -173,28 +173,30 @@
 //  ==============================================================================================
 //  FOUR PLATFORM HAZARDS THE CLOSED BINARY HIDES - DECIDED ONCE, DOCUMENTED, NOT "FIXED"
 //  ==============================================================================================
-//  DECISION H1 - CFB FEEDBACK WIDTH: FULL BLOCK WHERE THE PLATFORM ALLOWS IT
+//  DECISION H1 - CFB IS BLOCKED, BECAUSE ITS FEEDBACK WIDTH IS UNPROVABLE
 //  --------------------------------------------------------------------------------------------
-//  THE HIGHEST-VALUE ORACLE QUESTION IN THIS FILE. The legacy publishes a single CFB value
-//  [enums.sru:L945] with no feedback-size parameter. The Base Class Library requires an explicit
-//  feedback size, and CFB8 and full-block CFB produce ENTIRELY DIFFERENT CIPHERTEXT of different
-//  lengths, so a wrong choice is a silent parity failure that a round-trip test cannot detect: both
-//  choices round-trip perfectly against themselves.
+//  THE HIGHEST-VALUE ORACLE QUESTION IN THIS FILE, AND IT IS NOT ANSWERABLE FROM THIS REPOSITORY.
+//  The legacy publishes a single CFB value [enums.sru:L945] with no feedback-size parameter. This
+//  platform requires an explicit feedback size, and CFB8 and full-block CFB produce ENTIRELY
+//  DIFFERENT CIPHERTEXT of different lengths.
 //
-//  THE REASONED BASIS. The framework attributes OpenSSL among its eleven upstream libraries
-//  [ws_objects/pfw.demos.pbl.src/w_about.srw:L118], carried into this repository's NOTICE, and
-//  OpenSSL's plain CFB aliases are FULL-BLOCK: its AES CFB alias is the 128-bit form and its
-//  three-key DES CFB alias is the 64-bit form. A native surface publishing one unqualified CFB
-//  value most plausibly exposed those aliases. That is a reasoned inference from an attribution,
-//  NOT a measurement of the binary.
+//  WHAT WAS PREVIOUSLY DONE, AND WHY IT WAS WRONG. The width was inferred: the framework attributes
+//  OpenSSL among its eleven upstream libraries [ws_objects/pfw.demos.pbl.src/w_about.srw:L118], and
+//  OpenSSL's plain CFB aliases are full-block, so the full block width was adopted - 128 for AES,
+//  64 for 3DES, and 8 for DES because this platform's DES admits no other. Every part of that is
+//  defensible EXCEPT the conclusion, because an inference from an attribution is not a measurement
+//  of the binary, and this particular error is UNDETECTABLE: either width round-trips perfectly
+//  against itself, so no test available here can tell a right choice from a wrong one. Ciphertext
+//  produced under the wrong width passes every check and CANNOT BE DECRYPTED BY THE LEGACY.
 //
-//  THE RULE, NAMED IN ONE PLACE: the cipher's full block width. AES therefore takes 128 and 3DES
-//  takes 64. DES CANNOT: this platform's DES implementation admits ONLY the 8-bit feedback width
-//  and raises a cryptographic exception for any other, which was measured on this host rather than
-//  assumed. The DES arm is consequently a PLATFORM-IMPOSED DIVERGENCE of exactly the same kind as
-//  DECISION H2 - if the oracle used OpenSSL's 64-bit DES CFB alias, the DES-with-CFB cell will not
-//  be byte-exact, and no code change here can alter that. It is recorded rather than hidden, and it
-//  is the single cell of the five-type-by-three-mode grid carrying a known-unresolvable difference.
+//  THE RULE IS THEREFORE A REFUSAL, NOT A WIDTH. Every CFB call - encrypt or decrypt, with or
+//  without a vector, for every cipher type - raises `SymmetricParityUnavailableException` from
+//  `ScreenArguments`, the one gate all 32 overloads pass through. The mode identifier remains
+//  published and `IsSupportedSymmetricMode` still accepts it; only the capability is withdrawn.
+//  See DECISION D3 in `LegacyDefaults.cs` for the full reasoning and for the vector half of the
+//  same problem. NOTHING OBSERVABLE IS LOST: the oracle's own demo never selects CFB - all six of
+//  its symmetric call sites use CBC with an explicit vector
+//  [u_cst_tabpage_utility_crypto.sru:L504, L547, L592, L607, L622, L637].
 //
 //  DECISION H2 - THIS PLATFORM REJECTS WEAK AND DEGENERATE DES AND 3DES KEYS; THE LEGACY DID NOT
 //  --------------------------------------------------------------------------------------------
@@ -237,8 +239,10 @@
 //  DECISION H4 - THE INITIALIZATION-VECTOR RULES, ALL THREE ARMS
 //  --------------------------------------------------------------------------------------------
 //      (a) MODE SUPPLIED, NO VECTOR - the eight overloads at L31, L35, L39, L43 and mirrors L47,
-//          L51, L55, L59. When the mode is CBC or CFB, DECISION D3's all-zero vector is
-//          synthesised. When it is ECB, no vector is produced at all.
+//          L51, L55, L59. When the mode is ECB, no vector is produced and the call proceeds. When
+//          the mode consumes a vector, the call is REFUSED under DECISION D3 rather than having a
+//          vector invented for it; `RefuseOrOmitInitializationVector` is that arm. No vector is
+//          ever synthesised anywhere in this file.
 //      (b) ECB IGNORES A SUPPLIED VECTOR, and this is STRUCTURAL rather than accidental. The ECB
 //          path calls the library's ECB one-shot, whose signature HAS NO VECTOR PARAMETER, so a
 //          supplied vector has no way to reach the cipher. Its REFERENCE is still validated, so
@@ -326,25 +330,7 @@ public sealed class SymmetricCipherProvider
     /// </remarks>
     private const PaddingMode LegacyBlockPadding = PaddingMode.PKCS7;
 
-    /// <summary>
-    /// The number of bits in a byte, used to express a cipher's block length as a feedback width.
-    /// </summary>
-    /// <remarks>
-    /// Named rather than written inline so that the arithmetic in the feedback-width rule of
-    /// DECISION H1 reads as a unit conversion instead of as a magic number.
-    /// </remarks>
-    private const int BitsPerByte = 8;
 
-    /// <summary>
-    /// The single-byte CFB feedback width, in bits, which is the only width this platform's DES
-    /// implementation admits. See DECISION H1.
-    /// </summary>
-    /// <remarks>
-    /// This is a PLATFORM CONSTRAINT and not a preference: measured on this host, the library's DES
-    /// raises a cryptographic exception for every other feedback width, so the full-block width the
-    /// rest of the rule prefers is unreachable for DES alone.
-    /// </remarks>
-    private const int SingleByteFeedbackSizeBits = 8;
 
     /// <summary>
     /// The single message text for the unsupported-cipher-type failure.
@@ -497,7 +483,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics)));
+            RefuseOrOmitInitializationVector(mode)));
     }
 
     /// <summary>
@@ -647,7 +633,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics)));
+            RefuseOrOmitInitializationVector(mode)));
     }
 
     /// <summary>
@@ -785,7 +771,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics));
+            RefuseOrOmitInitializationVector(mode));
     }
 
     /// <summary>
@@ -919,7 +905,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics));
+            RefuseOrOmitInitializationVector(mode));
     }
 
     /// <summary>
@@ -1091,7 +1077,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics)));
+            RefuseOrOmitInitializationVector(mode)));
     }
 
     /// <summary>
@@ -1235,7 +1221,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics)));
+            RefuseOrOmitInitializationVector(mode)));
     }
 
     /// <summary>
@@ -1367,7 +1353,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics));
+            RefuseOrOmitInitializationVector(mode));
     }
 
     /// <summary>
@@ -1491,7 +1477,7 @@ public sealed class SymmetricCipherProvider
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            SynthesizeInitializationVector(mode, metrics));
+            RefuseOrOmitInitializationVector(mode));
     }
 
     /// <summary>
@@ -1644,25 +1630,15 @@ public sealed class SymmetricCipherProvider
                 return algorithm.EncryptEcb(plain, LegacyBlockPadding);
             }
 
-            // CBC AND CFB BOTH CONSUME A VECTOR, AND ONE IS GUARANTEED PRESENT HERE. The two
-            // resolvers produce a vector EXACTLY when the catalogue reports that the mode consumes
-            // one, and the ECB arm above has already returned, so both branches below are reached
-            // only with a vector in hand. That invariant is asserted with the null-forgiving operator
-            // rather than re-tested, deliberately: a defensive re-test would be an arm no input can
-            // reach, and were the invariant ever broken the primitive itself raises a null-argument
-            // failure, which is louder and more legible than anything this method could substitute.
-            if (mode == Enums.CRYPTO_SYMCRYPT_MODE_CBC)
-            {
-                return algorithm.EncryptCbc(plain, initializationVector!, LegacyBlockPadding);
-            }
-
-            // The only remaining published mode [enums.sru:L945]. DECISION H1 supplies the feedback
-            // width the legacy's single CFB value does not carry.
-            return algorithm.EncryptCfb(
-                plain,
-                initializationVector!,
-                LegacyBlockPadding,
-                ResolveCfbFeedbackSizeBits(ntype));
+            // CBC IS THE ONLY MODE THAT CAN REACH HERE, AND A VECTOR IS GUARANTEED PRESENT. Two
+            // screens have already run: `ScreenArguments` refused CFB outright under DECISION D3,
+            // and the vector resolvers produce a vector EXACTLY when the catalogue reports the mode
+            // consumes one - so with ECB returned above, CBC-with-vector is all that remains. That
+            // invariant is asserted with the null-forgiving operator rather than re-tested,
+            // deliberately: a defensive re-test would be an arm no input can reach, and were the
+            // invariant ever broken the primitive itself raises a null-argument failure, which is
+            // louder and more legible than anything this method could substitute.
+            return algorithm.EncryptCbc(plain, initializationVector!, LegacyBlockPadding);
         }
         finally
         {
@@ -1725,20 +1701,9 @@ public sealed class SymmetricCipherProvider
                 return algorithm.DecryptEcb(cipher, LegacyBlockPadding);
             }
 
-            // The same guaranteed-present invariant as on the encrypt side, asserted the same way
-            // and for the same reason.
-            if (mode == Enums.CRYPTO_SYMCRYPT_MODE_CBC)
-            {
-                return algorithm.DecryptCbc(cipher, initializationVector!, LegacyBlockPadding);
-            }
-
-            // DECISION H1 must resolve to the SAME width the encrypt side used, which it does
-            // because both read it from this one rule.
-            return algorithm.DecryptCfb(
-                cipher,
-                initializationVector!,
-                LegacyBlockPadding,
-                ResolveCfbFeedbackSizeBits(ntype));
+            // The same CBC-only, vector-guaranteed invariant as on the encrypt side, reached the
+            // same way and asserted for the same reason.
+            return algorithm.DecryptCbc(cipher, initializationVector!, LegacyBlockPadding);
         }
         finally
         {
@@ -1827,6 +1792,20 @@ public sealed class SymmetricCipherProvider
         if (!LegacyDefaults.IsSupportedSymmetricMode(mode))
         {
             throw new ArgumentOutOfRangeException(nameof(mode), mode, UnsupportedCipherModeMessage);
+        }
+
+        // DECISION D3, THE MODE HALF - applied here because this method is the one gate all 32
+        // overloads pass through, so the CFB block cannot be reached around. It is a SEPARATE and
+        // LATER question from the screening above: CFB is a published identifier and the predicate
+        // above rightly accepts it; what this repository cannot supply is its feedback width. The
+        // vector half of D3 lives in `RefuseOrOmitInitializationVector`, which is the only place
+        // knows a vector was NOT supplied.
+        SymmetricCellParity parity =
+            LegacyDefaults.ClassifySymmetricCell(mode, initializationVectorSupplied: true);
+
+        if (parity != SymmetricCellParity.Supported)
+        {
+            throw new SymmetricParityUnavailableException(parity, mode);
         }
 
         return LegacyDefaults.GetSymmetricCipherMetrics(ntype);
@@ -1948,99 +1927,62 @@ public sealed class SymmetricCipherProvider
             : null;
 
     /// <summary>
-    /// Produces the initialization vector for the eight overloads that take a mode but no vector.
-    /// Implements DECISION D3 and DECISION H4(a).
+    /// Applies the vector half of DECISION D3 for the eight overloads that take a mode but no vector:
+    /// ECB proceeds with no vector, and any vector-consuming mode is REFUSED.
     /// </summary>
     /// <param name="mode">The screened cipher mode.</param>
-    /// <param name="metrics">The cipher's sizing.</param>
     /// <returns>
-    /// A fresh ALL-ZERO buffer of exactly the cipher's block length when the mode consumes a vector;
-    /// otherwise <see langword="null"/>.
+    /// Always <see langword="null"/>. The method returns a value only so that the eight call sites
+    /// read identically to the twenty-four that normalize a supplied vector.
     /// </returns>
-    /// <remarks>
-    /// <para>
-    /// KNOWN WEAK DEFAULT, PRESERVED DELIBERATELY. Four <c>SymEncrypt</c> overloads accept a mode but
-    /// no vector [n_crypto.sru:L31, L35, L39, L43], mirrored by four <c>SymDecrypt</c> overloads
-    /// [:L47, L51, L55, L59]. CBC and CFB both require a vector, so those eight arms synthesise one,
-    /// and it is all zero.
-    /// </para>
-    /// <para>
-    /// A FIXED, PUBLICLY KNOWN VECTOR DESTROYS CBC'S SEMANTIC SECURITY: identical plaintext under the
-    /// same key yields identical ciphertext every time, so an observer learns when a value has not
-    /// changed, and the first block leaks equality much as ECB does. It is preserved because
-    /// generating a random vector would produce ciphertext the legacy could not decrypt - the legacy
-    /// format has no field in which to transmit one - so the alternative is not a safer port but a
-    /// broken one.
-    /// </para>
-    /// <para>
-    /// THE VECTOR IS COMPUTED FROM A LENGTH by the catalogue and is never written down as a literal,
-    /// so nothing resembling key material appears in this file. The ECB arms never reach this method,
-    /// because the catalogue's classifier reports that ECB consumes no vector.
-    /// </para>
-    /// </remarks>
-    private static byte[]? SynthesizeInitializationVector(
-        long mode,
-        SymmetricCipherMetrics metrics) =>
-        LegacyDefaults.ModeUsesInitializationVector(mode)
-            ? LegacyDefaults.CreateZeroInitializationVector(metrics.IvLengthBytes)
-            : null;
-
-    /// <summary>
-    /// Resolves the CFB feedback width, in bits, for a cipher type. This is DECISION H1, and it is
-    /// the only place in this port where that width is decided.
-    /// </summary>
-    /// <param name="ntype">The screened cipher type.</param>
-    /// <returns>
-    /// 128 for the AES types, 64 for 3DES - the full block width in both cases - and 8 for DES,
-    /// which is the only width this platform's DES implementation admits.
-    /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="ntype"/> is not a published cipher type, which indicates an unscreened caller.
+    /// <exception cref="SymmetricParityUnavailableException">
+    /// <paramref name="mode"/> consumes an initialization vector, which these eight overloads do not
+    /// supply. See the remarks.
     /// </exception>
     /// <remarks>
     /// <para>
-    /// THE HIGHEST-VALUE ORACLE QUESTION IN THIS FILE, and the reason it is a named method rather
-    /// than an inline argument. The legacy publishes ONE unqualified CFB value with no feedback-size
-    /// parameter [ws_objects/pfw.shared.pbl.src/enums.sru:L945], while the Base Class Library
-    /// requires the width explicitly. CFB8 and full-block CFB produce ENTIRELY DIFFERENT CIPHERTEXT,
-    /// of different lengths, so a wrong choice here is a silent parity failure that NO ROUND-TRIP
-    /// TEST CAN DETECT: either choice round-trips perfectly against itself.
+    /// THIS METHOD USED TO INVENT THE MISSING VECTOR, AND THAT IS THE DEFECT IT NOW EXISTS TO
+    /// PREVENT. Four <c>SymEncrypt</c> overloads accept a mode but no vector
+    /// [n_crypto.sru:L31, L35, L39, L43], mirrored by four <c>SymDecrypt</c> overloads
+    /// [:L47, L51, L55, L59]. CBC requires a vector, so one had to be supplied from somewhere, and an
+    /// all-zero buffer of the block length was chosen on the belief that it was "the conventional
+    /// legacy behaviour". Nothing in this repository establishes that. The closed binary
+    /// [n_crypto.sru:L8] could as easily have derived a vector from the key, used a fixed non-zero
+    /// constant, or refused the call outright.
     /// </para>
     /// <para>
-    /// THE REASONED BASIS, offered as an inference and not as a measurement. The framework attributes
-    /// OpenSSL among its eleven upstream libraries [ws_objects/pfw.demos.pbl.src/w_about.srw:L118],
-    /// an attribution carried forward into this repository's NOTICE, and OpenSSL's plain CFB aliases
-    /// are FULL-BLOCK - its AES alias is the 128-bit form and its three-key DES alias is the 64-bit
-    /// form. A native surface publishing a single unqualified CFB value most plausibly exposed those
-    /// aliases. Byte-exact agreement with the closed binary remains verifiable ONLY against the
-    /// behavioural oracle and is not claimed here.
+    /// WHY THE GUESS WAS PARTICULARLY DANGEROUS RATHER THAN MERELY UNVERIFIED. A wrong vector is
+    /// invisible to every test this repository can run, because encrypting and decrypting under the
+    /// same wrong vector round-trips perfectly. The caller receives ciphertext that passes every
+    /// check available and that THE LEGACY CANNOT DECRYPT - data loss wearing the appearance of
+    /// success. Refusing is the only outcome that cannot be silently wrong.
     /// </para>
     /// <para>
-    /// THE RULE IS THEREFORE THE CIPHER'S FULL BLOCK WIDTH, read from the catalogue's block length so
-    /// that it cannot drift from the sizing table. DES IS THE ONE EXCEPTION AND IT IS NOT A CHOICE:
-    /// this platform's DES implementation admits ONLY the single-byte feedback width and raises a
-    /// cryptographic exception for any other, which was measured rather than assumed. That makes the
-    /// DES-with-CFB cell a PLATFORM-IMPOSED DIVERGENCE of the same kind as DECISION H2 - if the
-    /// oracle used OpenSSL's 64-bit DES CFB alias, that one cell of the five-type-by-three-mode grid
-    /// cannot be byte-exact, and no code in this file can change that. Preferring CFB8 uniformly
-    /// instead would trade one known-divergent cell for three, so it is rejected.
+    /// THE ECB ARMS ARE UNAFFECTED, WHICH IS WHY THE DEFAULT PATH STILL WORKS. ECB consumes no vector
+    /// [enums.sru:L943] and is the default mode [:L946], so all eight mode-omitting overloads and the
+    /// explicit-ECB arms of these eight pass through untouched. A caller needing CBC through one of
+    /// these eight supplies a vector through one of the other twenty-four overloads, which the legacy
+    /// also publishes - so the narrowing removes no capability the surface does not offer elsewhere.
     /// </para>
     /// <para>
-    /// Visible to the test assembly so that the parity suite can pin the resolved width per cipher
-    /// type directly, rather than inferring it from ciphertext.
+    /// The classification is delegated rather than re-decided here: the catalogue owns the blocked
+    /// set so that this file and the wire contract cannot drift apart on what it contains.
     /// </para>
     /// </remarks>
-    internal static int ResolveCfbFeedbackSizeBits(ushort ntype)
+    private static byte[]? RefuseOrOmitInitializationVector(long mode)
     {
-        SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
+        SymmetricCellParity parity =
+            LegacyDefaults.ClassifySymmetricCell(mode, initializationVectorSupplied: false);
 
-        if (metrics.CipherType == Enums.CRYPTO_SYMCRYPT_TYPE_DES)
+        if (parity != SymmetricCellParity.Supported)
         {
-            return SingleByteFeedbackSizeBits;
+            throw new SymmetricParityUnavailableException(parity, mode);
         }
 
-        return metrics.BlockLengthBytes * BitsPerByte;
+        // Only ECB survives the classification without a vector, and ECB consumes none.
+        return null;
     }
+
 
     /// <summary>
     /// Creates the Base Class Library algorithm that substitutes a legacy cipher type.

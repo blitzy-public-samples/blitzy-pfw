@@ -266,8 +266,9 @@
 //  REFERENCED AND NEVER REDECLARED: every CRYPTO_* occurrence in this file is either an
 //  `Enums.`-qualified reference or documentation text, which is also why no identifier declared
 //  below uses the legacy SCREAMING_SNAKE spelling. That spelling is preserved verbatim only in
-//  the shared kernel's catalogue and in the seven files the root .editorconfig scopes its naming
-//  suppressions to; this file is not one of them, so a SCREAMING_SNAKE declaration here would be
+//  the shared kernel's catalogue and in the files on the root .editorconfig's BAND 3 roster - the
+//  single source of truth for that list - which its naming suppressions are scoped to; this file is
+//  not one of them, so a SCREAMING_SNAKE declaration here would be
 //  a build failure under warnings-as-errors rather than a style disagreement.
 //
 //  IT REPRODUCES NO LAZY-INITIALIZATION GUARD. The legacy declares a type-shadowing global

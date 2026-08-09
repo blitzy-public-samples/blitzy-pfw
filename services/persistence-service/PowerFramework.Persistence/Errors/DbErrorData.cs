@@ -132,15 +132,18 @@
 //  member order deliberately so the correspondence stays checkable at a glance.
 //
 //  The conversion to that message lives in Errors/SqlRedactor.cs, as a ToDbError extension that
-//  REQUIRES a redactor argument, and it is deliberately absent from this file. The reason is a
-//  security property rather than tidiness: SqlSyntax carries the complete generated statement
-//  INCLUDING INTERPOLATED LITERAL VALUES, because the legacy parses DBParm for DisableBind and
-//  DisableBind=1 means the runtime does not use bind variables at all
+//  APPLIES THE SEALED REDACTION POLICY ITSELF - it takes no redactor argument, so there is nothing
+//  to pass and therefore nothing to pass wrongly - and it is deliberately absent from this file. The
+//  reason is a security property rather than tidiness: SqlSyntax carries the complete generated
+//  statement INCLUDING INTERPOLATED LITERAL VALUES, because the legacy parses DBParm for DisableBind
+//  and DisableBind=1 means the runtime does not use bind variables at all
 //  [n_cst_thread_task_sqlbase.sru:L128-L129], and the legacy logger performs no redaction of any
 //  kind. If this type could convert itself, an unredacted statement could reach a network peer
-//  through a one-line call. Making the redactor a required argument of the only available
-//  conversion removes that path. Consumers must use that extension and must NOT hand-roll a
-//  mapping, which would reintroduce exactly the leak the split exists to prevent.
+//  through a one-line call. Keeping the conversion beside the redactor, with the redaction applied by
+//  the conversion itself and not supplied to it, removes that path AND removes the weaker variant of
+//  it: there is no injectable policy to replace with a pass-through. Consumers must use that
+//  extension and must NOT hand-roll a mapping, which would reintroduce exactly the leak the split
+//  exists to prevent.
 //
 //  C-A SELF-AUDIT: this type is Persistence-internal and is NOT promoted into
 //  PowerFramework.Contracts. The cross-service form of a database error is the generated DbError
@@ -407,8 +410,9 @@ public readonly record struct DbErrorData
     /// <para>
     /// The value is consequently safe for this service's own diagnostics under its own controls,
     /// and unsafe to publish. Conversion to the wire <c>DbError</c> message therefore lives in
-    /// <c>Errors/SqlRedactor.cs</c> and requires a redactor argument; there is deliberately no
-    /// self-conversion on this type. Do not hand-roll a mapping that bypasses it.
+    /// <c>Errors/SqlRedactor.cs</c>, which masks this member unconditionally and accepts no redactor
+    /// argument that could be substituted; there is deliberately no self-conversion on this type. Do
+    /// not hand-roll a mapping that bypasses it.
     /// </para>
     /// </value>
     [AllowNull]

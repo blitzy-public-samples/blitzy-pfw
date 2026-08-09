@@ -38,7 +38,8 @@
 //    C-K       Every behavioural claim carries its locator, in the form `file:Lnnn`.
 //    0.4.5.3   SCREAMING_SNAKE constant identifiers are REFERENCED (`RetCode.OK`,
 //              `RetCode.E_INVALID_DATA`) and NONE IS DECLARED here. That matters mechanically and not
-//              only stylistically: `.editorconfig` suppresses CA1707 for the ten specific files that
+//              only stylistically: `.editorconfig` suppresses CA1707 for the specific files on its
+//              BAND 3 roster - the single source of truth for that list - that
 //              declare preserved identifiers, this file is not one of them, and CA1707 reports
 //              declarations only - so a declaration here would break the build under
 //              TreatWarningsAsErrors while a reference cannot.
@@ -1990,9 +1991,24 @@ public sealed class NullValueValidatorParityTests
     /// its text.
     /// </summary>
     /// <remarks>
-    /// The identity assertion is what proves single sourcing. Reference equality holds because both
-    /// sides are the same interned compile-time constant, so a <c>Convert</c> overload that had grown
-    /// its own literal would still satisfy value equality and would fail here.
+    /// WHAT THIS ROW CAN PROVE, AND WHAT IT CANNOT - stated because an earlier form of it claimed the
+    /// larger of the two. It asserted <c>Assert.Same(owned, emitted)</c> and described reference
+    /// equality as the proof of single sourcing, reasoning that a <c>Convert</c> overload which had
+    /// grown its own literal would satisfy value equality and fail the identity check. **That
+    /// reasoning does not hold in C#.** <c>NullLiteralExpression</c> is a <c>const string</c>, so every
+    /// reference to it is INLINED at compile time into the referencing assembly, and every equal string
+    /// literal in a loaded assembly is INTERNED to one instance by the runtime. A duplicated literal
+    /// therefore produces the very same reference, and the assertion could not fail for the reason it
+    /// named - it could only fail if the two texts differed, which is value inequality wearing an
+    /// identity check's clothing.
+    /// <para>
+    /// So this row now asserts exactly what it can: the text <c>Convert</c> emits equals the sentinel
+    /// the oracle publishes at the cited locator. That is a real check - a validator whose constant
+    /// changed fails it - and it is stated as value parity because value parity is what it is.
+    /// Single sourcing is a property of the SOURCE rather than of the runtime, so it is asserted
+    /// where it is observable, by
+    /// <see cref="TheAbsentValueSentinelsAreSingleSourcedFromTheOwningValidators"/>.
+    /// </para>
     /// </remarks>
     [Theory]
     [MemberData(nameof(NullConversionSentinels))]
@@ -2002,10 +2018,9 @@ public sealed class NullValueValidatorParityTests
         string expectedSentinel)
     {
         string emitted = ConvertAbsentValue(typeKey);
-        string owned = OwningSentinelConstant(typeKey);
 
         Assert.Equal(expectedSentinel, emitted);
-        Assert.Same(owned, emitted);
+        Assert.Equal(OwningSentinelConstant(typeKey), emitted);
         Assert.Contains("dwvaluetoexp.srf:L", legacyLocator, StringComparison.Ordinal);
     }
 
@@ -2017,6 +2032,14 @@ public sealed class NullValueValidatorParityTests
     /// could drift. Covering it here rather than leaving it to the <c>ValueToExpression</c> suite keeps
     /// the whole sentinel story - producer, converter and binder - in one failing-row-per-overload
     /// table.
+    /// <para>
+    /// Value parity rather than reference identity, for the reason given in full on
+    /// <see cref="ConvertingAnAbsentValueEmitsTheOwningValidatorSentinel"/>: a <c>const string</c> is
+    /// inlined at compile time and equal literals are interned, so an identity assertion here could
+    /// never distinguish a referenced constant from a duplicated literal. Single sourcing is asserted
+    /// against the source text by
+    /// <see cref="TheAbsentValueSentinelsAreSingleSourcedFromTheOwningValidators"/>.
+    /// </para>
     /// </remarks>
     [Theory]
     [MemberData(nameof(NullConversionSentinels))]
@@ -2029,8 +2052,75 @@ public sealed class NullValueValidatorParityTests
 
         Assert.False(hasValue);
         Assert.Equal(expectedSentinel, parityText);
-        Assert.Same(OwningSentinelConstant(typeKey), parityText);
+        Assert.Equal(OwningSentinelConstant(typeKey), parityText);
         Assert.NotEqual(string.Empty, legacyLocator);
+    }
+
+    /// <summary>
+    /// The five absent-value sentinels are SINGLE SOURCED: <c>Validators/ValueToExpression.cs</c>
+    /// returns each owning validator's published constant, and contains no copy of any sentinel's text.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS WHERE SINGLE SOURCING IS ACTUALLY OBSERVABLE, AND IT IS THE SOURCE TEXT. The two
+    /// theories above can only compare values, and a duplicated literal is value-identical by
+    /// construction - that is the whole reason a duplicate is dangerous rather than merely untidy. The
+    /// only artifact in which "referenced" and "copied" differ is the source file, so the source file
+    /// is what this reads.
+    /// <para>
+    /// Two claims, and they are complementary. The POSITIVE one is that each of the five owners appears
+    /// as a returned constant, so the emitting overloads genuinely defer to the validator that owns the
+    /// spelling. The NEGATIVE one is that no sentinel text appears as a string literal anywhere in the
+    /// file, so a future edit cannot quietly inline one beside the reference and leave both present -
+    /// which is the state in which the two sides drift apart while every value assertion still passes.
+    /// </para>
+    /// <para>
+    /// The third assertion closes the loop back to the oracle: each owning constant's VALUE equals the
+    /// sentinel the row table publishes at its <c>dwvaluetoexp.srf</c> locator. Together the three mean
+    /// the emitted text is the owner's constant, the owner's constant is the oracle's spelling, and
+    /// there is no second copy of either.
+    /// </para>
+    /// <para>
+    /// Read-only, and nothing is created: the walk locates the repository by the same two root markers
+    /// the sibling suites use and reads one file. A file that cannot be located FAILS rather than
+    /// skips - standing down would turn a structural claim into a test that reports success without
+    /// reading anything.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheAbsentValueSentinelsAreSingleSourcedFromTheOwningValidators()
+    {
+        // CODE ONLY, AND THE DISTINCTION IS ESSENTIAL RATHER THAN TIDY. The emitting file QUOTES the
+        // legacy assignment `sVal = "dwNvlNumber()"` in a comment above each of the nine overloads, and
+        // it should: that citation is how a reader ties the C# arm to dwvaluetoexp.srf. Searching the
+        // raw text would therefore report the oracle citations as duplication - which is the opposite
+        // of the truth, since those comments are what make the single sourcing legible.
+        string source = CodeOnlyText(RequireDataServicesSourceText(ValueToExpressionSourcePath));
+
+        foreach (string owner in SentinelOwningValidatorNames)
+        {
+            string reference = $"return {owner}.{NullLiteralConstantName};";
+
+            Assert.True(
+                source.Contains(reference, StringComparison.Ordinal),
+                $"'{ValueToExpressionSourcePath}' does not return '{owner}.{NullLiteralConstantName}' " +
+                "anywhere, so the sentinel that overload emits is not single sourced from the " +
+                "validator that owns its spelling. The emitted text and the accepted text would then " +
+                "be free to drift, and no value assertion could see it: a duplicated literal is " +
+                "value-identical until the day one of the two copies is edited.");
+        }
+
+        foreach ((string typeKey, string sentinel) in DistinctSentinelTexts())
+        {
+            Assert.Equal(sentinel, OwningSentinelConstant(typeKey));
+
+            Assert.False(
+                source.Contains($"\"{sentinel}\"", StringComparison.Ordinal),
+                $"'{ValueToExpressionSourcePath}' contains the literal \"{sentinel}\" rather than " +
+                "referencing the owning validator's constant. That is precisely the duplication this " +
+                "region exists to prevent: both copies satisfy every value assertion in this file " +
+                "today, and the emitted text drifts away from what Coerce accepts the moment either " +
+                "one is edited alone.");
+        }
     }
 
     /// <summary>
@@ -2425,6 +2515,166 @@ public sealed class NullValueValidatorParityTests
     /// The sentinel constant OWNED by the validator responsible for the keyed CLR type. The five
     /// numeric keys all resolve to the one 16-bit sentinel, which is the sharing the legacy has.
     /// </summary>
+    /// <summary>
+    /// The project-relative path of the file whose single sourcing REGION 6 asserts.
+    /// </summary>
+    private const string ValueToExpressionSourcePath = "Validators/ValueToExpression.cs";
+
+    /// <summary>The published constant name every sentinel is sourced from.</summary>
+    private const string NullLiteralConstantName = "NullLiteralExpression";
+
+    /// <summary>The repository-root markers the source walk anchors on.</summary>
+    private const string SolutionMarkerFileName = "PowerFramework.slnx";
+
+    private const string PackageVersionMarkerFileName = "Directory.Packages.props";
+
+    /// <summary>The project directory the emitting file lives in, relative to the repository root.</summary>
+    private const string DataServicesProjectRelativeDirectory =
+        "services/dataservices-service/PowerFramework.DataServices";
+
+    /// <summary>
+    /// The five validators that own a sentinel spelling, by type name as the source spells it.
+    /// </summary>
+    /// <remarks>
+    /// Five names for nine overloads, because the five numeric overloads share the one 16-bit
+    /// <c>dwNvlNumber()</c> - asymmetry A of REGION 0, seen once more from the source's side.
+    /// </remarks>
+    private static readonly string[] SentinelOwningValidatorNames =
+    [
+        nameof(NumberValidator),
+        nameof(StringValidator),
+        nameof(DateTimeValidator),
+        nameof(DateValidator),
+        nameof(TimeValidator),
+    ];
+
+    /// <summary>
+    /// One representative type key per DISTINCT sentinel text, with that text.
+    /// </summary>
+    /// <remarks>
+    /// Distinct, so the five numeric rows do not assert the same claim five times, and keyed so the
+    /// assertion can resolve the owning constant through the same switch every other row uses.
+    /// </remarks>
+    private static IEnumerable<(string TypeKey, string Sentinel)> DistinctSentinelTexts() =>
+    [
+        ("decimal", "dwNvlNumber()"),
+        ("string", "dwNvlString()"),
+        ("DateTime", "dwNvlDateTime()"),
+        ("DateOnly", "dwNvlDate()"),
+        ("TimeOnly", "dwNvlTime()"),
+    ];
+
+    /// <summary>
+    /// Strips <c>//</c> line comments from C# source, leaving the code and every string literal intact.
+    /// </summary>
+    /// <remarks>
+    /// A DELIBERATELY SMALL LEXICAL FILTER, not a parser, and its scope is stated so its limits are
+    /// visible. It walks each line tracking whether it is inside a double-quoted string, and cuts the
+    /// line at the first <c>//</c> found OUTSIDE one - so a comment quoting a sentinel is removed while
+    /// a real literal containing <c>//</c> would survive. <c>///</c> is covered by the same rule.
+    /// <para>
+    /// It does NOT track block comments, because the file it reads contains none - verified: its only
+    /// <c>/*</c> occurrences are the two <c>ws_objects/**</c> path fragments inside XML documentation,
+    /// which the line rule removes anyway, and a block-comment tracker would mistake those for an
+    /// unterminated block and swallow the rest of the file. Nor does it handle verbatim or raw string
+    /// literals, of which that file has none either. Should a future edit introduce a block comment
+    /// containing a sentinel spelling, this filter would report duplication that is not there - a LOUD
+    /// and conservative failure, never a silent pass, which is the safe direction for a check whose
+    /// whole purpose is to notice a copy.
+    /// </para>
+    /// </remarks>
+    /// <param name="source">C# source text.</param>
+    /// <returns>The same text with line comments removed.</returns>
+    private static string CodeOnlyText(string source)
+    {
+        StringBuilder code = new(source.Length);
+
+        foreach (string line in source.Split('\n'))
+        {
+            bool inString = false;
+            int cut = line.Length;
+
+            for (int index = 0; index < line.Length; index++)
+            {
+                char current = line[index];
+
+                if (current == '\\' && inString)
+                {
+                    // Skip the escaped character so an escaped quote does not close the literal.
+                    index++;
+                    continue;
+                }
+
+                if (current == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (!inString && current == '/' && index + 1 < line.Length && line[index + 1] == '/')
+                {
+                    cut = index;
+                    break;
+                }
+            }
+
+            code.Append(line, 0, cut).Append('\n');
+        }
+
+        return code.ToString();
+    }
+
+    /// <summary>
+    /// Reads one authored source file of the DataServices project, walking up for the repository root.
+    /// </summary>
+    /// <remarks>
+    /// An upward SEARCH rather than a fixed number of parent hops, because the distance between a test
+    /// assembly and the repository root is a function of the configuration and the target framework in
+    /// the output path, so a fixed count breaks silently when either changes. The walk anchors on BOTH
+    /// root markers together with the project directory itself, so it cannot latch onto a same-named
+    /// directory elsewhere on the machine. Read-only: nothing is created, written or moved.
+    /// </remarks>
+    /// <param name="projectRelativePath">Forward-slashed path inside the DataServices project.</param>
+    /// <returns>The file's text.</returns>
+    private static string RequireDataServicesSourceText(string projectRelativePath)
+    {
+        string[] projectSegments = DataServicesProjectRelativeDirectory.Split('/');
+        string[] fileSegments = projectRelativePath.Split('/');
+
+        DirectoryInfo? candidate = new(AppContext.BaseDirectory);
+
+        while (candidate is not null)
+        {
+            string projectDirectory = Path.Combine([candidate.FullName, .. projectSegments]);
+
+            if (Directory.Exists(projectDirectory)
+                && File.Exists(Path.Combine(candidate.FullName, SolutionMarkerFileName))
+                && File.Exists(Path.Combine(candidate.FullName, PackageVersionMarkerFileName)))
+            {
+                string file = Path.Combine([projectDirectory, .. fileSegments]);
+
+                Assert.True(
+                    File.Exists(file),
+                    $"'{projectRelativePath}' was not found at '{file}'. It is the subject of a " +
+                    "source-level single-sourcing assertion, so its absence is the finding rather " +
+                    "than a reason to stand down.");
+
+                return File.ReadAllText(file);
+            }
+
+            // Parent is null at the filesystem root, which is what terminates the walk.
+            candidate = candidate.Parent;
+        }
+
+        Assert.Fail(
+            $"No directory from '{AppContext.BaseDirectory}' up to the filesystem root holds " +
+            $"'{DataServicesProjectRelativeDirectory}' together with both repository markers " +
+            $"'{SolutionMarkerFileName}' and '{PackageVersionMarkerFileName}', so the authored source " +
+            "could not be located. Both probes are read-only; nothing was created.");
+
+        return string.Empty;
+    }
+
     private static string OwningSentinelConstant(string typeKey) => typeKey switch
     {
         "decimal" or "short" or "long" or "double" or "float" => NumberValidator.NullLiteralExpression,

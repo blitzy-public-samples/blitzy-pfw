@@ -340,6 +340,30 @@ public sealed class ContractsCarryNoBehaviourTests
     /// <summary>The six published <see cref="ServiceDescriptor"/>s, as a set for identity tests.</summary>
     private static readonly IReadOnlySet<ServiceDescriptor> PublishedServices = ContractDescriptors.AllServices().ToHashSet();
 
+    /// <summary>
+    /// Every extension AUTHORED in the three <c>.proto</c> files - a Protobuf <c>extend</c> block's
+    /// declarations - indexed by field number.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FIELD NUMBER IS THE IDENTITY, and that is what makes the extension holder traceable rather
+    /// than merely plausible. A generated <see cref="Extension{TTarget,TValue}"/> instance carries the
+    /// number it was generated for, so a holder field can be matched to the declaration it came from
+    /// by reading that number off the live object - not by trusting its name and not by trusting its
+    /// generic arguments, either of which a hand-written static field could imitate.
+    /// </para>
+    /// <para>
+    /// <see cref="FieldDescriptor.PropertyName"/> is EMPTY for an extension - measured on this
+    /// toolchain, for both declarations - so it cannot be used here the way it is used for a message
+    /// field. The generated field name is the PascalCase of the extension's proto name, which is why
+    /// <see cref="ToPascalCase"/> appears in the extension trace and nowhere else in the field rules.
+    /// </para>
+    /// </remarks>
+    private static readonly IReadOnlyDictionary<int, FieldDescriptor> PublishedExtensionsByFieldNumber =
+        ContractDescriptors.All
+            .SelectMany(static file => file.Extensions.UnorderedExtensions)
+            .ToDictionary(static extension => extension.FieldNumber, static extension => extension);
+
     /// <summary>Every exported type, pre-classified once so each theory row is a dictionary hit.</summary>
     /// <remarks>
     /// Computed eagerly rather than per row because <see cref="SurfaceCategory.GrpcServerBase"/> and
@@ -564,6 +588,17 @@ public sealed class ContractsCarryNoBehaviourTests
     /// <c>fields.Length &gt; 0</c> is required so that an empty static class cannot slip through this
     /// recogniser on a vacuous "all fields are extensions".
     /// </para>
+    /// <para>
+    /// EVERY FIELD MUST TRACE TO AN EXTENSION THE PUBLISHED FILES ACTUALLY DECLARE. "Is a static
+    /// <see cref="Extension{TTarget,TValue}"/>" is a TYPE test, and a type test is imitable: a
+    /// hand-written static class can declare
+    /// <c>public static readonly Extension&lt;MethodOptions, string&gt; Whatever = new(60001, ...);</c>
+    /// and satisfy it, which would park shared static state on the boundary under a shape this
+    /// recogniser had blessed. So the field's live value is read and its
+    /// <see cref="Extension.FieldNumber"/> matched against
+    /// <see cref="PublishedExtensionsByFieldNumber"/>, which is identity rather than resemblance -
+    /// exactly the standard the message, enum and service recognisers already hold themselves to.
+    /// </para>
     /// </remarks>
     private static bool IsProtoExtensionHolderShape(Type type, MethodInfo[] methods, PropertyInfo[] properties, FieldInfo[] fields) =>
         !type.IsNested
@@ -573,7 +608,9 @@ public sealed class ContractsCarryNoBehaviourTests
         && Array.TrueForAll(fields, static field =>
             field.IsStatic
             && field.FieldType.IsGenericType
-            && field.FieldType.GetGenericTypeDefinition() == typeof(Extension<,>));
+            && field.FieldType.GetGenericTypeDefinition() == typeof(Extension<,>)
+            && field.GetValue(obj: null) is Extension declared
+            && PublishedExtensionsByFieldNumber.ContainsKey(declared.FieldNumber));
 
     /// <summary>
     /// The nested static <c>Types</c> scope protoc emits for a message's nested declarations: it
@@ -654,6 +691,36 @@ public sealed class ContractsCarryNoBehaviourTests
 
         return message.Oneofs.Any(oneof => string.Equals(ToPascalCase(oneof.Name), oneofName, StringComparison.Ordinal));
     }
+
+    /// <summary>
+    /// Whether protoc emits the <c>Has&lt;Field&gt;</c> property and the <c>Clear&lt;Field&gt;()</c>
+    /// method for <paramref name="field"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FOUR CLAUSES ARE NOT INTERCHANGEABLE AND EACH WAS MEASURED, because this predicate is what
+    /// makes the exact-member tests exact rather than approximately right. Explicit presence is the
+    /// necessary condition, and the three exclusions are the generator's own carve-outs: a MESSAGE
+    /// field has presence in the protocol yet gets no <c>Has</c> form, because a null reference already
+    /// expresses absence; a REPEATED field and a MAP field have no presence to express at all, their
+    /// emptiness being indistinguishable from their absence on the wire.
+    /// </para>
+    /// <para>
+    /// It holds uniformly across BOTH kinds of oneof, which is the part worth stating because it is
+    /// counter-intuitive. A member of a DECLARED oneof does get its own <c>Has</c> and <c>Clear</c>
+    /// forms when it is scalar - <c>dataservices.v1.VarValue.string_value</c> yields
+    /// <c>HasStringValue</c> and <c>ClearStringValue</c> alongside <c>KindCase</c> and
+    /// <c>ClearKind()</c> - and does not when it is message-typed, which is why
+    /// <c>dataservices.v1.EventNotification</c>, whose twenty-two members are all messages, exposes
+    /// neither form for any of them. The same predicate covers the synthetic oneof proto3
+    /// <c>optional</c> produces, so no separate rule is needed for it.
+    /// </para>
+    /// </remarks>
+    private static bool GeneratesTheHasAndClearForms(FieldDescriptor field) =>
+        field.HasPresence
+        && field.FieldType != FieldType.Message
+        && !field.IsRepeated
+        && !field.IsMap;
 
     /// <summary>
     /// Converts a <c>snake_case</c> Protobuf identifier to the PascalCase member name protoc derives
@@ -1063,21 +1130,29 @@ public sealed class ContractsCarryNoBehaviourTests
                 MessageDescriptor message = MessagesByClrType[type];
                 HashSet<string> permitted = new(ProtobufMessageProtocol, StringComparer.Ordinal);
 
-                // protoc emits ClearX() for a oneof - which resets whichever member is set - and for a
-                // field that carries explicit presence, which is what proto3 `optional` and a oneof
-                // member both produce. Deriving the set from the descriptor means adding a field to
-                // the .proto widens it automatically, while a hand-written ClearSomething() with no
-                // corresponding field in the protocol is rejected.
+                // protoc emits ClearX() for a DECLARED oneof - which resets whichever member is set -
+                // and for a field that carries the Has form. Deriving the set from the descriptor means
+                // adding a field to the .proto widens it automatically, while a hand-written
+                // ClearSomething() with no corresponding field in the protocol is rejected.
+                //
+                // A SYNTHETIC oneof gets no ClearX() of its own. proto3 `optional` makes protoc
+                // synthesise a single-field oneof named `_field`, and the generated member is
+                // ClearField() from the FIELD rule below - not ClearField from a oneof whose proto name
+                // starts with an underscore. Including synthetic oneofs here would permit a name protoc
+                // never emits, which the exactness test would then report as missing.
                 foreach (OneofDescriptor oneof in message.Oneofs)
                 {
-                    permitted.Add("Clear" + ToPascalCase(oneof.Name));
+                    if (!oneof.IsSynthetic)
+                    {
+                        permitted.Add("Clear" + ToPascalCase(oneof.Name));
+                    }
                 }
 
                 foreach (FieldDescriptor field in message.Fields.InDeclarationOrder())
                 {
-                    if (field.HasPresence || field.ContainingOneof is not null)
+                    if (GeneratesTheHasAndClearForms(field))
                     {
-                        permitted.Add("Clear" + ToPascalCase(field.Name));
+                        permitted.Add("Clear" + field.PropertyName);
                     }
                 }
 
@@ -1085,21 +1160,40 @@ public sealed class ContractsCarryNoBehaviourTests
             }
 
             case SurfaceCategory.GrpcServerBase:
-            case SurfaceCategory.GrpcClient:
             {
-                // EVERY METHOD MUST BE AN RPC THE SERVICE DESCRIPTOR DECLARES. The server base gets
-                // one virtual method per rpc; the client gets the blocking form plus, for unary calls,
-                // an Async form - and for streaming calls only the one form, because a stream is
-                // inherently asynchronous. Permitting both spellings of every declared rpc and nothing
-                // else is what makes a hand-written convenience method on the client - the most
-                // tempting place for one, since the client is what services actually hold - fail here.
-                ServiceDescriptor service = ServiceOfNestedGrpcHalf(type);
+                // THE SERVER BASE GETS EXACTLY ONE VIRTUAL METHOD PER RPC, NAMED FOR THE RPC, AND NO
+                // Async SPELLING AT ALL. A service implementation overrides these, so an Async name
+                // here would be a hand-written member on a type four services derive from.
                 HashSet<string> permitted = new(StringComparer.Ordinal);
 
-                foreach (MethodDescriptor rpc in service.Methods)
+                foreach (MethodDescriptor rpc in ServiceOfNestedGrpcHalf(type).Methods)
                 {
                     permitted.Add(rpc.Name);
-                    permitted.Add(rpc.Name + "Async");
+                }
+
+                return permitted;
+            }
+
+            case SurfaceCategory.GrpcClient:
+            {
+                // THE Async SPELLING EXISTS ONLY FOR A UNARY RPC, and permitting it for the streaming
+                // ones was a real gap: a hand-written RetrieveAsync convenience wrapper on the client -
+                // the most tempting place for one, since the client is what services actually hold -
+                // would have passed under a blanket "name or name+Async" rule. Measured on this
+                // toolchain: a unary rpc yields the blocking form plus an Async form, while a
+                // server-streaming, client-streaming or bidirectional rpc yields ONLY the one form,
+                // because a stream is inherently asynchronous and its call object is already awaited
+                // through its own reader and writer.
+                HashSet<string> permitted = new(StringComparer.Ordinal);
+
+                foreach (MethodDescriptor rpc in ServiceOfNestedGrpcHalf(type).Methods)
+                {
+                    permitted.Add(rpc.Name);
+
+                    if (!rpc.IsClientStreaming && !rpc.IsServerStreaming)
+                    {
+                        permitted.Add(rpc.Name + "Async");
+                    }
                 }
 
                 return permitted;
@@ -1256,23 +1350,21 @@ public sealed class ContractsCarryNoBehaviourTests
 
         string stem = field.Name[..^suffix.Length];
 
-        // The stem must name a real field. protoc appends '_' when the generated member would collide
-        // with an existing one - BeginSessionRequest has a proto field literally named `descriptor`,
-        // which collides with the static Descriptor property and becomes Descriptor_ - so the
-        // underscored spelling is accepted for that documented rule and for no other reason.
-        bool namesADeclaredField = message.Fields.InDeclarationOrder().Any(candidate =>
-        {
-            string generated = ToPascalCase(candidate.Name);
-
-            return string.Equals(stem, generated, StringComparison.Ordinal)
-                || string.Equals(stem, generated + "_", StringComparison.Ordinal);
-        });
+        // THE STEM MUST BE EXACTLY ONE FIELD'S PropertyName - not "one of two accepted spellings of
+        // it". protoc appends '_' when the generated member would collide with an existing one, and
+        // FieldDescriptor.PropertyName already reports the mangled result, so the collision case needs
+        // no special handling: `descriptor` on persistence.v1.BeginSessionRequest reports
+        // "Descriptor_" and its constant is Descriptor_FieldNumber. Accepting both spellings for every
+        // field, as this once did, meant a hand-written `RowCount_FieldNumber` const would pass.
+        bool namesADeclaredField = message.Fields
+            .InDeclarationOrder()
+            .Any(candidate => string.Equals(stem, candidate.PropertyName, StringComparison.Ordinal));
 
         Assert.True(
             namesADeclaredField,
             $"{typeName} declares the field-number constant '{field.Name}', but "
-                + $"{message.FullName} declares no field named '{stem}'. A field-number constant with "
-                + "no field behind it is hand-written, not generated.");
+                + $"{message.FullName} declares no field whose generated member name is '{stem}'. A "
+                + "field-number constant with no field behind it is hand-written, not generated.");
     }
 
     /// <summary>
@@ -1293,20 +1385,36 @@ public sealed class ContractsCarryNoBehaviourTests
 
                 foreach (FieldDescriptor field in message.Fields.InDeclarationOrder())
                 {
-                    string generated = ToPascalCase(field.Name);
+                    // THE ONE SPELLING THE GENERATOR ACTUALLY EMITS, TAKEN FROM THE DESCRIPTOR.
+                    // FieldDescriptor.PropertyName ALREADY CARRIES protoc's collision mangling, so
+                    // there is nothing to guess and nothing to permit twice: the two fields in these
+                    // contracts that collide - `descriptor` on persistence.v1.BeginSessionRequest and
+                    // on persistence.v1.GetTransactionDataResponse, which would clash with the static
+                    // Descriptor property - report PropertyName "Descriptor_", and every other field
+                    // reports the plain PascalCase form.
+                    //
+                    // The previous rule permitted `Foo`, `Foo_`, `HasFoo` and `HasFoo_` for EVERY
+                    // field, which was four spellings where the generator emits at most two. That
+                    // accepted `Descriptor` on the two mangled messages, where protoc emits only
+                    // `Descriptor_`, and accepted a trailing-underscore spelling on all 244 messages,
+                    // where protoc emits it on two - so a hand-written `RowCount_` property would have
+                    // passed. Deriving the name removes the guess entirely.
+                    permitted.Add(field.PropertyName);
 
-                    // The value, plus - for a presence-bearing field - the Has form. Both spellings of
-                    // each are accepted because of protoc's collision mangling, described in
-                    // AssertIsGeneratedFieldNumberConstant.
-                    permitted.Add(generated);
-                    permitted.Add(generated + "_");
-                    permitted.Add("Has" + generated);
-                    permitted.Add("Has" + generated + "_");
+                    if (GeneratesTheHasAndClearForms(field))
+                    {
+                        permitted.Add("Has" + field.PropertyName);
+                    }
                 }
 
+                // A DECLARED oneof gets a discriminator property; a synthetic one does not, for the
+                // reason recorded in PermittedMethodNames.
                 foreach (OneofDescriptor oneof in message.Oneofs)
                 {
-                    permitted.Add(ToPascalCase(oneof.Name) + "Case");
+                    if (!oneof.IsSynthetic)
+                    {
+                        permitted.Add(ToPascalCase(oneof.Name) + "Case");
+                    }
                 }
 
                 return permitted;
@@ -1323,6 +1431,580 @@ public sealed class ContractsCarryNoBehaviourTests
             default:
                 return new HashSet<string>(StringComparer.Ordinal);
         }
+    }
+
+    // ==============================================================================================
+    //  M2 (CONTINUED) - EXACTNESS: THE CONVERSE DIRECTION, THE COUNTS AND THE SIGNATURES
+    //
+    //  WHAT THE THREE TESTS ABOVE PROVE, AND WHAT THEY DO NOT. Each asserts that every member a type
+    //  DECLARES appears in the descriptor-derived permitted set. That is one direction of a set
+    //  comparison, and on its own it is a NAME test with two gaps a hand-written partial can walk
+    //  through:
+    //
+    //    * OVERLOADS. `permitted.Contains(method.Name)` is satisfied by ten methods called Clone as
+    //      readily as by one. A hand-written `Clone(bool deep)` or `MergeFrom(string json)` declares
+    //      a name the generator already emits and would pass unremarked.
+    //    * SIGNATURES. A member could keep a generated name and take or return something the
+    //      generator never produces - `Equals(string)`, or a `WriteTo` that returns a payload.
+    //
+    //  The tests in this section close both, and add the three member kinds the sweeps above do not
+    //  look at at all: CONSTRUCTORS, EVENTS and OPERATORS. Together with the sweeps above, the member
+    //  surface of every exported type is pinned to EXACT SET EQUALITY plus exact arity and exact
+    //  signature, rather than to membership.
+    //
+    //  THE EXPECTATIONS ARE STILL DERIVED FROM DESCRIPTORS, never from a transcript of today's output.
+    //  Adding a field to a .proto widens them automatically; adding a hand-written member does not.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The nine method signatures every generated Protobuf message declares, as
+    /// (name, return type, parameter types) where <see langword="null"/> in a type position means "the
+    /// message type itself".
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SELF-REFERENTIAL POSITIONS ARE MODELLED RATHER THAN LOOSENED. <c>Clone</c> returns the message
+    /// type, and <c>Equals</c> and <c>MergeFrom</c> each have a strongly typed overload taking it, so
+    /// those positions cannot be written as a fixed <see cref="Type"/>. Encoding them as
+    /// <see langword="null"/> and substituting the type under test keeps the assertion exact for all
+    /// 244 messages from one table, instead of degrading to "some overload with the right name".
+    /// </para>
+    /// <para>
+    /// Measured against every message in the assembly, all nine present and none extra. The two
+    /// <see cref="IBufferMessage"/> members are absent on purpose and their absence is correct: protoc
+    /// emits them as EXPLICIT interface implementations, so they are not public declared members and no
+    /// public sweep should expect them.
+    /// </para>
+    /// </remarks>
+    private static readonly IReadOnlyList<(string Name, Type? Returns, Type?[] Parameters)> MessageProtocolSignatures =
+    [
+        ("Clone", null, []),
+        ("Equals", typeof(bool), [typeof(object)]),
+        ("Equals", typeof(bool), [null]),
+        ("GetHashCode", typeof(int), []),
+        ("ToString", typeof(string), []),
+        ("WriteTo", typeof(void), [typeof(CodedOutputStream)]),
+        ("CalculateSize", typeof(int), []),
+        ("MergeFrom", typeof(void), [null]),
+        ("MergeFrom", typeof(void), [typeof(CodedInputStream)]),
+    ];
+
+    [Theory]
+    [MemberData(nameof(EveryExportedType))]
+    public void EveryMemberTheDescriptorImpliesIsActuallyDeclared(string typeName)
+    {
+        Type type = ResolveExportedType(typeName);
+        SurfaceCategory category = CategoryOf(type);
+
+        if (category is SurfaceCategory.Unclassified)
+        {
+            return;
+        }
+
+        // THIS IS THE OTHER HALF OF THE SET COMPARISON, and it is not merely symmetry for its own
+        // sake. A generated member that has GONE MISSING means the CLR surface and the published
+        // descriptors have diverged: either the .proto declares something the shipped stubs do not
+        // carry - a stale build, or a Grpc.Tools item that stopped matching the file - or a
+        // hand-written partial has shadowed a generated member. Both are contract defects that the
+        // "nothing unexplained" direction is structurally unable to see, because a smaller surface
+        // trivially satisfies it.
+        AssertSetsAgree(
+            typeName,
+            category,
+            "property",
+            PermittedPropertyNames(type, category),
+            type.GetProperties(Declared).Select(static property => property.Name));
+
+        AssertSetsAgree(
+            typeName,
+            category,
+            "method",
+            PermittedMethodNames(type, category),
+            DeclaredMethods(type).Select(static method => method.Name));
+
+        // An enum's declared fields ARE its members, which the alphabet suites own; and the extension
+        // holder's fields are pinned by name AND by traced identity in
+        // EveryExtensionFieldTracesToAnAuthoredExtensionAndEveryAuthoredExtensionHasOneField, which is
+        // a stronger statement than a name-set comparison could make. Every other category is compared
+        // here.
+        if (!type.IsEnum && category is not SurfaceCategory.ProtoExtensionHolder)
+        {
+            AssertSetsAgree(
+                typeName,
+                category,
+                "field",
+                PermittedFieldNames(type, category),
+                type.GetFields(Declared).Select(static field => field.Name));
+        }
+    }
+
+    /// <summary>
+    /// Asserts that the members a type declares are EXACTLY the members its descriptor implies -
+    /// reporting the missing ones, the extra ones, or both.
+    /// </summary>
+    /// <param name="typeName">The type under test, for the failure message.</param>
+    /// <param name="category">Its category, for the failure message.</param>
+    /// <param name="kind">The member kind being compared, singular, for the failure message.</param>
+    /// <param name="expected">The descriptor-derived member names.</param>
+    /// <param name="declared">The member names the type actually declares.</param>
+    private static void AssertSetsAgree(
+        string typeName,
+        SurfaceCategory category,
+        string kind,
+        IReadOnlySet<string> expected,
+        IEnumerable<string> declared)
+    {
+        HashSet<string> actual = new(declared, StringComparer.Ordinal);
+
+        string[] missing = Deduplicate(expected.Except(actual, StringComparer.Ordinal));
+        string[] extra = Deduplicate(actual.Except(expected, StringComparer.Ordinal));
+
+        Assert.True(
+            missing.Length == 0 && extra.Length == 0,
+            $"""
+            {typeName}'s declared {kind} surface is not the surface its category ({category}) and its
+            descriptor imply.
+
+            Missing ({missing.Length}) - implied by the descriptor, not declared by the type:
+            {(missing.Length == 0 ? "  (none)" : "  " + string.Join(FindingSeparator + "  ", missing))}
+
+            Extra ({extra.Length}) - declared by the type, not implied by the descriptor:
+            {(extra.Length == 0 ? "  (none)" : "  " + string.Join(FindingSeparator + "  ", extra))}
+
+            A MISSING member means the shipped stubs and the published .proto have diverged - a stale
+            build, a Grpc.Tools item that no longer matches the file, or a hand-written partial
+            shadowing a generated member.
+
+            An EXTRA member means behaviour has been added to the boundary definition, which all four
+            services reference ({ContractsAssemblyName} carries none - AAP 0.4.2.3).
+            """);
+    }
+
+    /// <summary>
+    /// The exact set of public field names the generator emits for <paramref name="type"/>.
+    /// </summary>
+    /// <remarks>
+    /// Only a generated message declares a field at all, and only protoc's
+    /// <c>const int &lt;Member&gt;FieldNumber</c> constants. The name comes from
+    /// <see cref="FieldDescriptor.PropertyName"/> for the reason recorded on
+    /// <see cref="AssertIsGeneratedFieldNumberConstant"/>: it already carries the collision mangling,
+    /// so the constant for <c>persistence.v1.BeginSessionRequest.descriptor</c> is
+    /// <c>Descriptor_FieldNumber</c> and nothing has to be guessed.
+    /// </remarks>
+    private static IReadOnlySet<string> PermittedFieldNames(Type type, SurfaceCategory category)
+    {
+        if (category is not SurfaceCategory.GeneratedMessage)
+        {
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        return MessagesByClrType[type]
+            .Fields
+            .InDeclarationOrder()
+            .Select(static field => field.PropertyName + "FieldNumber")
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryExportedType))]
+    public void EveryGeneratedMethodHasExactlyTheOverloadCountItsCategoryImplies(string typeName)
+    {
+        Type type = ResolveExportedType(typeName);
+        SurfaceCategory category = CategoryOf(type);
+
+        if (category is SurfaceCategory.Unclassified)
+        {
+            return;
+        }
+
+        foreach (IGrouping<string, MethodInfo> overloads in
+            DeclaredMethods(type).GroupBy(static method => method.Name, StringComparer.Ordinal))
+        {
+            int expected = ExpectedOverloadCount(category, overloads.Key);
+
+            Assert.True(
+                overloads.Count() == expected,
+                $"""
+                {typeName} declares {overloads.Count()} public overload(s) of '{overloads.Key}', and its
+                category ({category}) implies exactly {expected}.
+
+                A NAME CHECK CANNOT SEE THIS. The extra overload carries a name the generator already
+                emits, so the member sweeps accept it - and it is a hand-written method body shared
+                across all four services (AAP 0.4.2.3).
+
+                Declared overloads:
+                  {string.Join(FindingSeparator + "  ", Deduplicate(overloads.Select(static method => method.ToString() ?? method.Name)))}
+                """);
+        }
+    }
+
+    /// <summary>
+    /// How many public overloads of <paramref name="methodName"/> the generator emits for a type of
+    /// <paramref name="category"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three rules, each measured across the whole assembly rather than assumed. A generated message
+    /// declares ONE of everything except <c>Equals</c> and <c>MergeFrom</c>, which have two apiece -
+    /// the <see cref="object"/> and strongly typed forms of the first, and the message and
+    /// <see cref="CodedInputStream"/> forms of the second. A gRPC client declares TWO of every method,
+    /// which are the <c>(request, Metadata, DateTime?, CancellationToken)</c> and
+    /// <c>(request, CallOptions)</c> spellings of the same call. Everything else - the server base's
+    /// rpc virtuals, the container's two <c>BindService</c> entries under one name - declares ONE.
+    /// </para>
+    /// <para>
+    /// The container is the one place where "one name, two overloads" is the generated shape:
+    /// <c>ServerServiceDefinition BindService(TBase)</c> and
+    /// <c>void BindService(ServiceBinderBase, TBase)</c>. It is spelled out rather than folded into the
+    /// client rule so that neither rule can drift into covering the other.
+    /// </para>
+    /// </remarks>
+    private static int ExpectedOverloadCount(SurfaceCategory category, string methodName) => category switch
+    {
+        SurfaceCategory.GeneratedMessage when methodName is "Equals" or "MergeFrom" => 2,
+        SurfaceCategory.GrpcClient => 2,
+        SurfaceCategory.GrpcServiceContainer => 2,
+        _ => 1,
+    };
+
+    [Theory]
+    [MemberData(nameof(EveryExportedType))]
+    public void EveryGeneratedMessageDeclaresTheProtobufProtocolWithExactlyTheGeneratedSignatures(string typeName)
+    {
+        Type type = ResolveExportedType(typeName);
+
+        if (CategoryOf(type) is not SurfaceCategory.GeneratedMessage)
+        {
+            return;
+        }
+
+        MethodInfo[] declared = DeclaredMethods(type);
+
+        foreach ((string name, Type? returns, Type?[] parameters) in MessageProtocolSignatures)
+        {
+            Type expectedReturn = returns ?? type;
+            Type[] expectedParameters = [.. parameters.Select(parameter => parameter ?? type)];
+
+            bool present = declared.Any(method =>
+                string.Equals(method.Name, name, StringComparison.Ordinal)
+                && method.ReturnType == expectedReturn
+                && method.GetParameters().Select(static p => p.ParameterType).SequenceEqual(expectedParameters));
+
+            Assert.True(
+                present,
+                $"""
+                {typeName} does not declare the generated signature
+                  {expectedReturn.Name} {name}({string.Join(", ", expectedParameters.Select(static p => p.Name))})
+
+                Every generated Protobuf message declares all nine, because IMessage, IDeepCloneable<T>
+                and IEquatable<T> require them. A message that declares the NAME but not the SIGNATURE
+                has had that member hand-written or shadowed, which the name-based sweeps cannot detect.
+
+                Declared:
+                  {string.Join(FindingSeparator + "  ", Deduplicate(declared.Select(static method => method.ToString() ?? method.Name)))}
+                """);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryExportedType))]
+    public void NoExportedTypeDeclaresAConstructorItsCategoryDoesNotExplain(string typeName)
+    {
+        Type type = ResolveExportedType(typeName);
+        SurfaceCategory category = CategoryOf(type);
+
+        if (category is SurfaceCategory.Unclassified)
+        {
+            return;
+        }
+
+        // CONSTRUCTORS ARE SWEPT AT EVERY ACCESSIBILITY, NOT ONLY PUBLIC. A hand-written internal or
+        // private constructor still holds a body, still runs, and on a type four services construct
+        // per call it is the quietest place to put initialisation logic - it has no name to notice.
+        // The three sweeps above cannot see any of it, because a constructor is neither a method, a
+        // property nor a field.
+        ConstructorInfo[] constructors = type.GetConstructors(
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+
+        string Rendered() => constructors.Length == 0
+            ? "  (none)"
+            : "  " + string.Join(
+                FindingSeparator + "  ",
+                Deduplicate(constructors.Select(c =>
+                    $"{(c.IsPublic ? "public" : c.IsFamily ? "protected" : c.IsAssembly ? "internal" : "private")} "
+                    + $"({string.Join(", ", c.GetParameters().Select(static p => p.ParameterType.Name))})")));
+
+        switch (category)
+        {
+            case SurfaceCategory.GeneratedMessage:
+                // Exactly two, both public: the parameterless one and the copy constructor protoc emits
+                // so that Clone() and `new T(other)` share one implementation.
+                Assert.True(
+                    constructors.Length == 2
+                    && Array.TrueForAll(constructors, static c => c.IsPublic)
+                    && constructors.Any(static c => c.GetParameters().Length == 0)
+                    && constructors.Any(c => c.GetParameters() is [{ } only] && only.ParameterType == type),
+                    $"""
+                    {typeName} is a generated message, which declares EXACTLY TWO public constructors -
+                    a parameterless one and a copy constructor taking itself - and nothing else.
+
+                    Declared:
+                    {Rendered()}
+                    """);
+                break;
+
+            case SurfaceCategory.GrpcServerBase:
+                // One protected parameterless constructor. A parameterised one would mean the base a
+                // service implementation derives from now demands a dependency.
+                Assert.True(
+                    constructors is [{ IsFamily: true } only] && only.GetParameters().Length == 0,
+                    $"""
+                    {typeName} is a generated gRPC server base, which declares EXACTLY ONE protected
+                    parameterless constructor.
+
+                    Declared:
+                    {Rendered()}
+                    """);
+                break;
+
+            case SurfaceCategory.GrpcClient:
+                AssertGeneratedClientConstructors(typeName, type, constructors, Rendered);
+                break;
+
+            default:
+                // A static class - the three descriptor holders, the extension holder, the eighteen
+                // nested Types scopes, the six service containers - has no constructor to declare, and
+                // an enum has none either. Anything here is hand-written by definition.
+                Assert.True(
+                    constructors.Length == 0,
+                    $"""
+                    {typeName}'s category ({category}) is a generated static class or enum, which
+                    declares NO constructor at all. A constructor here is a body on the boundary.
+
+                    Declared:
+                    {Rendered()}
+                    """);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="constructors"/> are exactly the four a generated gRPC client
+    /// declares.
+    /// </summary>
+    /// <param name="typeName">The client under test, for the failure message.</param>
+    /// <param name="client">The client type, used to confirm its base is the gRPC client base.</param>
+    /// <param name="constructors">Its declared constructors at every accessibility.</param>
+    /// <param name="rendered">Renders the declared set for the failure message.</param>
+    /// <remarks>
+    /// <para>
+    /// THE FOURTH PARAMETER TYPE IS MATCHED BY NAME, AND THAT IS FORCED RATHER THAN CHOSEN.
+    /// <c>ClientBase.ClientBaseConfiguration</c> is a PROTECTED nested type in <c>Grpc.Core</c>, so it
+    /// cannot be named from outside a derived class at all - there is no <c>typeof</c> to write. The
+    /// name comparison is bracketed by three things a hand-written constructor could not fake
+    /// together: the type is already classified as a generated client, its base type is
+    /// <c>ClientBase&lt;TSelf&gt;</c>, and the constructor is protected, which no caller outside the
+    /// generated inheritance chain can invoke.
+    /// </para>
+    /// <para>
+    /// The two public overloads are the wire-up surface a service actually uses - a channel or a call
+    /// invoker - and the protected parameterless one exists for test doubles, which is the shape
+    /// <c>Grpc.Core</c> documents.
+    /// </para>
+    /// </remarks>
+    private static void AssertGeneratedClientConstructors(
+        string typeName,
+        Type client,
+        ConstructorInfo[] constructors,
+        Func<string> rendered)
+    {
+        bool baseIsGrpcClientBase =
+            client.BaseType is { IsGenericType: true } baseType
+            && baseType.GetGenericTypeDefinition() == typeof(ClientBase<>);
+
+        bool exact =
+            baseIsGrpcClientBase
+            && constructors.Length == 4
+            && constructors.Any(static c =>
+                c.IsPublic && c.GetParameters() is [{ } only] && only.ParameterType == typeof(ChannelBase))
+            && constructors.Any(static c =>
+                c.IsPublic && c.GetParameters() is [{ } only] && only.ParameterType == typeof(CallInvoker))
+            && constructors.Any(static c => c.IsFamily && c.GetParameters().Length == 0)
+            && constructors.Any(static c =>
+                c.IsFamily
+                && c.GetParameters() is [{ } only]
+                && string.Equals(only.ParameterType.Name, "ClientBaseConfiguration", StringComparison.Ordinal));
+
+        Assert.True(
+            exact,
+            $"""
+            {typeName} is a generated gRPC client, which declares EXACTLY FOUR constructors: public
+            (ChannelBase), public (CallInvoker), protected (), and protected (ClientBaseConfiguration) -
+            and derives from ClientBase<TSelf>.
+
+            Base type: {client.BaseType?.Name ?? "(none)"}
+
+            Declared:
+            {rendered()}
+            """);
+    }
+
+    [Fact]
+    public void NoExportedTypeDeclaresAnEventAtAnyAccessibility()
+    {
+        // AN EVENT IS A SUBSCRIPTION SURFACE, WHICH IS BEHAVIOUR AND SHARED MUTABLE STATE AT ONCE: the
+        // backing delegate field lives on the type, so on a static type it is shared across all four
+        // services, and every handler added to it is a body that runs when the boundary is touched.
+        // protoc emits none, at any accessibility, and there is nothing in a wire shape an event could
+        // express - so the assertion is simply that the set is empty.
+        string[] events = Deduplicate(ExportedTypes.SelectMany(static type => type
+            .GetEvents(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance
+                | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Select(declared => $"{CanonicalName(type)}.{declared.Name}")));
+
+        Assert.True(
+            events.Length == 0,
+            $"""
+            {ContractsAssemblyName} declares {events.Length} event(s). A boundary definition declares
+            none: an event is a subscription surface - behaviour - and its backing delegate field is
+            shared mutable state on a type all four services reference (AAP 0.4.2.3).
+
+            {string.Join(FindingSeparator, events)}
+            """);
+    }
+
+    [Fact]
+    public void NoExportedTypeDeclaresAnOperatorAtAnyAccessibility()
+    {
+        // AN OPERATOR IS A METHOD THAT DOES NOT LOOK LIKE ONE, which is exactly why it needs its own
+        // control: `IsSpecialName` is set on an op_* method, so DeclaredMethods FILTERS IT OUT and the
+        // method sweeps above are structurally blind to it. A hand-written
+        // `public static bool operator true(DbError e) => e.SqlDbCode != 0;` would be a rule compiled
+        // into four services that no other test in this file can see.
+        //
+        // Equality operators are included in the prohibition rather than exempted. protoc emits none -
+        // measured, zero across the whole assembly - and generated messages express equality through
+        // Equals, which the signature test pins.
+        string[] operators = Deduplicate(ExportedTypes.SelectMany(static type => type
+            .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance
+                | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(static method => method.IsSpecialName
+                && method.Name.StartsWith("op_", StringComparison.Ordinal))
+            .Select(declared => $"{CanonicalName(type)}.{declared.Name}")));
+
+        Assert.True(
+            operators.Length == 0,
+            $"""
+            {ContractsAssemblyName} declares {operators.Length} operator(s). An operator is a method
+            body that the name-based sweeps in this file cannot see, because the compiler marks it
+            IsSpecialName. protoc emits none.
+
+            {string.Join(FindingSeparator, operators)}
+            """);
+    }
+
+    [Fact]
+    public void EveryExtensionFieldTracesToAnAuthoredExtensionAndEveryAuthoredExtensionHasOneField()
+    {
+        // THE BIJECTION IS THE CONTROL. A Protobuf extension holder is the one category whose members
+        // are FIELDS, which makes it the one place a static mutable member could sit on the boundary
+        // wearing a generated shape - so "every field is an Extension<,>" is not enough. Each field's
+        // live value is read and its field number matched to an extension the published files actually
+        // declare, and the match is required in BOTH directions: no field without a declaration behind
+        // it, and no declaration without exactly one field carrying it.
+        List<string> findings = [];
+
+        Dictionary<int, string> claimed = [];
+
+        foreach (Type holder in TypesOf(SurfaceCategory.ProtoExtensionHolder))
+        {
+            foreach (FieldInfo field in holder.GetFields(Declared))
+            {
+                string where = $"{CanonicalName(holder)}.{field.Name}";
+
+                if (field.GetValue(obj: null) is not Extension declared)
+                {
+                    findings.Add($"{where} is not an Extension instance, so it cannot be traced to a declaration.");
+                    continue;
+                }
+
+                if (!PublishedExtensionsByFieldNumber.TryGetValue(declared.FieldNumber, out FieldDescriptor? authored))
+                {
+                    findings.Add(
+                        $"{where} carries field number {declared.FieldNumber}, which no `extend` block "
+                        + "in the published .proto files declares - so it is hand-written state, not a "
+                        + "generated custom-option descriptor.");
+                    continue;
+                }
+
+                if (claimed.TryGetValue(declared.FieldNumber, out string? already))
+                {
+                    findings.Add(
+                        $"{where} and {already} both carry field number {declared.FieldNumber}. An "
+                        + "authored extension is generated into exactly one field.");
+                    continue;
+                }
+
+                claimed[declared.FieldNumber] = where;
+
+                // THE NAME IS DERIVED, NOT ASSUMED. FieldDescriptor.PropertyName is empty for an
+                // extension - measured, for both of these - so the generated field name is the
+                // PascalCase of the proto name: rich_error -> RichError, legacy_name -> LegacyName.
+                string expectedName = ToPascalCase(authored.Name);
+
+                if (!string.Equals(field.Name, expectedName, StringComparison.Ordinal))
+                {
+                    findings.Add(
+                        $"{where} carries the declaration '{authored.FullName}', whose generated field "
+                        + $"name is '{expectedName}'. A generated holder field and its declaration "
+                        + "cannot disagree about the name.");
+                }
+
+                // AND THE EXTENDED TYPE MUST AGREE. Extension<TTarget, TValue>'s first argument is the
+                // descriptor the option hangs off, which the declaration states as its extendee - so a
+                // field claiming a declaration while extending something else is caught here.
+                Type? expectedTarget = authored.ExtendeeType?.ClrType;
+                Type actualTarget = field.FieldType.GetGenericArguments()[0];
+
+                if (expectedTarget is not null && actualTarget != expectedTarget)
+                {
+                    findings.Add(
+                        $"{where} is an Extension over {actualTarget.Name}, but '{authored.FullName}' "
+                        + $"extends {expectedTarget.Name}.");
+                }
+            }
+        }
+
+        string[] orphans = Deduplicate(PublishedExtensionsByFieldNumber
+            .Where(entry => !claimed.ContainsKey(entry.Key))
+            .Select(static entry => $"{entry.Value.FullName} (#{entry.Value.FieldNumber})"));
+
+        foreach (string orphan in orphans)
+        {
+            findings.Add(
+                $"The published files declare the extension {orphan}, but no generated holder field "
+                + "carries it. The shipped stubs and the published .proto have diverged.");
+        }
+
+        // THE VACUITY GUARD. Everything above passes over an empty holder set, so the count is asserted
+        // too: these contracts declare two custom options on google.protobuf.MethodOptions, and a build
+        // that produced none would otherwise report a green trace over nothing.
+        Assert.True(
+            PublishedExtensionsByFieldNumber.Count > 0 && claimed.Count == PublishedExtensionsByFieldNumber.Count,
+            $"""
+            The published extension declarations and the generated holder fields do not correspond
+            one-to-one: {PublishedExtensionsByFieldNumber.Count} declared, {claimed.Count} traced.
+
+            {(findings.Count == 0 ? "(no individual finding - the counts alone disagree)" : string.Join(FindingSeparator, Deduplicate(findings)))}
+            """);
+
+        Assert.True(
+            findings.Count == 0,
+            $"""
+            {findings.Count} extension-holder finding(s):
+
+            {string.Join(FindingSeparator, Deduplicate(findings))}
+            """);
     }
 
     [Fact]

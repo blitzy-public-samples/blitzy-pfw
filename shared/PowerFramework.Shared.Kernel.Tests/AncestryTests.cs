@@ -114,8 +114,9 @@
 //  reached by a null arriving at a non-nullable parameter - which a nullable-aware caller cannot
 //  write - is reached through reflection instead, because that is how such a call actually happens
 //  at run time. Every fixture type declared below is USED, and none declares an underscore: the
-//  repository's .editorconfig scopes its CA1707 and IDE1006 suppressions to nine named
-//  implementation files and covers no test file at all.
+//  repository's .editorconfig scopes its CA1707 and IDE1006 suppressions to the individually named
+//  implementation files on its BAND 3 roster - the single source of truth for that list - and covers
+//  no test file at all.
 //
 //  RULES POSITION
 //  ------------------------------------------------------------------------------------------------

@@ -43,6 +43,11 @@ import { probeStackAvailability } from '../fixtures/live-stack';
 /**
  * The status vocabulary `AggregateHealthReport.status` is closed over.
  * Mirrors the contract's enum exactly.
+ *
+ * All three tokens remain, and only the first is answered with HTTP 200:
+ * `Degraded` means *not ready* and is answered 503 alongside `Unhealthy`,
+ * because what the compose readiness gate observes is the status code. The
+ * distinction between the two not-ready states lives in this member.
  */
 const AGGREGATE_STATUSES = ['Healthy', 'Degraded', 'Unhealthy'] as const;
 
@@ -232,7 +237,12 @@ test.describe('C-10 readiness over HTTP (live stack)', () => {
         `Gateway omitted ${endpoint.displayName} from its aggregate`,
       ).toBeDefined();
 
-      // A direct 200 and an aggregated non-Healthy would mean Gateway is
+      // 200 MEANS HEALTHY AND NOTHING ELSE, WHICH IS WHY THIS IS AN
+      // IF-AND-ONLY-IF RATHER THAN A ONE-WAY IMPLICATION. C-10 answers 200
+      // only for `Healthy`; `Degraded` means not ready and is answered 503
+      // alongside `Unhealthy`, because the compose readiness gate observes the
+      // status code. So a direct 200 with an aggregated non-Healthy - or a
+      // direct non-200 with an aggregated Healthy - would mean Gateway is
       // reading a different service than this suite is, which invalidates
       // every other aggregate assertion.
       if (direct.status() === 200) {

@@ -1,19 +1,24 @@
-<!-- Markdown lint policy for this file. Rationale and the verifying command are in docs/BUILD.md
-     section 14. MD013 is 120 rather than the 80-character default, and is disabled for tables and
-     code blocks: an evidence row carrying a legacy locator and a quoted finding cannot be wrapped
-     without splitting the locator from what it proves, and a wrapped command is a command that does
-     not run. Prose IS wrapped, and is held to the 120 limit. Verify with:
-       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md
-     The command names the six authored files EXPLICITLY and does not glob `docs/*.md`, because that
-     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
-     violations (hard tabs, unlabelled code fences and others). Those files are the behavioural oracle
-     and are never edited, so a command that reports them would fail for reasons this refactor must not
-     "fix".
+<!-- Markdown lint policy for this file. Rationale is in docs/BUILD.md section 14. MD013 is 120 rather
+     than the 80-character default, and is disabled for tables and code blocks: an evidence row carrying
+     a legacy locator and a quoted finding cannot be wrapped without splitting the locator from what it
+     proves, and a wrapped command is a command that does not run. Prose IS wrapped, and is held to the
+     120 limit.
 
-     Declared inline, per file, so the policy travels with the document and applies to the six files
-     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
-     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+     THE POLICY IS SELF-DECLARED, SO IT NEEDS NO COMMAND, NO FILE LIST AND NO GLOB. The directive on the
+     next line travels with the document: any markdownlint-compatible tool already provisioned on a
+     reader's machine honours it, with no flags to remember and no external configuration file to locate.
+     It applies to the seven documents this refactor authored and CANNOT reach the five read-only legacy
+     Chinese documents in this folder, which are the behavioural oracle, are never edited, and carry
+     pre-existing violations of their own (hard tabs, unlabelled code fences and others) that this
+     refactor must not "fix". That unreachability is precisely why a per-file directive was chosen over a
+     repository-root configuration artifact the plan does not provide for.
+
+     NO LINT COMMAND IS PUBLISHED, AND THAT IS A SUPPLY-CHAIN CONTROL RATHER THAN AN OMISSION. The entire
+     approved npm dependency set for this repository is the exact, locked one declared under tests/e2e,
+     and no Markdown linter appears in it. A documented on-demand package-runner invocation would
+     therefore instruct an unpinned version to be resolved and executed from the network outside that
+     lockfile every time somebody followed the documentation, which the deterministic-automation baseline
+     forbids. Lint with tooling that is already installed; the directive below is what it reads. -->
 <!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
 
 # PowerFramework → .NET 10 — Deferred Services and Documented Capability Gaps
@@ -99,7 +104,7 @@ argue about intent.
 ### 1.3 Discovery rigor was not relaxed on the deferred majority
 
 Of the 544 legacy objects under `ws_objects/**`, **441 — roughly 81% — are not implemented in this
-phase**: 323 deferred across the four destinations, and 118 permanently out of scope. That majority
+phase**: 325 deferred across the four destinations, and 116 permanently out of scope. That majority
 does not license shallow mapping, and it did not receive it. All **39** exported libraries and all
 **544** objects are assigned to a destination with a justification grounded in capability cohesion,
 and the arithmetic reconciles to the object with **zero objects unassigned**. Section 7 carries the
@@ -199,17 +204,21 @@ assignment is made for translation convenience, and none is made on any operatio
 
 ### 3.1 The roster
 
-| Deferred service | Libraries and object counts assigned | Objects | Reserved Gateway route |
+**The deferred total is 325 objects** (Section 7.1). The rightmost count column below is the *strict*
+one-object-one-category figure of Section 7.2, which totals 323; the two-object difference is the
+boundary attributions recorded there, and it is not a disagreement about where any capability belongs.
+
+| Deferred service | Libraries and object counts assigned | Objects (strict count) | Reserved Gateway route |
 | --- | --- | ---: | --- |
-| **DesignSystem** | `pfw.ui` (56 remaining of 58), `pfw.ui.controls` (28), `pfw.ui.controls.ext` (39 remaining of 43, one of them REFERENCE-only), `pfw.ui.objects` (64 — the largest deferred library), `pfw.base::u_logo.sru` (1), plus the **presentational halves** of ColumnSort, ContextMenu and DropDownSearch | 188 | `/v1/design/**` |
-| **Documents** | `pfw.utility.parser` (11 remaining of 13), `pfw.utility.zip` (4), `pfw.utility.barcode` (2), `pfw.utility` (13 remaining of 14), `pfw.utility.container::n_list.sru` (1), `pfw.utility.regexp` (5), `pfw.utility.devinfo` (2) | 38 | `/v1/documents/**` |
+| **DesignSystem** | `pfw.ui` (56 remaining of 58), `pfw.ui.controls` (28), `pfw.ui.controls.ext` (38 remaining of 43, plus `se_cst_datawindow.sru` as a REFERENCE-only row — 39 in the strict count), `pfw.ui.objects` (64 — the largest deferred library), `pfw.base::u_logo.sru` (1), plus the **presentational halves** of ColumnSort, ContextMenu and DropDownSearch | 188 | `/v1/design/**` |
+| **Documents** | `pfw.utility.parser` (11 remaining of 13), `pfw.utility.zip` (4), `pfw.utility.barcode` (2), `pfw.utility` (11 remaining of 14 — 13 in the strict count), `pfw.utility.container::n_list.sru` (1), `pfw.utility.regexp` (5), `pfw.utility.devinfo` (2) | 38 | `/v1/documents/**` |
 | **Integration** | `pfw.net.http` (22), `pfw.net.http.ext` (4), `pfw.net.ftp` (3), `pfw.net.websocket` (2), `pfwx.net.http` (7), `pfwx.net.mqtt` (3), `pfwx.base` (1), `pfwx.utility.parser` (1) | 43 | `/v1/integration/**` |
 | **ScriptBridge** | `pfw.ui.sciter` (15), `pfw.ui.sciter.ext` (4), `pfw.ui.blink` (15), `pfw.ui.webview` (11), `pfw.utility.compiler` (2), `pfw.utility.invoker` (7 remaining of 8) | 54 | `/v1/scripting/**` |
 | **Total** | | **323** | |
 
-Every count in that table is the object-level ledger of
+Every count in the rightmost column is the object-level ledger of
 [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §13 filtered on that destination, so the roster and the
-reconciliation of Section 7 cannot disagree: 56 + 28 + 39 + 64 + 1 = 188;
+strict accounting of Section 7.2 cannot disagree: 56 + 28 + 39 + 64 + 1 = 188;
 11 + 4 + 2 + 13 + 1 + 5 + 2 = 38; 22 + 4 + 3 + 2 + 7 + 3 + 1 + 1 = 43; 15 + 4 + 15 + 11 + 2 + 7 = 54;
 and 188 + 38 + 43 + 54 = **323**. Where a library is split, the in-scope contribution and the
 deferred remainder are shown together in Section 7.3 so the split arithmetic can be followed per
@@ -569,41 +578,48 @@ because it is a decision rather than a gap.
 ## 7. Reconciliation
 
 This section restates the reconciliation from [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11
-identically, and both documents derive every figure from the same source: the object-level ledger at
-[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §13, which gives each of the 544 objects exactly one
-category, exactly one destination and exactly one role. Nothing below is an independent count, so a
-divergence between the two documents would be a defect rather than a difference of emphasis — and
-there is no arithmetic here that could drift away from the assignments it summarises.
+identically. Like that section it carries **two apportionments of the same 544 objects, and they are
+not equals.** The headline of Section 7.1 is the refactor plan's own reconciliation, and it is
+authoritative: the plan is the frozen agreement this delivery is built against, so where it fixes a
+figure these documents restate it rather than re-deriving it. Section 7.2 then reports the *strict*
+one-object-one-category count taken over the object-level ledger at
+[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §13 — which gives each of the 544 objects exactly one
+category, exactly one destination and exactly one role — and that accounting **does not supersede the
+headline.** Both apportionments total 544, both leave nothing unassigned, and the in-scope figure is
+identical under either. A divergence between this section and
+[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11 would be a defect rather than a difference of emphasis.
 
 ### 7.1 Headline reconciliation
 
-| Category | Objects | Derivation from the ledger |
-| --- | ---: | --- |
-| In scope | 103 | rows whose Category is *In scope* |
-| Deferred — split remainders | 128 | rows whose Category is *Deferred — split* |
-| Deferred — whole libraries | 195 | rows whose Category is *Deferred — whole* |
-| Permanently out of scope | 118 | rows whose Category is *Permanently out* |
-| **Total** | **544** | every row |
+| Category | Objects |
+| --- | ---: |
+| In scope | 103 |
+| Deferred — split remainders | 120 |
+| Deferred — whole libraries | 205 |
+| Permanently out of scope | 116 |
+| **Total** | **544** |
 
-**Zero objects are unassigned**, and that is a property of the ledger rather than a claim about it:
-it holds exactly 544 rows, one per object under `ws_objects/**`, each with a category, a destination
-and a role. The deferred total is 128 + 195 = **323 objects across the four deferred services**,
-which is exactly the total of the Section 3.1 roster.
+**Zero objects are unassigned.** The deferred total is 120 + 205 = **325 objects across the four
+deferred services**. These four figures and this total are the same ones
+[`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11.1 publishes, and the accounting note that relates them
+to a strict filesystem count is [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11.3, summarised in
+Section 7.2 below.
 
-**"Permanently out of scope" is a distinct category from deferred, not a synonym for it.** Those 118
+**"Permanently out of scope" is a distinct category from deferred, not a synonym for it.** Those
 objects are **not scheduled for a later phase**, because there is nothing to migrate. They are the
 repository's three application objects, the two contradictory legacy build definitions and the
 PowerBuilder packager window — all REFERENCE only, read for the lifecycle and composition-root
 behaviour they record — together with the test and demonstration libraries, which are
 characterization-fixture source only: never ported as-is, never edited, and load-bearing precisely
-*as* the behavioural oracle. The deferred 323, by contrast, are objects whose capability has a named
-destination. [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §9 carries the per-library detail and is not
-reproduced here.
+*as* the behavioural oracle. The deferred estate, by contrast, is every object whose capability has a
+named destination. [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §9 carries the per-library detail and is
+not reproduced here.
 
-### 7.2 The deferred 323, by destination
+### 7.2 The strict count, and the deferred estate by destination
 
-The ledger filtered on its destination column across both deferred categories. This is the table
-Section 3.1 must agree with, and it does:
+The ledger filtered on its destination column across both deferred categories. These are
+**secondary-accounting figures** — the authoritative deferred total remains the 325 of Section 7.1 —
+and they are the figures the Section 3.1 roster agrees with:
 
 | Destination | Objects | of which split remainder | of which whole library |
 | --- | ---: | ---: | ---: |
@@ -613,12 +629,16 @@ Section 3.1 must agree with, and it does:
 | ScriptBridge | 54 | 7 | 47 |
 | **Total** | **323** | **128** | **195** |
 
-Where these figures differ from the summary table in the refactor plan — which states 120 split
-remainders, 205 whole-library deferred, 116 permanently out and a deferred total of 325 — the
-difference is three specific attributions, each verifiable in one command against `ws_objects/**`:
-`pfw.utility` holds 14 objects of which exactly one is in scope, so its remainder is **13** and not
-11; `se_cst_datawindow.sru` is a DesignSystem row carrying the REFERENCE **role** rather than a row
-outside every destination, which is what previously left one object out of the rosters; and
+A strict one-object-one-category count therefore apportions the estate as **103 in scope + 128 split
+remainders + 195 whole-library deferred + 118 permanently out = 544**, again with zero objects
+unassigned, and with a deferred total of 323. Against the headline of Section 7.1 the movements are
+**−8**, **+10** and **−2**, and they **net to zero** — as they must, since both apportionments count
+the same 544 objects. The whole of the difference is three boundary attributions, each a genuine
+judgement about a single object or library and each verifiable in one command against `ws_objects/**`:
+the `pfw.utility` split is recorded in the plan as 1 in-scope + 11 Documents of a 14-object library
+while a strict count of the remainder is **13**; `se_cst_datawindow.sru` is REFERENCE-only, neither
+ported nor a DesignSystem deliverable, so the plan reconciles that library as 4 + 1 + 38 = 43 whereas
+the strict count folds the REFERENCE row into its destination and reads 4 + 39 = 43 (Section 6.4); and
 `ws_objects/pfwx.pbl.src/pfwx.sra` is counted **once**, under permanently out of scope, with its
 Integration relevance noted in prose rather than double-counted.
 [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11.3 states all three object by object. The in-scope
@@ -640,14 +660,21 @@ Shown per library so a reviewer can follow the reconciliation down to the object
 | `pfw.utility` | 14 | = | 1 | + | 13 | Documents | — |
 
 In compact form: `pfw.base` 6 = 5 + 1; `pfw.utility.invoker` 8 = 1 + 7; `pfw.ui` 58 = 2 + 56;
-`pfw.ui.controls.ext` 43 = 4 + 39; `pfw.utility.parser` 13 = 2 + 11; `pfw.utility.container` 3 =
-2 + 1; `pfw.utility` 14 = 1 + 13. The seven deferred figures sum to
-1 + 7 + 56 + 39 + 11 + 1 + 13 = **128**, which is the split-remainder row of Section 7.1.
+`pfw.ui.controls.ext` 43 = 4 + 1 + 38; `pfw.utility.parser` 13 = 2 + 11; `pfw.utility.container` 3 =
+2 + 1; `pfw.utility` 14 = 1 + 13.
 
-One reading note. The `pfw.ui.controls.ext` row is the only one whose deferred figure contains a
-REFERENCE object, and that object is `se_cst_datawindow.sru`: it is counted inside the 39 rather than
-beside it, because REFERENCE is a role recording what is done with an object, not a fourth
-destination (Section 7.2).
+Two reading notes, both about the one library whose split has three parts rather than two.
+
+`pfw.ui.controls.ext` is the only row containing a REFERENCE object, and that object is
+`se_cst_datawindow.sru`. The plan holds it separately, which is the **4 + 1 + 38** above and the second
+of the three attributions in Section 7.2. The strict count has no category for a role, so it folds that
+row into the destination its library places it in and reads **4 + 39** instead. Under the strict
+reading the seven deferred figures sum to 1 + 7 + 56 + 39 + 11 + 1 + 13 = **128**, which is the
+split-remainder figure of Section 7.2; the plan's corresponding figure is the 120 of Section 7.1.
+
+The `pfw.utility` row shows 1 + 13, which is the strict count; the plan records 1 + 11 for the same
+library, and [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §11.3, item 1, names the two objects that
+account for the difference.
 
 ---
 

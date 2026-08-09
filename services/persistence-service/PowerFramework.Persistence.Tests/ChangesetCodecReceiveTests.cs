@@ -724,6 +724,21 @@ public sealed class ChangesetPayloadCodecTests
         // status, a zero column number, an unknown value tag, an undefined date kind, a blob length past
         // the end - are all reachable by corrupting one byte, and enumerating them by offset would be
         // brittle against any future field.
+        //
+        // THE MUTATION ALPHABET IS BOUNDED ON PURPOSE, AND THE OMISSION IS THE POINT. It excludes 0x7F,
+        // which is the ONE byte value that turns the high byte of a length or count field into a
+        // MAXIMAL POSITIVE number - roughly two billion - and so turns this test from a decoder test
+        // into a request that the decoder reserve gigabytes. Even now that the decoder bounds every
+        // count against the bytes that remain before it allocates, asking it to do that from a
+        // shotgun loop would make THIS TEST's safety depend on the very production guard the suite is
+        // supposed to be able to fail independently: if the guard regressed, the test host would die
+        // rather than report a failure, and a dead host reports nothing useful.
+        //
+        // 0x00, 0x01 and 0xFF keep every structural arm reachable while keeping every derived count
+        // small or negative - 0xFF in a high byte yields a NEGATIVE count, which is rejected on sight.
+        // The maximal-positive cases are covered deliberately and safely instead, by the three
+        // hand-built oversized-count tests below, which additionally assert that the rejection happens
+        // BEFORE any allocation rather than merely that it happens.
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
@@ -744,7 +759,7 @@ public sealed class ChangesetPayloadCodecTests
 
         Assert.NotEmpty(whole);
 
-        foreach (byte replacement in new byte[] { 0x00, 0x01, 0x7F, 0xFF })
+        foreach (byte replacement in new byte[] { 0x00, 0x01, 0xFF })
         {
             for (int offset = 0; offset < whole.Length; offset++)
             {
@@ -760,6 +775,160 @@ public sealed class ChangesetPayloadCodecTests
         {
             AssertAnswersACodeAndDoesNotThrow(codec, whole[..length]);
         }
+    }
+
+    // ==========================================================================================
+    //  THE THREE COUNTS A PAYLOAD CAN WEAPONISE, EACH REJECTED BEFORE IT REACHES AN ALLOCATION
+    //  ----------------------------------------------------------------------------------------
+    //  A payload arrives over the wire, so every count in it is a number chosen by whoever produced
+    //  the bytes, and three of them are handed straight to an allocation or an iteration bound: the
+    //  per-segment row count, the per-row column count - which sizes FOUR arrays before a single
+    //  column has been read - and a blob length, which BinaryReader.ReadBytes turns into
+    //  `new byte[length]` BEFORE discovering the stream is shorter.
+    //
+    //  Each test below hands the decoder a payload of a few dozen bytes that declares int.MaxValue,
+    //  and asserts two things rather than one:
+    //
+    //    1. the answer is the legacy failure code, not an escaping exception; and
+    //    2. THE THREAD ALLOCATED ALMOST NOTHING WHILE PRODUCING IT, which is what distinguishes
+    //       "bounded before the allocation" from "the allocation happened to fail". A decoder that
+    //       reserved two gigabytes and then threw would satisfy (1) on some hosts and never (2).
+    //
+    //  Built by hand rather than by mutating a real payload, because a maximal count is a WHOLE FIELD
+    //  and a hand-built payload is the only way to set one without also asking a shotgun loop to
+    //  produce it - see the alphabet note in NoCorruptionOfAnyByteEverEscapesAsAnException.
+    // ==========================================================================================
+
+    /// <summary>
+    /// A segment declaring <see cref="int.MaxValue"/> rows in a payload that contains none is rejected
+    /// before the row loop starts.
+    /// </summary>
+    [Fact]
+    public void AnOversizedRowCountIsRejectedBeforeAnyAllocation()
+    {
+        using MemoryStream buffer = new();
+        using BinaryWriter writer = new(buffer);
+
+        WriteHeader(writer, segmentCount: 3);
+        writer.Write(0);                // DW_BUFFER_PRIMARY
+        writer.Write(int.MaxValue);     // the weaponised row count
+        writer.Flush();
+
+        AssertRejectedWithoutAllocating(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// A row declaring <see cref="int.MaxValue"/> columns is rejected before the four decode arrays are
+    /// sized from it.
+    /// </summary>
+    [Fact]
+    public void AnOversizedColumnCountIsRejectedBeforeAnyAllocation()
+    {
+        using MemoryStream buffer = new();
+        using BinaryWriter writer = new(buffer);
+
+        WriteHeader(writer, segmentCount: 3);
+        writer.Write(0);                                    // DW_BUFFER_PRIMARY
+        writer.Write(1);                                    // one row, which is honest
+        writer.Write((int)ItemStatus.DataModified);          // that row's own status
+        writer.Write(int.MaxValue);                          // the weaponised column count
+        writer.Flush();
+
+        AssertRejectedWithoutAllocating(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// A blob value declaring <see cref="int.MaxValue"/> bytes is rejected before
+    /// <see cref="BinaryReader.ReadBytes"/> allocates from the length.
+    /// </summary>
+    /// <remarks>
+    /// The value tag is written as its numeric byte because the tag enumeration is private to the
+    /// codec - which is correct, since it is format detail rather than API. 16 is the blob tag, and the
+    /// number is asserted indirectly by every round-trip test in this suite that carries a blob.
+    /// </remarks>
+    [Fact]
+    public void AnOversizedBlobLengthIsRejectedBeforeAnyAllocation()
+    {
+        const byte blobValueTag = 16;
+
+        using MemoryStream buffer = new();
+        using BinaryWriter writer = new(buffer);
+
+        WriteHeader(writer, segmentCount: 3);
+        writer.Write(0);                                    // DW_BUFFER_PRIMARY
+        writer.Write(1);                                    // one row
+        writer.Write((int)ItemStatus.DataModified);          // its status
+        writer.Write(1);                                    // one column
+        writer.Write(1);                                    // column number 1, one-based
+        writer.Write((int)ItemStatus.DataModified);          // that column's status
+        writer.Write(blobValueTag);                          // the current value is a blob
+        writer.Write(int.MaxValue);                          // the weaponised blob length
+        writer.Flush();
+
+        AssertRejectedWithoutAllocating(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// Writes the six-field payload header: magic, version, reserved flags, processing kind and the
+    /// segment count.
+    /// </summary>
+    /// <param name="writer">The writer to write to.</param>
+    /// <param name="segmentCount">The segment count to declare.</param>
+    private static void WriteHeader(BinaryWriter writer, int segmentCount)
+    {
+        writer.Write(0x43574650u);  // the format magic
+        writer.Write((byte)1);      // the format version
+        writer.Write((byte)0);      // the reserved flags
+        writer.Write(1L);           // the processing kind
+        writer.Write(segmentCount);
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="payload"/> answers the legacy failure code AND that producing that
+    /// answer allocated a trivial amount of memory, which is what proves the count was rejected before
+    /// it reached an allocation.
+    /// </summary>
+    /// <param name="payload">The hand-built malformed payload.</param>
+    /// <remarks>
+    /// <para>
+    /// The budget is deliberately generous rather than tight: the decoder legitimately copies the
+    /// payload and constructs a stream, a reader and a target carrier, all of which allocate, and the
+    /// test must not become brittle against a change in any of them. What it has to separate is
+    /// KILOBYTES from GIGABYTES, and a budget three orders of magnitude below the smallest weaponised
+    /// allocation does that with room to spare.
+    /// </para>
+    /// <para>
+    /// The measurement is per-thread and excludes collection, so it counts allocation REQUESTS rather
+    /// than surviving objects - which is exactly the quantity of interest. xunit runs a single test
+    /// method on one thread, so the reading is not polluted by siblings.
+    /// </para>
+    /// </remarks>
+    private static void AssertRejectedWithoutAllocating(byte[] payload)
+    {
+        const long allocationBudgetBytes = 1L << 20;
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        long result = codec.TryApply(target, payload);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
+
+        Assert.True(
+            allocated < allocationBudgetBytes,
+            $"Decoding a {payload.Length}-byte payload that declared int.MaxValue elements allocated "
+                + $"{allocated} bytes, which is over the {allocationBudgetBytes}-byte budget. The count "
+                + "is reaching an allocation before it is bounded.");
+
+        // Nothing was admitted to the carrier either: a partially applied image is worse than a
+        // rejected one, because the caller's next read would see rows the payload never justified.
+        Assert.Equal(0L, target.RowCount());
+        Assert.Equal(0L, target.DeletedCount());
+        Assert.Equal(0L, target.FilteredCount());
     }
 
     [Fact]

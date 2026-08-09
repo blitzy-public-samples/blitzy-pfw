@@ -212,11 +212,13 @@
 //  --------------------------------------------------------------------------------------------
 //  NAMING: NO SCREAMING_SNAKE IDENTIFIER IS DECLARED IN THIS FILE
 //  --------------------------------------------------------------------------------------------
-//  The repository-root .editorconfig switches CA1707 and IDE1006 off in exactly ten named files,
-//  each carrying preserved legacy constant spellings. THIS FILE IS DELIBERATELY NOT ONE OF THEM -
-//  the sibling IPagingRewriter.cs is, this one is not - and TreatWarningsAsErrors is on
-//  repository-wide, so an underscore-bearing identifier declared here would be a BUILD ERROR
-//  rather than a style note. Everything of that shape is therefore CONSUMED, never declared:
+//  The repository-root .editorconfig switches CA1707 and IDE1006 off in the individually named files on
+//  its BAND 3 roster - that roster being the single source of truth for the list, so it is referenced
+//  here and not counted again - each of which carries preserved legacy constant spellings. THIS FILE IS
+//  DELIBERATELY NOT ONE OF THEM - the sibling IPagingRewriter.cs is, this one is not - and
+//  TreatWarningsAsErrors is on repository-wide, so an underscore-bearing identifier declared here would
+//  be a BUILD ERROR rather than a style note. Everything of that shape is therefore CONSUMED, never
+//  declared:
 //
 //      Enums.SQL_MS_REPLACE, Enums.SQL_MS_APPEND   from PowerFramework.Shared.Kernel
 //      DatabaseType.DbtMssql                       from the generated persistence.v1 contract,
@@ -241,9 +243,19 @@
 //  * No paging-bounds guard. `_nPageSize <= 0 or _nPageIndex <= 0` at [:L307] is likewise
 //    pre-dispatch, and re-testing it here would produce a second, unreachable failure path.
 //  * No reference to the Oracle arm, in code or in comment beyond the dialect-split note above.
-//  * No test. The tests live in PowerFramework.Persistence.Tests, which the application project
-//    already grants internal access to; every member below is reachable from a table-driven theory
-//    whose entire fixture is strings (C-H).
+//  * No test IN THIS FILE. Tests belong in PowerFramework.Persistence.Tests, which the application
+//    project already grants internal access to; every member below is reachable from a table-driven
+//    theory whose entire fixture is strings (C-H).
+//    STATE, STATED PLAINLY RATHER THAN IMPLIED: THAT THEORY IS PLANNED AND DOES NOT EXIST. No test in
+//    PowerFramework.Persistence.Tests references this class, the Oracle sibling or
+//    PagingRewriteDispatcher, and that project does not currently build in any case because the
+//    application project it references has no entry point. So NOTHING BELOW IS PINNED BY A TEST yet -
+//    not one sentinel, not one of the four forms, not the count wrapper. An earlier revision of this
+//    header read as though the tests existed; that reading is withdrawn.
+//    docs/PARITY.md section 6.2 enumerates the eleven rows the matrix must carry, and states the rule
+//    that decides whether it is worth anything: every expectation must be derived from the LEGACY
+//    generator at n_cst_thread_task_sqlquery.sru:L320-L399 and :L830-L834, never from reading this
+//    file. A matrix asserted against this implementation would pass and prove nothing.
 // ==============================================================================================
 
 using System.Globalization;
@@ -648,6 +660,22 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
     /// </remarks>
     public DatabaseType Dialect => DatabaseType.DbtMssql;
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// <see langword="true"/>, AND THIS ARM IS THE ONLY REASON THE PROPERTY EXISTS. Each column is
+    /// concatenated into the select list <c>[:L331]</c>, into the join predicate twice - once with its
+    /// qualifier stripped and once whole <c>[:L333]</c> - and into the ORDER BY <c>[:L336]</c>, unquoted
+    /// and unescaped. <see cref="BuildUniqueIndexColumnFragments"/> carries the annotated-defect note for
+    /// those three sites.
+    /// </para>
+    /// <para>
+    /// Declaring it here is what makes <see cref="PagingRewriteDispatcher"/> validate the identifiers
+    /// before this arm ever sees them, without the dispatcher hard-coding which dialect splices what.
+    /// </para>
+    /// </remarks>
+    public bool ConsumesPagedUniqueIndexColumns => true;
+
     /// <summary>
     /// Rewrites a parsed statement into its SQL Server paged form.
     /// </summary>
@@ -870,12 +898,24 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
     /// <c>+=</c> would otherwise allocate a fresh string.
     /// </para>
     /// <para>
-    /// <b>ANNOTATED LEGACY DEFECT - injection site.</b> Every column name is spliced into SQL by
-    /// concatenation, unvalidated, unquoted and unescaped, exactly as the legacy does at
-    /// <c>[:L331]</c>, <c>[:L333]</c> and <c>[:L336]</c>. Bind parameters cannot carry an identifier
-    /// and the emitted identifier text IS the observable output verified for parity, so
-    /// parameterisation is unavailable here rather than merely omitted. Callers must supply column
-    /// names from a trusted schema source, never from user input.
+    /// <b>ANNOTATED LEGACY DEFECT - injection site, WITH THE TRUST BOUNDARY MOVED UPSTREAM.</b> Every
+    /// column name is spliced into SQL by concatenation, unquoted and unescaped, exactly as the legacy
+    /// does at <c>[:L331]</c>, <c>[:L333]</c> and <c>[:L336]</c>. Bind parameters cannot carry an
+    /// identifier and the emitted identifier text IS the observable output verified for parity, so
+    /// parameterisation is unavailable here rather than merely omitted, and the concatenation is
+    /// reproduced byte for byte.
+    /// </para>
+    /// <para>
+    /// WHAT CHANGED IS WHERE THE VALUES COME FROM. This method still validates nothing and is still
+    /// callable directly with anything - it is the faithful port of the arm, and a method that filtered
+    /// its input would no longer be that. The enforcement lives at the one place every request passes
+    /// through: <see cref="PagingRewriteDispatcher.Rewrite"/> runs
+    /// <see cref="PagedUniqueIndexColumnValidator"/> over the collection and answers
+    /// <see cref="PagingRewriteResult.InvalidPagedUniqueIndexColumn"/> before this arm is reached, gated on
+    /// <see cref="ConsumesPagedUniqueIndexColumns"/>. So "callers must supply trusted names" is no longer
+    /// guidance a caller can ignore on the dispatched path (CWE-89, AAP 0.6.4); a caller reaching this
+    /// method DIRECTLY - which is to say a test - is on its own, deliberately, because that is what makes
+    /// the unvalidated legacy behaviour still observable and assertable.
     /// </para>
     /// </remarks>
     internal static UniqueIndexColumnFragments BuildUniqueIndexColumnFragments(

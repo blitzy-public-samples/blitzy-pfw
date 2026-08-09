@@ -406,7 +406,7 @@ public sealed class BitsTests
             BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
 
         // Bits declares no constant and no property. This is worth pinning rather than assuming,
-        // because it is the reason Bits.cs is NOT one of the ten files the root .editorconfig
+        // because it is the reason Bits.cs is NOT on the BAND 3 roster the root .editorconfig
         // scopes its naming suppressions to: a file that carries no preserved SCREAMING_SNAKE
         // identifier needs no suppression, and adding one here later would be a signal that a
         // constant had migrated into the wrong file.

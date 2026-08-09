@@ -1277,4 +1277,3 @@ internal static class ItemChangeProtocol
         };
     }
 }
-

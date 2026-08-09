@@ -77,11 +77,20 @@
 // ==================================================================================================
 
 using System.Reflection;
+using Google.Protobuf;
 using Google.Protobuf.Reflection;
 using Microsoft.OpenApi;
 using PowerFramework.Contracts.Common.V1;
 using Xunit;
 using Xunit.Sdk;
+
+// `UpdateResponse` is declared in BOTH persistence.v1 and dataservices.v1 - deliberately, because C-03
+// relays C-06's reply and each service publishes its own message. Importing both namespaces would make
+// the simple name ambiguous (CS0104 under warnings-as-errors), and importing only one would hide the
+// relay from the very test that has to compare the two. Aliasing names each side explicitly, which is
+// also what the descriptor anchors below do for exactly the same reason.
+using DataServicesUpdateResponse = PowerFramework.Contracts.DataServices.V1.UpdateResponse;
+using PersistenceUpdateResponse = PowerFramework.Contracts.Persistence.V1.UpdateResponse;
 
 namespace PowerFramework.Contracts.Tests;
 
@@ -698,6 +707,166 @@ public sealed class ConflictContractTests(OpenApiContractDocuments documents)
         // invisible: both would carry two int64 arrays and only the ORDER would differ.
         Assert.Equal(IdentityColumnDataName, identity.MessageType.FullName);
         Assert.Same(ContractDescriptors.Common, identity.MessageType.File);
+    }
+
+    // ==============================================================================================
+    //  SECTION 2a - THE IDENTITY CARDINALITY : 0..N ORDERED BLOCKS, ONE PER UPDATE TABLE
+    //  --------------------------------------------------------------------------------------------
+    //  THE REPLY FIELD MUST BE REPEATED, AND A SINGULAR ONE WOULD BE SILENT DATA LOSS. `_of_Update`
+    //  fires the identity callback AT MOST ONCE [n_cst_thread_task_sqlupdate.sru:L243] - but the task
+    //  that drives it calls it ONCE PER UPDATE TABLE:
+    //
+    //      if _bMultiTableUpdate then
+    //          nCount = UpperBound(Tables)                                          [:L358]
+    //          for nIndex = 1 to nCount                                             [:L364]
+    //              rtCode = _of_UpdatePrepare(data,nIndex)                          [:L365]
+    //              rtCode = _of_Update(data)                                        [:L367]
+    //          next
+    //
+    //  and the caller-side proxy APPENDS every firing to an ordered array rather than replacing
+    //  anything - `IDCOLDATA _idColDatas[]` [n_cst_threading_task_sqlupdate.sru:L45],
+    //  `nIndex = UpperBound(_idColDatas) + 1` [:L73-L76] - then REPLAYS EVERY ELEMENT when it writes
+    //  the generated values back onto the caller's DataWindow [:L128, :L142-L195].
+    //
+    //  EACH BLOCK CARRIES ITS OWN COLUMN ORDINAL, because `_of_UpdatePrepare` re-describes the one
+    //  carrier per table [:L98-L145], so the discovered identity column legitimately differs between
+    //  tables. A singular field would keep the FIRST block and drop the rest, and the response would
+    //  still look entirely correct: the counts are summed across tables [:L66-L68] and so would not
+    //  disagree with the truncated identity payload. That is exactly the class of defect a row-count
+    //  assertion cannot catch, which is why the cardinality is asserted from the descriptor here.
+    //
+    //  THE ORDER OBLIGATION IS TWO-LEVEL AND BOTH LEVELS ARE ASSERTED BELOW: the BLOCKS in the order
+    //  the tables were declared, and within each block the Primary array forward and the Filter array
+    //  backward as separate fields.
+    // ==============================================================================================
+
+    /// <summary>
+    /// C-06's reply carries the identity blocks as a REPEATED field, so one call can report one block
+    /// per update table. Asserted on the descriptor, because cardinality is the property a singular
+    /// field would get wrong while remaining perfectly well-formed.
+    /// </summary>
+    [Fact]
+    public void TheReplyCarriesOneIdentityBlockPerUpdateTableRatherThanOne()
+    {
+        FieldDescriptor identity = Field(UpdateResponseName, "identity");
+
+        Assert.True(
+            identity.IsRepeated,
+            "persistence.v1.UpdateResponse.identity must be REPEATED. One Update can emit one identity "
+                + "block per update table - the worker loops `for nIndex = 1 to UpperBound(Tables)` "
+                + "calling _of_Update per table [n_cst_thread_task_sqlupdate.sru:L358-L369], each call "
+                + "fires the callback at most once [:L243], and the caller-side proxy APPENDS every "
+                + "firing to an ordered array [n_cst_threading_task_sqlupdate.sru:L45,L73-L76] which it "
+                + "later replays in full [:L128,L142-L195]. A singular field keeps the first block and "
+                + "drops the rest, and no count in this reply would disagree.");
+
+        // NOT A MAP AND NOT AN ARM OF A ONEOF. A map would key the blocks by something - and there is
+        // no key: the ORDER is the identity, because the legacy addresses them by array position. A
+        // oneof arm would make the blocks mutually exclusive with something else.
+        Assert.False(identity.IsMap);
+        Assert.Null(identity.ContainingOneof);
+    }
+
+    /// <summary>
+    /// C-03's relay carries the SAME repeated shape, so the cardinality cannot be narrowed on the way
+    /// to Gateway - which is where a relay defect would be invisible, because the reply would still
+    /// parse and still carry consistent counts.
+    /// </summary>
+    [Fact]
+    public void TheDataServicesRelayCarriesTheSameRepeatedIdentityShape()
+    {
+        FieldDescriptor relayed = ContractDescriptors.RequireField(
+            ContractDescriptors.RequireMessage("dataservices.v1.UpdateResponse"),
+            "identity");
+
+        Assert.True(
+            relayed.IsRepeated,
+            "dataservices.v1.UpdateResponse.identity must be REPEATED for the same reason C-06's is: it "
+                + "RELAYS C-06's payload unchanged, and a singular relay field would forward the first "
+                + "block and silently drop every other table's identities.");
+
+        // The SAME shared definition on both sides of the relay, so the two cannot drift.
+        Assert.Equal(FieldType.Message, relayed.FieldType);
+        Assert.Equal(IdentityColumnDataName, relayed.MessageType.FullName);
+        Assert.Same(ContractDescriptors.Common, relayed.MessageType.File);
+
+        // And the same element type object as C-06's field, not merely the same name.
+        Assert.Same(Field(UpdateResponseName, "identity").MessageType, relayed.MessageType);
+    }
+
+    /// <summary>
+    /// A round trip through both messages preserves the BLOCK order, each block's own column ordinal,
+    /// and each block's Primary and Filter subarray order - the three things a relay must not disturb.
+    /// </summary>
+    /// <remarks>
+    /// Asserted behaviourally as well as structurally because ordering is not expressible in a
+    /// descriptor: a repeated field is ordered by definition, but nothing in the schema states that a
+    /// FORWARDING SERVICE must not re-sort it. Serializing three blocks whose ordinals differ and
+    /// reading them back on the sibling message is the closest a contract test can come to exercising
+    /// the relay itself, and it fails loudly if either message's field is ever narrowed or reordered.
+    /// </remarks>
+    [Fact]
+    public void ARoundTripPreservesBlockOrderAndEachBlocksTwoArrays()
+    {
+        PersistenceUpdateResponse produced = new()
+        {
+            Identity =
+            {
+                new IdentityColumnData
+                {
+                    IdentityColumnId = 1L,
+                    PrimaryValues = { 11L, 12L },
+                    FilterValues = { 99L, 98L },
+                },
+                new IdentityColumnData { IdentityColumnId = 3L, PrimaryValues = { 21L } },
+                new IdentityColumnData { IdentityColumnId = 6L, FilterValues = { 31L, 32L, 33L } },
+            },
+        };
+
+        // The relay: C-06's bytes read back through C-03's message. They are DISTINCT messages that
+        // happen to number this field differently, so the payload is transcribed field by field rather
+        // than parsed across - which is what a relay implementation does too.
+        DataServicesUpdateResponse relayed = new();
+
+        relayed.Identity.AddRange(
+            PersistenceUpdateResponse.Parser.ParseFrom(produced.ToByteArray()).Identity);
+
+        // BLOCK ORDER, and each block's own ordinal - a re-sort would leave the count intact.
+        Assert.Equal([1L, 3L, 6L], relayed.Identity.Select(static block => block.IdentityColumnId));
+
+        // EACH BLOCK'S TWO ARRAYS, element for element, still separate and still in collection order.
+        Assert.Equal([11L, 12L], relayed.Identity[0].PrimaryValues);
+        Assert.Equal([99L, 98L], relayed.Identity[0].FilterValues);
+
+        Assert.Equal([21L], relayed.Identity[1].PrimaryValues);
+        Assert.Empty(relayed.Identity[1].FilterValues);
+
+        Assert.Empty(relayed.Identity[2].PrimaryValues);
+        Assert.Equal([31L, 32L, 33L], relayed.Identity[2].FilterValues);
+    }
+
+    /// <summary>
+    /// An empty block list is the "none collected" reading, and it survives a round trip as empty
+    /// rather than as one default-valued block.
+    /// </summary>
+    /// <remarks>
+    /// The distinction matters: the legacy's emit guard is a guard on the CALL, not on the contents
+    /// [n_cst_thread_task_sqlupdate.sru:L242-L244], so a block whose two arrays are both empty has no
+    /// legacy counterpart. Absence must be expressed by the list being shorter, never by a placeholder
+    /// element - a consumer that indexed blocks positionally would otherwise read a table's identities
+    /// from the wrong slot.
+    /// </remarks>
+    [Fact]
+    public void NoneCollectedIsAnEmptyListRatherThanOnePlaceholderBlock()
+    {
+        PersistenceUpdateResponse produced = new();
+
+        Assert.Empty(produced.Identity);
+
+        PersistenceUpdateResponse parsed =
+            PersistenceUpdateResponse.Parser.ParseFrom(produced.ToByteArray());
+
+        Assert.Empty(parsed.Identity);
     }
 
     // ==============================================================================================

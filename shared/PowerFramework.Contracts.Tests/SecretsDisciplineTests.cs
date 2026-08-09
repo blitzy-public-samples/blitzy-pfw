@@ -476,6 +476,7 @@ public sealed class SecretsDisciplineTests(OpenApiContractDocuments documents)
     private const string PersistenceProtoFileName = "persistence.v1.proto";
     private const string DataServicesProtoFileName = "dataservices.v1.proto";
     private const string SecurityDocumentFileName = "security.v1.yaml";
+    private const string GatewayDocumentFileName = "gateway.v1.yaml";
     private const string ProtoDirectoryName = "Proto";
     private const string OpenApiDirectoryName = "OpenApi";
 
@@ -589,18 +590,38 @@ public sealed class SecretsDisciplineTests(OpenApiContractDocuments documents)
     public static TheoryData<string> SecurityOperationIds { get; } = new(SecurityOperationIdInventory);
 
     /// <summary>
-    /// The four published contract artifacts, as repository-relative paths inside the contracts project,
-    /// for the artifact-level literal sweep.
+    /// EVERY published contract artifact, as repository-relative paths inside the contracts project, for
+    /// the artifact-level literal sweep.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// All five: the three protocol definitions plus BOTH OpenAPI documents. The gateway document belongs
+    /// here as much as the security one and is the likelier of the two to acquire a specimen credential,
+    /// because it is the ingress contract - the surface whose examples a reader reaches for first. An
+    /// artifact omitted from this list is not swept at all, and the omission is invisible: the theory
+    /// simply runs one row fewer and still reports success. <see
+    /// cref="TheArtifactSweepCoversEveryFileInBothPublishedContractFolders"/> exists so it cannot happen
+    /// again - it enumerates both folders on disk and fails if anything in either is missing from here.
+    /// </para>
+    /// <para>
     /// Paths use forward slashes and are split before being combined, so the rows read the same on every
     /// operating system while resolving correctly on the Linux target.
+    /// </para>
     /// </remarks>
-    public static TheoryData<string> ContractArtifactPaths { get; } = new(
+    public static TheoryData<string> ContractArtifactPaths { get; } = new(ContractArtifactInventory);
+
+    /// <summary>
+    /// The same five artifact paths as a plain array, for the coverage assertion that compares them
+    /// against what the two published folders actually hold.
+    /// </summary>
+    private static string[] ContractArtifactInventory =>
+    [
         $"{ProtoDirectoryName}/{CommonProtoFileName}",
         $"{ProtoDirectoryName}/{DataServicesProtoFileName}",
         $"{ProtoDirectoryName}/{PersistenceProtoFileName}",
-        $"{OpenApiDirectoryName}/{SecurityDocumentFileName}");
+        $"{OpenApiDirectoryName}/{GatewayDocumentFileName}",
+        $"{OpenApiDirectoryName}/{SecurityDocumentFileName}",
+    ];
 
     // ==============================================================================================
     //  PART 1 - THE TRANSACTION DESCRIPTOR'S PASSWORD IS WRITE-ONLY, AND ABSENT FROM EVERY RESPONSE
@@ -1641,6 +1662,59 @@ public sealed class SecretsDisciplineTests(OpenApiContractDocuments documents)
         }
     }
 
+    /// <summary>
+    /// The artifact sweep covers EVERY file in both published contract folders, with nothing extra.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SWEEP ABOVE CAN ONLY EXAMINE WHAT IT IS HANDED, AND A MISSING ROW LOOKS EXACTLY LIKE A CLEAN
+    /// RESULT. This test removes that failure mode by enumerating <c>Proto</c> and <c>OpenApi</c> on disk
+    /// and comparing them, both ways, against the sweep's own inventory. A new artifact added to either
+    /// folder without being added to the inventory fails here, before it has spent a single build being
+    /// silently unswept; an inventory row naming a file that no longer exists fails here too, rather than
+    /// deep inside the reader with a path that means nothing to the person who moved it.
+    /// </para>
+    /// <para>
+    /// Read-only and creates nothing: both folders are enumerated with a top-level search, and the walk
+    /// that locates them anchors on the two repository-root markers, so it cannot latch onto a same-named
+    /// folder elsewhere on the machine.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheArtifactSweepCoversEveryFileInBothPublishedContractFolders()
+    {
+        string contractsDirectory = RequireContractsDirectory();
+
+        string[] onDisk =
+            [.. new[] { ProtoDirectoryName, OpenApiDirectoryName }
+                .SelectMany(folder => EnumerateContractFolder(contractsDirectory, folder))
+                .OrderBy(static path => path, StringComparer.Ordinal)];
+
+        string[] swept =
+            [.. ContractArtifactInventory.OrderBy(static path => path, StringComparer.Ordinal)];
+
+        string[] unswept = [.. onDisk.Except(swept, StringComparer.Ordinal)];
+        string[] absent = [.. swept.Except(onDisk, StringComparer.Ordinal)];
+
+        Assert.True(
+            unswept.Length == 0,
+            $"{unswept.Length} published contract artifact(s) are not swept for committed secret "
+                + $"literals: [{string.Join(", ", unswept)}]. Add each one to ContractArtifactPaths in "
+                + "the same change that adds it to the folder - an unswept artifact is the one place a "
+                + "specimen key can be committed without any test noticing.");
+
+        Assert.True(
+            absent.Length == 0,
+            $"The sweep names {absent.Length} artifact(s) that are not present in the published folders: "
+                + $"[{string.Join(", ", absent)}]. Either the artifact moved, in which case the inventory "
+                + "row needs updating, or it is missing, which is itself the finding.");
+
+        // Stated as a count as well, so the failure message carries the size of the surface being swept
+        // rather than leaving a reader to count the rows: three protocol definitions and two OpenAPI
+        // documents are the whole published boundary of this phase.
+        Assert.Equal(5, onDisk.Length);
+    }
+
     // ==============================================================================================
     //  HELPERS - the sweeps, the lookups and the text readers
     //
@@ -2227,6 +2301,44 @@ public sealed class SecretsDisciplineTests(OpenApiContractDocuments documents)
         }
 
         return text;
+    }
+
+    /// <summary>
+    /// The files one published contract folder holds, as forward-slashed paths relative to the project.
+    /// </summary>
+    /// <remarks>
+    /// A TOP-LEVEL enumeration, matching the flat layout both folders actually have, and the absent or
+    /// empty folder is a failure rather than an empty result: a coverage assertion that stood down when
+    /// its subject disappeared would report success on a boundary that had lost its definitions.
+    /// </remarks>
+    /// <exception cref="FailException">The folder is missing, or holds no file at all.</exception>
+    private static IEnumerable<string> EnumerateContractFolder(
+        string contractsDirectory,
+        string folderName)
+    {
+        string folder = Path.Combine(contractsDirectory, folderName);
+
+        if (!Directory.Exists(folder))
+        {
+            throw FailException.ForFailure(
+                $"The published contract folder '{folderName}' was not found at '{folder}'. Both "
+                    + $"'{ProtoDirectoryName}' and '{OpenApiDirectoryName}' are part of the published "
+                    + "boundary, so neither can be stood down from.");
+        }
+
+        string[] names =
+            [.. Directory
+                .EnumerateFiles(folder, "*", SearchOption.TopDirectoryOnly)
+                .Select(static path => Path.GetFileName(path))];
+
+        if (names.Length == 0)
+        {
+            throw FailException.ForFailure(
+                $"The published contract folder '{folderName}' at '{folder}' holds no file, which is "
+                    + "itself the finding rather than a reason to report nothing to sweep.");
+        }
+
+        return names.Select(name => $"{folderName}/{name}");
     }
 
     /// <summary>

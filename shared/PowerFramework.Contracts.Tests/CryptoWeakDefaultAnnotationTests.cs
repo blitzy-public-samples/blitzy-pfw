@@ -178,6 +178,7 @@ public sealed class CryptoWeakDefaultAnnotationTests(
 
     private const string EncodingSchema = "CryptoEncoding";
     private const string HashTypeSchema = "CryptoHashType";
+    private const string KeyedHashTypeSchema = "CryptoKeyedHashType";
     private const string CipherTypeSchema = "CryptoSymCryptType";
     private const string CipherModeSchema = "CryptoSymCryptMode";
     private const string RsaPaddingSchema = "CryptoRsaPadding";
@@ -1399,6 +1400,139 @@ public sealed class CryptoWeakDefaultAnnotationTests(
     //  BuildFailure WAS taken, because narrowing that one to FailException tightens the signature
     //  instead of loosening it.
     // ==============================================================================================
+
+    // ==============================================================================================
+    //  THE TWO PUBLISHED CAPABILITY NARROWINGS
+    //  ----------------------------------------------------------------------------------------------
+    //  Distinct from every weakness above, and the distinction is the point. A WEAKNESS is behaviour
+    //  the legacy had that this port reproduces and annotates. A NARROWING is behaviour the legacy
+    //  DECLARED that this port cannot reproduce, because a parameter it needs exists only inside the
+    //  closed binary - n_crypto is native "pfw.dll" [n_crypto.sru:L8] with no PowerScript body for any
+    //  of its 63 declarations.
+    //
+    //  The rule for those is that the contract is narrowed with a DEFINED ERROR, never widened with a
+    //  guess, and the narrowing must be legible on the wire contract rather than discovered at runtime.
+    //  These tests hold the contract to that, in both directions: the narrowing must be published, AND
+    //  it must be exactly as wide as the missing evidence - never wider.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The keyed and signing operations narrow the hash set to the five identifiers that have a keyed
+    /// form, while the unkeyed digest operations keep all six.
+    /// </summary>
+    [Fact]
+    public void TheKeyedHashNarrowingIsPublishedAndIsExactlyOneIdentifierWide()
+    {
+        IReadOnlyList<long> full = ClosedEnumValues(RequireSchema(HashTypeSchema), HashTypeSchema);
+        IReadOnlyList<long> keyed =
+            ClosedEnumValues(RequireSchema(KeyedHashTypeSchema), KeyedHashTypeSchema);
+
+        // THE FULL SET IS UNREDUCED. Preserving the identifier set exactly is required (C-B), so the
+        // narrowing must be a SECOND schema rather than an edit to the first.
+        Assert.Equal<long>([0, 1, 2, 3, 4, 5], full);
+
+        // The narrowed set is a prefix-preserving subset: same identifiers, same numbers, one absent.
+        Assert.Equal<long>([0, 1, 2, 3, 4], keyed);
+        Assert.Equal(full.Count - 1, keyed.Count);
+        Assert.All(keyed, value => Assert.Contains(value, full));
+
+        // Exactly one identifier is withheld, and it is the checksum - the only member with no keyed
+        // or signed construction. A narrowing that dropped a real digest would fail here.
+        Assert.Equal<long>([5], [.. full.Except(keyed)]);
+    }
+
+    /// <summary>
+    /// Each of the six hash-taking request schemas points at the hash vocabulary its operation can
+    /// actually honour.
+    /// </summary>
+    /// <param name="requestSchema">The request schema under test.</param>
+    /// <param name="expectedVocabulary">The hash schema it must reference.</param>
+    /// <remarks>
+    /// THE ASSIGNMENT IS THE SUBSTANCE OF THE FIX, not the existence of the narrowed schema. Publishing
+    /// a narrowed vocabulary that no operation referenced would leave the original contradiction
+    /// exactly where it was: a schema-valid request accepted by a caller and refused by the provider.
+    /// Both halves are asserted together so neither can regress alone - the two unkeyed digests must
+    /// keep the full set, and the four keyed and signing operations must use the narrowed one.
+    /// </remarks>
+    [Theory]
+    [InlineData("HashRequest", HashTypeSchema)]
+    [InlineData("HashFileRequest", HashTypeSchema)]
+    [InlineData("HmacRequest", KeyedHashTypeSchema)]
+    [InlineData("HmacFileRequest", KeyedHashTypeSchema)]
+    [InlineData("RsaSignRequest", KeyedHashTypeSchema)]
+    [InlineData("RsaVerifyRequest", KeyedHashTypeSchema)]
+    public void EachHashTakingRequestReferencesTheVocabularyItsOperationCanHonour(
+        string requestSchema,
+        string expectedVocabulary)
+    {
+        IOpenApiSchema request = RequireSchema(requestSchema);
+
+        IOpenApiSchema selector =
+            request.Properties?.TryGetValue("hashType", out IOpenApiSchema? property) == true
+                ? property
+                : throw BuildFailure(
+                    $"Request schema '{requestSchema}' declares no 'hashType' property, so the "
+                    + "vocabulary it admits cannot be checked.");
+
+        // The reference is compared by the enumeration it resolves to rather than by a $ref string,
+        // because that is what a generator and a validator actually see.
+        Assert.Equal(
+            ClosedEnumValues(RequireSchema(expectedVocabulary), expectedVocabulary),
+            ClosedEnumValues(selector, $"{requestSchema}.hashType"));
+    }
+
+    /// <summary>
+    /// The symmetric mode schema publishes its blocked cells in machine-readable form, keeps all three
+    /// declared modes, and blocks exactly the cells whose parameters are unobservable.
+    /// </summary>
+    [Fact]
+    public void TheBlockedSymmetricCellsArePublishedAndKeepTheModeSetIntact()
+    {
+        IOpenApiSchema mode = RequireSchema(CipherModeSchema);
+
+        // THE IDENTIFIER SET IS UNTOUCHED. Withdrawing a capability must not withdraw a declaration.
+        Assert.Equal<long>([0, 1, 2], ClosedEnumValues(mode, CipherModeSchema));
+
+        JsonNode blocked =
+            mode.Extensions?.TryGetValue("x-blocked-cells", out IOpenApiExtension? extension) == true
+                && extension is JsonNodeExtension node
+                ? node.Node
+                : throw BuildFailure(
+                    $"Schema '{CipherModeSchema}' publishes no 'x-blocked-cells' extension, so a "
+                    + "caller cannot discover which cells are refused without provoking a failure.");
+
+        JsonArray cells = Assert.IsType<JsonArray>(blocked);
+
+        // Two entries, and BOTH reasons are named - they rest on different missing evidence and are
+        // unblocked by different measurements, so collapsing them would lose which is which.
+        Assert.Equal(2, cells.Count);
+
+        List<string> reasons =
+            [.. cells.Select(cell => cell?["reason"]?.GetValue<string>() ?? "(none)").Order(StringComparer.Ordinal)];
+
+        Assert.Equal<string>(
+            ["SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE", "SYMMETRIC_VECTOR_UNPROVABLE"],
+            reasons);
+
+        // The feedback mode is blocked in EITHER vector shape, because a vector does not disclose a
+        // feedback width; the chaining mode is blocked only without one. That asymmetry is the evidence
+        // that the narrowing is minimal rather than a blanket refusal of anything awkward.
+        JsonNode feedback = Assert.Single(
+            cells,
+            cell => cell?["reason"]?.GetValue<string>() == "SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE") !;
+        JsonNode vector = Assert.Single(
+            cells,
+            cell => cell?["reason"]?.GetValue<string>() == "SYMMETRIC_VECTOR_UNPROVABLE") !;
+
+        // Read as decimal: the YAML reader materialises an unquoted scalar as a decimal node, so
+        // requesting a 64-bit integer directly raises rather than converting.
+        Assert.Equal(2m, feedback["mode"]?.GetValue<decimal>());
+        Assert.Equal("any", feedback["ivSupplied"]?.GetValue<string>());
+        Assert.Equal(1m, vector["mode"]?.GetValue<decimal>());
+        Assert.False(vector["ivSupplied"]?.GetValue<bool>());
+
+        Report($"{cells.Count} blocked cells published on {CipherModeSchema} of {documents.SecurityDocumentPath}");
+    }
 
     /// <summary>Resolves a component schema of the Security document by name.</summary>
     /// <param name="schemaName">Component schema name, compared ordinally.</param>

@@ -311,10 +311,28 @@ public static class ContractDescriptors
     /// Every gRPC service declared in the three files - the six of contracts C-03 through C-08.
     /// </summary>
     /// <remarks>
-    /// Reaching for a <see cref="ServiceDescriptor"/> at all is what proves the code generation is
-    /// configured as <c>GrpcServices="Both"</c>: a misconfiguration there emits messages without
-    /// service stubs, which compiles perfectly and then fails at wire-up. <c>common.v1.proto</c>
-    /// contributes none by design, since it is shared vocabulary rather than a service.
+    /// <para>
+    /// A <see cref="ServiceDescriptor"/> here proves the <c>.proto</c> DECLARES the service, and that
+    /// is all it proves. It is worth being precise about, because the opposite reading is easy to reach
+    /// for and is wrong: a descriptor is deserialized from the <c>FileDescriptorProto</c> protoc embeds
+    /// in the generated reflection holder, and that proto carries every <c>service</c> block the file
+    /// declares REGARDLESS of the <c>GrpcServices</c> setting. So a build configured
+    /// <c>GrpcServices="None"</c> would still return all six services from this method while emitting
+    /// no client and no server base at all - the misconfiguration that compiles perfectly and then
+    /// fails at wire-up.
+    /// </para>
+    /// <para>
+    /// THE EVIDENCE FOR <c>GrpcServices="Both"</c> IS THE GENERATED CLR TYPES, not the descriptors: the
+    /// abstract <c>&lt;Service&gt;Base</c> server half and the <c>&lt;Service&gt;Client</c> client half
+    /// nested inside each container. That pairing is asserted directly by
+    /// <c>ContractsCarryNoBehaviourTests.TheSixServiceContainersAreTheSixPublishedServicesAndEachHasBothGeneratedHalves</c>,
+    /// which is where the claim belongs and where a regression in the build configuration is actually
+    /// caught. This method's own contribution is the descriptor side of that comparison.
+    /// </para>
+    /// <para>
+    /// <c>common.v1.proto</c> contributes none by design, since it is shared vocabulary rather than a
+    /// service.
+    /// </para>
     /// </remarks>
     public static IEnumerable<ServiceDescriptor> AllServices() => All.SelectMany(static file => file.Services);
 
@@ -1309,4 +1327,3 @@ public sealed class OpenApiContractDocuments : IAsyncLifetime
             + "registered by [assembly: AssemblyFixture(typeof(" + nameof(OpenApiContractDocuments) + "))]; "
             + "constructing it directly skips InitializeAsync and leaves it empty.");
 }
-

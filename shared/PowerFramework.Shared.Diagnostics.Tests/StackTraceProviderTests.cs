@@ -139,8 +139,9 @@
 //
 //  This file declares NO SCREAMING_SNAKE and no underscore-bearing identifier. That is a build
 //  requirement, not a preference: TreatWarningsAsErrors is inherited from Directory.Build.props, and
-//  the repository root .editorconfig scopes its CA1707 and IDE1006 suppressions to ten named
-//  PRODUCTION files. No test file is covered, so an underscored identifier here would be a build
+//  the repository root .editorconfig scopes its CA1707 and IDE1006 suppressions to the named
+//  PRODUCTION files on its BAND 3 roster, the single source of truth for that list. No test file is
+//  covered, so an underscored identifier here would be a build
 //  failure with no way to grant an exception. The legacy vocabulary survives in the VALUES - the
 //  oracle's own "-- " prefix - which is where it is observable.
 //

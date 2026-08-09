@@ -116,7 +116,8 @@
 //  NO SECRET, KEY, PASSWORD, TOKEN OR CREDENTIAL of any kind (constraint C-F). Nothing in this file is
 //      security sensitive and no literal below resembles credential material.
 //  NO SCREAMING_SNAKE MEMBER DECLARATION. The root .editorconfig scopes its CA1707 and IDE1006
-//      suppressions to exactly ten named non-test files; NO TEST FILE IS SUPPRESSED, and under
+//      suppressions to the individually named non-test files on its BAND 3 roster - the single source
+//      of truth for that list; NO TEST FILE IS SUPPRESSED, and under
 //      TreatWarningsAsErrors a naming diagnostic here would be an error rather than a warning. This file
 //      may freely REFERENCE a preserved constant such as DataWindowServiceBase.STYLE_GRID, and it
 //      declares none of its own.
@@ -3766,20 +3767,6 @@ public class FakeDataWindowHost : DataWindowServiceHost
     // ==============================================================================================
 
     /// <summary>
-    /// The shared write path behind all seven <c>SetItem</c> overloads.
-    /// </summary>
-    /// <param name="row">The one-based row number.</param>
-    /// <param name="columnId">The column number.</param>
-    /// <param name="value">The value, boxed as handed over.</param>
-    /// <returns><c>-1</c> when the row does not exist; otherwise <see cref="SetItemResult"/>.</returns>
-    /// <remarks>
-    /// NO VALIDATION OF ANY KIND. The value is not checked against the column's type, is not coerced and
-    /// is not rejected, because the code under test relies on the host being permissive - the restore path
-    /// at <c>se_cst_dw.sru:L219</c> and <c>:L375</c> writes back an <c>any</c> and must land. The
-    /// out-of-range answer of <c>-1</c> is the one thing that is enforced, and it is enforced because a
-    /// real DataWindow enforces it.
-    /// </remarks>
-    /// <summary>
     /// Resolves a column NAME to its id and reads the primary-buffer value, or answers
     /// <see langword="null"/> when either the column or the row is unknown.
     /// </summary>
@@ -3822,6 +3809,20 @@ public class FakeDataWindowHost : DataWindowServiceHost
         return definition is null ? -1 : StoreItem(row, definition.Id, value);
     }
 
+    /// <summary>
+    /// The shared write path behind all seven <c>SetItem</c> overloads.
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="columnId">The column number.</param>
+    /// <param name="value">The value, boxed as handed over.</param>
+    /// <returns><c>-1</c> when the row does not exist; otherwise <see cref="SetItemResult"/>.</returns>
+    /// <remarks>
+    /// NO VALIDATION OF ANY KIND. The value is not checked against the column's type, is not coerced and
+    /// is not rejected, because the code under test relies on the host being permissive - the restore path
+    /// at <c>se_cst_dw.sru:L219</c> and <c>:L375</c> writes back an <c>any</c> and must land. The
+    /// out-of-range answer of <c>-1</c> is the one thing that is enforced, and it is enforced because a
+    /// real DataWindow enforces it.
+    /// </remarks>
     private int StoreItem(long row, long columnId, object? value)
     {
         List<FakeBufferRow> primary = BufferOf(DwBuffer.Primary);
@@ -4484,4 +4485,3 @@ public static class FakeDataWindowFixtures
         column.DropDownAllowEdit = "no";
     }
 }
-

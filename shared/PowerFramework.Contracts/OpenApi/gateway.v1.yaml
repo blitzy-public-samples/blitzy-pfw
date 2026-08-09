@@ -6,6 +6,24 @@
 #  SERVED BY         gateway-service, PowerFramework.Gateway, port 5105
 #  CONSUMED BY       External clients. This is the system's FIRST-EVER ingress.
 #
+#  WHAT THIS DOCUMENT IS, AND WHAT IT IS NOT - READ BEFORE ANY OPERATION DESCRIPTION BELOW
+#  ------------------------------------------------------------------------------------------------
+#  THIS IS THE CONTRACT. IT IS NOT A DESCRIPTION OF RUNNING CODE. Every description below - the
+#  health aggregation, the proxying of each /v1/datawindow operation onto its gRPC method, the status
+#  translation, the reserved 501 routes - states TARGET SEMANTICS: what an implementation of this
+#  boundary must do. It is written in the present tense throughout because that is how a contract is
+#  written, and the present tense must NOT be read as a report of behaviour that has been observed.
+#
+#  At the time of writing, in this repository: PowerFramework.Gateway has NO ENTRY POINT and does not
+#  compile (CS5001), so no endpoint of this document is implemented and none has ever answered a
+#  request; the Endpoints/ folder carries capability, ping and deferred-route metadata but no proxy
+#  endpoint; no service Dockerfile and no orchestration/docker-compose.yml exist, so there is no
+#  stack for an aggregated /health to aggregate; and no CI workflow exists. What IS verified about
+#  this file is what a static check can verify: it parses as OpenAPI 3.1, has zero unresolved internal
+#  references, and its schema set agrees with the proto files it projects - which is exactly what the
+#  contract tests in shared/PowerFramework.Contracts.Tests assert. docs/BUILD.md section 1 defines
+#  the four status labels this documentation set uses, and section 5.5 records what has been run.
+#
 #  WHY THIS DOCUMENT IS REST AND NOT gRPC
 #  ------------------------------------------------------------------------------------------------
 #  Gateway is the sole ingress, and an ingress needs three properties gRPC cannot give it: reach from
@@ -159,6 +177,26 @@ info:
     * The four reserved-route families are *not* among the exceptions: they require a token like every
       other `/v1` route, so an unauthenticated caller cannot enumerate the deferred roster.
 
+    ### The `401` is a cross-cutting outcome of the scheme, not a response any route produces
+
+    **Every operation that does not override the document-level requirement answers `401` to an
+    unauthenticated caller, and it answers it before the route runs.** The check belongs to the
+    authentication layer, so the `401` is a property of `bearerAuth` rather than something an operation
+    computes - and it is declared once, here and on the scheme, rather than being restated on every
+    operation. `x-cross-cutting-responses` below carries the same statement machine-readably.
+
+    Two consequences a consumer needs, because the convention is otherwise easy to misread:
+
+    * **A `401` is observable on operations that do not list one.** Most operations in this document DO
+      enumerate `401`, because they describe the problem BODY Gateway returns with it. The four reserved
+      route families deliberately do not, and their omission is not a claim that the status cannot occur
+      - it is a statement that those routes *evaluate nothing*, so `501` is the only outcome they
+      themselves produce. An unauthenticated request to one of them receives `401` from the scheme and
+      never reaches the route at all.
+    * **Where an operation states that its response set is exactly one status, that set describes what
+      the ROUTE produces.** The cross-cutting `401` sits outside it by construction, and reading such a
+      statement as "this path can never answer 401" would be wrong.
+
     **Gateway holds verification material only. It is not an issuer.** Security is the sole minter in
     the system, and Gateway validates inbound tokens with the stock
     `Microsoft.AspNetCore.Authentication.JwtBearer` handler pointed at Security's own
@@ -174,7 +212,7 @@ info:
 
     | Service | Port | Role in relation to this document |
     | --- | --- | --- |
-    | Persistence | **5101** | Not reachable through this document. Gateway never calls it |
+    | Persistence | **5101** | No operation of this document reaches it - Gateway never *calls* Persistence. Gateway does *read* its anonymous `/health` on this port, which is what lets `/health` here name all three upstreams |
     | DataServices | **5102** | The gRPC upstream every `/v1/datawindow` operation projects onto |
     | *(reserved)* | **5103** | **Deliberately unallocated** - see below |
     | Security | **5104** | The token issuer and the JWKS publisher Gateway verifies against |
@@ -288,6 +326,35 @@ info:
     authentication posture, **this document is authoritative for the wire** and the prose is corrected
     to match it.
 
+# ==================================================================================================
+#  CROSS-CUTTING RESPONSES - declared once, machine-readably, so a consumer does not have to infer the
+#  convention from prose and a generator does not have to guess it.
+#
+#  WHY THIS EXTENSION EXISTS RATHER THAN A `401` ON EVERY OPERATION. OpenAPI has no first-class way to
+#  say "the security scheme produces this status on every operation it guards", so the choice is between
+#  restating the response on all forty-six paths - including the four reserved families, whose whole
+#  point is that their own response set is a single status because they evaluate nothing - or declaring
+#  the convention once in a form a tool can read. This is the second. Operations that enumerate `401`
+#  do so to describe the problem BODY that accompanies it; this declaration covers the STATUS, which is
+#  observable on every guarded operation whether or not one is enumerated.
+# ==================================================================================================
+x-cross-cutting-responses:
+  - status: 401
+    appliesTo: every-operation-not-overriding-document-security
+    producedBy: bearerAuth
+    evaluatedBefore: route-handler
+    declaredPerOperation: partial
+    body: >-
+      application/problem+json where an operation enumerates the response; status-only where it does
+      not. No reserved-route operation enumerates it, because those routes evaluate nothing and their
+      own response set is exactly the single status they declare.
+    reason: >-
+      The authentication check runs in the pipeline before any route handler, so this status is a
+      property of the security scheme rather than an outcome a route computes. Declaring it once keeps
+      the reserved families' single-status response sets honest - a second declared status on one of
+      those would say the route evaluates something before answering, which is precisely what a
+      reserved route must not imply.
+
 servers:
   # ONE ENTRY, DELIBERATELY. Port 5105 is Gateway's listener per docs/ARCHITECTURE.md 4.1, and it is
   # the documented composition-root access URL the attached environment fixes. The other services'
@@ -379,10 +446,16 @@ paths:
         on the very service being probed and on Security's token issuance being already live, which is
         a circular dependency that cannot resolve during a cold start.
 
-        **`Degraded` and `Unhealthy` are different states and are reported differently.** A service
-        still completing startup validation is not the same as one whose dependency has failed.
-        `Degraded` is reported with 200 so a probe that tears down on any non-2xx does not kill a
-        service that is merely still starting; `Unhealthy` is reported with 503.
+        **`Degraded` and `Unhealthy` are different states, and the difference is carried in the body
+        rather than in the status code.** A service still completing startup validation is not the same
+        as one whose dependency has failed, and the `status` member keeps the two apart. **Only
+        `Healthy` is answered with 200**; `Degraded` means *not ready* and is answered with 503
+        alongside `Unhealthy`. The reason is mechanical rather than a matter of taste: what an
+        orchestrator observes is the status **code**, so a service answering 200 immediately after
+        saying it was not ready would satisfy a `service_healthy` condition and let Gateway start
+        before its upstreams were usable - defeating the readiness property this contract exists to
+        guarantee. A probe that tears down on any non-2xx is a *liveness* concern, which is a different
+        question from readiness and is not what this path answers.
       # OVERRIDES the document-level bearer requirement with an EMPTY REQUIREMENT LIST, and this is the
       # ONLY operation in the document that overrides it. `[]` is not interchangeable with `[{}]`: `[]`
       # says "no requirement applies", whereas `[{}]` says "one requirement applies and it is satisfied
@@ -393,18 +466,19 @@ paths:
       responses:
         '200':
           description: >-
-            Gateway is `Healthy` or `Degraded`. Both are 200 for the reason given above. The body
-            names each upstream with its own state, so a `Degraded` aggregate identifies which
-            upstream is responsible.
+            Gateway is `Healthy`, which is the only verdict answered with 200: Gateway itself and all
+            three upstreams are ready. The body names each upstream with its own state.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AggregateHealthReport'
         '503':
           description: >-
-            Gateway is `Unhealthy` - one of its three upstreams has failed, or Gateway's own startup
-            validation has. The failing participant is named in the problem `detail` and `retCode`
-            carries the corresponding legacy return code.
+            Gateway is **not ready** - `Degraded` or `Unhealthy`. One of its three upstreams is not
+            ready or has failed, or Gateway's own startup validation has not completed. The `status`
+            member of the report distinguishes the two verdicts; the status code does not, for the
+            reason given above. The participant responsible is named in the problem `detail` and
+            `retCode` carries the corresponding legacy return code.
           content:
             application/problem+json:
               schema:
@@ -1668,14 +1742,24 @@ paths:
         is supported **only** when both DataWindows are co-resident in the same expression session
         inside one DataServices instance.
 
-        A reference spanning sessions or service instances returns **`422`** with a defined error
-        rather than a wrong value. `422` rather than `400` because the request is well-formed and its
-        arguments are individually valid - what fails is a **semantic precondition** of the
-        distributed topology, and a caller needs to tell that apart from a malformed request in order
-        to know that retrying will not help.
+        A reference spanning sessions or service instances returns **`400`** with a defined error
+        rather than a wrong value, and the caller tells that outcome apart from an ordinary malformed
+        request by reading the body rather than by counting statuses: `retCode` carries the
+        originating return code and the expression-error category is
+        `CATEGORY_FOREIGN_REFERENCE_BLOCKED`. A caller receiving it must not retry - the topology, not
+        the request, is what rejected it.
+
+        A distinct unprocessable-entity status is the intuitive reading, because the request is
+        well-formed and its arguments are individually valid, and it is **deliberately not used**. The
+        `CrossSessionReferenceBlocked` response records that decision in full, together with the
+        sanctioned status set it follows from, and is the one place it is recorded - so this operation
+        states the outcome its callers branch on and points there, rather than restating the reasoning
+        and drifting from it. No status this operation names in prose is absent from its `responses`
+        block, which is the property `GatewayContractTests` enforces.
 
         The legacy documentation notes that a foreign variable **requires** dynamic expansion, which
-        this contract enforces: a static foreign reference is rejected as `400`.
+        this contract enforces: a static foreign reference is rejected as `400` as well, with its own
+        return code.
       requestBody:
         required: true
         content:
@@ -2112,13 +2196,24 @@ paths:
         request/response direction to project at all. Neither has a REST path here, and the introduction
         names them individually so the gap is checkable.
 
-        ## The sequence value is for DETECTION, never for reordering
+        ## The sequence value carries reorder authority here, and that is pattern (a)
 
-        These events are notifications rather than a vetoable chain, so a consumer may process them as
-        they arrive. It may **not** reorder them: an out-of-order arrival is a hard error in this
-        contract, not a reorder opportunity. The distinction matters because the item-change and
-        validation chain on C-03 - which is *not* projected - depends on strict ordering for
-        correctness, and a consumer that learned to reorder here would carry the habit there.
+        This stream is under **`ORDERING_DISCIPLINE_SEQUENCED`** - pattern (a) of the two disciplines
+        `docs/CONTRACTS.md` 6.6 assigns per capability area, and the discipline is named on the response
+        itself in `x-ordering-discipline` so a consumer reads it from the contract rather than inferring
+        it from the event identity. These events are notifications rather than a vetoable chain: they
+        carry no cross-event state, so the token is what a consumer uses to **detect a gap and, if it
+        chooses, to reorder**. Processing them as they arrive is equally valid.
+
+        **The other discipline is the one that forbids reordering, and the difference is the point.**
+        Pattern (b), `ORDERING_DISCIPLINE_SYNCHRONOUS`, governs the item-change and validation chain on
+        C-03 - which is *not* projected here - and there the token is for **detection only**: an
+        out-of-order arrival is a hard error that fails the session, never a reorder opportunity, because
+        the validation-error handler consumes state the preceding item-change event stashed and a
+        re-sorted chain reads a stash written by the wrong predecessor. So a consumer must not carry
+        either habit across: reordering is permitted where the discipline says SEQUENCED and is a fault
+        where it says SYNCHRONOUS. Reading the discipline is how you tell, which is why it is on the
+        wire.
       requestBody:
         required: true
         content:
@@ -2168,21 +2263,34 @@ paths:
   #  had crept in, which is precisely what C-D forbids. Diffing them against each other is therefore a
   #  meaningful audit, and it is meant to be performed.
   #
-  #  WHY THE RESPONSE SET IS EXACTLY {501} AND CARRIES NO 401.
-  #  The document-level bearer requirement still applies to all eight operations - none of them
-  #  overrides it, so the deferred roster is NOT anonymously enumerable. What an unauthenticated request
-  #  meets is the authentication middleware, which is a cross-cutting concern declared once at the
-  #  security scheme; it is not a response this ROUTE produces. The route itself has exactly one
-  #  outcome, unconditionally, for every method and every path remainder, and declaring that single
-  #  outcome is the sharpest available statement that nothing is implemented behind it. A second status
-  #  in the set would suggest the route evaluates something before answering.
+  #  WHY THE RESPONSE SET IS {401, 501} AND WHY 501 IS STILL THE ONLY OUTCOME THE ROUTE PRODUCES.
+  #  These two statuses are not two outcomes of one handler; they are the two things a caller can
+  #  actually receive, and both belong in the contract because a generated client and a conformance tool
+  #  are told the response set is exhaustive.
+  #
+  #    401  What an UNAUTHENTICATED request meets. The document-level bearer requirement applies to all
+  #         eight operations and none overrides it, so the deferred roster is not anonymously
+  #         enumerable - the request is refused by the authentication middleware BEFORE any handler
+  #         runs. An earlier revision declared {501} alone on the reasoning that a cross-cutting concern
+  #         is not a response this ROUTE produces. The reasoning is sound about where the refusal comes
+  #         from and wrong about what a consumer needs: a client generated from a set that omits 401 is
+  #         told these operations cannot return the status they demonstrably do return, and a
+  #         conformance tool checking response coverage reports a violation against a correct server.
+  #    501  The only HANDLER result, and it is unconditional - every method, every path remainder, no
+  #         evaluation of anything. That is the property the compliance position rests on, and it is
+  #         unaffected by declaring the pre-handler refusal beside it.
+  #
+  #  WHAT WOULD STILL BE A VIOLATION, STATED SO THE LINE IS AUDITABLE: any 2xx, which would say part of
+  #  a deferred service had been built; and any 4xx OTHER than the 401 above, which would say the route
+  #  evaluates the request before answering. Neither appears. The eight declarations remain identical in
+  #  shape, so diffing them against each other is still a meaningful audit.
   # ================================================================================================
 
   /v1/design/{path}:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedDesignSystemGet
+      operationId: reservedDesignSystem
       x-contract-id: C-09
       x-deferred-service: DesignSystem
       x-reserved-marker: reserved for Phase 2
@@ -2221,12 +2329,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
     post:
@@ -2269,12 +2384,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -2282,7 +2404,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedDocumentsGet
+      operationId: reservedDocuments
       x-contract-id: C-09
       x-deferred-service: Documents
       x-reserved-marker: reserved for Phase 2
@@ -2319,12 +2441,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
     post:
@@ -2365,12 +2494,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -2378,7 +2514,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedIntegrationGet
+      operationId: reservedIntegration
       x-contract-id: C-09
       x-deferred-service: Integration
       x-reserved-marker: reserved for Phase 2
@@ -2415,12 +2551,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
     post:
@@ -2461,12 +2604,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -2474,7 +2624,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedScriptBridgeGet
+      operationId: reservedScriptBridge
       x-contract-id: C-09
       x-deferred-service: ScriptBridge
       x-reserved-marker: reserved for Phase 2
@@ -2512,12 +2662,19 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
     post:
@@ -2559,18 +2716,28 @@ paths:
 
         The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
         sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
-        on structured members rather than parsing prose. The response set is exactly `501`: the route
-        answers unconditionally, for every method and every path remainder. A token is nonetheless
-        required - this operation does not override the document-level requirement - because the body
-        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
-        caller.
+        on structured members rather than parsing prose. **`501` is the only outcome this route
+        produces**, unconditionally, for every method and every path remainder - nothing behind it
+        evaluates anything.
+
+        A token is nonetheless required - this operation does not override the document-level bearer
+        requirement - because the body names a Phase-2 plan and an anonymous reserved route would publish
+        it to any unauthenticated caller. So `401` is declared beside `501`: it is what an
+        unauthenticated request actually receives, from the authentication middleware and before any
+        handler runs. Declaring it does not make the route conditional; omitting it would tell a
+        generated client that these operations cannot return a status they demonstrably do.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
 components:
 
   securitySchemes:
+    # Presenting no token, or an invalid one, yields `401` on every operation this scheme guards -
+    # produced here, before any route handler runs. See `x-cross-cutting-responses` at document level
+    # for the machine-readable form and for why the reserved families do not enumerate it.
     bearerAuth:
       type: http
       scheme: bearer
@@ -2819,14 +2986,19 @@ components:
         one keeps the error path out of hand-written code, for the same reason token validation is
         left to the stock bearer handler.
 
-        ## Three extension members, and why RFC 9457 permits them
+        ## Four extension members, and why RFC 9457 permits them
 
         `retCode` carries the legacy PowerFramework return code, `upstream` names which upstream a
-        forwarded failure came from, and `dbError` carries the database-layer detail **when, and only
-        when, the failure originated in the data path**. RFC 9457 explicitly permits extension members,
-        which is why this schema - alone in this document apart from its own conflict specialization and
-        the delegated `ProtoPayload` - sets `additionalProperties: true` rather than `false`. A consumer
-        must ignore any member it does not recognise.
+        forwarded failure came from, `dbError` carries the database-layer detail **when, and only when,
+        the failure originated in the data path**, and `traceId` carries the correlation identifier
+        that locates the operator record for this occurrence. RFC 9457 explicitly permits extension
+        members, which is why this schema - alone in this document apart from its own conflict
+        specialization and the delegated `ProtoPayload` - sets `additionalProperties: true` rather than
+        `false`. A consumer must ignore any member it does not recognise.
+
+        `traceId` is declared rather than merely tolerated by that openness, and deliberately so: it is
+        the only member through which a caller can reach anything this body withholds, so a caller needs
+        a contractual basis for reading it. Its own description states the guarantee in full.
 
         **`dbError.sqlsyntax` is redacted**, and that is a contract commitment rather than an
         implementation detail: the legacy field carries the complete generated statement with
@@ -2974,6 +3146,29 @@ components:
             Which upstream service the failure originated from, when it originated from one. Present
             on `502` and on any status the projection forwarded, so an operator can attribute the
             failure without correlating logs. Absent when Gateway itself produced the response.
+        traceId:
+          type: string
+          description: |-
+            The correlation identifier for this occurrence: the **one thing a caller is given with
+            which to obtain the detail this body deliberately withholds**.
+
+            It is the ambient distributed-trace identifier when the request carried one - in which case
+            it is the `traceparent` `trace-id` in its `W3C` hexadecimal form and correlates this
+            occurrence with every other service's record of the same operation - and Gateway's own
+            per-request identifier otherwise.
+
+            ## Why this member is load-bearing rather than decorative
+
+            `detail` is fixed prose on a `500` and names nothing about the fault, by design: no stack
+            trace, no exception message, no host, no port, no path and no key material reaches a
+            caller. That redaction is only defensible because it is a REDIRECTION - the full diagnostic
+            exists on the operator channel and this identifier is what locates it. So the value here is
+            **the same value** that appears in the operator record for the same occurrence, resolved
+            once before either is written; a caller quoting it to an operator will always find a record.
+
+            Present on every problem-details response Gateway produces itself. It can be absent only if
+            the host supplies no request identifier at all, which is a configuration this service does
+            not ship.
 
     ConflictProblemDetails:
       title: ConflictProblemDetails
@@ -3074,6 +3269,14 @@ components:
     #  Schema type array, which OpenAPI 3.1 supports natively - there is no `nullable` keyword and no
     #  3.0-only construct anywhere in this document. 32-bit fields are plain integers, because the
     #  mapping emits them as JSON numbers.
+    #
+    #  AND THE SIGNEDNESS TRAVELS WITH THEM: `format` IS `int64` FOR A SIGNED FIELD AND `uint64` FOR AN
+    #  UNSIGNED ONE. The two are not interchangeable and the difference is not cosmetic. A `uint64`
+    #  declared `int64` produces a signed 64-bit generated model, and every value above
+    #  `Int64.MaxValue` - half the legacy `unsignedlong` domain - is then rejected by validation or
+    #  wrapped to a negative number, silently. Both formats are in the OpenAPI Formats Registry, so
+    #  naming the right one costs nothing; `AnyValue.uint64Value` additionally states `minimum` and
+    #  `maximum` so the domain is machine-checkable rather than inferred from a format name.
     # ==============================================================================================
 
     DwBuffer:
@@ -3223,8 +3426,19 @@ components:
           description: A legacy `long` or `integer`, widened. Emitted as a string by the canonical mapping.
         uint64Value:
           type: [integer, string]
-          format: int64
-          description: A legacy `unsignedlong`. Emitted as a string by the canonical mapping.
+          format: uint64
+          minimum: 0
+          maximum: 18446744073709551615
+          description: >-
+            A legacy `unsignedlong`. Emitted as a string by the canonical mapping.
+
+            THE FORMAT IS `uint64` AND NOT `int64`, WHICH IS A CORRECTION RATHER THAN A DETAIL. The
+            protobuf field is `uint64`, whose domain runs to 18446744073709551615 - more than twice
+            `Int64.MaxValue`. Declared `int64` a generator emits a signed 64-bit model for it, and every
+            value in the upper half of the legacy domain is then either rejected by validation or
+            wrapped to a negative number, silently, on a member whose whole purpose is to carry a value
+            the sender could not express as signed. `minimum` and `maximum` are stated so the domain is
+            machine-checkable rather than implied by the format name alone.
         doubleValue:
           type: number
           format: double
@@ -3891,24 +4105,67 @@ components:
                 calculation cache is tri-state, so "unknown" and "no" are different answers and this flag
                 overrides both.
 
+    OrderingDiscipline:
+      title: OrderingDiscipline
+      type: string
+      enum: [ORDERING_DISCIPLINE_UNSPECIFIED, ORDERING_DISCIPLINE_SYNCHRONOUS, ORDERING_DISCIPLINE_SEQUENCED]
+      x-enum-varnames: [ORDERING_DISCIPLINE_UNSPECIFIED, ORDERING_DISCIPLINE_SYNCHRONOUS, ORDERING_DISCIPLINE_SEQUENCED]
+      x-enum-values: [0, 1, 2]
+      description: |-
+        Which of the two ordering patterns governs a stream, mirrored from
+        `dataservices.v1.OrderingDiscipline`. Event ordering is the highest risk in this migration and
+        the resolution is to choose **per capability area** between two patterns, so the choice has to be
+        readable from the wire rather than from a table a consumer keeps privately in step.
+
+        | Member | Number | Rule for an out-of-order arrival |
+        | --- | --- | --- |
+        | `ORDERING_DISCIPLINE_UNSPECIFIED` | 0 | Not supplied. A fault on any stream that carries this type |
+        | `ORDERING_DISCIPLINE_SYNCHRONOUS` | 1 | **Pattern (b).** A HARD ERROR that fails the session. Reordering is not merely disallowed, it is semantically impossible - the validation-error handler reads and clears state the preceding item-change event stashed |
+        | `ORDERING_DISCIPLINE_SEQUENCED` | 2 | **Pattern (a).** A gap or reversal a consumer MAY detect and reorder on, because these events carry no cross-event state |
+
+        `docs/CONTRACTS.md` 6.6 assigns the two per capability area with the evidence for each. **The two
+        rules are opposite**, which is why the discipline travels as data: an implementation that applied
+        the wrong one would either reorder a chain that must not be reordered or fail a stream that may
+        be, and both look like correct behaviour from inside the consumer.
+
     EventStreamResponse:
       type: object
       title: EventStreamResponse
-      description: >-
+      x-ordering-discipline: ORDERING_DISCIPLINE_SEQUENCED
+      description: |-
         One element of the projected expression event sequence, mirrored from
-        `dataservices.v1.EventStreamResponse`. The sequence value is monotonic and is carried **for
-        detection**: a consumer uses it to notice a gap, never to reorder. These events are
-        notifications rather than a vetoable chain, which is why they project at all - the ordered
-        item-change and validation chain on C-03 does not.
+        `dataservices.v1.EventStreamResponse`.
+
+        **This stream is pattern (a), `ORDERING_DISCIPLINE_SEQUENCED`**, stated on the schema in
+        `x-ordering-discipline` rather than left to be inferred. These events are notifications rather
+        than a vetoable chain and carry no cross-event state, which is both why they project at all and
+        why the monotonic sequence value carries **reorder authority**: a consumer uses it to detect a
+        gap and may reorder on it, or may process elements as they arrive.
+
+        The contrast is pattern (b), `ORDERING_DISCIPLINE_SYNCHRONOUS`, which governs the item-change and
+        validation chain on C-03 and is **not** projected here. Under that discipline the same kind of
+        token is for detection only and an out-of-order arrival is a hard error that fails the session.
+        `docs/CONTRACTS.md` 6.6 assigns the two disciplines per capability area and
+        `dataservices.v1.OrderingDiscipline` is the enumeration behind both names.
       additionalProperties: false
-      required: [event, sequence]
+      required: [event, sequence, discipline]
       properties:
         event:
           $ref: '#/components/schemas/ColumnExpEvent'
         sequence:
           type: [integer, string]
           format: int64
-          description: The event's monotonic sequence number, for gap detection only.
+          description: >-
+            The event's monotonic sequence number. Under this stream's SEQUENCED discipline it is
+            usable for gap detection AND for reordering; under the SYNCHRONOUS discipline that governs
+            C-03's item-change chain the equivalent token is for detection only.
+        discipline:
+          allOf:
+            - $ref: '#/components/schemas/OrderingDiscipline'
+          description: >-
+            Always `ORDERING_DISCIPLINE_SEQUENCED` on this stream. Carried as a member rather than left
+            to be inferred from the event identity, so a consumer's ordering behaviour is driven by data
+            it already holds.
 
     ExpressionEventStreamResult:
       title: ExpressionEventStreamResult
@@ -4263,6 +4520,11 @@ components:
         Gateway reports `Healthy` only after Persistence, DataServices and Security all do. The
         aggregate names each upstream with its own state rather than returning one opaque verdict,
         because an operator reading a failed aggregate needs to know which upstream is responsible.
+
+        Gateway observes each upstream's anonymous `/health` and composes the three verdicts. **That
+        observation is not a call into any upstream's capability**, which is what lets this aggregate
+        name Persistence while Gateway never calls Persistence: the probe addresses are configured as a
+        separate group from the two services Gateway invokes, and Gateway holds no Persistence client.
       additionalProperties: false
       required: [status, service, upstreams]
       properties:
@@ -4274,10 +4536,12 @@ components:
             The aggregate verdict, carrying the distinction contract C-10 requires between "not ready"
             and "unhealthy":
 
-            - `Healthy` - Gateway and all three upstreams are ready. Reported with HTTP 200.
+            - `Healthy` - Gateway and all three upstreams are ready. Reported with HTTP 200, and the
+              only verdict that is.
             - `Degraded` - **not ready**, but not failed. Gateway is still completing startup
-              validation, or an upstream is. Reported with HTTP 200, so a probe that tears down on any
-              non-2xx does not kill a service that is merely still starting.
+              validation, or an upstream is. Reported with HTTP **503**, because not ready is not
+              ready: the readiness gate observes the status code, so answering 200 here would let a
+              dependent start against an aggregate that had just said it was not usable.
             - `Unhealthy` - **failed**. Reported with HTTP 503.
         service:
           type: string
@@ -4531,12 +4795,30 @@ components:
         prose - which is the whole point of declaring the routes: the shape of the eventual system is
         legible from this contract, while nothing is implemented behind it.
       additionalProperties: false
-      required: [status, deferredService, marker, route, retCode]
+      required: [status, service, deferredService, marker, route, retCode]
       properties:
         status:
           type: integer
           const: 501
           description: Always 501. Repeated in the body so a logged body is self-describing.
+        service:
+          type: string
+          enum: [DesignSystem, Documents, Integration, ScriptBridge]
+          x-enum-varnames: [DesignSystem, Documents, Integration, ScriptBridge]
+          description: |-
+            The deferred service this route will eventually reach. **The same value as
+            `deferredService`, and it is retained because it is the member this document published for
+            `v1` first.**
+
+            AN UNVERSIONED WIRE MEMBER IS NOT A NAME TO IMPROVE. A later revision introduced
+            `deferredService` for a real reason - `service` already means the *responding* service on
+            `PingResponse` and an *upstream* service on `UpstreamHealth`, and a third meaning on one word
+            makes a body ambiguous in exactly the place a client branches on it - and then removed
+            `service`. That silently broke every `v1` consumer reading it, under a version number that
+            promises it did not change. Both members are therefore emitted, carrying the identical value:
+            a consumer written against the original contract keeps working, and one written against the
+            unambiguous name gets it. Neither is deprecated in `v1`; retiring `service` is a `v2`
+            decision, not a tidying one.
         deferredService:
           type: string
           enum: [DesignSystem, Documents, Integration, ScriptBridge]
@@ -4551,12 +4833,15 @@ components:
             nothing beyond the name is permitted, because anything further would begin to describe a
             capability that must not be modelled.
 
-            The member is spelled `deferredService` rather than `service` deliberately: `service` is
-            already used in this document for the **responding** service (`PingResponse`) and for an
-            **upstream** service (`UpstreamHealth`), and a third meaning on the same word would make a
-            body ambiguous in exactly the place a client branches on it. It also matches the
-            `x-deferred-service` extension each reserved operation carries, so the wire member and the
-            routing metadata read the same.
+            The unambiguous spelling, and the one to prefer in new code: `service` is already used in
+            this document for the **responding** service (`PingResponse`) and for an **upstream** service
+            (`UpstreamHealth`), and a third meaning on the same word would make a body ambiguous in
+            exactly the place a client branches on it. It also matches the `x-deferred-service` extension
+            each reserved operation carries, so the wire member and the routing metadata read the same.
+
+            It does not REPLACE `service` in `v1`, it accompanies it. Both are emitted with the identical
+            value; see `service` above for why removing the original member was a compatibility break
+            rather than a rename.
         marker:
           type: string
           const: reserved for Phase 2

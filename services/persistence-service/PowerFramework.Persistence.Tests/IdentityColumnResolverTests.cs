@@ -26,6 +26,9 @@
 //  production code under test names no table, no column and no column count.
 // ==============================================================================================
 
+using System.Collections.Immutable;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using PowerFramework.Persistence.Concurrency;
 
 namespace PowerFramework.Persistence.Tests;
@@ -650,7 +653,9 @@ public sealed class IdentityColumnResolverTests
 
         IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
 
-        Assert.NotNull(outcome.Identity);
+        // ONE call of the per-table resolve fires the callback at most once [:L243], so exactly one
+        // ordered block - the N-block case belongs to ResolveTables.
+        _ = Assert.Single(outcome.Identity);
 
         // Exactly two short-form reads, both naming the discovered one-based column and no buffer.
         Assert.Equal(
@@ -774,7 +779,7 @@ public sealed class IdentityColumnResolverTests
 
         IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
 
-        Assert.Null(outcome.Identity);
+        Assert.Empty(outcome.Identity);
         Assert.Empty(source.DescribeReads);
         Assert.Empty(source.StatusReads);
         Assert.Empty(source.TwoArgumentValueReads);
@@ -802,7 +807,7 @@ public sealed class IdentityColumnResolverTests
 
         IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
 
-        Assert.Null(outcome.Identity);
+        Assert.Empty(outcome.Identity);
         Assert.NotEmpty(source.DescribeReads);
         Assert.Empty(source.StatusReads);
         Assert.Equal(new UpdateRowCounts(4L, 1L, 2L), outcome.Counts);
@@ -841,7 +846,7 @@ public sealed class IdentityColumnResolverTests
         source.FilterRows.AddRange([new FakeIdentityRow(ItemStatus.NotModified, 2L)]);
 
         Assert.Null(IdentityColumnResolver.CollectIdentityData(source, 1));
-        Assert.Null(IdentityColumnResolver.Resolve(source, source).Identity);
+        Assert.Empty(IdentityColumnResolver.Resolve(source, source).Identity);
     }
 
     /// <summary>
@@ -980,9 +985,10 @@ public sealed class IdentityColumnResolverTests
 
         IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
 
-        Assert.NotNull(outcome.Identity);
-        Assert.Equal<long?>([11L], outcome.Identity.PrimaryValues);
-        Assert.Equal<long?>([22L], outcome.Identity.FilterValues);
+        ResolvedIdentityColumnData block = Assert.Single(outcome.Identity);
+
+        Assert.Equal<long?>([11L], block.PrimaryValues);
+        Assert.Equal<long?>([22L], block.FilterValues);
         Assert.All(source.StatusReads, read => Assert.Equal(1L, read.Row));
     }
 
@@ -1053,8 +1059,7 @@ public sealed class IdentityColumnResolverTests
         source.FilterRows.AddRange([NewRow(901L), NewRow(902L)]);
 
         ResolvedIdentityColumnData payload =
-            Assert.IsType<ResolvedIdentityColumnData>(
-                IdentityColumnResolver.Resolve(source, source).Identity);
+            Assert.Single(IdentityColumnResolver.Resolve(source, source).Identity);
 
         (long id, IReadOnlyList<long?> primary, IReadOnlyList<long?> filter) = payload;
 
@@ -1232,6 +1237,239 @@ public sealed class IdentityColumnResolverTests
             () => IdentityColumnResolver.Resolve(source, null!));
         Assert.Throws<ArgumentNullException>(
             () => IdentityColumnResolver.BuildColumnDbNamePrefix(null!));
+        Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.ResolveTables(null!));
+
+        // A null surface INSIDE an element is the same structural fault as a null argument, and it is
+        // reported against the collection parameter because that is what the caller passed.
+        ArgumentNullException missingMetadata = Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.ResolveTables([new IdentityTableSurfaces(null!, source)]));
+        ArgumentNullException missingValues = Assert.Throws<ArgumentNullException>(
+            () => IdentityColumnResolver.ResolveTables([new IdentityTableSurfaces(source, null!)]));
+
+        Assert.Equal("tables", missingMetadata.ParamName);
+        Assert.Equal("tables", missingValues.ParamName);
+    }
+
+    #endregion
+
+    #region Multi-table - N ORDERED identity blocks, which a singular outcome could not carry
+
+    // ==========================================================================================
+    //  THE CARDINALITY THIS REGION EXISTS TO PIN
+    //  ----------------------------------------------------------------------------------------
+    //  `_of_Update` fires the identity callback AT MOST ONCE [:L243], but the task that drives it
+    //  calls it ONCE PER UPDATE TABLE:
+    //
+    //      if _bMultiTableUpdate then
+    //          nCount = UpperBound(Tables)                                          [:L358]
+    //          for nIndex = 1 to nCount                                             [:L364]
+    //              rtCode = _of_UpdatePrepare(data,nIndex)                          [:L365]
+    //              rtCode = _of_Update(data)                                        [:L367]
+    //          next
+    //
+    //  and the caller-side proxy APPENDS every firing to an ordered array and later REPLAYS EVERY
+    //  ELEMENT [n_cst_threading_task_sqlupdate.sru:L45, L73-L76, L128, L142-L195]. The counts are
+    //  accumulated with `+=` in the same place [:L66-L68].
+    //
+    //  SO THE SOURCE CARDINALITY IS 0..N ORDERED, AND EACH ELEMENT CARRIES ITS OWN COLUMN ORDINAL -
+    //  because `_of_UpdatePrepare` re-describes the one carrier per table [:L103-L145], so the
+    //  discovered column legitimately differs between them. A singular outcome would have kept one
+    //  block and dropped the rest: DATA LOSS THAT RETURNS A PLAUSIBLE ANSWER, since no count would
+    //  disagree with it. Every test below would pass against a singular model only if it happened to
+    //  be given one table, which is exactly why the multi-table cases are stated explicitly.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Three tables that each collect identities yield THREE blocks, in the order the tables were
+    /// supplied, each carrying its own column ordinal and its own two arrays.
+    /// </summary>
+    [Fact]
+    public void ThreeTablesYieldThreeBlocksInTableOrderEachWithItsOwnColumn()
+    {
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.ResolveTables(
+        [
+            TableCollecting(identityOrdinal: 1, primary: [11L], filter: [12L]),
+            TableCollecting(identityOrdinal: 3, primary: [21L, 22L], filter: []),
+            TableCollecting(identityOrdinal: 6, primary: [], filter: [31L, 32L, 33L]),
+        ]);
+
+        Assert.Equal(3, outcome.Identity.Length);
+
+        // ORDER, asserted as a sequence rather than as a set: the ordinals are what identify which
+        // table each block came from, so a re-ordering is detectable here and nowhere else.
+        Assert.Equal([1L, 3L, 6L], outcome.Identity.Select(static block => block.IdentityColumnId));
+
+        Assert.Equal<long?>([11L], outcome.Identity[0].PrimaryValues);
+        Assert.Equal<long?>([12L], outcome.Identity[0].FilterValues);
+
+        Assert.Equal<long?>([21L, 22L], outcome.Identity[1].PrimaryValues);
+        Assert.Empty(outcome.Identity[1].FilterValues);
+
+        Assert.Empty(outcome.Identity[2].PrimaryValues);
+        Assert.Equal<long?>([31L, 32L, 33L], outcome.Identity[2].FilterValues);
+    }
+
+    /// <summary>
+    /// A table that collects NOTHING contributes NO block, so the surviving blocks stay contiguous and
+    /// in order - the list is shorter rather than carrying an empty element.
+    /// </summary>
+    /// <remarks>
+    /// This is the emit guard [<c>:L242-L244</c>] holding across the loop. Synthesising a placeholder
+    /// block for the middle table would give it a legacy counterpart it does not have, and would make
+    /// the block index look like a table index - which it is not, and must not become.
+    /// </remarks>
+    [Fact]
+    public void ATableThatCollectsNothingContributesNoBlock()
+    {
+        RecordingIdentitySource barren = FixtureSource();
+        barren.InsertedCount = 2L;
+        barren.PrimaryRows.AddRange([new FakeIdentityRow(ItemStatus.NotModified, 99L)]);
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.ResolveTables(
+        [
+            TableCollecting(identityOrdinal: 1, primary: [11L], filter: []),
+            new IdentityTableSurfaces(barren, barren),
+            TableCollecting(identityOrdinal: 5, primary: [31L], filter: []),
+        ]);
+
+        Assert.Equal(2, outcome.Identity.Length);
+        Assert.Equal([1L, 5L], outcome.Identity.Select(static block => block.IdentityColumnId));
+    }
+
+    /// <summary>
+    /// The counts are SUMMED across the tables, never overwritten by the last one - the caller-side
+    /// handler accumulates with <c>+=</c> [<c>n_cst_threading_task_sqlupdate.sru:L66-L68</c>].
+    /// </summary>
+    [Fact]
+    public void TheCountsAreAccumulatedAcrossTablesRatherThanOverwritten()
+    {
+        RecordingIdentitySource first = FixtureSource();
+        first.InsertedCount = 1L;
+        first.UpdatedCount = 2L;
+        first.DeletedCount = 3L;
+
+        RecordingIdentitySource second = FixtureSource();
+        second.InsertedCount = 10L;
+        second.UpdatedCount = 20L;
+        second.DeletedCount = 30L;
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.ResolveTables(
+        [
+            new IdentityTableSurfaces(first, first),
+            new IdentityTableSurfaces(second, second),
+        ]);
+
+        Assert.Equal(new UpdateRowCounts(11L, 22L, 33L), outcome.Counts);
+    }
+
+    /// <summary>
+    /// The single-table arm goes through the same code path and produces exactly what
+    /// <see cref="IdentityColumnResolver.Resolve"/> alone produces - so there is no second
+    /// implementation to keep in step. The oracle's own <c>else</c> branch is one call [<c>:L371</c>].
+    /// </summary>
+    [Fact]
+    public void OneTableProducesTheSameOutcomeAsThePerTableResolve()
+    {
+        IdentityTableSurfaces only = TableCollecting(identityOrdinal: 1, primary: [7L], filter: [8L]);
+
+        IdentityResolutionOutcome throughTheLoop = IdentityColumnResolver.ResolveTables([only]);
+        IdentityResolutionOutcome direct = IdentityColumnResolver.Resolve(only.Metadata, only.Values);
+
+        // Re-reading the same surfaces is safe: the recording fake answers from stored state rather
+        // than consuming it, so the second pass sees the same rows the first did.
+        Assert.Equal(direct.Counts, throughTheLoop.Counts);
+
+        ResolvedIdentityColumnData expected = Assert.Single(direct.Identity);
+        ResolvedIdentityColumnData actual = Assert.Single(throughTheLoop.Identity);
+
+        Assert.Equal(expected.IdentityColumnId, actual.IdentityColumnId);
+        Assert.Equal(expected.PrimaryValues, actual.PrimaryValues);
+        Assert.Equal(expected.FilterValues, actual.FilterValues);
+    }
+
+    /// <summary>
+    /// No table at all answers the empty outcome rather than a second diagnostic: the oracle rejects an
+    /// empty table list one level up, in the task loop [<c>:L359-L362</c>], not here.
+    /// </summary>
+    [Fact]
+    public void NoTablesAnswersTheEmptyOutcome()
+    {
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.ResolveTables([]);
+
+        Assert.Empty(outcome.Identity);
+        Assert.Equal(default, outcome.Counts);
+    }
+
+    /// <summary>
+    /// The accumulated block list cannot be re-ordered by a consumer after the fact, because it is an
+    /// immutable array rather than a mutable list. Re-ordering is the one mutation that would pair
+    /// identity values with the wrong column while leaving every count intact.
+    /// </summary>
+    [Fact]
+    public void TheAccumulatedBlockListIsImmutable()
+    {
+        // The member is internal, reachable through InternalsVisibleTo, so the lookup has to say so -
+        // the default overload searches public members only and would answer null.
+        PropertyInfo identity = typeof(IdentityResolutionOutcome).GetProperty(
+            nameof(IdentityResolutionOutcome.Identity),
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+
+        Assert.NotNull(identity);
+        Assert.Equal(typeof(ImmutableArray<ResolvedIdentityColumnData>), identity.PropertyType);
+
+        // INIT-ONLY, so an accumulated outcome cannot be reassigned after construction either. An
+        // `init` accessor is a setter whose return parameter carries the IsExternalInit required
+        // modifier - which is how the distinction from a plain `set` is expressed in metadata.
+        MethodInfo setter = Assert.IsAssignableFrom<MethodInfo>(identity.SetMethod);
+
+        Assert.Contains(typeof(IsExternalInit), setter.ReturnParameter.GetRequiredCustomModifiers());
+    }
+
+    /// <summary>
+    /// Builds one table's surfaces: an identity column at <paramref name="identityOrdinal"/>, and rows
+    /// whose identity values are <paramref name="primary"/> in the Primary buffer and
+    /// <paramref name="filter"/> in the Filter buffer.
+    /// </summary>
+    /// <param name="identityOrdinal">The one-based column ordinal to mark as the identity column.</param>
+    /// <param name="primary">The Primary buffer's identity values, in collection order.</param>
+    /// <param name="filter">
+    /// The Filter buffer's identity values, in the order the resolver must REPORT them. Supplied
+    /// reversed to the fake, because the Filter buffer is walked BACKWARD [<c>:L237</c>] - which keeps
+    /// each test's expectation readable while still driving the inverted walk.
+    /// </param>
+    /// <returns>The surfaces, with one object serving both roles as the legacy's single carrier does.</returns>
+    private static IdentityTableSurfaces TableCollecting(
+        int identityOrdinal,
+        long?[] primary,
+        long?[] filter)
+    {
+        RecordingIdentitySource source = new()
+        {
+            UpdateTable = FixtureTable,
+            ColumnCount = FixtureColumns.Length,
+            InsertedCount = primary.Length + filter.Length,
+        };
+
+        for (int ordinal = ItemStatusMachine.FirstColumnNumber;
+            ordinal <= FixtureColumns.Length;
+            ordinal++)
+        {
+            source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(ordinal)] =
+                FixtureColumns[ordinal - ItemStatusMachine.FirstColumnNumber];
+        }
+
+        MarkIdentity(
+            source,
+            identityOrdinal,
+            FixtureColumns[identityOrdinal - ItemStatusMachine.FirstColumnNumber]);
+
+        source.PrimaryRows.AddRange(primary.Select(NewRow));
+
+        // Reversed on the way in, so that the BACKWARD walk reports them in the supplied order.
+        source.FilterRows.AddRange(filter.Reverse().Select(NewRow));
+
+        return new IdentityTableSurfaces(source, source);
     }
 
     #endregion

@@ -99,8 +99,9 @@
 //  PROHIBITIONS OBSERVED
 //      No timing, no clock read, no GUID, no random value, no thread, no file, no network and no
 //      database access anywhere in this file. No SCREAMING_SNAKE member is declared: the repository root
-//      .editorconfig scopes its CA1707 and IDE1006 suppressions to seven named IMPLEMENTATION files and
-//      to no test file at all, so such a member would be a build error under warnings-as-errors.
+//      .editorconfig scopes its CA1707 and IDE1006 suppressions to the named IMPLEMENTATION files on its
+//      BAND 3 roster - the single source of truth for that list - and to no test file at all, so such a
+//      member would be a build error under warnings-as-errors.
 // =====================================================================================================
 
 using System;

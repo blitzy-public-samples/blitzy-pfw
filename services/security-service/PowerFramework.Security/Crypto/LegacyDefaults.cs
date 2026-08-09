@@ -185,23 +185,72 @@
 //  not merely discouraged. Integrity, where a caller needs it, is a separate keyed-hash call over
 //  the ciphertext using the HMAC surface the legacy already publishes at L23-L26.
 //
-//  DECISION D3 - THE EIGHT MODE-WITHOUT-IV OVERLOADS USE AN ALL-ZERO IV OF THE BLOCK LENGTH
+//  DECISION D3 - THE UNPROVABLE CELLS ARE BLOCKED, NOT GUESSED: IV-LESS CBC, AND CFB ENTIRELY
 //  --------------------------------------------------------------------------------------------
-//  Four of the sixteen SymEncrypt overloads accept a mode but no IV [n_crypto.sru:L31, L35, L39,
-//  L43], mirrored by four of the sixteen SymDecrypt overloads [L47, L51, L55, L59] - eight of the
-//  thirty-two. CBC and CFB both require an IV, so when one of those eight is called with CBC or
-//  CFB an IV must come from somewhere. The conventional legacy behaviour, and what this port does,
-//  is an ALL-ZERO IV OF THE CIPHER'S BLOCK LENGTH, produced by `CreateZeroInitializationVector`
-//  below from a length alone - a computed buffer, never a literal.
+//  THIS DECISION REPLACES AN EARLIER ONE THAT GUESSED, AND THE REASONING IS RECORDED BECAUSE THE
+//  REVERSAL IS THE POINT. Two parameters of the symmetric grid are not determined by anything in
+//  this repository, and each was previously supplied by inference:
 //
-//  This is a weak default and is annotated as one. A fixed, publicly known IV destroys CBC's
-//  semantic security: identical plaintexts under the same key produce identical ciphertexts, so an
-//  observer learns when a value has not changed, and the first block leaks equality just as ECB
-//  does. It is preserved because the alternative - inventing a random IV - would produce
-//  ciphertext the legacy could not decrypt, there being no field in which to transmit it.
+//      (a) THE VECTOR FOR THE EIGHT MODE-WITHOUT-VECTOR OVERLOADS. Four SymEncrypt overloads
+//          accept a mode but no vector [n_crypto.sru:L31, L35, L39, L43], mirrored by four
+//          SymDecrypt overloads [:L47, L51, L55, L59] - eight of the thirty-two. CBC requires a
+//          vector, so one had to come from somewhere, and an all-zero buffer of the block length
+//          was chosen as "the conventional legacy behaviour". THAT WAS AN ASSUMPTION, NOT A
+//          MEASUREMENT. The closed binary may equally have used a vector derived from the key, a
+//          fixed non-zero constant, or a refusal.
 //
-//  The ECB arms are untouched by this decision: ECB uses no IV at all, so the four no-IV-no-mode
-//  and four IV-but-no-mode shapes run in the default mode and never consult it.
+//      (b) THE CFB FEEDBACK WIDTH. The legacy publishes ONE unqualified CFB value with no
+//          feedback-size parameter [enums.sru:L945], while this platform requires the width
+//          explicitly. Full-block CFB and 8-bit CFB produce ENTIRELY DIFFERENT CIPHERTEXT of
+//          different lengths. The width was inferred from the framework's OpenSSL attribution
+//          [ws_objects/pfw.demos.pbl.src/w_about.srw:L118], which is a reasoned guess about which
+//          alias a native surface most plausibly exposed - not an observation of the binary.
+//
+//  WHY A GUESS IS WORSE HERE THAN A REFUSAL. Both guesses are UNDETECTABLE by any test this
+//  repository can run, because each round-trips perfectly against itself: encrypt and decrypt
+//  under the same wrong assumption and the plaintext comes back intact. A caller therefore gets
+//  ciphertext that looks correct, passes every check, and CANNOT BE DECRYPTED BY THE LEGACY. That
+//  is data loss disguised as success, and it is exactly the failure mode the framework-wide rule
+//  exists to prevent: a contract is NARROWED WITH A DEFINED ERROR, NEVER WIDENED WITH A GUESS.
+//  The same rule already governs the sibling pinyin matcher, which ships BLOCKED rather than
+//  approximating a table held only inside the same closed binary.
+//
+//  THE ORACLE CANNOT SETTLE EITHER QUESTION FROM THIS REPOSITORY. `n_crypto` is declared
+//  `native "pfw.dll"` [n_crypto.sru:L8] and its 86 lines are declarations only - there is no
+//  PowerScript body anywhere for any of the 32 symmetric overloads. The behaviour lives entirely
+//  inside a closed, Windows-only binary that a Linux container cannot execute.
+//
+//  WHAT IS BLOCKED, EXACTLY - and it is the smallest set that removes every guess:
+//
+//      mode   vector supplied   status
+//      ----   ---------------   ------------------------------------------------------------
+//      ECB    either            SUPPORTED. Consumes no vector and has no feedback width, so
+//                               nothing about it is inferred. This is also the DEFAULT mode
+//                               [enums.sru:L946], so every mode-omitting arm stays supported.
+//      CBC    yes               SUPPORTED. Every parameter is caller-supplied; padding is
+//                               settled by DECISION H3.
+//      CBC    no                BLOCKED - the synthesised vector is unprovable, case (a).
+//      CFB    either            BLOCKED - the feedback width is unprovable, case (b).
+//
+//  THE BLOCKED SET IS PRECISELY THE SET THE ORACLE NEVER DEMONSTRATES, WHICH IS THE STRONGEST
+//  AVAILABLE EVIDENCE THAT THE NARROWING COSTS NOTHING OBSERVABLE. The only code in the entire
+//  repository that invokes the symmetric surface is the framework's own demo, and all six of its
+//  call sites pass an explicit vector with CBC: DES at
+//  [u_cst_tabpage_utility_crypto.sru:L504, L547], AES256 at [:L592, L607] and 3DES at
+//  [:L622, L637]. It never selects CFB and never uses a vector-less arm. Every cell the oracle
+//  actually exercises therefore remains fully supported, and every blocked cell is one for which
+//  this repository holds no evidence of any kind.
+//
+//  THE IDENTIFIER SETS ARE UNCHANGED. CFB remains a published mode: `IsSupportedSymmetricMode`
+//  still accepts it, because that predicate answers "is this a declared legacy identifier?" and
+//  the answer is yes. Blocking is a SEPARATE and LATER capability question, answered by
+//  `ClassifySymmetricCell` below. Removing or renumbering the identifier would break the
+//  preserve-the-set-exactly rule; refusing to guess one of its parameters does not.
+//
+//  HOW THE REFUSAL SURFACES. `SymmetricParityUnavailableException` - a `NotSupportedException`,
+//  deliberately NOT a `CryptographicException`, so that a blocked cell can never be mistaken for
+//  a padding failure or a wrong key, and so no existing handler absorbs it silently. It names the
+//  cell and the reason, and the published contract carries the same reason codes.
 //
 //  DECISION D4 - THE STRING-SHAPED OVERLOADS CARRY A BASE64 TEXT-SAFE PAYLOAD, UNIFORMLY
 //  --------------------------------------------------------------------------------------------
@@ -1026,49 +1075,62 @@ public static class LegacyDefaults
     }
 
     /// <summary>
-    /// Produces the all-zero initialization vector that the eight mode-without-IV overloads use when
-    /// the caller asks for CBC or CFB without supplying one. See DECISION D3.
+    /// Reports whether one cell of the symmetric grid can be reproduced faithfully, or is BLOCKED
+    /// because a parameter it needs is not determined by anything in this repository. This is
+    /// DECISION D3, and it is the ONLY place the blocked set is defined.
     /// </summary>
-    /// <param name="blockLengthBytes">
-    /// The cipher's block length, taken from the cipher metrics table. An initialization vector is
-    /// exactly one block wide.
+    /// <param name="mode">
+    /// The cipher mode. Screen it with <see cref="IsSupportedSymmetricMode"/> first: this method
+    /// answers a capability question about a PUBLISHED mode and treats an unpublished value as
+    /// supported, because rejecting it is the screening step's job and duplicating that here would
+    /// put two different refusals on one input.
     /// </param>
-    /// <returns>A fresh, all-zero buffer of exactly <paramref name="blockLengthBytes"/> bytes.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="blockLengthBytes"/> is zero or negative.
-    /// </exception>
+    /// <param name="initializationVectorSupplied">
+    /// Whether the caller supplied an initialization vector - that is, whether the overload reached
+    /// is one of the twenty-four that take one, rather than one of the eight that do not.
+    /// </param>
+    /// <returns>
+    /// <see cref="SymmetricCellParity.Supported"/>, or the reason the cell is blocked.
+    /// </returns>
     /// <remarks>
     /// <para>
-    /// KNOWN WEAK DEFAULT, PRESERVED DELIBERATELY. Four of the sixteen SymEncrypt overloads accept
-    /// a mode but no initialization vector [n_crypto.sru:L31, L35, L39, L43], mirrored by four of
-    /// the sixteen SymDecrypt overloads [L47, L51, L55, L59]. CBC and CFB both require an
-    /// initialization vector, so those eight arms must synthesise one, and this is it.
+    /// THE CIPHER TYPE IS DELIBERATELY NOT A PARAMETER, because neither blocking reason depends on
+    /// it. The feedback width is unprovable for every cipher type, and the synthesised vector is
+    /// unprovable for every cipher type. Accepting a type here would imply the answer varied with
+    /// it and invite a caller to believe some type escapes the block.
     /// </para>
     /// <para>
-    /// A fixed, publicly known initialization vector destroys CBC's semantic security: the same
-    /// plaintext under the same key produces the same ciphertext every time, so an observer learns
-    /// when a value has not changed, and the first block leaks equality much as ECB does. It is
-    /// preserved because the alternative - generating a random initialization vector - would produce
-    /// ciphertext the legacy could not decrypt, there being no field in the legacy format in which
-    /// to transmit one.
+    /// THE TWO REASONS ARE DISTINGUISHED because they have different futures. A measurement of the
+    /// oracle's feedback width would unblock CFB; a measurement of its synthesised vector would
+    /// unblock the vector-less CBC arms. They are independent findings, and collapsing them into one
+    /// "unsupported" answer would lose which evidence is missing.
     /// </para>
     /// <para>
-    /// The vector is COMPUTED FROM A LENGTH and is never written down as a literal, so this file
-    /// contains nothing that resembles key material. The result is a fresh buffer on every call, so
-    /// no two operations share one and a caller that overwrites it affects nothing else.
-    /// </para>
-    /// <para>
-    /// The ECB arms never reach this method: ECB consumes no initialization vector at all. Screen
-    /// the mode with <see cref="ModeUsesInitializationVector"/> first.
+    /// Pure, allocation-free and total: every combination of inputs yields an answer, so a caller
+    /// can classify a cell without attempting the operation. That is what makes the narrowing
+    /// DISCOVERABLE rather than merely enforced - the wire contract publishes the same reason codes,
+    /// and a client can refuse a blocked cell before a request is ever sent.
     /// </para>
     /// </remarks>
-    public static byte[] CreateZeroInitializationVector(int blockLengthBytes)
+    public static SymmetricCellParity ClassifySymmetricCell(
+        long mode,
+        bool initializationVectorSupplied)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(blockLengthBytes);
+        // Case (b) of DECISION D3, and it is checked first because it holds regardless of whether a
+        // vector was supplied: a vector does not tell us the feedback width.
+        if (mode == Enums.CRYPTO_SYMCRYPT_MODE_CFB)
+        {
+            return SymmetricCellParity.BlockedFeedbackWidthUnprovable;
+        }
 
-        // Computed, never a literal: the runtime zero-fills a new array, so the all-zero vector is
-        // produced by the allocation itself.
-        return new byte[blockLengthBytes];
+        // Case (a). Reached only for CBC, the one remaining vector-consuming mode, and only on the
+        // eight arms that supply none. ECB never consumes a vector, so it never lands here.
+        if (!initializationVectorSupplied && ModeUsesInitializationVector(mode))
+        {
+            return SymmetricCellParity.BlockedSynthesizedVectorUnprovable;
+        }
+
+        return SymmetricCellParity.Supported;
     }
 
     #endregion
@@ -1119,4 +1181,114 @@ public readonly record struct SymmetricCipherMetrics(
     /// <see cref="LegacyDefaults.ModeUsesInitializationVector"/> before reading it.
     /// </remarks>
     public int IvLengthBytes => BlockLengthBytes;
+}
+
+/// <summary>
+/// Whether one cell of the symmetric cipher grid is faithfully reproducible, or is BLOCKED because a
+/// parameter it requires is not determined by anything in this repository. See DECISION D3 in the
+/// banner of <c>LegacyDefaults.cs</c>.
+/// </summary>
+/// <remarks>
+/// Three values rather than a boolean, because the two refusals rest on DIFFERENT missing evidence
+/// and would be unblocked by different measurements. The published contract carries these same
+/// names as its machine-readable reason codes, so a caller reads one vocabulary on both sides.
+/// </remarks>
+public enum SymmetricCellParity
+{
+    /// <summary>
+    /// Every parameter the cell needs is determined: it is either ECB, which consumes no vector and
+    /// has no feedback width, or CBC with a caller-supplied vector. These are also the only cells
+    /// the oracle's own demo exercises.
+    /// </summary>
+    Supported = 0,
+
+    /// <summary>
+    /// CFB, in any shape. The legacy publishes one unqualified CFB value with no feedback-size
+    /// parameter [enums.sru:L945]; full-block and 8-bit CFB produce entirely different ciphertext,
+    /// and which the closed binary produced is unobservable from this repository.
+    /// </summary>
+    BlockedFeedbackWidthUnprovable = 1,
+
+    /// <summary>
+    /// CBC through one of the eight overloads that accept a mode but no vector
+    /// [n_crypto.sru:L31, L35, L39, L43, L47, L51, L55, L59]. What vector the closed binary
+    /// substituted is unobservable, and any choice made here would produce ciphertext the legacy
+    /// could not decrypt while round-tripping perfectly against itself.
+    /// </summary>
+    BlockedSynthesizedVectorUnprovable = 2,
+}
+
+/// <summary>
+/// Raised when a symmetric operation names a cell that cannot be reproduced faithfully, so the port
+/// refuses it rather than producing ciphertext from a guessed parameter.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A <see cref="NotSupportedException"/> AND DELIBERATELY NOT A <see cref="CryptographicException"/>.
+/// The distinction carries real weight: a cryptographic exception on this surface means a refused
+/// key, a mis-sized ciphertext or a failed padding check, and every one of those is a runtime
+/// condition about the DATA. This is a statement about the PORT - the operation is well-formed and
+/// would have succeeded, and the refusal is ours. Deriving from the cryptographic type would let
+/// existing handlers that absorb padding failures swallow it, turning a deliberate, documented
+/// refusal into an apparently ordinary decryption miss.
+/// </para>
+/// <para>
+/// The sibling <c>RsaProvider</c> already uses <see cref="NotSupportedException"/> for
+/// "this platform has no such construction", so the folder keeps one idiom for one meaning.
+/// </para>
+/// </remarks>
+public sealed class SymmetricParityUnavailableException : NotSupportedException
+{
+    /// <summary>
+    /// Creates the exception for a classified cell.
+    /// </summary>
+    /// <param name="reason">
+    /// Why the cell is blocked. <see cref="SymmetricCellParity.Supported"/> is not a valid argument:
+    /// a supported cell has nothing to raise.
+    /// </param>
+    /// <param name="mode">The cipher mode named by the refused call.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="reason"/> is <see cref="SymmetricCellParity.Supported"/> or is not a defined
+    /// member.
+    /// </exception>
+    public SymmetricParityUnavailableException(SymmetricCellParity reason, long mode)
+        : base(DescribeReason(reason))
+    {
+        Reason = reason;
+        Mode = mode;
+    }
+
+    /// <summary>Why the cell is blocked. Never <see cref="SymmetricCellParity.Supported"/>.</summary>
+    public SymmetricCellParity Reason { get; }
+
+    /// <summary>The cipher mode the refused call named.</summary>
+    public long Mode { get; }
+
+    /// <summary>
+    /// Produces the message for a blocking reason, and rejects a reason that does not block.
+    /// </summary>
+    /// <param name="reason">The blocking reason.</param>
+    /// <returns>The message.</returns>
+    /// <remarks>
+    /// EXHAUSTIVE BY CONSTRUCTION. A future member added to <see cref="SymmetricCellParity"/> lands
+    /// in the final arm and fails loudly rather than acquiring a vague message by default. No message
+    /// names a key, a vector or any payload content: all three are caller material and none of them
+    /// is what went wrong.
+    /// </remarks>
+    private static string DescribeReason(SymmetricCellParity reason) => reason switch
+    {
+        SymmetricCellParity.BlockedFeedbackWidthUnprovable =>
+            "The CFB feedback width the legacy binary used is not determined by anything in this "
+            + "repository, and CFB ciphertext differs entirely between the candidate widths. This "
+            + "cell is BLOCKED rather than encrypted under a guessed width. See DECISION D3.",
+        SymmetricCellParity.BlockedSynthesizedVectorUnprovable =>
+            "The initialization vector the legacy binary substituted when a mode was supplied "
+            + "without one is not determined by anything in this repository. This cell is BLOCKED "
+            + "rather than encrypted under a guessed vector; supply a vector explicitly, or select "
+            + "ECB, which consumes none. See DECISION D3.",
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(reason),
+            reason,
+            "Only a blocking reason can raise this exception."),
+    };
 }

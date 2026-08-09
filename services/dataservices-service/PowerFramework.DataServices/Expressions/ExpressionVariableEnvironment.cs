@@ -1786,4 +1786,3 @@ public sealed class ExpressionVariableEnvironment : IEquatable<ExpressionVariabl
         return hash.ToHashCode();
     }
 }
-

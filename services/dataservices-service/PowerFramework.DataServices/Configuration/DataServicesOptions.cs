@@ -134,8 +134,9 @@
 // Members here are PascalCase. The legacy SCREAMING_SNAKE spellings - RS_SINGLE, FILTER_DISP,
 // FILTER_DISP_PY, FILTER_ALL, PY_LIKE_IGNORE_CASE and the rest - are preserved in the
 // documentation of the property that carries their value, never in an identifier. The
-// repository-root .editorconfig carries narrow naming-analyzer bands for the ten files whose
-// IDENTIFIERS are the recording-visible artifact, and this path is deliberately not one of them:
+// repository-root .editorconfig carries narrow naming-analyzer bands for the files on its BAND 3
+// roster - published once there rather than counted again here - whose IDENTIFIERS are the
+// recording-visible artifact, and this path is deliberately not one of them:
 // what travels in a recording here is a configuration VALUE, not the C# name that holds it. So no
 // constant is declared in this file, and none should be added.
 //
@@ -730,6 +731,105 @@ public sealed class SecurityClientOptions
     /// </remarks>
     [Required(AllowEmptyStrings = false)]
     public string BaseAddress { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The client identity this service presents on the single mutual-TLS edge in the system - the
+    /// Security service's token endpoint. Bound from <c>DataServices:Security:MutualTls</c>. Paths
+    /// only, never material.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// CREATED BY THE DECOMPOSITION, and required for a functional reason rather than as hardening.
+    /// <c>POST /v1/tokens</c> is protected by mutual TLS and by nothing else, because <b>a caller
+    /// cannot present a bearer token in order to obtain its first bearer token</b>. DataServices is one
+    /// of the two services that request tokens - it needs one for its own C-02 cryptographic calls and
+    /// one for the audience beneath it - so with no client certificate to present it obtains none, and
+    /// every authenticated call it would make is unreachable. The published contract has required this
+    /// since it was authored; this group is what makes it configurable.
+    /// </para>
+    /// <para>
+    /// TWO PATHS AND NO MATERIAL, ENFORCED BY THE MEMBER SET RATHER THAN BY A CONVENTION. There is no
+    /// property here for a certificate body, a private key body or a passphrase, so there is nowhere
+    /// for one to be placed - which is the same rule the keyed cryptographic surface follows, where a
+    /// caller passes an opaque reference and never key bytes. Both values name material mounted from
+    /// the orchestration secret layer; nothing is committed to this repository or embedded in an image.
+    /// </para>
+    /// <para>
+    /// OPTIONAL AS A GROUP AND INSEPARABLE WHEN PRESENT. Both empty means this deployment presents no
+    /// client certificate and requests no token. Setting one without the other is refused by
+    /// <see cref="DataServicesOptions"/>'s validator: a certificate cannot complete a handshake without
+    /// its key and a key has nothing to present without its certificate, so half a client identity is
+    /// unusable rather than merely weaker.
+    /// </para>
+    /// </remarks>
+    public MutualTlsClientOptions MutualTls { get; set; } = new();
+}
+
+/// <summary>
+/// The client identity presented on the token-issuance edge. Bound from
+/// <c>DataServices:Security:MutualTls</c>.
+/// </summary>
+/// <remarks>
+/// A separate type rather than two loose properties, so that the pair can be validated as a pair and
+/// so that the absence of any material-bearing member is a property of a named type a reader can check
+/// at a glance.
+/// </remarks>
+public sealed class MutualTlsClientOptions
+{
+    /// <summary>
+    /// Path to the PEM-encoded client certificate this service presents. Empty means none.
+    /// </summary>
+    public string CertificatePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Path to the PEM-encoded key file for <see cref="CertificatePath"/>. Empty means none.
+    /// </summary>
+    public string CertificateKeyPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this deployment presents a client certificate at all.
+    /// </summary>
+    public bool IsConfigured =>
+        !string.IsNullOrWhiteSpace(CertificatePath) || !string.IsNullOrWhiteSpace(CertificateKeyPath);
+
+    /// <summary>
+    /// Describes the one way this group can be wrong: half-configured.
+    /// </summary>
+    /// <param name="configurationKeyPrefix">
+    /// The configuration path of this group, quoted into the message so an operator can find the
+    /// offending key without reading source.
+    /// </param>
+    /// <returns>
+    /// One message when exactly one of the two paths is set, otherwise an empty sequence.
+    /// </returns>
+    /// <remarks>
+    /// NO PATH IS EVER ECHOED INTO A MESSAGE. A path is not itself a credential, but it names where one
+    /// is mounted, and a startup log is exactly the wrong place to publish that. The configuration key
+    /// is sufficient for an operator to find the setting.
+    /// </remarks>
+    internal IEnumerable<string> DescribeFailures(string configurationKeyPrefix)
+    {
+        bool hasCertificate = !string.IsNullOrWhiteSpace(CertificatePath);
+        bool hasKey = !string.IsNullOrWhiteSpace(CertificateKeyPath);
+
+        if (hasCertificate == hasKey)
+        {
+            yield break;
+        }
+
+        yield return string.Concat(
+            configurationKeyPrefix,
+            ":",
+            nameof(CertificatePath),
+            " and ",
+            configurationKeyPrefix,
+            ":",
+            nameof(CertificateKeyPath),
+            " must be configured together or not at all. A client certificate cannot complete a TLS "
+                + "handshake without its key, and a key has nothing to present without its certificate, "
+                + "so half of this pair is unusable rather than merely weaker. Neither path is quoted "
+                + "here, because a startup log must not record where key material is mounted.");
+    }
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1280,6 +1380,15 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
         {
             AppendAnnotationFailures(options.Security, path, failures);
             AppendAddressFailure(options.Security.BaseAddress, string.Concat(path, ":BaseAddress"), failures);
+
+            // The token-issuance edge's client identity. Optional as a group and inseparable when
+            // present, which is why it is checked here rather than expressed as attributes: no single
+            // attribute can say "both or neither".
+            string mutualTlsPath = string.Concat(path, ":MutualTls");
+            if (EnsureGroupBound(options.Security.MutualTls, mutualTlsPath, failures))
+            {
+                failures.AddRange(options.Security.MutualTls.DescribeFailures(mutualTlsPath));
+            }
         }
 
         // --- Resilience: both clients, same rules, separate values -------------------------------

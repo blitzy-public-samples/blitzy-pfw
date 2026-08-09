@@ -328,17 +328,46 @@
     Debug assembly.
 
     HOW IT WORKS. After the SDK has resolved project references it publishes their output paths in
-    _ResolvedProjectReferencePaths. Every project in this repository uses the default output layout,
-    bin\$(Configuration)\$(TargetFramework), and a reference assembly lands under
-    obj\$(Configuration)\$(TargetFramework)\ref, so the configuration being built appears as a path
-    segment in either shape. The item filter below therefore selects any resolved reference whose path
-    does not carry the current configuration as a segment, and a non empty result is a hard error.
-    Separators are normalised to forward slashes first so the rule behaves identically on Linux, the
-    target operating system, and on Windows.
+    _ResolvedProjectReferencePaths. The configuration being built appears as a path SEGMENT of every
+    supported output layout, so the item filter below selects any resolved reference whose path does
+    not carry it, and a non empty result is a hard error.
+
+    THE FILTER RECOGNISES BOTH SUPPORTED LAYOUTS, AND BOTH HALVES OF THAT ARE LOAD BEARING.
+
+      * The DEFAULT layout, which every project in this repository uses today:
+        bin/$(Configuration)/$(TargetFramework), with a reference assembly under
+        obj/$(Configuration)/$(TargetFramework)/ref. The configuration appears with the casing it was
+        requested in, so 'Release' is spelled 'Release'.
+      * The SDK ARTIFACTS layout, selected by ArtifactsPath or UseArtifactsOutput:
+        $(ArtifactsPath)/bin/$(MSBuildProjectName)/$(ArtifactsPivots). The pivot is
+        $(Configuration.ToLowerInvariant()), so 'Release' is spelled 'release', and it gains a
+        '_$(TargetFramework)' and/or '_$(RuntimeIdentifier)' suffix for a multi targeting or RID
+        specific build - 'release_net10.0'.
+
+    Both facts are MEASURED on SDK 10.0.302 rather than assumed. An earlier form of this filter
+    compared case sensitively against '/$(Configuration)/' alone, which made a genuine all Release
+    build under the artifacts layout fail PFW0001 against '/release/' - the layout and the casing were
+    the whole of the mismatch, not the configuration, and overriding ArtifactsPivots to 'Release' made
+    the identical build advance. The comparison is therefore performed with BOTH sides lowercased, and
+    a pivot suffix is accepted by testing for the segment prefix '/<configuration>_' alongside the
+    exact segment '/<configuration>/'.
+
+    Separators are normalised to forward slashes before either test, so the rule behaves identically
+    on Linux, the target operating system, and on Windows. Lowercasing is invariant rather than culture
+    sensitive: these are ASCII build tokens, and a culture aware comparison would make the build's
+    verdict depend on the machine's locale.
+
+    RESIDUAL LIMITATION, STATED RATHER THAN LEFT TO BE DISCOVERED. The test is a path segment test, so
+    a repository checked out under a directory literally named after the configuration would satisfy it
+    for any reference. That is unchanged from the original form of this check and is not resolvable
+    from here: the resolved reference items carry no Configuration metadata to consult - verified by
+    dumping all forty metadata names MSBuild attaches to _ResolvedProjectReferencePaths - so the output
+    path is the only signal available.
 
     Verified both ways on SDK 10.0.302 rather than assumed: with propagation in place the target
-    selects nothing across every project in the tree, and with propagation switched off it selects the
-    shared project outputs and fails the build with the message below.
+    selects nothing across every project in the tree, under the default layout and under the artifacts
+    layout alike, and with propagation switched off it selects the shared project outputs and fails the
+    build with the message below.
 
     IT IS AN Error AND NOT A Warning, deliberately. MSBuildTreatWarningsAsErrors is not set, for the
     reasons recorded above, so a warning here would be advisory only and could be merged past CI
@@ -351,10 +380,19 @@
           AfterTargets="ResolveProjectReferences"
           Condition="'@(_ResolvedProjectReferencePaths)' != ''">
 
+    <!--
+      The configuration as it appears in an output path, lowercased once here so that neither the
+      filter below nor a reader has to repeat the call. Scoped to this target, so it adds no property
+      to the global namespace of any project.
+    -->
+    <PropertyGroup>
+      <PowerFrameworkConfigurationSegment>$(Configuration.ToLowerInvariant())</PowerFrameworkConfigurationSegment>
+    </PropertyGroup>
+
     <ItemGroup>
       <PowerFrameworkForeignConfigurationReference
           Include="@(_ResolvedProjectReferencePaths)"
-          Condition="!$([System.String]::Copy('%(FullPath)').Replace('\', '/').Contains('/$(Configuration)/'))" />
+          Condition="!$([System.String]::Copy('%(FullPath)').Replace('\', '/').ToLowerInvariant().Contains('/$(PowerFrameworkConfigurationSegment)/')) and !$([System.String]::Copy('%(FullPath)').Replace('\', '/').ToLowerInvariant().Contains('/$(PowerFrameworkConfigurationSegment)_'))" />
     </ItemGroup>
 
     <Error Condition="'@(PowerFrameworkForeignConfigurationReference)' != ''"

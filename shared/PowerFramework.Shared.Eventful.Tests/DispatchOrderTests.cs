@@ -92,7 +92,8 @@
 //  Sequences are asserted, never sets. Every matrix is a [Theory] with [MemberData] over TheoryData;
 //  [Fact] is reserved for cases with no table. A fresh EventBroker and a fresh DispatchLog are built
 //  per test, so no test can observe another's table. No member here is SCREAMING_SNAKE: the root
-//  .editorconfig relaxes CA1707 and IDE1006 for ten NAMED implementation files and for no test file,
+//  .editorconfig relaxes CA1707 and IDE1006 for the NAMED implementation files on its BAND 3 roster -
+//  the single source of truth for that list - and for no test file,
 //  and TreatWarningsAsErrors is true, so such a member would be a build error. Dispatch is
 //  synchronous, so there is no timing, no Task.Delay, no Thread.Sleep, no clock read, no GUID, no
 //  random source and no thread anywhere in this file. Nothing reads a file, a socket or a database.

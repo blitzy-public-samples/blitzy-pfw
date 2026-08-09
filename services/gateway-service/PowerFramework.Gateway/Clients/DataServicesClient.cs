@@ -573,9 +573,11 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
     /// <returns>A task that completes when the message has been written to the stream.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="request"/> carries no sequencing token, or carries one whose sequence is zero.
-    /// Every message on this stream carries a token, and zero means "not supplied", so this is refused
-    /// at the point where it is cheap to diagnose rather than becoming an ordering fault at the far end.
+    /// <paramref name="request"/> carries no sequencing token, carries one whose sequence is zero, or
+    /// carries one whose discipline is <see cref="OrderingDiscipline.Unspecified"/>. Every message on
+    /// this stream carries a token, zero means "not supplied", and an unstated discipline leaves the
+    /// mandated ordering check with nothing to drive it - so all three are refused at the point where
+    /// they are cheap to diagnose rather than becoming a fault at the far end.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The channel has been disposed.</exception>
     /// <exception cref="RpcException">The stream faulted.</exception>
@@ -600,6 +602,32 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
                 nameof(request));
         }
 
+        // AN UNSTATED DISCIPLINE IS REFUSED OUTBOUND FOR THE SAME REASON IT IS REFUSED INBOUND.
+        //
+        // InspectOrdering fails the session when an arriving token declares no discipline, because the
+        // mandated ordering check would have nothing to drive it. That reasoning is symmetric, and
+        // leaving it unenforced here was strictly worse than an argument fault: writing such a message
+        // would hand the far end exactly the value its own guard treats as fatal, so a caller's
+        // omission would be answered by the DESTRUCTION OF THE SESSION - and, on a chain whose whole
+        // purpose is ordered cross-event state, a session lost mid-conversation cannot be resumed.
+        //
+        // Refusing here costs the caller an ArgumentException before anything is written, leaves the
+        // session intact and names the omission. Nothing is defaulted on the caller's behalf: the
+        // discipline is a property of the EVENT - synchronous for the item-change and validation chain,
+        // sequenced for the notification events - so choosing one here would be this client deciding a
+        // semantic the event catalogue owns.
+        if (token.Discipline == OrderingDiscipline.Unspecified)
+        {
+            throw new ArgumentException(
+                "Every message on the DataServices event chain declares its ordering discipline on the "
+                + "token, and 'unspecified' is not a usable value: the far end fails the session on it, "
+                + "so writing it would destroy the conversation rather than merely be rejected. Set "
+                + "Token.Discipline to Synchronous for the item-change and validation chain, or to "
+                + "Sequenced for the notification events. This client does not choose a default, "
+                + "because the discipline is a property of the event rather than of the transport.",
+                nameof(request));
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
 
         await _call.RequestStream.WriteAsync(request, cancellationToken).ConfigureAwait(false);
@@ -609,18 +637,81 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
     /// Signals that the client will send no further messages, leaving the inbound half open until
     /// DataServices completes it.
     /// </summary>
+    /// <param name="cancellationToken">
+    /// Abandons the half-close and, with it, the conversation. See the remarks: the underlying gRPC
+    /// API accepts no token, so cancellation is applied to the CALL rather than to the write.
+    /// </param>
     /// <returns>A task that completes when the half-close has been written.</returns>
     /// <exception cref="ObjectDisposedException">The channel has been disposed.</exception>
+    /// <exception cref="RpcException">The stream faulted while the half-close was being written.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled, either before the attempt or while it was
+    /// pending. In the second case the conversation has been torn down and this channel is finished;
+    /// the fault that the tear-down produced is retained as the inner exception.
+    /// </exception>
     /// <remarks>
+    /// <para>
     /// This is a half-close, not a cancellation: an in-flight answer from DataServices still arrives.
     /// Disposing without calling this cancels the call instead, which is the right outcome when the
     /// conversation is being abandoned rather than finished.
+    /// </para>
+    /// <para>
+    /// WHY CANCELLATION IS REGISTERED AGAINST THE CALL RATHER THAN PASSED TO THE WRITE. gRPC's client
+    /// stream writer exposes a completion method with NO cancellation-token overload - unlike its write
+    /// method, which has one and which <see cref="SendAsync"/> uses. A half-close is nevertheless a
+    /// network write and can block indefinitely: the far end may never read, or a wedged connection may
+    /// leave flow control closed. Without a cancellation path this member was therefore the one place in
+    /// this client where a request could hang forever with no way out, which is precisely what the
+    /// file's end-to-end cancellation doctrine exists to prevent.
+    /// </para>
+    /// <para>
+    /// So cancellation is applied one level down, at the only seam the API offers: a registration
+    /// disposes the call, which cancels it and makes the pending completion fault. That fault - whatever
+    /// shape it takes, and it varies with where the tear-down landed - is then translated into the
+    /// cancellation the caller actually asked for, with the original retained as the inner exception so
+    /// nothing is lost. The consequence is stated rather than hidden: CANCELLING A HALF-CLOSE ENDS THE
+    /// CONVERSATION. That is the honest semantic, because a half-close the caller no longer wants to
+    /// complete cannot be un-started, and a conversation whose outbound half is in an unknown state
+    /// cannot safely carry another ordered message.
+    /// </para>
     /// </remarks>
-    public async Task CompleteSendingAsync()
+    public async Task CompleteSendingAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        await _call.RequestStream.CompleteAsync().ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        Task completion = _call.RequestStream.CompleteAsync();
+
+        if (!cancellationToken.CanBeCanceled)
+        {
+            // No registration is possible and none is needed; the caller has opted out of cancelling.
+            await completion.ConfigureAwait(false);
+            return;
+        }
+
+        // The registration is disposed on every exit, so a completed half-close leaves nothing attached
+        // to the caller's token that could cancel the call later.
+        using CancellationTokenRegistration registration = cancellationToken.UnsafeRegister(
+            static state => ((IDisposable)state!).Dispose(),
+            _call);
+
+        try
+        {
+            await completion.ConfigureAwait(false);
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested)
+        {
+            // The half-close faulted because the registration tore the call down. The caller asked for
+            // cancellation and receives exactly that, carrying its own token so a `catch` filtered on
+            // that token matches, and carrying the underlying fault so an operator can still see how
+            // the tear-down surfaced.
+            throw new OperationCanceledException(
+                "The half-close of the DataServices event chain was cancelled while it was pending, so "
+                + "the conversation has been torn down and this channel is finished.",
+                exception,
+                cancellationToken);
+        }
     }
 
     /// <summary>
@@ -793,18 +884,74 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
 /// session was open or already gone, so closing again is always safe.
 /// </para>
 /// <para>
-/// A FAILURE TO CLOSE IS LOGGED AND NOT RETHROWN. Throwing from disposal would replace whatever
-/// exception is unwinding through the enclosing block with a less informative one, and the primary
-/// fault is what the caller needs. The outcome is available on <see cref="CloseResult"/>, which stays
-/// <see langword="null"/> when the close did not complete.
+/// BUT DISPOSAL IS BOUNDED, on a deadline of its own. Not observing the caller's token is not the same
+/// as observing nothing: an unbounded close is a close that can hang, and a hang inside
+/// <c>await using</c> stalls the request that was trying to unwind - so a mechanism whose whole purpose
+/// is to stop a session leaking would instead stop the caller from finishing. The disposal deadline is
+/// <see cref="CloseTimeout"/>, and it is a LIVENESS BOUND rather than a latency budget: this repository
+/// publishes no service-level agreement, no latency target and no throughput target anywhere, so no
+/// performance objective is asserted here or anywhere else. The bound exists so that disposal
+/// terminates, and for no other reason.
+/// </para>
+/// <para>
+/// THERE ARE TWO WAYS TO CLOSE, AND THEY DIFFER IN EXACTLY ONE RESPECT - WHO LEARNS ABOUT A FAILURE.
+/// </para>
+/// <list type="bullet">
+///   <item>
+///     <description>
+///     <see cref="CloseAsync"/> is the EXPLICIT close, for a caller finishing normally. It PROPAGATES a
+///     failure, because on a normal path there is no primary exception for it to mask and a caller that
+///     asked to close is entitled to learn that the close did not happen. A leaked upstream session is
+///     not a detail to discover from a log later.
+///     </description>
+///   </item>
+///   <item>
+///     <description>
+///     <see cref="DisposeAsync"/> is the SAFETY NET, and it does NOT rethrow. Throwing from disposal
+///     would replace whatever exception is unwinding through the enclosing block with a less
+///     informative one, and the primary fault is what the caller needs. The failure is not lost: it is
+///     logged, and it is recorded on <see cref="CloseFailure"/> so it is observable in code rather than
+///     only in telemetry.
+///     </description>
+///   </item>
+/// </list>
+/// <para>
+/// SO A CLOSE THAT DID NOT HAPPEN IS ALWAYS DISTINGUISHABLE FROM ONE THAT DID.
+/// <see cref="CloseResult"/> is non-null exactly when the upstream answered, and
+/// <see cref="CloseFailure"/> is non-null exactly when the attempt failed; both are null only before
+/// any attempt has been made. Reading a null result as "closed cleanly" was previously possible and is
+/// now not, which matters because the whole point of this type is that a session cannot be left behind
+/// silently.
 /// </para>
 /// </remarks>
 public sealed class ValidationSessionScope : IAsyncDisposable
 {
+    /// <summary>
+    /// The bound on a close attempt: how long a close is given before it is abandoned.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A LIVENESS BOUND, EXPLICITLY NOT A LATENCY BUDGET. This repository publishes no service-level
+    /// agreement, no latency target, no throughput target and no availability commitment anywhere, so
+    /// this value asserts no performance objective and must not be read as one. It exists so that a
+    /// close, and therefore a disposal, is guaranteed to TERMINATE - which is a correctness property
+    /// rather than a performance one, because an unbounded disposal stalls the very request that was
+    /// unwinding.
+    /// </para>
+    /// <para>
+    /// The magnitude is chosen to be uninteresting in both directions: long enough that no close which
+    /// is going to succeed is cut off by it, short enough that a wedged upstream cannot hold a disposing
+    /// caller indefinitely. Nothing depends on the exact number, and a caller that needs a different one
+    /// calls <see cref="CloseAsync"/> with a token of its own instead.
+    /// </para>
+    /// </remarks>
+    public static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(5);
+
     private readonly DataServicesClient _client;
     private readonly OpenValidationSessionResponse _opened;
     private readonly ILogger _logger;
 
+    private bool _closeAttempted;
     private bool _disposed;
 
     /// <summary>
@@ -850,21 +997,128 @@ public sealed class ValidationSessionScope : IAsyncDisposable
     public WireRetCode RetCode => _opened.RetCode;
 
     /// <summary>
-    /// The close outcome once disposal has completed, or <see langword="null"/> while the session is
-    /// still open or when the close did not complete.
+    /// The close outcome once a close has completed, or <see langword="null"/> when no close has been
+    /// attempted or the attempt failed.
     /// </summary>
     /// <remarks>
     /// Worth reading rather than discarding: the response reports whether the session WAS still open,
     /// which is informational and not an error, and carries the state at the moment of closure - so an
     /// outstanding deferred continuation or a still-set re-entrancy guard is observable instead of
     /// being thrown away.
+    /// <para>
+    /// Non-null means the upstream answered. It never means "probably fine": a failed attempt leaves
+    /// this <see langword="null"/> and sets <see cref="CloseFailure"/>.
+    /// </para>
     /// </remarks>
     public CloseValidationSessionResponse? CloseResult { get; private set; }
 
     /// <summary>
-    /// Closes the session. Safe to call more than once; the second call does nothing.
+    /// The failure a close attempt ended with, or <see langword="null"/> when no close has been
+    /// attempted or the attempt succeeded.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This member exists so that a failure swallowed by <see cref="DisposeAsync"/> is still OBSERVABLE
+    /// IN CODE. Disposal must not rethrow - it would mask the fault unwinding through the enclosing
+    /// block - but "must not rethrow" is not a licence to discard, and a leaked upstream session that
+    /// can only be discovered by reading logs is a leak that will not be discovered.
+    /// </para>
+    /// <para>
+    /// After a successful close this is <see langword="null"/>; after a failed one it holds the fault,
+    /// which is either the transport status the upstream returned or the cancellation that
+    /// <see cref="CloseTimeout"/> produced. Exactly one of this member and
+    /// <see cref="CloseResult"/> is non-null once a close has been attempted.
+    /// </para>
+    /// </remarks>
+    public Exception? CloseFailure { get; private set; }
+
+    /// <summary>
+    /// Closes the session explicitly, PROPAGATING a failure. Safe to call more than once; a second call
+    /// does nothing and returns the first call's result.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// Cancels the close. It is combined with <see cref="CloseTimeout"/>, so the attempt ends at
+    /// whichever comes first and it can never be unbounded.
+    /// </param>
+    /// <returns>
+    /// The close outcome: whether the session was still open, and its state at the moment of closure. A
+    /// session already closed or expired reports so WITHOUT that being an error.
+    /// </returns>
+    /// <exception cref="RpcException">The close failed. The session may remain held upstream until it expires.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled, or <see cref="CloseTimeout"/> elapsed.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// A previous attempt FAILED. The failure is not silently re-attempted, because a caller that
+    /// received it has already been told the session may be leaked and a second attempt reporting
+    /// success would contradict the first answer; the original fault is the inner exception.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE MEMBER A CALLER FINISHING NORMALLY SHOULD USE, and the difference from disposal is
+    /// only who learns about a failure. On a normal path there is no primary exception for a close
+    /// failure to mask, so swallowing it would be pure information loss: the caller would proceed
+    /// believing the upstream session was released when it was not. Disposal still runs afterwards
+    /// through <c>await using</c> and does nothing, because this attempt already happened.
+    /// </para>
+    /// <para>
+    /// RETRY SAFETY: the underlying operation is idempotent by contract, so a caller may retry a failed
+    /// close - but it must do so by calling the client's own close operation, not by calling this member
+    /// again. A scope records one attempt, deliberately: re-attempting from inside it would let a
+    /// success overwrite a failure a caller has already acted on.
+    /// </para>
+    /// </remarks>
+    public async Task<CloseValidationSessionResponse> CloseAsync(CancellationToken cancellationToken)
+    {
+        if (_closeAttempted)
+        {
+            return CloseResult ?? throw new InvalidOperationException(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"Closing DataServices validation session '{_opened.SessionId}' has already been "
+                    + $"attempted and it failed, so this scope has no close result to return. The "
+                    + $"session may remain held by the upstream until it expires. Closure is idempotent "
+                    + $"by contract, so a retry is safe - issue it through the client's own close "
+                    + $"operation rather than through this scope."),
+                CloseFailure);
+        }
+
+        _closeAttempted = true;
+
+        // The caller's token AND the liveness bound. Linking rather than choosing is what makes the
+        // attempt bounded even when the caller passes a token that is never cancelled.
+        using CancellationTokenSource bounded = CreateBoundedSource(cancellationToken);
+
+        try
+        {
+            CloseResult = await _client
+                .CloseValidationSessionAsync(
+                    new CloseValidationSessionRequest { SessionId = _opened.SessionId },
+                    bounded.Token)
+                .ConfigureAwait(false);
+
+            return CloseResult;
+        }
+        catch (Exception exception) when (exception is RpcException or OperationCanceledException)
+        {
+            // Recorded before it is rethrown, so the two ways of closing agree on what is observable:
+            // whichever path a caller took, CloseFailure holds the fault afterwards.
+            CloseFailure = exception;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Closes the session as a safety net, without rethrowing. Safe to call more than once; the second
+    /// call does nothing.
     /// </summary>
     /// <returns>A task that completes when the close has been attempted.</returns>
+    /// <remarks>
+    /// Bounded by <see cref="CloseTimeout"/> on a token of its own, and deliberately blind to the
+    /// caller's token: the case that most needs the session closed is the case where that token has just
+    /// been cancelled. A failure is logged and recorded on <see cref="CloseFailure"/> rather than
+    /// rethrown, so it cannot displace the fault unwinding through the enclosing block.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -874,35 +1128,74 @@ public sealed class ValidationSessionScope : IAsyncDisposable
 
         _disposed = true;
 
+        // An explicit close already happened - including one that failed and was reported to the
+        // caller. Re-attempting would either duplicate work or turn a failure the caller has acted on
+        // into a success, so disposal defers to whatever the explicit attempt recorded.
+        if (_closeAttempted)
+        {
+            return;
+        }
+
+        _closeAttempted = true;
+
+        // A DEADLINE OF ITS OWN, NOT CancellationToken.None. Not observing the caller's token is
+        // correct; observing NOTHING is not, because an unbounded close inside `await using` stalls the
+        // request that was trying to unwind - so the mechanism that exists to stop a session leaking
+        // would instead stop the caller finishing.
+        using CancellationTokenSource bounded = new(CloseTimeout);
+
         try
         {
             CloseResult = await _client
                 .CloseValidationSessionAsync(
                     new CloseValidationSessionRequest { SessionId = _opened.SessionId },
-                    CancellationToken.None)
+                    bounded.Token)
                 .ConfigureAwait(false);
         }
         catch (RpcException exception)
         {
+            CloseFailure = exception;
+
             _logger.LogWarning(
                 exception,
                 "Closing DataServices validation session {SessionId} failed with status {StatusCode}. "
                 + "The session may remain held by the upstream until it expires. This failure is not "
                 + "rethrown, so that it cannot mask whichever fault is unwinding through the enclosing "
-                + "scope.",
+                + "scope; it is recorded on the scope's CloseFailure member instead.",
                 _opened.SessionId,
                 exception.StatusCode);
         }
         catch (OperationCanceledException exception)
         {
-            // Reachable even though no caller token is passed: the underlying call can still be
-            // cancelled by the channel or the host shutting down.
+            CloseFailure = exception;
+
+            // Two causes, and the record does not pretend to distinguish them because the consequence
+            // is identical: the disposal deadline elapsed, or the underlying call was cancelled by the
+            // channel or by the host shutting down.
             _logger.LogWarning(
                 exception,
-                "Closing DataServices validation session {SessionId} was cancelled before it "
-                + "completed. The session may remain held by the upstream until it expires.",
-                _opened.SessionId);
+                "Closing DataServices validation session {SessionId} did not complete within the "
+                + "{CloseTimeoutSeconds}s disposal bound, or was cancelled by the channel or a host "
+                + "shutdown. The session may remain held by the upstream until it expires. This failure "
+                + "is not rethrown; it is recorded on the scope's CloseFailure member instead.",
+                _opened.SessionId,
+                CloseTimeout.TotalSeconds);
         }
+    }
+
+    /// <summary>
+    /// Links a caller's token to the liveness bound, so an attempt ends at whichever comes first.
+    /// </summary>
+    /// <param name="cancellationToken">The caller's token, which may never be cancelled.</param>
+    /// <returns>The linked source. The caller disposes it.</returns>
+    private static CancellationTokenSource CreateBoundedSource(CancellationToken cancellationToken)
+    {
+        CancellationTokenSource bounded =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        bounded.CancelAfter(CloseTimeout);
+
+        return bounded;
     }
 }
 
@@ -1346,9 +1639,9 @@ public sealed class DataServicesClient
         }
 
         // Guarded because both of the derived arguments below are computed purely FOR the log record and
-        // have no other purpose: the classification does not affect control flow, and the identity
-        // presence test is a diagnostic. Computing them when nothing will read them would be work done
-        // for no observable reason.
+        // have no other purpose: the classification does not affect control flow, and the identity block
+        // count is a diagnostic. Computing them when nothing will read them would be work done for no
+        // observable reason.
         if (_logger.IsEnabled(LogLevel.Debug))
         {
             // Classified with the PORTED tri-state algebra rather than an ad-hoc comparison written
@@ -1357,17 +1650,26 @@ public sealed class DataServicesClient
             // no reference to the kernel - so the conversion is stated rather than assumed.
             bool succeeded = Predicates.IsSucceeded((long)response.RetCode);
 
+            // THE IDENTITY DIAGNOSTIC IS A COUNT, NOT A PRESENCE TEST, because the field is REPEATED:
+            // the reply carries ONE ORDERED BLOCK PER UPDATE TABLE, mirroring the legacy caller-side
+            // proxy that appends a block per table and replays every one of them
+            // [n_cst_threading_task_sqlupdate.sru:L73-L76, L142-L195]. A presence test would report
+            // `true` unconditionally - protoc initialises a repeated field to an empty collection that
+            // is never null - so it would have stopped diagnosing anything the moment the contract
+            // became repeated. The count is the fact worth recording: zero means no block was
+            // collected, and a count that disagrees with the number of update tables prepared is the
+            // shape of a relay that dropped one.
             _logger.LogDebug(
                 "Update on DataWindow {DataWindowHandle} returned retCode {RetCode} (succeeded: "
                 + "{Succeeded}); {RowsInserted} inserted, {RowsUpdated} updated, {RowsDeleted} deleted; "
-                + "identity block present: {HasIdentity}.",
+                + "{IdentityBlockCount} identity block(s), one per update table.",
                 request.DatawindowHandle,
                 response.RetCode,
                 succeeded,
                 response.RowsInserted,
                 response.RowsUpdated,
                 response.RowsDeleted,
-                response.Identity is not null);
+                response.Identity.Count);
         }
 
         if (response.Error is not null)
@@ -2284,9 +2586,20 @@ public sealed class DataServicesClient
     /// frames are what a consumer should actually read. This client chooses neither for the caller.
     /// </para>
     /// <para>
-    /// The outbound half is deliberately NOT half-closed after the subscription is written, so a caller
-    /// retains the ability to send a further control message on the same channel. Ending the
-    /// enumeration disposes the call, which cancels it and unsubscribes.
+    /// THIS MEMBER IS ONE-SHOT, AND THE OUTBOUND HALF IS CLOSED AS SOON AS THE ONE CONTROL MESSAGE HAS
+    /// BEEN WRITTEN. The underlying operation is duplex, but this signature exposes only the inbound
+    /// half - it returns records and hands back no writer - so there is no way for a caller to send a
+    /// second control message even in principle. Leaving the outbound half open on the strength of an
+    /// ability the API does not grant would be worse than merely inaccurate: the far end cannot
+    /// distinguish "will send more" from "cannot send more", so it would wait for a message that can
+    /// never arrive, and it would hold the resources of that wait for as long as the subscription lasts.
+    /// Half-closing states the truth on the wire.
+    /// </para>
+    /// <para>
+    /// TO CHANGE A SUBSCRIPTION, CALL AGAIN. The request carries its own kind - subscribe or unsubscribe
+    /// - so an unsubscribe is another one-shot call rather than a second message on this one. Ending the
+    /// enumeration also unsubscribes: it disposes the call, which cancels it. That is the ordinary way
+    /// to stop, and an explicit unsubscribe exists for a caller that wants the far end to be told.
     /// </para>
     /// <para>RETRY SAFETY: re-subscribing is safe - the trace is diagnostic, and a duplicate record has no effect on any result.</para>
     /// </remarks>
@@ -2303,6 +2616,12 @@ public sealed class DataServicesClient
             _columnExpression.TraceChannel(options);
 
         await call.RequestStream.WriteAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // ONE CONTROL MESSAGE, THEN HALF-CLOSE. This signature exposes no writer, so no further message
+        // can be sent; saying so on the wire is what stops the far end waiting for one. It is a
+        // half-close and not a cancellation, so the subscription itself stays live and records keep
+        // arriving on the inbound half until the enumeration ends or the call is cancelled.
+        await call.RequestStream.CompleteAsync().ConfigureAwait(false);
 
         await foreach (TraceRecord record in call.ResponseStream
             .ReadAllAsync(cancellationToken)

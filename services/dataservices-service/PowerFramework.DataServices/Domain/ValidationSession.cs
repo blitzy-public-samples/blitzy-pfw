@@ -1122,6 +1122,71 @@ internal sealed class ValidationSession : IItemChangeSessionState
     }
 
     /// <summary>
+    /// Validates that the session may be used and records the activity - ALL UNDER ONE ACQUISITION OF
+    /// THE GATE.
+    /// </summary>
+    /// <returns>
+    /// <see cref="ValidationSessionAcquisition.Acquired"/> when the session was open, unexpired, and has
+    /// now had its activity recorded; <see cref="ValidationSessionAcquisition.Closed"/> when it had
+    /// already been closed; <see cref="ValidationSessionAcquisition.Expired"/> when it had gone idle past
+    /// its timeout, in which case IT IS CLOSED BEFORE THIS RETURNS.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THIS EXISTS BECAUSE THE THREE STEPS IT PERFORMS CANNOT BE THREE CALLS. Asking
+    /// <see cref="IsOpen"/>, then <see cref="HasExpired"/>, then <see cref="Touch"/> takes and releases
+    /// the gate three times, and a close landing in either interval produces an outcome no single state
+    /// of the session justifies: the checks pass, the touch silently does nothing because the session is
+    /// already closed, and the caller is handed a CLOSED session together with a success code. The
+    /// caller then works against state the close was supposed to have released.
+    /// </para>
+    /// <para>
+    /// Under one acquisition there is no interval to land in. A concurrent <see cref="Close"/> either
+    /// runs first - and this returns <see cref="ValidationSessionAcquisition.Closed"/>, so the operation
+    /// is refused - or runs after, and the NEXT acquisition is refused. Both orderings are outcomes the
+    /// session's own state justifies, and neither produces "success with a closed session". That is what
+    /// makes the refusal deterministic rather than merely likely.
+    /// </para>
+    /// <para>
+    /// EXPIRY IS DECIDED AND ACTED ON TOGETHER, for the same reason: a session found expired is closed
+    /// here, under the same lock, so no second observer can look at it and conclude anything different.
+    /// The registry still removes it and releases its slot, which is why the caller of this method closes
+    /// through the registry on a non-acquired outcome rather than leaving a closed session in the map.
+    /// </para>
+    /// <para>
+    /// The expiry test is duplicated from <see cref="HasExpired"/> rather than delegated to it, and that
+    /// is the point: delegating would re-enter the gate and reintroduce exactly the interval this method
+    /// exists to remove. <see cref="HasExpired"/> remains for the sweep, which asks the question without
+    /// intending to use the session.
+    /// </para>
+    /// </remarks>
+    internal ValidationSessionAcquisition Acquire()
+    {
+        lock (_gate)
+        {
+            if (!_isOpen)
+            {
+                return ValidationSessionAcquisition.Closed;
+            }
+
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+
+            if (IdleTimeout > TimeSpan.Zero && now - _lastAccessedAt > IdleTimeout)
+            {
+                // Terminal under this lock. The four legacy fields are deliberately NOT reset, exactly as
+                // Close() leaves them, so the registry's close can still report the state at closure.
+                _isOpen = false;
+
+                return ValidationSessionAcquisition.Expired;
+            }
+
+            _lastAccessedAt = now;
+
+            return ValidationSessionAcquisition.Acquired;
+        }
+    }
+
+    /// <summary>
     /// Releases the session's state deterministically.
     /// </summary>
     /// <returns>
@@ -1955,6 +2020,33 @@ internal sealed record ValidationSessionCloseResult(
     ValidationSessionSnapshot FinalState);
 
 /// <summary>
+/// The outcome of one atomic attempt to take a validation session into use.
+/// </summary>
+/// <remarks>
+/// Three outcomes rather than a boolean, because the two refusals have different consequences for the
+/// registry: a session that was merely closed has already been accounted for, whereas one this attempt
+/// found EXPIRED has just been closed by the attempt itself and its registry slot still needs releasing.
+/// Collapsing them would either leak a slot or double-release one.
+/// </remarks>
+internal enum ValidationSessionAcquisition
+{
+    /// <summary>
+    /// The session was open and unexpired, and its activity stamp has been advanced. The only outcome on
+    /// which a caller may use the session.
+    /// </summary>
+    Acquired = 0,
+
+    /// <summary>The session had already been closed. The attempt changed nothing.</summary>
+    Closed = 1,
+
+    /// <summary>
+    /// The session had gone idle past its timeout. It was CLOSED by the attempt, under the same lock that
+    /// decided it, so no other observer can reach a different conclusion about it.
+    /// </summary>
+    Expired = 2,
+}
+
+/// <summary>
 /// The result of looking a validation session up by its correlation identifier.
 /// </summary>
 /// <param name="Session">The session, or <see langword="null"/> when it could not be resolved.</param>
@@ -2214,8 +2306,19 @@ internal sealed class ValidationSessionRegistry
     /// <param name="sessionId">The correlation identifier.</param>
     /// <returns>The resolution. Never a silently created session.</returns>
     /// <remarks>
+    /// <para>
     /// An expired session found here is CLOSED AND RELEASED on the way out, so expiry is enforced at the
     /// point of use as well as by the sweep - a caller cannot revive one by holding its identifier.
+    /// </para>
+    /// <para>
+    /// THE VALIDATION IS ONE ATOMIC STEP, not three. <see cref="ValidationSession.Acquire"/> tests open
+    /// state, tests expiry and records activity under a SINGLE acquisition of the session's gate. Asking
+    /// the three questions separately took the gate three times, and a close landing in either interval
+    /// returned a CLOSED session together with <see cref="RetCode.OK"/> - the touch quietly did nothing,
+    /// so nothing reported the contradiction and the caller went on to work against state the close was
+    /// supposed to have released. There is now no interval for a close to land in: it either precedes the
+    /// acquisition, which is refused, or follows it, and the next acquisition is refused.
+    /// </para>
     /// </remarks>
     internal ValidationSessionResolution Resolve(string? sessionId)
     {
@@ -2229,14 +2332,15 @@ internal sealed class ValidationSessionRegistry
             return new ValidationSessionResolution(null, RetCode.E_INVALID_HANDLE);
         }
 
-        if (!found.IsOpen || found.HasExpired())
+        if (found.Acquire() != ValidationSessionAcquisition.Acquired)
         {
+            // Closed, or expired-and-now-closed. Either way the registry drops it and gives the slot
+            // back; the close is idempotent, so doing it for an already-closed session is safe and is
+            // what keeps a closed entry from lingering in the map.
             Close(sessionId);
 
             return new ValidationSessionResolution(null, RetCode.E_NOT_EXISTS);
         }
-
-        found.Touch();
 
         return new ValidationSessionResolution(found, RetCode.OK);
     }

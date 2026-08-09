@@ -221,16 +221,25 @@
 //      their locators, [:L834] and [:L333, :L350, :L362] respectively. The FOUR aliases this arm does
 //      emit are the four constants declared below, and there are no others.
 //    * NO SCREAMING_SNAKE identifier. The repository-root .editorconfig scopes its CA1707 and
-//      IDE1006 suppressions to seven named files and THIS FILE IS NOT ONE OF THEM, while
+//      IDE1006 suppressions to the files on its BAND 3 roster - the single source of truth for that
+//      list - and THIS FILE IS NOT ONE OF THEM, while
 //      Directory.Build.props sets TreatWarningsAsErrors repository-wide - so such an identifier
 //      declared here is a COMPILE ERROR, not a style debate. SQL_MS_REPLACE is consumed from
 //      PowerFramework.Shared.Kernel.Enums and DBT_ORACLE from the generated contract enum, where
 //      protoc renders it DbtOracle. The five constants below are the permitted exception IN FORM
 //      ONLY: each legacy LITERAL is preserved exactly, while each C# IDENTIFIER is PascalCase.
-//    * NO test. The tests for this class live in PowerFramework.Persistence.Tests, to which the
-//      application project already grants internal access, and every branch below is reachable from
+//    * NO test IN THIS FILE. Tests for this class belong in PowerFramework.Persistence.Tests, to which
+//      the application project already grants internal access, and every branch below is reachable from
 //      a table-driven theory whose entire fixture is strings - no database, no connection, no client
 //      package and no fixture object of any kind (C-H).
+//      STATE, STATED PLAINLY: THAT THEORY IS PLANNED AND DOES NOT EXIST. No test in that project
+//      references this class, the SQL Server sibling or PagingRewriteDispatcher, and the project does
+//      not currently build because the application project it references has no entry point. The
+//      triple-nested form, its three nesting aliases and the empty-order-by substitution below are
+//      therefore UNPINNED. An earlier revision of this header read as though the tests existed; that
+//      reading is withdrawn. docs/PARITY.md section 6.2 lists the required rows and the rule that every
+//      expectation be derived from the LEGACY generator at n_cst_thread_task_sqlquery.sru:L392-L398
+//      rather than from this file.
 // ==============================================================================================
 
 using System.Globalization;
@@ -389,6 +398,23 @@ internal sealed class OraclePagingRewriter : IPagingRewriter
     /// </para>
     /// </remarks>
     public DatabaseType Dialect => DatabaseType.DbtOracle;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// <see langword="false"/>, AND THAT IS A TRANSCRIBED FACT ABOUT THE ORACLE'S ARM RATHER THAN A
+    /// CHOICE. <c>[:L386-L395]</c> never reads <c>_sPagedUniqueIndexColumns</c> at all - the collection
+    /// simply does not appear in the arm - so this dialect emits no identifier a caller supplied and has no
+    /// concatenation site to protect.
+    /// </para>
+    /// <para>
+    /// The consequence is deliberate: <see cref="PagingRewriteDispatcher"/> does NOT validate the
+    /// collection when this arm is selected, so a request carrying a malformed column reaches this arm and
+    /// is answered exactly as before, with the collection ignored. Rejecting it would be a narrowing with
+    /// no injection to prevent, and it would change an outcome the legacy defines (C-B).
+    /// </para>
+    /// </remarks>
+    public bool ConsumesPagedUniqueIndexColumns => false;
 
     /// <inheritdoc />
     /// <remarks>

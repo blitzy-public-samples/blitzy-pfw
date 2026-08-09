@@ -1716,6 +1716,170 @@ public sealed class FullStateCodecTests
             ApplyToFreshCarrier(PatchInt32(image, ValuePayloadOffset + 12, 0x00FF_0000)));
     }
 
+    // ==========================================================================================
+    //  THE TWO STRING FAULTS, WHICH ARE THE ONES THAT USED TO ESCAPE
+    //  ----------------------------------------------------------------------------------------
+    //  A string value is written through BinaryWriter.Write(string), which emits a 7-BIT ENCODED
+    //  LENGTH followed by the UTF-8 bytes, and it is read back through BinaryReader.ReadString. The
+    //  encoding this codec uses is deliberately constructed with throwOnInvalidBytes: true, so that a
+    //  value which cannot round-trip is a DETECTED fault rather than a silent replacement character.
+    //  That decision has a consequence the decode path has to honour: malformed bytes make ReadString
+    //  THROW, and a malformed 7-bit length makes it throw something different again.
+    //
+    //  Both faults are as plainly "the payload is bad" as a truncation is, and both must therefore
+    //  answer the failure code SetFullState answers [n_cst_threading_task_sqlquery.sru:L190]. Neither
+    //  is reachable by patching a field offset - one needs invalid UTF-8 in the value bytes and the
+    //  other needs an illegal continuation pattern in the length prefix - which is why they are built
+    //  by hand and why they went unnoticed.
+    // ==========================================================================================
+
+    /// <summary>
+    /// A string value whose bytes are not valid UTF-8 is rejected with the failure code rather than
+    /// escaping as a decoder exception.
+    /// </summary>
+    /// <remarks>
+    /// <c>0xC3</c> introduces a two-byte sequence and <c>0x28</c> cannot continue one, so the pair is
+    /// invalid UTF-8 in the one way a strict decoder is obliged to notice. The length prefix stays
+    /// honest at two bytes, so this test isolates the DECODE fault from any length fault.
+    /// </remarks>
+    [Fact]
+    public void Apply_RejectsMalformedUtf8InAStringValue_UnitLevelNoOracle()
+    {
+        // "ab" is two ASCII bytes, so its 7-bit length prefix is the single byte 0x02 and the two value
+        // bytes sit immediately after it - which is what makes the substitution below exact.
+        byte[] image = SingleRowImage("ab");
+
+        Assert.Equal(0x02, image[ValuePayloadOffset]);
+
+        image[ValuePayloadOffset + 1] = 0xC3;   // leads a two-byte sequence
+        image[ValuePayloadOffset + 2] = 0x28;   // cannot continue one
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, ApplyToFreshCarrier(image));
+    }
+
+    /// <summary>
+    /// A string value whose 7-BIT ENCODED LENGTH PREFIX is malformed is rejected with the failure code.
+    /// </summary>
+    /// <remarks>
+    /// Every byte of a 7-bit encoded integer but the last sets its high bit, and the encoding admits at
+    /// most five bytes. Five continuation bytes in a row therefore describe no integer at all, which
+    /// raises a format fault from inside the length read - before any character has been decoded.
+    /// </remarks>
+    [Fact]
+    public void Apply_RejectsAMalformedSevenBitStringLength_UnitLevelNoOracle()
+    {
+        byte[] image = SingleRowImage("abcdefgh");
+
+        Assert.Equal(0x08, image[ValuePayloadOffset]);
+
+        for (int offset = 0; offset < 5; offset++)
+        {
+            image[ValuePayloadOffset + offset] = 0xFF;
+        }
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, ApplyToFreshCarrier(image));
+    }
+
+    // ==========================================================================================
+    //  THE COUNTS A HOSTILE IMAGE CAN WEAPONISE, REJECTED BEFORE THEY REACH AN ALLOCATION
+    //  ----------------------------------------------------------------------------------------
+    //  An image arrives from a peer, so its row count, its per-row column count and any blob length
+    //  are numbers chosen by whoever produced the bytes. The column count is the sharpest of the
+    //  three, because ReadRow sizes FIVE arrays from it before reading a single column, and a blob
+    //  length is next, because ReadBytes allocates from it BEFORE discovering the stream is shorter.
+    //
+    //  A negative value was already rejected, and the sibling cases above cover that. What these
+    //  cases add is the MAXIMAL POSITIVE value, which a negative check does not touch, together with
+    //  the assertion that matters more than the result code: THE ANSWER IS PRODUCED WITHOUT
+    //  ALLOCATING. A decoder that reserved gigabytes and then failed would return the same code on a
+    //  host with the memory to spare, and would take the host down on one without.
+    // ==========================================================================================
+
+    /// <summary>
+    /// An image declaring <see cref="long.MaxValue"/> rows in a buffer is rejected before the row loop
+    /// starts, and without allocating.
+    /// </summary>
+    [Fact]
+    public void Apply_RejectsAnOversizedRowCountBeforeAllocating_UnitLevelNoOracle()
+    {
+        AssertRejectedWithoutAllocating(
+            PatchInt64(SingleRowImage("a"), FirstBufferRowCountOffset, long.MaxValue));
+    }
+
+    /// <summary>
+    /// An image declaring <see cref="int.MaxValue"/> columns on a row is rejected before the five decode
+    /// arrays are sized from it, and without allocating.
+    /// </summary>
+    [Fact]
+    public void Apply_RejectsAnOversizedColumnCountBeforeAllocating_UnitLevelNoOracle()
+    {
+        AssertRejectedWithoutAllocating(
+            PatchInt32(SingleRowImage("a"), ColumnCountOffset, int.MaxValue));
+    }
+
+    /// <summary>
+    /// An image declaring <see cref="int.MaxValue"/> blob bytes is rejected before
+    /// <see cref="BinaryReader.ReadBytes"/> allocates from the length, and without allocating.
+    /// </summary>
+    [Fact]
+    public void Apply_RejectsAnOversizedBlobLengthBeforeAllocating_UnitLevelNoOracle()
+    {
+        AssertRejectedWithoutAllocating(
+            PatchInt32(SingleRowImage(new byte[] { 1, 2, 3 }), ValuePayloadOffset, int.MaxValue));
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="image"/> answers the failure code and that producing that answer
+    /// allocated a trivial amount of memory.
+    /// </summary>
+    /// <param name="image">The hand-patched image declaring a maximal count.</param>
+    /// <remarks>
+    /// <para>
+    /// The budget is generous rather than tight on purpose: the decoder legitimately constructs a
+    /// stream, a reader and a carrier, all of which allocate, and this assertion must not become
+    /// brittle against a change in any of them. What it has to separate is KILOBYTES from GIGABYTES,
+    /// and a one-megabyte budget does that with three orders of magnitude to spare.
+    /// </para>
+    /// <para>
+    /// The reading is per-thread and counts allocation REQUESTS rather than surviving objects, which is
+    /// exactly the quantity of interest here.
+    /// </para>
+    /// <para>
+    /// THE CARRIER'S STATE IS DELIBERATELY NOT ASSERTED, and the reason is a real property of this
+    /// codec rather than a gap in the test. <c>Apply</c> RESETS the target and then restores into it,
+    /// and <see cref="FullStateCodec"/>'s row restore appends the row BEFORE decoding its columns -
+    /// which it must, because the three-pass value restore addresses the row by the number
+    /// <c>AppendRow</c> hands back. So a fault detected part-way through a row leaves that row present
+    /// and incomplete. That matches the operation being reproduced: <c>SetFullState</c> answering -1
+    /// leaves the DataStore in an unspecified state and the legacy caller reads the CODE, not the
+    /// carrier [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L190</c>].
+    /// Asserting emptiness here would therefore be asserting a guarantee the legacy does not give, and
+    /// changing the append ordering to provide one would be a behavioural change (C-B). The sibling
+    /// changeset codec IS asserted for emptiness, because its row decode reads every column into local
+    /// arrays before admitting anything.
+    /// </para>
+    /// </remarks>
+    private static void AssertRejectedWithoutAllocating(byte[] image)
+    {
+        const long allocationBudgetBytes = 1L << 20;
+
+        DataWindowBufferStore target = new();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        long result = FullStateCodec.Apply(target, image);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
+
+        Assert.True(
+            allocated < allocationBudgetBytes,
+            $"Decoding a {image.Length}-byte image that declared a maximal count allocated {allocated} "
+                + $"bytes, over the {allocationBudgetBytes}-byte budget. The count is reaching an "
+                + "allocation before it is bounded.");
+    }
+
     #endregion
 
     #region End to end across the two seams

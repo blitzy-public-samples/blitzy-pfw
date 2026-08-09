@@ -100,8 +100,22 @@
 //     C-C (AAP 0.7.3): the legacy tree is read-only and is the behavioural oracle.
 //     pfw.i18n.xml sits inside that region, so it is opened READ-ONLY and is never written,
 //     re-encoded, reformatted, normalized or saved. There is no Save call, no write path and no
-//     temporary file anywhere in this type. It is also NOT copied or embedded into this project:
-//     the csproj deliberately declares no Content, None or EmbeddedResource item naming it.
+//     temporary file anywhere in this type.
+//
+//     It is NOT embedded. The csproj declares no EmbeddedResource item naming it, deliberately,
+//     because the behaviour being reproduced is a read of a real file at a real relative path -
+//     see (c) above - and an embedded resource would not have a path to resolve at all.
+//     It IS copied, and the copy is load-bearing rather than incidental: the csproj declares one
+//     Content item for it with CopyToOutputDirectory and CopyToPublishDirectory both PreserveNewest,
+//     which places the table beside the assembly in the build output and in the publish output.
+//     That is what (c)'s bare relative filename can resolve against whenever the process is
+//     launched from that directory - which is how the test host runs and how the container image
+//     sets WORKDIR. Without that copy every lookup would miss and the two mistranslations below
+//     could never be observed at run time. Copying is not editing: AAP
+//     0.2.1.2 lists this file as a read-only DATA INPUT rather than part of the 0.2.2.1 read-only
+//     legacy boundary, C-C forbids editing, deleting, moving, renaming and reformatting it, and
+//     MSBuild here only ever copies it byte for byte. The csproj comment above that item carries
+//     the measured byte-identity requirement the copy must keep.
 //
 //     The two mistranslations that AAP 0.8.2 requires preserved are DATA defects inside that
 //     read-only file, not code defects:

@@ -205,7 +205,8 @@
 //     mutated text on the statement after the call.
 //   * Any SCREAMING_SNAKE identifier of this file's own. Enums.I18N_SRC_PFW is CONSUMED here by
 //     name, as AAP §0.4.5.3 requires, but nothing is DECLARED. That matters mechanically: the
-//     repository-root .editorconfig relaxes CA1707 and IDE1006 only for the ten specific files that
+//     repository-root .editorconfig relaxes CA1707 and IDE1006 only for the specific files on its
+//     BAND 3 roster - the single source of truth for that list - that
 //     carry preserved legacy constant spellings, and this file is deliberately not one of them.
 //   * `sealed`. The legacy `global type` is an ordinary derivable type, the two siblings are the
 //     same, and nothing here relies on being final; the modifier would be a new constraint on a

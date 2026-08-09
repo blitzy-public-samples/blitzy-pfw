@@ -46,13 +46,61 @@ namespace PowerFramework.DataServices.Tests;
 /// </summary>
 internal sealed class RecordingHandler : HttpMessageHandler
 {
+    /// <summary>The path contract C-01's token issuance operation is published at.</summary>
+    public const string TokenPath = "/v1/tokens";
+
+    /// <summary>
+    /// The credential the auto-answered token response carries. An obviously-fake fixed marker: it is
+    /// not a credential, does not resemble one, and is copied from nowhere in the repository.
+    /// </summary>
+    public const string AutoAnsweredCredential = "auto.not-a-real-token.value";
+
+    /// <summary>The scope the auto-answered credential is granted.</summary>
+    public const string AutoAnsweredScope = "security.crypto";
+
+    private const string AutoAnsweredTokenJson =
+        "{\"access_token\":\"" + AutoAnsweredCredential + "\",\"token_type\":\"Bearer\","
+        + "\"expires_in\":300,\"scope\":\"" + AutoAnsweredScope + "\"}";
+
     private readonly Queue<HttpResponseMessage> _responses = new();
 
-    /// <summary>The requests this handler was given, in order.</summary>
+    /// <summary>The requests this handler was given, in order, EXCLUDING auto-answered token requests.</summary>
+    /// <remarks>
+    /// Auto-answered token requests are kept out of this list on purpose. Every contract C-02 operation
+    /// now acquires a credential before it sends, so recording that acquisition here would shift the
+    /// index of the request each C-02 test is actually about - a purely mechanical renumbering that
+    /// would obscure what those tests assert. They are recorded in <see cref="TokenRequests"/> instead,
+    /// so nothing is hidden and a test that cares can inspect them.
+    /// </remarks>
     public List<HttpRequestMessage> Requests { get; } = [];
 
-    /// <summary>The request body text this handler observed, in order.</summary>
+    /// <summary>The request body text this handler observed, in order, on the same basis.</summary>
     public List<string> Bodies { get; } = [];
+
+    /// <summary>The auto-answered token requests, in order.</summary>
+    public List<HttpRequestMessage> TokenRequests { get; } = [];
+
+    /// <summary>The body text of each auto-answered token request, in order.</summary>
+    public List<string> TokenBodies { get; } = [];
+
+    /// <summary>
+    /// When set, a request to <see cref="TokenPath"/> is answered from a canned credential WITHOUT
+    /// consuming a queued response.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This exists because the two edges of the Security contract are authenticated differently. Token
+    /// issuance is authenticated by the transport and carries no bearer credential; all seventeen C-02
+    /// crypto operations DO carry one, which they must acquire first. A suite testing a C-02 operation is
+    /// therefore answering two different endpoints, and a strict first-in-first-out queue would hand the
+    /// operation's own canned response to the credential acquisition instead.
+    /// </para>
+    /// <para>
+    /// Left OFF by default, deliberately: the C-01 suite tests issuance itself and must see its own
+    /// queued responses used. Only a suite whose subject is a C-02 operation turns it on.
+    /// </para>
+    /// </remarks>
+    public bool AutoAnswerTokenRequests { get; set; }
 
     /// <summary>Whether the last observed cancellation token could be cancelled.</summary>
     public bool ObservedCancellableToken { get; private set; }
@@ -93,6 +141,20 @@ internal sealed class RecordingHandler : HttpMessageHandler
     {
         cancellationToken.ThrowIfCancellationRequested();
         ObservedCancellableToken = cancellationToken.CanBeCanceled;
+
+        if (AutoAnswerTokenRequests
+            && string.Equals(request.RequestUri?.AbsolutePath, TokenPath, StringComparison.Ordinal))
+        {
+            TokenRequests.Add(request);
+            TokenBodies.Add(request.Content is null
+                ? string.Empty
+                : request.Content.ReadAsStringAsync(CancellationToken.None).GetAwaiter().GetResult());
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(AutoAnsweredTokenJson, Encoding.UTF8, "application/json"),
+            });
+        }
 
         Requests.Add(request);
         Bodies.Add(request.Content is null
@@ -341,6 +403,60 @@ public sealed class SecurityClientTests
         Assert.Equal(2, handler.Requests.Count);
     }
 
+    // ----------------------------------------------------------------------------------------------
+    //  THE CACHE KEY IS INJECTIVE FOR ARBITRARY COMPONENT CONTENT.
+    //  ----------------------------------------------------------------------------------------------
+    //  The pairs below are the minimal ones that collided when the components were joined with U+001F on
+    //  the stated ground that no subject, audience or scope could contain it - true of this service's own
+    //  fixed call sites, but never CHECKED anywhere, so a convention rather than a control. A collision
+    //  is not a cache inefficiency: it hands one caller a credential minted for a different audience or
+    //  a different scope set, which is precisely what the contract's one-audience rule exists to prevent.
+    // ----------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task GetTokenAsync_DoesNotShareACredentialBetweenRequestsThatCollidedUnderTheDelimiter()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "first.not-a-real-token.value"))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "second.not-a-real-token.value"));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            new ServiceTokenRequest("a\u001Fb", "c", ["scope"]),
+            TestContext.Current.CancellationToken);
+
+        ServiceToken second = await client.GetTokenAsync(
+            new ServiceTokenRequest("a", "b\u001Fc", ["scope"]),
+            TestContext.Current.CancellationToken);
+
+        // Two issuances, and each caller holds ITS OWN credential. Under the delimiter encoding both
+        // requests resolved to one key, so the second returned the first's credential and issued nothing.
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal("first.not-a-real-token.value", first.AccessToken);
+        Assert.Equal("second.not-a-real-token.value", second.AccessToken);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_DoesNotShareACredentialBetweenScopeSetsThatCollidedWhenPreJoined()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "first.not-a-real-token.value"))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "second.not-a-real-token.value"));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["read\u001Fwrite"]),
+            TestContext.Current.CancellationToken);
+
+        ServiceToken second = await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["read", "write"]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal("first.not-a-real-token.value", first.AccessToken);
+        Assert.Equal("second.not-a-real-token.value", second.AccessToken);
+    }
+
     [Fact]
     public async Task GetTokenAsync_ReusesACredentialWhenTheSameScopeSetArrivesInAnotherOrder()
     {
@@ -577,6 +693,12 @@ public sealed class SecurityClientTests
     {
         RecordingHandler handler = new RecordingHandler()
             .Enqueue(HttpStatusCode.OK, "{\"digest\":\"d\"}");
+
+        // The example operation here is a C-02 one, and every C-02 operation now acquires a credential
+        // before it sends, so the credential acquisition is auto-answered rather than being handed this
+        // test's queued digest response.
+        handler.AutoAnswerTokenRequests = true;
+
         (SecurityClient client, _, _) = CreateClient(handler);
         using CancellationTokenSource source = new();
 

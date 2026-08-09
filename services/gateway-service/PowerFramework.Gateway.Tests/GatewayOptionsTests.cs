@@ -25,6 +25,7 @@
 // ==================================================================================================
 
 using System.ComponentModel.DataAnnotations;
+using System.Reflection;
 using PowerFramework.Gateway.Configuration;
 using PowerFramework.Shared.Kernel;
 using Xunit;
@@ -40,12 +41,25 @@ public sealed class GatewayOptionsTests
         options.Validate(new ValidationContext(options)).ToArray();
 
     /// <summary>An options instance whose upstream addresses are valid, for isolating other checks.</summary>
+    /// <remarks>
+    /// Every service declares ONE listener on its assigned port, so the upstream and probe addresses for
+    /// DataServices name the same endpoint; they stay in separate groups because one is a call edge and
+    /// the other an observation. Both groups are populated because both are validated. The values here
+    /// are deliberately NOT the defaults - a fixture that reproduced the defaults could not distinguish
+    /// "the validator accepted this" from "the validator never read it".
+    /// </remarks>
     private static GatewayOptions ValidOptions() => new()
     {
         Upstreams = new GatewayOptions.UpstreamAddresses
         {
+            DataServices = "https://dataservices:5102",
+            Security = "https://security:5104",
+        },
+        HealthProbes = new GatewayOptions.HealthProbeAddresses
+        {
+            Persistence = "http://persistence:5101",
             DataServices = "http://dataservices:5102",
-            Security = "http://security:5104",
+            Security = "https://security:5104",
         },
     };
 
@@ -149,16 +163,212 @@ public sealed class GatewayOptionsTests
     {
         var upstreams = new GatewayOptions().Upstreams;
 
-        // 5102 IS DATASERVICES AND 5104 IS SECURITY, per the port map in docs/ARCHITECTURE.md.
+        // 5102 IS DATASERVICES AND 5104 IS SECURITY, per the port map in docs/ARCHITECTURE.md 4.1 and
+        // AAP 0.3.2.2, which fix the band at 5101-5105 with 5103 reserved and nothing outside it.
         //
-        // THE SCHEME IS PART OF THE ASSERTION, NOT INCIDENTAL. Both defaults are https: Security is the
-        // trust bootstrap whose published key set every service verifies against, and DataServices
-        // carries buffer state and conflict detail. The loopback plain-http topology the local bring-up
+        // THE SCHEME IS THE LOAD-BEARING HALF OF THE DATASERVICES ASSERTION. Both defaults are https:
+        // Security is the trust
+        // bootstrap whose published key set every service verifies against, and DataServices carries
+        // buffer state and conflict detail. The loopback plain-http topology the local bring-up
         // publishes is an override in appsettings.Development.json, so it applies only when
         // ASPNETCORE_ENVIRONMENT is Development and can never be inherited by a deployment that simply
         // forgets to override something.
         Assert.Equal("https://localhost:5102", upstreams.DataServices);
         Assert.Equal("https://localhost:5104", upstreams.Security);
+    }
+
+    [Fact]
+    public void TheDataServicesUpstreamNeverNamesACleartextListener()
+    {
+        // A REGRESSION GUARD WITH A SPECIFIC FAILURE IN MIND, NOT A RESTATEMENT OF THE TEST ABOVE.
+        //
+        // `http://localhost:5102` is the value that looks correct from every angle except the one that
+        // matters: right service, right port, right band, and it is what the readiness gate probes. It
+        // is nonetheless unusable HERE, because Gateway reaches this upstream over gRPC and gRPC needs
+        // HTTP/2. DataServices declares ONE endpoint carrying both versions - https://+:5102 with
+        // Protocols Http1AndHttp2 - and that only works because ALPN selects the version per
+        // connection. ALPN exists only inside a TLS handshake, so on cleartext Kestrel disables HTTP/2
+        // outright and says so at startup.
+        //
+        // The failure the cleartext value produces is why this is asserted separately from the equality
+        // above: every call fails with the HTTP/2 error HTTP_1_1_REQUIRED during transport negotiation,
+        // BEFORE the request reaches DataServices. Nothing in DataServices logs it, so the symptom is a
+        // Gateway 502 on every /v1/datawindow route and the cause is four characters of scheme.
+        Assert.StartsWith("https://", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+        Assert.DoesNotContain("http://", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheProbeDefaultsCoverAllThreeUpstreamsOnTheirRestPorts()
+    {
+        var probes = new GatewayOptions().HealthProbes;
+
+        // THREE, WHERE Upstreams HAS TWO, AND THE ASYMMETRY IS THE CONTRACT. C-09's
+        // AggregateHealthReport bounds `upstreams` at exactly three items and closes UpstreamHealth's
+        // service name over persistence, dataservices and security, so a two-member probe group leaves
+        // the published aggregate unbuildable.
+        Assert.Equal("https://localhost:5101", probes.Persistence);
+        Assert.Equal("https://localhost:5102", probes.DataServices);
+        Assert.Equal("https://localhost:5104", probes.Security);
+
+        // THE PROBE AND THE CALL EDGE NAME THE SAME LISTENER, AND THAT IS THE CORRECT STATE RATHER THAN
+        // A DUPLICATION TO REMOVE. DataServices declares one endpoint on its assigned port carrying both
+        // protocol versions over ALPN, so the HTTP/1.1 probe and the HTTP/2 contract traffic share it.
+        // The two members stay separate because one authorises an anonymous GET /health for the C-10
+        // aggregate and the other carries C-03 and C-04 - a topology distinction, not an addressing one.
+        Assert.Equal(new GatewayOptions().Upstreams.DataServices, probes.DataServices);
+    }
+
+    [Fact]
+    public void TheProbeGroupCarriesPersistenceWhileTheCallGroupDoesNot()
+    {
+        // THE ONE PLACE PERSISTENCE MAY BE NAMED IN GATEWAY'S CONFIGURATION, AND THE REASON IS THE
+        // DIFFERENCE BETWEEN OBSERVING AND CALLING.
+        //
+        // C-10 requires Gateway's aggregate to name Persistence with its own state; the same contract
+        // states that Gateway never calls Persistence. Both hold because the probe group authorises one
+        // anonymous endpoint - GET /health - and Gateway holds no Persistence client, channel or
+        // generated stub with which anything further could be reached. Moving this member onto
+        // UpstreamAddresses would put SQL generation one hop from the ingress while looking like
+        // configuration, which is why the two groups are separate types rather than one.
+        Assert.Contains(
+            typeof(GatewayOptions.HealthProbeAddresses).GetProperties(),
+            static p => p.Name == "Persistence");
+
+        Assert.DoesNotContain(
+            typeof(GatewayOptions.UpstreamAddresses).GetProperties(),
+            static p => p.Name == "Persistence");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not-a-uri")]
+    [InlineData("ftp://persistence:5101")]
+    [InlineData("http://user:secret@persistence:5101")]
+    [InlineData("http://persistence:5101?probe=1")]
+    [InlineData("http://persistence:5101#fragment")]
+    public void AnUnusableProbeAddressIsRefusedByTheSameRulesAsAnUpstreamAddress(string? address)
+    {
+        GatewayOptions options = ValidOptions();
+        options.HealthProbes.Persistence = address!;
+
+        ValidationResult result = Assert.Single(Validate(options));
+
+        Assert.Contains(nameof(GatewayOptions.HealthProbes), result.MemberNames);
+
+        // The value is never echoed, for the same reason an upstream address is not: a rejected address
+        // may carry a credential, and the startup log is the wrong place to publish one.
+        if (!string.IsNullOrWhiteSpace(address))
+        {
+            Assert.DoesNotContain(address, result.ErrorMessage!, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("DataServices")]
+    [InlineData("Security")]
+    [InlineData("Persistence")]
+    public void EVERYProbeMemberIsCheckedAndNotOnlyTheFirst(string member)
+    {
+        // The row above varies the ADDRESS on one member. This one varies the MEMBER, because the
+        // validator checks the three probes with three separate blocks and a block that was never
+        // reached would let an unusable address for that upstream through - Gateway would then start
+        // with a probe it can never call, and report an upstream unhealthy for the wrong reason.
+        GatewayOptions options = ValidOptions();
+
+        PropertyInfo property = typeof(GatewayOptions.HealthProbeAddresses).GetProperty(member)!;
+
+        Assert.NotNull(property);
+
+        property.SetValue(options.HealthProbes, "ftp://probe:5101");
+
+        ValidationResult result = Assert.Single(Validate(options));
+
+        // The GROUP is named, so a startup failure points at the section to correct...
+        Assert.Contains(nameof(GatewayOptions.HealthProbes), result.MemberNames);
+
+        // ...and the MEMBER is named in the message, so it points at the row within it.
+        Assert.Contains(member, result.ErrorMessage!, StringComparison.Ordinal);
+
+        // The rejected value is still never echoed, for the reason the row above states.
+        Assert.DoesNotContain("ftp://probe:5101", result.ErrorMessage!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMissingProbeGroupIsASingleFatalErrorThatStopsFurtherChecking()
+    {
+        GatewayOptions options = ValidOptions();
+        options.HealthProbes = null!;
+
+        ValidationResult single = Assert.Single(Validate(options));
+
+        Assert.Contains(nameof(GatewayOptions.HealthProbes), single.MemberNames);
+        Assert.Contains("C-10", single.ErrorMessage!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheMutualTlsPairIsOptionalAsAGroupAndInseparableWhenPresent()
+    {
+        // BOTH EMPTY IS VALID: this deployment presents no client certificate and requests no token.
+        Assert.Empty(Validate(ValidOptions()));
+        Assert.False(new GatewayOptions().MutualTls.IsConfigured);
+
+        // BOTH SET IS VALID.
+        GatewayOptions both = ValidOptions();
+        both.MutualTls.CertificatePath = "/run/secrets/powerframework/gateway.crt";
+        both.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/gateway.key";
+        Assert.Empty(Validate(both));
+        Assert.True(both.MutualTls.IsConfigured);
+
+        // EITHER ONE ALONE IS REFUSED. A certificate cannot complete a handshake without its key, and a
+        // key has nothing to present without its certificate, so half a client identity is unusable
+        // rather than merely weaker - and it would fail at the first token request rather than at start.
+        foreach ((string? certificate, string? key) in ((string?, string?)[])
+            [("/run/secrets/powerframework/gateway.crt", null), (null, "/run/secrets/powerframework/gateway.key")])
+        {
+            GatewayOptions half = ValidOptions();
+            half.MutualTls.CertificatePath = certificate ?? string.Empty;
+            half.MutualTls.CertificateKeyPath = key ?? string.Empty;
+
+            ValidationResult single = Assert.Single(Validate(half));
+
+            Assert.Contains(nameof(GatewayOptions.MutualTls), single.MemberNames);
+
+            // NEITHER PATH IS ECHOED. A path names where key material is mounted, and a startup log must
+            // not record that.
+            Assert.DoesNotContain("gateway.crt", single.ErrorMessage!, StringComparison.Ordinal);
+            Assert.DoesNotContain("gateway.key", single.ErrorMessage!, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheMutualTlsGroupCarriesPathsAndHasNoMemberThatCouldHoldMaterial()
+    {
+        // THE ABSENCE IS THE CONTROL. There is no certificate body, no key body and no passphrase member,
+        // so C-F cannot be violated by filling one in - there is no such member to fill. Every property
+        // is a path, which names material mounted from the orchestration secret layer.
+        System.Reflection.PropertyInfo[] properties =
+            typeof(GatewayOptions.MutualTlsClientOptions).GetProperties();
+
+        foreach (var property in properties)
+        {
+            if (property.PropertyType == typeof(bool))
+            {
+                continue;
+            }
+
+            Assert.EndsWith("Path", property.Name, StringComparison.Ordinal);
+            Assert.Equal(typeof(string), property.PropertyType);
+        }
+
+        foreach (string forbidden in (string[])["Passphrase", "Password", "Pem", "Body", "Material", "Content"])
+        {
+            Assert.DoesNotContain(
+                properties,
+                p => p.Name.Contains(forbidden, StringComparison.OrdinalIgnoreCase));
+        }
     }
 
     [Fact]
@@ -183,7 +393,13 @@ public sealed class GatewayOptionsTests
         // holds verification material only, so a signing-key property here would be a second signing
         // authority - which is the specific thing the token topology forbids.
         foreach (Type type in (Type[])
-            [typeof(GatewayOptions), typeof(GatewayOptions.UpstreamAddresses), typeof(JwtBearerVerificationOptions)])
+            [
+                typeof(GatewayOptions),
+                typeof(GatewayOptions.UpstreamAddresses),
+                typeof(GatewayOptions.HealthProbeAddresses),
+                typeof(GatewayOptions.MutualTlsClientOptions),
+                typeof(JwtBearerVerificationOptions),
+            ])
         {
             foreach (var property in type.GetProperties())
             {

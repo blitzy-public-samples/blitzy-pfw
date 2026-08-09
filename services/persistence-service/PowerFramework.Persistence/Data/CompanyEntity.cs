@@ -194,7 +194,8 @@
 //      guard. EF Core materialises through the property setters, and a guard would impose
 //      validation the column never had.
 //    * Any SCREAMING_SNAKE identifier, and indeed any constant at all. The repository-root
-//      .editorconfig scopes its CA1707 and IDE1006 relaxations to ten individually named files -
+//      .editorconfig scopes its CA1707 and IDE1006 relaxations to the individually named files on its
+//      BAND 3 roster, the single source of truth for that list -
 //      inside this project only Sql/ClauseModifier.cs and Sql/Paging/IPagingRewriter.cs are among
 //      them - and Data/ is deliberately outside every one. Under the inherited
 //      TreatWarningsAsErrors an underscored identifier here would be a build ERROR once the

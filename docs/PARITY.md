@@ -1,20 +1,25 @@
-<!-- Markdown lint policy for this file. Rationale and the verifying command are in section 11, and the
-     policy itself is shared with the other six documents this refactor authors — see docs/BUILD.md
-     section 14, which directs that this document carry the same directive and join that command.
-     MD013 is 120 rather than the 80-character default, and is disabled for tables and code blocks: an
-     evidence row carrying a legacy locator and the behaviour it proves cannot be wrapped without
-     splitting the locator from what it proves, and a wrapped command is a command that does not run.
-     Prose IS wrapped, and is held to the 120 limit. Verify with:
-       npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                             docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md docs/PARITY.md
-     The command names the seven authored files EXPLICITLY and does not glob `docs/*.md`, because that
-     glob also sweeps the five read-only legacy Chinese documents, which carry their own pre-existing
-     violations. Those files are the behavioural oracle and are never edited, so a command that reports
-     them would fail for reasons this refactor must not act on.
+<!-- Markdown lint policy for this file. Rationale is in section 11, and the policy itself is shared with
+     the other six documents this refactor authors — see docs/BUILD.md section 14, which directs that this
+     document carry the same directive. MD013 is 120 rather than the 80-character default, and is disabled
+     for tables and code blocks: an evidence row carrying a legacy locator and the behaviour it proves
+     cannot be wrapped without splitting the locator from what it proves, and a wrapped command is a
+     command that does not run. Prose IS wrapped, and is held to the 120 limit.
 
-     Declared inline, per file, so the policy travels with the document and applies to the seven files
-     this refactor authored WITHOUT changing how the read-only legacy documents in this folder are
-     linted, and without adding a repository-root configuration artifact the plan does not provide for. -->
+     THE POLICY IS SELF-DECLARED, SO IT NEEDS NO COMMAND, NO FILE LIST AND NO GLOB. The directive on the
+     next line travels with the document: any markdownlint-compatible tool already provisioned on a
+     reader's machine honours it, with no flags to remember and no external configuration file to locate.
+     It applies to the seven documents this refactor authored and CANNOT reach the five read-only legacy
+     Chinese documents in this folder, which are the behavioural oracle, are never edited, and carry
+     pre-existing violations of their own (hard tabs, unlabelled code fences and others) that this
+     refactor must not act on. That unreachability is precisely why a per-file directive was chosen over a
+     repository-root configuration artifact the plan does not provide for.
+
+     NO LINT COMMAND IS PUBLISHED, AND THAT IS A SUPPLY-CHAIN CONTROL RATHER THAN AN OMISSION. The entire
+     approved npm dependency set for this repository is the exact, locked one declared under tests/e2e,
+     and no Markdown linter appears in it. A documented on-demand package-runner invocation would
+     therefore instruct an unpinned version to be resolved and executed from the network outside that
+     lockfile every time somebody followed the documentation, which the deterministic-automation baseline
+     forbids. Lint with tooling that is already installed; the directive below is what it reads. -->
 <!-- markdownlint-configure-file { "MD013": { "line_length": 120, "tables": false, "code_blocks": false } } -->
 
 # PowerFramework → .NET 10 — Behavioural Parity and Characterization Model
@@ -170,10 +175,17 @@ than a line, the command that produced the count is given so a reader can re-run
 
 Stated narrowly, because a parity document that overclaims its own verification is self-defeating:
 
-- **The per-service restore, release build and coverage-collecting test path was exercised and passed**
-  with **zero warnings and zero errors**, and it produced `coverage.cobertura.xml` — the exact artifact
-  the coverage gate in [§8](#8-coverage-gate-mechanics) is measured from. [`BUILD.md`](BUILD.md) records
-  the command and its output.
+- **The per-service restore, release build and coverage-collecting test COMMAND SHAPE was exercised and
+  passed** with **zero warnings and zero errors**, and it produced `coverage.cobertura.xml` — the exact
+  artifact the coverage gate in [§8](#8-coverage-gate-mechanics) is measured from. **That run was against
+  a throwaway skeleton project, not against this repository's services**, and it is evidence that the
+  command and the coverage collector work rather than a result for the four services.
+  [`BUILD.md`](BUILD.md) §13 states the same caveat and is the authority for it.
+- **Separately, in this repository:** restore is audit-clean and the shared libraries, the contracts
+  project and the four service projects build with zero warnings and zero errors, with the test suites
+  passing. What has **not** been exercised here is a service *starting* — no `Program.cs` is authored yet,
+  so an application project supplies no entry point of its own and nothing in this document should be read
+  as evidence that a service serves a request. [`BUILD.md`](BUILD.md) §13 carries the current figures.
 - **Every locator in this document was resolved against the file on disk**, and the cited line numbers
   were checked against their content rather than trusted.
 - **Every count in [§3](#3-the-oracle-and-its-fixture-corpus) was produced by counting the files**, and
@@ -187,16 +199,24 @@ Stated narrowly, because a parity document that overclaims its own verification 
 
 ### 1.5 What was not verified — stated plainly
 
-**No verified container bring-up is claimed anywhere in this document.** Docker was not installed and
-no daemon was available in the environment where this migration was planned, so the Compose bring-up
-and its ordered health probes **could not be exercised**.
+**No verified container bring-up is claimed anywhere in this document**, and the reason is stronger than
+an unavailable tool: **nothing exists to bring up.** No service `Dockerfile`, no
+`orchestration/docker-compose.yml`, no `.github/workflows/ci.yml`, and no service application entry
+point. Docker was additionally not installed in the environment where this migration was planned, so the
+Compose bring-up and its ordered health probes could not have been exercised in any case.
 
 This matters more in this document than in any other, because the capture rule in
 [§4.2](#42-the-rule-stated-in-full) is expressed in terms of a Docker volume. So the position must be
-exact: **the rule is authoritative, and the bring-up it presumes was never run here.** Container
-correctness is asserted by container-definition and Compose review plus CI, and
-[R4](#r4--container-bring-up-could-not-be-exercised-in-the-authoring-environment) carries that as a
+exact: **the rule is authoritative, and the environment it presumes has never been stood up here — nor
+can it be yet.** Container correctness is **not asserted at present**: definition-and-manifest review plus
+CI is the intended assurance mechanism once those artifacts are authored, not a step that has been taken,
+and [R4](#r4--there-is-no-container-artifact-to-bring-up-and-none-has-been-reviewed) carries that as a
 tracked risk rather than a footnote.
+
+**No paired recording exists, therefore no parity result exists.** This document is the model and the
+method; it reports no comparison, because the legacy oracle has not been exercised here
+([R1](#r1--pinyin-first-letter-matching-cannot-be-proven-bit-exact-from-the-repository-alone)) and the
+target side has no running service to capture from.
 
 Two further things are not claimed. **No paired recording exists yet** — the store described in §4 is
 planned, so this document defines the model and the discipline, not a completed comparison. And **the
@@ -446,9 +466,22 @@ grep -rn "CREATE TABLE" --include="*.sru" --include="*.srw" --include="*.srf" \
 # -> ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:463  (plus :470, which is a dialog title)
 ```
 
-The table it creates, `COMPANY`, has six columns: an auto-increment integer primary key declared
-`NOT NULL`, a required text name, a required integer age, a fifty-character address, a real salary and a
-text birth field.
+The table it creates, `COMPANY`, has six columns, and it is worth quoting the declarations rather than
+describing them because two of them are habitually read as saying more than they do:
+`ID INTEGER PRIMARY KEY NOT NULL`, `NAME TEXT NOT NULL`, `AGE INT NOT NULL`, `ADDRESS CHAR(50)`,
+`SALARY REAL`, `BIRTH TEXT`.
+
+- **`ID` is a rowid alias, not an `AUTOINCREMENT` column.** The keyword is absent; the legacy's own inline
+  comment on that line reads `自增列`, "auto-increment column", recording the *intent*. `INTEGER PRIMARY
+  KEY` does make SQLite assign a value when none is supplied, but by the largest-existing-rowid-plus-one
+  rule, which **reuses the rowids of deleted rows**. The identity round-trip must not assume monotonicity.
+- **`CHAR(50)` is not a fifty-character constraint.** SQLite has no fixed-width string type: a declared
+  type sets *affinity* only — TEXT affinity here — and the parenthesised length is ignored entirely. A
+  longer value is stored in full, unpadded and untruncated, with no error. `REAL` likewise sets affinity
+  rather than a scale, and `TEXT` on `BIRTH` carries no date semantics at all.
+
+§3.5 catalogues the four places these declarations disagree with the DataWindow's own, and what each
+disagreement makes observable.
 
 The surrounding lines define the connection grammar the implementation must reproduce:
 
@@ -475,22 +508,33 @@ draws the opposite conclusion from §6.2:
 The encrypted-SQLite path is separately out of Phase-1 scope; the reason is
 [R3](#r3--encrypted-sqlite-page-format-parity-is-out-of-phase-1-scope).
 
-### 3.5 Three preserved schema mismatches
+### 3.5 Four preserved schema mismatches
 
-The DataWindow definition of §3.2 and the DDL of §3.3 **disagree**, in three places. The disagreements
-are **preserved as defects, and are not reconciled**:
+The DataWindow definition of §3.2 and the DDL of §3.3 **disagree**, in four places — four of the six
+columns. The disagreements are **preserved as defects, and are not reconciled**:
 
 | # | DataWindow declares [`dw_sqlite.srd`] | The table declares [`w_test_sqlite.srw:L463-L469`] | Consequence to reproduce |
 | ---: | --- | --- | --- |
-| 1 | `address` as `char(200)` [`:L11`] | a **fifty**-character address column | The DataWindow admits input the column cannot store. Truncation or rejection is decided by the engine, not by the framework, and whichever it does is the behaviour to record |
-| 2 | `salary` as `decimal(2)` [`:L12`] | a **real** salary column | A two-place decimal presented over a floating-point column. Round-trip values are not guaranteed to be identical, and the observed result is the specification |
-| 3 | `birth` as `date` [`:L13`] | a **text** birth field | Date semantics over text storage: ordering, comparison and format all follow from the text representation actually written, not from a date type |
+| 1 | `name` as `char(100)` [`:L9`] | `NAME TEXT NOT NULL` — **unbounded** | The bound exists **only** in the DataWindow. SQLite stores a longer value in full, so any truncation observed is the DataWindow's, and a port that enforces 100 characters in storage diverges from the oracle. An earlier revision of this table omitted this row entirely |
+| 2 | `address` as `char(200)` [`:L11`] | `ADDRESS CHAR(50)` | **`CHAR(50)` is not a width constraint in SQLite.** The declared type sets *affinity* only — TEXT affinity here — and the length is ignored entirely: a 200-character address is stored in full, unpadded and untruncated, with no error. So the two declarations disagree and **the engine enforces neither**; the observable behaviour is whatever the DataWindow does with its own 200-character bound. An earlier revision of this row said the column "cannot store" the value; SQLite can, and does |
+| 3 | `salary` as `decimal(2)` [`:L12`] | `SALARY REAL` | A two-place decimal presented over REAL affinity. The scale exists only in the DataWindow; round-trip values are not guaranteed identical, and the observed result is the specification |
+| 4 | `birth` as `date` [`:L13`] | `BIRTH TEXT` | Date semantics over text storage: SQLite has no date type at all, so ordering, comparison and format all follow from the text representation actually written, not from a date type |
+
+**A fifth row that is *not* a mismatch, recorded so nobody adds it.** `id` is `type=number key=yes
+identity=yes` in the DataWindow [`:L8`] against `ID INTEGER PRIMARY KEY NOT NULL`. That is consistent:
+`INTEGER PRIMARY KEY` makes the column an **alias for the rowid**, so SQLite assigns a value when none is
+supplied, which is what `identity=yes` expects. **But note what it is not** — the DDL has **no
+`AUTOINCREMENT` keyword**; the legacy's own comment beside the column reads `自增列`, "auto-increment
+column", which records the *intent*. Without the keyword, assignment follows the
+largest-existing-rowid-plus-one rule, which **reuses the rowids of deleted rows**. The identity round-trip
+must therefore not assume monotonicity. `orchestration/.env.example` §2 records the same two facts from the
+storage side.
 
 These are not oversights to tidy up on the way through. Each one is reachable from the primary fixture,
 each one produces observable behaviour, and each one is therefore something a recording will contain.
 An implementation that declares consistent types on both sides would diverge from the oracle on the
 first value that exercises the difference. Reproduce; do not reconcile.
-[`ARCHITECTURE.md`](ARCHITECTURE.md) records the same three mismatches from the storage side.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) records the same mismatches from the storage side.
 
 ---
 
@@ -519,11 +563,22 @@ forbids. One mask, one workflow, applied identically to both captures.
 ### 4.2 The rule, stated in full
 
 This is the most operationally important paragraph in this document. It is the environment's binding
-instruction (C-L), restated against the renamed volume:
+instruction (C-L), reproduced **word for word with one substitution and no other change** — every
+occurrence of the volume name `data-service-db` becomes `persistence-db`, for the reason §4.3 records:
 
-> **For a given workflow identifier, the legacy-side and target-side captures must be taken against the
-> *same* `persistence-db` volume state, and the volume must not be recreated or reseeded between them —
-> otherwise the paired recordings are not comparable.**
+> **Persistence rule: legacy characterization recordings (PowerBuilder behavioral oracle output, keyed
+> per workflow ID) and this scaffold's target-side recordings must be captured against the SAME
+> `persistence-db` Docker volume state for a given workflow ID comparison to be valid. Do not recreate or
+> reseed `persistence-db` between the legacy-side capture and the .NET-side capture for the same workflow
+> ID, or the paired recordings required by the Agent Action Plan's success criteria will not be
+> comparable.**
+
+Nothing above is paraphrase. Two things an earlier revision of this section dropped while shortening it
+are back, and both carry weight: that the recordings are **keyed per workflow ID** on the legacy side as
+well as the target side, and that what a broken pair invalidates is **the Agent Action Plan's own success
+criteria** rather than merely a local comparison. A third, `Docker volume` in full, is back because the
+rule is about a volume in a specific technology and a "volume state" in the abstract is a weaker
+instruction.
 
 In operational terms, for one workflow identifier: capture the legacy side, capture the target side, and
 do **not** run anything between them that destroys, recreates, re-initializes or re-seeds the
@@ -547,14 +602,19 @@ Two things about the rename are recorded rather than assumed (C-K):
 
 - **The rule is restated *verbatim* against the new name, so its intent survives the rename intact.**
   Renaming a volume in an instruction and paraphrasing the instruction at the same time is how an
-  operational rule quietly loses its force. Only the volume name changed; every other word of the rule
-  is the environment's.
-- **`characterization/README.md` restates the identical rule, and that duplication is deliberate and
+  operational rule quietly loses its force. §4.2 is therefore the environment's own two sentences, word
+  for word, with `data-service-db` replaced by `persistence-db` in both places it occurs and **no other
+  edit** — not a shortening, not a re-ordering, not a summary. An earlier revision of this document
+  claimed verbatim reproduction while in fact carrying a paraphrase that had dropped material wording;
+  the full text is now restored and §4.2 names what had been lost.
+- **`characterization/README.md` is to restate the identical rule, and that duplication is deliberate and
   mandated — not an oversight to consolidate.** The two must say the same thing. The reason is
   situational: an operator capturing a recording is working inside `characterization/`, and a rule that
   lives only in a documentation folder they have no reason to open is a rule that will be broken by
   someone acting in good faith. This is the one place in this documentation set where restatement beats
-  cross-reference, and §4.2 is the canonical text both copies carry.
+  cross-reference, and §4.2 is the canonical text both copies carry. **That second copy does not exist
+  yet**: the `characterization/` directory is planned and absent, so the obligation is on the work that
+  creates it, and whoever writes it copies §4.2 rather than re-deriving it.
 
 ### 4.4 The rule is the technique's own prerequisite, not merely a local convention
 
@@ -579,15 +639,74 @@ the abstract.
 
 ### 5.1 The seam register
 
-Every seam below is **injected, so a test substitutes a deterministic double while production uses the
-platform implementation**:
+A seam that is documented but not injected has no effect on a single test (§5.2), so each row below
+carries **its own status** in the vocabulary [`BUILD.md`](BUILD.md) §1 declares, rather than a blanket
+claim over all four. Three of the four are injected in source; the fourth is not in the tree yet. The
+per-row status is the point: a single "every seam is injected" sentence would be false of the fourth row,
+and — because it names no injection point — unfalsifiable for the other three.
 
-| Seam | Where it originates | Why it must be seamed |
-| --- | --- | --- |
-| GUID generation, random string generation, random blob generation | The cryptographic surface — `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L14-L18` (`GenRandomBlob`, `GenRandomString` in two arities, `GenGUID` in two arities), plus the `guid.srf` and `randomstring.srf` wrappers in the same library | The **primary** non-determinism sources in the in-scope estate. Every value differs on every run by design, so any recording that contains one is unmatchable unless the value is masked on both sides |
-| Transaction-pool idle expiry | CPU-clock based, keyed on the two keep-alive settings — `ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L76-L79` reads them, `:L97` stamps the idle start, `:L215` compares elapsed against the expiry | Elapsed-time-dependent behaviour cannot be reproduced without a controllable clock. Whether a pooled transaction is reused or discarded is **observable**, so the decision must be reproducible even though the elapsed time itself is never asserted |
-| Every clock read | Throughout the in-scope estate, wherever a timestamp reaches an output or a decision | A timestamp in recorded output differs on every run. Seaming the clock is what makes a recording containing one comparable at all |
-| Modify-call ordering | The DataWindow modify path, where a sequence of property modifications is applied to reach a target state | Two orderings that reach the same state can emit different intermediate output. An unpinned ordering surfaces as a spurious difference — a diff that reports a change where no behaviour changed |
+**No implemented seam here has been executed.** All three live inside service projects, and no service
+project currently produces an assembly ([§1.4](#14-what-was-verified-by-execution)), so their doubles are
+written and unrun. Exactly one piece of *executed* evidence bears on this section, and it is negative:
+`shared/PowerFramework.Contracts.Tests/ContractsCarryNoBehaviourTests.cs` lists `System.TimeProvider`
+among the ambient capabilities the boundary must not hold (`:L1545-L1556`) and
+`NoExportedTypeMentionsIoNetworkDatabaseConfigurationOrAmbientStateInItsSignature` (`:L1595`) fails the
+build if any exported contract type mentions one. So the clock seam is provably **not** smuggled into the
+published boundary. That project builds and that test is among its 2,785 passing, which is why this one
+can be cited as a result rather than as an intention.
+
+| Seam | Where it originates | Why it must be seamed | Status |
+| --- | --- | --- | --- |
+| GUID generation, random string generation, random blob generation | The cryptographic surface — `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L14-L18` (`GenRandomBlob`, `GenRandomString` in two arities, `GenGUID` in two arities), plus the `guid.srf` and `randomstring.srf` wrappers in the same library | The **primary** non-determinism sources in the in-scope estate. Every value differs on every run by design, so any recording that contains one is unmatchable unless the value is masked on both sides | **Present but unexercised** |
+| Transaction-pool idle expiry | CPU-clock based, keyed on the two keep-alive settings — `ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L76-L79` reads them, `:L97` stamps the idle start, `:L215` compares elapsed against the expiry | Elapsed-time-dependent behaviour cannot be reproduced without a controllable clock. Whether a pooled transaction is reused or discarded is **observable**, so the decision must be reproducible even though the elapsed time itself is never asserted | **Planned — not yet present** |
+| Every clock read | Throughout the in-scope estate, wherever a timestamp reaches an output or a decision | A timestamp in recorded output differs on every run. Seaming the clock is what makes a recording containing one comparable at all | **Present but unexercised** |
+| Modify-call ordering | The DataWindow modify path, where a sequence of property modifications is applied to reach a target state | Two orderings that reach the same state can emit different intermediate output. An unpinned ordering surfaces as a spurious difference — a diff that reports a change where no behaviour changed | **Present but unexercised** |
+
+Each status above is checkable, because the mechanism carrying it is named. Taking the four in order:
+
+- **Randomness — injected through a dedicated abstraction, not through the BCL static.** The seam is
+  `IEntropySource`, declared at
+  `services/security-service/PowerFramework.Security/Crypto/RandomProvider.cs:L228`; production takes
+  `CryptographicEntropySource` (`:L269`), which fills from `RandomNumberGenerator.Fill` at `:L279`; and
+  `RandomProvider` reaches entropy *only* through the constructor parameter at `:L578`. That last point is
+  what makes the seam total rather than partial — `Guid.NewGuid()` and `Random.Shared` are deliberately
+  unreachable from the provider, so no code path can bypass the double. Two doubles are written:
+  `SequencedEntropySource` and `ConstantEntropySource`, at
+  `services/security-service/PowerFramework.Security.Tests/RandomProviderTests.cs:L81` and `:L108`.
+- **Transaction-pool idle expiry — no injection point exists, because the type does not.**
+  `Transactions/TransactionPool.cs` is absent from
+  `services/persistence-service/PowerFramework.Persistence/`; the only file in that folder is
+  `Transactions/TransactionData.cs`. The row states the requirement the type will be built against; it
+  reports nothing about the tree. This is the row a blanket claim misrepresented, and it is why the status
+  column exists.
+- **Clock reads — injected as `TimeProvider`, taken by constructor, with no ambient read behind it.**
+  Present at
+  `services/dataservices-service/PowerFramework.DataServices/Domain/ValidationSession.cs:L858,L909`,
+  `services/persistence-service/PowerFramework.Persistence/Buffers/DataWindowBuffers.cs:L1969,L2022`,
+  `services/persistence-service/PowerFramework.Persistence/Buffers/ChangesetCodec.cs:L1974` and
+  `services/gateway-service/PowerFramework.Gateway/Clients/SecurityClient.cs:L746`. Three doubles are
+  written: `DeterministicClock`
+  (`services/persistence-service/PowerFramework.Persistence.Tests/DataWindowBuffersTests.cs:L70`),
+  `ValidationSessionTestClock`
+  (`services/dataservices-service/PowerFramework.DataServices.Tests/ValidationSessionParityTests.cs:L48`)
+  and `MutableClock`
+  (`services/dataservices-service/PowerFramework.DataServices.Tests/SecurityClientTests.cs:L112`). The
+  BCL `TimeProvider` is the abstraction rather than a bespoke clock interface, deliberately: it is
+  designed to be subclassed for exactly this, so no second clock abstraction is introduced.
+- **Modify-call ordering — the injection mechanism is the carrier-surface interface, named here because it
+  is the least obvious of the four.** Ordering is not made deterministic by substituting a *clock*; it is
+  made **observable** by routing every property call through one injected interface whose calls a test can
+  record in order. That interface is `IFullStateCarrierSurface`
+  (`services/persistence-service/PowerFramework.Persistence/Buffers/FullStateCodec.cs:L338`), declaring
+  `Describe` (`:L353`), `Modify` (`:L367`), `SetSort` (`:L379`) and `SetFilter` (`:L390`), and taken as a
+  parameter by `SynchronizeSortAndFilter` (`:L830`) and `ApplyNoUserPromptWorkaround` (`:L959`). The
+  double is `RecordingCarrierSurface`
+  (`services/persistence-service/PowerFramework.Persistence.Tests/FullStateCodecTests.cs:L70`), which
+  appends every call to an ordered `Calls` list (`:L73`, appended at `:L90`, `:L98`, `:L106`, `:L114`) so
+  a test asserts the **exact sequence** rather than the end state — for example
+  `["SetSort:age A salary A", "SetFilter:age > 1"]` at `:L481`. Whether a modify was issued at all is
+  carried separately by `NoUserPromptOutcome.ModifyAttempted` (`FullStateCodec.cs:L529`), because a port
+  that emits a modify the legacy would not have made is a divergence even when the resulting state agrees.
 
 ### 5.2 How a seam is expressed, and what a mask is not
 
@@ -612,9 +731,11 @@ Two distinctions worth keeping sharp:
 
 One closing point, because it is where this section is most often misapplied. A single reproducible run
 proves nothing about a pair. The question a seam has to answer is not "does this run twice the same?"
-but "does the recorded legacy value and the produced target value agree after identical masking?" Every
-seam above is therefore configured **once per workflow** and used for both captures, alongside the
-volume state that §4.2 pins.
+but "does the recorded legacy value and the produced target value agree after identical masking?" Each
+seam above is therefore to be configured **once per workflow** and used for both captures, alongside the
+volume state that §4.2 pins. Stated as a requirement rather than as a practice, because §4 records that no
+paired recording exists yet: no seam has been configured for a workflow, for the plain reason that there is
+no workflow capture to configure it for.
 
 ---
 
@@ -634,11 +755,17 @@ and a page-scoped footer aggregate. A matrix over that fixture reaches the concu
 identity round-trip, the self-assignment path of [§7.6](#76-the-self-assignment-workaround) and the
 expression engine from one place.
 
-Alongside the unit-level matrices, **service-level tests run against an in-process host**, so a test
-exercises the real endpoint, the real serialization and the real authorization filter rather than a
+Alongside the unit-level matrices, **service-level tests are to run against an in-process host**, so a
+test exercises the real endpoint, the real serialization and the real authorization filter rather than a
 hand-assembled approximation of them. That distinction matters for a decomposition specifically: several
 behaviours in §7 are only observable *across* the boundary, and a test that calls the implementation
 class directly cannot see them.
+
+> **That is planned test architecture, not the current state.** No test in this repository uses
+> `WebApplicationFactory` or `TestServer` today, and none could: the four service applications have no
+> entry point, so the four service test projects do not build. `Microsoft.AspNetCore.Mvc.Testing` is
+> referenced by all four in anticipation. The 6,645 tests that do pass are shared-layer unit tests
+> ([`BUILD.md`](BUILD.md) §5.5).
 
 ### 6.2 The paging rewriters are pure-function matrices requiring no storage engine
 
@@ -677,7 +804,37 @@ grep -rho "pfwPagedSQL_[A-Za-z_]*" ws_objects/ | sort | uniq -c
 And the count wrapper carries its own literal: the count form replaces the select list with the alias
 **`"1 AS _"`** [`n_cst_thread_task_sqlquery.sru:L830`], strips the order-by when one is present
 [`:L831-L833`], and wraps the result as a subquery aliased `pfwPagedSQL_Tbl` [`:L834`]. All three steps
-are observable in the generated text, so all three are pinned.
+are observable in the generated text, so all three **must be** pinned.
+
+> **The paging matrix is PLANNED, and nothing here is pinned yet.** This is the one place in this document
+> where the gap between the model and the tests is wide enough to mislead, so it is stated plainly:
+> `SqlServerPagingRewriter`, `OraclePagingRewriter` and `PagingRewriteDispatcher` are **present in the
+> tree**, and **no test in `PowerFramework.Persistence.Tests` references any of the three.** The project
+> does not build in any case, because its application project has no entry point. So the sentinel
+> register, the four-form cross-product and the count wrapper above are a **specification of the matrix to
+> be written**, and no byte-exact assertion currently stands behind them. Earlier revisions of this
+> subsection, and comments in both rewriter files and in that test project's own manifest, described those
+> tests as existing; they do not, and the claim is withdrawn here and at each of those three sites.
+>
+> **The rows the matrix must contain**, so the obligation is checkable rather than gestural:
+>
+> | # | Case | Expected outcome |
+> | ---: | --- | --- |
+> | 1 | First dialect arm, unique-index columns supplied, native paging selected | Byte-exact statement for that form |
+> | 2 | First dialect arm, unique-index columns supplied, native paging not selected | Byte-exact statement for that form |
+> | 3 | First dialect arm, no unique-index columns, native paging selected | Byte-exact statement for that form |
+> | 4 | First dialect arm, no unique-index columns, native paging not selected | Byte-exact statement for that form |
+> | 5 | First dialect arm, input statement with no order-by | The scalar-subquery substitution [`:L370`] |
+> | 6 | Second dialect arm, triple-nested row-number form [`:L394-L395`] | Byte-exact statement, all three nesting aliases present |
+> | 7 | Second dialect arm, input statement with no order-by | The empty-string-literal substitution [`:L392`] |
+> | 8 | Any other dialect selector | `RetCode.E_NO_IMPLEMENTATION`, **not** `E_NO_SUPPORT` [`:L396-L398`] |
+> | 9 | Count form, order-by present | Select list replaced with `"1 AS _"`, order-by stripped, wrapped and aliased `pfwPagedSQL_Tbl` |
+> | 10 | Count form, no order-by | Same, with no strip step observable |
+> | 11 | Page size or page index at or below zero | The invalid-paging-setting outcome, pre-dispatch |
+>
+> Each row's expectation must be derived from the **legacy generator** at
+> `n_cst_thread_task_sqlquery.sru:L320-L399` and `:L830-L834`, never from reading the .NET rewriter —
+> asserting a rewriter against itself would produce a matrix that passes and proves nothing.
 
 Three further points the matrices must cover, all verified at source:
 
@@ -939,8 +1096,18 @@ The handler in order, with locators:
 5. **If unequal, re-read the value from the buffer and fire the nested changing event** [`:L204-L208`].
    The value is re-read rather than reused, because the handler may have altered the buffer.
 6. **Dispatch on the stashed result** [`:L211-L251`]:
-   - **`case 1` is empty and falls through to `case 2`** [`:L212-L213`]. A port that gives `1` its own
-     body changes behaviour; a port that omits `1` from the switch changes it differently.
+   - **`case 1` is an EMPTY arm and does NOT fall through** [`:L212`]. PowerScript `choose case` is not a
+     C `switch`: an arm with no statements executes nothing and control leaves the construct. So `1`
+     returns exactly as the semantic handler produced it, with value and status **untouched**. The empty
+     arm is load-bearing precisely *because* it is empty — it stops `1` from reaching `case else` — and
+     the source comment immediately above the dispatch [`:L210`] says why that matters: returning 1 is
+     what raises `ItemValidationError`, and it is *that* handler which restores value and status
+     [`:L369-L379`], after reading the stashed code. Restoring here as well would restore twice and would
+     do it too early. A port that gives `1` a body changes behaviour; a port that omits `1` from the
+     switch changes it differently; and a port that treats `1` as `2` restores where the legacy leaves
+     things alone. `Proto/dataservices.v1.proto` and [`CONTRACTS.md`](CONTRACTS.md) §6.5 settle this the
+     same way — earlier revisions of this document described the arm as falling through, and that reading
+     is withdrawn.
    - **`case 2` restores the value and status, but only if the earlier equality test held**
      [`:L216-L222`]. The guard exists because the buffer may already have been changed and must not be
      overwritten.
@@ -1036,14 +1203,33 @@ default and *annotated*** as a known legacy weakness, in the contract descriptio
 implementation. [`CONTRACTS.md`](CONTRACTS.md) (C-02) carries the contract-side annotations; this section
 records them as parity obligations:
 
+There are **eight**, and the numbering below is the authoritative register's own — the one in
+`shared/PowerFramework.Contracts/OpenApi/security.v1.yaml`, which is where each is annotated and which
+`CryptoWeakDefaultAnnotationTests` asserts against. An earlier revision of this section listed six by
+merging two pairs, which is why the numbering is stated as shared rather than local:
+
 | # | Legacy default or limitation | Parity obligation |
 | ---: | --- | --- |
-| 1 | **ECB is the default symmetric mode**, so every mode-omitting overload runs in ECB | The default stays ECB. Changing it would alter the ciphertext of every call that omits a mode |
-| 2 | **PKCS#1 is the default RSA padding, and no-padding is explicitly rejected** | Both halves are preserved: the default, and the rejection. The legacy refuses no-padding; so does the port |
-| 3 | **PKCS#5-family padding only, and it is not selectable** | No padding parameter is introduced. Adding one would widen the contract |
-| 4 | **No key-derivation function is reachable at all** — no PBKDF2, scrypt, bcrypt or Argon2, and no salt concept exists | A passphrase is used as **raw key bytes**, exactly as the legacy does. Introducing derivation would change every key, and therefore every ciphertext |
-| 5 | **No authenticated encryption** — no GCM, CCM or Poly1305 | Ciphertext carries **no integrity tag**. Adding one would change the output length and format |
-| 6 | **1024-bit RSA remains a legal key size** | It stays legal. The legacy demonstration code uses it |
+| 1 | **ECB is the default symmetric mode** [`enums.sru:L946`], so every mode-omitting overload runs in ECB | The default stays ECB. Changing it would alter the ciphertext of every call that omits a mode |
+| 2 | **PKCS#1 v1.5 is the default RSA padding** [`enums.sru:L951`] | The default is preserved on both RSA cipher operations |
+| 3 | **No-padding is not selectable** — the legacy declares no such constant, so the padding enum has exactly two members and a request for no-padding is refused | The refusal is preserved as well as the default. These are two obligations, not one: a port could keep the default and still widen the accepted set |
+| 4 | **PKCS#5-family symmetric padding only, and not selectable** — not one of the 32 symmetric overloads has a padding parameter | No padding parameter is introduced. Adding one would widen the contract |
+| 5 | **No key-derivation function is reachable at all** — no PBKDF2, scrypt, bcrypt or Argon2, and no salt concept exists | Key material is used as **raw key bytes**, exactly as the legacy does. Introducing derivation would change every key, and therefore every ciphertext |
+| 6 | **No authenticated encryption** — the mode set is exactly ECB, CBC and CFB, so no GCM, CCM or Poly1305 | Ciphertext carries **no integrity tag**. Adding one would change the output length and format |
+| 7 | **1024-bit RSA remains a legal key size** [`enums.sru:L965`] and is not removed from the accepted set | It stays legal. The legacy demonstration code uses it |
+| 8 | **The same six-member hash set governs the RSA signature hash** [`enums.sru:L927`], so MD5 — and CRC32, which is not a cryptographic hash at all — are legal signature-hash selectors | The set is not narrowed for signatures. This is the one most easily missed, because it is a weakness produced by *reusing* a set rather than by declaring a weak default |
+
+Items 3, 4, 5 and 6 are established by **absence** — there is no constant to select and no signature that
+accepts one. Absence is weaker evidence than presence in general and exactly the right kind here: a
+capability the legacy cannot express is one this port must not offer, because offering it would be a new
+feature. Each carries its mechanical proof where it is annotated, so none is taken on trust.
+
+Three cells of that surface are **BLOCKED rather than characterized**, because the parameter each needs
+exists only inside `pfw.dll` and no test this repository can run could tell a right choice from a wrong
+one: keyed and signed use of the CRC32 identifier, any use of the CFB mode, and the chaining mode through
+an overload that supplies no initialization vector. `docs/CONTRACTS.md` records all three as narrowings
+N1 to N3 with their reason codes. Every cell the oracle's own demo exercises remains fully supported, so
+the parity corpus loses nothing it could have measured.
 
 The algorithm identifier sets are preserved exactly as well — the hash types from MD5 through CRC32, the
 ciphers from DES through AES-256, and the ECB, CBC and CFB modes — with their identifier **values** and
@@ -1144,13 +1330,16 @@ single line.
 Coverage is the only quantitative non-functional requirement in the entire brief (C-H, and §1.6), so its
 mechanics are stated precisely rather than as an aspiration.
 
-- **The collector emits `coverage.cobertura.xml`.** This was **empirically confirmed on the authoring
-  host**: the per-service restore, release build and coverage-collecting test path was executed, passed
-  with zero warnings and zero errors, and produced that report. It is the exact artifact the gate is
-  measured from — not an inferred one.
-- **CI enforces 80% line coverage per in-scope service**, on new business-logic code. Four services are in
-  scope; the four deferred destinations have no project, no test and therefore no coverage figure at all
-  (see [`DEFERRED.md`](DEFERRED.md)).
+- **The collector emits `coverage.cobertura.xml`.** This was confirmed on the authoring host **against a
+  throwaway one-test skeleton project**, where the restore, release build and coverage-collecting test path
+  passed with zero warnings and zero errors and produced that report. It is the exact artifact the gate
+  will be measured from — not an inferred one — but no such report has been produced for any service in
+  this repository, because no service test project builds (§1.4).
+- **CI is to enforce 80% line coverage per in-scope service**, on new business-logic code. **The workflow
+  does not exist**: `.github/workflows/ci.yml` is planned and absent, so the gate is specified and
+  currently unenforced, and there is no service coverage figure for it to read. Four services are in scope;
+  the four deferred destinations have no project, no test and therefore no coverage figure at all (see
+  [`DEFERRED.md`](DEFERRED.md)).
 - **Evaluation is per service, never repository-wide.** This is the load-bearing detail. A repository-wide
   figure lets one service's coverage **mask** another's: a thoroughly tested shared library and a
   thoroughly tested Security service can carry an under-tested Persistence service over the line, and the
@@ -1180,10 +1369,10 @@ correct engineering answer is *report blocked rather than approximate*, that is 
 
 | ID | Risk | Class | Correct response |
 | --- | --- | --- | --- |
-| R1 | Pinyin first-letter matching cannot be proven bit-exact from the repository alone | Parity — the **single genuine parity risk in the in-scope set** | Characterize from the oracle, else **report BLOCKED** |
+| R1 | Pinyin first-letter matching cannot be proven bit-exact from the repository alone — the **flags are documented**, the lookup table, the matching algorithm and the exact fuzzy-equivalence set are not | Parity — the **single genuine parity risk in the in-scope set** | Characterize the table, the algorithm and the fuzzy set from the oracle, else **report BLOCKED**. The flag decoding needs no characterization |
 | R2 | Cross-session foreign column-expression variables cannot cross a process boundary | Deliberate contract narrowing | Support co-resident references; **BLOCK the rest with a defined error** |
 | R3 | Encrypted-SQLite page-format parity | Out of Phase-1 scope | Provision the unencrypted path; document the limitation |
-| R4 | Container bring-up was not exercised in the authoring environment | Unverified claim, disclaimed | Assert by definition and Compose review plus CI; claim no bring-up |
+| R4 | No container artifact exists to bring up, and none has been reviewed | Unverified claim, disclaimed | Definition-and-manifest review plus CI is the intended mechanism once those artifacts exist; claim neither a bring-up nor a completed review |
 | R5 | No authoritative legacy build definition exists to translate | Reconstituting the behavioural oracle | Author the .NET build clean; read the legacy definitions for intent only |
 | R6 | The changelog is stale and is not a specification | Evidence discipline | Derive behaviour from source, with a locator on every claim |
 
@@ -1191,21 +1380,46 @@ correct engineering answer is *report blocked rather than approximate*, that is 
 
 The drop-down search service builds a filter expression that calls a pinyin first-letter matching function
 [`ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323`], passing the display
-column, the user's input and a **flag value of 7**. Two facts make this unprovable from the repository:
+column, the user's input and a **flag value of 7**. The risk is narrower than it first appears, and getting
+its boundary right decides how much characterization is actually needed.
+
+**The flags ARE documented, so `7` needs no characterization at all.**
+[`ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149`] declares them under the comment
+`//PinyinFirstLetterLike:[flags]`:
+
+| Constant | Value | Legacy comment | Meaning |
+| --- | ---: | --- | --- |
+| `PY_LIKE_IGNORE_CASE` | 1 | 忽略大小写 | Ignore case |
+| `PY_LIKE_IGNORE_WIDTH` | 2 | 忽略全角半角 | Ignore full-width versus half-width forms |
+| `PY_LIKE_FUZZY_SOUND` | 4 | 匹配模糊发音（l=n，f=h，r=l） | Match fuzzy pronunciation, the comment naming `l`/`n`, `f`/`h` and `r`/`l` |
+
+`7` is therefore `1 | 2 | 4` — all three enabled. An earlier revision of this document said the flag
+semantics were recorded nowhere in the repository; that was wrong, and the correction narrows the risk
+rather than widening it. [`ARCHITECTURE.md`](ARCHITECTURE.md) §13 L1 records the same decoding.
+
+**What genuinely remains unprovable from the repository, and it is enough to keep this risk live:**
 
 - **The lookup table exists only inside the closed binary.** There is no table, no data file and no source
-  for it anywhere in the tree.
-- **The flag semantics are undocumented.** The literal `7` appears at the call site and its meaning is
-  recorded nowhere in the repository — not in the source, not in the five legacy documents, not in the
-  changelog.
+  mapping any character to its pinyin initial anywhere in the tree, and no C++ source for the native
+  library at all. `pinyinfirstletterlike.srf` declares only two prototypes bound to `pfw.dll` under the
+  alias `pfwPinyinFirstLetterLike`.
+- **The matching algorithm is unspecified.** Whether the comparison is a prefix, a substring or a
+  subsequence over the derived initials; how a non-Han character is treated; and what a multi-reading
+  character resolves to are all unrecorded.
+- **The fuzzy-sound equivalence set is illustrative, not provably exhaustive.** The comment names three
+  pairs. Whether those are the whole set, whether they are symmetric, and whether the set extends to the
+  other pairs a Chinese input method would normally fold together cannot be determined from the source.
 
 Two further details from the same call site belong on the record because they shape the matrix: the pinyin
 clause is only appended when the input matches an ASCII-letter test [`:L322`], and it is combined
 **disjunctively** with the plain display-column filter [`:L319`, `:L323`] — so the pinyin behaviour is one
 term of a compound expression, and a matrix must vary the other terms too.
 
-**Mitigation.** Characterize **both** the table and the flag behaviour from the behavioural oracle, over a
-deliberately broad input set. If the oracle cannot be exercised — and note §1.5: it has **not** been
+**Mitigation.** Characterize the **lookup table, the matching algorithm and the fuzzy-equivalence set** from
+the behavioural oracle, over a deliberately broad input set — Han characters across readings, mixed-script
+input, full-width and half-width forms, and each documented fuzzy pair in both directions. The **flag
+decoding needs no characterization**, since `enums.sru` supplies it; what needs characterizing is what each
+flag actually *does* to a comparison. If the oracle cannot be exercised — and note §1.5: it has **not** been
 exercised in this environment — then:
 
 > **Report the pinyin filter as BLOCKED. Do not approximate it.**
@@ -1250,20 +1464,28 @@ a format the target provider cannot produce. An attempt would fail in a way that
 defect, which is worse than a documented gap. [`ARCHITECTURE.md`](ARCHITECTURE.md) records the same decision
 from the storage side.
 
-### R4 — Container bring-up could not be exercised in the authoring environment
+### R4 — There is no container artifact to bring up, and none has been reviewed
 
-Docker was not installed and no daemon was available in the environment where this migration was planned,
-so the Compose bring-up and its ordered health probes **were not run**.
+No service `Dockerfile`, no `orchestration/docker-compose.yml`, no `.github/workflows/ci.yml`, and no
+service application entry point exists. Docker was additionally not installed in the environment where
+this migration was planned, so the Compose bring-up and its ordered health probes **were not run** and
+could not have been.
 
-**Mitigation.** Container correctness is asserted by **container-definition and Compose review plus CI**.
+**Mitigation.** Definition-and-manifest review plus CI is the **intended** assurance mechanism for that
+path once the artifacts are authored. It is not a step that has been taken: there is nothing to review and
+no pipeline to run it.
 
-> **No verified bring-up is claimed anywhere in this document.** No sentence here should be read as
-> reporting a successful stack start.
+> **No verified bring-up is claimed anywhere in this document, and no completed review is claimed
+> either.** No sentence here should be read as reporting a successful stack start or a reviewed manifest.
 
 This risk is sharper in this document than elsewhere, because §4.2's capture rule is expressed in terms of a
 Docker volume: the rule is authoritative and the environment it presumes is, at the time of writing,
 unexercised here. What **was** exercised is the per-service restore, release build and coverage-collecting
-test path, which passed with **zero warnings and zero errors** and produced a Cobertura report (§1.4, §8).
+test **command shape** — passing with zero warnings and zero errors and producing a Cobertura report — and
+that run was against a **throwaway skeleton**, not against these services (§1.4, §8, and
+[`BUILD.md`](BUILD.md) §13, which is the authority for the distinction). Separately, this repository's own
+projects restore audit-clean and build with zero warnings and zero errors, and their test suites pass; no
+service has been *started*, because no `Program.cs` is authored yet.
 
 ### R5 — There is no authoritative legacy build definition to translate
 
@@ -1300,16 +1522,23 @@ only updatable DataWindow in the repository and `w_test_sqlite.srw` carries the 
 than assumed; that the shared-volume capture rule of §4.2 is binding and is also the technique's own
 prerequisite; that the four determinism seams of §5.1 are the enumerated sources of per-run variation; that
 the twelve groups in §7 are legacy behaviours to be reproduced and annotated, each with locators that
-resolve; that the coverage gate is measured from `coverage.cobertura.xml` at 80% line coverage per in-scope
-service; and that the per-service restore, release build and coverage-collecting test path was exercised and
-passed with zero warnings and zero errors.
+resolve; that the coverage gate, once a pipeline exists to run it, is measured from
+`coverage.cobertura.xml` at 80% line coverage per in-scope service; and that the six shared and contracts
+test projects build and pass in this repository with 6,645 tests and zero failures.
 
-**It does not claim.** That any container bring-up was verified — it was not, and R4 says so. That any paired
-recording exists yet — the store is planned. That the legacy oracle has been executed in this environment —
-it has not, which is what makes R1 live. That the pinyin filter can be delivered at bit-exact parity from
-repository evidence alone. That cross-session foreign expression variables will be supported. That encrypted
-SQLite reaches parity in this phase. And **no performance claim of any kind**, because the repository
-publishes no baseline and characterization compares observable outputs only, never execution time (§1.6).
+**It does not claim.** That any container bring-up was verified, or that any container artifact has been
+reviewed — none exists, and R4 says so. That CI enforces anything — the workflow file is absent. That any
+service builds, starts, serves a request or has been tested — all four service applications report `CS5001`
+for a missing entry point, so no service test project builds and no service coverage figure exists. That
+the restore/build/coverage path was exercised **against this repository** — it was exercised against a
+throwaway skeleton, and §1.4 says which. That the paging matrix of §6.2 exists — it is specified there and
+not written. That service-level tests run against an in-process host — that is planned architecture, and no
+test uses `WebApplicationFactory` or `TestServer` today. That any paired recording exists — the store is
+planned. That the legacy oracle has been executed in this environment — it has not, which is what makes R1
+live. That the pinyin filter can be delivered at bit-exact parity from repository evidence alone. That
+cross-session foreign expression variables will be supported. That encrypted SQLite reaches parity in this
+phase. And **no performance claim of any kind**, because the repository publishes no baseline and
+characterization compares observable outputs only, never execution time (§1.6).
 
 **It is additive.** This document created one file and changed nothing that already existed. No file under
 `ws_objects/**`, and none of the five pre-existing Chinese documents in this folder, was edited, translated,
@@ -1334,17 +1563,20 @@ because neither construct can be wrapped without damage: a table cell has no con
 wrapping an evidence row splits a locator away from the behaviour it proves, and a wrapped command is a
 command that does not run.
 
-**Verifying.** From the repository root:
+**Verifying, and why no command is published for it.** The directive at the head of this file *is* the
+verification mechanism: a markdownlint-compatible tool that is already provisioned reads it and reports zero
+issues, with no flags, no file list and no external configuration file. No command line is published here
+because doing so would name a linter that is **not** part of this repository's approved dependency set — the
+whole of that set is the exact, locked npm manifest under `tests/e2e` ([`BUILD.md`](BUILD.md) §11.3), and no
+Markdown linter is in it. A documented on-demand package-runner invocation would instruct an unpinned
+version to be resolved from the network and executed outside that lockfile every time somebody followed
+this document, which is exactly the deterministic-automation property [`BUILD.md`](BUILD.md) §9 is built to
+protect. Lint with tooling that is already installed.
 
-```bash
-npx markdownlint-cli2 docs/SERVICE_MAPPING.md docs/ARCHITECTURE.md docs/CONTRACTS.md \
-                      docs/DEFERRED.md docs/SECRETS.md docs/BUILD.md docs/PARITY.md
-```
-
-Expected output is `Summary: 0 issues in 0 files`.
-
-**Name the files; do not glob.** `npx markdownlint-cli2 "docs/*.md"` also sweeps the five read-only legacy
-Chinese documents, which carry pre-existing violations of their own — unlabelled code fences, hard tabs and
-others. Those are **out of scope and are deliberately not addressed**, because the files are read-only
-(C-C). A glob therefore reports a failure that must not be acted on, which is worse than no check at all.
-One of those files is not even UTF-8 encoded, so tooling that assumes UTF-8 across `docs/` will fault on it.
+**No file list and no glob is needed, which is the stronger property.** A repository-root configuration file
+or a glob such as `docs/*.md` would also reach the five read-only legacy Chinese documents, which carry
+pre-existing violations of their own — unlabelled code fences, hard tabs and others. Those are **out of
+scope and are deliberately not addressed**, because the files are read-only (C-C), so a sweep that reported
+them would report a failure that must not be acted on, which is worse than no check at all. One of those
+files is not even UTF-8 encoded, so tooling that assumes UTF-8 across `docs/` will fault on it. A per-file
+directive cannot reach any of them, and that is why the policy is declared this way.

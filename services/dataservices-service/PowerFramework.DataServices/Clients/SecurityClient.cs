@@ -170,20 +170,40 @@
 //        registered in the composition root. It is not this file's concern and is not duplicated
 //        here.
 //
-//    (h) ISSUANCE IS AUTHENTICATED BY THE TRANSPORT, SO THIS CLIENT SENDS NO CREDENTIAL, AND NO
-//        REFRESH SEMANTICS EXIST TO IMPLEMENT.
-//        POST /v1/tokens declares the mutualTLS security scheme and OVERRIDES the document-level
-//        bearer requirement. The reason is structural rather than a preference: A CALLER CANNOT
-//        PRESENT A BEARER TOKEN IN ORDER TO OBTAIN ITS FIRST BEARER TOKEN. It is the single
-//        mutual-TLS edge in the entire system, and the one path that must not be terminated by an
-//        intermediary proxy.
+//    (h) THE TWO EDGES ARE AUTHENTICATED DIFFERENTLY, AND WHICH ONE APPLIES IS DECIDED BY THE
+//        OPERATION - NEVER BY A DEFAULT.
 //
-//        Two consequences this file honours exactly. It attaches NO Authorization header to the
-//        issuance request - doing so would be meaningless on an operation that does not accept one.
-//        And it places NO credential in the request body: the schema carries no client secret,
+//        ISSUANCE (C-01, POST /v1/tokens) is authenticated BY THE TRANSPORT and carries no bearer
+//        credential. That operation declares the mutualTLS security scheme and OVERRIDES the
+//        document-level bearer requirement. The reason is structural rather than a preference: A
+//        CALLER CANNOT PRESENT A BEARER TOKEN IN ORDER TO OBTAIN ITS FIRST BEARER TOKEN. It is the
+//        single mutual-TLS edge in the entire system, and the one path that must not be terminated by
+//        an intermediary proxy.
+//
+//        Two consequences this file honours exactly on that edge. It attaches NO Authorization header
+//        to the issuance request - doing so would be meaningless on an operation that does not accept
+//        one. And it places NO credential in the request body: the schema carries no client secret,
 //        password, API key, assertion or key material, so the body this file sends has exactly the
 //        three members the schema declares. The client certificate is a transport concern configured
 //        on the message handler in the composition root.
+//
+//        THE SEVENTEEN C-02 CRYPTO OPERATIONS ARE THE OTHER EDGE, AND EVERY ONE OF THEM CARRIES A
+//        BEARER CREDENTIAL. They do not override the document-level security, so the bearer
+//        requirement applies to all of them; an unauthenticated crypto call is therefore not merely
+//        unwise but unusable, because once Security enforces its own contract every one of them
+//        answers 401 and the whole cryptographic surface becomes unreachable. This client obtains a
+//        credential for Security's OWN audience, scoped to the cryptographic capability, through the
+//        same cached GetTokenAsync path its external callers use - so the internal credential gets
+//        the same expiry comparison and the same never-logged treatment as every other, rather than a
+//        second credential path to keep in step.
+//
+//        THE SPLIT IS ENFORCED BY TWO DIFFERENTLY NAMED SENDERS RATHER THAN BY A FLAG. Routing
+//        issuance through the authenticated sender would not merely be wrong on the wire: it would
+//        recurse without bound, because acquiring the credential calls issuance. A name makes that
+//        visible at the call site; a boolean parameter with a default would not. The credential is
+//        carried on a PER-CALL request message and never on the shared client's default headers,
+//        because a typed client instance serves concurrent requests and its default headers are
+//        instance-wide mutable state.
 //
 //        The contract declares no grant type, no authorization endpoint, no token-endpoint client
 //        authentication and no refresh token anywhere. Its stated remedy for needing another token
@@ -231,10 +251,16 @@
 //         [enums.sru:L943-L945] - so ciphertext carries no integrity tag.
 //      7. 1024-bit RSA remains a legal key size [enums.sru:L965] and is not removed from the
 //         accepted set.
-//      8. ONE six-member hash set governs the unkeyed hash, the keyed hash AND the RSA signature
-//         hash - the legacy comment at enums.sru:L927 reads
-//         "(n_crypto::Hash/RSASign/VerifyRSASign:[ntype])" - so MD5, and even CRC32 which is a
-//         checksum rather than a cryptographic hash at all, are legal signature-hash selectors.
+//      8. ONE hash set is DECLARED for the unkeyed hash, the keyed hash AND the RSA signature hash
+//         - the legacy comment at enums.sru:L927 reads
+//         "(n_crypto::Hash/RSASign/VerifyRSASign:[ntype])" - so MD5 is a legal signature-hash
+//         selector and stays one. CRC32 is the single member the keyed and signing operations do
+//         NOT accept, and that is an ABSENT CONSTRUCTION rather than a policy choice: a checksum
+//         has no compression function for a keyed digest to key and no algorithm identifier for a
+//         signature scheme to name, so HMAC-CRC32 and RSA-over-CRC32 were never defined. It stays
+//         fully legal for the two UNKEYED digest operations, where computing it is well defined.
+//         The published contract carries the same split: CryptoHashType for the unkeyed pair,
+//         CryptoKeyedHashType - the same identifiers minus the checksum - for the other four.
 //    Items 3, 4, 5 and 6 are established by ABSENCE: there is no constant to select and no signature
 //    that accepts one. A capability the legacy cannot express is one this client must not offer,
 //    because offering it would be a new feature.
@@ -278,6 +304,8 @@
 
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
@@ -414,12 +442,16 @@ public interface ICryptoServiceClient
     /// The hash selector, from <see cref="Enums"/>: <c>CRYPTO_HASH_MD5</c> (0) through
     /// <c>CRYPTO_HASH_CRC32</c> (5) [enums.sru:L928-L933].
     /// <para>
-    /// PRESERVED LEGACY WEAKNESS 8. This one six-member set governs the unkeyed hash, the keyed hash
-    /// AND the RSA signature hash - the legacy comment at <c>enums.sru:L927</c> reads
-    /// "(n_crypto::Hash/RSASign/VerifyRSASign:[ntype])". <c>CRYPTO_HASH_MD5</c> and
-    /// <c>CRYPTO_HASH_CRC32</c> are therefore legal everywhere a hash selector is accepted, and
-    /// <c>CRYPTO_HASH_CRC32</c> is a checksum rather than a cryptographic hash at all. Both remain
-    /// legal members: a preserved quirk, not a defect to fix.
+    /// PRESERVED LEGACY WEAKNESS 8. The legacy comment at <c>enums.sru:L927</c> reads
+    /// "(n_crypto::Hash/RSASign/VerifyRSASign:[ntype])", declaring one set for the unkeyed hash, the
+    /// keyed hash and the RSA signature hash alike. THIS operation accepts all six members:
+    /// <c>CRYPTO_HASH_MD5</c> is weak and remains legal, and <c>CRYPTO_HASH_CRC32</c> is a checksum
+    /// rather than a cryptographic hash yet computing it is perfectly well defined. Both are
+    /// preserved quirks, not defects to fix.
+    /// </para>
+    /// <para>
+    /// THE KEYED AND SIGNING OPERATIONS ACCEPT FIVE, NOT SIX. <c>CRYPTO_HASH_CRC32</c> has no keyed
+    /// or signed form to implement - see <see cref="HmacAsync"/> and <see cref="RsaSignAsync"/>.
     /// </para>
     /// </param>
     /// <param name="cancellationToken">Cancels the request.</param>
@@ -672,10 +704,17 @@ public interface ICryptoServiceClient
     /// <param name="data">The payload to sign, in either legacy overload family.</param>
     /// <param name="keyRef">An opaque handle to the signing key, which never leaves Security.</param>
     /// <param name="hashType">
-    /// The signature hash selector, drawn from the SAME six-member set as the unkeyed and keyed hash
-    /// operations. PRESERVED LEGACY WEAKNESS 8 in its sharpest form: <c>CRYPTO_HASH_MD5</c> and
-    /// <c>CRYPTO_HASH_CRC32</c> are legal signature-hash selectors here, and the second is not a
-    /// cryptographic hash at all. The set is not narrowed for this operation.
+    /// The signature hash selector. PRESERVED LEGACY WEAKNESS 8 in its sharpest form:
+    /// <c>CRYPTO_HASH_MD5</c> is a legal signature-hash selector here and is NOT removed, even though
+    /// signing under it yields no meaningful collision resistance.
+    /// <para>
+    /// <c>CRYPTO_HASH_CRC32</c> is the one declared member this operation refuses, and the reason is
+    /// not that it is weak - it is that there is nothing to implement. A checksum has no
+    /// digest-algorithm identifier for a signature scheme to name, so RSA-over-CRC32 was never a
+    /// defined construction. Building one would mean inventing an encoding and calling it parity,
+    /// which nothing in this repository could confirm. The published contract states the same
+    /// narrowing through its <c>CryptoKeyedHashType</c> schema.
+    /// </para>
     /// </param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>
@@ -1183,7 +1222,7 @@ public sealed class ServiceToken
 /// The third is the one most easily mistaken for the second.
 /// </para>
 /// </remarks>
-[JsonConverter(typeof(JsonStringEnumConverter<PayloadForm>))]
+[JsonConverter(typeof(PayloadFormJsonConverter))]
 public enum PayloadForm
 {
     /// <summary>
@@ -1202,6 +1241,52 @@ public enum PayloadForm
     /// perform no encoding of their own.
     /// </summary>
     BLOB,
+}
+
+/// <summary>
+/// The JSON converter for <see cref="PayloadForm"/>: the two published names and NOTHING ELSE.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY A DERIVED CONVERTER EXISTS RATHER THAN THE STOCK ONE. The stock string-enum converter accepts
+/// INTEGERS as well as names by default, and the contract publishes this member as a string with a
+/// closed set of two values. Accepting an integer would therefore admit a value the published schema
+/// cannot express - and, worse, admit values that name no member at all, because an enum in .NET does
+/// not restrict a numeric value to its declared members. A response carrying <c>3</c> would deserialize
+/// to an undefined <see cref="PayloadForm"/> that no comparison against
+/// <see cref="PayloadForm.STRING"/> matches, so every "is it a string, otherwise treat it as a blob"
+/// test would silently classify it as a blob and BASE64-DECODE A PAYLOAD THE SERVICE NEVER DESCRIBED
+/// THAT WAY (CWE-20).
+/// </para>
+/// <para>
+/// The stock converter cannot be configured through the attribute, because the attribute needs a type
+/// with a parameterless constructor. Deriving one and fixing the setting there is the supported way to
+/// carry a non-default converter setting on a type, and it puts the setting ON THE TYPE rather than in
+/// one serializer-options instance - so it holds for every reader and writer of this enum, including
+/// any added later that forgets to reuse those options.
+/// </para>
+/// <para>
+/// This is the FIRST of two independent controls. The second is that every consumer of the value
+/// switches exhaustively and rejects an undefined member rather than falling through to a family; see
+/// <see cref="CryptoPayload.FromWire"/>. Two controls rather than one, deliberately: this one depends on
+/// the value arriving through JSON, and the other holds however it arrives.
+/// </para>
+/// </remarks>
+internal sealed class PayloadFormJsonConverter : JsonStringEnumConverter<PayloadForm>
+{
+    /// <summary>
+    /// Creates the converter with integer values REFUSED.
+    /// </summary>
+    /// <remarks>
+    /// The naming policy is left null so the member identifiers travel exactly as declared. That is not
+    /// a default taken by omission: the published contract spells these values in upper case, and the
+    /// preserved identifier spellings appear in serialized payloads, log records and characterization
+    /// recordings, where a policy that recased them would invalidate every stored comparison.
+    /// </remarks>
+    public PayloadFormJsonConverter()
+        : base(namingPolicy: null, allowIntegerValues: false)
+    {
+    }
 }
 
 /// <summary>
@@ -1327,9 +1412,12 @@ public sealed class CryptoPayload
     /// blob-shaped family. The base64 here is the JSON TRANSPORT encoding and is not a legacy
     /// argument; see <see cref="PayloadForm"/> for the three encodings this boundary keeps apart.
     /// </returns>
-    internal string ToWireData() => Form == PayloadForm.STRING
-        ? _text
-        : Convert.ToBase64String(_bytes.Span);
+    internal string ToWireData() => Form switch
+    {
+        PayloadForm.STRING => _text,
+        PayloadForm.BLOB => Convert.ToBase64String(_bytes.Span),
+        _ => throw UndefinedForm(Form, nameof(Form)),
+    };
 
     /// <summary>
     /// Reconstructs a payload from the form selector and data member of a response.
@@ -1342,9 +1430,44 @@ public sealed class CryptoPayload
     /// surfaced by the caller as an off-contract response rather than being absorbed, because a
     /// payload that cannot be decoded is not a payload.
     /// </exception>
-    internal static CryptoPayload FromWire(PayloadForm form, string data) => form == PayloadForm.STRING
-        ? FromString(data)
-        : FromBlob(Convert.FromBase64String(data));
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="form"/> names no declared member. REJECTED BEFORE ANY DECODING, which is the
+    /// substantive part: the previous test asked only whether the form was the string family and treated
+    /// everything else as the blob family, so an undefined value was base64-decoded as though the
+    /// service had described it that way.
+    /// </exception>
+    /// <remarks>
+    /// This is the SECOND of the two controls described on <see cref="PayloadFormJsonConverter"/>, and
+    /// it is the one that does not depend on how the value arrived. The converter refuses an undefined
+    /// value coming through JSON; this switch refuses one however it was produced, so a future
+    /// serializer-options change, a differently configured reader, or a direct internal call cannot
+    /// reopen the hole. An exhaustive switch also makes ADDING a member a compile-time decision here
+    /// rather than a silent reclassification into the blob family.
+    /// </remarks>
+    internal static CryptoPayload FromWire(PayloadForm form, string data) => form switch
+    {
+        PayloadForm.STRING => FromString(data),
+        PayloadForm.BLOB => FromBlob(Convert.FromBase64String(data)),
+        _ => throw UndefinedForm(form, nameof(form)),
+    };
+
+    /// <summary>
+    /// Builds the refusal for a form value that names no declared member.
+    /// </summary>
+    /// <param name="form">The offending value.</param>
+    /// <param name="parameterName">The parameter or member that carried it.</param>
+    /// <returns>The exception to throw.</returns>
+    private static ArgumentOutOfRangeException UndefinedForm(PayloadForm form, string parameterName) =>
+        new(
+            parameterName,
+            form,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"'{(int)form}' names no {nameof(PayloadForm)} member. The published contract declares "
+                + $"exactly two values, '{nameof(PayloadForm.STRING)}' and "
+                + $"'{nameof(PayloadForm.BLOB)}', and an undefined value is refused rather than being "
+                + $"treated as either family - reinterpreting it would decode a payload in a form the "
+                + $"service never described."));
 }
 
 /// <summary>
@@ -1816,15 +1939,64 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <summary>The credential type contract C-01 pins with a schema constant.</summary>
     private const string BearerTokenType = "Bearer";
 
+    /// <summary>
+    /// The identity DataServices claims when it asks Security for a token to call Security's own
+    /// cryptographic surface.
+    /// </summary>
+    /// <remarks>
+    /// A NON-SECRET PROTOCOL IDENTIFIER, NOT A CREDENTIAL. It is a name, it authenticates nothing on its
+    /// own, and it is deliberately not configurable: the identity actually honoured is the one the
+    /// transport establishes when Security issues the token - the contract states in as many words that
+    /// the subject is a claim checked against the presented client certificate and a mismatch is refused
+    /// - so a configurable value here could only ever disagree with the transport and be rejected.
+    /// Everything genuinely sensitive binds from environment configuration in the composition root.
+    /// </remarks>
+    private const string TokenSubject = "powerframework-dataservices";
+
+    /// <summary>
+    /// The single audience a credential for contract C-02 is requested for: Security's own.
+    /// </summary>
+    /// <remarks>
+    /// The audience of a call to Security IS Security, and the value follows the audience convention the
+    /// service's own inbound configuration fixes. The token contract carries ONE audience per request,
+    /// deliberately, so a credential is never valid somewhere its holder did not intend it to be - which
+    /// is why this cannot be shared with the credential DataServices presents to Persistence.
+    /// </remarks>
+    private const string SecurityAudience = "powerframework-security";
+
+    /// <summary>
+    /// The scope covering contract C-02's cryptographic surface.
+    /// </summary>
+    /// <remarks>
+    /// Named on the service-dot-capability convention this system's other outbound credentials already
+    /// use. One scope covers all seventeen C-02 operations because they are one capability: a caller
+    /// that may hash may also sign, since the same key store answers both. Splitting them into finer
+    /// scopes would publish a distinction the contract does not make.
+    /// </remarks>
+    private const string CryptoScope = "security.crypto";
+
     /// <summary>The name of the single extension member the contract's error body defines.</summary>
     private const string RetCodeExtensionMember = "retCode";
 
     /// <summary>
-    /// Separates the parts of a cache key. A unit separator is used because it is a control character
-    /// that cannot appear in a subject, an audience or a scope, so no combination of member values can
-    /// produce a collision by spanning the boundary between two of them.
+    /// Separates a cache-key component's LENGTH from the component itself.
     /// </summary>
-    private const char CacheKeySeparator = '\u001F';
+    /// <remarks>
+    /// <para>
+    /// This is not a delimiter between components and the distinction is the whole point. A delimiter
+    /// is only collision-free while every component is guaranteed not to contain it, and that guarantee
+    /// has to be ENFORCED somewhere - which it was not. A separator that merely "cannot appear in
+    /// practice" is an unverified invariant, and an unverified invariant on a cache key is a
+    /// credential-confusion bug waiting for the first component that breaks it.
+    /// </para>
+    /// <para>
+    /// Length prefixing needs no such guarantee: a reader consumes the digits, then exactly that many
+    /// characters, so the encoding is self-delimiting and the mapping from component sequence to key is
+    /// injective for ARBITRARY component content, including content carrying this character or any
+    /// other. See <see cref="AppendKeyComponent"/>.
+    /// </para>
+    /// </remarks>
+    private const char CacheKeyLengthSeparator = ':';
 
     private readonly HttpClient _httpClient;
     private readonly IOptions<DataServicesOptions> _options;
@@ -1858,6 +2030,25 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// </para>
     /// </remarks>
     private readonly ConcurrentDictionary<string, ServiceToken> _tokenCache = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The one token request every contract C-02 call is authenticated with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Static and shared because all three of its members are compile-time constants, which is also what
+    /// makes the credential cache reusable across every crypto operation: seventeen operations resolve to
+    /// ONE cache key, so a burst of crypto calls costs one issuance rather than seventeen.
+    /// </para>
+    /// <para>
+    /// This request is fed to <see cref="GetTokenAsync"/>, the same public member the service's own
+    /// callers use. Nothing separate is built for it: reusing that path is what gives the internal
+    /// credential the same caching, the same expiry comparison and the same never-logged treatment as
+    /// every other, instead of a second credential path that would have to be kept in step with it.
+    /// </para>
+    /// </remarks>
+    private static readonly ServiceTokenRequest CryptoTokenRequest =
+        new(TokenSubject, SecurityAudience, [CryptoScope]);
 
     /// <summary>
     /// Creates the client against the system clock.
@@ -1969,11 +2160,17 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The issued credential.</returns>
     /// <remarks>
-    /// NO CREDENTIAL IS SENT. The operation is authenticated by the transport - a client certificate
+    /// NO BEARER CREDENTIAL IS SENT, and that is why this is the ONE call in this client that goes
+    /// through <see cref="SendWithoutCredentialAsync{TRequest, TResponse}"/> rather than through the
+    /// authenticated sender. The operation is authenticated by the transport - a client certificate
     /// presented during the handshake, configured on the message handler in the composition root -
     /// because a caller cannot present a bearer token in order to obtain its first bearer token. No
     /// <c>Authorization</c> header is attached, and the body carries exactly the three members the
     /// schema declares.
+    /// <para>
+    /// Routing this through the authenticated sender would not merely be wrong on the wire; it would
+    /// recurse without bound, because acquiring the credential would call this operation again.
+    /// </para>
     /// </remarks>
     private async Task<ServiceToken> IssueTokenAsync(
         ServiceTokenRequest request,
@@ -1993,10 +2190,13 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
             Scopes = request.Scopes,
         };
 
-        (TokenIssuanceResponseBody payload, System.Net.HttpStatusCode statusCode) = await InvokeAsync<
-            TokenIssuanceRequestBody,
-            TokenIssuanceResponseBody>(TokenPath, body, "issueToken", cancellationToken)
-            .ConfigureAwait(false);
+        (TokenIssuanceResponseBody payload, System.Net.HttpStatusCode statusCode) =
+            await SendWithoutCredentialAsync<TokenIssuanceRequestBody, TokenIssuanceResponseBody>(
+                    TokenPath,
+                    body,
+                    "issueToken",
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         ServiceToken token = ToServiceToken(payload, statusCode);
 
@@ -2156,7 +2356,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     {
         ArgumentNullException.ThrowIfNull(data);
         ArgumentException.ThrowIfNullOrWhiteSpace(keyRef);
-        EnsureDeclaredHashType(hashType);
+        EnsureKeyedHashType(hashType);
 
         HmacRequestBody body = new()
         {
@@ -2208,7 +2408,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileRef);
         ArgumentException.ThrowIfNullOrWhiteSpace(keyRef);
-        EnsureDeclaredHashType(hashType);
+        EnsureKeyedHashType(hashType);
 
         HmacFileRequestBody body = new()
         {
@@ -2322,7 +2522,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     {
         ArgumentNullException.ThrowIfNull(data);
         ArgumentException.ThrowIfNullOrWhiteSpace(keyRef);
-        EnsureDeclaredHashType(hashType);
+        EnsureKeyedHashType(hashType);
 
         RsaSignRequestBody body = new()
         {
@@ -2354,7 +2554,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         ArgumentNullException.ThrowIfNull(data);
         ArgumentNullException.ThrowIfNull(signature);
         ArgumentException.ThrowIfNullOrWhiteSpace(keyRef);
-        EnsureDeclaredHashType(hashType);
+        EnsureKeyedHashType(hashType);
 
         // ONE form selector governs both members, because the legacy correlates them: :L72 pairs a
         // string payload with a string signature and :L73 a blob payload with a blob signature, and
@@ -2628,6 +2828,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         if (mode is long requestedMode)
         {
             EnsureDeclaredMode(requestedMode);
+            EnsureReproducibleCipherCell(requestedMode, initializationVectorSupplied: ivRef is not null);
         }
 
         return new SymEncryptRequestBody
@@ -2696,6 +2897,22 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <returns>The response body and the status it arrived with.</returns>
     /// <remarks>
     /// <para>
+    /// THIS OVERLOAD IS THE AUTHENTICATED ONE, AND IT IS THE ONE ALL SEVENTEEN C-02 OPERATIONS USE. It
+    /// obtains a bearer credential for Security's own audience and attaches it to the request before
+    /// sending. Every C-02 operation inherits the document-level bearer requirement in the published
+    /// contract, so an unauthenticated crypto call is not merely unwise - once Security enforces its own
+    /// contract, every one of them answers 401 and the entire cryptographic surface is unreachable.
+    /// </para>
+    /// <para>
+    /// THE ONE OPERATION THAT MUST NOT USE IT IS TOKEN ISSUANCE, which is why the split is expressed as
+    /// two differently NAMED members rather than as a flag with a default. A credential cannot be
+    /// presented in order to obtain the first credential, so
+    /// <see cref="SendWithoutCredentialAsync{TRequest, TResponse}"/> exists for that one call - and,
+    /// mechanically, routing issuance through here instead would recurse without bound: acquiring a
+    /// token would require a token. A name makes that mistake visible at the call site; a boolean
+    /// parameter would not.
+    /// </para>
+    /// <para>
     /// EVERY NON-SUCCESS STATUS IS A DEFINITIVE ANSWER AND IS SURFACED AS A TYPED FAILURE. Nothing is
     /// retried here: transient transport faults are the composition root's resilience handler's
     /// concern, and a 4xx is a refusal that repeating cannot change.
@@ -2703,7 +2920,8 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <para>
     /// The single diagnostic this method writes carries the operation identifier and nothing else. NO
     /// REQUEST BODY OR RESPONSE BODY IS LOGGED, on any operation, because every one of them may carry
-    /// plaintext, ciphertext, a digest, a signature, a generated key or an opaque reference.
+    /// plaintext, ciphertext, a digest, a signature, a generated key or an opaque reference. NEITHER IS
+    /// THE CREDENTIAL, nor the header that carries it.
     /// </para>
     /// </remarks>
     private async Task<(TResponse Payload, System.Net.HttpStatusCode StatusCode)> InvokeAsync<TRequest, TResponse>(
@@ -2714,11 +2932,93 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         where TRequest : class
         where TResponse : class
     {
+        // Obtained through the cached public path, so seventeen operations share one credential and one
+        // issuance. The token's OWN reported type is used as the scheme rather than a literal: the
+        // contract pins it with a schema constant and this client already validates it on arrival, so
+        // reusing it keeps a single source of truth instead of two that can disagree.
+        ServiceToken credential = await GetTokenAsync(CryptoTokenRequest, cancellationToken)
+            .ConfigureAwait(false);
+
+        return await SendAsync<TRequest, TResponse>(
+                path,
+                body,
+                operationId,
+                new AuthenticationHeaderValue(credential.TokenType, credential.AccessToken),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends one request with NO credential attached - the token-issuance path, and only that path.
+    /// </summary>
+    /// <typeparam name="TRequest">The request body type.</typeparam>
+    /// <typeparam name="TResponse">The response body type.</typeparam>
+    /// <param name="path">The operation's path, relative to the configured base address.</param>
+    /// <param name="body">The request body.</param>
+    /// <param name="operationId">The published operation identifier.</param>
+    /// <param name="cancellationToken">Cancels the request and the reading of its response.</param>
+    /// <returns>The response body and the status it arrived with.</returns>
+    /// <remarks>
+    /// The operation this exists for is authenticated BY THE TRANSPORT - a client certificate presented
+    /// during the handshake, configured on the message handler in the composition root - because a caller
+    /// cannot present a bearer token in order to obtain its first bearer token. So "no credential" here
+    /// means no BEARER credential, not an anonymous call.
+    /// </remarks>
+    private Task<(TResponse Payload, System.Net.HttpStatusCode StatusCode)>
+        SendWithoutCredentialAsync<TRequest, TResponse>(
+            Uri path,
+            TRequest body,
+            string operationId,
+            CancellationToken cancellationToken)
+        where TRequest : class
+        where TResponse : class =>
+        SendAsync<TRequest, TResponse>(path, body, operationId, credential: null, cancellationToken);
+
+    /// <summary>
+    /// The single transport step both senders share: build the request, send it, and project the
+    /// response.
+    /// </summary>
+    /// <typeparam name="TRequest">The request body type.</typeparam>
+    /// <typeparam name="TResponse">The response body type.</typeparam>
+    /// <param name="path">The operation's path, relative to the configured base address.</param>
+    /// <param name="body">The request body.</param>
+    /// <param name="operationId">The published operation identifier.</param>
+    /// <param name="credential">
+    /// The credential to present, or <see langword="null"/> to present none. Whether this is null is the
+    /// ONLY difference between the two senders, and the decision is made by the caller's choice of
+    /// sender rather than anywhere in here.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the request and the reading of its response.</param>
+    /// <returns>The response body and the status it arrived with.</returns>
+    /// <remarks>
+    /// A PER-CALL REQUEST MESSAGE, NOT A HEADER ON THE SHARED CLIENT. A typed client instance can serve
+    /// several concurrent requests, and its default headers are instance-wide mutable state: setting a
+    /// credential there would publish one call's credential to every other call in flight and would race
+    /// on refresh. Carrying it on the message keeps it scoped to the one request it was obtained for.
+    /// </remarks>
+    private async Task<(TResponse Payload, System.Net.HttpStatusCode StatusCode)> SendAsync<TRequest, TResponse>(
+        Uri path,
+        TRequest body,
+        string operationId,
+        AuthenticationHeaderValue? credential,
+        CancellationToken cancellationToken)
+        where TRequest : class
+        where TResponse : class
+    {
         EnsureBaseAddress(operationId);
         _logger.LogDebug("Invoking the Security service operation {OperationId}.", operationId);
 
+        using HttpRequestMessage request = new(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(body, mediaType: null, WireJson),
+        };
+
+        // Assigned rather than added, so there is exactly one Authorization header and no possibility of
+        // a second one being appended by a later change.
+        request.Headers.Authorization = credential;
+
         using HttpResponseMessage response = await _httpClient
-            .PostAsJsonAsync(path, body, WireJson, cancellationToken)
+            .SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
@@ -2810,8 +3110,18 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <param name="statusCode">The status the response carried.</param>
     /// <returns>The reconstructed payload, in the family the service reported.</returns>
     /// <remarks>
+    /// <para>
     /// The service's own reported form is honoured rather than the request's, so that a response which
     /// answered in the other family is reported as such instead of being silently reinterpreted.
+    /// </para>
+    /// <para>
+    /// Honouring it is not the same as trusting it. Two off-contract shapes are translated into the
+    /// typed failure here rather than escaping as raw framework exceptions: a blob-shaped payload whose
+    /// data is not base64, and a form value that names no declared member. Both are the service
+    /// answering outside its own published schema, so both carry the operation identifier and the status
+    /// the response arrived with, which is what lets a caller attribute the fault without parsing a
+    /// message.
+    /// </para>
     /// </remarks>
     private static CryptoPayload ToPayload(
         PayloadResponseBody payload,
@@ -2829,6 +3139,22 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
                     CultureInfo.InvariantCulture,
                     $"The Security service answered '{operationId}' with a blob-shaped payload whose "
                     + $"data member is not valid base64, which the published contract does not permit."),
+                exception)
+            {
+                OperationId = operationId,
+                StatusCode = (int)statusCode,
+            };
+        }
+        catch (ArgumentOutOfRangeException exception)
+        {
+            // The reconstruction refused an undefined form value. Reported as an off-contract response,
+            // which is what it is: the payload is NOT decoded in either family, because guessing one
+            // would produce a result the service never described.
+            throw new SecurityClientException(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"The Security service answered '{operationId}' with a payload form that names no "
+                    + $"value the published contract declares, so the payload was not decoded."),
                 exception)
             {
                 OperationId = operationId,
@@ -3038,23 +3364,65 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <param name="request">The request the credential was issued for.</param>
     /// <returns>The cache key.</returns>
     /// <remarks>
+    /// <para>
     /// All three members participate, because a credential is valid only for the subject, the single
     /// audience and the scope set it was issued against - keying on the audience alone would hand a
     /// caller a token minted for somewhere else, which is the precise outcome the contract's
-    /// one-audience-per-request rule exists to prevent. Scopes are ordered before joining so that the
-    /// same set requested in a different order resolves to the same key; the order the caller supplied
-    /// is preserved in the request that is actually sent.
+    /// one-audience-per-request rule exists to prevent. Scopes are ordered so that the same set
+    /// requested in a different order resolves to the same key; the order the caller supplied is
+    /// preserved in the request that is actually sent.
+    /// </para>
+    /// <para>
+    /// EVERY COMPONENT IS LENGTH-PREFIXED, INCLUDING EACH SCOPE INDIVIDUALLY, so the key depends on NO
+    /// invariant about what a component may contain. The previous encoding joined the components with a
+    /// control character on the stated ground that no subject, audience or scope could contain it -
+    /// true of this service's own fixed call sites, but never CHECKED anywhere, so the claim was a
+    /// convention rather than a control. Two distinct requests colliding on one key is not a cache
+    /// inefficiency; it is one caller receiving a credential minted for another audience or another
+    /// scope set, which is the exact confusion the contract's one-audience rule exists to prevent.
+    /// </para>
+    /// <para>
+    /// The scope SET is also encoded element by element rather than pre-joined with its RFC 6749
+    /// separator, which removes the last place an invariant was relied upon: a scope containing a space
+    /// is refused by the request type today, and this key does not care whether it stays refused.
+    /// </para>
     /// </remarks>
     private static string BuildCacheKey(ServiceTokenRequest request)
     {
         string[] orderedScopes = [.. request.Scopes];
         Array.Sort(orderedScopes, StringComparer.Ordinal);
 
-        return string.Join(
-            CacheKeySeparator,
-            request.Subject,
-            request.Audience,
-            string.Join(ScopeSeparator, orderedScopes));
+        StringBuilder key = new();
+
+        AppendKeyComponent(key, request.Subject);
+        AppendKeyComponent(key, request.Audience);
+
+        foreach (string scope in orderedScopes)
+        {
+            AppendKeyComponent(key, scope);
+        }
+
+        return key.ToString();
+    }
+
+    /// <summary>
+    /// Appends one length-prefixed component to a cache key under construction.
+    /// </summary>
+    /// <param name="key">The key being built.</param>
+    /// <param name="component">The component, whose content is unconstrained.</param>
+    /// <remarks>
+    /// The encoding is the component's character count, then
+    /// <see cref="CacheKeyLengthSeparator"/>, then the component verbatim. A reader consumes the digits
+    /// and then exactly that many characters, so a concatenation of these is self-delimiting and the
+    /// sequence-to-key mapping is injective for arbitrary content. No component is escaped, rejected or
+    /// normalised, because none needs to be: nothing about the content can change where the next
+    /// component begins.
+    /// </remarks>
+    private static void AppendKeyComponent(StringBuilder key, string component)
+    {
+        key.Append(component.Length.ToString(CultureInfo.InvariantCulture))
+            .Append(CacheKeyLengthSeparator)
+            .Append(component);
     }
 
     /// <summary>
@@ -3088,17 +3456,23 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     // ==============================================================================================
 
     /// <summary>
-    /// Refuses a hash selector that is not one of the six the legacy declares.
+    /// Refuses a hash selector that is not one of the six the legacy declares. Used by the two
+    /// UNKEYED digest operations, where every declared member is genuinely usable.
     /// </summary>
     /// <param name="hashType">The selector to check.</param>
     /// <exception cref="ArgumentOutOfRangeException">The selector is not a declared member.</exception>
     /// <remarks>
-    /// The same six-member set governs the unkeyed hash, the keyed hash AND the RSA signature hash
-    /// [enums.sru:L927], so this one check serves all four operations that take a hash selector.
-    /// Preserved legacy weakness 8: <c>CRYPTO_HASH_MD5</c> and <c>CRYPTO_HASH_CRC32</c> ARE ACCEPTED
-    /// everywhere, including as a signature hash, and the second is a checksum rather than a
-    /// cryptographic hash at all. Neither is filtered out, because filtering one would narrow a surface
-    /// the legacy does not narrow.
+    /// <para>
+    /// Preserved legacy weakness 8: <c>CRYPTO_HASH_MD5</c> IS ACCEPTED, and so is
+    /// <c>CRYPTO_HASH_CRC32</c> - a checksum rather than a cryptographic hash. Neither is filtered
+    /// out here, because computing either digest is a well-defined operation that the legacy offers
+    /// and this port performs identically.
+    /// </para>
+    /// <para>
+    /// THE KEYED AND SIGNING OPERATIONS USE <see cref="EnsureKeyedHashType"/> INSTEAD. The oracle
+    /// declares one set for all of them [enums.sru:L927], but a checksum cannot be keyed or signed -
+    /// see that method for why that is an absent construction rather than a policy choice.
+    /// </para>
     /// </remarks>
     private static void EnsureDeclaredHashType(long hashType)
     {
@@ -3113,6 +3487,54 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
                 nameof(hashType),
                 hashType,
                 "The hash selector must be one of the six values the legacy constant set declares.");
+        }
+    }
+
+    /// <summary>
+    /// Refuses a hash selector that the KEYED and SIGNING operations cannot honour: anything outside
+    /// the declared set, and additionally <c>CRYPTO_HASH_CRC32</c>.
+    /// </summary>
+    /// <param name="hashType">The selector to check.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The selector is not a declared member, or is the checksum member, which has no keyed or
+    /// signed form.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// WHY THE CHECKSUM MEMBER IS EXCLUDED, AND WHY THAT IS NOT A NARROWING OF THE LEGACY'S INTENT.
+    /// The oracle's comment at <c>enums.sru:L927</c> names one set for
+    /// <c>Hash/RSASign/VerifyRSASign</c>, so the legacy DECLARED the checksum as legal for all of
+    /// them. But there is no construction to perform: CRC32 has no compression function for a keyed
+    /// digest to key and no digest-algorithm identifier for a signature scheme to name. Standard
+    /// HMAC-CRC32 and RSA-over-CRC32 were never defined - this is an absent construction, not an
+    /// option this platform withholds.
+    /// </para>
+    /// <para>
+    /// WHY THE CHECK BELONGS HERE, ON THE CALLER'S SIDE. The service refuses this selector too, but
+    /// it can only do so after a request has crossed the network. Rejecting it at construction turns
+    /// a remote failure into a local, synchronous argument error at the earliest point it can be
+    /// detected, and it means this client cannot emit a request the published contract declares
+    /// invalid: <c>hashType</c> on these four operations resolves to <c>CryptoKeyedHashType</c>,
+    /// whose enumeration omits the checksum member.
+    /// </para>
+    /// <para>
+    /// It delegates the declared-set half rather than restating it, so the two checks cannot drift on
+    /// which identifiers exist while differing - as they must - on which are usable here.
+    /// </para>
+    /// </remarks>
+    private static void EnsureKeyedHashType(long hashType)
+    {
+        EnsureDeclaredHashType(hashType);
+
+        if (hashType == Enums.CRYPTO_HASH_CRC32)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(hashType),
+                hashType,
+                "The checksum hash selector has no keyed or signed form: no standard construction "
+                + "keys a checksum or names one as a signature digest. The keyed and signing "
+                + "operations accept the declared set without it, as the published contract's "
+                + "CryptoKeyedHashType schema records.");
         }
     }
 
@@ -3159,6 +3581,66 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
                 mode,
                 "The cipher mode must be one of the three values the legacy constant set declares. "
                 + "There is no authenticated mode to select, because the legacy declares none.");
+        }
+    }
+
+    /// <summary>
+    /// Refuses a symmetric cell whose behaviour is not reproducible: any use of the feedback mode, and
+    /// the vector-consuming mode without a vector reference.
+    /// </summary>
+    /// <param name="mode">The cipher mode, already checked against the declared set.</param>
+    /// <param name="initializationVectorSupplied">
+    /// Whether a vector reference accompanies the request.
+    /// </param>
+    /// <exception cref="NotSupportedException">
+    /// The cell is blocked. The message names the same reason code the published contract carries.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE IDENTIFIER SET IS UNTOUCHED - <see cref="EnsureDeclaredMode"/> above still accepts all
+    /// three declared modes, because it answers "is this a legacy identifier?" and the answer is yes
+    /// for every one of them. THIS is the separate capability question, and the two are kept apart
+    /// deliberately so that neither refusal is mistaken for the other.
+    /// </para>
+    /// <para>
+    /// WHY THESE TWO CELLS. Both need a parameter the legacy never published and that nothing in this
+    /// repository records. The feedback mode carries no feedback-size argument, yet full-block and
+    /// 8-bit feedback produce entirely different ciphertext. The eight overloads that take a mode but
+    /// no vector must get a vector from somewhere, and which one the closed binary
+    /// [n_crypto.sru:L8] chose is unobservable. Either wrong choice ROUND-TRIPS PERFECTLY against
+    /// itself, so a caller would receive ciphertext that passes every available check and that the
+    /// legacy cannot decrypt - data loss wearing the appearance of success. The governing rule is that
+    /// a contract is narrowed with a defined error, never widened with a guess.
+    /// </para>
+    /// <para>
+    /// WHY <see cref="NotSupportedException"/> RATHER THAN AN ARGUMENT EXCEPTION. Nothing is wrong with
+    /// the arguments: the request is well-formed, every value is a declared identifier, and the
+    /// operation would have succeeded. The limitation is this port's, and the exception type says so.
+    /// </para>
+    /// <para>
+    /// THE REASON CODES ARE THE CONTRACT'S OWN, reproduced as text rather than shared as a type,
+    /// because constraint C-A forbids this service from referencing the security service where the
+    /// equivalent classification lives. One vocabulary, no shared code.
+    /// </para>
+    /// </remarks>
+    private static void EnsureReproducibleCipherCell(long mode, bool initializationVectorSupplied)
+    {
+        if (mode == Enums.CRYPTO_SYMCRYPT_MODE_CFB)
+        {
+            throw new NotSupportedException(
+                "SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE: the feedback width the legacy binary used is "
+                + "not determined by anything in this repository, and the candidate widths produce "
+                + "entirely different ciphertext. This cell is blocked rather than encrypted under a "
+                + "guessed width. Select the codebook mode, or the chaining mode with a vector.");
+        }
+
+        if (!initializationVectorSupplied && mode == Enums.CRYPTO_SYMCRYPT_MODE_CBC)
+        {
+            throw new NotSupportedException(
+                "SYMMETRIC_VECTOR_UNPROVABLE: the initialization vector the legacy binary substituted "
+                + "when a mode was supplied without one is not determined by anything in this "
+                + "repository. This cell is blocked rather than encrypted under a guessed vector. "
+                + "Supply a vector reference, or select the codebook mode, which consumes none.");
         }
     }
 
@@ -3329,7 +3811,7 @@ internal sealed class HashRequestBody
     [JsonPropertyName("payloadForm")]
     public required PayloadForm PayloadForm { get; init; }
 
-    /// <summary>The hash selector, from the six-member legacy set.</summary>
+    /// <summary>The hash selector, from the six declared legacy members.</summary>
     [JsonPropertyName("hashType")]
     public required long HashType { get; init; }
 }
@@ -3353,7 +3835,7 @@ internal sealed class HmacRequestBody
     [JsonPropertyName("keyRef")]
     public required string KeyRef { get; init; }
 
-    /// <summary>The hash selector, from the six-member legacy set.</summary>
+    /// <summary>The hash selector, from the five declared members that have a keyed form.</summary>
     [JsonPropertyName("hashType")]
     public required long HashType { get; init; }
 }
@@ -3370,7 +3852,7 @@ internal sealed class HashFileRequestBody
     [JsonPropertyName("fileRef")]
     public required string FileRef { get; init; }
 
-    /// <summary>The hash selector, from the six-member legacy set.</summary>
+    /// <summary>The hash selector, from the six declared legacy members.</summary>
     [JsonPropertyName("hashType")]
     public required long HashType { get; init; }
 }
@@ -3386,7 +3868,7 @@ internal sealed class HmacFileRequestBody
     [JsonPropertyName("keyRef")]
     public required string KeyRef { get; init; }
 
-    /// <summary>The hash selector, from the six-member legacy set.</summary>
+    /// <summary>The hash selector, from the five declared members that have a keyed form.</summary>
     [JsonPropertyName("hashType")]
     public required long HashType { get; init; }
 }
@@ -3485,8 +3967,9 @@ internal sealed class RsaSignRequestBody
     public required string KeyRef { get; init; }
 
     /// <summary>
-    /// The signature hash selector, drawn from the SAME six-member set as the hash operations
-    /// [enums.sru:L927], so MD5 and CRC32 are legal here.
+    /// The signature hash selector, from the five declared members that have a signed form
+    /// [enums.sru:L927]. MD5 is legal here and is preserved; the checksum member is not, because no
+    /// RSA-over-checksum construction exists to implement.
     /// </summary>
     [JsonPropertyName("hashType")]
     public required long HashType { get; init; }

@@ -115,8 +115,9 @@
 //  governs it, nothing was invented in their place, and the absence is a finding rather than licence
 //  to lower the bar: the standard applied instead is AAP 0.7.2, the enterprise baseline, plus the AAP
 //  0.7.3 constraints cited above. Naming follows from the same position: the repository root
-//  .editorconfig scopes its naming-analyzer suppressions to ten named PRODUCTION files and extends
-//  them to no test file, so every identifier here is conventional PascalCase and no SCREAMING_SNAKE
+//  .editorconfig scopes its naming-analyzer suppressions to the named PRODUCTION files on its BAND 3
+//  roster - the single source of truth for that list - and extends them to no test file, so every
+//  identifier here is conventional PascalCase and no SCREAMING_SNAKE
 //  constant is declared. The legacy vocabulary survives in the VALUES, where it is observable.
 //
 //  AAP 0.6.7 - TABLE-DRIVEN THROUGHOUT

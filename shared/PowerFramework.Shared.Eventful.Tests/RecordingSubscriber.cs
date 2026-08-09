@@ -87,10 +87,10 @@
 //      unnecessary here.
 //
 //  THE NAMING RULING - BUILD BREAKING IF IGNORED
-//      The repository-root .editorconfig scopes its naming-analyzer suppressions to nine NAMED
-//      implementation files (RetCode.cs, Enums.cs, Categories.cs, EventGate.cs, ItemChangeProtocol.cs,
-//      ColumnExpressionEngine.cs, ClauseModifier.cs, IPagingRewriter.cs, LegacyDefaults.cs) and covers NO
-//      test file. Every member declared here is therefore conventional PascalCase, and the legacy
+//      The repository-root .editorconfig scopes its naming-analyzer suppressions to a roster of
+//      individually named IMPLEMENTATION files - see the BAND 3 roster in that file, which is the single
+//      source of truth for the list and is deliberately not restated here - and it covers NO test file.
+//      Every member declared here is therefore conventional PascalCase, and the legacy
 //      spellings - `of_on`, `of_trigger`, `of_post`, `_of_passargs`, `PREVENT_ONCE`, `CAP_ALL` - appear in
 //      documentation only. Where a suite needs one of those alphabets it references the subject's own
 //      PascalCase member: VetoResult.PreventOnce, CaptureMode.All, Priorities.Low.
@@ -1230,4 +1230,3 @@ public sealed class RecordingSubscriber
         return value;
     }
 }
-

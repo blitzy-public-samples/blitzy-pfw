@@ -162,8 +162,9 @@
 // labelled component is asserted separately with ordinal comparison, so a change to one label
 // cannot mask a change to another. Assert.Throws is used only where the legacy throws, and a
 // normal return is asserted only where the legacy swallows. No SCREAMING_SNAKE member is declared:
-// the root .editorconfig scopes its CA1707 and IDE1006 suppressions to seven named implementation
-// files and no test file, so such a member would be a build error under TreatWarningsAsErrors.
+// the root .editorconfig scopes its CA1707 and IDE1006 suppressions to the named implementation
+// files on its BAND 3 roster - the single source of truth for that list - and to no test file, so
+// such a member would be a build error under TreatWarningsAsErrors.
 // Every test builds a fresh broker, fresh subscribers and a fresh log - hygiene, and NOT a
 // substitute for section 2's assertion that the broker itself clears the latch at depth zero.
 // Queue semantics are not re-asserted here: section 5 uses Post only to show that a drained

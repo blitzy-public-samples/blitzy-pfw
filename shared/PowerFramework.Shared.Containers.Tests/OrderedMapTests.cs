@@ -185,7 +185,8 @@
 //      n_map.sru:L20 declares `global n_map n_map`, a global auto-instance whose name shadows its
 //      own type name, and OrderedMap is documented as not thread safe.
 //    * SCREAMING_SNAKE and underscore-laden identifiers. The repository-root .editorconfig scopes
-//      its naming-analyzer suppressions to a closed list of ten constant-carrying files and THIS
+//      its naming-analyzer suppressions to the closed BAND 3 roster of constant-carrying files - the
+//      single source of truth for that list - and THIS
 //      FILE IS NOT ONE OF THEM, so with TreatWarningsAsErrors inherited such an identifier would
 //      be a build ERROR. Legacy spellings appear only in string literals and comments.
 //    * A `using PowerFramework.Shared.Containers;` directive. This namespace is nested inside the

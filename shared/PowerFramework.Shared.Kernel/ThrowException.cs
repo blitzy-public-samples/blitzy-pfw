@@ -259,7 +259,8 @@
 //  DELIBERATELY ABSENT, EACH FOR A STATED REASON
 //  --------------------------------------------------------------------------------------------
 //    * Any SCREAMING_SNAKE identifier. The repository-root .editorconfig scopes its naming
-//      analyzer suppressions to the ten files that genuinely carry preserved constant spellings,
+//      analyzer suppressions to the files on its BAND 3 roster that genuinely carry preserved
+//      constant spellings,
 //      and this file is not one of them; with TreatWarningsAsErrors inherited from
 //      Directory.Build.props such an identifier here would be a build ERROR. The legacy string
 //      VALUES appear below as literals, which is unaffected.

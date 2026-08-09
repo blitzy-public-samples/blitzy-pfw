@@ -774,7 +774,8 @@ public static class Assertions
         // one role or the other depending on the host platform and must never appear here; see the
         // newline discipline in this file's header. The legacy spells this constant in upper case,
         // which is not available: the repository root .editorconfig scopes its naming-analyzer
-        // suppressions to ten named files and none of them is in this project, so under the inherited
+        // suppressions to the files on its BAND 3 roster - the single source of truth for that list -
+        // and none of them is in this project, so under the inherited
         // TreatWarningsAsErrors a SCREAMING_SNAKE member here would be a build failure with no way to
         // grant an exception. PascalCase preserves the word and the value.
         const string Delimiter = "\r\n";

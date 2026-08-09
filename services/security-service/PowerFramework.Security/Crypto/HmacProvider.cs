@@ -873,16 +873,26 @@ public sealed class HmacProvider
     /// </para>
     /// <para>
     /// EXPOSURE CONSIDERATION FOR THE ENDPOINT AUTHOR, carried forward from the unkeyed file member
-    /// because it applies identically here. The published cryptographic service contract enumerates
-    /// keyed HMAC but DOES NOT ENUMERATE A FILE-HASH OPERATION, and a caller-supplied filesystem path
-    /// reachable from a network endpoint is an arbitrary-file-read primitive: a caller could confirm
-    /// the existence of a path, and could authenticate a file it cannot otherwise read. An in-process
-    /// library called by its own application could never have been that. This type registers no
-    /// route and opens no listener, so it creates no such exposure by itself; publishing this member
-    /// is a decision to be taken knowingly at the endpoint layer, where it can be expressed as an
-    /// authorization and allow-list concern, and the safe default is not to publish it. NO PATH
-    /// VALIDATION IS ADDED HERE, because a path filter would change observable behaviour for the
-    /// in-process callers the legacy had.
+    /// because it applies identically here. This member IS published: the cryptographic contract
+    /// projects all 63 legacy overloads onto 17 operations, and the keyed file hash is
+    /// <c>POST /v1/crypto/hmac-file</c> - operation 4
+    /// [<c>shared/PowerFramework.Contracts/OpenApi/security.v1.yaml</c>].
+    /// </para>
+    /// <para>
+    /// WHAT IS NOT PUBLISHED IS A PATH. A caller-supplied filesystem path reachable from a network
+    /// endpoint would be an arbitrary-file-read primitive - a caller could confirm that a path exists
+    /// and could authenticate a file it cannot otherwise read, neither of which an in-process library
+    /// called by its own application could ever have been. The wire therefore carries an opaque
+    /// server-resolved <c>fileRef</c>, exactly as it carries <c>keyRef</c> for key material: the endpoint
+    /// resolves it against its own configured, allow-listed store, an unknown reference is a plain
+    /// <c>404</c>, and a reference outside the store cannot be constructed by a caller. The narrowing is
+    /// real and deliberate - the legacy authenticates any file its process could open, these operations
+    /// any file the deployment has been configured to expose.
+    /// </para>
+    /// <para>
+    /// THIS TYPE STILL TAKES A RESOLVED PATH, because the resolution belongs to the endpoint layer along
+    /// with its allow-list. NO PATH VALIDATION IS ADDED HERE, because a path filter would change
+    /// observable behaviour for the in-process callers the legacy had.
     /// </para>
     /// </remarks>
     public string HashFile(string filename, string key, long ntype)

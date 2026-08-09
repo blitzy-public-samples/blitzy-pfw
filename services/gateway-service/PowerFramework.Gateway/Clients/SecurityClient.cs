@@ -177,6 +177,7 @@
 
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
@@ -673,11 +674,24 @@ public sealed class SecurityClient : IServiceTokenProvider
     private const string RetCodeExtensionMember = "retCode";
 
     /// <summary>
-    /// Separates the parts of a cache key. A unit separator is used because it is a control character
-    /// that cannot appear in a subject, an audience or a scope, so no combination of member values can
-    /// produce a collision by spanning the boundary between two of them.
+    /// Separates a cache-key component's LENGTH from the component itself.
     /// </summary>
-    private const char CacheKeySeparator = '\u001F';
+    /// <remarks>
+    /// <para>
+    /// This is not a delimiter between components and the distinction is the whole point. A delimiter
+    /// is only collision-free while every component is guaranteed not to contain it, and that guarantee
+    /// has to be ENFORCED somewhere - which it was not. A separator that merely "cannot appear in
+    /// practice" is an unverified invariant, and an unverified invariant on a cache key is a
+    /// credential-confusion bug waiting for the first component that breaks it.
+    /// </para>
+    /// <para>
+    /// Length prefixing needs no such guarantee: a reader consumes the digits, then exactly that many
+    /// characters, so the encoding is self-delimiting and the mapping from component sequence to key is
+    /// injective for ARBITRARY component content, including content carrying this character or any
+    /// other. See <see cref="AppendKeyComponent"/>.
+    /// </para>
+    /// </remarks>
+    private const char CacheKeyLengthSeparator = ':';
 
     private readonly HttpClient _httpClient;
     private readonly ILogger<SecurityClient> _logger;
@@ -1026,9 +1040,25 @@ public sealed class SecurityClient : IServiceTokenProvider
     /// </para>
     /// <para>
     /// A missing or unparseable body degrades to <see langword="null"/> rather than masking the
-    /// underlying refusal - the status code is the substantive answer, and losing it behind a
-    /// deserialization failure would be strictly worse. Only the two exceptions a malformed body can
-    /// produce are absorbed; A CANCELLATION IS DELIBERATELY NOT CAUGHT and propagates unchanged.
+    /// underlying refusal - THE STATUS CODE IS THE SUBSTANTIVE ANSWER, and losing it behind a
+    /// deserialization failure would be strictly worse. This body is entirely OPTIONAL enrichment: the
+    /// caller already has the refusal, and everything read here only adds detail to it.
+    /// </para>
+    /// <para>
+    /// THREE FAILURE SHAPES ARE ABSORBED, AND THE THIRD IS THE ONE THAT WAS MISSING. A malformed body
+    /// raises a JSON fault; a body whose declared media type has no reader raises an unsupported-type
+    /// fault; and A BODY WHOSE CHARSET PARAMETER CANNOT BE RESOLVED RAISES AN INVALID-OPERATION FAULT
+    /// FROM THE CONTENT READER ITSELF, before any JSON is looked at. That third shape is not exotic -
+    /// a proxy or a misconfigured upstream emitting <c>charset=utf8x</c> is enough to produce it - and
+    /// leaving it unabsorbed meant a 401 or a 503 was REPLACED by an unrelated encoding complaint, so
+    /// the caller was told the wrong thing about its own request. All three now degrade identically,
+    /// for the same reason: none of them changes what the status code already said.
+    /// </para>
+    /// <para>
+    /// A CANCELLATION IS DELIBERATELY NOT CAUGHT and propagates unchanged. That distinction is why the
+    /// absorbed set is enumerated by type rather than written as a blanket catch: a cancellation is not
+    /// a malformed body, it is the caller's own instruction, and swallowing it here would report a
+    /// refusal for a request that was abandoned.
     /// </para>
     /// </remarks>
     private static async Task<ProblemDetails?> ReadProblemDetailsAsync(
@@ -1049,10 +1079,20 @@ public sealed class SecurityClient : IServiceTokenProvider
         }
         catch (JsonException)
         {
+            // The body is not valid JSON, or does not match the shape.
             return null;
         }
         catch (NotSupportedException)
         {
+            // The content cannot be read as JSON at all.
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            // The content reader raises this when the response declares a charset it cannot resolve to
+            // an encoding. It is a property of the RESPONSE HEADER rather than of the body, so it fires
+            // before deserialization and is not covered by either catch above. Absorbed for the same
+            // reason they are: the refusal this method is enriching is already in hand.
             return null;
         }
     }
@@ -1109,23 +1149,65 @@ public sealed class SecurityClient : IServiceTokenProvider
     /// <param name="request">The request the credential was issued for.</param>
     /// <returns>The cache key.</returns>
     /// <remarks>
+    /// <para>
     /// All three members participate, because a credential is valid only for the subject, the single
     /// audience and the scope set it was issued against - keying on the audience alone would hand a
     /// caller a token minted for somewhere else, which is the precise outcome the contract's
-    /// one-audience-per-request rule exists to prevent. Scopes are ordered before joining so that the
-    /// same set requested in a different order resolves to the same key; the order the caller supplied
-    /// is preserved in the request that is actually sent.
+    /// one-audience-per-request rule exists to prevent. Scopes are ordered so that the same set
+    /// requested in a different order resolves to the same key; the order the caller supplied is
+    /// preserved in the request that is actually sent.
+    /// </para>
+    /// <para>
+    /// EVERY COMPONENT IS LENGTH-PREFIXED, INCLUDING EACH SCOPE INDIVIDUALLY, so the key depends on NO
+    /// invariant about what a component may contain. The previous encoding joined the components with a
+    /// control character on the stated ground that no subject, audience or scope could contain it -
+    /// true of this service's own fixed call sites, but never CHECKED anywhere, so the claim was a
+    /// convention rather than a control. Two distinct requests colliding on one key is not a cache
+    /// inefficiency; it is one caller receiving a credential minted for another audience or another
+    /// scope set, which is the exact confusion the contract's one-audience rule exists to prevent.
+    /// </para>
+    /// <para>
+    /// The scope SET is also encoded element by element rather than pre-joined with its RFC 6749
+    /// separator, which removes the last place an invariant was relied upon: a scope containing a space
+    /// is refused by the request type today, and this key does not care whether it stays refused.
+    /// </para>
     /// </remarks>
     private static string BuildCacheKey(ServiceTokenRequest request)
     {
         string[] orderedScopes = [.. request.Scopes];
         Array.Sort(orderedScopes, StringComparer.Ordinal);
 
-        return string.Join(
-            CacheKeySeparator,
-            request.Subject,
-            request.Audience,
-            string.Join(ScopeSeparator, orderedScopes));
+        StringBuilder key = new();
+
+        AppendKeyComponent(key, request.Subject);
+        AppendKeyComponent(key, request.Audience);
+
+        foreach (string scope in orderedScopes)
+        {
+            AppendKeyComponent(key, scope);
+        }
+
+        return key.ToString();
+    }
+
+    /// <summary>
+    /// Appends one length-prefixed component to a cache key under construction.
+    /// </summary>
+    /// <param name="key">The key being built.</param>
+    /// <param name="component">The component, whose content is unconstrained.</param>
+    /// <remarks>
+    /// The encoding is the component's character count, then
+    /// <see cref="CacheKeyLengthSeparator"/>, then the component verbatim. A reader consumes the digits
+    /// and then exactly that many characters, so a concatenation of these is self-delimiting and the
+    /// sequence-to-key mapping is injective for arbitrary content. No component is escaped, rejected or
+    /// normalised, because none needs to be: nothing about the content can change where the next
+    /// component begins.
+    /// </remarks>
+    private static void AppendKeyComponent(StringBuilder key, string component)
+    {
+        key.Append(component.Length.ToString(CultureInfo.InvariantCulture))
+            .Append(CacheKeyLengthSeparator)
+            .Append(component);
     }
 
     /// <summary>

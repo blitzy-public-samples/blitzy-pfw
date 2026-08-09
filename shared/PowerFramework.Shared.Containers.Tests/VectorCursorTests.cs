@@ -181,7 +181,8 @@
 //  STYLE AND ISOLATION
 //  --------------------------------------------------------------------------------------------
 //  Ordinary C# naming throughout. The repository-root .editorconfig scopes its naming-analyzer
-//  suppressions to a closed list of seven files that genuinely carry preserved legacy constants,
+//  suppressions to the closed BAND 3 roster of files that genuinely carry preserved legacy constants
+//  - that roster being the single source of truth for the list -
 //  and this file is not among them; with warnings as errors a SCREAMING_SNAKE or underscore-laden
 //  identifier here would be a build error, so legacy spellings appear only in string literals,
 //  comments and locators.
@@ -1203,6 +1204,18 @@ public sealed class VectorCursorTests
     /// somewhere the case name no longer describes. Every call here is positional, so none of them
     /// moves the cursor itself - the position changes observed by the theory are entirely the
     /// container's doing.
+    /// <para>
+    /// THE TWO INSERTIONS PASS THE CURSOR'S OWN INDEX, NOT AN OFFSET FROM IT, AND THAT IS A
+    /// CORRECTION WORTH RECORDING. An earlier form of this method called
+    /// <c>InsertBefore(cursor - 1)</c> and <c>InsertAfter(cursor + 1)</c>, on the reasoning that the
+    /// index should name the neighbouring element. It should not: <c>Vector.InsertBefore(index)</c>
+    /// resolves the index to a slot and inserts AT it, and <c>InsertAfter(index)</c> inserts at that
+    /// slot PLUS ONE - the before/after semantics are the container's, applied to the index given.
+    /// Adding an offset applied them twice, so each insertion landed two positions from the cursor
+    /// instead of adjacent to it. The matrix expectations encoded that same displacement, so the
+    /// theory passed while testing a relationship neither case name described - the exact failure
+    /// mode a table-driven test is supposed to make impossible.
+    /// </para>
     /// </remarks>
     private static void ApplyMutation(Vector vector, CursorMutation mutation)
     {
@@ -1219,7 +1232,7 @@ public sealed class VectorCursorTests
                 break;
 
             case CursorMutation.InsertBeforeTheCursor:
-                vector.InsertBefore(cursor - 1UL, Inserted);
+                vector.InsertBefore(cursor, Inserted);
                 break;
 
             case CursorMutation.RemoveBeforeTheCursor:
@@ -1231,7 +1244,7 @@ public sealed class VectorCursorTests
                 break;
 
             case CursorMutation.InsertAfterTheCursor:
-                vector.InsertAfter(cursor + 1UL, Inserted);
+                vector.InsertAfter(cursor, Inserted);
                 break;
 
             case CursorMutation.RemoveAfterTheCursor:
@@ -1327,11 +1340,23 @@ public sealed class VectorCursorTests
     /// <item>
     /// BEFORE the cursor - all three rows keep the position NUMERICALLY and therefore change which
     /// element it addresses. This is the implemented behaviour, pinned rather than corrected: the
-    /// cursor does not chase its element.
+    /// cursor does not chase its element. The insertion row is the sharpest case of it, because the
+    /// new element lands ON the cursor's own number: <c>InsertBefore(3)</c> with the cursor at
+    /// <c>3</c> leaves the cursor addressing <c>inserted</c> rather than the <c>charlie</c> it was
+    /// parked on.
     /// </item>
     /// <item>
     /// AFTER the cursor - both rows keep the position AND the element, since nothing at or below the
     /// cursor moved. Element identity is preserved here and only here.
+    /// </item>
+    /// <item>
+    /// THE TWO INSERTION ROWS PRODUCE THE SAME CONTENTS FROM OPPOSITE SIDES OF ONE GAP, which is a
+    /// fact about the container rather than a coincidence in the table: <c>InsertBefore(3)</c> and
+    /// <c>InsertAfter(2)</c> resolve to the same slot, so both yield
+    /// <c>alpha bravo inserted charlie delta</c>. What separates them is entirely the cursor - one
+    /// inserts at the cursor's number and displaces what it addressed, the other inserts above the
+    /// cursor's number and leaves it addressing the same element. Two rows whose CONTENTS agree and
+    /// whose IDENTITY outcome differs are exactly what this matrix exists to hold apart.
     /// </item>
     /// <item>
     /// INVALIDATION - the last row removes the element the cursor is ON while it is also the tail, so
@@ -1355,7 +1380,7 @@ public sealed class VectorCursorTests
         },
         {
             CursorMutation.InsertBeforeTheCursor, 3UL, Charlie,
-            5UL, 3UL, Bravo, $"{Alpha} {Inserted} {Bravo} {Charlie} {Delta}"
+            5UL, 3UL, Inserted, $"{Alpha} {Bravo} {Inserted} {Charlie} {Delta}"
         },
         {
             CursorMutation.RemoveBeforeTheCursor, 3UL, Charlie,
@@ -1367,7 +1392,7 @@ public sealed class VectorCursorTests
         },
         {
             CursorMutation.InsertAfterTheCursor, 2UL, Bravo,
-            5UL, 2UL, Bravo, $"{Alpha} {Bravo} {Charlie} {Inserted} {Delta}"
+            5UL, 2UL, Bravo, $"{Alpha} {Bravo} {Inserted} {Charlie} {Delta}"
         },
         {
             CursorMutation.RemoveAfterTheCursor, 2UL, Bravo,

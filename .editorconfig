@@ -386,6 +386,42 @@ trim_trailing_whitespace = true
 # becomes effective the moment the file lands, so leaving it in place is correct rather than
 # speculative. When adding a section, cite the PowerScript declaration site the way the existing
 # ones do, so the exception can be audited instead of guessed at.
+#
+# ==============================================================================================
+# THE ROSTER - THIS LIST IS THE SINGLE SOURCE OF TRUTH FOR "WHICH FILES ARE IN BAND 3"
+# ==============================================================================================
+# 11 SECTIONS: 10 EFFECTIVE (the file exists) + 1 PENDING (the file is specified but unauthored).
+#
+#      1  shared/PowerFramework.Shared.Kernel/RetCode.cs                                  effective
+#      2  shared/PowerFramework.Shared.Kernel/Enums.cs                                    effective
+#      3  shared/PowerFramework.Shared.Localization/Categories.cs                         effective
+#      4  .../PowerFramework.DataServices/Domain/EventGate.cs                             effective
+#      5  .../PowerFramework.DataServices/Domain/ItemChangeProtocol.cs                    effective
+#      6  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           PENDING
+#      7  .../PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs    effective
+#      8  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
+#      9  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
+#     10  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
+#     11  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
+#
+# ENTRY 6 IS THE PENDING ONE AND IT STAYS. ColumnExpressionEngine.cs is enumerated in the
+# target-structure specification and is not yet authored, so its section is inert - it suppresses
+# nothing today and becomes effective the moment the file lands. That is exactly the case the
+# maintenance rule above sanctions, and the rule is quoted rather than re-derived on purpose:
+# deleting the section would mean re-deriving the suppression later, from scratch, at the moment
+# somebody is busy authoring a 2,435-line engine. The `_of_calcitem` entry point it exists for -
+# public despite its legacy underscore prefix - is the one member in the whole port that trips
+# IDE1006 rather than CA1707, so it is the least reconstructible entry in the band.
+#
+# WHY A ROSTER LIVES HERE AND NOWHERE ELSE
+# Comment blocks throughout the repository used to restate this list as a COUNT in prose - build
+# documentation, the event broker, test doubles, a system-error handler, an options type, several
+# validators and providers, the container types, and both paging rewriters. They disagreed with each
+# other and with reality, variously claiming seven, nine and ten NAMED files, because each was a
+# copy of a number with no mechanism keeping it honest and every copy went stale the moment a
+# section was added. They now point HERE instead of restating it, so there is exactly one place to
+# update and no second place to fall out of step. If you add or remove a section, update this
+# roster; nothing else needs touching, and nothing else should be made to carry the count again.
 
 # Preserved verbatim: the return-code algebra - OK/SUCCESS/ALLOW=0, PREVENT=1, FAILED=-1,
 # CANCELED=-2 and CANCELLED=-2, the contiguous E_INVALID_ARGUMENT..E_RETRY block,

@@ -253,9 +253,37 @@ framework on net10.0 rather than to a package and therefore appears in no lock
 file and adds no third-party terms.
 
 Registry: npmjs.org -- used only by the cross-service end-to-end suite under
-tests/e2e
+tests/e2e. All three are devDependencies of tests/e2e/package.json, so the same
+two-directional reconciliation applies: every devDependency in that manifest
+appears below at the same version, and every entry below is pinned there. None of
+them is referenced by any service project and none is shipped in any service
+image; they are development and verification tooling for that one suite.
 
   @playwright/test                               1.62.1    Apache-2.0
+  @types/node                                    22.20.1   MIT
+  typescript                                     5.9.3     Apache-2.0
+
+typescript and @types/node are taken by that suite because its specs and
+fixtures are TypeScript compiled under the strict settings in
+tests/e2e/tsconfig.json, and its Node built-in usage is typed rather than
+untyped. Neither is a Playwright dependency, so neither would arrive on its own.
+
+The following arrive transitively from the three above. They are recorded for the
+same reason as the transitive .NET packages: so that a reader of
+tests/e2e/package-lock.json does not mistake any of them for an undeclared
+direct dependency, and so that their terms are on the record too.
+
+  playwright                                     1.62.1    Apache-2.0
+  playwright-core                                1.62.1    Apache-2.0
+  undici-types                                   6.21.0    MIT
+
+playwright and playwright-core arrive through @playwright/test, and undici-types
+through @types/node. One further entry appears in that lock file and is
+deliberately not listed above: fsevents 2.3.2 (MIT), an optional dependency of
+playwright declared for darwin only. It is not installed on the Linux hosts this
+repository builds and tests on, so it contributes no terms to any artifact
+produced here; it is named here only so that every entry in the lock file is
+accounted for.
 
 A note on SQLite, which appears in both section 3 and section 4. That is a
 genuine continuity rather than a duplicated entry. The legacy framework links a

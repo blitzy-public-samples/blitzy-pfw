@@ -117,9 +117,10 @@
 //
 //  THE NAMING RULING - BUILD BREAKING IF IGNORED
 //      The repository-root .editorconfig scopes its naming-analyzer suppressions
-//      (dotnet_diagnostic.CA1707.severity = none and IDE1006 none) to TEN NAMED IMPLEMENTATION FILES -
-//      RetCode.cs, Enums.cs, Categories.cs, EventGate.cs, ItemChangeProtocol.cs, ColumnExpressionEngine.cs,
-//      ExpressionVariableEnvironment.cs, ClauseModifier.cs, IPagingRewriter.cs and LegacyDefaults.cs - and
+//      (dotnet_diagnostic.CA1707.severity = none and IDE1006 none) to a roster of individually NAMED
+//      IMPLEMENTATION FILES. That roster is published once, in the BAND 3 header of .editorconfig, and is
+//      deliberately not copied here: a list restated in a comment disagrees with the real one as soon as a
+//      section is added, which is what happened across seven files before this note was corrected. It
 //      covers NO test file. With TreatWarningsAsErrors true, a SCREAMING_SNAKE or underscored member here
 //      is a BUILD ERROR and not a style opinion. Every member declared below is therefore conventional
 //      PascalCase, and the legacy spellings - `#Silent`, `_source`, `_hEvtCancelled`, `argPassed`,

@@ -139,7 +139,8 @@ public static class NumberValidator
     //
     // NOTE ON THE IDENTIFIER, WHICH IS NOT THE VALUE. The legacy spelling lives in the string VALUE
     // and never in a C# identifier. The repository-root .editorconfig scopes its naming-analyzer
-    // suppressions to ten named files and this is not one of them, so with warnings promoted to
+    // suppressions to the files on its BAND 3 roster - the single source of truth for that list - and
+    // this is not one of them, so with warnings promoted to
     // errors a camelCase or underscored public member here would fail the build outright.
 
     /// <summary>

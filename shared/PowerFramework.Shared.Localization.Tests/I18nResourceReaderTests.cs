@@ -180,7 +180,11 @@
 //           non-nullable parameter - the only way to express a nullable-oblivious caller, and the
 //           same convention the sibling VectorTests.cs suite already uses for its own argument
 //           guards. It is never used to silence a nullability diagnostic on a value this file then
-//           dereferences.
+//           dereferences. XDocument.Root is the one navigation where that temptation is real,
+//           because it is nullable by contract; every reader of it goes through
+//           RequireRootElement, which answers the null with Assert.NotNull and hands the compiler's
+//           flow analysis a non-null XElement. If a future edit reintroduces `Root!`, this claim
+//           becomes false - use the helper instead.
 //      C-K  Every technology-specific and boundary-specific decision is documented where it is
 //           made: the substitution above, why Region 7 is structural, why the fixture is reached
 //           by relative name, why the twelve-row matrix is static, and why the constructor
@@ -343,10 +347,12 @@ public sealed class I18nResourceReaderTests
     private const string FixtureMissingMessage =
         "The localization resource fixture 'pfw.i18n.xml' is not present in the test host's " +
         "working directory, so this suite cannot verify anything and must not be allowed to pass. " +
-        "PowerFramework.Shared.Localization.Tests.csproj supplies it by LINKING the single " +
-        "repository-root resource into the build output: " +
-        "<Content Include=\"../../pfw.i18n.xml\" Link=\"pfw.i18n.xml\" " +
-        "CopyToOutputDirectory=\"PreserveNewest\" />. Restore that item - do not add a second, " +
+        "PowerFramework.Shared.Localization.csproj - the LIBRARY project, at lines 256-261 - supplies " +
+        "it by LINKING the single repository-root resource into the build output, from where it flows " +
+        "to this project down the ProjectReference edge: " +
+        "<Content Include=\"$(MSBuildThisFileDirectory)../../pfw.i18n.xml\" Link=\"pfw.i18n.xml\" " +
+        "CopyToOutputDirectory=\"PreserveNewest\" CopyToPublishDirectory=\"PreserveNewest\" />. " +
+        "Restore that item - do not add a second, " +
         "checked-in copy of the resource, which would be free to drift from the read-only " +
         "behavioural oracle.";
 
@@ -1450,7 +1456,7 @@ public sealed class I18nResourceReaderTests
 
         int asserted = 0;
 
-        foreach (XElement section in document.Root!.Elements())
+        foreach (XElement section in RequireRootElement(document).Elements())
         {
             string category = section.Name.LocalName;
             string language = (string?)section.Attribute(LanguageAttributeName) ?? string.Empty;

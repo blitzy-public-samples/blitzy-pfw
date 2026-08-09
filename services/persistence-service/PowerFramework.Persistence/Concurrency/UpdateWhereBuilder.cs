@@ -267,8 +267,9 @@
 //  the only outward shape of these types is TableUpdateContract in the published contract.
 //
 //  NAMING, VERIFIED AGAINST THE ARTIFACT. The repository-root .editorconfig scopes its CA1707 and
-//  IDE1006 relaxations to ten named files. Concurrency/ IS NOT AMONG THEM - the sibling that is, in
-//  this same service, is Sql/ClauseModifier.cs. TreatWarningsAsErrors is inherited as true, so a
+//  IDE1006 relaxations to the files on its BAND 3 roster, the single source of truth for that list.
+//  Concurrency/ IS NOT AMONG THEM - the sibling that is, in this same service, is
+//  Sql/ClauseModifier.cs. TreatWarningsAsErrors is inherited as true, so a
 //  SCREAMING_SNAKE identifier declared here would be a BUILD FAILURE, not a lint nit. Every member
 //  below is therefore PascalCase, and the preserved legacy constant values are CONSUMED from
 //  PowerFramework.Shared.Kernel.RetCode rather than restated. The shouty spellings that appear in
@@ -1971,4 +1972,3 @@ internal sealed class UpdatePreparer
 }
 
 #endregion
-

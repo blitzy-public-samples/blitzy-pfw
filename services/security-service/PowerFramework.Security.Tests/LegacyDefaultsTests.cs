@@ -158,6 +158,23 @@ public sealed class LegacyDefaultsTests
     ];
 
     /// <summary>
+    /// The published modes whose behaviour this port can reproduce, which is where the round-trip and
+    /// padding matrices run.
+    /// </summary>
+    /// <remarks>
+    /// The feedback mode is absent because its feedback width is unprovable (DECISION D3), and its
+    /// absence HERE is not a reduction of the published set - <see cref="PublishedCipherModes"/> above
+    /// still carries all three, and the set-completeness tests still read it. The two lists answer two
+    /// different questions: which identifiers the legacy declares, and which cells this port can
+    /// faithfully serve.
+    /// </remarks>
+    private static readonly long[] ReproducibleCipherModes =
+    [
+        Enums.CRYPTO_SYMCRYPT_MODE_ECB,
+        Enums.CRYPTO_SYMCRYPT_MODE_CBC,
+    ];
+
+    /// <summary>
     /// The three cipher types whose key length the platform accepts at every value, used by the
     /// tests that deliberately supply under-length key material.
     /// </summary>
@@ -327,13 +344,48 @@ public sealed class LegacyDefaultsTests
     /// mode.
     /// </summary>
     /// <returns>Fifteen rows, each carrying a cipher type then a cipher mode.</returns>
+    /// <summary>
+    /// All six mode-by-vector combinations with the classification each must receive.
+    /// </summary>
+    /// <returns>One row per combination: mode, vector supplied, expected classification.</returns>
+    public static TheoryData<long, bool, SymmetricCellParity> CipherCellClassifications() =>
+        new()
+        {
+            // The codebook mode consumes no vector, so neither shape is blocked - and this is the
+            // default mode, which is why both rows matter.
+            { Enums.CRYPTO_SYMCRYPT_MODE_ECB, true, SymmetricCellParity.Supported },
+            { Enums.CRYPTO_SYMCRYPT_MODE_ECB, false, SymmetricCellParity.Supported },
+
+            // Chaining is reproducible with a caller-supplied vector and blocked without one.
+            { Enums.CRYPTO_SYMCRYPT_MODE_CBC, true, SymmetricCellParity.Supported },
+            {
+                Enums.CRYPTO_SYMCRYPT_MODE_CBC,
+                false,
+                SymmetricCellParity.BlockedSynthesizedVectorUnprovable
+            },
+
+            // The feedback mode is blocked either way: a vector does not disclose the feedback width.
+            {
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB,
+                true,
+                SymmetricCellParity.BlockedFeedbackWidthUnprovable
+            },
+            {
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB,
+                false,
+                SymmetricCellParity.BlockedFeedbackWidthUnprovable
+            },
+        };
+
     public static TheoryData<ushort, long> CipherTypeAndModeGrid()
     {
         TheoryData<ushort, long> data = new();
 
         foreach (ushort ntype in PublishedCipherTypes)
         {
-            foreach (long mode in PublishedCipherModes)
+            // Reproducible cells only: the blocked cells are covered by the refusal theories in the
+            // DECISION D3 section, which assert the outcome those cells actually have.
+            foreach (long mode in ReproducibleCipherModes)
             {
                 data.Add(ntype, mode);
             }
@@ -575,11 +627,15 @@ public sealed class LegacyDefaultsTests
         // The two modes the default is NOT. If a future edit promoted the default to either of
         // them, the equality above would fail and one of these would start passing vacuously, so
         // both directions are asserted together.
-        byte[] explicitCbc = _cipher.SymEncrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC);
-        byte[] explicitCfb = _cipher.SymEncrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CFB);
-
-        Assert.NotEqual(explicitCbc, modeOmitted);
-        Assert.NotEqual(explicitCfb, modeOmitted);
+        // THE PROOF IS NOW SHARPER THAN AN INEQUALITY. Asking this same vector-less arm for either of
+        // the other two modes is REFUSED under DECISION D3, and that refusal is itself decisive: the
+        // codebook mode is the ONLY mode this arm can serve, because it is the only one consuming no
+        // vector. Were the default anything else, the mode-omitting call above would have been refused
+        // too rather than returning ciphertext.
+        Assert.Throws<SymmetricParityUnavailableException>(
+            () => _cipher.SymEncrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC));
+        Assert.Throws<SymmetricParityUnavailableException>(
+            () => _cipher.SymEncrypt(plain, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CFB));
     }
 
     /// <summary>
@@ -628,12 +684,13 @@ public sealed class LegacyDefaultsTests
             RecoversPlainText(cipherText, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_ECB, plain),
             "The helper must be able to answer positively, or the refutations below prove nothing.");
 
-        Assert.False(
-            RecoversPlainText(cipherText, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC, plain),
-            "The mode-omitting arms must be ECB, so CBC must not recover their plaintext.");
-        Assert.False(
-            RecoversPlainText(cipherText, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CFB, plain),
-            "The mode-omitting arms must be ECB, so CFB must not recover their plaintext.");
+        // The refutation is now a refusal rather than a failed recovery, and it is stronger for it:
+        // the other two modes cannot even be ATTEMPTED through this vector-less arm (DECISION D3), so
+        // the codebook mode is the only one it can serve and therefore the only one it can default to.
+        Assert.Throws<SymmetricParityUnavailableException>(
+            () => _cipher.SymDecrypt(cipherText, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC));
+        Assert.Throws<SymmetricParityUnavailableException>(
+            () => _cipher.SymDecrypt(cipherText, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CFB));
     }
 
     /// <summary>
@@ -1356,15 +1413,21 @@ public sealed class LegacyDefaultsTests
         SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
         byte[] key = SyntheticKeyMaterial(metrics.KeyLengthBytes);
 
+        // A VECTOR IS SUPPLIED EXPLICITLY because the grid now includes the chaining mode, which this
+        // port serves only with a caller-supplied vector (DECISION D3). Passing one keeps this test
+        // measuring what it is about - padding overhead, tamper behaviour or payload form - rather
+        // than colliding with a capability refusal it is not testing.
+        byte[] vector = SyntheticVectorMaterial(metrics.IvLengthBytes);
+
         foreach (int plainLength in new[] { 0, 1, metrics.BlockLengthBytes, metrics.BlockLengthBytes + 1 })
         {
             byte[] plain = SyntheticPayload(plainLength);
-            byte[] cipherText = _cipher.SymEncrypt(plain, key, ntype, mode);
+            byte[] cipherText = _cipher.SymEncrypt(plain, key, vector, ntype, mode);
 
             int overhead = cipherText.Length - plain.Length;
 
             Assert.InRange(overhead, 1, metrics.BlockLengthBytes);
-            Assert.Equal(plain, _cipher.SymDecrypt(cipherText, key, ntype, mode));
+            Assert.Equal(plain, _cipher.SymDecrypt(cipherText, key, vector, ntype, mode));
         }
     }
 
@@ -1397,13 +1460,19 @@ public sealed class LegacyDefaultsTests
         byte[] key = SyntheticKeyMaterial(metrics.KeyLengthBytes);
         byte[] plain = SyntheticPayload(metrics.BlockLengthBytes * 2);
 
-        byte[] tampered = _cipher.SymEncrypt(plain, key, ntype, mode);
+        // A VECTOR IS SUPPLIED EXPLICITLY because the grid now includes the chaining mode, which this
+        // port serves only with a caller-supplied vector (DECISION D3). Passing one keeps this test
+        // measuring what it is about - padding overhead, tamper behaviour or payload form - rather
+        // than colliding with a capability refusal it is not testing.
+        byte[] vector = SyntheticVectorMaterial(metrics.IvLengthBytes);
+
+        byte[] tampered = _cipher.SymEncrypt(plain, key, vector, ntype, mode);
 
         // The positive control first, on the UNTAMPERED bytes: the helper must be able to answer
         // positively, or the refutation below would hold for the trivial reason that it never answers
         // anything else.
         Assert.True(
-            RecoversPlainText(tampered, key, ntype, mode, plain),
+            RecoversPlainText(tampered, key, ntype, mode, plain, vector),
             "The helper must be able to answer positively, or the refutation below proves nothing.");
 
         // One flipped bit in the first byte. Under an authenticated mode this would be reported as a
@@ -1411,96 +1480,239 @@ public sealed class LegacyDefaultsTests
         tampered[0] ^= 0x01;
 
         Assert.False(
-            RecoversPlainText(tampered, key, ntype, mode, plain),
+            RecoversPlainText(tampered, key, ntype, mode, plain, vector),
             "Tampering must not be silently repaired: the original plaintext must not return.");
     }
 
     // ==========================================================================================
-    //  DECISION D3 - THE EIGHT MODE-WITHOUT-VECTOR ARMS USE AN ALL-ZERO VECTOR OF THE BLOCK LENGTH
+    //  DECISION D3 - THE EIGHT MODE-WITHOUT-VECTOR ARMS REFUSE A VECTOR-CONSUMING MODE
     //  ORACLE  n_crypto.sru:L31, L35, L39, L43   SymEncrypt - a mode, but no vector
     //          n_crypto.sru:L47, L51, L55, L59   SymDecrypt - the same four shapes, mirrored
     //  ------------------------------------------------------------------------------------------
-    //  A DOCUMENTED DECISION, NOT DERIVED PARITY (constraint C-K). Eight of the thirty-two symmetric
-    //  overloads accept a mode but no initialization vector, so a caller may ask for CBC or CFB -
-    //  both of which require one - without supplying it. Those eight arms must synthesise a vector,
-    //  and the catalogue rules that it is ALL ZERO of the cipher's block length.
+    //  WHAT THESE TESTS USED TO ASSERT, AND WHY IT WAS THE WRONG THING. Eight of the thirty-two
+    //  symmetric overloads accept a mode but no initialization vector, so a caller may ask for a
+    //  vector-consuming mode without supplying one. The port used to synthesise an all-zero vector
+    //  of the block length, and these tests asserted that it did - comparing the vector-less arm
+    //  against an explicit all-zero vector and finding them equal.
     //
-    //  This is not a rare branch: it is a quarter of the family, and it exists because a vector
-    //  parameter was only added to the family later than the family itself.
+    //  That equality was guaranteed by construction: one code path called the other. It therefore
+    //  proved the two agreed with EACH OTHER and nothing at all about the closed binary, while
+    //  reading exactly like a parity assertion. `n_crypto` is declared native "pfw.dll"
+    //  [n_crypto.sru:L8] with no PowerScript body for any of the 32 overloads, so what vector the
+    //  oracle substituted is unobservable from this repository.
+    //
+    //  WHY THAT MATTERS MORE THAN IT LOOKS. A wrong vector round-trips perfectly against itself, so
+    //  no test here could ever detect it - while the ciphertext produced would be undecryptable by
+    //  the legacy. The guess was therefore silently unfalsifiable AND potentially destructive, which
+    //  is the combination the narrow-with-a-defined-error rule exists to forbid.
+    //
+    //  WHAT IS ASSERTED NOW. Those eight arms REFUSE a vector-consuming mode, with a reason naming
+    //  the missing evidence. This is not a rare branch - it is a quarter of the family - and the
+    //  codebook mode, which consumes no vector, is unaffected and is asserted to still work.
     // ==========================================================================================
 
     /// <summary>
-    /// A mode-without-vector call produces byte-for-byte the ciphertext of the same call made with an
-    /// explicit all-zero vector of the cipher's block length.
+    /// The refusal type will not be constructed for a NON-blocking reason, and it carries the cell it
+    /// refused so a handler can report which one without re-deriving it.
     /// </summary>
-    /// <param name="ntype">The published cipher type under test.</param>
-    /// <param name="mode">A mode that consumes a vector - CBC or CFB.</param>
     /// <remarks>
     /// <para>
-    /// DOCUMENTED DECISION D3, KNOWN WEAK DEFAULT, PRESERVED DELIBERATELY AND ASSERTED AS CORRECT. A
-    /// fixed, publicly known vector destroys cipher block chaining's semantic security: the same
-    /// plaintext under the same key yields the same ciphertext every time, so an observer learns when
-    /// a value has not changed and the first block leaks equality much as electronic codebook mode
-    /// does. It is preserved because generating a random vector would produce ciphertext the legacy
-    /// cannot decrypt - its format has no field in which to transmit one - so the alternative is not
-    /// a safer port but a broken one.
+    /// THE GUARD EXISTS BECAUSE THE ENUM HAS A SUPPORTED MEMBER AND AN EXCEPTION HAS NO USE FOR IT.
+    /// Constructing this type with <see cref="SymmetricCellParity.Supported"/> would mean some caller
+    /// classified a cell as fine and then raised on it anyway - a contradiction whose message could
+    /// only be misleading. Refusing to build it turns that contradiction into an immediate failure at
+    /// the point of the mistake.
     /// </para>
     /// <para>
-    /// The expected vector is COMPUTED FROM A LENGTH by the catalogue rather than written down as a
-    /// literal, which is why this test contains nothing resembling key material. The comparison
-    /// against a NON-ZERO vector is included so the equality cannot pass for the trivial reason that
-    /// the vector is being ignored altogether.
+    /// An undefined member is rejected by the same arm, so adding a future blocking reason without
+    /// giving it a message fails loudly rather than inheriting a vague default.
     /// </para>
     /// </remarks>
-    [Theory]
-    [MemberData(nameof(VectorConsumingTypeAndModeGrid))]
-    public void OmittingTheVectorUsesTheAllZeroVectorOfTheBlockLength(ushort ntype, long mode)
+    [Fact]
+    public void TheRefusalTypeRejectsANonBlockingReasonAndCarriesItsCell()
     {
-        SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
-        byte[] key = SyntheticKeyMaterial(metrics.KeyLengthBytes);
-        byte[] plain = SyntheticPayload(metrics.BlockLengthBytes * 2);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SymmetricParityUnavailableException(
+            SymmetricCellParity.Supported,
+            Enums.CRYPTO_SYMCRYPT_MODE_CBC));
 
-        byte[] zeroVector = LegacyDefaults.CreateZeroInitializationVector(metrics.IvLengthBytes);
-        Assert.Equal(metrics.BlockLengthBytes, zeroVector.Length);
-        Assert.All(zeroVector, vectorByte => Assert.Equal(0, vectorByte));
+        // An undefined member takes the same arm.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SymmetricParityUnavailableException(
+            (SymmetricCellParity)int.MaxValue,
+            Enums.CRYPTO_SYMCRYPT_MODE_CBC));
 
-        byte[] vectorOmitted = _cipher.SymEncrypt(plain, key, ntype, mode);
-        byte[] explicitZeroVector = _cipher.SymEncrypt(plain, key, zeroVector, ntype, mode);
+        // A blocking reason builds, and both facts about the refused cell survive on the instance.
+        SymmetricParityUnavailableException refusal = new(
+            SymmetricCellParity.BlockedFeedbackWidthUnprovable,
+            Enums.CRYPTO_SYMCRYPT_MODE_CFB);
 
-        Assert.Equal(explicitZeroVector, vectorOmitted);
+        Assert.Equal(SymmetricCellParity.BlockedFeedbackWidthUnprovable, refusal.Reason);
+        Assert.Equal(Enums.CRYPTO_SYMCRYPT_MODE_CFB, refusal.Mode);
 
-        // A non-zero vector must differ, or the equality above would hold for the wrong reason.
-        byte[] nonZeroVector = SyntheticVectorMaterial(metrics.IvLengthBytes);
-        Assert.NotEqual(
-            _cipher.SymEncrypt(plain, key, nonZeroVector, ntype, mode),
-            vectorOmitted);
+        // NOT a cryptographic failure, so no handler that absorbs a padding error can swallow it.
+        Assert.IsType<NotSupportedException>(refusal, exactMatch: false);
+        Assert.IsNotType<CryptographicException>(refusal, exactMatch: false);
+
+        // The message explains the refusal and names no key, vector or payload content.
+        Assert.Contains("feedback width", refusal.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The same rule governs the decrypting half: a mode-without-vector decrypt recovers what a
-    /// mode-without-vector encrypt produced, and what an explicit all-zero vector produced.
+    /// The classifier answers every one of the six mode-by-vector combinations, and the answers are
+    /// exactly the blocked set DECISION D3 defines - no more and no less.
+    /// </summary>
+    /// <param name="mode">The cipher mode.</param>
+    /// <param name="vectorSupplied">Whether a vector accompanies the call.</param>
+    /// <param name="expected">The classification the catalogue must report.</param>
+    /// <remarks>
+    /// TOTALITY IS THE POINT. Enumerating all six combinations rather than only the interesting ones
+    /// is what proves the narrowing is minimal: three of the six are Supported, and if a future edit
+    /// broadened the block to catch the codebook mode or vector-bearing chaining, three of these rows
+    /// would fail immediately. A test that only checked the blocked cells could not tell a correct
+    /// narrowing from a blanket refusal.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(CipherCellClassifications))]
+    public void TheClassifierReportsExactlyTheBlockedSet(
+        long mode,
+        bool vectorSupplied,
+        SymmetricCellParity expected) =>
+        Assert.Equal(expected, LegacyDefaults.ClassifySymmetricCell(mode, vectorSupplied));
+
+    /// <summary>
+    /// A blocked mode remains a PUBLISHED mode. The two questions are separate and this pins the
+    /// separation, because collapsing them would breach the preserve-the-identifier-set rule.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is the whole shape of the DECISION D3 remediation. Withdrawing the identifier
+    /// would have been a reduction of the legacy surface - forbidden, because the oracle declares
+    /// three modes at [enums.sru:L943-L945] and the set is preserved exactly. Withdrawing only the
+    /// CAPABILITY leaves the surface intact while refusing to invent the one parameter the legacy
+    /// never published. A future edit that "tidied" the mode out of the supported-identifier predicate
+    /// would fail here.
+    /// </remarks>
+    [Fact]
+    public void ABlockedModeIsStillAPublishedMode()
+    {
+        // Published: the screening predicate accepts it, and it is a member of the declared set.
+        Assert.True(LegacyDefaults.IsSupportedSymmetricMode(Enums.CRYPTO_SYMCRYPT_MODE_CFB));
+        Assert.Contains(Enums.CRYPTO_SYMCRYPT_MODE_CFB, PublishedCipherModes);
+
+        // Yet not reproducible, in either vector shape.
+        Assert.Equal(
+            SymmetricCellParity.BlockedFeedbackWidthUnprovable,
+            LegacyDefaults.ClassifySymmetricCell(
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB,
+                initializationVectorSupplied: true));
+        Assert.Equal(
+            SymmetricCellParity.BlockedFeedbackWidthUnprovable,
+            LegacyDefaults.ClassifySymmetricCell(
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB,
+                initializationVectorSupplied: false));
+    }
+
+    /// <summary>
+    /// The classifier treats an UNPUBLISHED mode as supported, leaving its rejection to the screening
+    /// step, so one input never draws two different refusals.
+    /// </summary>
+    /// <remarks>
+    /// Asserted because it looks wrong at a glance and is deliberate. The classifier answers "can this
+    /// cell be reproduced?", not "is this a legal identifier?" - and an undeclared value has no cell.
+    /// The provider screens the identifier first, so an undeclared mode is refused as an out-of-range
+    /// argument and never reaches a capability question. Were the classifier to also reject it, the
+    /// order of the two checks would decide which exception a caller saw.
+    /// </remarks>
+    [Fact]
+    public void TheClassifierLeavesAnUndeclaredModeToTheScreeningStep()
+    {
+        long undeclared = Enums.CRYPTO_SYMCRYPT_MODE_CFB + 1;
+
+        Assert.False(LegacyDefaults.IsSupportedSymmetricMode(undeclared));
+        Assert.Equal(
+            SymmetricCellParity.Supported,
+            LegacyDefaults.ClassifySymmetricCell(undeclared, initializationVectorSupplied: false));
+
+        // And the provider refuses it as an argument, not as a capability.
+        Assert.Throws<ArgumentOutOfRangeException>(() => _cipher.SymEncrypt(
+            SyntheticPayload(16),
+            SyntheticKeyMaterial(32),
+            (ushort)Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
+            undeclared));
+    }
+
+    /// <summary>
+    /// Omitting the vector for a vector-consuming mode is REFUSED, on every cipher type and in both
+    /// directions, rather than having a vector invented for it.
     /// </summary>
     /// <param name="ntype">The published cipher type under test.</param>
-    /// <param name="mode">A mode that consumes a vector - CBC or CFB.</param>
+    /// <param name="mode">The vector-consuming mode under test.</param>
     /// <remarks>
-    /// DOCUMENTED DECISION D3. Asserted separately because the four decrypt arms
-    /// [n_crypto.sru:L47, L51, L55, L59] are a distinct declaration group from the four encrypt arms
-    /// [:L31, L35, L39, L43], and a synthesised vector applied on one side but not the other would
-    /// round-trip nothing.
+    /// The refusal names WHICH evidence is missing, so the two independent blocking reasons stay
+    /// distinguishable: a measurement of the oracle's feedback width would unblock one, and a
+    /// measurement of its substituted vector the other.
     /// </remarks>
     [Theory]
     [MemberData(nameof(VectorConsumingTypeAndModeGrid))]
-    public void OmittingTheVectorOnTheDecryptSideUsesTheSameAllZeroVector(ushort ntype, long mode)
+    public void OmittingTheVectorForAVectorConsumingModeIsRefused(ushort ntype, long mode)
     {
         SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
         byte[] key = SyntheticKeyMaterial(metrics.KeyLengthBytes);
         byte[] plain = SyntheticPayload(metrics.BlockLengthBytes * 2);
-        byte[] zeroVector = LegacyDefaults.CreateZeroInitializationVector(metrics.IvLengthBytes);
 
-        byte[] cipherText = _cipher.SymEncrypt(plain, key, ntype, mode);
+        SymmetricCellParity expected = mode == Enums.CRYPTO_SYMCRYPT_MODE_CFB
+            ? SymmetricCellParity.BlockedFeedbackWidthUnprovable
+            : SymmetricCellParity.BlockedSynthesizedVectorUnprovable;
 
-        Assert.Equal(plain, _cipher.SymDecrypt(cipherText, key, ntype, mode));
-        Assert.Equal(plain, _cipher.SymDecrypt(cipherText, key, zeroVector, ntype, mode));
+        Assert.Equal(
+            expected,
+            Assert.Throws<SymmetricParityUnavailableException>(
+                () => _cipher.SymEncrypt(plain, key, ntype, mode)).Reason);
+
+        Assert.Equal(
+            expected,
+            Assert.Throws<SymmetricParityUnavailableException>(
+                () => _cipher.SymDecrypt(plain, key, ntype, mode)).Reason);
+    }
+
+    /// <summary>
+    /// Supplying a vector rescues the chaining mode but NOT the feedback mode, because the two arms
+    /// are blocked by different missing evidence.
+    /// </summary>
+    /// <param name="ntype">The published cipher type under test.</param>
+    /// <remarks>
+    /// THE DISCRIMINATING TEST OF THE WHOLE SECTION. It is what proves the narrowing is the minimum
+    /// one rather than a blanket refusal of everything awkward: with a vector supplied, chaining is
+    /// fully supported and round-trips, while the feedback mode stays refused because a vector says
+    /// nothing about its feedback width. A blanket block would fail the first half; a block that had
+    /// missed the width problem would fail the second.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(CipherTypes))]
+    public void SupplyingAVectorRescuesChainingButNotFeedback(ushort ntype)
+    {
+        SymmetricCipherMetrics metrics = LegacyDefaults.GetSymmetricCipherMetrics(ntype);
+        byte[] key = SyntheticKeyMaterial(metrics.KeyLengthBytes);
+        byte[] plain = SyntheticPayload(metrics.BlockLengthBytes * 2);
+        byte[] vector = SyntheticVectorMaterial(metrics.IvLengthBytes);
+
+        byte[] chained = _cipher.SymEncrypt(
+            plain,
+            key,
+            vector,
+            ntype,
+            Enums.CRYPTO_SYMCRYPT_MODE_CBC);
+
+        Assert.Equal(
+            plain,
+            _cipher.SymDecrypt(chained, key, vector, ntype, Enums.CRYPTO_SYMCRYPT_MODE_CBC));
+
+        Assert.Equal(
+            SymmetricCellParity.BlockedFeedbackWidthUnprovable,
+            Assert.Throws<SymmetricParityUnavailableException>(() => _cipher.SymEncrypt(
+                plain,
+                key,
+                vector,
+                ntype,
+                Enums.CRYPTO_SYMCRYPT_MODE_CFB)).Reason);
     }
 
     /// <summary>
@@ -1527,10 +1739,13 @@ public sealed class LegacyDefaultsTests
         Assert.False(LegacyDefaults.ModeUsesInitializationVector(ecb));
 
         byte[] withoutVector = _cipher.SymEncrypt(plain, key, ntype, ecb);
+        // Constructed here from a length rather than written as a literal, so this file still holds
+        // nothing resembling key material. The catalogue no longer offers a factory for it: the
+        // all-zero vector was DECISION D3's guess, and removing the guess removed its factory.
         byte[] withZeroVector = _cipher.SymEncrypt(
             plain,
             key,
-            LegacyDefaults.CreateZeroInitializationVector(metrics.IvLengthBytes),
+            new byte[metrics.IvLengthBytes],
             ntype,
             ecb);
         byte[] withNonZeroVector = _cipher.SymEncrypt(
@@ -1599,8 +1814,14 @@ public sealed class LegacyDefaultsTests
         string plainText = SyntheticText(metrics.BlockLengthBytes * 2);
         byte[] plainBytes = LegacyDefaults.KeyMaterialEncoding.GetBytes(plainText);
 
-        string textShaped = _cipher.SymEncrypt(plainText, key, ntype, mode);
-        byte[] byteShaped = _cipher.SymEncrypt(plainBytes, key, ntype, mode);
+        // A VECTOR IS SUPPLIED EXPLICITLY because the grid now includes the chaining mode, which this
+        // port serves only with a caller-supplied vector (DECISION D3). Passing one keeps this test
+        // measuring what it is about - padding overhead, tamper behaviour or payload form - rather
+        // than colliding with a capability refusal it is not testing.
+        byte[] vector = SyntheticVectorMaterial(metrics.IvLengthBytes);
+
+        string textShaped = _cipher.SymEncrypt(plainText, key, vector, ntype, mode);
+        byte[] byteShaped = _cipher.SymEncrypt(plainBytes, key, vector, ntype, mode);
 
         Assert.Equal(byteShaped, DecodePayloadText(textShaped));
     }
@@ -2152,35 +2373,6 @@ public sealed class LegacyDefaultsTests
     }
 
     /// <summary>
-    /// The vector factory produces a fresh all-zero buffer of every real block length, and refuses a
-    /// non-positive length.
-    /// </summary>
-    /// <remarks>
-    /// DOCUMENTED DECISION D3's factory. The vector is COMPUTED FROM A LENGTH and never written down
-    /// as a literal, which is what keeps anything resembling key material out of both the catalogue
-    /// and this file. Freshness matters for the same reason it does for the key buffer: the provider
-    /// zeroes the vector it owns when an operation completes.
-    /// </remarks>
-    [Fact]
-    public void TheVectorFactoryProducesFreshAllZeroBuffersAndRefusesANonPositiveLength()
-    {
-        foreach (SymmetricCipherMetrics metrics in LegacyDefaults.AllSymmetricCipherMetrics)
-        {
-            byte[] vector = LegacyDefaults.CreateZeroInitializationVector(metrics.IvLengthBytes);
-            byte[] again = LegacyDefaults.CreateZeroInitializationVector(metrics.IvLengthBytes);
-
-            Assert.Equal(metrics.BlockLengthBytes, vector.Length);
-            Assert.All(vector, vectorByte => Assert.Equal(0, vectorByte));
-            Assert.NotSame(vector, again);
-        }
-
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => LegacyDefaults.CreateZeroInitializationVector(0));
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => LegacyDefaults.CreateZeroInitializationVector(-1));
-    }
-
-    /// <summary>
     /// The two flag defaults are valued from their shared kernel constants and carry the composite
     /// values the legacy composes them from.
     /// </summary>
@@ -2363,12 +2555,21 @@ public sealed class LegacyDefaultsTests
         byte[] key,
         ushort ntype,
         long mode,
-        byte[] expectedPlainText)
+        byte[] expectedPlainText,
+        byte[]? vector = null)
     {
         try
         {
-            return _cipher.SymDecrypt(cipherText, key, ntype, mode).AsSpan()
-                .SequenceEqual(expectedPlainText);
+            // The vector-bearing arm when a vector is supplied, and the vector-less arm otherwise, so
+            // one helper serves both the codebook-default callers and the chaining callers. It does NOT
+            // absorb a capability refusal: only a cryptographic failure is caught below, and
+            // SymmetricParityUnavailableException is deliberately not of that type, so a blocked cell
+            // reaching here would surface as an error rather than as a quiet negative answer.
+            byte[] recovered = vector is null
+                ? _cipher.SymDecrypt(cipherText, key, ntype, mode)
+                : _cipher.SymDecrypt(cipherText, key, vector, ntype, mode);
+
+            return recovered.AsSpan().SequenceEqual(expectedPlainText);
         }
         catch (CryptographicException)
         {
@@ -2422,9 +2623,10 @@ public sealed class LegacyDefaultsTests
     /// <param name="length">The number of bytes to produce, which is the cipher's block length.</param>
     /// <returns>A fresh buffer of computed, non-secret, non-zero bytes.</returns>
     /// <remarks>
-    /// The non-zero guarantee is what the DECISION D3 tests rest on: they distinguish the synthesised
-    /// all-zero vector from a caller-supplied one, so a helper that could return zeroes would let
-    /// those tests pass for the wrong reason. Every byte is non-zero by construction.
+    /// The non-zero guarantee still matters after DECISION D3 stopped synthesising a vector: the
+    /// codebook-mode test distinguishes a vector that is IGNORED from one that is consumed, and a
+    /// helper that could return zeroes would let it pass for the wrong reason. Every byte is non-zero
+    /// by construction.
     /// </remarks>
     private static byte[] SyntheticVectorMaterial(int length)
     {

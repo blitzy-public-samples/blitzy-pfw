@@ -194,7 +194,12 @@ public class NestedDescribeTests
         DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out FakeDataWindowHost host);
         host.CurrentRow = 1L;
 
-        // The compute is `sum(salary for page)`; with the default whole-buffer resolver it is the same
+        // The subject here is the NESTED Describe/Evaluate, so the fixture is declared unpaginated rather
+        // than left to the refusing default - `sum(salary for page)` needs a stated pagination before it
+        // answers anything (DECISION D7a).
+        evaluator.PageResolver = WholeBufferPageResolver.Instance;
+
+        // The compute is `sum(salary for page)`; with the whole-buffer resolver it is the same
         // total on every row, so the comparison is false rather than a fault.
         DataWindowExpressionResult result = evaluator.TryEvaluate(LegacyFindExpression, 1L);
 
@@ -407,11 +412,21 @@ public class LenVersusLenATests
 public class PageAggregateTests
 {
     [Fact]
-    public void SumForPageDefaultsToTheWholeBuffer()
+    public void SumForPageIsRefusedUntilAPaginationIsSupplied()
     {
         DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
 
-        Assert.IsType<WholeBufferPageResolver>(evaluator.PageResolver);
+        // The primary fixture's own footer compute is `sum(salary for page)` [dw_sqlite.srd:L27], so this
+        // is not a corner case - it is the expression the fixture exercises. Refusing it by default is
+        // deliberate: see TheDefaultPageResolverRefusesRatherThanWideningToTheWholeBuffer.
+        Assert.IsType<UnresolvedPageResolver>(evaluator.PageResolver);
+        Assert.Equal(
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            evaluator.Evaluate("sum(salary for page)", 1L));
+
+        // Supplying the pagination is all it takes, and the same expression then answers.
+        evaluator.PageResolver = WholeBufferPageResolver.Instance;
+
         Assert.Equal("6000.75", evaluator.Evaluate("sum(salary for page)", 1L));
     }
 
@@ -431,6 +446,11 @@ public class PageAggregateTests
     public void TheFooterComputeEvaluatesThroughItsName()
     {
         DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out FakeDataWindowHost host);
+
+        // The fixture's compute is `sum(salary for page)`, so the pagination has to be stated before the
+        // compute can answer at all. This test is about resolving a compute BY NAME, not about the page
+        // default, so it says the fixture is unpaginated and moves on.
+        evaluator.PageResolver = WholeBufferPageResolver.Instance;
 
         // The compute's own [GENERAL] mask is preserved verbatim beside the columns' [general].
         Assert.Equal("[GENERAL]", host.Describe("compute_1.Format"));
@@ -1478,16 +1498,56 @@ public class AggregateScopeTests
     }
 
     [Fact]
-    public void TheDefaultPageResolverIsTheWholeBuffer()
+    public void TheDefaultPageResolverRefusesRatherThanWideningToTheWholeBuffer()
     {
         DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
 
-        Assert.Same(WholeBufferPageResolver.Instance, evaluator.PageResolver);
+        // DECISION D7(a) AS THE DEFAULT, NOT MERELY AS AN OPTION. A page boundary is computed from band
+        // heights and print margins - the deferred DesignSystem's half - so an uninstructed evaluator
+        // knows no page range. Defaulting to "the buffer is one page" would answer `sum(salary for page)`
+        // with the GRAND TOTAL: right on this four-row fixture, wrong on any paginated surface, and
+        // indistinguishable from the page total in either case. AAP 0.1.5 requires the narrowing with a
+        // defined error, which is what `for group` already receives.
+        Assert.Same(UnresolvedPageResolver.Instance, evaluator.PageResolver);
+        Assert.False(
+            UnresolvedPageResolver.Instance.TryGetPageRange(1L, 4L, out long first, out long last));
+
+        // The out-parameters carry the empty range, so a caller that ignored the return value still
+        // cannot read a plausible span out of them.
+        Assert.Equal(0L, first);
+        Assert.Equal(0L, last);
+
+        DataWindowExpressionResult refused = evaluator.TryEvaluate("sum(salary for page)", 1L);
+
+        Assert.Equal(ExpressionEvaluationOutcome.InvalidExpression, refused.Outcome);
+        Assert.Equal(DataWindowExpressionEvaluator.InvalidExpressionSentinel, refused.Text);
+        Assert.NotNull(refused.Error);
+
+        // AND THE ERROR NAMES THE GAP AND THE WAY OUT, because a refusal a caller cannot act on is
+        // only marginally better than a wrong number.
+        Assert.Contains("/v1/design/**", refused.Error!.Text, StringComparison.Ordinal);
+        Assert.Contains("FixedRowsPerPageResolver", refused.Error.Text, StringComparison.Ordinal);
+        Assert.Contains("WholeBufferPageResolver", refused.Error.Text, StringComparison.Ordinal);
+
+        // The grand total is what it would have answered had the scope been widened. It does not.
+        Assert.NotEqual("6000.75", refused.Text);
+        Assert.Equal("6000.75", evaluator.Evaluate("sum(salary for all)", 1L));
+    }
+
+    [Fact]
+    public void TheWholeBufferResolverRemainsAvailableAsAnExplicitOptIn()
+    {
+        DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+
+        // IT IS THE RIGHT MODEL FOR AN UNPAGINATED SURFACE - a characterization run over a fixture that
+        // fits on one page needs to be able to SAY the buffer is the page. What changed is that it has
+        // to be said rather than assumed, so the resulting number is attributable to a stated pagination.
+        evaluator.PageResolver = WholeBufferPageResolver.Instance;
+
         Assert.True(
             WholeBufferPageResolver.Instance.TryGetPageRange(1L, 4L, out long first, out long last));
         Assert.Equal(1L, first);
         Assert.Equal(4L, last);
-        // With no page model installed the page IS the buffer, so `for page` equals `for all`.
         Assert.Equal(
             evaluator.Evaluate("sum(salary for all)", 1L),
             evaluator.Evaluate("sum(salary for page)", 1L));

@@ -63,10 +63,12 @@ public class EnglishProviderTests
     /// </summary>
     private const string FixtureMissingMessage =
         "pfw.i18n.xml is not in the test working directory, so every lookup below would miss and this "
-            + "suite would pass vacuously. Restore the Content item in "
-            + "PowerFramework.Shared.Localization.Tests.csproj: "
-            + "<Content Include=\"../../pfw.i18n.xml\" Link=\"pfw.i18n.xml\" "
-            + "CopyToOutputDirectory=\"PreserveNewest\" />";
+            + "suite would pass vacuously. Restore the Content item in the LIBRARY project, "
+            + "shared/PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj:256-261 "
+            + "- it is declared there once and flows to this project down the ProjectReference edge, so do "
+            + "not add a second copy here: "
+            + "<Content Include=\"$(MSBuildThisFileDirectory)../../pfw.i18n.xml\" Link=\"pfw.i18n.xml\" "
+            + "CopyToOutputDirectory=\"PreserveNewest\" CopyToPublishDirectory=\"PreserveNewest\" />";
 
     /// <summary>
     /// The encoding synthetic fixtures are written with: UTF-8, and NO byte order mark, matching the

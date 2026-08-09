@@ -499,4 +499,52 @@ public sealed class OpenApiContractDocumentTests
             "ProblemDetails must carry `retCode` so the originating legacy return code survives the "
                 + "projection into HTTP.");
     }
+
+    [Fact]
+    public void TheGatewayProblemDetailsDeclaresTheCorrelationIdentifierItActuallyReturns()
+    {
+        OpenApiDocument document = ParseEmbeddedDocument(GatewayResourceName);
+
+        Assert.NotNull(document.Components?.Schemas);
+        Assert.True(
+            document.Components.Schemas.TryGetValue("ProblemDetails", out IOpenApiSchema? problem),
+            "The gateway document does not define a ProblemDetails schema.");
+        Assert.NotNull(problem);
+        Assert.NotNull(problem.Properties);
+
+        // THE CORRELATION IDENTIFIER IS THE ONLY WAY OUT OF THE REDACTION, SO IT MUST BE DECLARED.
+        //
+        // Gateway's `500` body is deliberately uninformative: `detail` is fixed prose and names nothing
+        // about the fault - no stack trace, no exception message, no host, no port, no path, no key
+        // material. That is defensible only because it REDIRECTS rather than refuses: the full
+        // diagnostic exists on the operator channel and `traceId` is what locates it.
+        //
+        // `additionalProperties: true` would already TOLERATE the member, and tolerating it is exactly
+        // what is not sufficient here. A caller has no contractual basis for reading a member the
+        // document does not declare, so an undeclared bridge is a bridge a conforming consumer must
+        // ignore - which would leave the redaction with no far side at all.
+        //
+        // This test is therefore paired with the handler that emits the member. If a future change
+        // stops emitting it, the emitting side's own suite fails; if a future change removes the
+        // declaration, this one does.
+        Assert.True(
+            problem.Properties.ContainsKey("traceId"),
+            "Gateway's ProblemDetails must DECLARE `traceId`: it is the one member through which a "
+                + "caller can reach the diagnostic detail the body withholds, so `additionalProperties: "
+                + "true` merely tolerating it is not enough.");
+
+        IOpenApiSchema traceId = problem.Properties["traceId"];
+
+        // A string, because it carries either a W3C hexadecimal trace identifier or a host-generated
+        // request identifier, and neither is numeric.
+        Assert.Equal(JsonSchemaType.String, traceId.Type);
+
+        // NOT required. The member is present on every response Gateway itself produces, but a
+        // `required` declaration would also bind the forwarded-failure bodies, and an upstream's
+        // problem-details response is not Gateway's to guarantee.
+        Assert.False(
+            problem.Required?.Contains("traceId") == true,
+            "`traceId` must not be `required`: a forwarded upstream problem-details body is not "
+                + "Gateway's to guarantee.");
+    }
 }

@@ -103,8 +103,9 @@
 //           CS0542 rename above, the bare-null overload binding, and the destroyed-object state that
 //           has no managed analogue.
 //
-//  NAMING. The repository-root .editorconfig scopes its CA1707 and IDE1006 suppressions to ten NAMED
-//  PRODUCTION files and does not cover test files. No identifier declared here is therefore
+//  NAMING. The repository-root .editorconfig scopes its CA1707 and IDE1006 suppressions to the NAMED
+//  PRODUCTION files on its BAND 3 roster - the single source of truth for that list - and does not
+//  cover test files. No identifier declared here is therefore
 //  SCREAMING_SNAKE, and every legacy constant VALUE is referenced through
 //  PowerFramework.Shared.Kernel.RetCode rather than retyped as a literal - a retyped literal would
 //  silently survive a constant-value regression, which is the one failure this matrix must catch.

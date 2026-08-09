@@ -27,10 +27,23 @@
  * either; where a value here and a value there ever differ, those are right
  * and this is wrong.
  *
- *   5101  Persistence   PowerFramework.Persistence   gRPC, plus REST /health and /v1/ping
- *   5102  DataServices  PowerFramework.DataServices  gRPC primary, plus a thin REST projection
- *   5104  Security      PowerFramework.Security      REST, and the sole token issuer
- *   5105  Gateway       PowerFramework.Gateway       REST + OpenAPI, the sole ingress
+ *   5101  Persistence   PowerFramework.Persistence   https, Http1AndHttp2 — gRPC (C-05..C-08)
+ *                                                      plus REST /health and /v1/ping
+ *   5102  DataServices  PowerFramework.DataServices  https, Http1AndHttp2 — gRPC (C-03, C-04)
+ *                                                      plus /health, /v1/ping, thin projection
+ *   5104  Security      PowerFramework.Security      https, Http1AndHttp2, AllowCertificate —
+ *                                                      the sole token issuer
+ *   5105  Gateway       PowerFramework.Gateway       http — REST + OpenAPI, the sole ingress
+ *
+ * ONE PORT PER SERVICE, AND THERE IS NO SECOND LISTENER ANYWHERE. Each service
+ * declares exactly one Kestrel endpoint, and the three that serve gRPC or
+ * terminate a client-certificate handshake do so over TLS with both protocol
+ * versions enabled, so ALPN selects the version per connection and the one port
+ * carries the gRPC contracts and this suite's HTTP/1.1 `fetch` probes together.
+ * An earlier form of this comment noted a parallel h2c band beside the map; that
+ * band was **withdrawn**, because it contradicted the fixed port map and left
+ * every caller holding two addresses for one service to keep in step. A `fetch`
+ * speaks HTTP/1.1 and is served on the same port a gRPC caller dials.
  *
  * The band runs 5101 to 5105 and the composition root is published on 5105,
  * both preserved from the attached environment (C-L) so the environment's
@@ -282,10 +295,26 @@ function stripTrailingSlashes(value: string): string {
  * Its primary transport is gRPC, so this suite drives no business operation
  * against it directly; the address exists so the anonymous health path can be
  * probed and so a readiness walk can name which upstream is not ready.
+ *
+ * **The scheme is `https`, and that is functional rather than a hardening
+ * preference.** This service serves its gRPC contracts *and* the HTTP/1.1
+ * `/health` this suite probes on the one port the port map assigns it. Kestrel
+ * cannot do that on a cleartext listener: configured for both protocol versions
+ * without TLS it disables HTTP/2 outright and logs that it is doing so, and
+ * configured for HTTP/2 alone it answers an HTTP/1.1 probe with `400`. With TLS
+ * the ambiguity does not arise, because ALPN selects the version per connection —
+ * so this suite's HTTP/1.1 probe and the service's gRPC callers share port 5101
+ * without a second, undeclared port existing anywhere.
+ *
+ * A consequence for a local run: the listener presents the local ASP.NET Core
+ * development certificate unless the orchestration layer mounts one, so trust it
+ * once with `dotnet dev-certs https --trust`. `playwright.config.ts` keeps
+ * `ignoreHTTPSErrors` **false** deliberately — an untrusted certificate is a real
+ * finding about the stack, not noise to suppress.
  */
 export const PERSISTENCE_BASE_URL: string = resolveBaseUrl(
   'PERSISTENCE_BASE_URL',
-  'http://localhost:5101',
+  'https://localhost:5101',
 );
 
 /**
@@ -295,44 +324,82 @@ export const PERSISTENCE_BASE_URL: string = resolveBaseUrl(
  * Its primary transport is also gRPC, with a thin REST projection consumed
  * only by Gateway, so this suite reaches its behaviour through Gateway rather
  * than through this address. The address is here for the health probe.
+ *
+ * **The scheme is `https` for exactly the reason given on
+ * {@link PERSISTENCE_BASE_URL}** — one port carrying both gRPC over HTTP/2 and
+ * REST over HTTP/1.1 requires ALPN, and ALPN requires TLS.
  */
 export const DATASERVICES_BASE_URL: string = resolveBaseUrl(
   'DATASERVICES_BASE_URL',
-  'http://localhost:5102',
+  'https://localhost:5102',
 );
 
 /**
- * Security, on 5104 — the sole token issuer, reached over REST **and over TLS**.
+ * Security, on 5104 — the sole token issuer.
  *
  * This is the one non-Gateway address the suite calls functionally rather
  * than only probing: token issuance and the published verification material
  * live here (contract C-01).
  *
- * ⚠ REST IS NOT THE SAME PROPERTY AS PLAINTEXT, AND THIS IS THE ONE ADDRESS
- * WHERE THE DIFFERENCE MATTERS ⚠
+ * ⚠ THE DEFAULT IS `https`, IN EVERY ENVIRONMENT, AND THE SCHEME IS FUNCTIONAL ⚠
  *
- * The reason this contract is REST is that a consumer's stock bearer handler
- * can self-configure from an ordinary HTTP discovery document with no bespoke
- * code — a property of the protocol shape, not of the transport being
- * unencrypted. Security is nonetheless the system's trust bootstrap: its token
- * endpoint authenticates callers with a **client certificate**, which cannot be
- * presented on a plaintext listener at all, and the key set published at
- * `/.well-known/jwks.json` is what every other service verifies tokens
- * against. Fetched over plaintext, that document is substitutable on path, and
- * an attacker who replaces it has every other service accepting tokens the
- * attacker signed while behaving exactly as designed.
+ * Two independent reasons, either of which alone would settle it, and neither of
+ * which is a hardening preference:
  *
- * `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` therefore
- * publishes `https://localhost:5104` as its single canonical server, and this
- * default matches it. The three addresses above stay on `http` because no
- * comparable requirement has been established for them; that is a difference
- * in what each edge carries, not an inconsistency.
+ *   1. `POST /v1/tokens` authenticates its caller with a **client certificate**
+ *      (see {@link TOKEN_PATH}), and mutual TLS *is* TLS — a client certificate
+ *      cannot be requested, presented or validated on a plaintext listener at
+ *      all. Over `http` the issuance operation would have no caller
+ *      authentication available whatsoever, so it would not be weakly
+ *      authenticated but **uncallable**, and no service could obtain its first
+ *      token.
+ *   2. The key set at `/.well-known/jwks.json` is the system's **trust
+ *      bootstrap**. Fetched in the clear it is substitutable on path: an attacker
+ *      who replaces it makes all three verifiers accept tokens the attacker
+ *      signed, each of them behaving exactly as designed while doing it.
  *
- * That distinction is load-bearing for one endpoint. `POST /v1/tokens` is
- * protected by **mutual TLS and by nothing else** (see {@link TOKEN_PATH}), so
- * over plain http it would have no caller authentication available at all. A
- * spec that exercises issuance must present a client certificate; see
- * {@link SECURITY_CLIENT_CERTIFICATE}.
+ * All three sides now agree, which is what makes this a default rather than an
+ * assumption. `services/security-service/PowerFramework.Security/appsettings.json`
+ * declares exactly ONE Kestrel endpoint — `https://+:5104`, `Http1AndHttp2`,
+ * `ClientCertificateMode: AllowCertificate` — in the base file, so it applies to
+ * every environment including Development;
+ * `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` publishes
+ * `https://localhost:5104` as its single canonical server; and
+ * `docs/ARCHITECTURE.md` §4.1 records the same listener. An earlier form of this
+ * constant defaulted to `http` on the reasoning that the service had no TLS
+ * listener to reach — which was true of a configuration that has since been
+ * **withdrawn**, along with the development-only cleartext `/health` listener that
+ * accompanied it. Defaulting to `http` now would name a listener nobody binds.
+ *
+ * `AllowCertificate` rather than `RequireCertificate` is why this suite can still
+ * probe `/health` and read the key set with no certificate at all: Kestrel
+ * *requests* a certificate during the handshake and hands whatever it gets to the
+ * application, so a caller presenting none still completes the handshake and the
+ * per-operation authorization on the token path is what refuses it. Requiring one
+ * at the listener would abort the handshake and take the anonymous probe with it.
+ *
+ * Persistence and DataServices are `https` too, for the unrelated
+ * protocol-multiplexing reason recorded on {@link PERSISTENCE_BASE_URL}; Gateway
+ * alone stays on `http`, because it is the published ingress whose documented
+ * access URL is `http://localhost:5105` and it serves REST only, so no version
+ * negotiation arises there. Those are differences in what each edge carries, not
+ * an inconsistency.
+ *
+ * A consequence for a local run, the same one {@link PERSISTENCE_BASE_URL}
+ * carries: the listener presents the local ASP.NET Core development certificate
+ * unless the orchestration layer mounts one, so trust it once with
+ * `dotnet dev-certs https --trust`. `playwright.config.ts` keeps
+ * `ignoreHTTPSErrors` **false** deliberately.
+ *
+ * One consequence to be honest about: a TLS handshake happening is not the same
+ * as a client certificate being presented. Unless a spec supplies one, the
+ * mutual-TLS caller authentication on `POST /v1/tokens` is negotiated but not
+ * exercised; see {@link SECURITY_CLIENT_CERTIFICATE} for how a spec supplies it.
+ *
+ * Nothing here restricts the scheme: `SECURITY_BASE_URL` accepts `http` exactly
+ * as it accepts `https`, so a deployment that genuinely terminates TLS elsewhere
+ * states that in one environment variable and no code change. What this module
+ * will not do is *default* to a listener the repository does not declare.
  */
 export const SECURITY_BASE_URL: string = resolveBaseUrl(
   'SECURITY_BASE_URL',
@@ -509,13 +576,24 @@ export const OIDC_DISCOVERY_PATH: string = '/.well-known/openid-configuration';
  *
  * WHY THIS EXISTS AT ALL
  * ----------------------
- * `POST /v1/tokens` is protected by mutual TLS and by nothing else, so against
- * an https deployment a spec that calls it must present a client certificate or
- * be refused with `401`. Without this resolver the suite would have no way to
- * exercise the issuance edge as it is actually specified, and every downstream
- * spec would be limited to whatever a plain-http loopback bring-up happens to
- * accept — which is precisely the gap between the contract and the test that
- * lets an authentication requirement rot unnoticed.
+ * `POST /v1/tokens` is protected by mutual TLS and by nothing else, so a spec
+ * that calls it must present a client certificate or be refused with `401`.
+ * Without this resolver the suite would have no way to exercise the issuance
+ * edge as it is actually specified — which is precisely the gap between the
+ * contract and the test that lets an authentication requirement rot unnoticed.
+ *
+ * THIS APPLIES ON EVERY TOPOLOGY, INCLUDING THE LOCAL BRING-UP
+ * ------------------------------------------------------------
+ * Security declares exactly ONE listener — `https://+:5104`, `Http1AndHttp2`,
+ * `ClientCertificateMode` `AllowCertificate` — in its **base** settings file, so
+ * it applies to Development as well, and there is no cleartext port anywhere.
+ * `AllowCertificate` means Kestrel requests a certificate without demanding one,
+ * so `/health`, `/v1/ping`, the crypto operations and the two anonymous documents
+ * are reachable on that listener with none, while `POST /v1/tokens` enforces the
+ * requirement **per operation** and refuses a caller without one. So there is no
+ * address — local or deployed — at which a token is minted without a client
+ * certificate, and this suite must never be written as though the local
+ * bring-up were the exception. See `docs/ARCHITECTURE.md` §4.1 and §9.3.1.
  *
  * WHAT IT DOES *NOT* DO
  * ---------------------
@@ -526,15 +604,26 @@ export const OIDC_DISCOVERY_PATH: string = '/.well-known/openid-configuration';
  * from the environment and is never defaulted, never logged and never included
  * in an assertion message.
  *
- * ABSENT IS THE NORMAL CASE, AND IT IS NOT AN ERROR
- * -------------------------------------------------
- * The documented local bring-up publishes plain http on loopback, where there is
- * no TLS handshake and therefore no certificate to present. This resolver
- * returns `undefined` there, and it does so deliberately rather than throwing:
- * a suite that refused to start without certificates would be unrunnable on the
- * one topology the setup instructions actually document. A spec that requires a
- * certificate should skip itself when this is `undefined`, and state in the skip
- * reason that the issuance edge is only exercisable against an https deployment.
+ * ABSENT IS THE COMMON CASE, AND IT IS NOT AN ERROR — IT IS A CLOSED EDGE
+ * ----------------------------------------------------------------------
+ * A developer who has not generated the local certificate set has nothing to
+ * present, so this resolver returns `undefined`. It does so deliberately rather
+ * than throwing: the readiness, capability and 401-without-a-token specs need no
+ * certificate at all and a suite that refused to start without one would be
+ * unrunnable for them.
+ *
+ * `undefined` means **the issuance edge is not exercisable in this run**. It does
+ * not mean the edge is open, and it does not mean no certificate is required —
+ * those are the two readings this comment exists to rule out. A spec that needs
+ * a token skips itself when this is `undefined` and says so in the skip reason;
+ * it never falls back to calling `POST /v1/tokens` without a certificate, which
+ * would assert a behaviour the contract does not offer. `fixtures/auth.ts`
+ * states the same policy in the same terms, and the two must not drift.
+   *
+   * With **exactly one** of the pair set, it throws instead. That state is a
+   * mistake rather than a topology, and merging it into `undefined` sends an
+   * operator to debug a `401` at Security that a typo in one variable name caused.
+   * {@link SECURITY_CLIENT_CERTIFICATE} sets out the reasoning in full.
  *
  * Shape matches Playwright's `use.clientCertificates` entry so a config or a
  * spec can pass it through unchanged: the `origin` it applies to, a certificate
@@ -564,16 +653,30 @@ export interface ClientCertificate {
 }
 
 /**
- * Reads an environment variable, treating blank as absent.
+ * Reads an environment variable holding a **filesystem path**, treating blank as
+ * absent.
  *
- * Shares rule 2 and rule 3 of {@link resolveBaseUrl}: values arriving from an
- * environment file or a shell export frequently carry stray whitespace, and a
- * value that is empty once trimmed means "not set" rather than "set to empty".
+ * Trimming is the ONE normalization applied, and it is applied because a path is
+ * the kind of value that legitimately cannot begin or end with whitespace:
+ * values arriving from an environment file or a shell export frequently carry a
+ * stray space or a trailing newline, and a value that is empty once trimmed means
+ * "not set" rather than "set to empty" — rule 2 and rule 3 of
+ * {@link resolveBaseUrl}.
+ *
+ * The path is deliberately **not resolved to an absolute one**. Playwright
+ * resolves a relative `clientCertificates` path against the process working
+ * directory, and resolving it here as well would produce a second, possibly
+ * different absolute path depending on where the runner was launched from — one
+ * more place for the same setting to mean two things.
+ *
+ * **This reader is for paths only.** The passphrase has its own reader
+ * immediately below, and the separation is the whole point of there being two:
+ * see {@link readOptionalSecret}.
  *
  * @param variableName the environment variable to read
  * @returns the trimmed value, or `undefined` when unset or blank
  */
-function readOptional(variableName: string): string | undefined {
+function readOptionalPath(variableName: string): string | undefined {
   const configured: string | undefined = process.env[variableName];
 
   if (configured === undefined) {
@@ -586,31 +689,148 @@ function readOptional(variableName: string): string | undefined {
 }
 
 /**
+ * Reads an environment variable holding **secret material**, preserving every
+ * character of it exactly.
+ *
+ * ⚠ THIS READER MUST NOT TRIM, AND THAT IS THE REASON IT EXISTS ⚠
+ *
+ * An earlier form of this module read the key passphrase with the path reader
+ * above, so a passphrase with a leading or trailing space was silently altered
+ * before it ever reached the TLS stack. The consequence is about as
+ * unhelpful as a failure gets: the handshake fails with a key-decryption error,
+ * which reads as *wrong key* or *corrupt file*, while the key and the file are
+ * both fine and the only thing wrong is that the fixture edited the passphrase
+ * on the way past. Whitespace is a legal passphrase character, and nothing here
+ * is entitled to decide it was accidental.
+ *
+ * So the only distinction drawn is **unset versus set**. A variable that is not
+ * present is absent; a variable present with any content at all is that content,
+ * verbatim. A variable set to a zero-length value is treated as absent too, since
+ * an empty passphrase is the same statement as "the key needs none" and passing
+ * `''` through would merely move the failure downstream.
+ *
+ * No value read here is ever logged, echoed, defaulted or placed in a diagnostic
+ * (C-F). Only the variable NAME appears in any message this module produces.
+ *
+ * @param variableName the environment variable to read
+ * @returns the value exactly as set, or `undefined` when unset or zero-length
+ */
+function readOptionalSecret(variableName: string): string | undefined {
+  const configured: string | undefined = process.env[variableName];
+
+  if (configured === undefined || configured.length === 0) {
+    return undefined;
+  }
+
+  return configured;
+}
+
+/**
  * The client certificate to present to Security, or `undefined` when none is
  * configured.
  *
- * Both the certificate path and the key path must be present: a certificate
- * without its key cannot complete a handshake, so half a configuration is
- * treated as no configuration rather than as something to attempt and fail on
- * with a message that names neither variable.
+ * ⚠ A HALF-CONFIGURED PAIR FAILS FAST — IT IS NOT TREATED AS "NO CERTIFICATE" ⚠
+ *
+ * An earlier form of this resolver returned `undefined` whenever either path was
+ * missing, on the reasoning that a certificate without its key cannot complete a
+ * handshake so half a configuration is as good as none. That reasoning holds for
+ * the handshake and fails completely for the operator. The two states it merged
+ * are not alike:
+ *
+ * - **Neither set** is the documented local bring-up. Plain http on loopback, no
+ *   handshake, nothing to present. Returning `undefined` is correct, and it stays
+ *   correct — a suite that refused to start without certificates would be
+ *   unrunnable on the one topology the setup instructions actually document.
+ * - **Exactly one set** is a mistake, every time. Nobody configures a
+ *   certificate path and no key on purpose. Silently downgrading it to "no
+ *   certificate" means the suite runs anonymously against an edge that is
+ *   authenticated by certificate and by nothing else, so the mutual-TLS issuance
+ *   call comes back `401` — and that `401` is indistinguishable from a genuine
+ *   authorization defect at the issuer. The operator then debugs Security while
+ *   the fault is a typo in one variable name.
+ *
+ * This resolver therefore throws on the second, naming both variables and which
+ * one is missing. A passphrase configured with no pair is the same class of
+ * mistake and is reported the same way, because a passphrase with nothing to
+ * unlock cannot be anything but half-finished configuration.
+ *
+ * Throwing at module scope is safe here and does not compromise import-safety:
+ * this evaluates during collection only when a variable is set, and the state it
+ * refuses is one no run could succeed on. Nothing is thrown for the default,
+ * fully-unset case, so `playwright test --list` collects with no stack running
+ * and no certificates configured (C-L).
+ *
+ * **Names only in every message.** No path and no passphrase is echoed (C-F).
  */
 export const SECURITY_CLIENT_CERTIFICATE: ClientCertificate | undefined = (():
   | ClientCertificate
   | undefined => {
-  const certPath: string | undefined = readOptional('SECURITY_MTLS_CERT_PATH');
-  const keyPath: string | undefined = readOptional('SECURITY_MTLS_KEY_PATH');
+  const certVariable: string = 'SECURITY_MTLS_CERT_PATH';
+  const keyVariable: string = 'SECURITY_MTLS_KEY_PATH';
+  const passphraseVariable: string = 'SECURITY_MTLS_KEY_PASSPHRASE';
 
-  if (certPath === undefined || keyPath === undefined) {
+  const certPath: string | undefined = readOptionalPath(certVariable);
+  const keyPath: string | undefined = readOptionalPath(keyVariable);
+  const passphrase: string | undefined = readOptionalSecret(passphraseVariable);
+
+  if (certPath === undefined && keyPath === undefined) {
+    if (passphrase !== undefined) {
+      throw new Error(
+        `${passphraseVariable} is set but neither ${certVariable} nor ` +
+          `${keyVariable} is. A passphrase unlocks a private key, so one ` +
+          'configured with no key and no certificate is half-finished ' +
+          'configuration rather than an optional extra. Set both paths, or ' +
+          'unset the passphrase to run against the documented plain-http ' +
+          'loopback bring-up where no certificate is presented at all. (Variable ' +
+          'names only — no path or passphrase is ever echoed.)',
+      );
+    }
+
     return undefined;
   }
 
-  const passphrase: string | undefined = readOptional('SECURITY_MTLS_KEY_PASSPHRASE');
+  if (certPath === undefined || keyPath === undefined) {
+    const missing: string = certPath === undefined ? certVariable : keyVariable;
+    const present: string = certPath === undefined ? keyVariable : certVariable;
 
-  return Object.freeze(
-    passphrase === undefined
-      ? { origin: SECURITY_BASE_URL, certPath, keyPath }
-      : { origin: SECURITY_BASE_URL, certPath, keyPath, passphrase },
-  );
+    throw new Error(
+      `${present} is set but ${missing} is not. A client certificate and its ` +
+        'private key are presented as a pair and neither is usable alone, so ' +
+        'this is reported rather than silently downgraded to "no certificate": ' +
+        'running anonymously against the mutual-TLS issuance edge produces a ' +
+        '401 that is indistinguishable from a real authorization defect at ' +
+        `Security. Set ${missing} as well, or unset ${present} to run against ` +
+        'the documented plain-http loopback bring-up. (Variable names only — no ' +
+        'path or passphrase is ever echoed.)',
+    );
+  }
+
+  // ⚠ NOT FROZEN, AND THIS IS THE ONE VALUE IN THIS MODULE THAT MUST NOT BE ⚠
+  //
+  // Everything else here is frozen, so this exception needs its reason recorded
+  // or it reads as an omission. `playwright.config.ts` passes this entry
+  // straight into `use.clientCertificates`, and Playwright REWRITES IT IN PLACE:
+  // resolveClientCerticates() in playwright/lib/index.js assigns `cert.certPath`,
+  // `cert.keyPath` and `cert.pfxPath` unconditionally while resolving each
+  // against the config directory. The assignment happens even for an already
+  // absolute path — resolveFileToConfig returns the value unchanged, and the
+  // property is still written — so a frozen entry throws
+  // `TypeError: Cannot assign to read only property 'certPath'` in strict mode
+  // and takes the whole run down at config load. Measured directly against
+  // @playwright/test 1.62.1 with two absolute paths.
+  //
+  // The practical effect of freezing it was therefore that the mutual-TLS path
+  // could not run AT ALL: with no certificate configured nothing touched this
+  // value, and with one configured the runner crashed before the first test. It
+  // stayed invisible because the only state anyone exercised was the unset one.
+  //
+  // Immutability is not lost so much as relocated: the members are `readonly` on
+  // {@link ClientCertificate}, so a spec cannot reassign one through the type,
+  // and the only writer in practice is the runner performing the path
+  // resolution it is entitled to perform.
+  return passphrase === undefined
+    ? { origin: SECURITY_BASE_URL, certPath, keyPath }
+    : { origin: SECURITY_BASE_URL, certPath, keyPath, passphrase };
 })();
 
 // ---------------------------------------------------------------------------

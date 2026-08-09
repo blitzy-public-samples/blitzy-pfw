@@ -118,8 +118,9 @@
 //               as the empty string and says so on itself; this suite asserts what the port
 //               defines and claims nothing about the original.
 //
-//  NAMING. The repository-root .editorconfig scopes its naming-analyzer suppressions to ten named
-//  PRODUCTION files and none of them is in this project, so no SCREAMING_SNAKE identifier may be
+//  NAMING. The repository-root .editorconfig scopes its naming-analyzer suppressions to the named
+//  PRODUCTION files on its BAND 3 roster - the single source of truth for that list - and none of
+//  them is in this project, so no SCREAMING_SNAKE identifier may be
 //  declared here - under the inherited TreatWarningsAsErrors it would be a build failure with no
 //  route to an exception. Every identifier below is PascalCase. The legacy magic number and the
 //  bare assertion text are legacy STRING LITERALS rather than identifiers, which is fine, and they

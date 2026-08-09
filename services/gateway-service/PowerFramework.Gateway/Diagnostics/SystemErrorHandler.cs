@@ -77,7 +77,7 @@
 //           and the terminate path are all reachable from a plain unit test with no host. See
 //           DECISION 5.
 //      C-K  document every technology-specific and boundary-specific decision. Discharged by
-//           DECISION 1 through DECISION 6 below.
+//           DECISION 1 through DECISION 7 below.
 //
 //  ----------------------------------------------------------------------------------------------
 //  DECISION 1 - THE DIALOG BECOMES A STRUCTURED RESULT, AND ONLY THE DELIVERY CHANNEL CHANGES.
@@ -105,10 +105,41 @@
 //  Decomposition creates the system's first caller, so the single legacy audience splits in two and
 //  each half gets what it is entitled to:
 //
-//      OPERATOR CHANNEL (the faithful successor to the dialog) - a structured log record carrying
-//      all seven decoded fields AND the exact formatted Chinese block, with the title and the
-//      severity. Nothing is redacted away from the operator, because the operator is who the dialog
-//      was for.
+//      OPERATOR CHANNEL (the faithful successor to the dialog) - a structured log record. It has
+//      TWO forms, and which form is written is decided by the same structural-versus-request line
+//      DECISION 5 draws, never by anything else:
+//
+//        * STRUCTURAL (a decoded assertion). All seven decoded fields AND the exact formatted
+//          Chinese block, with the title and the severity, plus the managed exception itself so its
+//          stack trace reaches the operator. Nothing is withheld, because this record IS the dialog
+//          and the operator is who the dialog was for. This form is written at most once per
+//          process, since the path it belongs to terminates the host (DECISION 4).
+//
+//        * ORDINARY REQUEST FAULT. An ALLOWLISTED record: the title and the severity, the
+//          correlation identifier, the request method, the matched ROUTE PATTERN, the response
+//          status, the raw decoded number, the wire return code, the exception TYPE CHAIN, and the
+//          fault site as a declaring-type name, a member name and a source line. Every one of those
+//          is either a compile-time constant, an integer, a name drawn from this system's own code,
+//          or a value the caller itself sent. Deliberately ABSENT, and this is the whole point of
+//          the form: the exception object, the exception message, any inner exception's message,
+//          `Exception.Source`, and the formatted block - because the block embeds the message.
+//
+//      WHY THE TWO FORMS MAY DIFFER WITHOUT BREACHING C-B. There is no legacy behaviour on the
+//      ordinary path to preserve. DECISION 5 records the reason in full: the legacy has no request
+//      boundary at all, so every legacy system error was terminal and the ordinary form is a record
+//      the legacy never produced. Choosing its content is therefore not a relaxation of anything
+//      the oracle does - the terminal form, which IS the oracle's behaviour, keeps every field. What
+//      the ordinary form avoids is a leak the oracle could not have had either: the legacy rendered
+//      its text to one screen in front of one person, whereas a log record is retained, shipped and
+//      indexed, so arbitrary upstream exception text in it can carry a URL, request data, statement
+//      text, personal data, a token embedded by a dependency, or an internal path past a boundary
+//      the legacy had no way to cross (C-F).
+//
+//      Every field EXCLUDED from the ordinary form remains recoverable by an operator who needs it:
+//      the correlation identifier ties this record to the host's own request log, and to a debugger
+//      or an exception-tracking sink attached deliberately and configured to hold exception content
+//      under its own retention rules. Redaction here is about what this file writes UNCONDITIONALLY
+//      into general-purpose logging, not about denying an operator access to a fault.
 //
 //      CALLER CHANNEL - a REDACTED problem-details response. Under C-G a caller learns that the
 //      request failed, the legacy return code class, and a correlation identifier with which an
@@ -186,10 +217,14 @@
 //      with a non-zero exit code. This is the `HALT CLOSE` path and it is never softened.
 //
 //      ORDINARY REQUEST FAULT -> SURFACE, DO NOT KILL THE HOST. Any other unhandled exception is
-//      formatted and logged through the SAME block - the legacy formatted every system error, not
-//      only asserts, because its formatting statements sit OUTSIDE the decode branch
-//      [ws_objects/pfw.pbl.src/pfw.sra:L129 versus :L114-L127] - and the redacted body is returned,
-//      and the host lives on to serve the next request.
+//      still FORMATTED through the SAME block - the legacy formatted every system error, not only
+//      asserts, because its formatting statements sit OUTSIDE the decode branch
+//      [ws_objects/pfw.pbl.src/pfw.sra:L129 versus :L114-L127], so Format() runs unconditionally
+//      here too and its behaviour is identical on both paths - and the redacted body is returned,
+//      and the host lives on to serve the next request. What differs is only which operator record
+//      is written: the allowlisted form of DECISION 2, because the formatted block embeds the
+//      arbitrary exception message and a retained log record is not the one-operator-one-screen
+//      channel the legacy dialog was.
 //
 //  The second case is not a licence to weaken the first. It exists only because a request can now
 //  fail without the process being at fault, a state the legacy could not represent.
@@ -208,6 +243,31 @@
 //  code" without stopping or failing the test host (C-H). There is exactly ONE constructor, so the
 //  dependency-injection container has no overload to choose between; the two optional parameters
 //  are filled from their defaults when nothing is registered for them.
+//
+//  ----------------------------------------------------------------------------------------------
+//  DECISION 7 - THE CORRELATION IDENTIFIER IS MINTED ONCE, BEFORE ANY WRITE, AND IS THE SAME VALUE
+//  ON BOTH CHANNELS.
+//
+//  DECISION 2 gives the caller a correlation identifier and nothing else, and states that an
+//  operator can find the full record with it. That promise is only true if the identifier the caller
+//  is handed is ALSO in the record - otherwise the response advertises a bridge that leads nowhere,
+//  and the redaction becomes a refusal rather than a redirection.
+//
+//  So the identifier is resolved ONCE, in TryHandleAsync, BEFORE the operator record is written, and
+//  the single resolved value is then used in three places: as the {TraceId} field of whichever
+//  operator record is written, as the {TraceId} field of the response-already-started record, and as
+//  the problem-details correlation extension member. It is passed down as a parameter rather than
+//  re-resolved at each site, because re-resolving is exactly how the two channels drift apart: the
+//  ambient activity identifier is not guaranteed to be stable for the lifetime of a request, so two
+//  reads can legitimately return two values and a caller would then quote an identifier that
+//  appears in no record at all.
+//
+//  The value itself is the ambient distributed-trace identifier when one exists, because that is
+//  what correlates this record with every other service's record for the same operation, and the
+//  host's own per-request identifier otherwise. Neither is caller-supplied content: the trace
+//  identifier is generated or parsed by the tracing infrastructure into a fixed hexadecimal shape,
+//  and the host's identifier is host-generated. Nothing about the resolution discloses anything, and
+//  nothing about it can fail - the fallback is always available.
 //
 //  ----------------------------------------------------------------------------------------------
 //  THE FOUR PRESERVED QUIRKS (C-B). Each is verified against ws_objects/pfw.pbl.src/pfw.sra, each
@@ -247,7 +307,8 @@
 //  in the shared framework, which is why this project references no logging package at all.
 //
 //  NO IDENTIFIER IN THIS FILE USES THE PRESERVED SCREAMING-SNAKE SPELLING. The repository root
-//  .editorconfig scopes its naming-analyzer suppressions to ten named files and not one of them is
+//  .editorconfig scopes its naming-analyzer suppressions to the files on its BAND 3 roster - which that
+//  file publishes once, and which this comment deliberately does not restate - and not one of them is
 //  in this project, so with warnings treated as errors such a declaration would be a hard build
 //  error with no way to grant an exception. Consuming a catalogue constant by name is fine;
 //  declaring one here is not.
@@ -603,28 +664,96 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// </remarks>
     private const int StructuralFaultExitCode = 70;
 
-    /// <summary>The operator-channel record for the terminal, assert-decoded path.</summary>
+    /// <summary>
+    /// The operator-channel record for the terminal, assert-decoded path - the unredacted form of
+    /// DECISION 2, carrying all seven decoded fields and the exact formatted block.
+    /// </summary>
+    /// <remarks>
+    /// The correlation identifier leads this record deliberately: it is the value the caller was
+    /// handed, so an operator searching for it must be able to match it without knowing which of the
+    /// two record forms was written (DECISION 7).
+    /// </remarks>
     private const string AssertionFailureLogMessage =
         "{ReportTitle} ({Severity}): a decoded assertion failure reached the unhandled path, so the "
-        + "framework halt path runs and the host is asked to shut down. Number={ErrorNumber} "
-        + "WireRetCode={WireRetCode} Text={ErrorText} WindowMenu={WindowMenu} ErrorObject={ErrorObject} "
-        + "ObjectEvent={ObjectEvent} Line={ErrorLine} LegacyStackTrace={LegacyStackTrace} "
-        + "Report={Report}";
+        + "framework halt path runs and the host is asked to shut down. TraceId={TraceId} "
+        + "Number={ErrorNumber} WireRetCode={WireRetCode} Text={ErrorText} WindowMenu={WindowMenu} "
+        + "ErrorObject={ErrorObject} ObjectEvent={ObjectEvent} Line={ErrorLine} "
+        + "LegacyStackTrace={LegacyStackTrace} Report={Report}";
 
-    /// <summary>The operator-channel record for an ordinary, non-terminal request fault.</summary>
+    /// <summary>
+    /// The operator-channel record for an ordinary, non-terminal request fault - the ALLOWLISTED
+    /// form of DECISION 2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every placeholder here is filled from a compile-time constant, an integer, a name drawn from
+    /// this system's own code, or a value the caller itself sent. There is deliberately no
+    /// placeholder for the exception message, for any inner exception's message, for
+    /// <see cref="Exception.Source"/>, or for the formatted block - the block embeds the message, so
+    /// including it would reintroduce exactly what the allowlist exists to keep out (C-F).
+    /// </para>
+    /// <para>
+    /// Adding a placeholder to this template is therefore a security decision, not a formatting one.
+    /// The rule for a future editor is short: a value may be added only if it is constant, numeric,
+    /// an identifier from this codebase, or already known to the caller.
+    /// </para>
+    /// </remarks>
     private const string RequestFaultLogMessage =
         "{ReportTitle} ({Severity}): an unhandled request fault was formatted through the legacy "
-        + "system-error block; the host continues. Number={ErrorNumber} WireRetCode={WireRetCode} "
-        + "Text={ErrorText} WindowMenu={WindowMenu} ErrorObject={ErrorObject} "
-        + "ObjectEvent={ObjectEvent} Line={ErrorLine} LegacyStackTrace={LegacyStackTrace} "
-        + "Report={Report}";
+        + "system-error block; the host continues. TraceId={TraceId} Method={RequestMethod} "
+        + "Route={RoutePattern} Status={ResponseStatus} Number={ErrorNumber} "
+        + "WireRetCode={WireRetCode} FaultTypes={FaultTypes} FaultObject={ErrorObject} "
+        + "FaultMember={ObjectEvent} Line={ErrorLine}";
 
     /// <summary>
     /// The operator-channel record for the one case in which no body can be written.
     /// </summary>
+    /// <remarks>
+    /// This record carries the correlation identifier too, and for a reason specific to it: it is
+    /// written precisely when the caller receives NO body, so the caller cannot have been handed the
+    /// identifier. Without it here, the two records this request produced - the fault record and
+    /// this one - could not be tied to each other at all (DECISION 7).
+    /// </remarks>
     private const string ResponseAlreadyStartedLogMessage =
         "The response had already started when the system-error handler ran, so no problem-details "
-        + "body could be written for this request.";
+        + "body could be written for this request. TraceId={TraceId}";
+
+    /// <summary>
+    /// The separator between links of the exception type chain the allowlisted record carries,
+    /// pointing from the outermost type towards the innermost cause.
+    /// </summary>
+    private const string ExceptionTypeChainSeparator = " <- ";
+
+    /// <summary>
+    /// The marker appended when an exception chain is deeper than
+    /// <see cref="MaximumDescribedExceptionDepth"/>, so a truncated chain is never mistaken for a
+    /// complete one.
+    /// </summary>
+    private const string ExceptionTypeChainTruncationMarker = "...";
+
+    /// <summary>
+    /// How many links of an exception chain the allowlisted record describes.
+    /// </summary>
+    /// <remarks>
+    /// A chain is bounded rather than walked to its end because its depth is not under this
+    /// service's control - a nesting library can produce an arbitrarily deep one - and an unbounded
+    /// walk would make the size of a log record a function of upstream behaviour. Eight links reach
+    /// the root cause of every chain this system produces while keeping the record a fixed-size
+    /// object.
+    /// </remarks>
+    private const int MaximumDescribedExceptionDepth = 8;
+
+    /// <summary>
+    /// The route description used when no endpoint matched, so the placeholder is never filled with
+    /// a caller-supplied request path.
+    /// </summary>
+    /// <remarks>
+    /// A raw request path is caller-controlled text and can carry a token or an identifier in a
+    /// segment or a query, so it is not allowlisted (C-F). Nothing is lost: the host's own
+    /// per-request log records the path, and the correlation identifier of DECISION 7 ties the two
+    /// records together.
+    /// </remarks>
+    private const string UnroutedRouteDescription = "(unrouted)";
 
     // ------------------------------------------------------------------------------------------
     //  6.2  THE PURE DECODER. No host, no container, no input or output, and it never throws.
@@ -1086,6 +1215,121 @@ public sealed class SystemErrorHandler : IExceptionHandler
         return frame?.GetFileLineNumber() ?? 0;
     }
 
+    /// <summary>
+    /// Describes an exception chain by TYPE ALONE, for the allowlisted operator record of
+    /// DECISION 2.
+    /// </summary>
+    /// <param name="exception">The exception, which may be <see langword="null"/>.</param>
+    /// <returns>
+    /// The chain from the outermost type towards its innermost cause, joined by
+    /// <see cref="ExceptionTypeChainSeparator"/>, bounded at
+    /// <see cref="MaximumDescribedExceptionDepth"/> links and marked with
+    /// <see cref="ExceptionTypeChainTruncationMarker"/> when it was cut short; the empty string for
+    /// <see langword="null"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// A type chain is what makes an ordinary-fault record actionable while carrying no content: a
+    /// type name is chosen by whoever wrote the throwing code, never by a caller and never by data,
+    /// so it cannot carry a credential, a statement, a URL or personal data. The nesting is what
+    /// matters diagnostically - a timeout wrapped in a transport failure wrapped in an invalid
+    /// operation is a different fault from any one of the three alone - which is why the chain is
+    /// walked rather than only the outermost type being reported.
+    /// </para>
+    /// <para>
+    /// The assembly-qualified name is deliberately not used and the namespace-qualified name is: the
+    /// namespace is what distinguishes same-named types, whereas the version, culture and public key
+    /// token add length without adding distinction.
+    /// </para>
+    /// <para>
+    /// Only the primary <see cref="Exception.InnerException"/> chain is followed. An aggregate fault
+    /// exposes its first inner exception through that member as well, so its root is still reached;
+    /// enumerating every branch of a fan-out would make the record's size a function of how many
+    /// parallel operations failed, which is the same unbounded-growth problem
+    /// <see cref="MaximumDescribedExceptionDepth"/> exists to prevent.
+    /// </para>
+    /// <para>
+    /// This method is public and static so that every branch - null, single, nested, and deeper than
+    /// the bound - is reachable from a plain unit test with no host (C-H).
+    /// </para>
+    /// </remarks>
+    public static string DescribeExceptionTypes(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return string.Empty;
+        }
+
+        StringBuilder chain = new();
+        Exception? current = exception;
+
+        for (int depth = 0; depth < MaximumDescribedExceptionDepth && current is not null; depth++)
+        {
+            if (depth != 0)
+            {
+                chain.Append(ExceptionTypeChainSeparator);
+            }
+
+            Type type = current.GetType();
+
+            // The namespace-qualified name, falling back to the bare name for a type that reports
+            // none - a generic parameter or a type emitted without a namespace.
+            chain.Append(type.FullName ?? type.Name);
+
+            current = current.InnerException;
+        }
+
+        if (current is not null)
+        {
+            chain.Append(ExceptionTypeChainSeparator).Append(ExceptionTypeChainTruncationMarker);
+        }
+
+        return chain.ToString();
+    }
+
+    /// <summary>
+    /// Resolves the ONE correlation identifier both channels carry (DECISION 7).
+    /// </summary>
+    /// <param name="httpContext">The request context.</param>
+    /// <returns>
+    /// The ambient distributed-trace identifier when one exists, and the host's own per-request
+    /// identifier otherwise. Never <see langword="null"/>; the empty string only in the pathological
+    /// case where the host supplies no identifier either.
+    /// </returns>
+    /// <remarks>
+    /// Called exactly once per fault, from <see cref="TryHandleAsync"/>, and its result is then
+    /// passed to every site that needs it. Re-resolving instead of passing is what let the two
+    /// channels disagree before: the ambient activity is not guaranteed to be the same object for
+    /// the whole of a request, so two reads can legitimately differ and a caller would then hold an
+    /// identifier that appears in no record.
+    /// </remarks>
+    private static string ResolveCorrelationId(HttpContext httpContext)
+    {
+        string? activityId = Activity.Current?.Id;
+        return string.IsNullOrEmpty(activityId) ? httpContext.TraceIdentifier ?? string.Empty : activityId;
+    }
+
+    /// <summary>
+    /// Describes which route the fault occurred on, using the route PATTERN and never the request
+    /// path.
+    /// </summary>
+    /// <param name="httpContext">The request context.</param>
+    /// <returns>
+    /// The matched endpoint's raw route pattern, or <see cref="UnroutedRouteDescription"/> when no
+    /// endpoint matched or the matched endpoint carries no pattern.
+    /// </returns>
+    /// <remarks>
+    /// The pattern is the allowlisted form of "where did this happen": it is authored in this
+    /// codebase and its parameter placeholders stand where caller values would be, so it identifies
+    /// the route while disclosing none of the values bound to it. The concrete path, which does carry
+    /// those values, is deliberately not read here (C-F).
+    /// </remarks>
+    private static string DescribeRoute(HttpContext httpContext)
+    {
+        string? pattern = (httpContext.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText;
+        return string.IsNullOrEmpty(pattern) ? UnroutedRouteDescription : pattern;
+    }
+
 
     // ------------------------------------------------------------------------------------------
     //  6.4 and 6.5 THE DELIVERY CHANNEL AND THE TERMINATION PATH. Everything above this line is
@@ -1199,27 +1443,45 @@ public sealed class SystemErrorHandler : IExceptionHandler
 
         SystemErrorInfo raised = FromException(exception);
         SystemErrorInfo decoded = Decode(raised);
+
+        // Format() runs on BOTH paths, unconditionally, because the legacy's formatting statements
+        // sit outside its decode branch [ws_objects/pfw.pbl.src/pfw.sra:L129 versus :L114-L127]
+        // (C-B, DECISION 5). Which of its members reach a log record is a separate question, decided
+        // by DECISION 2.
         SystemErrorReport report = Format(decoded);
         long wireRetCode = ResolveRetCode(decoded, structuralFault);
 
-        // ---- OPERATOR CHANNEL: the faithful successor to the dialog. Nothing is withheld here,
-        // because this is the audience the dialog had (DECISION 2). All seven decoded fields plus
-        // the exact composed block, with the title and the severity. The exception itself is passed
-        // so the managed stack trace reaches the operator through the logging abstraction's own
-        // argument rather than through the legacy call-stack field, which stays faithful to the
-        // legacy and is empty on this path unless a seven-field payload supplied it.
-        //
-        // C-F: no field read here is a credential, a key or a connection string, and the one
-        // upstream field known to carry interpolated literal statement text is redacted or
-        // parameter-separated by the service that owns it - this file never reads, echoes or
-        // reconstructs it.
+        // The single correlation identifier, resolved BEFORE anything is written and then passed to
+        // every site that needs it, so the value the caller is handed is provably the value in the
+        // record (DECISION 7). Resolving it here rather than at each site is the fix, not an
+        // optimization.
+        string correlationId = ResolveCorrelationId(httpContext);
+
+        // ---- OPERATOR CHANNEL (DECISION 2), in one of its two forms.
         if (structuralFault)
         {
+            // THE UNREDACTED FORM: the faithful successor to the dialog, for the audience the dialog
+            // had. All seven decoded fields plus the exact composed block, with the title and the
+            // severity. The exception itself is passed so the managed stack trace reaches the
+            // operator through the logging abstraction's own argument rather than through the legacy
+            // call-stack field, which stays faithful to the legacy and is empty on this path unless
+            // a seven-field payload supplied it.
+            //
+            // This form is entitled to the full detail for two independent reasons. It IS the
+            // legacy's own behaviour, which C-B requires be preserved rather than trimmed. And the
+            // path it belongs to terminates the host (DECISION 4), so it is written at most once per
+            // process and cannot become a volume channel through which upstream content accumulates.
+            //
+            // C-F: no field read here is a credential, a key or a connection string, and the one
+            // upstream field known to carry interpolated literal statement text is redacted or
+            // parameter-separated by the service that owns it - this file never reads, echoes or
+            // reconstructs it.
             _logger.LogCritical(
                 exception,
                 AssertionFailureLogMessage,
                 report.Title,
                 report.Severity,
+                correlationId,
                 decoded.Number,
                 wireRetCode,
                 decoded.Text,
@@ -1232,24 +1494,38 @@ public sealed class SystemErrorHandler : IExceptionHandler
         }
         else
         {
+            // THE ALLOWLISTED FORM. The exception object is NOT passed to the logger, and neither
+            // the decoded text, the source field nor the formatted block is read: all four are
+            // arbitrary upstream content, and the logging abstraction renders a passed exception
+            // through its own string conversion, which includes every message in the chain
+            // (C-F). What is passed instead identifies the fault without quoting it - the request's
+            // own method, the route PATTERN rather than the path, the status the caller is about to
+            // receive, the two numeric codes, the exception TYPE chain, and the fault site as a
+            // declaring-type name, a member name and a source line, all three of which name this
+            // system's own code.
             _logger.LogError(
-                exception,
                 RequestFaultLogMessage,
                 report.Title,
                 report.Severity,
+                correlationId,
+                httpContext.Request.Method,
+                DescribeRoute(httpContext),
+                StatusCodes.Status500InternalServerError,
                 decoded.Number,
                 wireRetCode,
-                decoded.Text,
-                decoded.WindowMenu,
+                DescribeExceptionTypes(exception),
                 decoded.Object,
                 decoded.ObjectEvent,
-                decoded.Line,
-                decoded.StackTrace,
-                report.Body);
+                decoded.Line);
         }
 
-        // ---- CALLER CHANNEL: the redacted body (DECISION 2).
-        bool handled = await WriteRedactedProblemAsync(httpContext, wireRetCode, cancellationToken)
+        // ---- CALLER CHANNEL: the redacted body (DECISION 2), carrying the SAME correlation
+        // identifier that was just written to the operator record (DECISION 7).
+        bool handled = await WriteRedactedProblemAsync(
+                httpContext,
+                wireRetCode,
+                correlationId,
+                cancellationToken)
             .ConfigureAwait(false);
 
         // ---- THE HALT PATH [ws_objects/pfw.pbl.src/pfw.sra:L143]. Requested last, exactly as the
@@ -1270,6 +1546,10 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// </summary>
     /// <param name="httpContext">The request context.</param>
     /// <param name="wireRetCode">The return code chosen by <see cref="ResolveRetCode"/>.</param>
+    /// <param name="correlationId">
+    /// The correlation identifier already written to the operator record, passed in rather than
+    /// resolved here so that the two channels cannot disagree (DECISION 7).
+    /// </param>
     /// <param name="cancellationToken">Cancels the write.</param>
     /// <returns><see langword="true"/> when a body was written.</returns>
     /// <remarks>
@@ -1291,19 +1571,24 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// The correlation identifier is the bridge between the two channels: it is what lets an
     /// operator find the full record that was deliberately not disclosed here. The published body
     /// permits additional members and instructs consumers to ignore any they do not recognise, so
-    /// carrying it conforms rather than extends.
+    /// carrying it conforms rather than extends. It arrives as a PARAMETER, already written to the
+    /// operator record, which is what makes the bridge load-bearing rather than advertised
+    /// (DECISION 7).
     /// </para>
     /// </remarks>
     private async ValueTask<bool> WriteRedactedProblemAsync(
         HttpContext httpContext,
         long wireRetCode,
+        string correlationId,
         CancellationToken cancellationToken)
     {
         if (httpContext.Response.HasStarted)
         {
             // Nothing can be written once the response is on the wire. This is reported rather than
-            // swallowed, and it is the one path on which this method returns false.
-            _logger.LogWarning(ResponseAlreadyStartedLogMessage);
+            // swallowed, and it is the one path on which this method returns false. The correlation
+            // identifier is carried here too, because on this path the caller receives no body and
+            // therefore never learns it (DECISION 7).
+            _logger.LogWarning(ResponseAlreadyStartedLogMessage, correlationId);
             return false;
         }
 
@@ -1322,7 +1607,9 @@ public sealed class SystemErrorHandler : IExceptionHandler
 
         problem.Extensions[RetCodeExtensionMember] = wireRetCode;
 
-        string correlationId = Activity.Current?.Id ?? httpContext.TraceIdentifier;
+        // The identical value that was just written to the operator record - not a second resolution
+        // of it (DECISION 7). The emptiness guard remains because a host that supplies no identifier
+        // at all would otherwise publish an empty member, which advertises a bridge with no far side.
         if (!string.IsNullOrEmpty(correlationId))
         {
             problem.Extensions[TraceIdExtensionMember] = correlationId;

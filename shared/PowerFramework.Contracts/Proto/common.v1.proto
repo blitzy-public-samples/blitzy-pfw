@@ -1125,6 +1125,26 @@ message ConflictDetail {
 //  forwards C-03's, C-03 forwards C-06's - MUST forward both arrays element for element in the order
 //  received. Re-sorting either array, deduplicating it, or concatenating the two is a contract
 //  violation, not an optimisation.
+//
+//  ============ THIS MESSAGE IS CARRIED AS A REPEATED FIELD, ONE ELEMENT PER UPDATE TABLE =======
+//  Both producers declare it `repeated` - persistence.v1.UpdateResponse.identity and
+//  dataservices.v1.UpdateResponse.identity - and that is not defensive plurality. ONE Update can emit
+//  ONE BLOCK PER UPDATE TABLE: the worker loops `for nIndex = 1 to UpperBound(Tables)` calling
+//  `_of_Update` once per table [n_cst_thread_task_sqlupdate.sru:L358-L369], each call fires the
+//  callback AT MOST ONCE [:L243], and the caller-side proxy APPENDS each firing to an ordered array
+//  rather than replacing anything:
+//      IDCOLDATA _idColDatas[]                    [n_cst_threading_task_sqlupdate.sru:L45]
+//      nIndex = UpperBound(_idColDatas) + 1       [:L73]
+//  then replays EVERY element when it writes the values back [:L128, :L142-L195]. Each element
+//  therefore carries its OWN identity_column_id, and the elements are ordered by the table order
+//  declared on PrepareUpdate.
+//
+//  SO THE ORDER OBLIGATION HAS TWO LEVELS AND BOTH BIND: the BLOCKS in the order received, and within
+//  each block the two arrays element for element. Dropping blocks after the first, re-ordering them, or
+//  merging them into one is data loss that returns a PLAUSIBLE response - the first table's identities
+//  arrive, the rest vanish, and no count anywhere disagrees. An EMPTY list means "none collected" for
+//  the same three-level conditional reason described above, and a single-table update that collected
+//  identities carries exactly one element.
 // ==============================================================================================
 
 message IdentityColumnData {

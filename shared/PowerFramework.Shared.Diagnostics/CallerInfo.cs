@@ -197,7 +197,8 @@
 //  This file declares NO SCREAMING_SNAKE and no underscore bearing identifier. That is a build
 //  requirement rather than a preference: TreatWarningsAsErrors is inherited from
 //  Directory.Build.props, and the repository root .editorconfig scopes its CA1707 and IDE1006
-//  suppressions to the nine individual files that genuinely carry preserved legacy constant
+//  suppressions to the individual files on its BAND 3 roster - the single source of truth for that
+//  list - that genuinely carry preserved legacy constant
 //  identifiers. No file in this project is one of them, so an identifier here that needed a
 //  suppression would be a build error with no way to grant it.
 //
