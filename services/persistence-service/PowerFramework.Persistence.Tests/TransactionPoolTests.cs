@@ -1,0 +1,2976 @@
+// ==================================================================================================
+//  TransactionPoolTests.cs - THE REFERENCE-COUNT, EXPIRY AND CONNECTION-SEMANTICS PARITY SUITES
+//  ------------------------------------------------------------------------------------------------
+//  UNDER TEST     services/persistence-service/PowerFramework.Persistence/Transactions/
+//                     TransactionPool.cs - the pool, the pooled transaction, the SQL-state snapshot
+//                     and the class-name activator, all four of which live in that one file.
+//  ORACLE         ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru        (READ ONLY)
+//                 ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru             (READ ONLY)
+//                 ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru      (READ ONLY)
+//                 ws_objects/pfw.shared.pbl.src/retcode.sru                            (READ ONLY)
+//
+//  WHAT THESE SUITES ARE FOR. The subject reproduces a dozen legacy behaviours that LOOK like defects
+//  and are not, and constraint C-B forbids correcting any of them. A comment saying so protects
+//  nothing on its own: the assertions below are what make a "tidying" edit fail the build. Every one
+//  of the following is pinned here, and each is pinned because the tidier alternative is the one a
+//  reader would reach for first:
+//
+//    1  Release tests the reference count for EXACTLY 1 and does NOT decrement       [pool :L123]
+//    2  RemoveRef's keep-alive arm RETAINS the entry rather than destroying it        [pool :L95-L99]
+//    3  Collect's expiry comparison is GREATER-OR-EQUAL, not strictly greater         [pool :L215]
+//    4  RemoveRef's disconnect is guarded by not-broken; RemoveAll's and Collect's
+//       are NOT                                                        [pool :L105, :L197, :L217]
+//    5  Get applies the descriptor to a NEWLY CREATED object only                     [pool :L171]
+//    6  Get answers E_INVALID_OBJECT for ANY throwable                          [pool :L173-L175]
+//    7  AddRef answers an INDEX, not a return code                                    [pool :L151]
+//    8  A non-positive configured expiry falls back to 30000 ms rather than failing    [pool :L79]
+//    9  Rollback under auto-commit answers FAILED, not a harmless no-op               [trans :L185]
+//   10  The rollback and the clean disconnect PRESERVE all five SQL-state values
+//                                                          [trans :L163-L183, :L504-L524]
+//   11  SQLCode = 100 reads as a SUCCESS                                 [trans :L233, :L340]
+//   12  IsBroken has a SIDE EFFECT - it fires the check hook                 [trans :L530-L534]
+//
+//  Two further behaviours are pinned that are not legacy defects but are documented decisions of the
+//  port: the SATURATING decrement at zero, whose alternative is a silent connection leak, and the
+//  four constraints the class-name activator enforces.
+//
+//  NO DATABASE, NO CONNECTION, NO NETWORK AND NO CONTAINER IS INVOLVED ANYWHERE IN THIS FILE, which
+//  is exactly what constraint C-H asks of the subject. Three hand-rolled doubles supply everything:
+//  a clock, a pooled transaction, and a database-verb engine. The pool's own body performs no I/O at
+//  all, and the pooled transaction's I/O sits behind the engine seam.
+//
+//  THE CLOCK IS HAND-ROLLED ON PURPOSE. Microsoft.Extensions.TimeProvider.Testing - which supplies
+//  the framework's own FakeTimeProvider - is NOT among the repository's central package versions, and
+//  adding a package that the refactor's dependency inventory does not list would be scope creep on a
+//  test file. A TimeProvider subclass with a settable instant is nine lines and needs nothing.
+//
+//  EVERY VALUE IN THIS FILE IS SYNTHETIC AND IS INVENTED HERE (C-F). No password, account name, host
+//  name or connection string is copied from the legacy tree, from any catalogued in-source secret
+//  site, or from any real system. The descriptors below carry only DBMS and database identifiers,
+//  because those are the only fields the pool's behaviour depends on - it matches descriptors by
+//  value and never reads a field.
+//
+//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so no
+//  user-specified rule governs this file. The enterprise-standard baseline applies instead, and the
+//  binding constraints are the refactor plan's own non-rule inventory - C-B, C-C, C-E, C-F and C-H
+//  bite here and are cited at the point each applies.
+// ==================================================================================================
+
+using Microsoft.Extensions.Options;
+
+using PowerFramework.Contracts.Persistence.V1;
+using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Transactions;
+
+namespace PowerFramework.Persistence.Tests;
+
+/// <summary>
+/// The parity suites for <c>TransactionPool</c> and the three companion types that share its file.
+/// </summary>
+public sealed class TransactionPoolTests
+{
+    // ==============================================================================================
+    //  SYNTHETIC FIXTURES - INVENTED HERE, NOT IMPORTED (C-F)
+    // ==============================================================================================
+
+    /// <summary>A distinctive non-zero instant, so the zero "not idle" sentinel is never ambiguous.</summary>
+    /// <remarks>
+    /// Deliberately not the Unix epoch. <c>TransactionPool.CurrentTicks</c> documents that a clock
+    /// positioned at exactly the epoch would stamp zero, which reads as the sentinel [pool :L149], so
+    /// every suite here starts the clock somewhere else.
+    /// </remarks>
+    private static readonly DateTimeOffset ClockStart = new(2024, 3, 4, 5, 6, 7, TimeSpan.Zero);
+
+    /// <summary>The full name of the default pooled transaction, for the activation suite.</summary>
+    private const string DefaultTransactionTypeName =
+        "PowerFramework.Persistence.Transactions.PooledTransaction";
+
+    /// <summary>A first descriptor. Only the two identifiers matter; the pool never reads a field.</summary>
+    private static TransactionData DescriptorA => new()
+    {
+        Dbms = "SQLITE",
+        Database = "pfw-parity-a",
+    };
+
+    /// <summary>A second descriptor, unequal to the first.</summary>
+    private static TransactionData DescriptorB => new()
+    {
+        Dbms = "SQLITE",
+        Database = "pfw-parity-b",
+    };
+
+    // ==============================================================================================
+    //  SUITE 1 - INITIALISATION [n_cst_thread_trans_pool.sru:L76-L83]
+    // ==============================================================================================
+
+    /// <summary>
+    /// Keep-alive defaults to <see langword="false"/> and the idle sweep is then NEVER driven, because
+    /// the legacy subscription sits inside the keep-alive branch [pool :L80].
+    /// </summary>
+    [Fact]
+    public void KeepAliveDefaultsToFalseAndIdleCollectionIsNotDriven()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        Assert.False(pool.IsKeepAliveEnabled);
+        Assert.False(pool.IsIdleCollectionEnabled);
+    }
+
+    /// <summary>
+    /// With keep-alive off, <c>OnIdle</c> is inert - it must not sweep, because the legacy never
+    /// registered the handler at all [pool :L80]. Proven by leaving an expired unreferenced entry in
+    /// place and observing that it survives.
+    /// </summary>
+    [Fact]
+    public void OnIdleDoesNothingWhenKeepAliveIsOff()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock clock, out StubActivator activator);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? _));
+
+        // WITH KEEP-ALIVE OFF NO ENTRY CAN EVER SIT AT ZERO REFERENCES: the retention arm is skipped
+        // [pool :L95] so RemoveRef destroys immediately [pool :L101-L114]. That is precisely why the
+        // legacy never subscribes the idle handler in this configuration - there would be nothing for it
+        // to find.
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(0, pool.UpperBound);
+
+        // A REFERENCED entry, which OnIdle must leave alone even if it did run - and it does not run.
+        int second = pool.AddRef(DescriptorB);
+        Assert.Equal(RetCode.OK, pool.Get(second, out IPooledTransaction? held));
+        FakeTransaction survivor = Assert.IsType<FakeTransaction>(held);
+
+        pool.OnIdle();
+
+        Assert.Equal(1, pool.UpperBound);
+        Assert.Equal(0, survivor.DisconnectCalls);
+        Assert.Equal(0, survivor.DisposeCalls);
+        Assert.Equal(2, activator.CreatedCount);
+    }
+
+    /// <summary>
+    /// A non-positive configured expiry resolves to 30000 ms THROUGH the options type's own call, and is
+    /// NOT rejected [pool :L78-L79]. Zero, a negative value and a fractional value under one
+    /// millisecond all take the fallback.
+    /// </summary>
+    /// <param name="configuredSeconds">The configured value in seconds.</param>
+    [Theory]
+    [InlineData(0d)]
+    [InlineData(-1d)]
+    [InlineData(-3600d)]
+    [InlineData(0.0004d)]
+    public void NonPositiveExpiryFallsBackToThirtySecondsAndIsNotRejected(double configuredSeconds)
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: configuredSeconds);
+
+        Assert.Equal(
+            TransactionPoolOptions.DefaultKeepAliveExpireMilliseconds,
+            pool.KeepAliveExpireMilliseconds);
+    }
+
+    /// <summary>
+    /// A positive configured expiry is converted from seconds to milliseconds exactly once
+    /// [pool :L78]. A second conversion here would produce a value a thousand times too large.
+    /// </summary>
+    [Fact]
+    public void PositiveExpiryIsConvertedFromSecondsExactlyOnce()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 7d);
+
+        Assert.Equal(7_000L, pool.KeepAliveExpireMilliseconds);
+    }
+
+    /// <summary>
+    /// With keep-alive OFF the expiry field still carries thirty seconds, because the legacy field's
+    /// initialiser survives the unexecuted branch [pool :L59] and <c>of_collect</c> is public
+    /// [pool :L210].
+    /// </summary>
+    [Fact]
+    public void ExpiryIsPopulatedEvenWhenKeepAliveIsOff()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: false,
+            keepAliveExpireSeconds: 99d);
+
+        Assert.Equal(
+            TransactionPoolOptions.DefaultKeepAliveExpireMilliseconds,
+            pool.KeepAliveExpireMilliseconds);
+    }
+
+    /// <summary>
+    /// The class name is resolved EVENT-FIRST: the resolver wins, and configuration is consulted only
+    /// when the resolver yields null or empty [pool :L82-L83].
+    /// </summary>
+    /// <param name="resolverAnswer">What the resolver returns, or <see langword="null"/>.</param>
+    /// <param name="configured">The configured fallback.</param>
+    /// <param name="expected">The name the pool must settle on.</param>
+    [Theory]
+    [InlineData("FromResolver", "FromConfig", "FromResolver")]
+    [InlineData(null, "FromConfig", "FromConfig")]
+    [InlineData("", "FromConfig", "FromConfig")]
+    [InlineData(null, "", "")]
+    [InlineData(" ", "FromConfig", " ")]
+    public void ClassNameIsResolvedEventFirst(string? resolverAnswer, string configured, string expected)
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            transactionClassName: configured,
+            classNameResolver: () => resolverAnswer);
+
+        // The whitespace row is deliberate: the oracle tests `IsNull(...) or ... = ""`, NOT blankness,
+        // so a single space WINS over configuration and reaches the activator, which rejects it.
+        Assert.Equal(expected, pool.TransactionClassName);
+    }
+
+    /// <summary>
+    /// FAIL FAST on a structurally invalid construction (AAP 0.1.4) - a null argument or a missing
+    /// options section throws rather than degrading.
+    /// </summary>
+    [Fact]
+    public void ConstructionFailsFastOnStructurallyInvalidInput()
+    {
+        FakeClock clock = new(ClockStart);
+        StubActivator activator = new();
+        IOptions<PersistenceOptions> options = Options.Create(new PersistenceOptions());
+
+        Assert.Throws<ArgumentNullException>(() => { _ = new TransactionPool(null!, clock, activator); });
+        Assert.Throws<ArgumentNullException>(() => { _ = new TransactionPool(options, null!, activator); });
+        Assert.Throws<ArgumentNullException>(() => { _ = new TransactionPool(options, clock, null!); });
+
+        IOptions<PersistenceOptions> noSection =
+            Options.Create(new PersistenceOptions { TransactionPool = null! });
+        Assert.Throws<InvalidOperationException>(
+            () => { _ = new TransactionPool(noSection, clock, activator); });
+    }
+
+    // ==============================================================================================
+    //  SUITE 2 - THE REFERENCE-COUNT MATRIX [pool :L86-L152]
+    // ==============================================================================================
+
+    /// <summary>
+    /// <c>AddRef</c> on an unknown descriptor APPENDS at upper bound plus one and answers that
+    /// one-based index [pool :L143-L145, :L151].
+    /// </summary>
+    [Fact]
+    public void AddRefOnUnknownDescriptorAppendsAndAnswersOneBasedIndex()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        Assert.Equal(0, pool.UpperBound);
+
+        // ONE-BASED: the first entry is index 1, not 0. An index of 0 is what the consumer stores to
+        // mean "no reference" [n_cst_thread_task_sqlbase.sru:L123], so it must never address entry one.
+        Assert.Equal(1, pool.AddRef(DescriptorA));
+        Assert.Equal(1, pool.UpperBound);
+
+        Assert.Equal(2, pool.AddRef(DescriptorB));
+        Assert.Equal(2, pool.UpperBound);
+    }
+
+    /// <summary>
+    /// <c>AddRef</c> on a KNOWN descriptor answers the existing index, increments, and zeroes the idle
+    /// stamp [pool :L138-L139, :L148-L149].
+    /// </summary>
+    [Fact]
+    public void AddRefOnKnownDescriptorReusesTheIndexIncrementsAndClearsTheIdleStamp()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock clock,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? _));
+
+        // Drop to zero so the keep-alive arm stamps the idle clock.
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(1, pool.UpperBound);
+
+        // Re-reference it: same index, count back to one, AND THE STAMP IS CLEARED [pool :L149]. If it
+        // were not cleared, a sweep could expire a transaction somebody has just asked for.
+        clock.Advance(TimeSpan.FromMilliseconds(5_000));
+        Assert.Equal(index, pool.AddRef(DescriptorA));
+        Assert.Equal(1, pool.UpperBound);
+
+        // Prove the stamp is gone by forcing the clock well past the expiry and sweeping: a referenced
+        // entry survives, and the stamp being zero is what a later unforced sweep would consult.
+        clock.Advance(TimeSpan.FromMilliseconds(1_000_000));
+        pool.Collect(force: false);
+        Assert.Equal(1, pool.UpperBound);
+    }
+
+    /// <summary>
+    /// The last reference with keep-alive ON and a HEALTHY transaction RETAINS the entry and stamps the
+    /// idle clock - it does not destroy, does not disconnect and does not remove [pool :L95-L99].
+    /// </summary>
+    [Fact]
+    public void LastReferenceWithKeepAliveAndHealthyTransactionRetainsAndStamps()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock clock,
+            out StubActivator activator,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        // RETAINED.
+        Assert.Equal(1, pool.UpperBound);
+        Assert.Equal(0, transaction.DisconnectCalls);
+        Assert.Equal(0, transaction.DisposeCalls);
+
+        // And the SAME object comes back, which is the whole point of retention.
+        Assert.Equal(index, pool.AddRef(DescriptorA));
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? again));
+        Assert.Same(transaction, again);
+        Assert.Equal(1, activator.CreatedCount);
+    }
+
+    /// <summary>
+    /// The last reference with keep-alive OFF removes the entry and DISCONNECTS before disposing
+    /// [pool :L101-L114].
+    /// </summary>
+    [Fact]
+    public void LastReferenceWithKeepAliveOffRemovesAndDisconnects()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        // The create arm's own entries - the descriptor apply - are not what this suite is about.
+        transaction.Log.Clear();
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(1, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+
+        // The disconnect precedes the dispose [pool :L106-L108].
+        AssertSequence(["Disconnect", "Dispose"], transaction.Log);
+    }
+
+    /// <summary>
+    /// The last reference on a BROKEN transaction removes it WITHOUT calling <c>Disconnect</c>, because
+    /// that call is guarded by not-broken in <c>RemoveRef</c> [pool :L105]. This is the guard whose
+    /// absence in <c>RemoveAll</c> and <c>Collect</c> the next suites pin.
+    /// </summary>
+    [Fact]
+    public void LastReferenceOnBrokenTransactionRemovesWithoutDisconnecting()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator activator,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+        transaction.Broken = true;
+
+        // Keep-alive is ON, yet a broken transaction still falls through to destruction [pool :L96].
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(0, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+        Assert.Equal(1, activator.CreatedCount);
+    }
+
+    /// <summary>
+    /// An entry that never went through <c>Get</c> holds no transaction, and dropping its last
+    /// reference removes it even with keep-alive on - because <c>IsValidObject</c> fails at
+    /// [pool :L95].
+    /// </summary>
+    [Fact]
+    public void LastReferenceOnAnEntryWithNoTransactionRemovesItEvenWithKeepAlive()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator activator,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(1, pool.UpperBound);
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(0, activator.CreatedCount);
+    }
+
+    /// <summary>
+    /// A count above zero survives the decrement untouched [pool :L94].
+    /// </summary>
+    [Fact]
+    public void RemoveRefWithReferencesRemainingKeepsTheEntry()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(index, pool.AddRef(DescriptorA));
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        Assert.Equal(1, pool.UpperBound);
+        Assert.Equal(0, transaction.DisconnectCalls);
+        Assert.Equal(0, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// THE DECREMENT-AT-ZERO CASE, which is the documented width decision. The count SATURATES at zero
+    /// rather than wrapping to <c>4294967295</c>, so a second <c>RemoveRef</c> on an entry that is
+    /// already at zero still takes the release arm rather than retaining the entry for the life of the
+    /// process.
+    /// </summary>
+    /// <remarks>
+    /// The rejected alternative is the wrap, which <c>PooledEntry.DecrementRefCount</c> names
+    /// explicitly. Under the wrap the second call below would leave the count at four billion, the
+    /// <c>&lt;= 0</c> arm would be unreachable, and the entry - together with its pooled connection -
+    /// would never be released again. This test is the thing that stops that behaviour from being
+    /// reintroduced.
+    /// </remarks>
+    [Fact]
+    public void DecrementAtZeroSaturatesRatherThanWrapping()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        // First call: count 1 -> 0, retained by the keep-alive arm.
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(1, pool.UpperBound);
+
+        // Second call on a count that is ALREADY ZERO. Saturating, so the count stays at zero and the
+        // release arm is taken again - the entry is retained once more because it is still healthy,
+        // which proves the arm was REACHED rather than skipped.
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(1, pool.UpperBound);
+
+        // Now condemn it and drop again: the release arm destroys, which under a wrapped count would be
+        // unreachable because 4294967294 is not zero.
+        transaction.Broken = true;
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(1, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// <c>IsBroken</c> IS ASKED, and asking is what can condemn an entry [trans :L530-L534]. A check
+    /// hook that condemns on inspection turns <c>RemoveRef</c>'s retention arm into a destruction arm.
+    /// </summary>
+    [Fact]
+    public void RemoveRefInspectsWithIsBrokenAndACondemningCheckChangesTheArm()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        // Get already asked once [pool :L159]; reset so this suite measures RemoveRef alone.
+        transaction.IsBrokenCalls = 0;
+
+        // The inspection itself condemns it - the side effect the check hook exists for.
+        transaction.CondemnOnNextIsBroken = true;
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        // ASKED EXACTLY ONCE, which is the hook-count trace RemoveRef's remarks record: the oracle asks
+        // at :L96 and again at :L105, but the second call finds the flag already set and fires no hook.
+        Assert.Equal(1, transaction.IsBrokenCalls);
+
+        // Condemned on inspection, so destroyed - and with NO disconnect, because :L105's guard sees it
+        // as broken.
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(0, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// <c>IsBroken</c> is NOT asked at all when the entry holds no transaction - the zero-hook row of
+    /// the trace [pool :L95, :L104].
+    /// </summary>
+    [Fact]
+    public void RemoveRefDoesNotInspectWhenThereIsNoTransaction()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator activator,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        Assert.Equal(0, activator.CreatedCount);
+        Assert.Empty(activator.Created);
+    }
+
+    /// <summary>
+    /// THE REBUILD RENUMBERS EVERY LATER INDEX [pool :L114]. A preserved defect: an index held above a
+    /// removed position addresses a DIFFERENT entry afterwards, silently.
+    /// </summary>
+    [Fact]
+    public void RemovalRenumbersEveryLaterIndex()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int first = pool.AddRef(DescriptorA);
+        int second = pool.AddRef(DescriptorB);
+        Assert.Equal(1, first);
+        Assert.Equal(2, second);
+
+        // Drop the FIRST entry. The second entry is now at index 1, so the caller's stored index 2 is
+        // out of range - and had there been a third entry it would silently address the second.
+        Assert.Equal(RetCode.OK, pool.RemoveRef(first));
+        Assert.Equal(1, pool.UpperBound);
+
+        // The surviving entry answers to index 1 now, and re-acquiring says so.
+        Assert.Equal(1, pool.AddRef(DescriptorB));
+
+        // The stale index is out of range rather than merely wrong, in this two-entry shape.
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, pool.RemoveRef(3));
+    }
+
+    // ==============================================================================================
+    //  SUITE 3 - THE RELEASE MATRIX [pool :L120-L132]
+    // ==============================================================================================
+
+    /// <summary>
+    /// At EXACTLY one reference, <c>Release</c> disconnects the caller's object, clears its state, nulls
+    /// the caller's handle - AND LEAVES THE COUNT UNCHANGED [pool :L123-L131].
+    /// </summary>
+    [Fact]
+    public void ReleaseAtExactlyOneReferenceDisconnectsClearsAndNullsWithoutDecrementing()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+        transaction.Log.Clear();
+
+        IPooledTransaction? handle = handed;
+        Assert.Equal(RetCode.OK, pool.Release(index, ref handle));
+
+        Assert.Null(handle);
+        Assert.Equal(1, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.ClearStateCalls);
+        Assert.Equal(0, transaction.DisposeCalls);
+        AssertSequence(["Disconnect", "ClearState"], transaction.Log);
+
+        // NO DECREMENT. The entry is still there with its reference intact, which is exactly why a
+        // second Release behaves identically rather than tipping into a release arm.
+        Assert.Equal(1, pool.UpperBound);
+
+        IPooledTransaction? again = transaction;
+        Assert.Equal(RetCode.OK, pool.Release(index, ref again));
+        Assert.Equal(2, transaction.DisconnectCalls);
+    }
+
+    /// <summary>
+    /// At TWO references, <c>Release</c> does NOT disconnect - the test is <c>== 1</c>, not
+    /// <c>&lt;= 1</c> [pool :L123] - yet it still clears and still nulls.
+    /// </summary>
+    [Fact]
+    public void ReleaseAtTwoReferencesDoesNotDisconnectButStillClearsAndNulls()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(index, pool.AddRef(DescriptorA));
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+        transaction.Log.Clear();
+
+        IPooledTransaction? handle = handed;
+        Assert.Equal(RetCode.OK, pool.Release(index, ref handle));
+
+        Assert.Null(handle);
+        Assert.Equal(0, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.ClearStateCalls);
+        AssertSequence(["ClearState"], transaction.Log);
+    }
+
+    /// <summary>
+    /// At ZERO references, <c>Release</c> does not disconnect either - <c>== 1</c> excludes zero just as
+    /// firmly as it excludes two [pool :L123].
+    /// </summary>
+    [Fact]
+    public void ReleaseAtZeroReferencesDoesNotDisconnect()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        // Down to zero, retained by the keep-alive arm.
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        transaction.Log.Clear();
+
+        IPooledTransaction? handle = handed;
+        Assert.Equal(RetCode.OK, pool.Release(index, ref handle));
+
+        Assert.Null(handle);
+        Assert.Equal(0, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.ClearStateCalls);
+    }
+
+    /// <summary>
+    /// <c>Release</c> validates the CALLER'S object, not the stored one, and answers
+    /// <see cref="RetCode.E_INVALID_OBJECT"/> for a null handle [pool :L121]. The stored transaction is
+    /// untouched.
+    /// </summary>
+    [Fact]
+    public void ReleaseRejectsANullCallerHandleAndLeavesTheStoredTransactionAlone()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+        transaction.Log.Clear();
+
+        IPooledTransaction? handle = null;
+        Assert.Equal(RetCode.E_INVALID_OBJECT, pool.Release(index, ref handle));
+
+        Assert.Null(handle);
+        Assert.Empty(transaction.Log);
+    }
+
+    /// <summary>
+    /// THE GUARD ORDER IS INDEX FIRST, THEN OBJECT [pool :L120 then :L121] - observable when both are
+    /// bad, where the answer is <see cref="RetCode.E_OUT_OF_BOUND"/> rather than
+    /// <see cref="RetCode.E_INVALID_OBJECT"/>.
+    /// </summary>
+    [Fact]
+    public void ReleaseChecksTheIndexBeforeTheObject()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        IPooledTransaction? handle = null;
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, pool.Release(1, ref handle));
+    }
+
+    /// <summary>
+    /// A failing guard leaves the caller's handle untouched, exactly as the legacy's early returns do -
+    /// they never reach <c>SetNull</c> [pool :L129].
+    /// </summary>
+    [Fact]
+    public void ReleaseLeavesTheHandleIntactOnAFailingGuard()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+
+        IPooledTransaction? handle = handed;
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, pool.Release(index + 1, ref handle));
+
+        Assert.Same(handed, handle);
+    }
+
+    // ==============================================================================================
+    //  SUITE 4 - THE INDEX-GUARD MATRIX [pool :L89, :L120, :L154]
+    // ==============================================================================================
+
+    /// <summary>
+    /// Zero, negative and past-the-upper-bound indices all answer
+    /// <see cref="RetCode.E_OUT_OF_BOUND"/> on all three guarded members.
+    /// </summary>
+    /// <param name="refIndex">The index to reject.</param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-2_147_483_648)]
+    [InlineData(2)]
+    [InlineData(int.MaxValue)]
+    public void EveryGuardedMemberRejectsAnOutOfRangeIndex(int refIndex)
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        // Exactly one entry, so the only valid index is 1.
+        Assert.Equal(1, pool.AddRef(DescriptorA));
+
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, pool.RemoveRef(refIndex));
+
+        IPooledTransaction? handle = null;
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, pool.Release(refIndex, ref handle));
+
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, pool.Get(refIndex, out IPooledTransaction? transaction));
+        Assert.Null(transaction);
+    }
+
+    /// <summary>
+    /// THE UPPER BOUND IS THE COUNT, NOT THE COUNT MINUS ONE, so the highest entry is reachable
+    /// [pool :L89]. Reading it as a zero-based last index would make this call fail.
+    /// </summary>
+    [Fact]
+    public void TheHighestOneBasedIndexIsReachable()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        _ = pool.AddRef(DescriptorA);
+        int highest = pool.AddRef(DescriptorB);
+
+        Assert.Equal(2, highest);
+        Assert.Equal(2, pool.UpperBound);
+        Assert.Equal(RetCode.OK, pool.Get(highest, out IPooledTransaction? transaction));
+        Assert.NotNull(transaction);
+    }
+
+    // ==============================================================================================
+    //  SUITE 5 - THE GET MATRIX [pool :L154-L178]
+    // ==============================================================================================
+
+    /// <summary>
+    /// A healthy stored transaction is REUSED, has its state cleared, and does NOT have the descriptor
+    /// re-applied [pool :L160-L162, :L171].
+    /// </summary>
+    [Fact]
+    public void GetReusesAHealthyTransactionClearsItAndDoesNotReapplyTheDescriptor()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        int index = pool.AddRef(DescriptorA);
+
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? first));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(first);
+
+        // The CREATE path applied it exactly once [pool :L171].
+        Assert.Equal(1, transaction.ApplyTransactionDataCalls);
+        Assert.Equal(DescriptorA, transaction.LastAppliedDescriptor);
+
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? second));
+
+        Assert.Same(first, second);
+        Assert.Equal(1, activator.CreatedCount);
+
+        // STILL ONCE. A reused object is never re-configured.
+        Assert.Equal(1, transaction.ApplyTransactionDataCalls);
+
+        // THE MIRROR IMAGE OF THAT ASYMMETRY, AND IT IS EASY TO GET BACKWARDS: ClearState is called on
+        // the REUSE arm only [pool :L161] and NOT on the create arm [pool :L166-L172], which is why the
+        // count here is ONE after two hand-outs rather than two. A freshly created object has nothing to
+        // clear, so the oracle does not clear it - and a port that cleared on both arms would fire one
+        // extra call per newly created transaction.
+        Assert.Equal(1, transaction.ClearStateCalls);
+    }
+
+    /// <summary>
+    /// A BROKEN stored transaction is destroyed WITHOUT a disconnect [pool :L164] and a replacement is
+    /// created and configured.
+    /// </summary>
+    [Fact]
+    public void GetDestroysABrokenTransactionWithoutDisconnectingAndRecreates()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? first));
+        FakeTransaction original = Assert.IsType<FakeTransaction>(first);
+        original.Broken = true;
+
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? second));
+        FakeTransaction replacement = Assert.IsType<FakeTransaction>(second);
+
+        Assert.NotSame(original, replacement);
+        Assert.Equal(2, activator.CreatedCount);
+
+        // THE THIRD DESTROY BEHAVIOUR IN THE FILE: destroyed, but NOT disconnected [pool :L164].
+        Assert.Equal(0, original.DisconnectCalls);
+        Assert.Equal(1, original.DisposeCalls);
+
+        // The replacement is newly created, so it DOES get the descriptor.
+        Assert.Equal(1, replacement.ApplyTransactionDataCalls);
+        Assert.Equal(DescriptorA, replacement.LastAppliedDescriptor);
+    }
+
+    /// <summary>
+    /// <c>Get</c> NEVER CONNECTS. No arm of it calls <c>Connect</c> - creation, reuse and recreation
+    /// alike - because the pool has no <c>of_Connect</c> call anywhere in its 240 lines.
+    /// </summary>
+    [Fact]
+    public void GetNeverConnectsOnAnyArm()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        int index = pool.AddRef(DescriptorA);
+
+        // Create arm.
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? created));
+        FakeTransaction first = Assert.IsType<FakeTransaction>(created);
+        Assert.Equal(0, first.ConnectCalls);
+
+        // Reuse arm.
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? _));
+        Assert.Equal(0, first.ConnectCalls);
+
+        // Recreate arm.
+        first.Broken = true;
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? recreated));
+        Assert.Equal(0, Assert.IsType<FakeTransaction>(recreated).ConnectCalls);
+
+        Assert.All(activator.Created, static t => Assert.Equal(0, t.ConnectCalls));
+    }
+
+    /// <summary>
+    /// An empty class name selects the DEFAULT create arm [pool :L169]; a non-empty one selects the
+    /// named arm [pool :L167].
+    /// </summary>
+    [Fact]
+    public void GetSelectsTheCreateArmFromTheClassName()
+    {
+        using TransactionPool defaulted = CreatePool(out FakeClock _, out StubActivator defaultActivator);
+        int defaultedIndex = defaulted.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, defaulted.Get(defaultedIndex, out IPooledTransaction? _));
+        Assert.Equal(1, defaultActivator.CreateDefaultCalls);
+        Assert.Empty(defaultActivator.RequestedClassNames);
+
+        using TransactionPool named = CreatePool(
+            out FakeClock _,
+            out StubActivator namedActivator,
+            transactionClassName: "SomeConfiguredName");
+        int namedIndex = named.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, named.Get(namedIndex, out IPooledTransaction? _));
+        Assert.Equal(0, namedActivator.CreateDefaultCalls);
+        AssertSequence(["SomeConfiguredName"], namedActivator.RequestedClassNames);
+    }
+
+    /// <summary>
+    /// ANY throwable from the create path answers <see cref="RetCode.E_INVALID_OBJECT"/> and hands back
+    /// no object [pool :L173-L175]. This is why the activator reports failure by throwing.
+    /// </summary>
+    [Fact]
+    public void GetAnswersInvalidObjectForAnyActivationFailure()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator activator,
+            transactionClassName: "WillNotResolve");
+
+        activator.ThrowOnCreate = true;
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.E_INVALID_OBJECT, pool.Get(index, out IPooledTransaction? transaction));
+
+        Assert.Null(transaction);
+
+        // The entry survives, so a later call can succeed once the configuration is corrected.
+        Assert.Equal(1, pool.UpperBound);
+    }
+
+    /// <summary>
+    /// A throwable from the DESCRIPTOR APPLY is caught by the same arm, and the broken object destroyed
+    /// on the way through is still disposed - the <see langword="finally"/> runs on the throwing path.
+    /// </summary>
+    [Fact]
+    public void GetCatchesAFailingDescriptorApplyAndStillDisposesTheDoomedObject()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? first));
+        FakeTransaction original = Assert.IsType<FakeTransaction>(first);
+        original.Broken = true;
+
+        activator.ThrowOnApply = true;
+
+        Assert.Equal(RetCode.E_INVALID_OBJECT, pool.Get(index, out IPooledTransaction? transaction));
+        Assert.Null(transaction);
+
+        // The broken predecessor was disposed even though a later step threw.
+        Assert.Equal(1, original.DisposeCalls);
+    }
+
+    // ==============================================================================================
+    //  SUITE 6 - THE EXPIRY MATRIX [pool :L210-L226]
+    // ==============================================================================================
+
+    /// <summary>
+    /// A delta EXACTLY equal to the expiry COLLECTS, because the comparison is greater-or-equal
+    /// [pool :L215]. One tick under it does not.
+    /// </summary>
+    /// <param name="elapsedMilliseconds">How far the clock advances after the idle stamp.</param>
+    /// <param name="expectCollected">Whether the entry must be gone afterwards.</param>
+    [Theory]
+    [InlineData(9_999, false)]
+    [InlineData(10_000, true)]
+    [InlineData(10_001, true)]
+    [InlineData(0, false)]
+    public void CollectUsesAGreaterOrEqualExpiryComparison(long elapsedMilliseconds, bool expectCollected)
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock clock,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 10d);
+
+        Assert.Equal(10_000L, pool.KeepAliveExpireMilliseconds);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        // Retained, with the idle clock stamped at the current instant [pool :L97].
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(1, pool.UpperBound);
+
+        clock.Advance(TimeSpan.FromMilliseconds(elapsedMilliseconds));
+        pool.Collect(force: false);
+
+        Assert.Equal(expectCollected ? 0 : 1, pool.UpperBound);
+        Assert.Equal(expectCollected ? 1 : 0, transaction.DisposeCalls);
+
+        // WHEN IT DOES COLLECT, THE DISCONNECT IS UNGUARDED [pool :L217] - contrast with RemoveRef's
+        // guarded call, which the reference-count suite pins.
+        Assert.Equal(expectCollected ? 1 : 0, transaction.DisconnectCalls);
+    }
+
+    /// <summary>
+    /// <c>force</c> overrides the EXPIRY only, never the reference count [pool :L215].
+    /// </summary>
+    [Fact]
+    public void ForcedCollectionOverridesTheExpiryButNotTheReferenceCount()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 3_600d);
+
+        int referenced = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(referenced, out IPooledTransaction? held));
+        FakeTransaction stillHeld = Assert.IsType<FakeTransaction>(held);
+
+        int idle = pool.AddRef(DescriptorB);
+        Assert.Equal(RetCode.OK, pool.Get(idle, out IPooledTransaction? release));
+        FakeTransaction released = Assert.IsType<FakeTransaction>(release);
+        Assert.Equal(RetCode.OK, pool.RemoveRef(idle));
+
+        Assert.Equal(2, pool.UpperBound);
+
+        // Forced, with the clock not advanced at all: the unreferenced entry goes, the referenced one
+        // survives.
+        pool.Collect(force: true);
+
+        Assert.Equal(1, pool.UpperBound);
+        Assert.Equal(1, released.DisposeCalls);
+        Assert.Equal(0, stillHeld.DisposeCalls);
+    }
+
+    /// <summary>
+    /// A BROKEN transaction is still disconnected by <c>Collect</c>, because that call is UNGUARDED
+    /// [pool :L217] unlike <c>RemoveRef</c>'s [pool :L105]. This is the asymmetry stated as a pair.
+    /// </summary>
+    [Fact]
+    public void CollectDisconnectsEvenABrokenTransaction()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock clock,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 1d);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(1, pool.UpperBound);
+
+        transaction.Broken = true;
+        clock.Advance(TimeSpan.FromMilliseconds(1_000));
+        pool.Collect(force: false);
+
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(1, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// The idle sweep runs from <c>OnIdle</c> when keep-alive is ON, unforced [pool :L73, :L80].
+    /// </summary>
+    [Fact]
+    public void OnIdleSweepsUnforcedWhenKeepAliveIsOn()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock clock,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 2d);
+
+        Assert.True(pool.IsIdleCollectionEnabled);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        // Not yet expired.
+        clock.Advance(TimeSpan.FromMilliseconds(1_999));
+        pool.OnIdle();
+        Assert.Equal(1, pool.UpperBound);
+
+        // Expired.
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        pool.OnIdle();
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(1, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// An entry that never held a transaction is still swept out; there is simply nothing to settle
+    /// [pool :L216].
+    /// </summary>
+    [Fact]
+    public void CollectRemovesAnEntryThatNeverHeldATransaction()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+        Assert.Equal(0, pool.UpperBound);
+
+        int second = pool.AddRef(DescriptorB);
+        Assert.Equal(1, second);
+        pool.Collect(force: true);
+
+        Assert.Equal(1, pool.UpperBound);
+        Assert.Equal(0, activator.CreatedCount);
+    }
+
+    // ==============================================================================================
+    //  SUITE 7 - REMOVE-ALL AND DISPOSAL [pool :L190-L208, :L238]
+    // ==============================================================================================
+
+    /// <summary>
+    /// Unforced, <c>RemoveAll</c> destroys unreferenced entries IGNORING the idle clock, and keeps
+    /// referenced ones [pool :L195].
+    /// </summary>
+    [Fact]
+    public void RemoveAllUnforcedDestroysUnreferencedEntriesIgnoringTheClock()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator _,
+            keepAlive: true,
+            keepAliveExpireSeconds: 3_600d);
+
+        int referenced = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(referenced, out IPooledTransaction? held));
+        FakeTransaction stillHeld = Assert.IsType<FakeTransaction>(held);
+
+        int idle = pool.AddRef(DescriptorB);
+        Assert.Equal(RetCode.OK, pool.Get(idle, out IPooledTransaction? release));
+        FakeTransaction released = Assert.IsType<FakeTransaction>(release);
+        Assert.Equal(RetCode.OK, pool.RemoveRef(idle));
+
+        // The clock has not moved, so Collect would keep both; RemoveAll does not consult it.
+        Assert.Equal(RetCode.OK, pool.RemoveAll(force: false));
+
+        Assert.Equal(1, pool.UpperBound);
+        Assert.Equal(1, released.DisposeCalls);
+        Assert.Equal(1, released.DisconnectCalls);
+        Assert.Equal(0, stillHeld.DisposeCalls);
+    }
+
+    /// <summary>
+    /// Forced, <c>RemoveAll</c> destroys REFERENCED entries too - which is the difference from a forced
+    /// <c>Collect</c> [pool :L195 against :L215].
+    /// </summary>
+    [Fact]
+    public void RemoveAllForcedDestroysReferencedEntriesToo()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        Assert.Equal(RetCode.OK, pool.RemoveAll(force: true));
+
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(1, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// <c>RemoveAll</c>'s disconnect is UNGUARDED, so a broken transaction is disconnected [pool :L197].
+    /// </summary>
+    [Fact]
+    public void RemoveAllDisconnectsEvenABrokenTransaction()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+        transaction.Broken = true;
+
+        Assert.Equal(RetCode.OK, pool.RemoveAll(force: true));
+
+        Assert.Equal(1, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+    }
+
+    /// <summary>
+    /// Disposal is <c>RemoveAll(true)</c> [pool :L238] and is IDEMPOTENT, and every member then refuses
+    /// to run.
+    /// </summary>
+    [Fact]
+    public void DisposalForcesRemoveAllIsIdempotentAndClosesEveryMember()
+    {
+        FakeTransaction transaction;
+        TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        transaction = Assert.IsType<FakeTransaction>(handed);
+
+        pool.Dispose();
+
+        // Forced, so the still-referenced entry was destroyed.
+        Assert.Equal(1, transaction.DisconnectCalls);
+        Assert.Equal(1, transaction.DisposeCalls);
+
+        // Idempotent: the second call is a no-op rather than a second sweep or a throw.
+        pool.Dispose();
+        Assert.Equal(1, transaction.DisposeCalls);
+
+        TransactionData descriptor = DescriptorA;
+        IPooledTransaction? handle = transaction;
+        Assert.Throws<ObjectDisposedException>(() => { _ = pool.AddRef(descriptor); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = pool.RemoveRef(1); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = pool.Release(1, ref handle); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = pool.Get(1, out IPooledTransaction? _); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = pool.Exists(descriptor); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = pool.RemoveAll(force: true); });
+        Assert.Throws<ObjectDisposedException>(() => pool.Collect(force: true));
+        Assert.Throws<ObjectDisposedException>(pool.OnIdle);
+    }
+
+    // ==============================================================================================
+    //  SUITE 8 - EXISTS [pool :L180-L188]
+    // ==============================================================================================
+
+    /// <summary>
+    /// <c>Exists</c> answers about the ENTRY, not about a transaction, so an entry that has never been
+    /// through <c>Get</c> still answers <see langword="true"/>.
+    /// </summary>
+    [Fact]
+    public void ExistsAnswersAboutTheEntryRatherThanAboutATransaction()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        Assert.False(pool.Exists(DescriptorA));
+        Assert.False(pool.Exists(DescriptorB));
+
+        _ = pool.AddRef(DescriptorA);
+
+        Assert.True(pool.Exists(DescriptorA));
+        Assert.False(pool.Exists(DescriptorB));
+        Assert.Equal(0, activator.CreatedCount);
+    }
+
+    /// <summary>
+    /// The pool key is the WHOLE descriptor by value, so a difference in ANY field - including
+    /// <c>DbParm</c>, which carries the bind-disabling flag - produces a different entry. Narrowing the
+    /// key would share one connection between a bound and an unbound configuration.
+    /// </summary>
+    [Fact]
+    public void TheKeyIsTheWholeDescriptorSoADbParmDifferenceIsADifferentEntry()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        TransactionData bound = DescriptorA with { DbParm = "DisableBind=0" };
+        TransactionData unbound = DescriptorA with { DbParm = "DisableBind=1" };
+
+        int first = pool.AddRef(bound);
+        int second = pool.AddRef(unbound);
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(2, pool.UpperBound);
+        Assert.True(pool.Exists(bound));
+        Assert.True(pool.Exists(unbound));
+        Assert.False(pool.Exists(DescriptorA));
+    }
+
+    // ==============================================================================================
+    //  SUITE 9 - THREAD SAFETY
+    // ==============================================================================================
+
+    /// <summary>
+    /// Concurrent <c>AddRef</c>, <c>Get</c>, <c>RemoveRef</c> and <c>Collect</c> neither tear the entry
+    /// collection nor deadlock, and the pool settles empty.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentUseDoesNotTearStateOrDeadlock()
+    {
+        using TransactionPool pool = CreatePool(
+            out FakeClock _,
+            out StubActivator activator,
+            keepAlive: true,
+            keepAliveExpireSeconds: 1d);
+
+        const int workers = 8;
+        const int iterations = 60;
+
+        Task[] tasks = new Task[workers];
+        for (int worker = 0; worker < workers; worker++)
+        {
+            int seed = worker;
+            tasks[worker] = Task.Run(
+                () =>
+                {
+                    for (int iteration = 0; iteration < iterations; iteration++)
+                    {
+                        TransactionData descriptor = new()
+                        {
+                            Dbms = "SQLITE",
+                            Database = "pfw-concurrent-" + ((seed + iteration) % 4),
+                        };
+
+                        int index = pool.AddRef(descriptor);
+                        Assert.True(index > 0);
+
+                        // The index may already have been renumbered by another worker's removal - the
+                        // preserved defect - so a non-success answer here is legitimate and is exactly
+                        // what a caller must tolerate. What must NEVER happen is a torn read or a hang.
+                        long got = pool.Get(index, out IPooledTransaction? transaction);
+                        Assert.True(got == RetCode.OK || got == RetCode.E_OUT_OF_BOUND);
+
+                        if (got == RetCode.OK)
+                        {
+                            Assert.NotNull(transaction);
+                        }
+
+                        long removed = pool.RemoveRef(index);
+                        Assert.True(removed == RetCode.OK || removed == RetCode.E_OUT_OF_BOUND);
+
+                        pool.Collect(force: false);
+                    }
+                },
+                TestContext.Current.CancellationToken);
+        }
+
+        await Task.WhenAll(tasks);
+
+        pool.RemoveAll(force: true);
+        Assert.Equal(0, pool.UpperBound);
+
+        // Every transaction the activator ever produced has been disposed exactly once, so nothing was
+        // orphaned by a race.
+        Assert.All(activator.Created, static t => Assert.Equal(1, t.DisposeCalls));
+    }
+
+    /// <summary>
+    /// The lock is NOT held across a disconnect: a transaction whose <c>Disconnect</c> re-enters the
+    /// pool completes rather than deadlocking.
+    /// </summary>
+    /// <remarks>
+    /// This is the only way to assert the rule from outside. A re-entrant call from inside a disconnect
+    /// would block forever if settlement happened under the lock; with settlement outside it, the
+    /// nested call simply succeeds. Note that <see cref="System.Threading.Lock"/> is re-entrant on the
+    /// same thread, so the assertion is strengthened by making the nested call observe real state
+    /// rather than merely return.
+    /// </remarks>
+    [Fact]
+    public void SettlementHappensOutsideTheLock()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator _);
+
+        int index = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(index, out IPooledTransaction? handed));
+        FakeTransaction transaction = Assert.IsType<FakeTransaction>(handed);
+
+        int observedUpperBound = -1;
+        transaction.OnDisconnect = () => observedUpperBound = pool.UpperBound;
+
+        Assert.Equal(RetCode.OK, pool.RemoveRef(index));
+
+        // The entry was already removed from the collection before the disconnect ran, which is what
+        // "decide under the lock, settle outside it" means in observable terms.
+        Assert.Equal(0, observedUpperBound);
+        Assert.Equal(0, pool.UpperBound);
+    }
+
+    /// <summary>
+    /// A throwing disconnect still reaches the dispose, and a batch settles EVERY item before reporting.
+    /// </summary>
+    [Fact]
+    public void AThrowingDisconnectStillDisposesAndABatchSettlesEveryItem()
+    {
+        using TransactionPool pool = CreatePool(out FakeClock _, out StubActivator activator);
+
+        int first = pool.AddRef(DescriptorA);
+        Assert.Equal(RetCode.OK, pool.Get(first, out IPooledTransaction? one));
+        FakeTransaction failing = Assert.IsType<FakeTransaction>(one);
+        failing.ThrowOnDisconnect = true;
+
+        int second = pool.AddRef(DescriptorB);
+        Assert.Equal(RetCode.OK, pool.Get(second, out IPooledTransaction? two));
+        FakeTransaction healthy = Assert.IsType<FakeTransaction>(two);
+
+        AggregateException raised =
+            Assert.Throws<AggregateException>(() => pool.RemoveAll(force: true));
+
+        Assert.Single(raised.InnerExceptions);
+
+        // BOTH were disposed: the failing one through its own finally, the healthy one because the batch
+        // loop kept going.
+        Assert.Equal(1, failing.DisposeCalls);
+        Assert.Equal(1, healthy.DisposeCalls);
+        Assert.Equal(0, pool.UpperBound);
+        Assert.Equal(2, activator.CreatedCount);
+    }
+
+    // ==============================================================================================
+    //  SUITE 10 - THE CONNECTION-SEMANTICS MATRIX [n_cst_thread_trans.sru]
+    //  Run against the REAL PooledTransaction over a fake engine, so every arm is exercised with no
+    //  database, no connection and no network (C-E, C-H).
+    // ==============================================================================================
+
+    /// <summary>
+    /// A successful connect disconnects any open handle first, clears state, connects, and stamps the
+    /// liveness tick [trans :L111-L143].
+    /// </summary>
+    [Fact]
+    public void ConnectDisconnectsAnOpenHandleFirstAndStampsTheLivenessTick()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { DbHandle = 7 };
+        RecordingHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+        hooks.Observed = transaction;
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+
+        // The pre-emptive disconnect [trans :L115-L117] fires NO hook - it is a bare statement.
+        AssertSequence(["Disconnect", "Connect"], engine.Log);
+        AssertSequence(["OnBeforeConnect", "OnAfterConnect", "OnConnectionOk"], hooks.Log);
+
+        // The tick is stamped, so the liveness cache short-circuits immediately afterwards.
+        Assert.True(transaction.IsConnected());
+    }
+
+    /// <summary>
+    /// A prevented before-connect hook answers <see cref="RetCode.E_DB_ERROR"/> when it left an error
+    /// and <see cref="RetCode.CANCELLED"/> when it did not [trans :L122-L124].
+    /// </summary>
+    /// <param name="hookSqlCode">The code the hook leaves behind.</param>
+    /// <param name="expected">The return code the connect must answer.</param>
+    [Theory]
+    [InlineData(0L, RetCode.CANCELLED)]
+    [InlineData(-1L, RetCode.E_DB_ERROR)]
+    [InlineData(100L, RetCode.E_DB_ERROR)]
+    public void APreventedConnectDiscriminatesOnTheStateTheHookLeft(long hookSqlCode, long expected)
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        RecordingHooks hooks = new()
+        {
+            BeforeConnectResult = RetCode.PREVENT,
+
+            // The 100 row matters: the veto discrimination tests SQLCode <> 0 [trans :L123], and 100 is
+            // non-zero - so the "no data found" code, which reads as a SUCCESS everywhere else in this
+            // file, reads as a DATABASE ERROR here. That asymmetry is the oracle's.
+            BeforeConnectStamp = hookSqlCode == 0
+                ? null
+                : new SqlState(hookSqlCode, hookSqlCode, 0, "hook", string.Empty),
+        };
+
+        using PooledTransaction transaction = new(engine, clock, hooks);
+        hooks.Observed = transaction;
+        hooks.Observed = transaction;
+
+        Assert.Equal(expected, transaction.Connect());
+        Assert.DoesNotContain("Connect", engine.Log);
+    }
+
+    /// <summary>
+    /// A hook returning <c>2</c> does NOT veto, because the test is
+    /// <c>Predicates.IsPrevented</c> - an exact equality against <c>1</c> [trans :L122].
+    /// </summary>
+    [Fact]
+    public void ADeepPreventionValueDoesNotVetoTheConnect()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        RecordingHooks hooks = new() { BeforeConnectResult = 2L };
+        using PooledTransaction transaction = new(engine, clock, hooks);
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+        Assert.Contains("Connect", engine.Log);
+    }
+
+    /// <summary>
+    /// A connect that SUCCEEDED but whose state is spoiled by the after-hook performs the
+    /// state-preserving clean disconnect and answers <see cref="RetCode.E_DB_ERROR"/>
+    /// [trans :L129-L137].
+    /// </summary>
+    [Fact]
+    public void AConnectSpoiledByItsAfterHookCleanlyDisconnectsAndReportsADatabaseError()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        RecordingHooks hooks = new() { AfterConnectStamp = SqlState.Failed(-99, "spoiled") };
+        using PooledTransaction transaction = new(engine, clock, hooks);
+        hooks.Observed = transaction;
+
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Connect());
+
+        // The connect ran and was then cleanly undone, with the disconnect hooks fired [trans :L513, :L523].
+        AssertSequence(["Connect", "Disconnect"], engine.Log);
+        AssertSequence(
+            ["OnBeforeConnect", "OnAfterConnect", "OnBeforeDisconnect", "OnAfterDisconnect"],
+            hooks.Log);
+
+        // STATE PRESERVED: the caller still reads the error that condemned it, not the disconnect's own
+        // outcome.
+        Assert.Equal(-99L, transaction.SqlDbCode);
+        Assert.Equal("spoiled", transaction.SqlErrText);
+        Assert.False(transaction.IsConnected());
+    }
+
+    /// <summary>
+    /// A connect on a BROKEN transaction answers <see cref="RetCode.E_INVALID_TRANSACTION"/> and touches
+    /// the engine not at all [trans :L113].
+    /// </summary>
+    [Fact]
+    public void ConnectRefusesABrokenTransaction()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.SetBroken());
+        Assert.Equal(RetCode.E_INVALID_TRANSACTION, transaction.Connect());
+        Assert.Empty(engine.Log);
+    }
+
+    /// <summary>
+    /// <c>Disconnect</c>'s no-op fast path fires NO hooks and still answers success, for a closed handle
+    /// and for a broken transaction alike [trans :L145-L148].
+    /// </summary>
+    /// <param name="dbHandle">The engine's handle.</param>
+    /// <param name="broken">Whether the transaction is condemned first.</param>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(-1, false)]
+    [InlineData(5, true)]
+    public void DisconnectFastPathFiresNoHooksAndReportsSuccess(int dbHandle, bool broken)
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { DbHandle = dbHandle };
+        RecordingHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+
+        if (broken)
+        {
+            Assert.Equal(RetCode.OK, transaction.SetBroken());
+        }
+
+        Assert.Equal(RetCode.OK, transaction.Disconnect());
+        Assert.Empty(engine.Log);
+        Assert.Empty(hooks.Log);
+    }
+
+    /// <summary>
+    /// A real disconnect fires both hooks, zeroes the liveness tick, and reports the engine's own
+    /// failure [trans :L150-L158].
+    /// </summary>
+    [Fact]
+    public void ARealDisconnectFiresBothHooksAndReportsAFailure()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { DbHandle = 3, DisconnectResult = SqlState.Failed(-12, "no") };
+        RecordingHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+        hooks.Observed = transaction;
+
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Disconnect());
+        AssertSequence(["OnBeforeDisconnect", "OnAfterDisconnect"], hooks.Log);
+        Assert.False(transaction.IsConnected());
+    }
+
+    /// <summary>
+    /// ROLLBACK UNDER AUTO-COMMIT ANSWERS <see cref="RetCode.FAILED"/>, not a harmless no-op
+    /// [trans :L185] - and the auto-commit test comes BEFORE the broken test, which is observable when
+    /// both hold.
+    /// </summary>
+    [Fact]
+    public void RollbackUnderAutoCommitReportsFailureAndIsTestedBeforeBrokenness()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { AutoCommit = true };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.FAILED, transaction.Rollback());
+        Assert.Empty(engine.Log);
+
+        // Broken AS WELL: still FAILED, because :L185 precedes :L186.
+        Assert.Equal(RetCode.OK, transaction.SetBroken());
+        Assert.Equal(RetCode.FAILED, transaction.Rollback());
+
+        // Not auto-commit and broken: NOW the broken arm answers.
+        engine.AutoCommit = false;
+        Assert.Equal(RetCode.E_INVALID_TRANSACTION, transaction.Rollback());
+    }
+
+    /// <summary>
+    /// THE ROLLBACK PRESERVES ALL FIVE SQL-STATE VALUES, and the after-hook observes the RESTORED state
+    /// rather than the rollback's own [trans :L163-L183].
+    /// </summary>
+    [Fact]
+    public void TheRollbackPreservesAllFiveStateValuesAndTheAfterHookSeesThem()
+    {
+        FakeClock clock = new(ClockStart);
+        SqlState original = new(-1, -4711, 17, "the original error", "the original return");
+        FakeEngine engine = new()
+        {
+            DbHandle = 4,
+            ExecuteResult = original,
+
+            // The rollback statement reports something entirely different, which must NOT survive.
+            RollbackResult = new SqlState(0, 0, 0, string.Empty, "rollback-return"),
+        };
+        RecordingHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+        hooks.Observed = transaction;
+
+        // Put the original state in place through a failing command.
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Exec("UPDATE COMPANY SET AGE = 1"));
+        Assert.Equal(original.SqlDbCode, transaction.SqlDbCode);
+
+        Assert.Equal(RetCode.OK, transaction.Rollback());
+
+        // ALL FIVE RESTORED.
+        Assert.Equal(original.SqlCode, transaction.SqlCode);
+        Assert.Equal(original.SqlDbCode, transaction.SqlDbCode);
+        Assert.Equal(original.SqlNRows, transaction.SqlNRows);
+        Assert.Equal(original.SqlErrText, transaction.SqlErrText);
+        Assert.Equal(original.SqlReturnData, transaction.SqlReturnData);
+
+        // The BEFORE hook saw the failing operation's state; the AFTER hook saw the restored state.
+        Assert.Equal(original.SqlDbCode, hooks.BeforeRollbackObservedSqlDbCode);
+        Assert.Equal(original.SqlDbCode, hooks.AfterRollbackObservedSqlDbCode);
+        Assert.Equal(original.SqlErrText, hooks.AfterRollbackObservedSqlErrText);
+    }
+
+    /// <summary>
+    /// THE CLEAN DISCONNECT PRESERVES THE SAME FIVE VALUES [trans :L504-L524], through the same snapshot
+    /// type - which is why the two routines cannot drift apart.
+    /// </summary>
+    [Fact]
+    public void TheCleanDisconnectPreservesTheSameFiveStateValues()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new()
+        {
+            // The disconnect the clean path performs reports its own, different state.
+            DisconnectResult = new SqlState(-2, -222, 3, "disconnect-error", "disconnect-return"),
+        };
+        RecordingHooks hooks = new() { AfterConnectStamp = SqlState.Failed(-808, "after-connect-spoil") };
+        using PooledTransaction transaction = new(engine, clock, hooks);
+        hooks.Observed = transaction;
+
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Connect());
+
+        // The spoiled state survived the clean disconnect, which is the whole point.
+        Assert.Equal(-1L, transaction.SqlCode);
+        Assert.Equal(-808L, transaction.SqlDbCode);
+        Assert.Equal("after-connect-spoil", transaction.SqlErrText);
+        Assert.Equal(-808L, hooks.AfterDisconnectObservedSqlDbCode);
+    }
+
+    /// <summary>
+    /// <c>Commit</c> gates on auto-commit and brokenness, and on failure rolls back only when asked
+    /// [trans :L240-L257]. The parameterless overload delegates with auto-rollback ON [trans :L383].
+    /// </summary>
+    [Fact]
+    public void CommitGatesRollsBackOnDemandAndTheParameterlessOverloadOptsIn()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { AutoCommit = true };
+        RecordingHooks hooks = new();
+        using PooledTransaction autoCommitted = new(engine, clock, hooks);
+
+        Assert.Equal(RetCode.FAILED, autoCommitted.Commit(autoRollback: true));
+        Assert.Equal(RetCode.FAILED, autoCommitted.Commit());
+
+        FakeEngine broken = new();
+        using PooledTransaction condemned = new(broken, clock);
+        Assert.Equal(RetCode.OK, condemned.SetBroken());
+        Assert.Equal(RetCode.E_INVALID_TRANSACTION, condemned.Commit(autoRollback: true));
+
+        // A failing commit WITHOUT auto-rollback does not roll back.
+        FakeEngine failingBare = new() { CommitResult = SqlState.Failed(-5, "commit failed") };
+        RecordingHooks bareHooks = new();
+        using PooledTransaction bare = new(failingBare, clock, bareHooks);
+        Assert.Equal(RetCode.E_DB_ERROR, bare.Commit(autoRollback: false));
+        AssertSequence(["Commit"], failingBare.Log);
+        AssertSequence(["OnBeforeCommit", "OnAfterCommit"], bareHooks.Log);
+
+        // The parameterless overload DOES roll back, because it passes true.
+        FakeEngine failingDefault = new() { CommitResult = SqlState.Failed(-5, "commit failed") };
+        using PooledTransaction defaulted = new(failingDefault, clock);
+        Assert.Equal(RetCode.E_DB_ERROR, defaulted.Commit());
+        AssertSequence(["Commit", "Rollback"], failingDefault.Log);
+    }
+
+    /// <summary>
+    /// The autocommit checkpoint inspects the state it inherits: an error rolls back and reports, a
+    /// clean non-auto-commit state commits, and a clean auto-commit state does nothing
+    /// [trans :L370-L381].
+    /// </summary>
+    [Fact]
+    public void TheAutoCommitCheckpointChoosesBetweenRollbackCommitAndNothing()
+    {
+        FakeClock clock = new(ClockStart);
+
+        // An inherited error, not auto-commit: roll back and report.
+        FakeEngine erroring = new() { DbHandle = 2, ExecuteResult = SqlState.Failed(-3, "bad") };
+        using PooledTransaction failed = new(erroring, clock);
+        Assert.Equal(RetCode.E_DB_ERROR, failed.Exec("DELETE FROM COMPANY"));
+        Assert.Equal(RetCode.E_DB_ERROR, failed.AutoCommitCheckpoint());
+        AssertSequence(["Execute", "Rollback"], erroring.Log);
+
+        // An inherited error under auto-commit: report WITHOUT rolling back.
+        FakeEngine erroringAuto = new()
+        {
+            DbHandle = 2,
+            AutoCommit = true,
+            ExecuteResult = SqlState.Failed(-3, "bad"),
+        };
+        using PooledTransaction failedAuto = new(erroringAuto, clock);
+        Assert.Equal(RetCode.E_DB_ERROR, failedAuto.Exec("DELETE FROM COMPANY"));
+        Assert.Equal(RetCode.E_DB_ERROR, failedAuto.AutoCommitCheckpoint());
+        AssertSequence(["Execute"], erroringAuto.Log);
+
+        // Clean and not auto-commit: commit.
+        FakeEngine clean = new();
+        using PooledTransaction committing = new(clean, clock);
+        Assert.Equal(RetCode.OK, committing.AutoCommitCheckpoint());
+        AssertSequence(["Commit"], clean.Log);
+
+        // Clean and auto-commit: nothing at all.
+        FakeEngine cleanAuto = new() { AutoCommit = true };
+        using PooledTransaction nothing = new(cleanAuto, clock);
+        Assert.Equal(RetCode.OK, nothing.AutoCommitCheckpoint());
+        Assert.Empty(cleanAuto.Log);
+    }
+
+    /// <summary>
+    /// <c>SQLCode = 100</c> READS AS A SUCCESS, both in the command path [trans :L233] and in the
+    /// transaction's own success predicate [trans :L340].
+    /// </summary>
+    /// <param name="sqlCode">The code the statement leaves behind.</param>
+    /// <param name="expected">The return code the command must answer.</param>
+    /// <param name="expectSqlSucceeded">What the SQLCode success predicate must answer.</param>
+    [Theory]
+    [InlineData(0L, RetCode.OK, true)]
+    [InlineData(100L, RetCode.OK, true)]
+    [InlineData(-1L, RetCode.E_DB_ERROR, false)]
+    [InlineData(1L, RetCode.E_DB_ERROR, true)]
+    public void SqlCodeOneHundredReadsAsSuccessInBothPlaces(
+        long sqlCode,
+        long expected,
+        bool expectSqlSucceeded)
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new()
+        {
+            DbHandle = 1,
+            ExecuteResult = new SqlState(sqlCode, sqlCode, 0, string.Empty, string.Empty),
+        };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(expected, transaction.Exec("SELECT * FROM COMPANY"));
+
+        // THE SQLCODE FAMILY, NOT the return-code algebra. Note the 1 row: it is a database error in the
+        // command path yet reads as a SUCCESS to the predicate, because the two tests are different.
+        Assert.Equal(expectSqlSucceeded, transaction.IsSqlSucceeded());
+        Assert.Equal(!expectSqlSucceeded, transaction.IsSqlFailed());
+    }
+
+    /// <summary>
+    /// A null or empty command answers <see cref="RetCode.E_INVALID_ARGUMENT"/> [trans :L220], and a
+    /// prevented command hook discriminates exactly as the connect hook does [trans :L225-L226].
+    /// </summary>
+    [Fact]
+    public void ExecRejectsEmptyCommandsAndDiscriminatesAVeto()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, transaction.Exec(null));
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, transaction.Exec(string.Empty));
+        Assert.Empty(engine.Log);
+
+        // WHITESPACE IS NOT EMPTY: the oracle tests emptiness, not blankness, so this reaches the engine.
+        Assert.Equal(RetCode.OK, transaction.Exec("   "));
+        AssertSequence(["Execute"], engine.Log);
+
+        FakeEngine vetoed = new();
+        RecordingHooks cleanVeto = new() { BeforeCommandResult = RetCode.PREVENT };
+        using PooledTransaction cancelled = new(vetoed, clock, cleanVeto);
+        Assert.Equal(RetCode.CANCELLED, cancelled.Exec("SELECT 1"));
+        Assert.Empty(vetoed.Log);
+
+        FakeEngine errored = new();
+        RecordingHooks dirtyVeto = new()
+        {
+            BeforeCommandResult = RetCode.PREVENT,
+            BeforeCommandStamp = SqlState.Failed(-9, "veto error"),
+        };
+        using PooledTransaction dbError = new(errored, clock, dirtyVeto);
+        dirtyVeto.Observed = dbError;
+        Assert.Equal(RetCode.E_DB_ERROR, dbError.Exec("SELECT 1"));
+        Assert.Empty(errored.Log);
+    }
+
+    /// <summary>
+    /// THE LIVENESS CACHE SHORT-CIRCUITS STRICTLY UNDER TEN THOUSAND MILLISECONDS and re-probes at or
+    /// beyond it [trans :L198].
+    /// </summary>
+    /// <param name="elapsedMilliseconds">How far the clock advances after the connect.</param>
+    /// <param name="expectProbe">Whether the built-in probe must have run.</param>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(9_999, false)]
+    [InlineData(10_000, true)]
+    [InlineData(10_001, true)]
+    public void TheLivenessCacheShortCircuitsStrictlyUnderTheWindow(
+        long elapsedMilliseconds,
+        bool expectProbe)
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { ExecuteResult = SqlState.Succeeded(rowCount: 1) };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+        engine.Log.Clear();
+
+        clock.Advance(TimeSpan.FromMilliseconds(elapsedMilliseconds));
+
+        Assert.True(transaction.IsConnected());
+
+        string[] expectedLog = expectProbe ? ["Execute"] : [];
+        AssertSequence(expectedLog, engine.Log);
+    }
+
+    /// <summary>
+    /// The built-in probe judges on the ROW COUNT and not on <c>SQLCode</c> [trans :L207], and it
+    /// chooses the dual-table form for Oracle and the bare form for everything else
+    /// [trans :L202-L205].
+    /// </summary>
+    /// <param name="dbms">The DBMS identifier.</param>
+    /// <param name="expectedStatement">The probe statement that must be sent.</param>
+    [Theory]
+    [InlineData("SQLITE", "SELECT 1")]
+    [InlineData("", "SELECT 1")]
+    [InlineData("MSS Microsoft SQL Server", "SELECT 1")]
+    [InlineData("O90 Oracle9i", "SELECT 1 FROM DUAL")]
+    [InlineData("oracle", "SELECT 1 FROM DUAL")]
+    public void TheBuiltInProbePicksItsStatementByDialect(string dbms, string expectedStatement)
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new()
+        {
+            Dbms = dbms,
+            ExecuteResult = SqlState.Succeeded(rowCount: 1),
+        };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+        clock.Advance(TimeSpan.FromMilliseconds(10_000));
+
+        Assert.True(transaction.IsConnected());
+        AssertSequence([expectedStatement], engine.ExecutedStatements);
+    }
+
+    /// <summary>
+    /// A probe that returns NO ROWS reads as NOT connected even with a clean code, because the verdict is
+    /// <c>SQLNRows &gt; 0</c> [trans :L207] - and a failed probe ZEROES the tick [trans :L214].
+    /// </summary>
+    [Fact]
+    public void AProbeWithNoRowsReadsAsDisconnectedAndZeroesTheTick()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { ExecuteResult = SqlState.Succeeded(rowCount: 0) };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+        clock.Advance(TimeSpan.FromMilliseconds(10_000));
+
+        Assert.False(transaction.IsConnected());
+
+        // The tick is now zero, so the next call short-circuits to false without probing again.
+        engine.Log.Clear();
+        Assert.False(transaction.IsConnected());
+        Assert.Empty(engine.Log);
+    }
+
+    /// <summary>
+    /// The liveness path's HOOK results are judged by the shared kernel's return-code predicates
+    /// [trans :L197, :L209] - so a cancelled check is NOT a failure, and a prevention reads as
+    /// connected.
+    /// </summary>
+    [Fact]
+    public void TheLivenessHooksAreJudgedByTheReturnCodeAlgebra()
+    {
+        FakeClock clock = new(ClockStart);
+
+        // A FAILING check hook answers false before the cache is even consulted [trans :L197].
+        FakeEngine failing = new();
+        RecordingHooks failCheck = new() { CheckResult = RetCode.FAILED };
+        using PooledTransaction failed = new(failing, clock, failCheck);
+        Assert.Equal(RetCode.OK, failed.Connect());
+        Assert.False(failed.IsConnected());
+
+        // CANCELLED IS NOT A FAILURE under Predicates.IsFailed - the preserved tri-state hole - so the
+        // connection still reads as live.
+        FakeEngine cancelled = new();
+        RecordingHooks cancelCheck = new() { CheckResult = RetCode.CANCELLED };
+        using PooledTransaction survived = new(cancelled, clock, cancelCheck);
+        Assert.Equal(RetCode.OK, survived.Connect());
+        Assert.True(survived.IsConnected());
+
+        // A test hook that answers a PREVENTION reads as connected, because IsSucceeded is >= 0.
+        FakeEngine prevented = new();
+        RecordingHooks preventTest = new() { TestResult = RetCode.PREVENT };
+        using PooledTransaction live = new(prevented, clock, preventTest);
+        Assert.Equal(RetCode.OK, live.Connect());
+        clock.Advance(TimeSpan.FromMilliseconds(10_000));
+        Assert.True(live.IsConnected());
+
+        // And no built-in probe ran, because the hook answered non-null [trans :L201].
+        Assert.Empty(prevented.ExecutedStatements);
+    }
+
+    /// <summary>
+    /// A never-connected transaction reads as disconnected without consulting any hook [trans :L196].
+    /// </summary>
+    [Fact]
+    public void ANeverConnectedTransactionReadsAsDisconnected()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        RecordingHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+
+        Assert.False(transaction.IsConnected());
+        Assert.Empty(hooks.Log);
+    }
+
+    /// <summary>
+    /// <c>IsBroken</c> FIRES THE CHECK HOOK when the flag is not already set, and skips it once it is
+    /// [trans :L530-L534].
+    /// </summary>
+    [Fact]
+    public void IsBrokenFiresTheCheckHookOnlyWhileNotAlreadyBroken()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        RecordingHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+
+        Assert.False(transaction.IsBroken());
+        Assert.Equal(1, hooks.CheckCalls);
+
+        Assert.False(transaction.IsBroken());
+        Assert.Equal(2, hooks.CheckCalls);
+
+        // Now let the hook condemn it. The flag is read AFTER the hook, so this answers true.
+        hooks.CondemnTarget = transaction;
+        Assert.True(transaction.IsBroken());
+        Assert.Equal(3, hooks.CheckCalls);
+
+        // Already broken: the hook is skipped from here on.
+        Assert.True(transaction.IsBroken());
+        Assert.Equal(3, hooks.CheckCalls);
+    }
+
+    /// <summary>
+    /// The dialect resolver answers Oracle only on a substring match, and MSSQL for everything else -
+    /// SQLite and the empty string included [trans :L356-L361].
+    /// </summary>
+    /// <param name="dbms">The DBMS identifier.</param>
+    /// <param name="expectOracle">Whether the answer must be the Oracle discriminator.</param>
+    [Theory]
+    [InlineData("SQLITE", false)]
+    [InlineData("", false)]
+    [InlineData("MSS Microsoft SQL Server", false)]
+    [InlineData("ORACLE", true)]
+    [InlineData("O90 Oracle9i", true)]
+    [InlineData("prefix-oRaClE-suffix", true)]
+    public void TheDialectResolverAnswersOracleOnlyOnASubstringMatch(string dbms, bool expectOracle)
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { Dbms = dbms };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(
+            expectOracle ? DatabaseType.DbtOracle : DatabaseType.DbtMssql,
+            transaction.GetDbType());
+    }
+
+    /// <summary>
+    /// <c>ClearState</c> zeroes the five values but touches NEITHER the broken flag NOR the liveness
+    /// tick [trans :L363-L368], so clearing state cannot resurrect a condemned transaction.
+    /// </summary>
+    [Fact]
+    public void ClearStateLeavesTheBrokenFlagAndTheLivenessTickAlone()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new()
+        {
+            DbHandle = 1,
+            ExecuteResult = new SqlState(-1, -7, 4, "err", "ret"),
+        };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Exec("SELECT 1"));
+        Assert.Equal(RetCode.OK, transaction.SetBroken());
+
+        transaction.ClearState();
+
+        Assert.Equal(0L, transaction.SqlCode);
+        Assert.Equal(0L, transaction.SqlDbCode);
+        Assert.Equal(0L, transaction.SqlNRows);
+        Assert.Equal(string.Empty, transaction.SqlErrText);
+        Assert.Equal(string.Empty, transaction.SqlReturnData);
+
+        Assert.True(transaction.IsBroken());
+        Assert.False(transaction.IsConnected());
+    }
+
+    /// <summary>
+    /// The descriptor transfer delegates the seven-field fold to the engine and answers
+    /// <see cref="RetCode.OK"/> [trans :L343-L354], and the structured error carries exactly the two
+    /// values the consumer copies [n_cst_thread_task_sqlbase.sru:L175-L176].
+    /// </summary>
+    [Fact]
+    public void ApplyTransactionDataFoldsSevenFieldsAndCaptureErrorCarriesTwoValues()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new()
+        {
+            DbHandle = 1,
+            ExecuteResult = new SqlState(-1, -4711, 0, "provider text", "ret"),
+        };
+        using PooledTransaction transaction = new(engine, clock);
+
+        TransactionData descriptor = DescriptorA with { UserParm = "ignored-by-the-fold" };
+        Assert.Equal(RetCode.OK, transaction.ApplyTransactionData(in descriptor));
+
+        // The fold moved SEVEN fields and left AutoCommit and UserParm alone [trans :L345-L351].
+        Assert.Equal(descriptor.Dbms, engine.AppliedDescriptor.Dbms);
+        Assert.Equal(descriptor.Database, engine.AppliedDescriptor.Database);
+        Assert.Equal(string.Empty, engine.AppliedDescriptor.UserParm);
+
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Exec("SELECT 1"));
+
+        DbErrorData error = transaction.CaptureError();
+        Assert.Equal(-4711L, error.SqlDbCode);
+        Assert.Equal("provider text", error.SqlErrText);
+
+        // AND NO STATEMENT TEXT, which is why there is nothing here for the redactor to redact.
+        Assert.Equal(string.Empty, error.SqlSyntax);
+    }
+
+    /// <summary>
+    /// The pooled transaction's own disposal is idempotent and disposes the engine it owns.
+    /// </summary>
+    [Fact]
+    public void PooledTransactionDisposalIsIdempotentAndDisposesItsEngine()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        PooledTransaction transaction = new(engine, clock);
+
+        transaction.Dispose();
+        transaction.Dispose();
+
+        Assert.Equal(1, engine.DisposeCalls);
+
+        // And a disposed transaction refuses to work rather than misbehaving silently.
+        Assert.Throws<ObjectDisposedException>(() => { _ = transaction.Connect(); });
+        Assert.Throws<ObjectDisposedException>(() => { _ = transaction.Exec("SELECT 1"); });
+
+        // SetBroken is deliberately NOT guarded - condemning is meaningful at any point.
+        Assert.Equal(RetCode.OK, transaction.SetBroken());
+    }
+
+    /// <summary>
+    /// The pooled transaction fails fast on a structurally invalid construction.
+    /// </summary>
+    [Fact]
+    public void PooledTransactionConstructionFailsFast()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+
+        Assert.Throws<ArgumentNullException>(() => { _ = new PooledTransaction(null!, clock); });
+        Assert.Throws<ArgumentNullException>(() => { _ = new PooledTransaction(engine, null!); });
+    }
+
+    /// <summary>
+    /// The cleared SQL state is exactly zero, zero, zero, empty and empty, and the two factories spell
+    /// success and failure as the oracle does.
+    /// </summary>
+    [Fact]
+    public void TheSqlStateSnapshotHasTheOraclesClearedAndFactoryValues()
+    {
+        SqlState cleared = SqlState.Cleared;
+        Assert.Equal(0L, cleared.SqlCode);
+        Assert.Equal(0L, cleared.SqlDbCode);
+        Assert.Equal(0L, cleared.SqlNRows);
+        Assert.Equal(string.Empty, cleared.SqlErrText);
+        Assert.Equal(string.Empty, cleared.SqlReturnData);
+
+        SqlState succeeded = SqlState.Succeeded(rowCount: 12);
+        Assert.Equal(0L, succeeded.SqlCode);
+        Assert.Equal(12L, succeeded.SqlNRows);
+
+        SqlState failed = SqlState.Failed(-77, null);
+        Assert.Equal(-1L, failed.SqlCode);
+        Assert.Equal(-77L, failed.SqlDbCode);
+        Assert.Equal(string.Empty, failed.SqlErrText);
+
+        // The five-value constructor and value equality, which is what makes the snapshot a snapshot.
+        SqlState explicitly = new(-1, -77, 0, string.Empty, string.Empty);
+        Assert.Equal(failed, explicitly);
+
+        // The two projecting members answer EMPTY rather than null however the value was built, which is
+        // what stops a defaulted struct from handing a null reference to a consumer.
+        SqlState viaInitialiser = new()
+        {
+            SqlCode = -1,
+            SqlDbCode = -2,
+            SqlNRows = 3,
+            SqlErrText = null!,
+            SqlReturnData = null!,
+        };
+        Assert.Equal(string.Empty, viaInitialiser.SqlErrText);
+        Assert.Equal(string.Empty, viaInitialiser.SqlReturnData);
+
+        SqlState withText = viaInitialiser with { SqlErrText = "text", SqlReturnData = "ret" };
+        Assert.Equal("text", withText.SqlErrText);
+        Assert.Equal("ret", withText.SqlReturnData);
+    }
+
+    /// <summary>
+    /// The DEFAULT disconnect hooks - the ones nothing overrides - are reached on a real disconnect, so
+    /// an implementation that supplies no script behaves exactly as an unimplemented PowerBuilder event
+    /// [trans :L150, :L152].
+    /// </summary>
+    [Fact]
+    public void TheDefaultDisconnectHooksAreReachedAndDoNothing()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { DbHandle = 9 };
+        MinimalHooks hooks = new();
+        using PooledTransaction transaction = new(engine, clock, hooks);
+
+        Assert.Equal(RetCode.OK, transaction.Disconnect());
+
+        // The verbs ran; the defaults contributed nothing, which is the whole contract of a default.
+        AssertSequence(["Disconnect"], engine.Log);
+    }
+
+    /// <summary>
+    /// The transaction's <c>AutoCommit</c> property is a pass-through to the connection target, because
+    /// the legacy property lives on the transaction object itself and the command task toggles it to
+    /// reproduce the native-autocommit arm.
+    /// </summary>
+    [Fact]
+    public void AutoCommitPassesThroughToTheConnectionTarget()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.False(transaction.AutoCommit);
+
+        transaction.AutoCommit = true;
+
+        Assert.True(transaction.AutoCommit);
+        Assert.True(engine.AutoCommit);
+
+        // And the gate it controls now answers accordingly [trans :L185].
+        Assert.Equal(RetCode.FAILED, transaction.Rollback());
+    }
+
+    /// <summary>
+    /// The state stamp overwrites all five values at once and touches nothing else - the port of the
+    /// legacy SQL-state properties being assignable [trans :L176-L180, :L517-L521].
+    /// </summary>
+    [Fact]
+    public void TheStateStampOverwritesAllFiveValuesAndNothingElse()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect());
+        Assert.True(transaction.IsConnected());
+
+        SqlState imposed = new(-1, -321, 8, "imposed text", "imposed return");
+        transaction.StampSqlState(in imposed);
+
+        Assert.Equal(-1L, transaction.SqlCode);
+        Assert.Equal(-321L, transaction.SqlDbCode);
+        Assert.Equal(8L, transaction.SqlNRows);
+        Assert.Equal("imposed text", transaction.SqlErrText);
+        Assert.Equal("imposed return", transaction.SqlReturnData);
+
+        // NOT the liveness tick and NOT the broken flag.
+        Assert.True(transaction.IsConnected());
+        Assert.False(transaction.IsBroken());
+    }
+
+    // ==============================================================================================
+    //  SUITE 11 - THE CLASS-NAME ACTIVATOR AND ITS FOUR CONSTRAINTS
+    // ==============================================================================================
+
+    /// <summary>
+    /// The default create arm builds the default pooled transaction over a fresh engine.
+    /// </summary>
+    [Fact]
+    public void TheActivatorCreatesTheDefaultTransaction()
+    {
+        FakeClock clock = new(ClockStart);
+        int engines = 0;
+        PooledTransactionActivator activator = new(
+            () =>
+            {
+                engines++;
+                return new FakeEngine();
+            },
+            clock);
+
+        using IPooledTransaction created = activator.CreateDefault();
+
+        Assert.IsType<PooledTransaction>(created);
+        Assert.Equal(1, engines);
+    }
+
+    /// <summary>
+    /// A REGISTERED name is resolved from the registry, case-insensitively, without any reflection.
+    /// </summary>
+    [Fact]
+    public void TheActivatorPrefersARegisteredFactory()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeTransaction registered = new();
+        Dictionary<string, Func<IPooledTransaction>> registry =
+            new(StringComparer.OrdinalIgnoreCase) { ["MyTransaction"] = () => registered };
+
+        PooledTransactionActivator activator = new(
+            static () => new FakeEngine(),
+            clock,
+            hooks: null,
+            namedFactories: registry);
+
+        Assert.Same(registered, activator.Create("MyTransaction"));
+        Assert.Same(registered, activator.Create("mytransaction"));
+    }
+
+    /// <summary>
+    /// A registered factory that hands back nothing is a failure rather than a null instance.
+    /// </summary>
+    [Fact]
+    public void TheActivatorRejectsARegisteredFactoryThatReturnsNothing()
+    {
+        FakeClock clock = new(ClockStart);
+        Dictionary<string, Func<IPooledTransaction>> registry =
+            new(StringComparer.OrdinalIgnoreCase) { ["Nothing"] = static () => null! };
+
+        PooledTransactionActivator activator = new(
+            static () => new FakeEngine(),
+            clock,
+            hooks: null,
+            namedFactories: registry);
+
+        Assert.Throws<InvalidOperationException>(() => { _ = activator.Create("Nothing"); });
+    }
+
+    /// <summary>
+    /// CONSTRAINT 2 AND 3 TOGETHER: a type that ships in the service and implements the contract IS
+    /// activated by name - which is what reproduces <c>Create Using</c> [pool :L167].
+    /// </summary>
+    [Fact]
+    public void TheActivatorActivatesAnInServiceTypeByName()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        using IPooledTransaction created = activator.Create(DefaultTransactionTypeName);
+
+        Assert.IsType<PooledTransaction>(created);
+    }
+
+    /// <summary>
+    /// The four constraints, each rejected with <see cref="InvalidOperationException"/> so that
+    /// <c>Get</c>'s catch-all turns it into <see cref="RetCode.E_INVALID_OBJECT"/>.
+    /// </summary>
+    /// <param name="className">The name to refuse.</param>
+    [Theory]
+    // CONSTRAINT 1 - assembly-qualified names are refused before resolution is even attempted.
+    [InlineData("PowerFramework.Persistence.Transactions.PooledTransaction, PowerFramework.Persistence")]
+    // CONSTRAINT 2 - not a type in this assembly.
+    [InlineData("System.Object")]
+    [InlineData("Nope.Not.A.Type")]
+    [InlineData("   ")]
+    // CONSTRAINT 3 - a real in-assembly type that does not implement the contract.
+    [InlineData("PowerFramework.Persistence.Transactions.TransactionPool")]
+    // CONSTRAINT 3 - an interface rather than a concrete class.
+    [InlineData("PowerFramework.Persistence.Transactions.IPooledTransaction")]
+    public void TheActivatorEnforcesItsFourConstraints(string className)
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        Assert.Throws<InvalidOperationException>(() => { _ = activator.Create(className); });
+    }
+
+    /// <summary>
+    /// A null or empty class name is an argument error - the activator is never asked for one, because
+    /// the pool selects the default arm on an empty name [pool :L166].
+    /// </summary>
+    [Fact]
+    public void TheActivatorRejectsANullOrEmptyClassName()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        Assert.Throws<ArgumentNullException>(() => { _ = activator.Create(null!); });
+        Assert.Throws<ArgumentException>(() => { _ = activator.Create(string.Empty); });
+    }
+
+    /// <summary>
+    /// An engine factory that hands back nothing fails fast rather than producing a transaction that
+    /// would break on its first verb.
+    /// </summary>
+    [Fact]
+    public void TheActivatorRejectsAnEngineFactoryThatReturnsNothing()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => null!, clock);
+
+        Assert.Throws<InvalidOperationException>(() => { _ = activator.CreateDefault(); });
+    }
+
+    /// <summary>
+    /// The activator fails fast on a structurally invalid construction.
+    /// </summary>
+    [Fact]
+    public void TheActivatorConstructionFailsFast()
+    {
+        FakeClock clock = new(ClockStart);
+
+        Assert.Throws<ArgumentNullException>(() => { _ = new PooledTransactionActivator(null!, clock); });
+        Assert.Throws<ArgumentNullException>(
+            () => { _ = new PooledTransactionActivator(static () => new FakeEngine(), null!); });
+    }
+
+    // ==============================================================================================
+    //  THE CONSTRUCTOR-SHAPE MATRIX  [n_cst_thread_trans_pool.sru:L167 `Create Using _sTransCls`]
+    //
+    //  These drive Activate(Type) DIRECTLY rather than through Create(string). That is deliberate and
+    //  it does NOT bypass a security constraint: CONSTRAINT 2 restricts which types a configuration
+    //  STRING may name, and it still governs Create(string) untouched. Activate takes an
+    //  already-resolved Type that no configuration value can produce, so the shapes it accepts are
+    //  testable only from here - which is why the method carries `internal` and the service grants
+    //  InternalsVisibleTo.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The zero-argument shape is the LITERAL analogue of <c>Create Using</c> [pool :L167], which passes
+    /// no arguments at all. No type this service ships declares it, so it is exercised here against a
+    /// purpose-built double rather than deleted - deleting it would narrow the port, because a faithful
+    /// descendant of the legacy transaction class takes no constructor arguments either.
+    /// </summary>
+    [Fact]
+    public void TheZeroArgumentShapeIsTheLiteralCreateUsingAnalogue()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        IPooledTransaction created = activator.Activate(typeof(ZeroArgumentProbe));
+
+        _ = Assert.IsType<ZeroArgumentProbe>(created);
+    }
+
+    /// <summary>
+    /// Proves the documented claim that an OPTIONAL third parameter matches the seamed probe, because the
+    /// probe compares declared parameter TYPES rather than requiring an exact arity. Also confirms the
+    /// engine, the clock and the hooks are the ones the activator holds - an activator that constructed
+    /// the type but passed the wrong collaborators would leave an unseamed clock behind.
+    /// </summary>
+    [Fact]
+    public void AnOptionalThirdParameterMatchesTheSeamedShapeAndReceivesTheRealCollaborators()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new();
+        MinimalHooks hooks = new();
+        PooledTransactionActivator activator = new(() => engine, clock, hooks);
+
+        IPooledTransaction created = activator.Activate(typeof(OptionalHooksProbe));
+
+        OptionalHooksProbe probe = Assert.IsType<OptionalHooksProbe>(created);
+        Assert.Same(engine, probe.Engine);
+        Assert.Same(clock, probe.Clock);
+        Assert.Same(hooks, probe.Hooks);
+    }
+
+    /// <summary>
+    /// With no hooks configured the activator passes <see langword="null"/> through rather than inventing
+    /// a no-op, because substituting the no-op is the IMPLEMENTATION's job - <c>PooledTransaction</c>
+    /// does it in its own constructor, so a type that wants the real thing gets exactly what was
+    /// registered and a type that wants none is not handed a decoy.
+    /// </summary>
+    [Fact]
+    public void NoConfiguredHooksReachTheSeamedShapeAsNull()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        IPooledTransaction created = activator.Activate(typeof(OptionalHooksProbe));
+
+        Assert.Null(Assert.IsType<OptionalHooksProbe>(created).Hooks);
+    }
+
+    /// <summary>
+    /// The seamed shape wins when a type declares BOTH, pinning the documented probe order so a later
+    /// reordering cannot silently start constructing implementations without their seams.
+    /// </summary>
+    [Fact]
+    public void TheSeamedShapeIsPreferredWhenATypeDeclaresBoth()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        IPooledTransaction created = activator.Activate(typeof(BothShapesProbe));
+
+        Assert.True(Assert.IsType<BothShapesProbe>(created).UsedSeamedConstructor);
+    }
+
+    /// <summary>
+    /// A type declaring neither accepted shape reaches the closing throw, which the pool's catch-all
+    /// [pool :L173-L175] turns into <c>E_INVALID_OBJECT</c>.
+    /// </summary>
+    [Fact]
+    public void ATypeDeclaringNoAcceptedShapeIsRejected()
+    {
+        FakeClock clock = new(ClockStart);
+        PooledTransactionActivator activator = new(static () => new FakeEngine(), clock);
+
+        _ = Assert.Throws<InvalidOperationException>(
+            () => activator.Activate(typeof(NoAcceptedShapeProbe)));
+    }
+
+    // ==============================================================================================
+    //  HELPERS
+    // ==============================================================================================
+
+    /// <summary>
+    /// Asserts that a recorded call log matches an expected sequence exactly, in order.
+    /// </summary>
+    /// <param name="expected">The expected entries, in order.</param>
+    /// <param name="actual">The recorded log.</param>
+    /// <remarks>
+    /// A named helper rather than a bare <c>Assert.Equal</c> at each site, because a collection
+    /// expression does not participate in generic type inference: <c>Assert.Equal(["a"], log)</c> cannot
+    /// infer its element type, while an array-typed parameter accepts the same literal. It also makes
+    /// the intent - ORDER MATTERS - explicit, which is load-bearing here: several suites assert hook and
+    /// verb ORDERING rather than mere occurrence.
+    /// </remarks>
+    private static void AssertSequence(string[] expected, List<string> actual) =>
+        Assert.Equal(expected, actual);
+
+    /// <summary>
+    /// Builds a pool over the three doubles, with the three settings the legacy <c>oninit</c> reads.
+    /// </summary>
+    /// <param name="clock">Receives the hand-driven clock.</param>
+    /// <param name="activator">Receives the recording activator.</param>
+    /// <param name="keepAlive">The keep-alive setting. Defaults to the LEGACY default of false.</param>
+    /// <param name="keepAliveExpireSeconds">The idle lifetime in seconds.</param>
+    /// <param name="transactionClassName">The configured class name.</param>
+    /// <param name="classNameResolver">The event-first resolver.</param>
+    /// <returns>The pool, which the caller disposes.</returns>
+    private static TransactionPool CreatePool(
+        out FakeClock clock,
+        out StubActivator activator,
+        bool keepAlive = false,
+        double keepAliveExpireSeconds = 0d,
+        string transactionClassName = "",
+        TransactionClassNameResolver? classNameResolver = null)
+    {
+        clock = new FakeClock(ClockStart);
+        activator = new StubActivator();
+
+        PersistenceOptions options = new()
+        {
+            TransactionPool = new TransactionPoolOptions
+            {
+                KeepAlive = keepAlive,
+                KeepAliveExpireSeconds = keepAliveExpireSeconds,
+                TransactionClassName = transactionClassName,
+            },
+        };
+
+        return new TransactionPool(
+            Options.Create(options),
+            clock,
+            activator,
+            classNameResolver);
+    }
+
+    /// <summary>
+    /// A hand-driven clock. Nine lines, and it is why no test-clock package is referenced.
+    /// </summary>
+    private sealed class FakeClock : TimeProvider
+    {
+        private DateTimeOffset _now;
+
+        internal FakeClock(DateTimeOffset start) => _now = start;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        internal void Advance(TimeSpan delta) => _now += delta;
+    }
+
+    /// <summary>
+    /// A recording <c>IPooledTransaction</c>. Everything the pool decides is expressed through these
+    /// members, so this double is the whole environment the pool suites need (C-H).
+    /// </summary>
+    private sealed class FakeTransaction : IPooledTransaction
+    {
+        internal List<string> Log { get; } = [];
+
+        internal int ConnectCalls { get; private set; }
+
+        internal int DisconnectCalls { get; private set; }
+
+        internal int ClearStateCalls { get; private set; }
+
+        internal int ApplyTransactionDataCalls { get; private set; }
+
+        internal int DisposeCalls { get; private set; }
+
+        internal int IsBrokenCalls { get; set; }
+
+        internal bool Broken { get; set; }
+
+        internal bool CondemnOnNextIsBroken { get; set; }
+
+        internal bool ThrowOnApply { get; set; }
+
+        internal bool ThrowOnDisconnect { get; set; }
+
+        internal Action? OnDisconnect { get; set; }
+
+        internal TransactionData LastAppliedDescriptor { get; private set; }
+
+        public long SqlCode => 0;
+
+        public long SqlDbCode => 0;
+
+        public long SqlNRows => 0;
+
+        public string SqlErrText => string.Empty;
+
+        public string SqlReturnData => string.Empty;
+
+        public void StampSqlState(in SqlState state)
+        {
+            // The pool never writes state, so this double records only that nobody tried to.
+            Log.Add("StampSqlState");
+        }
+
+        public bool AutoCommit { get; set; }
+
+        public long Connect()
+        {
+            ConnectCalls++;
+            Log.Add("Connect");
+            return RetCode.OK;
+        }
+
+        public long Disconnect()
+        {
+            DisconnectCalls++;
+            Log.Add("Disconnect");
+            OnDisconnect?.Invoke();
+
+            return ThrowOnDisconnect
+                ? throw new InvalidOperationException("the fake engine refuses to disconnect")
+                : RetCode.OK;
+        }
+
+        public long Rollback() => RetCode.OK;
+
+        public long Commit(bool autoRollback) => RetCode.OK;
+
+        public long Commit() => RetCode.OK;
+
+        public long AutoCommitCheckpoint() => RetCode.OK;
+
+        public long Exec(string? sqlCommand) => RetCode.OK;
+
+        public bool IsConnected() => true;
+
+        public bool IsBroken()
+        {
+            IsBrokenCalls++;
+
+            if (CondemnOnNextIsBroken)
+            {
+                CondemnOnNextIsBroken = false;
+                Broken = true;
+            }
+
+            return Broken;
+        }
+
+        public long SetBroken()
+        {
+            Broken = true;
+            return RetCode.OK;
+        }
+
+        public void ClearState()
+        {
+            ClearStateCalls++;
+            Log.Add("ClearState");
+        }
+
+        public DatabaseType GetDbType() => DatabaseType.DbtMssql;
+
+        public long ApplyTransactionData(in TransactionData descriptor)
+        {
+            if (ThrowOnApply)
+            {
+                throw new InvalidOperationException("the fake refuses the descriptor");
+            }
+
+            ApplyTransactionDataCalls++;
+            LastAppliedDescriptor = descriptor;
+            Log.Add("ApplyTransactionData");
+            return RetCode.OK;
+        }
+
+        public bool IsSqlFailed() => false;
+
+        public bool IsSqlSucceeded() => true;
+
+        public DbErrorData CaptureError() => DbErrorData.Empty;
+
+        public void Dispose()
+        {
+            DisposeCalls++;
+            Log.Add("Dispose");
+        }
+    }
+
+    /// <summary>
+    /// A recording activator that hands out <see cref="FakeTransaction"/> instances.
+    /// </summary>
+    private sealed class StubActivator : IPooledTransactionActivator
+    {
+        internal List<FakeTransaction> Created { get; } = [];
+
+        internal List<string> RequestedClassNames { get; } = [];
+
+        internal int CreateDefaultCalls { get; private set; }
+
+        internal int CreatedCount => Created.Count;
+
+        internal bool ThrowOnCreate { get; set; }
+
+        internal bool ThrowOnApply { get; set; }
+
+        public IPooledTransaction CreateDefault()
+        {
+            CreateDefaultCalls++;
+            return Produce();
+        }
+
+        public IPooledTransaction Create(string className)
+        {
+            RequestedClassNames.Add(className);
+
+            return ThrowOnCreate
+                ? throw new InvalidOperationException("the stub activator refuses this class name")
+                : Produce();
+        }
+
+        private FakeTransaction Produce()
+        {
+            FakeTransaction transaction = new() { ThrowOnApply = ThrowOnApply };
+            Created.Add(transaction);
+            return transaction;
+        }
+    }
+
+    /// <summary>
+    /// A recording <c>ITransactionEngine</c>. It NEVER opens a connection, composes no connection
+    /// string and references no provider (C-E); it records the verb and answers a configured state.
+    /// </summary>
+    private sealed class FakeEngine : ITransactionEngine
+    {
+        internal List<string> Log { get; } = [];
+
+        internal List<string> ExecutedStatements { get; } = [];
+
+        internal int DisposeCalls { get; private set; }
+
+        internal TransactionData AppliedDescriptor { get; private set; }
+
+        internal SqlState ConnectResult { get; init; } = SqlState.Succeeded();
+
+        internal SqlState DisconnectResult { get; init; } = SqlState.Succeeded();
+
+        internal SqlState CommitResult { get; init; } = SqlState.Succeeded();
+
+        internal SqlState RollbackResult { get; init; } = SqlState.Succeeded();
+
+        internal SqlState ExecuteResult { get; init; } = SqlState.Succeeded();
+
+        public int DbHandle { get; set; }
+
+        public string Dbms { get; set; } = "SQLITE";
+
+        public bool AutoCommit { get; set; }
+
+        public void ApplyConnectionFields(in TransactionData descriptor)
+        {
+            // The seven-field fold, performed by the descriptor's own accessor so the omissions are the
+            // descriptor's rather than this double's.
+            AppliedDescriptor = AppliedDescriptor.WithConnectionFieldsFrom(in descriptor);
+            Log.Add("ApplyConnectionFields");
+        }
+
+        public SqlState Connect()
+        {
+            Log.Add("Connect");
+            return ConnectResult;
+        }
+
+        public SqlState Disconnect()
+        {
+            Log.Add("Disconnect");
+            return DisconnectResult;
+        }
+
+        public SqlState Commit()
+        {
+            Log.Add("Commit");
+            return CommitResult;
+        }
+
+        public SqlState Rollback()
+        {
+            Log.Add("Rollback");
+            return RollbackResult;
+        }
+
+        public SqlState Execute(string sqlCommand)
+        {
+            Log.Add("Execute");
+            ExecutedStatements.Add(sqlCommand);
+            return ExecuteResult;
+        }
+
+        public void Dispose() => DisposeCalls++;
+    }
+
+    /// <summary>
+    /// A hook set that overrides NOTHING, so every member resolves to the interface's own default.
+    /// </summary>
+    /// <remarks>
+    /// It exists to prove that the defaults are genuinely reachable and genuinely inert. The recording
+    /// double below cannot do that, because it overrides all thirteen members in order to record them.
+    /// </remarks>
+    private sealed class MinimalHooks : IPooledTransactionHooks
+    {
+    }
+
+    /// <summary>
+    /// A recording hook set that can also spoil the SQL state, which is how the after-hook arms are
+    /// reached.
+    /// </summary>
+    /// <remarks>
+    /// The state-spoiling members are the only way to exercise the two arms where a HOOK changes the
+    /// outcome of an operation that had already succeeded - the connect's clean disconnect
+    /// [trans :L133-L137] and the commit's conditional rollback [trans :L249-L254].
+    /// </remarks>
+    private sealed class RecordingHooks : IPooledTransactionHooks
+    {
+        internal List<string> Log { get; } = [];
+
+        internal int CheckCalls { get; private set; }
+
+        internal long BeforeConnectResult { get; init; } = RetCode.OK;
+
+        internal SqlState? BeforeConnectStamp { get; init; }
+
+        internal SqlState? AfterConnectStamp { get; init; }
+
+        internal long BeforeCommandResult { get; init; } = RetCode.OK;
+
+        internal SqlState? BeforeCommandStamp { get; init; }
+
+        internal long CheckResult { get; init; } = RetCode.OK;
+
+        internal long? TestResult { get; init; }
+
+        internal IPooledTransaction? CondemnTarget { get; set; }
+
+        internal long BeforeRollbackObservedSqlDbCode { get; private set; }
+
+        internal long AfterRollbackObservedSqlDbCode { get; private set; }
+
+        internal string AfterRollbackObservedSqlErrText { get; private set; } = string.Empty;
+
+        internal long AfterDisconnectObservedSqlDbCode { get; private set; }
+
+        /// <summary>The transaction the state-observing hooks read. Set by the suites that need it.</summary>
+        internal PooledTransaction? Observed { get; set; }
+
+        public long OnBeforeConnect()
+        {
+            Log.Add("OnBeforeConnect");
+            ApplyStamp(BeforeConnectStamp);
+            return BeforeConnectResult;
+        }
+
+        public void OnAfterConnect()
+        {
+            Log.Add("OnAfterConnect");
+            ApplyStamp(AfterConnectStamp);
+        }
+
+        public void OnConnectionOk() => Log.Add("OnConnectionOk");
+
+        public void OnBeforeDisconnect() => Log.Add("OnBeforeDisconnect");
+
+        public void OnAfterDisconnect()
+        {
+            Log.Add("OnAfterDisconnect");
+            AfterDisconnectObservedSqlDbCode = Observed?.SqlDbCode ?? 0;
+        }
+
+        public void OnBeforeRollback()
+        {
+            Log.Add("OnBeforeRollback");
+            BeforeRollbackObservedSqlDbCode = Observed?.SqlDbCode ?? 0;
+        }
+
+        public void OnAfterRollback()
+        {
+            Log.Add("OnAfterRollback");
+            AfterRollbackObservedSqlDbCode = Observed?.SqlDbCode ?? 0;
+            AfterRollbackObservedSqlErrText = Observed?.SqlErrText ?? string.Empty;
+        }
+
+        public void OnBeforeCommit() => Log.Add("OnBeforeCommit");
+
+        public void OnAfterCommit() => Log.Add("OnAfterCommit");
+
+        public long OnBeforeCommand(string sqlCommand)
+        {
+            Log.Add("OnBeforeCommand");
+            ApplyStamp(BeforeCommandStamp);
+            return BeforeCommandResult;
+        }
+
+        public void OnAfterCommand(string sqlCommand) => Log.Add("OnAfterCommand");
+
+        public long OnCheck()
+        {
+            CheckCalls++;
+
+            if (CondemnTarget is { } target)
+            {
+                CondemnTarget = null;
+                _ = target.SetBroken();
+            }
+
+            return CheckResult;
+        }
+
+        public long? OnTest() => TestResult;
+
+        /// <summary>
+        /// Spoils - or cleans - the SQL state the way a real hook would, by running a statement through
+        /// the observed transaction's engine. Implemented as a direct state write instead, because a
+        /// hook cannot reach the transaction's private state and must not need to.
+        /// </summary>
+        /// <param name="stamp">The state to impose, or <see langword="null"/> to impose none.</param>
+        private void ApplyStamp(SqlState? stamp)
+        {
+            if (stamp is { } state && Observed is { } transaction)
+            {
+                transaction.StampSqlState(in state);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The shared base for the constructor-shape probes. Every member is implemented inertly because
+    /// these doubles exist to be CONSTRUCTED, never driven - the shape matrix asserts on which
+    /// constructor the activator selected, so behaviour here would be dead weight that could drift out
+    /// of step with <see cref="FakeTransaction"/>.
+    /// </summary>
+    private abstract class ShapeProbe : IPooledTransaction
+    {
+        public long SqlCode => 0;
+
+        public long SqlDbCode => 0;
+
+        public long SqlNRows => 0;
+
+        public string SqlErrText => string.Empty;
+
+        public string SqlReturnData => string.Empty;
+
+        public bool AutoCommit { get; set; }
+
+        public void StampSqlState(in SqlState state) => _ = state;
+
+        public long Connect() => RetCode.OK;
+
+        public long Disconnect() => RetCode.OK;
+
+        public long Rollback() => RetCode.OK;
+
+        public long Commit(bool autoRollback) => RetCode.OK;
+
+        public long Commit() => RetCode.OK;
+
+        public long AutoCommitCheckpoint() => RetCode.OK;
+
+        public long Exec(string? sqlCommand) => RetCode.OK;
+
+        public bool IsConnected() => false;
+
+        public bool IsBroken() => false;
+
+        public long SetBroken() => RetCode.OK;
+
+        public void ClearState()
+        {
+        }
+
+        public DatabaseType GetDbType() => DatabaseType.DbtMssql;
+
+        public long ApplyTransactionData(in TransactionData descriptor) => RetCode.OK;
+
+        public bool IsSqlFailed() => false;
+
+        public bool IsSqlSucceeded() => true;
+
+        public DbErrorData CaptureError() => DbErrorData.Empty;
+
+        public void Dispose() => GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Declares ONLY the zero-argument shape - the literal <c>Create Using</c> form [pool :L167].
+    /// </summary>
+    private sealed class ZeroArgumentProbe : ShapeProbe;
+
+    /// <summary>
+    /// Declares the seamed shape with an OPTIONAL hooks parameter, to prove the probe matches on declared
+    /// parameter types rather than on exact arity.
+    /// </summary>
+    private sealed class OptionalHooksProbe : ShapeProbe
+    {
+        public OptionalHooksProbe(
+            ITransactionEngine engine,
+            TimeProvider clock,
+            IPooledTransactionHooks? hooks = null)
+        {
+            Engine = engine;
+            Clock = clock;
+            Hooks = hooks;
+        }
+
+        public ITransactionEngine Engine { get; }
+
+        public TimeProvider Clock { get; }
+
+        public IPooledTransactionHooks? Hooks { get; }
+    }
+
+    /// <summary>
+    /// Declares BOTH accepted shapes, so the probe order is observable.
+    /// </summary>
+    private sealed class BothShapesProbe : ShapeProbe
+    {
+        public BothShapesProbe() => UsedSeamedConstructor = false;
+
+        public BothShapesProbe(ITransactionEngine engine, TimeProvider clock, IPooledTransactionHooks hooks)
+        {
+            _ = engine;
+            _ = clock;
+            _ = hooks;
+            UsedSeamedConstructor = true;
+        }
+
+        public bool UsedSeamedConstructor { get; }
+    }
+
+    /// <summary>
+    /// Declares neither accepted shape, so activation reaches the closing throw.
+    /// </summary>
+    private sealed class NoAcceptedShapeProbe : ShapeProbe
+    {
+        public NoAcceptedShapeProbe(string unmatched) => _ = unmatched;
+    }
+}

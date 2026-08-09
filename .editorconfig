@@ -390,7 +390,7 @@ trim_trailing_whitespace = true
 # ==============================================================================================
 # THE ROSTER - THIS LIST IS THE SINGLE SOURCE OF TRUTH FOR "WHICH FILES ARE IN BAND 3"
 # ==============================================================================================
-# 12 SECTIONS: 11 EFFECTIVE (the file exists) + 1 PENDING (the file is specified but unauthored).
+# 15 SECTIONS, ALL 15 EFFECTIVE - every file named below exists in the tree.
 #
 #      1  shared/PowerFramework.Shared.Kernel/RetCode.cs                                  effective
 #      2  shared/PowerFramework.Shared.Kernel/Enums.cs                                    effective
@@ -398,21 +398,29 @@ trim_trailing_whitespace = true
 #      4  .../PowerFramework.DataServices/Domain/DataWindowEventChain.cs                  effective
 #      5  .../PowerFramework.DataServices/Domain/EventGate.cs                             effective
 #      6  .../PowerFramework.DataServices/Domain/ItemChangeProtocol.cs                    effective
-#      7  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           PENDING
+#      7  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           effective
 #      8  .../PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs    effective
-#      9  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
-#     10  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
-#     11  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
-#     12  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
+#      9  .../PowerFramework.DataServices/Services/ColumnSortModel.cs                     effective
+#     10  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
+#     11  .../PowerFramework.DataServices/Services/ContextMenuModel.cs                    effective
+#     12  .../PowerFramework.DataServices/Services/DropDownSearchModel.cs                 effective
+#     13  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
+#     14  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
+#     15  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
 #
-# ENTRY 7 IS THE PENDING ONE AND IT STAYS. ColumnExpressionEngine.cs is enumerated in the
-# target-structure specification and is not yet authored, so its section is inert - it suppresses
-# nothing today and becomes effective the moment the file lands. That is exactly the case the
-# maintenance rule above sanctions, and the rule is quoted rather than re-derived on purpose:
-# deleting the section would mean re-deriving the suppression later, from scratch, at the moment
-# somebody is busy authoring a 2,435-line engine. The `_of_calcitem` entry point it exists for -
-# public despite its legacy underscore prefix - is the one member in the whole port that trips
-# IDE1006 rather than CA1707, so it is the least reconstructible entry in the band.
+# ENTRY 7 WAS THE PENDING ONE AND IS NOW EFFECTIVE. ColumnExpressionEngine.cs was enumerated in the
+# target-structure specification before it was authored, and its section was carried inert on the
+# strength of the maintenance rule above; the file has since landed, so the section now suppresses
+# what it was written for. The `_of_calcitem` entry point it exists for - public despite its legacy
+# underscore prefix - is the one member in the whole port that trips IDE1006 rather than CA1707, so
+# it remains the least reconstructible entry in the band.
+#
+# THE THREE HEADLESS DATAWINDOW SERVICE MODELS EACH EARNED THEIR OWN SECTION as they were ported:
+# ColumnSortModel.cs for SORT_*/ARROWSUFFIX, ContextMenuModel.cs for the nine reserved MID_* command
+# identifiers, and DropDownSearchModel.cs for the FILTER_* bitmask. None of the three alphabets is
+# declared in the shared kernel's catalogue - a search of enums.sru returns nothing for any of them -
+# so in the .NET tree each belongs to the file that declares it, which is why the band grew by three
+# sections rather than by three entries on an existing one.
 #
 # WHY A ROSTER LIVES HERE AND NOWHERE ELSE
 # Comment blocks throughout the repository used to restate this list as a COUNT in prose - build
@@ -591,6 +599,56 @@ dotnet_diagnostic.IDE1006.severity = none
 # the same file are private, and CA1707 reports externally-visible declarations only, so they need
 # nothing further.
 [services/dataservices-service/PowerFramework.DataServices/Services/RowSelectService.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
+# Preserved verbatim: the nine reserved context-menu command identifiers MID_RESERVED=10000
+# (保留的开始ID, "the reserved start id"), MID_COLAUTOWIDTH=10000 (自动列宽, "auto column width"),
+# MID_COLAUTOWIDTH_ALL=10001, MID_COLCHECK=10002, MID_COLUNCHECK=10003, MID_COLREVERTCHECK=10004,
+# MID_COLCOPY=10005, MID_COLPASTE=10006 and MID_ITEMCOPY=10007, plus the two private literals
+# ARROW_BTN_WIDTH=18 and PRP_POPUPMENUCREATOR="{DWSVC_POPUPMENU_CREATOR}".
+# Source: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L37-L45 (the nine
+# ids, under the `public:` block) and :L64-L65 (the two private literals, under the `private:` block
+# opened at :L62). A search of enums.sru for MID_ or for ARROW_BTN_WIDTH returns nothing, so all
+# eleven are declared on this file rather than arriving with Shared.Kernel's constant catalogue - the
+# same finding the two sections above record for the sort and row-select services.
+# A MENU ID CROSSES THE WIRE ON EVERY SELECTION, so these spellings travel in serialized payloads,
+# log records and characterization recordings and a rename would silently invalidate every stored
+# comparison. CA1707 reports externally-visible declarations only, so strictly the nine ids need it
+# and the two private literals do not; IDE1006 is a style rule that applies regardless of
+# accessibility, so both diagnostics are named here for all eleven.
+# MID_RESERVED AND MID_COLAUTOWIDTH ARE BOTH 10000 - the same aliasing pattern as
+# RetCode.OK/SUCCESS/ALLOW, and suppressing the naming diagnostic here must not be read as licence to
+# de-duplicate them. They are separate `const uint` fields and deliberately NOT enum members, because
+# two enum members of one value invite a "cleanup" that deletes a name the oracle declares. The
+# observable consequence is that OnDefProc's dispatch has a `case MID_COLAUTOWIDTH` arm [:L206], so
+# MID_RESERVED is unreachable as a distinct case.
+[services/dataservices-service/PowerFramework.DataServices/Services/ContextMenuModel.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
+# Preserved verbatim: the drop-down search filter-type bitmask FILTER_DISP=1 (Display列, the display
+# column), FILTER_DISP_PY=2 (Display列以输入数据的拼音首字母过滤, the display column matched by the
+# Pinyin first letters of the input), FILTER_DATA=4 (Data列, the data column) and FILTER_ALL, which the
+# oracle declares as the COMPUTED SUM FILTER_DISP + FILTER_DISP_PY + FILTER_DATA rather than as the
+# literal 7 - the .NET port preserves the expression form so the derivation survives in the code. All
+# four are declared on the drop-down search service itself rather than in the framework-wide constant
+# catalogue: a search of enums.sru for any of the four names returns nothing, so in the .NET tree they
+# belong to this file, and Configuration/DataServicesOptions.cs deliberately spells the FilterType
+# default as the numeric literal 3 rather than referencing them. That is the same finding the
+# row-select service's RS_* constants and the sort service's SORT_*/ARROWSUFFIX constants produced.
+# Source: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L49-L53, declared
+# under the comment at :L49 that the type "supports combination", with the default assigned at :L57.
+# These spellings travel in serialized payloads, log records and characterization recordings, so a
+# rename would silently invalidate every stored comparison. TWO CAUTIONS THAT MUST NOT BE TIDIED AWAY
+# BY ANYONE ACTING ON THIS SUPPRESSION. First, the default IS NOT FILTER_ALL: it is FILTER_DISP +
+# FILTER_DISP_PY, that is 3, because the oracle deliberately omits the data-column bit. Second,
+# FILTER_ALL evaluates to 7 and the Pinyin flags argument at :L323 is ALSO 7, and the two are unrelated
+# values in unrelated domains - the latter decomposes per enums.sru:L1147-L1149 as
+# PY_LIKE_IGNORE_CASE + PY_LIKE_IGNORE_WIDTH + PY_LIKE_FUZZY_SOUND - so neither may ever be derived
+# from the other. The three broker topic constants in the same file are private, and CA1707 reports
+# externally-visible declarations only, so they need nothing further.
+[services/dataservices-service/PowerFramework.DataServices/Services/DropDownSearchModel.cs]
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 

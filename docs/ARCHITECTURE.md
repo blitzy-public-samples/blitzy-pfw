@@ -1162,6 +1162,17 @@ environment, and the only thing development changes is that the local readiness 
 `curl -sf https://localhost:5104/health` rather than with the attached environment's `http`, as §4.2
 records.
 
+**Security's own authority is the one address that is https in EVERY configuration, including
+Development, and no consumer relaxes `RequireHttpsMetadata` anywhere.** The convenience above applies to
+loopback addresses whose scheme is a deployment detail; it does not apply here, because for this
+particular address the scheme is functional. Mutual TLS on `POST /v1/tokens` cannot be presented on a
+plaintext listener at all, and the JWKS and discovery documents are the material the other three
+services trust — so a Development override to `http` would not be a relaxed setting, it would be a
+listener that cannot issue a first token and a trust bootstrap an attacker on path can rewrite. There is
+consequently **no development exception for Security at all**: it declares one TLS listener on 5104 in
+every environment, and the only thing development changes is that the local readiness gate speaks `https`
+to it, exactly as §4.2 records.
+
 **The one path that constrains deployment.** Bearer-protected and anonymous operations may sit behind a
 TLS-terminating proxy in the ordinary way. **`POST /v1/tokens` may not.** Mutual TLS authenticates the
 client to Security itself, so an intermediary that terminates TLS on that path either discards the

@@ -133,10 +133,21 @@
 //  The repository-root .editorconfig switches CA1707 and IDE1006 off in the individually named files
 //  on its BAND 3 roster - the single source of truth for that list, cited here rather than recounted
 //  - each of which carries preserved legacy constant spellings. This file is deliberately NOT one
-//  of them, and TreatWarningsAsErrors is on repository-wide, so an underscore-bearing identifier
-//  declared here would be a compile error rather than a style note. The three modify-style
-//  constants are therefore CONSUMED from PowerFramework.Shared.Kernel.Enums, where they are
-//  declared inside the .editorconfig's suppression scope, and none is redeclared here.
+//  of them. That roster is where a preserved SCREAMING_SNAKE spelling is SANCTIONED, and its
+//  deliberate narrowness is what keeps the exception auditable; a file outside the roster declaring
+//  one is outside the sanctioned scope. The three modify-style constants are therefore CONSUMED from
+//  PowerFramework.Shared.Kernel.Enums, where they are declared inside the .editorconfig's
+//  suppression scope, and none is redeclared here.
+//
+//  Stated precisely, because the imprecise version is tempting and would mislead: this is a
+//  CONVENTION bounded by the roster, NOT a hard build failure. Verified by building one - an
+//  underscore-bearing constant added to this project compiles with zero warnings, whether internal
+//  or public. Directory.Build.props sets TreatWarningsAsErrors, EnableNETAnalyzers and AnalysisLevel
+//  but pointedly does NOT set EnforceCodeStyleInBuild, so the IDE rule family never reaches the
+//  build, and CA1707 is not among the rules the SDK's default analysis mode enables. Warnings-as-
+//  errors is real and this file is kept clean under it; it is simply not the mechanism that holds
+//  this particular line. A reader told otherwise would try it, watch it compile, and wrongly
+//  conclude the convention does not apply.
 // ==============================================================================================
 
 using System.Text;

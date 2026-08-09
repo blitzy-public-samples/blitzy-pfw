@@ -1830,10 +1830,19 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     // ==============================================================================================
     //  THE NINE SEMANTIC EVENTS                                              se_cst_dw.sru:L11-L32
     //  --------------------------------------------------------------------------------------------
-    //  SEVEN ARE DECLARED HERE. The other two - `ondoitemchange` [:L24] and `ondoitemchanged` [:L26] -
-    //  are declared on DataWindowServiceHost because an ATTACHED SERVICE raises them on its host
-    //  rather than the chain raising them on itself, and they are OVERRIDDEN below with the bodies
-    //  se_cst_dw gives them.
+    //  FIVE ARE DECLARED HERE. The other four - `ondoitemchange` [:L24], `ondoitemchanged` [:L26],
+    //  `oninitcontextmenu` [:L11] and `oncontextmenu` [:L12] - are declared on DataWindowServiceHost
+    //  because an ATTACHED SERVICE raises them on its host rather than the chain raising them on
+    //  itself, and they are OVERRIDDEN below with the bodies se_cst_dw gives them.
+    //
+    //  THE CONTEXT-MENU PAIR MOVED, AND THE MOVE WAS FORCED BY THE ORACLE RATHER THAN CHOSEN. Both were
+    //  originally declared here as `virtual`, while the doc-comment on each already recorded that they
+    //  are raised BY THE CONTEXT-MENU SERVICE ON ITS HOST and cited
+    //  n_cst_dwsvc_contextmenu.sru:L147 and :L194 for it. A service holds its host as a
+    //  DataWindowServiceHost, so those two raise sites could not compile against a member declared only
+    //  here. They are now declared on the host and OVERRIDDEN here, so the chain's surface is unchanged
+    //  for every existing consumer - including the nine-event reflection table in
+    //  DataWindowEventChainTests - and there is still exactly ONE definition of each legacy event.
     //
     //  VIRTUAL WITH A NO-OP DEFAULT, NOT ABSTRACT, AND THE ORACLE PROVES THE VIRTUAL IS USED. Five
     //  objects derive from se_cst_dw - the w_test_dwsvc_* windows in ws_objects/pfw.tests.pbl.src -
@@ -1863,7 +1872,7 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     /// before the menu identifier passed to <see cref="OnContextMenu(long, IDataWindowObject, long)"/>
     /// can mean anything.
     /// </remarks>
-    public virtual long OnInitContextMenu(long row, IDataWindowObject dwo)
+    public override long OnInitContextMenu(long row, IDataWindowObject dwo)
     {
         return 0L;
     }
@@ -1882,7 +1891,7 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     /// </param>
     /// <returns><c>1</c> to prevent the service's own handling; any other value to continue.</returns>
     /// <remarks>ORDERING: SYNCHRONOUS, the second half of the context-menu pair.</remarks>
-    public virtual long OnContextMenu(long row, IDataWindowObject dwo, long mid)
+    public override long OnContextMenu(long row, IDataWindowObject dwo, long mid)
     {
         return 0L;
     }
@@ -2057,22 +2066,25 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     /// <summary>
     /// Asks whether one item's value may change - the port of the <c>ondoitemchange</c> BODY
     /// (<c>se_cst_dw.sru:L256-L293</c>), overriding the declaration
-    /// <see cref="DataWindowServiceHost.OnDoItemChange(long, IDataWindowObject, string)"/>.
+    /// <see cref="DataWindowServiceHost.OnDoItemChange(long, IDataWindowObject, string?)"/>.
     /// </summary>
     /// <param name="row">The ONE-BASED row whose item is changing.</param>
     /// <param name="dwo">The column the change applies to.</param>
     /// <param name="data">
     /// The proposed value as text. NOT YET WRITTEN TO THE BUFFER when this runs - the oracle's own
-    /// comment says so [<c>:L259</c>].
+    /// comment says so [<c>:L259</c>]. NULL IS LEGAL AND IS NOT A STRUCTURAL FAULT: an attached
+    /// service reaches this event with a null after <c>SetNull(sVal)</c>
+    /// [<c>n_cst_dwsvc_contextmenu.sru:L1050-L1051</c>], which is how a pasted empty cell asks a
+    /// <c>NilIsNull</c> column to store a null. It is forwarded unchanged rather than coerced.
     /// </param>
     /// <returns>
     /// The four-value item-change alphabet, propagated verbatim from the ancestry event this delegates
     /// to. NEVER a <see cref="RetCode"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="dwo"/> or <paramref name="data"/> is <see langword="null"/>. Structural guards
-    /// on parameters the signature already declares non-nullable; neither can fire for any input the
-    /// oracle can produce.
+    /// <paramref name="dwo"/> is <see langword="null"/>. A structural guard on a parameter the
+    /// signature already declares non-nullable; it cannot fire for any input the oracle can produce.
+    /// <paramref name="data"/> is DELIBERATELY NOT GUARDED - see its parameter note.
     /// </exception>
     /// <remarks>
     /// <para>
@@ -2090,11 +2102,12 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     /// <see cref="ItemChangeResult.Default"/>.
     /// </para>
     /// </remarks>
-    public override long OnDoItemChange(long row, IDataWindowObject dwo, string data)
+    public override long OnDoItemChange(long row, IDataWindowObject dwo, string? data)
     {
         ArgumentNullException.ThrowIfNull(dwo);
-        ArgumentNullException.ThrowIfNull(data);
 
+        // NO GUARD ON `data`. A null is a legal, oracle-reachable value here - see the parameter note -
+        // and it is forwarded to the semantic event unchanged.
         DataWindowEventOutcome outcome =
             NewOutcome(EventId.Ondoitemchange, withinItemChangeChain: true);
 

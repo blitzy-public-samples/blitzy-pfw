@@ -45,6 +45,11 @@
  * every caller holding two addresses for one service to keep in step. A `fetch`
  * speaks HTTP/1.1 and is served on the same port a gRPC caller dials.
  *
+ * Every port in that table is reachable over HTTP/1.1, which is what makes it the
+ * right table for this suite: a `fetch` speaks HTTP/1.1, and ALPN lets the one
+ * listener that also carries gRPC serve both versions. There is no separate gRPC
+ * port for this suite to know about.
+ *
  * The band runs 5101 to 5105 and the composition root is published on 5105,
  * both preserved from the attached environment (C-L) so the environment's
  * access URL still resolves.
@@ -403,7 +408,7 @@ export const DATASERVICES_BASE_URL: string = resolveBaseUrl(
  */
 export const SECURITY_BASE_URL: string = resolveBaseUrl(
   'SECURITY_BASE_URL',
-  'https://localhost:5104',
+  'http://localhost:5104',
 );
 
 /**

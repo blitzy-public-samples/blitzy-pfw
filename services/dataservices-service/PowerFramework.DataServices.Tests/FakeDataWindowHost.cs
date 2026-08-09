@@ -1463,6 +1463,10 @@ public sealed class FakeDataWindowObject : IDataWindowObject
 
         Name = name;
         ColType = colType;
+
+        // A STANDALONE HANDLE HAS NO DECLARATION TO TAKE AN OBJECT TYPE FROM, so it answers the empty
+        // string - which no branch treats as a type - and a suite that needs one sets it.
+        Type = string.Empty;
         ID = id;
         Primary = new FakeDataWindowValueBuffer();
     }
@@ -1481,6 +1485,7 @@ public sealed class FakeDataWindowObject : IDataWindowObject
         Definition = definition;
         Name = definition.Name;
         ColType = definition.ColType;
+        Type = definition.Type;
 
         // Boxed as a long, which is the most common shape a real DataWindow reports, while remaining an
         // `any` on the contract so a suite can replace it with text or with null.
@@ -1503,6 +1508,24 @@ public sealed class FakeDataWindowObject : IDataWindowObject
     /// The raw column type, kept as text so the five-character prefix match keeps its input.
     /// </summary>
     public string ColType { get; set; }
+
+    /// <summary>
+    /// The OBJECT type - <c>column</c>, <c>compute</c>, <c>text</c> and so on - which is a different
+    /// thing from <see cref="ColType"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DEFAULTED FROM THE DECLARATION rather than left empty, so a handle built from a declared object
+    /// answers what the host's <c>Describe(name + ".Type")</c> answers for the same object. A standalone
+    /// handle gets the empty string, which no branch treats as a type.
+    /// </para>
+    /// <para>
+    /// THE DISTINCTION IS LOAD-BEARING at <c>n_cst_dwsvc_contextmenu.sru:L242</c> and <c>:L245</c>, where
+    /// the item-copy block tests <c>dwo.Type</c> against <c>"column"</c> and <c>"compute"</c> - a test
+    /// against <c>ColType</c> would compare a data type against an object type and never match.
+    /// </para>
+    /// </remarks>
+    public string Type { get; set; }
 
     /// <summary>
     /// The primary-buffer view, as the concrete type so a suite can write to it.
@@ -1806,8 +1829,16 @@ public static class FakeItemValue
 /// harmonised.
 /// </para>
 /// <para>
-/// NO CALL LOG. This type is a pure value source: it records nothing, because nothing in the ported code
-/// mutates a child DataWindow. Adding a log here would suggest an ordering question that does not exist.
+/// IT HAS A CALL LOG, AND THAT IS A CORRECTION OF RECORD. This paragraph previously read "NO CALL LOG.
+/// This type is a pure value source: it records nothing, because nothing in the ported code mutates a
+/// child DataWindow." That was true only of the two sources measured at the time; it is FALSE for
+/// <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru</c>, which mutates its
+/// child at seven sites - <c>SetRedraw</c> [<c>:L387</c>, <c>:L410</c>], <c>SetFilter</c> [<c>:L389</c>],
+/// <c>Filter</c> [<c>:L390</c>], <c>Sort</c> [<c>:L391</c>], <c>SetSort</c> [<c>:L220</c>] and
+/// <c>RowsMove</c> [<c>:L402</c>]. There IS therefore an ordering question, and it is the sharpest one in
+/// that port: the two counts must be captured BEFORE the relocation and the semantic event raised AFTER
+/// it, carrying the pre-move values. <see cref="Calls"/> is settable so a suite can point it at the
+/// host's own log and read ONE interleaved sequence covering both objects.
 /// </para>
 /// </remarks>
 public sealed class FakeDataWindowChild : IDataWindowChild
@@ -1983,7 +2014,11 @@ public sealed class FakeDataWindowChild : IDataWindowChild
     /// The LAST VALID ROW NUMBER, not a zero-based length, because the oracle's loop at
     /// <c>n_cst_dwsvc.sru:L601</c> iterates <c>1</c> to this value INCLUSIVE.
     /// </remarks>
-    public long RowCount() => _rows.Count;
+    public long RowCount()
+    {
+        RecordRead(nameof(RowCount));
+        return _rows.Count;
+    }
 
     /// <inheritdoc/>
     public string? GetItemString(long row, string column) =>
@@ -2036,6 +2071,169 @@ public sealed class FakeDataWindowChild : IDataWindowChild
         return _rows[OneBasedRows.ToListIndex(row)].TryGetValue(column, out object? value)
             ? value
             : null;
+    }
+
+    // ----------------------------------------------------------------------------------------------
+    //  THE FILTER, SORT AND BUFFER SURFACE THE DROP-DOWN SEARCH SERVICE DRIVES
+    //  --------------------------------------------------------------------------------------------
+    //  Added for Services/DropDownSearchModel.cs. Every outcome is a plain settable property defaulting
+    //  to the legacy success value, so a suite states the outcome it wants rather than contriving a
+    //  state that produces it - the same policy FakeDataWindowHost applies to its own fallible members.
+    //
+    //  WHAT THIS DOUBLE DELIBERATELY DOES NOT DO: it does not evaluate a filter expression and does not
+    //  sort. Both belong to the DataWindow, not to the code under test, and a double that evaluated the
+    //  composed expression would be asserting its own parser instead of the subject's composition
+    //  (constraint C-B). The one thing it DOES model is the row movement a successful relocation
+    //  performs, switchable through RowsMoveRelocatesRows - modelled for exactly the reason
+    //  DeleteRowCoreRemovesRow is on the host: the ported code reads RowCount() AFTER the move
+    //  [n_cst_dwsvc_dropdownsearch.sru:L404] while the event carries the count from BEFORE it
+    //  [:L393, :L408], so the pre-move-versus-post-move distinction is untestable unless the two differ.
+    // ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The call log this child appends to. Settable so a suite can share the host's log and read one
+    /// interleaved sequence across both objects.
+    /// </summary>
+    /// <remarks>
+    /// Only MUTATIONS are recorded unconditionally; <see cref="FilteredCount"/> and
+    /// <see cref="RowCount"/> are reads and stay out unless <see cref="RecordsReads"/> is on, which is
+    /// the same policy the host applies and for the same reason.
+    /// </remarks>
+    public DataWindowCallLog Calls { get; set; } = new();
+
+    /// <summary>
+    /// Whether reads reach <see cref="Calls"/>. Off by default.
+    /// </summary>
+    public bool RecordsReads { get; set; }
+
+    /// <summary>What <see cref="SetRedraw"/> answers. Defaults to the legacy success value.</summary>
+    public int SetRedrawResult { get; set; } = 1;
+
+    /// <summary>What <see cref="SetFilter"/> answers. Defaults to the legacy success value.</summary>
+    public int SetFilterResult { get; set; } = 1;
+
+    /// <summary>What <see cref="Filter"/> answers. Defaults to the legacy success value.</summary>
+    public int FilterResult { get; set; } = 1;
+
+    /// <summary>What <see cref="Sort"/> answers. Defaults to the legacy success value.</summary>
+    public int SortResult { get; set; } = 1;
+
+    /// <summary>What <see cref="SetSort"/> answers. Defaults to the legacy success value.</summary>
+    public int SetSortResult { get; set; } = 1;
+
+    /// <summary>
+    /// What <see cref="RowsMoveFilterToPrimary"/> answers. Defaults to <c>1</c>, which is the ONLY value
+    /// the ported code treats as success [<c>n_cst_dwsvc_dropdownsearch.sru:L402</c>].
+    /// </summary>
+    public int RowsMoveResult { get; set; } = 1;
+
+    /// <summary>
+    /// What <see cref="FilteredCount"/> answers. Zero by default, because a child with no filter applied
+    /// has filtered nothing.
+    /// </summary>
+    public long FilteredRowCount { get; set; }
+
+    /// <summary>
+    /// Whether a successful <see cref="RowsMoveFilterToPrimary"/> actually moves rows - appending the
+    /// moved count to the primary buffer and clearing <see cref="FilteredRowCount"/>. On by default.
+    /// </summary>
+    public bool RowsMoveRelocatesRows { get; set; } = true;
+
+    /// <summary>
+    /// The expression most recently passed to <see cref="SetFilter"/>, or <see langword="null"/> when it
+    /// has not been called. THE PARITY ASSERTION READS THIS, byte for byte.
+    /// </summary>
+    /// <remarks>
+    /// SETTABLE so a suite can reset it to <see langword="null"/> between an arrange and an act phase and
+    /// then prove that the change guard at <c>n_cst_dwsvc_dropdownsearch.sru:L382</c> suppressed the
+    /// second apply entirely. That is the same need <see cref="DataWindowCallLog.Clear"/> serves for the
+    /// sequence.
+    /// </remarks>
+    public string? LastFilterSet { get; set; }
+
+    /// <summary>
+    /// The expression most recently passed to <see cref="SetSort"/>, or <see langword="null"/> when it
+    /// has not been called.
+    /// </summary>
+    /// <remarks>Settable for the reason given on <see cref="LastFilterSet"/>.</remarks>
+    public string? LastSortSet { get; set; }
+
+    /// <inheritdoc/>
+    public int SetRedraw(bool enable)
+    {
+        Calls.Record(nameof(SetRedraw), enable);
+        return SetRedrawResult;
+    }
+
+    /// <inheritdoc/>
+    public int SetFilter(string filter)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+
+        LastFilterSet = filter;
+        Calls.Record(nameof(SetFilter), filter);
+        return SetFilterResult;
+    }
+
+    /// <inheritdoc/>
+    public int Filter()
+    {
+        Calls.Record(nameof(Filter));
+        return FilterResult;
+    }
+
+    /// <inheritdoc/>
+    public int Sort()
+    {
+        Calls.Record(nameof(Sort));
+        return SortResult;
+    }
+
+    /// <inheritdoc/>
+    public int SetSort(string sort)
+    {
+        ArgumentNullException.ThrowIfNull(sort);
+
+        LastSortSet = sort;
+        Calls.Record(nameof(SetSort), sort);
+        return SetSortResult;
+    }
+
+    /// <inheritdoc/>
+    public long FilteredCount()
+    {
+        RecordRead(nameof(FilteredCount));
+        return FilteredRowCount;
+    }
+
+    /// <inheritdoc/>
+    public int RowsMoveFilterToPrimary(long startRow, long endRow, long beforeRow)
+    {
+        Calls.Record(nameof(RowsMoveFilterToPrimary), startRow, endRow, beforeRow);
+
+        if (RowsMoveResult == 1 && RowsMoveRelocatesRows)
+        {
+            long moved = endRow - startRow + 1;
+            for (long index = 0; index < moved; index++)
+            {
+                _rows.Add(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase));
+            }
+
+            FilteredRowCount = 0;
+        }
+
+        return RowsMoveResult;
+    }
+
+    /// <summary>
+    /// Records a READ, but only when <see cref="RecordsReads"/> is on.
+    /// </summary>
+    private void RecordRead(string member, params object?[]? arguments)
+    {
+        if (RecordsReads)
+        {
+            Calls.Record(member, arguments);
+        }
     }
 
     /// <summary>
@@ -2137,6 +2335,9 @@ public class FakeDataWindowHost : DataWindowServiceHost
     private readonly Dictionary<DwBuffer, List<FakeBufferRow>> _buffers;
 
     private readonly Dictionary<string, string> _describeTable =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, List<string>> _rawValueLists =
         new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Dictionary<string, IDataWindowChild> _children =
@@ -2532,7 +2733,7 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// how the equality test at <c>:L198-L202</c> is driven to its unequal arm - write through
     /// <c>DwObject(...).Primary[row]</c> from inside the handler.
     /// </remarks>
-    public Func<long, IDataWindowObject, string, long>? ItemChangedHandler { get; set; }
+    public Func<long, IDataWindowObject, string?, long>? ItemChangedHandler { get; set; }
 
     /// <summary>
     /// Scripts <see cref="ItemError(long, IDataWindowObject, string)"/>, WHICH MAY RETURN
@@ -2559,7 +2760,7 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// and NOT the return-code algebra. When unset the inherited no-op answers <c>0</c> and every change
     /// is accepted.
     /// </remarks>
-    public Func<long, IDataWindowObject, string, long>? DoItemChangeHandler { get; set; }
+    public Func<long, IDataWindowObject, string?, long>? DoItemChangeHandler { get; set; }
 
     /// <summary>
     /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnDoItemChanged"/>.
@@ -2570,6 +2771,81 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// return; giving it one would invent a veto the notification does not have.
     /// </remarks>
     public Action<long, IDataWindowObject>? DoItemChangedHandler { get; set; }
+
+    /// <summary>
+    /// Scripts <see cref="Find(string, long, long)"/>, taking the expression, the start row and the end
+    /// row and answering the matching row - or <c>0</c> for none.
+    /// </summary>
+    /// <remarks>
+    /// EXISTS BECAUSE THIS FAKE CANNOT EVALUATE A DATAWINDOW EXPRESSION. The auto-width pass uses
+    /// <c>Find</c> as an ADJACENT-DIFFERENCE scan [<c>n_cst_dwsvc_contextmenu.sru:L1191</c>,
+    /// <c>:L1222</c>], so a suite scripts the row sequence it wants walked. Answering a row at or below
+    /// the supplied start would spin for ever, exactly as it would against a real DataWindow, so a script
+    /// must advance.
+    /// </remarks>
+    public Func<string, long, long, long>? FindHandler { get; set; }
+
+    /// <summary>
+    /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnInitContextMenu"/> - the FIRST
+    /// of the context menu's two vetoes [<c>n_cst_dwsvc_contextmenu.sru:L147</c>].
+    /// </summary>
+    /// <remarks>
+    /// THE VETO IS AN EQUALITY TEST AGAINST <c>1</c> AND NOT A NON-ZERO TEST, so a handler answering any
+    /// other value does NOT prevent the menu. Scripting it with <c>2</c> is how a suite proves that.
+    /// </remarks>
+    public Func<long, IDataWindowObject, long>? InitContextMenuHandler { get; set; }
+
+    /// <summary>
+    /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnContextMenu"/> - the SECOND
+    /// veto, which carries the chosen identifier [<c>n_cst_dwsvc_contextmenu.sru:L194</c>].
+    /// </summary>
+    public Func<long, IDataWindowObject, long, long>? ContextMenuHandler { get; set; }
+
+    /// <summary>
+    /// Scripts <see cref="InsertRow(long)"/>, pre-empting the real insert - which is how a suite forces
+    /// the refusal branch at <c>n_cst_dwsvc_contextmenu.sru:L999</c>.
+    /// </summary>
+    public Func<long, long>? InsertRowHandler { get; set; }
+
+    /// <summary>
+    /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnDDSGetFilter"/>, which may
+    /// REPLACE the composed filter by returning a different string.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <see cref="Func{T1, T2, T3, TResult}"/> returning the new filter rather than an
+    /// <see cref="Action"/> taking a <c>ref</c>, because a delegate type cannot carry a <c>ref</c>
+    /// parameter without a custom declaration and the observable effect is identical: whatever this
+    /// answers becomes the value the <c>ref</c> parameter holds on return. When unset the inherited no-op
+    /// leaves the composed filter untouched, which is what a PowerBuilder event with no script does.
+    /// </para>
+    /// <para>
+    /// The test seam for <c>n_cst_dwsvc_dropdownsearch.sru:L342</c>, and note the case that matters most:
+    /// the event is raised EVEN WHEN THE SEARCH TEXT IS EMPTY [<c>:L247</c>, <c>:L315</c>], which is how
+    /// an application supplies an initial filter for a freshly focused cell.
+    /// </para>
+    /// </remarks>
+    public Func<long, IDataWindowObject?, string, string, string>? DdsGetFilterHandler { get; set; }
+
+    /// <summary>
+    /// The stand-in for a subscriber of <see cref="DataWindowServiceHost.OnDDSFiltered"/>.
+    /// </summary>
+    /// <remarks>
+    /// An <see cref="Action"/> because the legacy event is declared with no <c>type</c> clause
+    /// [<c>se_cst_dw.sru:L28</c>]. The two counts it receives are PRE-MOVE values
+    /// [<c>n_cst_dwsvc_dropdownsearch.sru:L393-L394</c>, <c>:L408</c>]; capturing them here is how a
+    /// suite proves the subject did not re-read them after relocating rows.
+    /// </remarks>
+    public Action<long, IDataWindowObject?, long, long>? DdsFilteredHandler { get; set; }
+
+    /// <summary>
+    /// The column <see cref="GetColumnName"/> answers, standing in for the column that holds the caret.
+    /// </summary>
+    /// <remarks>
+    /// THE EMPTY-STRING DEFAULT IS THE DATAWINDOW'S OWN ANSWER when no column has focus, so a fixture
+    /// that never sets it is not in an invented state.
+    /// </remarks>
+    public string CurrentColumnName { get; set; } = string.Empty;
 
     /// <summary>
     /// Scripts <see cref="LoseFocus"/>, whose value the raw handler returns verbatim
@@ -3715,6 +3991,139 @@ public class FakeDataWindowHost : DataWindowServiceHost
     }
 
     /// <inheritdoc/>
+    public override DateTime? GetItemDateTime(long row, string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        RecordRead("GetItemDateTime", row, column);
+        return FakeItemValue.AsDateTime(ReadNamedItem(row, column));
+    }
+
+    /// <inheritdoc/>
+    public override DateOnly? GetItemDate(long row, string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        RecordRead("GetItemDate", row, column);
+        return FakeItemValue.AsDateOnly(ReadNamedItem(row, column));
+    }
+
+    /// <inheritdoc/>
+    public override TimeOnly? GetItemTime(long row, string column)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        RecordRead("GetItemTime", row, column);
+        return FakeItemValue.AsTimeOnly(ReadNamedItem(row, column));
+    }
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, DateTime? value)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        CallLog.RecordOverload("SetItem", "DateTime?", row, column, value);
+        return StoreNamedItem(row, column, value);
+    }
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, DateOnly? value)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        CallLog.RecordOverload("SetItem", "DateOnly?", row, column, value);
+        return StoreNamedItem(row, column, value);
+    }
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, TimeOnly? value)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+
+        CallLog.RecordOverload("SetItem", "TimeOnly?", row, column, value);
+        return StoreNamedItem(row, column, value);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// DELEGATES TO <see cref="FindHandler"/> AND ANSWERS <c>0</c> WHEN NONE IS SET, because this fake
+    /// carries no DataWindow expression engine and <c>Find</c>'s argument is expression TEXT, not a
+    /// predicate this double could evaluate. Zero is "no matching row", which is what terminates the
+    /// auto-width walk at <c>n_cst_dwsvc_contextmenu.sru:L1192</c> - so an unconfigured fake plans no row
+    /// candidates rather than looping.
+    /// </para>
+    /// <para>
+    /// THE CALL IS RECORDED WITH THE EXPRESSION VERBATIM, which is what lets a suite assert the three
+    /// byte-exact predicates at <c>:L1183</c>, <c>:L1186</c> and <c>:L1188</c> without reaching into the
+    /// service.
+    /// </para>
+    /// </remarks>
+    public override long Find(string expression, long start, long end)
+    {
+        ArgumentNullException.ThrowIfNull(expression);
+
+        RecordRead("Find", expression, start, end);
+
+        return FindHandler is null ? 0L : FindHandler(expression, start, end);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Answers <see cref="CurrentColumnName"/>, which a suite sets to whatever column the caret is
+    /// supposed to be in. The empty-string default is what a DataWindow answers when no column has focus.
+    /// </remarks>
+    public override string GetColumnName()
+    {
+        RecordRead("GetColumnName");
+        return CurrentColumnName;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// REPRODUCES POWERSCRIPT'S TWO MODES: a row of <c>0</c> APPENDS and any other row inserts BEFORE
+    /// that row, and the answer is the one-based number of the new row. A row past the end is a failure
+    /// answering <c>-1</c>, matching the DataWindow rather than clamping - the paste path at
+    /// <c>n_cst_dwsvc_contextmenu.sru:L999</c> tests <c>&lt;= 0</c> and fails the whole operation, so a
+    /// clamping double would make that branch unreachable.
+    /// </para>
+    /// <para>
+    /// <see cref="InsertRowHandler"/> pre-empts all of it when set, which is how a suite forces the
+    /// refusal branch without arranging an impossible row number.
+    /// </para>
+    /// <para>
+    /// THE NEW ROW CARRIES NO VALUES AND NO STATUSES, so every column reads back null - which is exactly
+    /// what makes the paste path's three-valued comparisons fall through and write.
+    /// </para>
+    /// </remarks>
+    public override long InsertRow(long row)
+    {
+        CallLog.Record("InsertRow", row);
+
+        if (InsertRowHandler is not null)
+        {
+            return InsertRowHandler(row);
+        }
+
+        List<FakeBufferRow> rows = BufferOf(DwBuffer.Primary);
+
+        if (row == 0L)
+        {
+            rows.Add(new FakeBufferRow());
+            return OneBasedRows.ToRowNumber(rows.Count - 1);
+        }
+
+        if (!OneBasedRows.IsInRange(row, rows.Count))
+        {
+            return -1L;
+        }
+
+        rows.Insert(OneBasedRows.ToListIndex(row), new FakeBufferRow());
+        return row;
+    }
+
+    /// <inheritdoc/>
     /// <remarks>
     /// Answers <c>display</c> and <c>value</c> joined by a TAB, which is the shape the oracle splits with
     /// <c>Pos(sVal,"~t")</c> [<c>n_cst_dwsvc.sru:L653-L656</c>], and answers THE EMPTY STRING once
@@ -3729,6 +4138,13 @@ public class FakeDataWindowHost : DataWindowServiceHost
 
         RecordRead("GetValue", column, index);
 
+        // A taught RAW list wins, because a code-table entry is not obliged to carry a tab and the
+        // composed form below can never express one that does not - see SetValueList.
+        if (_rawValueLists.TryGetValue(column, out List<string>? raw))
+        {
+            return index < 1 || index > raw.Count ? string.Empty : raw[OneBasedRows.ToListIndex(index)];
+        }
+
         FakeDataWindowObjectDefinition? definition = FindObject(column);
         if (definition is null || index < 1 || index > definition.CodeTable.Count)
         {
@@ -3737,6 +4153,31 @@ public class FakeDataWindowHost : DataWindowServiceHost
 
         FakeCodeTableEntry entry = definition.CodeTable[OneBasedRows.ToListIndex(index)];
         return entry.Display + "\t" + entry.Value;
+    }
+
+    /// <summary>
+    /// Teaches one column's value list VERBATIM, bypassing the display-tab-value composition.
+    /// </summary>
+    /// <param name="column">The column the list belongs to.</param>
+    /// <param name="values">
+    /// The entries, in one-based order. Each is returned by <see cref="GetValue"/> exactly as given.
+    /// </param>
+    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// TEST SETUP, SO IT IS NOT RECORDED - see the call-log policy in this file's header. It exists
+    /// because <see cref="AddCodeTableEntry"/> always composes <c>display + TAB + value</c>, which cannot
+    /// express AN ENTRY WITH NO TAB - and that case is live behaviour the drop-down search port must
+    /// reproduce: <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L123</c>
+    /// takes <c>Left(sVal,Pos(sVal,"~t") - 1)</c>, so a missing tab makes <c>Pos</c> answer <c>0</c> and
+    /// the display half comes out EMPTY while the match still counts at <c>:L127</c>. A double that could
+    /// not stage that case would leave the behaviour untested.
+    /// </remarks>
+    public void SetValueList(string column, params string[] values)
+    {
+        ArgumentNullException.ThrowIfNull(column);
+        ArgumentNullException.ThrowIfNull(values);
+
+        _rawValueLists[column] = [.. values];
     }
 
     /// <inheritdoc/>
@@ -3905,7 +4346,7 @@ public class FakeDataWindowHost : DataWindowServiceHost
     }
 
     /// <inheritdoc/>
-    public override long ItemChanged(long row, IDataWindowObject dwo, string data)
+    public override long ItemChanged(long row, IDataWindowObject dwo, string? data)
     {
         CallLog.Record("Event ItemChanged", row, dwo, data);
         return ItemChangedHandler is null
@@ -3914,12 +4355,48 @@ public class FakeDataWindowHost : DataWindowServiceHost
     }
 
     /// <inheritdoc/>
-    public override long OnDoItemChange(long row, IDataWindowObject dwo, string data)
+    public override long OnInitContextMenu(long row, IDataWindowObject dwo)
+    {
+        CallLog.Record("Event OnInitContextMenu", row, dwo);
+        return InitContextMenuHandler is null
+            ? base.OnInitContextMenu(row, dwo)
+            : InitContextMenuHandler(row, dwo);
+    }
+
+    /// <inheritdoc/>
+    public override long OnContextMenu(long row, IDataWindowObject dwo, long mid)
+    {
+        CallLog.Record("Event OnContextMenu", row, dwo, mid);
+        return ContextMenuHandler is null
+            ? base.OnContextMenu(row, dwo, mid)
+            : ContextMenuHandler(row, dwo, mid);
+    }
+
+    /// <inheritdoc/>
+    public override long OnDoItemChange(long row, IDataWindowObject dwo, string? data)
     {
         CallLog.Record("Event OnDoItemChange", row, dwo, data);
         return DoItemChangeHandler is null
             ? base.OnDoItemChange(row, dwo, data)
             : DoItemChangeHandler(row, dwo, data);
+    }
+
+    /// <inheritdoc/>
+    public override void OnDDSGetFilter(long row, IDataWindowObject? dwo, string data, ref string filter)
+    {
+        CallLog.Record("Event OnDDSGetFilter", row, dwo, data, filter);
+
+        if (DdsGetFilterHandler is not null)
+        {
+            filter = DdsGetFilterHandler(row, dwo, data, filter);
+        }
+    }
+
+    /// <inheritdoc/>
+    public override void OnDDSFiltered(long row, IDataWindowObject? dwo, long rowCount, long filteredCount)
+    {
+        CallLog.Record("Event OnDDSFiltered", row, dwo, rowCount, filteredCount);
+        DdsFilteredHandler?.Invoke(row, dwo, rowCount, filteredCount);
     }
 
     /// <inheritdoc/>

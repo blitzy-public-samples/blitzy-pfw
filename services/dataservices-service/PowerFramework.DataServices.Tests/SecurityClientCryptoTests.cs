@@ -1636,7 +1636,7 @@ public sealed class SecurityClientCryptoTests
 
         // THE THREE REPRODUCIBLE SHAPES, ASSERTED TOGETHER SO THE NARROWING CANNOT SILENTLY WIDEN.
         // The codebook mode needs no vector, so both of its shapes go; chaining goes with a vector.
-        foreach ((string? ivRef, long? mode) in (( string?, long? )[])
+        foreach ((string? ivRef, long? mode) in ((string?, long?)[])
         [
             (null, Enums.CRYPTO_SYMCRYPT_MODE_ECB),
             (FakeIvRef, Enums.CRYPTO_SYMCRYPT_MODE_ECB),

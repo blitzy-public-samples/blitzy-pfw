@@ -2779,7 +2779,7 @@ public sealed class NullValueValidatorParityTests
         /// the <c>:L198-L202</c> equality test true and satisfies the <c>if bEqual</c> guard at
         /// <c>:L229</c>.
         /// </summary>
-        public long OnDoItemChange(long row, IDataWindowObject dwo, string data) => RetCode.OK;
+        public long OnDoItemChange(long row, IDataWindowObject dwo, string? data) => RetCode.OK;
 
         /// <summary>
         /// Unreached on these rows, because <c>:L204</c> only raises it when the buffer value CHANGED

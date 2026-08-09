@@ -483,8 +483,16 @@ internal interface IItemChangeEventSink
     /// [<c>:L292</c>], preceded by a dormant commented byte-length check
     /// [<c>:L280-L290</c>] - reproduced inert on <see cref="ItemChangeProtocol"/>, never revived.
     /// </para>
+    /// <para>
+    /// <paramref name="data"/> IS NULLABLE, and the null is load-bearing rather than defensive: the
+    /// paste path at <c>n_cst_dwsvc_contextmenu.sru:L1050</c> runs <c>SetNull(sVal)</c> for an empty
+    /// pasted cell in a <c>NilIsNull</c> column and raises this event with that null at <c>:L1051</c>.
+    /// Nothing on THIS protocol's own path produces a null - <c>OnDwnItemChange</c> guards its own
+    /// <c>data</c> as non-null - so the widening exists purely to let an attached service express what
+    /// its oracle expresses.
+    /// </para>
     /// </remarks>
-    long OnDoItemChange(long row, IDataWindowObject dwo, string data);
+    long OnDoItemChange(long row, IDataWindowObject dwo, string? data);
 
     /// <summary>
     /// Raised, NESTED, when the buffer value turns out to have changed - the port of

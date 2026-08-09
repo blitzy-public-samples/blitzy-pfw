@@ -575,17 +575,27 @@ public sealed class TransactionPoolOptions
     /// default here.
     /// </para>
     /// <para>
-    /// SECURITY RULING - THIS STRING IS NEVER RESOLVED INTO A TYPE. The legacy pattern for a class-name
-    /// setting is <c>Create Using</c> on the configured string
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L199-L203</c>], and this port
-    /// does NOT reproduce that: there is no <c>Type.GetType</c> and no <c>Activator.CreateInstance</c>
-    /// over a configured value anywhere in this service. Loading a type named by external configuration
-    /// is a new attack surface - a writable settings source becomes arbitrary code execution inside the
-    /// only process that holds a storage provider - and the technology transition does not require it.
-    /// In this port the transaction implementation is a dependency-injection registration in
-    /// <c>Program.cs</c>: an empty value means "use the registered default", and a non-empty value is
-    /// carried for parity and diagnostics only. It is deliberately NOT validated against a type name,
-    /// because validating it would imply it is going to be loaded.
+    /// SECURITY RULING - RESOLUTION IS REGISTRY-FIRST AND ANY TYPE-NAME FALLBACK IS CONFINED TO THIS
+    /// SERVICE'S OWN ASSEMBLY. The legacy pattern for a class-name setting is <c>Create Using</c> on the
+    /// configured string [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L166-L170</c>,
+    /// and the same idiom at <c>n_cst_thread_task_sqlbase.sru:L199-L203</c>], and the
+    /// empty-versus-non-empty branch at that site is observable, so it IS reproduced - by
+    /// <c>PooledTransactionActivator</c> in <c>Transactions/TransactionPool.cs</c>, which documents the
+    /// four constraints it enforces. Unconstrained, loading a type named by external configuration is a
+    /// new attack surface: a writable settings source becomes arbitrary code execution inside the only
+    /// process that holds a storage provider. The four constraints close that route - an
+    /// assembly-qualified name is refused outright so no assembly can ever be located or loaded,
+    /// resolution is performed against the declaring assembly alone, the type must implement the
+    /// service-internal pooled-transaction contract and be a concrete non-generic class, and only three
+    /// fixed constructor shapes are accepted.
+    /// </para>
+    /// <para>
+    /// THE RECOMMENDED POSTURE IS STILL TO LEAVE THIS EMPTY. An empty value means "use the registered
+    /// default", which is a dependency-injection registration in <c>Program.cs</c>; a deployment that
+    /// needs an alternative should register a named factory, which the activator consults BEFORE any
+    /// reflection and which therefore never reaches the type-name fallback at all. The property remains
+    /// deliberately NOT validated against a type name, both because a registry name is not a type name
+    /// and because validating it would imply it must always be loadable.
     /// </para>
     /// </remarks>
     public string TransactionClassName { get; set; } = string.Empty;

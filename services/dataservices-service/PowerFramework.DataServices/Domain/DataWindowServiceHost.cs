@@ -155,6 +155,30 @@
 //      GetItemNumber                  2       GetItemDateTime                2
 //      GetItemDate                    2       GetItemTime                    2
 //
+//  A THIRD SOURCE CONTRIBUTES TO THIS CONTRACT, AND ITS USES ARE MEASURED THE SAME WAY.
+//  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru is ported by
+//  Services/DropDownSearchModel.cs, which is an ATTACHED SERVICE and therefore reaches its host and
+//  its child only through this file. Its additions, each with the call sites that justify it:
+//
+//      MEMBER                      USES  WHERE (all n_cst_dwsvc_dropdownsearch.sru)
+//      GetColumnName                  1  :L138 - "" is a live answer, tested at :L139
+//      OnDDSGetFilter                 1  :L342 - `#DataWindow.Event`, ref string out-parameter
+//      OnDDSFiltered                  1  :L408 - `#DataWindow.Event`, pre-move counts
+//
+//      datawindowchild additions, receiver `_editCtx.dddw.object` in every case:
+//      SetRedraw                      2  :L387 :L410      SetFilter                      1  :L389
+//      Filter                         1  :L390            Sort                           1  :L391
+//      SetSort                        1  :L220            FilteredCount                  2  :L394 :L402
+//      RowsMoveFilterToPrimary        1  :L402 - narrowed to the one form used; see its remarks
+//
+//  MEASURED AND DELIBERATELY NOT ADDED, so the omissions are auditable rather than accidental:
+//  `Handle(...)` [:L171, :L214, :L469], `IsWindowVisible` [:L255, :L385], `SetDetailHeight`
+//  [:L399, :L404], `SetText` and `SelectText` [:L128-L129], `UnitsToPixels` [:L480] and the four
+//  `Win32.*` calls [:L256, :L474, :L475, :L489]. All are the presentational half of the drop-down
+//  search split (AAP 0.2.1.3 Correction 4) and belong to the reserved `/v1/design/**` extension
+//  point (AAP 0.4.4); putting any of them on this contract would breach constraint C-D by giving a
+//  deferred capability a place to live.
+//
 //  ============================================================================================
 //  DECISIONS (constraint C-K: every technology-specific and boundary-specific decision recorded)
 //  ============================================================================================
@@ -246,6 +270,8 @@
 
 using System.Globalization;
 
+using PowerFramework.DataServices.Validators;
+using PowerFramework.Shared.Containers;
 using PowerFramework.Shared.Eventful;
 using PowerFramework.Shared.Kernel;
 
@@ -378,6 +404,39 @@ public interface IDataWindowObject
     /// </para>
     /// </remarks>
     string ColType { get; }
+
+    /// <summary>
+    /// The object's KIND, as the legacy raw token: <c>"column"</c>, <c>"compute"</c>, <c>"text"</c>,
+    /// <c>"datawindow"</c>, and so on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ADDED ON MEASURED EVIDENCE, AND DISTINCT FROM <see cref="ColType"/> - the two are easy to
+    /// confuse and mean different things. <see cref="ColType"/> is the DATABASE type of a column
+    /// (<c>"char(50)"</c>, <c>"decimal(2)"</c>); this is the DataWindow OBJECT type. Both exist on the
+    /// legacy <c>dwobject</c> and both are read in the in-scope set.
+    /// </para>
+    /// <para>
+    /// TWO CALL SITES, BOTH IN THE CONTEXT-MENU SERVICE'S DEFAULT ITEM SET:
+    /// <c>n_cst_dwsvc_contextmenu.sru:L242</c> reads
+    /// <c>row &gt; 0 and (dwo.Type = "column" or dwo.Type = "compute")</c> and <c>:L245</c> reads
+    /// <c>elseif dwo.Type = "compute"</c>. Those two tests select between the two item-copy early
+    /// returns, so the token decides whether the menu has one item or many.
+    /// </para>
+    /// <para>
+    /// NOT SUBSTITUTED BY <c>Describe(dwo.Name + ".Type")</c>, EVEN THOUGH THE SAME FILE USES THAT FORM
+    /// ELSEWHERE [<c>:L258</c>]. The two mechanisms agree for a NAMED object and disagree for the
+    /// DataWindow itself, whose property expression is not describable, so collapsing them would change
+    /// behaviour in exactly the case a right-click on the DataWindow background produces. The oracle
+    /// uses both forms and both are carried.
+    /// </para>
+    /// <para>
+    /// Non-nullable, because <c>:L242</c> compares it with no null guard. An implementation with no
+    /// object kind to report returns the empty string, which matches neither arm and falls through -
+    /// the same outcome the legacy reaches for any unrecognised kind.
+    /// </para>
+    /// </remarks>
+    string Type { get; }
 
     /// <summary>
     /// The primary buffer view, so that <c>dwo.Primary[row]</c> ports as
@@ -686,6 +745,169 @@ public interface IDataWindowChild
     /// <returns>The item value, or <see langword="null"/> when the item is null.</returns>
     /// <remarks>AAP 0.4.5.2 maps <c>time</c> onto <see cref="TimeOnly"/>.</remarks>
     TimeOnly? GetItemTime(long row, string column);
+
+    // ------------------------------------------------------------------------------------------
+    //  THE FILTER, SORT AND BUFFER MEMBERS THE DROP-DOWN SEARCH SERVICE DRIVES ON ITS CHILD
+    //  ----------------------------------------------------------------------------------------
+    //  ADDED FOR Services/DropDownSearchModel.cs, AND EVERY ONE IS MEASURED ON THE CHILD RATHER
+    //  THAN ON THE HOST, exactly as the typed getters above are. Measured on
+    //  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru, where the
+    //  receiver is `_editCtx.dddw.object` - the datawindowchild handle - in all nine cases:
+    //      SetRedraw       :L387 (false) and :L410 (true), the pair around a filter application
+    //      SetFilter       :L389
+    //      Filter          :L390
+    //      Sort            :L391 and, indirectly, :L220's SetSort
+    //      SetSort         :L220, seeding the display-column sort when the child has none
+    //      FilteredCount   :L394 (captured for the event) and :L402 (re-read for the move)
+    //      RowsMove        :L402
+    //  There is not one `#DataWindow.SetFilter`, `#DataWindow.FilteredCount` or
+    //  `#DataWindow.RowsMove` in that source, so declaring them on the host as well would invent a
+    //  surface the oracle does not have (constraint C-B).
+    //
+    //  WHY NOT REUSE THE HOST'S Filter()/Sort()/SetSort()/SetRedraw(). Those exist for the CHAIN -
+    //  the host's Filter() is overridden by se_cst_dw and notifies the row-select service
+    //  [se_cst_dw.sru:L406-L410]. The child is a different DataWindow entirely, with its own buffers
+    //  and its own filter, and routing its calls through the host's members would apply the search
+    //  filter to the parent DataWindow. The duplication of NAME here is the oracle's own and is not
+    //  a duplication of BEHAVIOUR.
+    //
+    //  THE RETURN TYPES ARE THE POWERSCRIPT ONES, NOT NORMALISED. PowerBuilder's SetFilter, Filter,
+    //  Sort, SetSort and SetRedraw all answer `integer` with 1 for success, and RowsMove answers
+    //  `integer` as well; the one call site that tests a result is :L402, which tests `= 1`
+    //  explicitly. Mapping any of them onto bool would erase the distinction between the -1 failure
+    //  and the null-argument outcome the runtime also has.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Suspends or resumes the child's repainting - the port of <c>dwc.SetRedraw(enable)</c>
+    /// (<c>n_cst_dwsvc_dropdownsearch.sru:L387</c>, <c>:L410</c>).
+    /// </summary>
+    /// <param name="enable"><see langword="false"/> to suspend, <see langword="true"/> to resume.</param>
+    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
+    /// <remarks>
+    /// A HEADLESS SERVICE STILL CALLS THIS, AND THAT IS DELIBERATE. Repaint suppression is a
+    /// data-model operation in the sense that matters here - it is a property of the DataWindow
+    /// object, not a window handle operation - so it stays on this contract. What does NOT cross the
+    /// boundary is the legacy's PRECONDITION for calling it: <c>if IsWindowVisible(hWnd)</c>
+    /// [<c>:L385</c>] is a <c>user32.dll</c> prototype [<c>:L41-L44</c>] that AAP 0.6.5 places OUT OF
+    /// SCOPE as presentational. Services/DropDownSearchModel.cs records that narrowing at the call
+    /// site.
+    /// </remarks>
+    int SetRedraw(bool enable);
+
+    /// <summary>
+    /// Sets the child's filter expression WITHOUT applying it - the port of
+    /// <c>dwc.SetFilter(filter)</c> (<c>n_cst_dwsvc_dropdownsearch.sru:L389</c>).
+    /// </summary>
+    /// <param name="filter">
+    /// The filter expression, which may be the empty string to clear the filter. THE TEXT IS PASSED
+    /// THROUGH VERBATIM AND UNESCAPED - it is composed by
+    /// <c>n_cst_dwsvc_dropdownsearch.sru:L313-L344</c> from unescaped interpolation, which AAP 0.6.4
+    /// records as a known legacy defect to be documented rather than silently corrected
+    /// (constraint C-B).
+    /// </param>
+    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
+    /// <remarks>
+    /// SETTING AND APPLYING ARE TWO CALLS IN POWERBUILDER AND STAY TWO CALLS HERE. <c>:L389</c> sets
+    /// and <c>:L390</c> applies; merging them would change the observable sequence a
+    /// characterization recording captures, and would also make the no-op case - a filter set to the
+    /// value it already had - indistinguishable from a re-filter.
+    /// </remarks>
+    int SetFilter(string filter);
+
+    /// <summary>
+    /// Applies the filter expression, moving non-matching rows to the filter buffer - the port of
+    /// <c>dwc.Filter()</c> (<c>n_cst_dwsvc_dropdownsearch.sru:L390</c>).
+    /// </summary>
+    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
+    int Filter();
+
+    /// <summary>
+    /// Applies the current sort - the port of <c>dwc.Sort()</c>
+    /// (<c>n_cst_dwsvc_dropdownsearch.sru:L391</c>).
+    /// </summary>
+    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
+    /// <remarks>
+    /// Called UNCONDITIONALLY after every filter application at <c>:L391</c>, with no guard and no
+    /// test of the result. Filtering re-orders the primary buffer, so the oracle re-sorts to restore
+    /// the order the child was given at <c>:L220</c>.
+    /// </remarks>
+    int Sort();
+
+    /// <summary>
+    /// Sets the child's sort expression WITHOUT applying it - the port of
+    /// <c>dwc.SetSort(sort)</c> (<c>n_cst_dwsvc_dropdownsearch.sru:L220</c>).
+    /// </summary>
+    /// <param name="sort">
+    /// The sort expression, for example the display column name followed by <c>" ASC"</c>, which is
+    /// the one form the oracle composes.
+    /// </param>
+    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
+    /// <remarks>
+    /// Reached only when the child reports no sort of its own -
+    /// <c>if dwc.Describe("DataWindow.Table.Sort") = "?"</c> [<c>:L219</c>] - so a child that already
+    /// carries a sort keeps it. The oracle discards the result.
+    /// </remarks>
+    int SetSort(string sort);
+
+    /// <summary>
+    /// The number of rows the filter moved out of the primary buffer - the port of
+    /// <c>dwc.FilteredCount()</c> (<c>n_cst_dwsvc_dropdownsearch.sru:L394</c>, <c>:L402</c>).
+    /// </summary>
+    /// <returns>The filtered row count.</returns>
+    /// <remarks>
+    /// READ TWICE BY THE ORACLE FOR TWO DIFFERENT PURPOSES, AND THE TWO READS MUST STAY SEPARATE.
+    /// <c>:L394</c> captures it BEFORE any buffer move, because that captured value is what the
+    /// <c>onddsfiltered</c> event carries [<c>:L408</c>] - the oracle stresses the point in comments
+    /// at <c>:L392</c> and <c>:L407</c>. <c>:L402</c> re-reads it live as the row count to move.
+    /// </remarks>
+    long FilteredCount();
+
+    /// <summary>
+    /// Moves rows out of the child's FILTER buffer and into its PRIMARY buffer - the port of the one
+    /// <c>RowsMove</c> form the oracle uses,
+    /// <c>dwc.RowsMove(startRow, endRow, Filter!, dwc, beforeRow, Primary!)</c>
+    /// (<c>n_cst_dwsvc_dropdownsearch.sru:L402</c>).
+    /// </summary>
+    /// <param name="startRow">
+    /// The first row to move, in the FILTER buffer's own one-based numbering. The oracle always
+    /// passes <c>1</c>.
+    /// </param>
+    /// <param name="endRow">
+    /// The last row to move. The oracle passes a live <see cref="FilteredCount"/>, so the whole
+    /// filter buffer moves.
+    /// </param>
+    /// <param name="beforeRow">
+    /// The one-based primary-buffer row to insert before. The oracle passes the pre-move row count
+    /// plus one, which appends.
+    /// </param>
+    /// <returns>
+    /// <c>1</c> on success, <c>-1</c> on failure. THE ORACLE TESTS <c>= 1</c> [<c>:L402</c>] and
+    /// performs its follow-up only then, so the value must not be normalised to a bool.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// NARROWED TO THE ONE FORM THE ORACLE USES, DELIBERATELY. The general PowerScript member takes
+    /// a source buffer, a target DataWindow and a target buffer; at the single call site the source
+    /// is always <c>Filter!</c>, the target is always THIS SAME CHILD and the target buffer is always
+    /// <c>Primary!</c>. Carrying three parameters no caller can vary would widen the contract past
+    /// what AAP 0.4.2.5's consumption criterion admits - the same judgement this file already applies
+    /// to <see cref="DataWindowServiceHost.GetObjectAttribute"/>'s dropped second argument - and it
+    /// would additionally drag the generated <c>common.v1.DwBuffer</c> enum into
+    /// Services/DropDownSearchModel.cs, whose contract audit under constraint C-A requires ZERO
+    /// references to the published contracts assembly. The buffers are therefore named in the member
+    /// name and documented here rather than passed.
+    /// </para>
+    /// <para>
+    /// WHY A HEADLESS SERVICE PERFORMS THIS MOVE AT ALL. Relocating rows between buffers is a
+    /// data-model operation and its result - which rows now sit where - is data. What is deferred is
+    /// the CONCEALMENT that surrounds it: the two <c>SetDetailHeight</c> calls at <c>:L399</c> and
+    /// <c>:L404</c> are row geometry, which AAP 0.4.4 assigns to the reserved
+    /// <c>/v1/design/**</c> extension point. Services/DropDownSearchModel.cs performs the move and
+    /// publishes the row ranges those two calls would have consumed.
+    /// </para>
+    /// </remarks>
+    int RowsMoveFilterToPrimary(long startRow, long endRow, long beforeRow);
 }
 
 /// <summary>
@@ -885,6 +1107,52 @@ public abstract class DataWindowServiceHost
     /// </para>
     /// </remarks>
     public abstract int SetRow(long row);
+
+    /// <summary>
+    /// The name of the column that currently has the edit cursor - the port of
+    /// <c>GetColumnName()</c>
+    /// (<c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L138</c>).
+    /// </summary>
+    /// <returns>
+    /// The current column's name, or THE EMPTY STRING when no column is current. Both outcomes are
+    /// live: the one call site tests <c>if sColName = "" then return</c> [<c>:L139</c>] and abandons
+    /// the refresh, so the empty string is an ordinary answer rather than an error and must NOT be
+    /// mapped onto null or onto an exception.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// ADDED FOR Services/DropDownSearchModel.cs. It is a DATA-MODEL read - which column the cursor
+    /// sits in - and not a window or input-method operation, which is why it belongs on this contract
+    /// rather than on the deferred <c>/v1/design/**</c> side of the drop-down search split
+    /// (AAP 0.2.1.3 Correction 4, AAP 0.4.4).
+    /// </para>
+    /// <para>
+    /// PAIRED WITH <see cref="GetRow"/> AND IN THAT ORDER. The oracle reads the row FIRST and
+    /// abandons on zero [<c>:L136-L137</c>], then reads the column and abandons on empty
+    /// [<c>:L138-L139</c>], and only then resolves the name to an object through
+    /// <see cref="DataWindowServiceBase.GetDataWindowObject(in string)"/>. Reversing the two reads
+    /// would resolve a column object for a DataWindow with no current row.
+    /// </para>
+    /// <para>
+    /// NAME-VALUED RATHER THAN OBJECT-VALUED, DELIBERATELY. PowerScript's own member answers a
+    /// string, and the ported call site passes that string through the name-taking accessor. Having
+    /// this member answer an <see cref="IDataWindowObject"/> instead would fuse two legacy calls into
+    /// one and lose the empty-string branch, which is the only branch that distinguishes "no current
+    /// column" from "a column that does not resolve".
+    /// </para>
+    /// <para>
+    /// TWO SERVICES CONSUME IT, AND ONE DECLARATION SERVES BOTH. The context-menu service reads it
+    /// immediately after <see cref="GetRow"/> to establish that a click landed on the cell being
+    /// edited - <c>if #DataWindow.GetRow() &lt;&gt; row then return true</c>
+    /// [<c>n_cst_dwsvc_contextmenu.sru:L320</c>] followed by
+    /// <c>if #DataWindow.GetColumnName() &lt;&gt; sName then return true</c> [<c>:L321</c>] - and the
+    /// drop-down search service reads it for the focus refresh at [<c>:L138-L139</c>]. Both consume
+    /// the SAME legacy member, so declaring it twice on this contract would be two names for one
+    /// oracle call rather than two capabilities; the empty-string answer is live for both, allowing
+    /// the popup in the first case and abandoning the refresh in the second.
+    /// </para>
+    /// </remarks>
+    public abstract string GetColumnName();
 
     /// <summary>
     /// Applies the text currently in the edit control to the buffer - the port of
@@ -1442,11 +1710,19 @@ public abstract class DataWindowServiceHost
     //  se_cst_dw's coercion table, which genuinely holds `Long(dwo.ID)` [se_cst_dw.sru:L233-L243].
     //  Both calling conventions exist in the legacy and both are therefore carried.
     //
-    //  ONLY THE THREE TYPES ACTUALLY CONSUMED. The reads are decimal, number and string; the writes
-    //  are decimal, long and string. No date, datetime or time member appears here, because
-    //  n_cst_dwsvc_rowselect.sru's three-arm type switch [:L203-L222, :L230-L237, :L246-L253] has
-    //  exactly three arms - COL_TYPE_DECIMAL, COL_TYPE_INTEGER and a default that reads text - and
-    //  adding the other three would fabricate surface no ported call site reaches.
+    //  ALL SIX TYPES ARE CONSUMED, AND THE COUNT WAS REVISED ON MEASURED EVIDENCE. This banner
+    //  originally read "only the three types actually consumed" because the only source measured for
+    //  it was n_cst_dwsvc_rowselect.sru, whose type switch [:L203-L222, :L230-L237, :L246-L253] has
+    //  exactly three arms - COL_TYPE_DECIMAL, COL_TYPE_INTEGER and a default that reads text. A
+    //  FOURTH in-scope source contradicts that: n_cst_dwsvc_contextmenu.sru's paste-into-column
+    //  protocol switches on ALL SEVEN COL_TYPE_* values and reads
+    //  `#DataWindow.GetItemDateTime` [:L1036], `GetItemDate` [:L1042] and `GetItemTime` [:L1048]
+    //  BY NAME, then writes `SetItem(nRow,colName,DateTime(sVal))` [:L1067],
+    //  `SetItem(nRow,colName,Date(sVal))` [:L1069] and `SetItem(nRow,colName,Time(sVal))` [:L1071]
+    //  BY NAME. So the three temporal members below are consumed surface, not fabricated surface,
+    //  and the by-name family is now the same six types IDataWindowChild already declares - which
+    //  is the shape it should always have had, since a column read is a column read whether the
+    //  buffer is the DataWindow's or its child's.
     // ==========================================================================================
 
     /// <summary>
@@ -1551,6 +1827,161 @@ public abstract class DataWindowServiceHost
     /// </param>
     /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
     public abstract int SetItem(long row, string column, long? value);
+
+    /// <summary>
+    /// Reads a <c>datetime</c>-typed item by column NAME - the port of
+    /// <c>#DataWindow.GetItemDateTime(nRow, colName)</c>
+    /// (<c>n_cst_dwsvc_contextmenu.sru:L1036</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <returns>The item value, or <see langword="null"/> when the item is null.</returns>
+    /// <remarks>
+    /// Reached only on the <c>COL_TYPE_DATETIME</c> arm of the paste protocol, where the comparison is
+    /// <c>GetItemDateTime(nRow,colName) = DateTime(sVal)</c> - a comparison of MOMENTS and not of text,
+    /// unlike the decimal and number arms which stringify first. Nullable because a null item must not
+    /// compare equal to a parsed moment, and because AAP 0.4.5.4 forbids collapsing null onto a
+    /// default - substituting <c>DateTime.MinValue</c> here would make a null item indistinguishable
+    /// from the empty <c>datetime</c> the oracle keeps in its own <c>dttEmpty</c> local
+    /// [<c>:L945</c>], which is a DIFFERENT value with a different meaning.
+    /// </remarks>
+    public abstract DateTime? GetItemDateTime(long row, string column);
+
+    /// <summary>
+    /// Reads a <c>date</c>-typed item by column NAME - the port of
+    /// <c>#DataWindow.GetItemDate(nRow, colName)</c> (<c>n_cst_dwsvc_contextmenu.sru:L1042</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <returns>The item value, or <see langword="null"/> when the item is null.</returns>
+    /// <remarks>
+    /// <see cref="DateOnly"/> rather than <see cref="DateTime"/>, per AAP 0.4.5.2's mapping of the
+    /// legacy <c>date</c>. Keeping the two distinct is what preserves the oracle's own distinction
+    /// between the <c>COL_TYPE_DATE</c> arm [<c>:L1037-L1042</c>], which validates with
+    /// <c>IsDate</c>, and the <c>COL_TYPE_DATETIME</c> arm [<c>:L1031-L1036</c>], which compares
+    /// against an empty <c>datetime</c> instead.
+    /// </remarks>
+    public abstract DateOnly? GetItemDate(long row, string column);
+
+    /// <summary>
+    /// Reads a <c>time</c>-typed item by column NAME - the port of
+    /// <c>#DataWindow.GetItemTime(nRow, colName)</c> (<c>n_cst_dwsvc_contextmenu.sru:L1048</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <returns>The item value, or <see langword="null"/> when the item is null.</returns>
+    /// <remarks>
+    /// <see cref="TimeOnly"/> per AAP 0.4.5.2's mapping of the legacy <c>time</c>.
+    /// </remarks>
+    public abstract TimeOnly? GetItemTime(long row, string column);
+
+    /// <summary>
+    /// Writes a <c>datetime</c> value into one item by column NAME - the port of
+    /// <c>#DataWindow.SetItem(nRow, colName, DateTime(sVal))</c>
+    /// (<c>n_cst_dwsvc_contextmenu.sru:L1067</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="value">
+    /// The value to write, or <see langword="null"/> when the source text did not parse - which for
+    /// PowerScript's <c>DateTime</c> is the EMPTY datetime rather than an error, and is passed through
+    /// as a null here rather than coerced.
+    /// </param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    public abstract int SetItem(long row, string column, DateTime? value);
+
+    /// <summary>
+    /// Writes a <c>date</c> value into one item by column NAME - the port of
+    /// <c>#DataWindow.SetItem(nRow, colName, Date(sVal))</c>
+    /// (<c>n_cst_dwsvc_contextmenu.sru:L1069</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="value">The value to write, or <see langword="null"/> when the text did not parse.</param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    public abstract int SetItem(long row, string column, DateOnly? value);
+
+    /// <summary>
+    /// Writes a <c>time</c> value into one item by column NAME - the port of
+    /// <c>#DataWindow.SetItem(nRow, colName, Time(sVal))</c>
+    /// (<c>n_cst_dwsvc_contextmenu.sru:L1071</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="value">The value to write, or <see langword="null"/> when the text did not parse.</param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    public abstract int SetItem(long row, string column, TimeOnly? value);
+
+    // ==========================================================================================
+    //  THREE FURTHER DATA-MODEL OPERATIONS, EACH ADDED ON A MEASURED CALL SITE
+    //  ----------------------------------------------------------------------------------------
+    //  Find and InsertRow are all consumed by
+    //  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru and by nothing else in
+    //  the in-scope set. Each is a DATA-MODEL operation - it reads or writes the buffer, or reports
+    //  which column the edit control is on - so each belongs here rather than on any service, and
+    //  none of them is presentational: no window, no pointer, no device coordinate is involved.
+    //  Constraint C-D is therefore not engaged by any of the three.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Searches the primary buffer for the first row in a range that satisfies a DataWindow boolean
+    /// expression - the port of <c>#DataWindow.Find(sFind, start, end)</c>
+    /// (<c>n_cst_dwsvc_contextmenu.sru:L1191</c>, <c>:L1222</c>, <c>:L1357</c>, <c>:L1388</c>).
+    /// </summary>
+    /// <param name="expression">
+    /// The boolean DataWindow expression to match. Built by
+    /// <c>Formatting.Sprintf</c> from one of three format strings at
+    /// <c>n_cst_dwsvc_contextmenu.sru:L1183</c>, <c>:L1186</c> and <c>:L1188</c>, and passed through
+    /// VERBATIM: this member neither parses nor rewrites it.
+    /// </param>
+    /// <param name="start">The one-based row to start from, inclusive.</param>
+    /// <param name="end">The one-based row to stop at, inclusive.</param>
+    /// <returns>
+    /// The one-based row number of the first match, <c>0</c> when there is no match in the range, or a
+    /// NEGATIVE value on error. All three outcomes are load-bearing: the ported scan loops
+    /// <c>do while(nRow &gt; 0)</c> [<c>:L1192</c>, <c>:L1358</c>], so <c>0</c> terminates it and a
+    /// negative value terminates it identically - which is exactly what the oracle does with an
+    /// unusable expression, silently measuring nothing rather than faulting.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THIS IS A DISTINCT-VALUE SCAN, NOT A SEARCH FOR A KNOWN ROW. Its callers use it to skip rows
+    /// whose display value equals row 1's, so that only rows that could widen a column are examined.
+    /// Losing it would not merely change complexity - it would change WHICH rows are measured, and
+    /// therefore the computed width.
+    /// </para>
+    /// <para>
+    /// THE RANGE IS INCLUSIVE AT BOTH ENDS AND ONE-BASED AT BOTH ENDS. The oracle passes
+    /// <c>Find(sFind, 1, nRowCnt)</c> on the first pass and <c>Find(sFind, nRow + 1, nRowCnt)</c> on
+    /// each subsequent pass, then guards <c>if nRow = nRowCnt then exit</c> BEFORE searching again
+    /// [<c>:L1221</c>, <c>:L1387</c>] - so a match on the final row never leads to a call with
+    /// <c>start &gt; end</c>. An implementation must still answer <c>0</c> for an empty range rather
+    /// than throwing, because that guard is the oracle's and a future edit could remove it.
+    /// </para>
+    /// </remarks>
+    public abstract long Find(string expression, long start, long end);
+
+    /// <summary>
+    /// Inserts a row into the primary buffer - the port of <c>#DataWindow.InsertRow(0)</c>
+    /// (<c>n_cst_dwsvc_contextmenu.sru:L999</c>).
+    /// </summary>
+    /// <param name="row">
+    /// The one-based row to insert BEFORE, or <c>0</c> to append after the last row. The only ported
+    /// call site passes <c>0</c>; the parameter is carried because PowerBuilder's own signature
+    /// carries it and narrowing it to a no-argument append would silently forbid an insert the legacy
+    /// permits.
+    /// </param>
+    /// <returns>
+    /// The one-based number of the inserted row, or a value <c>&lt;= 0</c> on failure. The
+    /// distinction is observable: <c>if #DataWindow.InsertRow(0) &lt;= 0 then return RetCode.FAILED</c>
+    /// [<c>:L999</c>] abandons the whole paste, mid-way, leaving the rows already written in place.
+    /// </returns>
+    /// <remarks>
+    /// REACHED ONLY WHEN THE PASTED TEXT HAS MORE LINES THAN THE BUFFER HAS ROWS [<c>:L994</c>], so
+    /// pasting is allowed to GROW the buffer. That is a data-model mutation and stays on this
+    /// contract; nothing about it is presentational.
+    /// </remarks>
+    public abstract long InsertRow(long row);
 
     /// <summary>
     /// Reads one entry of a column's code table - the port of
@@ -1851,7 +2282,12 @@ public abstract class DataWindowServiceHost
     /// </summary>
     /// <param name="row">The one-based row being changed.</param>
     /// <param name="dwo">The column being changed.</param>
-    /// <param name="data">The entered text, not yet written to the buffer.</param>
+    /// <param name="data">
+    /// The entered text, not yet written to the buffer. NULLABLE for the same reason
+    /// <see cref="OnDoItemChange(long, IDataWindowObject, string?)"/> is - that event's one-line body
+    /// forwards straight to this one [<c>se_cst_dw.sru:L292</c>], so a null arriving there arrives
+    /// here unchanged.
+    /// </param>
     /// <returns>
     /// A value in the FOUR-VALUE ITEM-CHANGE ALPHABET <c>{0, 1, 2, 3}</c> - NOT a
     /// <c>RetCode</c>.
@@ -1879,7 +2315,7 @@ public abstract class DataWindowServiceHost
     /// (constraint C-B).
     /// </para>
     /// </remarks>
-    public virtual long ItemChanged(long row, IDataWindowObject dwo, string data)
+    public virtual long ItemChanged(long row, IDataWindowObject dwo, string? data)
     {
         return 0L;
     }
@@ -1952,24 +2388,47 @@ public abstract class DataWindowServiceHost
     }
 
     // ==========================================================================================
-    //  THE TWO se_cst_dw SEMANTIC EVENTS THAT AN ATTACHED SERVICE RAISES THROUGH #DataWindow
+    //  THE SIX se_cst_dw SEMANTIC EVENTS THAT AN ATTACHED SERVICE RAISES THROUGH #DataWindow
     //  ----------------------------------------------------------------------------------------
     //  These are declared BY se_cst_dw itself [se_cst_dw.sru:L24 `event type long ondoitemchange
     //  (long row, dwobject dwo, string data)` and :L26 `event ondoitemchanged (long row, dwobject
     //  dwo)`], so the file header's ownership statement correctly assigns the 22-event chain to
-    //  Domain/DataWindowEventChain.cs. EXACTLY TWO OF THE NINE ESCAPE THAT BOUNDARY, and they do so
+    //  Domain/DataWindowEventChain.cs. EXACTLY SIX OF THE NINE ESCAPE THAT BOUNDARY, and they do so
     //  because an ATTACHED SERVICE raises them on its host rather than the chain raising them on
-    //  itself: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L238 is
-    //  `#DataWindow.Event OnDoItemChange(nRow,dwo,sVal)` and :L254 is
-    //  `#DataWindow.Event OnDoItemChanged(nRow,dwo)`. A service holds its host through the base's
-    //  DataWindow property, which is typed as THIS contract, so the two must be declared here or
-    //  the ported call sites cannot exist at all.
+    //  itself:
+    //      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L238
+    //          `#DataWindow.Event OnDoItemChange(nRow,dwo,sVal)`
+    //      n_cst_dwsvc_rowselect.sru:L254
+    //          `#DataWindow.Event OnDoItemChanged(nRow,dwo)`
+    //      n_cst_dwsvc_contextmenu.sru:L147
+    //          `if #DataWindow.Event OnInitContextMenu(row,dwo) = 1 then return`
+    //      n_cst_dwsvc_contextmenu.sru:L194
+    //          `if #DataWindow.Event OnContextMenu(row,dwo,rtCode) = 1 then return`
+    //      n_cst_dwsvc_dropdownsearch.sru:L342
+    //          `#DataWindow.Event OnDDSGetFilter(_editCtx.row,_editCtx.dwo,data,ref sFilter)`
+    //      n_cst_dwsvc_dropdownsearch.sru:L408
+    //          `#DataWindow.Event OnDDSFiltered(row,dwo,nRowCnt,nFilteredCnt)`
+    //  A service holds its host through the base's DataWindow property, which is typed as THIS
+    //  contract, so all six must be declared here or the ported call sites cannot exist at all.
     //
-    //  THE OTHER SEVEN ARE DELIBERATELY ABSENT. oninitcontextmenu, oncontextmenu, onddsgetfilter,
-    //  oncolumnexpinvokemethod, onitemchanged, onddsfiltered and oncolumnexptrace [:L11-L14, :L25,
-    //  :L28, :L32] are raised by the CHAIN on itself, never by a service on its host, so none of
-    //  them is consumed through this contract and adding them would fabricate surface (C-B).
-    //  `ondwnchanging` is likewise absent: it is a raw pbm_dwn* handler on the chain [:L21].
+    //  CORRECTION OF RECORD, KEPT VISIBLE RATHER THAN QUIETLY EDITED AWAY (constraint C-K). This
+    //  block has twice understated the count, and both understatements were MEASUREMENT ERRORS
+    //  rather than judgement calls. It first read "EXACTLY TWO OF THE NINE", naming only the two
+    //  row-select raises; the two context-menu events were then found to be raised by the
+    //  context-menu service at :L147 and :L194 - the chain's own doc-comment already said as much
+    //  while declaring them, a contradiction resolved in favour of the oracle. They remain visible
+    //  on the chain, now as `override`, so no consumer of the chain loses anything and there is
+    //  still exactly ONE definition of each legacy event. The same measurement then found
+    //  onddsgetfilter and onddsfiltered among the events said to be "raised by the CHAIN on
+    //  itself": they are not - both raises above are `#DataWindow.Event ...` inside the drop-down
+    //  search service, so the chain only DECLARES them. The count is SIX, and the two DDS members
+    //  were added when Services/DropDownSearchModel.cs was ported and that error surfaced.
+    //
+    //  THE OTHER THREE ARE DELIBERATELY ABSENT. oncolumnexpinvokemethod, onitemchanged and
+    //  oncolumnexptrace [:L14, :L25, :L32] are raised by the CHAIN on itself, never by a service on
+    //  its host, so none of them is consumed through this contract and adding them would fabricate
+    //  surface (C-B). `ondwnchanging` is likewise absent: it is a raw pbm_dwn* handler on the
+    //  chain [:L21].
     //
     //  SIGNATURE-COMPATIBLE WITH Domain/ItemChangeProtocol.cs's IItemChangeEventSink ON PURPOSE.
     //  That internal interface declares OnDoItemChange and OnDoItemChanged with exactly these
@@ -1993,7 +2452,13 @@ public abstract class DataWindowServiceHost
     /// </summary>
     /// <param name="row">The one-based row whose item is changing.</param>
     /// <param name="dwo">The column the change applies to.</param>
-    /// <param name="data">The proposed new value, as text.</param>
+    /// <param name="data">
+    /// The proposed new value, as text. NULLABLE, AND THE NULL IS LOAD-BEARING: the paste path at
+    /// <c>n_cst_dwsvc_contextmenu.sru:L1050</c> executes <c>SetNull(sVal)</c> when the pasted cell is
+    /// empty and the column declares <c>NilIsNull = "yes"</c>, and then raises this very event with
+    /// that null at <c>:L1051</c>. Collapsing it to an empty string would tell a handler that a value
+    /// is being written where the oracle says a null is - a difference a veto can observe.
+    /// </param>
     /// <returns>
     /// <c>0</c> TO ACCEPT. ANY NON-ZERO VALUE IS A REJECTION - the test at
     /// <c>n_cst_dwsvc_rowselect.sru:L238</c> is <c>&lt;&gt; 0</c>, so this is NOT the four-value
@@ -2007,7 +2472,7 @@ public abstract class DataWindowServiceHost
     /// because a headless service has no dialog. The four-value alphabet that the CHAIN layers on top
     /// of this event lives in Domain/ItemChangeProtocol.cs and is a separate mechanism.
     /// </remarks>
-    public virtual long OnDoItemChange(long row, IDataWindowObject dwo, string data)
+    public virtual long OnDoItemChange(long row, IDataWindowObject dwo, string? data)
     {
         return 0L;
     }
@@ -2027,6 +2492,149 @@ public abstract class DataWindowServiceHost
     /// have.
     /// </remarks>
     public virtual void OnDoItemChanged(long row, IDataWindowObject dwo)
+    {
+    }
+
+    /// <summary>
+    /// Raised so the application can populate the context menu before it is shown - the port of
+    /// <c>Event OnInitContextMenu(row, dwo)</c> (declared <c>se_cst_dw.sru:L11</c>; raised by an
+    /// attached service at <c>n_cst_dwsvc_contextmenu.sru:L147</c>).
+    /// </summary>
+    /// <param name="row">The ONE-BASED row the menu was requested over, or <c>0</c> when none.</param>
+    /// <param name="dwo">The object the menu was requested over.</param>
+    /// <returns>
+    /// <c>1</c> TO PREVENT THE MENU; any other value continues. The test at <c>:L147</c> is
+    /// <c>= 1</c> - an EQUALITY, not a truthiness test - so <c>2</c> does not prevent and neither does
+    /// <c>-1</c>. This is the tri-valued prevent convention read at its shallow value, and it must not
+    /// be flattened to a boolean.
+    /// </returns>
+    /// <remarks>
+    /// ORDERING: SYNCHRONOUS, AND STRICTLY SO (AAP 0.6.1.4 pattern (b) for the context-menu area).
+    /// Population must COMPLETE before the identifier passed to
+    /// <see cref="OnContextMenu(long, IDataWindowObject, long)"/> can mean anything, because that
+    /// identifier is chosen from the very items this event added. A prevention here suppresses the whole
+    /// menu, and the service still performs its per-invocation cleanup on that path
+    /// [<c>:L197-L201</c>].
+    /// </remarks>
+    public virtual long OnInitContextMenu(long row, IDataWindowObject dwo)
+    {
+        return 0L;
+    }
+
+    /// <summary>
+    /// Raised when a context-menu item has been chosen, before the service's own default handling -
+    /// the port of <c>Event OnContextMenu(row, dwo, mid)</c> (declared <c>se_cst_dw.sru:L12</c>;
+    /// raised by an attached service at <c>n_cst_dwsvc_contextmenu.sru:L194</c>).
+    /// </summary>
+    /// <param name="row">The ONE-BASED row the menu was shown over.</param>
+    /// <param name="dwo">The object the menu was shown over.</param>
+    /// <param name="mid">
+    /// The chosen item's identifier, as returned by the menu. Meaningful only because
+    /// <see cref="OnInitContextMenu(long, IDataWindowObject)"/> has already completed.
+    /// </param>
+    /// <returns>
+    /// <c>1</c> to prevent the service's own default handling; any other value lets it proceed. Again an
+    /// EQUALITY test at <c>:L194</c>.
+    /// </returns>
+    /// <remarks>
+    /// THE SECOND HALF OF THE CONTEXT-MENU PAIR, AND THE APPLICATION'S CHANCE TO CLAIM AN IDENTIFIER
+    /// IT ADDED ITSELF. The service's own dispatch [<c>:L196</c>, <c>:L204-L222</c>] recognises only the
+    /// nine reserved <c>MID_*</c> values and has NO default arm, so an application identifier reaches
+    /// the dispatch harmlessly and does nothing - preventing here is how an application acts on its own
+    /// item rather than how it avoids a fault.
+    /// </remarks>
+    public virtual long OnContextMenu(long row, IDataWindowObject dwo, long mid)
+    {
+        return 0L;
+    }
+
+    /// <summary>
+    /// Raised to let the application supply, replace or extend the drop-down search filter the
+    /// service has just composed - the port of
+    /// <c>Event OnDDSGetFilter(row, dwo, data, ref filter)</c> (declared
+    /// <c>se_cst_dw.sru:L13</c>; raised by an attached service at
+    /// <c>n_cst_dwsvc_dropdownsearch.sru:L342</c>).
+    /// </summary>
+    /// <param name="row">
+    /// The one-based row being edited, taken from the service's edit context. IT MAY BE <c>0</c>:
+    /// the context is reset to row zero on lose-focus [<c>n_cst_dwsvc_dropdownsearch.sru:L148</c>],
+    /// and the composition path is also reached during context initialisation.
+    /// </param>
+    /// <param name="dwo">
+    /// The column being edited, or <see langword="null"/> when the edit context holds no valid
+    /// object. NULLABLE ON PURPOSE - the legacy passes <c>_editCtx.dwo</c> straight through, and that
+    /// field is deliberately assigned an UNINITIALISED <c>dwobject</c> by the lose-focus reset
+    /// [<c>:L145-L148</c>]. Collapsing that to a sentinel would hide the reset from a handler that
+    /// legitimately branches on it.
+    /// </param>
+    /// <param name="data">
+    /// The search text, verbatim and UNESCAPED. THE EMPTY STRING IS A LIVE VALUE AND ITS CALL IS
+    /// LOAD BEARING: <c>:L247</c> composes with <c>_of_GetFilter("")</c>, which skips the whole clause
+    /// builder [<c>:L315</c>] and reaches this event with empty data - that is precisely how an
+    /// application supplies the INITIAL filter for a freshly focused cell.
+    /// </param>
+    /// <param name="filter">
+    /// The filter expression, passed BY REFERENCE. On entry it carries whatever the service composed,
+    /// which is the empty string when no clause was produced; on return it is whatever the handler
+    /// left there, and the service uses that value verbatim [<c>:L344</c>]. A handler may replace it,
+    /// wrap it, or leave it untouched.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// RETURNS NOTHING, AND THAT IS THE LEGACY DECLARATION. <c>se_cst_dw.sru:L13</c> carries no
+    /// <c>type</c> clause, so the whole result of the event travels through the <c>ref</c> parameter.
+    /// </para>
+    /// <para>
+    /// STRICTLY SYNCHRONOUS, AND THE <c>ref</c> IS THE REASON. AAP 0.6.1.4 assigns the drop-down
+    /// search capability area pattern (b) - synchronous request and response with NO reordering
+    /// permitted - specifically because a <c>ref string</c> result has no asynchronous
+    /// representation: the caller blocks on the produced filter and cannot proceed without it. This
+    /// member must therefore never be made fire-and-forget and must never carry a sequencing token as
+    /// though its delivery were reorderable.
+    /// </para>
+    /// <para>
+    /// WHY VIRTUAL WITH AN EMPTY DEFAULT. A PowerBuilder event with no script attached performs
+    /// nothing and leaves its arguments alone, which is exactly this: the composed filter passes
+    /// through unchanged. Making it abstract would force every host - including every test double -
+    /// to supply a body for an event the legacy allows to be unhandled.
+    /// </para>
+    /// </remarks>
+    public virtual void OnDDSGetFilter(long row, IDataWindowObject? dwo, string data, ref string filter)
+    {
+    }
+
+    /// <summary>
+    /// Raised after the drop-down search filter has been applied - the port of
+    /// <c>Event OnDDSFiltered(row, dwo, rowcount, filteredcount)</c> (declared
+    /// <c>se_cst_dw.sru:L28</c>; raised by an attached service at
+    /// <c>n_cst_dwsvc_dropdownsearch.sru:L408</c>).
+    /// </summary>
+    /// <param name="row">The one-based row being edited. May be <c>0</c>; see
+    /// <see cref="OnDDSGetFilter"/>.</param>
+    /// <param name="dwo">The column being edited, or <see langword="null"/>; see
+    /// <see cref="OnDDSGetFilter"/>.</param>
+    /// <param name="rowCount">
+    /// The child's row count AS IT WAS BEFORE ANY BUFFER MOVE. The oracle captures it at
+    /// <c>:L393</c>, under a comment at <c>:L392</c> that exists solely to say so, and repeats the
+    /// same comment at <c>:L407</c> immediately above this raise.
+    /// </param>
+    /// <param name="filteredCount">
+    /// The child's filtered-row count, likewise captured BEFORE the move, at <c>:L394</c>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// RETURNS NOTHING - <c>se_cst_dw.sru:L28</c> declares no <c>type</c> clause, so no veto is
+    /// possible from here and the raiser discards nothing.
+    /// </para>
+    /// <para>
+    /// THE ORDERING IS CONTRACT, NOT INCIDENTAL: the two counts are captured BEFORE the show-filtered
+    /// rows relocation and this event is raised AFTER it, carrying the pre-move values. A handler
+    /// therefore sees the partition as the user's query produced it rather than as the concealment
+    /// left it. An implementation that re-read either count at raise time would report the post-move
+    /// totals, which for the relocating branch are a different pair of numbers entirely.
+    /// </para>
+    /// </remarks>
+    public virtual void OnDDSFiltered(long row, IDataWindowObject? dwo, long rowCount, long filteredCount)
     {
     }
 }
@@ -2484,12 +3092,20 @@ public abstract class DataWindowServiceBase
     //  :L189-L196 has to come out byte-identical everywhere or two services will disagree about
     //  whether the same cell is protected.
     //
-    //  THE ADMISSION CRITERION IS DEPENDENCY, NOT SIZE. Every member below composes a string and
-    //  hands it to DataWindowServiceHost.Describe. Not one of them needs the DataWindow expression
-    //  evaluator, an IDataWindowChild, an ordered map or any presentational primitive - so each is
-    //  fully portable here, and each is fully testable against a Describe test double with no
-    //  DataWindow, no database and no UI (constraint C-H). The three helpers that DO need that
-    //  machinery are named in this class's own remarks and stay in Expressions/.
+    //  THE ADMISSION CRITERION IS DEPENDENCY, NOT SIZE. Every member in the first eight composes a
+    //  string and hands it to DataWindowServiceHost.Describe. Not one of them needs the DataWindow
+    //  expression evaluator or any presentational primitive - so each is fully portable here, and each
+    //  is fully testable against a Describe test double with no DataWindow, no database and no UI
+    //  (constraint C-H). The helpers that DO need the expression evaluator are named in this class's
+    //  own remarks and stay in Expressions/.
+    //
+    //  SEVEN MORE FOLLOW THE EIGHT, ADDED FOR Services/ContextMenuModel.cs, and two of them widen the
+    //  criterion in a way worth stating: GetColumnValueMap reaches an IDataWindowChild and builds an
+    //  OrderedMap. Neither is presentational and neither is an expression evaluator - a child
+    //  DataWindow is a DATA source and the ordered map is the ported n_map container - so the criterion
+    //  still holds as written: what may not appear here is UI, and what must not appear here is
+    //  behaviour a single service could own alone. Both new dependencies arrive through project
+    //  references PowerFramework.DataServices.csproj already declares (constraint C-I).
     //
     //  NAMES ARE PascalCase, FOLLOWING GetDataWindowObject ABOVE. The `_of_` prefix is PowerBuilder's
     //  protected-member convention, not part of any wire payload, log record or characterization
@@ -2661,6 +3277,53 @@ public abstract class DataWindowServiceBase
     /// normalises both together.
     /// </remarks>
     private const string InvalidExpressionSentinel = "!";
+
+    /// <summary>
+    /// The answer a DataWindow gives when a Describe property is recognised but cannot be determined
+    /// in the current context - <c>"?"</c>.
+    /// </summary>
+    /// <remarks>
+    /// DISTINCT FROM <see cref="InvalidExpressionSentinel"/> AND NOT INTERCHANGEABLE WITH IT, for the
+    /// reason that constant's own remarks give. It is named here because the seven helpers added for
+    /// <c>Services/ContextMenuModel.cs</c> test BOTH sentinels together at five sites -
+    /// <c>n_cst_dwsvc.sru</c>'s <c>_of_getdwoprop</c> body, <c>:L587</c>, <c>:L598</c>, <c>:L599</c>
+    /// and <c>:L701</c> - and spelling the pair out at each would invite one of them to drift.
+    /// </remarks>
+    private const string UndeterminedValueSentinel = "?";
+
+    /// <summary>
+    /// The TAB that separates a DataWindow property's unconditional value from its conditional
+    /// expression, and that separates the entries of both <c>DataWindow.Objects</c> and a code-table
+    /// entry's display and data halves.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ONE CHARACTER, THREE UNRELATED GRAMMARS, AND THE ORACLE SPELLS IT <c>"~t"</c> IN ALL THREE. It is
+    /// named once here rather than at each site so that a reader can see the three uses are the same
+    /// byte and not a coincidence: the property split
+    /// (<c>_of_getdwoprop</c>, <c>_of_getpropexp</c>), the code-table split
+    /// [<c>n_cst_dwsvc.sru:L653</c>] and the object-name list [<c>:L697</c>].
+    /// </para>
+    /// <para>
+    /// PROTECTED RATHER THAN PRIVATE because a derived service has to make the SAME tab test for
+    /// itself: the auto-width pass detects an expression-form format with
+    /// <c>Pos(sFormat,"~t") &gt; 0</c> [<c>n_cst_dwsvc_contextmenu.sru:L1169</c>, <c>:L1335</c>] before
+    /// handing the stripped expression to <see cref="GetPropertyExpression"/>. Re-declaring the literal
+    /// there would be exactly the duplication this constant exists to prevent.
+    /// </para>
+    /// </remarks>
+    protected const char PropertyExpressionSeparator = '\t';
+
+    /// <summary>
+    /// The separator between names in the <c>DataWindow.Objects</c> answer - the same TAB as
+    /// <see cref="PropertyExpressionSeparator"/>, named separately because the grammar is different.
+    /// </summary>
+    /// <remarks>
+    /// The list has NO TRAILING SEPARATOR, which is the whole reason
+    /// <see cref="GetObjectNames(ref string[], in string, in string)"/> needs a tail block after its
+    /// loop [<c>n_cst_dwsvc.sru:L722-L742</c>].
+    /// </remarks>
+    private const char ObjectNameSeparator = '\t';
 
     /// <summary>
     /// Reads one of a column's properties, resolving a property EXPRESSION when the DataWindow
@@ -3020,6 +3683,714 @@ public abstract class DataWindowServiceBase
     {
         // n_cst_dwsvc.sru:L538
         return ConvertColumnType(RequireHost().Describe(name + ".ColType"));
+    }
+
+    // ==========================================================================================
+    //  SEVEN FURTHER PROTECTED HELPERS FROM n_cst_dwsvc, ALL CONCRETE IN THE ORACLE
+    //  ----------------------------------------------------------------------------------------
+    //  Every member below ports a body that ALREADY EXISTS in
+    //  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru as a `protected function`, so none
+    //  of them invents behaviour and none of them is abstract: adding them breaks no implementer.
+    //  They live here for the reason the whole helper layer lives here - the oracle declares them
+    //  `protected` on the SHARED BASE so that all five attached services reach one copy, and
+    //  reproducing them on a service instead would fork that copy per service.
+    //
+    //  THEY ARE ADDED BECAUSE THEY ARE CONSUMED. Services/ContextMenuModel.cs reaches every one:
+    //  _of_LookupDisplay at n_cst_dwsvc_contextmenu.sru:L1205 and :L1371; _of_GetDWOProp at :L1142
+    //  and :L1308; _of_GetDWOText at :L1137 and :L1303; _of_GetPropExp at :L1171 and :L1337;
+    //  _of_SplitString at :L952; _of_GetObjectNames at :L1100 and :L1284; _of_GetColumnValueMap at
+    //  :L987. GetValue and GetChild were already added to the host contract on the strength of
+    //  _of_getcolumnvaluemap's two branches, which is the other half of this same finding.
+    //
+    //  NOTHING HERE IS PRESENTATIONAL. Each one reads the DATA MODEL through Describe, GetValue,
+    //  GetChild or a typed item read. No window, font, device coordinate or DPI conversion appears,
+    //  so constraint C-D is not engaged by any of them - which is exactly why the headless half of
+    //  the three presentational DataWindow services can be ported at all.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Reads one item's DISPLAY value - the value the user sees rather than the value stored - as the
+    /// port of <c>_of_LookupDisplay(row, colName)</c> (<c>n_cst_dwsvc.sru:L289</c>).
+    /// </summary>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="colName">The column name.</param>
+    /// <returns>
+    /// The display text, or one of the DataWindow sentinels - <c>"!"</c> for an invalid expression and
+    /// <c>"?"</c> for an undetermined one. Callers must test the sentinels rather than assume text;
+    /// <c>n_cst_dwsvc_contextmenu.sru:L1207</c> tests only for the empty string, which is the oracle's
+    /// own narrower test and is preserved as such at that call site.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE WHOLE BODY IS ONE <c>Describe</c> OF AN <c>Evaluate</c> PROPERTY - <c>:L289</c> is
+    /// <c>Describe("Evaluate('LookUpDisplay("+colName+")',"+string(row)+")")</c> - so the DISPLAY value
+    /// is obtained by asking the DataWindow's own expression engine, not by reading the buffer. That
+    /// distinction is the point of the member: for a code-table, DDDW or check-box column the stored
+    /// value and the displayed value differ.
+    /// </para>
+    /// <para>
+    /// AAP 0.4.2.5 NAMES THIS EXACT LINE as one of the sites behind the largest net-new obligation in
+    /// the refactor, because <c>Describe("Evaluate(...)")</c> has no .NET equivalent. It is resolved by
+    /// composition rather than here: this member composes the property text the oracle composes and
+    /// hands it to the host, and a host whose <see cref="DataWindowServiceHost.Describe(string)"/>
+    /// routes an <c>Evaluate</c> property through <c>Expressions/DataWindowExpressionEvaluator.cs</c> is
+    /// what answers it. Keeping the composition here and the evaluation there is what lets a test
+    /// double answer the same property with no evaluator at all.
+    /// </para>
+    /// <para>
+    /// THE ROW IS FORMATTED INVARIANTLY. <c>String(row)</c> on an integral value cannot vary by culture
+    /// in PowerScript, and pinning the culture here keeps the composed property text - which appears in
+    /// characterization recordings - identical on every machine.
+    /// </para>
+    /// </remarks>
+    protected string LookupDisplay(in long row, in string colName)
+    {
+        // n_cst_dwsvc.sru:L289
+        return RequireHost().Describe(
+            "Evaluate('LookUpDisplay("
+            + colName
+            + ")',"
+            + row.ToString(CultureInfo.InvariantCulture)
+            + ")");
+    }
+
+    /// <summary>
+    /// Reads one DataWindow object's property, resolving it when the property holds an EXPRESSION
+    /// rather than a literal - the port of <c>_of_GetDWOProp(dwoName, prop)</c>
+    /// (<c>n_cst_dwsvc.sru</c>, the <c>_of_getdwoprop</c> body).
+    /// </summary>
+    /// <param name="dwoName">The object name.</param>
+    /// <param name="prop">The property name, for example <c>"text"</c> or <c>"Format"</c>.</param>
+    /// <returns>
+    /// The literal property value, the EVALUATED value when the property carries an expression, or the
+    /// EMPTY STRING when the property is unreadable. Note that the two sentinels are normalised to the
+    /// empty string HERE, unlike <see cref="GetColumnProperty"/> which passes them through - the
+    /// difference is the oracle's and both are preserved.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE TAB IS THE DISCRIMINATOR, AND IT IS A THREE-STEP DECISION. A DataWindow property that has
+    /// been made conditional reads back as <c>literal~texpression"</c> - the unconditional value, a
+    /// TAB, then the expression with a TRAILING DOUBLE QUOTE. So: read the property; normalise both
+    /// sentinels to empty; if there is no tab the value IS the answer; otherwise take everything after
+    /// the tab, PREFIX A DOUBLE QUOTE, and evaluate the result at row <c>0</c>.
+    /// </para>
+    /// <para>
+    /// THE PREFIXED QUOTE IS NOT A TYPO AND MUST NOT BE "CLEANED UP". The stored form ends with a
+    /// closing quote and no opening one, so the oracle supplies the opening quote to make
+    /// <c>Evaluate("...",0)</c> parse - which is why this member, unlike
+    /// <see cref="GetPropertyExpression"/>, does NOT strip the trailing character. The two helpers
+    /// consume the same encoding for different purposes and their string arithmetic differs
+    /// accordingly.
+    /// </para>
+    /// <para>
+    /// ROW <c>0</c> IS DELIBERATE: a property expression is evaluated OUTSIDE any row context, so a
+    /// per-row property answers its unconditional form here.
+    /// </para>
+    /// </remarks>
+    protected string GetDataWindowObjectProperty(in string dwoName, in string prop)
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // _of_getdwoprop: sExp = #DataWindow.Describe(dwoName + "." + prop)
+        string exp = host.Describe(dwoName + "." + prop);
+
+        // _of_getdwoprop: if sExp = "!" or sExp = "?" then return ""
+        if (string.Equals(exp, InvalidExpressionSentinel, StringComparison.Ordinal)
+            || string.Equals(exp, UndeterminedValueSentinel, StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        // _of_getdwoprop: nPos = Pos(sExp,"~t") - PowerScript's Pos is one-based and answers 0 for no
+        // match, which is IndexOf's -1. The branch below is on PRESENCE, so the two agree.
+        int tab = exp.IndexOf(PropertyExpressionSeparator, StringComparison.Ordinal);
+        if (tab < 0)
+        {
+            // _of_getdwoprop: if nPos = 0 then return sExp
+            return exp;
+        }
+
+        // _of_getdwoprop: sExp = "~"" + Mid(sExp,nPos + 1)
+        //
+        // Mid's one-based start of (tabPosition + 1) is the zero-based index (tab + 1), so the
+        // conversion is the whole of the one-based arithmetic here and it is done exactly once.
+        string quoted = "\"" + exp[(tab + 1)..];
+
+        // _of_getdwoprop: return #DataWindow.Describe("Evaluate("+sExp+",0)")
+        return host.Describe("Evaluate(" + quoted + ",0)");
+    }
+
+    /// <summary>
+    /// Reads one DataWindow object's <c>text</c> property - the port of <c>_of_GetDWOText(dwoName)</c>
+    /// (<c>n_cst_dwsvc.sru</c>, the <c>_of_getdwotext</c> body).
+    /// </summary>
+    /// <param name="dwoName">The object name.</param>
+    /// <returns>The object's text, or the empty string when it is unreadable.</returns>
+    /// <remarks>
+    /// A ONE-LINE DELEGATION IN THE ORACLE TOO - <c>return _of_GetDWOProp(dwoName,"text")</c> - so it
+    /// inherits the expression resolution and the sentinel normalisation rather than repeating them. It
+    /// exists as its own member because the text property is the one a caller wants by far most often;
+    /// <c>n_cst_dwsvc_contextmenu.sru:L1137</c> and <c>:L1303</c> use it to obtain the label of a
+    /// heading object whose width is being measured.
+    /// </remarks>
+    protected string GetDataWindowObjectText(in string dwoName)
+    {
+        // _of_getdwotext: return _of_GetDWOProp(dwoName,"text")
+        return GetDataWindowObjectProperty(dwoName, "text");
+    }
+
+    /// <summary>
+    /// Extracts the EXPRESSION half of a conditional property value - the port of
+    /// <c>_of_GetPropExp(prop)</c> (<c>n_cst_dwsvc.sru</c>, the <c>_of_getpropexp</c> body).
+    /// </summary>
+    /// <param name="prop">
+    /// A raw property value, possibly in the <c>literal~texpression"</c> conditional form.
+    /// </param>
+    /// <returns>
+    /// The expression with its TRAILING DOUBLE QUOTE REMOVED, or <paramref name="prop"/> unchanged when
+    /// it carries no tab and is therefore not conditional.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE TRAILING CHARACTER IS DROPPED ON PURPOSE, AND THE ORACLE SAYS SO. Its own comment reads
+    /// 取表达式（排除尾部'"'） - "take the expression, excluding the trailing quote" - and the length
+    /// arithmetic <c>Len(prop) - nPos - 1</c> is one shorter than the remainder for exactly that
+    /// reason. This is the opposite operation to
+    /// <see cref="GetDataWindowObjectProperty"/>'s, which ADDS a leading quote: that one is building an
+    /// <c>Evaluate</c> argument, this one is extracting an expression to evaluate directly.
+    /// </para>
+    /// <para>
+    /// A ZERO-LENGTH RESULT ANSWERS THE EMPTY STRING RATHER THAN FAULTING, which is what PowerScript's
+    /// <c>Mid</c> does for a non-positive length. It is reachable: a value that ends with a tab has
+    /// nothing after it to take.
+    /// </para>
+    /// </remarks>
+    protected static string GetPropertyExpression(in string prop)
+    {
+        // _of_getpropexp: nPos = Pos(prop,"~t")
+        int tab = prop.IndexOf(PropertyExpressionSeparator, StringComparison.Ordinal);
+        if (tab < 0)
+        {
+            // _of_getpropexp: else return prop
+            return prop;
+        }
+
+        // _of_getpropexp: return Mid(prop,nPos + 1,Len(prop) - nPos - 1)
+        int start = tab + 1;
+        int length = prop.Length - start - 1;
+
+        return length <= 0 ? string.Empty : prop.Substring(start, length);
+    }
+
+    /// <summary>
+    /// Splits text on a multi-character delimiter into a one-based array - the port of
+    /// <c>_of_SplitString(src, delimiter, ref dstArray, ignoreEmpty)</c>
+    /// (<c>n_cst_dwsvc.sru:L455-L478</c>).
+    /// </summary>
+    /// <param name="src">
+    /// The text to split. Taken BY VALUE and consumed as the walk proceeds, exactly as the oracle
+    /// declares it - <c>string src</c> with no <c>readonly</c>, unlike every other parameter on the
+    /// signature.
+    /// </param>
+    /// <param name="delimiter">The delimiter. An EMPTY delimiter answers <c>0</c> and writes nothing.</param>
+    /// <param name="dstArray">
+    /// Receives the pieces. REPLACED WHOLESALE rather than appended to [<c>:L462</c>], so a caller
+    /// cannot accumulate across two calls.
+    /// </param>
+    /// <param name="ignoreEmpty">
+    /// When <see langword="true"/>, empty pieces are dropped; when <see langword="false"/>, they are
+    /// kept. <c>n_cst_dwsvc_contextmenu.sru:L952</c> passes <see langword="false"/>, so a blank
+    /// clipboard line is a real value that will be pasted.
+    /// </param>
+    /// <returns>
+    /// The number of pieces, which for a one-based array IS the last valid index - <c>UpperBound</c> at
+    /// <c>:L477</c>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// A TRAILING DELIMITER PRODUCES NO TRAILING EMPTY PIECE, and that asymmetry is the oracle's. The
+    /// loop appends the text BEFORE each delimiter and the tail is appended only
+    /// <c>if src &lt;&gt; ""</c> [<c>:L473</c>] - which is not governed by
+    /// <paramref name="ignoreEmpty"/> at all. So <c>"a\r\nb"</c> and <c>"a\r\nb\r\n"</c> both answer two
+    /// pieces, and the empty string answers ZERO pieces even with
+    /// <paramref name="ignoreEmpty"/> <see langword="false"/>. That zero is what
+    /// <c>n_cst_dwsvc_contextmenu.sru:L953</c> converts into <c>E_INVALID_ARGUMENT</c>.
+    /// </para>
+    /// <para>
+    /// STATIC BECAUSE IT TOUCHES NO HOST. It is the only member in this helper block that reads nothing
+    /// from the DataWindow, and saying so in the signature keeps it usable - and testable - with no
+    /// attachment.
+    /// </para>
+    /// </remarks>
+    protected static int SplitString(
+        string src,
+        in string delimiter,
+        ref string[] dstArray,
+        in bool ignoreEmpty)
+    {
+        ArgumentNullException.ThrowIfNull(src);
+        ArgumentNullException.ThrowIfNull(delimiter);
+
+        // :L459-L460  nLenDelimiter = Len(delimiter) / if nLenDelimiter = 0 then return 0 - and note
+        // this happens BEFORE dstArray is replaced, so an empty delimiter leaves the caller's array
+        // untouched rather than emptying it.
+        int delimiterLength = delimiter.Length;
+        if (delimiterLength == 0)
+        {
+            return 0;
+        }
+
+        // :L462  dstArray = emptyArray
+        List<string> pieces = [];
+
+        // :L464-L472  the walk. `remaining` is the oracle's `src`, reassigned as it consumes.
+        string remaining = src;
+        int pos = remaining.IndexOf(delimiter, StringComparison.Ordinal);
+        while (pos >= 0)
+        {
+            // :L466  str = Left(src,nPos - 1) - the text before the delimiter, empty when the
+            // delimiter is at the start.
+            string piece = remaining[..pos];
+
+            // :L467-L469  if str <> "" or Not ignoreEmpty then append
+            if (piece.Length > 0 || !ignoreEmpty)
+            {
+                pieces.Add(piece);
+            }
+
+            // :L470  src = Mid(src,nPos + nLenDelimiter) - one-based Mid start (pos + 1) plus the
+            // delimiter length, which is the zero-based index (pos + delimiterLength).
+            remaining = remaining[(pos + delimiterLength)..];
+            pos = remaining.IndexOf(delimiter, StringComparison.Ordinal);
+        }
+
+        // :L473-L475  the tail, appended only when non-empty REGARDLESS of ignoreEmpty.
+        if (remaining.Length > 0)
+        {
+            pieces.Add(remaining);
+        }
+
+        dstArray = [.. pieces];
+
+        // :L477  return UpperBound(dstArray)
+        return dstArray.Length;
+    }
+
+    /// <summary>
+    /// Enumerates the DataWindow's object names, optionally filtered by object type and by band - the
+    /// port of <c>_of_GetObjectNames(ref names, sType, band)</c> (<c>n_cst_dwsvc.sru:L669-L745</c>).
+    /// </summary>
+    /// <param name="names">Receives the names, REPLACED WHOLESALE [<c>:L695</c>].</param>
+    /// <param name="sType">
+    /// The object type to keep, or the EMPTY STRING for no type filter - the empty string is the
+    /// "unfiltered" marker, not a type that matches nothing [<c>:L706</c>].
+    /// </param>
+    /// <param name="band">The band to keep, or the empty string for no band filter [<c>:L711</c>].</param>
+    /// <returns>The number of names, which for a one-based array is the last valid index.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE FIRST FILTER IS NOT A FILTER BUT AN EXISTENCE TEST. Before either optional filter, every
+    /// candidate must answer a readable <c>.Band</c> [<c>:L700-L705</c>]: an object whose band reads
+    /// back as <c>"!"</c> or <c>"?"</c> is dropped. That is how the DataWindow-level pseudo-objects in
+    /// the <c>DataWindow.Objects</c> list are excluded without naming any of them.
+    /// </para>
+    /// <para>
+    /// THE BAND IS DESCRIBED TWICE WHEN A BAND FILTER IS SUPPLIED - once for the existence test and
+    /// again for the comparison [<c>:L712</c>] - and the redundancy is preserved rather than hoisted,
+    /// because <c>Describe</c> is observable: a recording of the ported call sequence has to match the
+    /// oracle's, and a host may legitimately answer differently on a second read.
+    /// </para>
+    /// <para>
+    /// THE TAIL BLOCK IS DUPLICATED IN THE ORACLE AND THE DUPLICATION IS FAITHFUL, NOT COPIED BY
+    /// ACCIDENT. <c>DataWindow.Objects</c> is TAB-SEPARATED WITHOUT A TRAILING TAB, so the loop
+    /// [<c>:L698-L721</c>] consumes every name that IS followed by a tab and the final name falls out
+    /// of the loop as the remainder, which <c>:L722-L742</c> then re-tests with the same three
+    /// conditions. Rewriting the two blocks as one would be a behaviour-preserving tidy-up in this
+    /// case, but it would also erase the shape a reader must recognise to see that the LAST object is
+    /// handled at all - and a list of exactly one object exercises only the tail block.
+    /// </para>
+    /// </remarks>
+    protected int GetObjectNames(ref string[] names, in string sType, in string band)
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // :L693  sObjString = #DataWindow.Describe("DataWindow.Objects")
+        string objString = host.Describe("DataWindow.Objects");
+
+        // :L695  names = emptyArray
+        List<string> collected = [];
+
+        // :L697-L721  the loop over every tab-terminated name.
+        int pos = objString.IndexOf(ObjectNameSeparator, StringComparison.Ordinal);
+        while (pos >= 0)
+        {
+            // :L699  sName = Left(sObjString,nPos - 1)
+            string name = objString[..pos];
+
+            if (MatchesObjectFilters(host, name, sType, band))
+            {
+                // :L717  names[UpperBound(names) + 1] = sName - the one-based append idiom.
+                collected.Add(name);
+            }
+
+            // :L719-L720  sObjString = Mid(sObjString,nPos + 1) then re-scan.
+            objString = objString[(pos + 1)..];
+            pos = objString.IndexOf(ObjectNameSeparator, StringComparison.Ordinal);
+        }
+
+        // :L722-L742  the tail: the final name carries no trailing tab.
+        if (objString.Length > 0 && MatchesObjectFilters(host, objString, sType, band))
+        {
+            // :L740
+            collected.Add(objString);
+        }
+
+        names = [.. collected];
+
+        // :L744  return UpperBound(names)
+        return names.Length;
+    }
+
+    /// <summary>
+    /// Enumerates the DataWindow's object names filtered by object type - the port of the two-argument
+    /// <c>_of_GetObjectNames(ref names, sType)</c> (<c>n_cst_dwsvc.sru:L747</c>).
+    /// </summary>
+    /// <param name="names">Receives the names.</param>
+    /// <param name="sType">The object type to keep.</param>
+    /// <returns>The number of names.</returns>
+    /// <remarks>A one-line delegation in the oracle: <c>_of_GetObjectNames(ref names,sType,"")</c>.</remarks>
+    protected int GetObjectNames(ref string[] names, in string sType)
+    {
+        // :L747
+        return GetObjectNames(ref names, sType, string.Empty);
+    }
+
+    /// <summary>
+    /// Enumerates ALL of the DataWindow's object names - the port of the one-argument
+    /// <c>_of_GetObjectNames(ref names)</c> (<c>n_cst_dwsvc.sru:L750</c>).
+    /// </summary>
+    /// <param name="names">Receives the names.</param>
+    /// <returns>The number of names.</returns>
+    /// <remarks>
+    /// A one-line delegation in the oracle: <c>_of_GetObjectNames(ref names,"","")</c>. This is the
+    /// arity both column-auto-width passes use [<c>n_cst_dwsvc_contextmenu.sru:L1100</c>,
+    /// <c>:L1284</c>], which is why they filter by band and type THEMSELVES afterwards rather than
+    /// asking for a filtered list - and the order of their own guards is observable.
+    /// </remarks>
+    protected int GetObjectNames(ref string[] names)
+    {
+        // :L750
+        return GetObjectNames(ref names, string.Empty, string.Empty);
+    }
+
+    /// <summary>
+    /// Builds a column's DISPLAY-to-DATA value map - the port of
+    /// <c>_of_GetColumnValueMap(colName)</c> (<c>n_cst_dwsvc.sru:L561-L664</c>).
+    /// </summary>
+    /// <param name="colName">The column name.</param>
+    /// <returns>
+    /// A NEWLY CREATED map, keyed by display value. NEVER <see langword="null"/> and never shared: the
+    /// oracle creates it at <c>:L585</c> before any guard and returns it from every exit, including the
+    /// three that return it EMPTY [<c>:L587</c>, <c>:L598</c>, <c>:L599</c>]. An empty map therefore
+    /// means "no translation is available", not "failure".
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// AN <see cref="OrderedMap"/> AND NOT A DICTIONARY, because insertion order is observable (AAP
+    /// 0.2.1.3 Correction 2) - the check-box branch below seeds five keys in a fixed order and a
+    /// positional read of the result is a legitimate use of the ported container.
+    /// </para>
+    /// <para>
+    /// THREE BRANCHES, SELECTED BY PROBING PROPERTIES IN A FIXED ORDER:
+    /// </para>
+    /// <para>
+    /// 1. DDDW [<c>:L590-L636</c>]. The child DataWindow's display and data columns are read by name,
+    /// their column types converted, and each row contributes one entry. Both the display and the data
+    /// value are read through a SIX-ARM type switch and both are stringified - only the string arm
+    /// escapes a <c>String(...)</c> wrapper, and only because it is already text. A NULL display value
+    /// or a NULL data value SKIPS the row [<c>:L617</c>, <c>:L633</c>] rather than storing a null.
+    /// </para>
+    /// <para>
+    /// 2. CHECK BOX [<c>:L639-L648</c>]. FIVE literal keys are seeded, and they are asymmetric: THREE
+    /// spellings map to the on value (是, Y and √) but only TWO map to the off value (否 and N).
+    /// There is no √-equivalent for off. That asymmetry is the oracle's and is reproduced - a paste of
+    /// a tick character sets the box, while there is no character that clears it by the same route.
+    /// The raw <c>Describe</c> answers are stored WITHOUT sentinel normalisation, so an unreadable
+    /// check-box property stores the sentinel text as the mapped value.
+    /// </para>
+    /// <para>
+    /// 3. CODE TABLE [<c>:L650-L659</c>]. <c>GetValue</c> is walked from index <c>1</c> until it answers
+    /// the empty string, and each entry is split on its tab. AN ENTRY WITH NO TAB IS SKIPPED ENTIRELY
+    /// [<c>:L654</c>] - it is not stored with an empty value - and the walk still advances, so one
+    /// malformed entry does not truncate the table.
+    /// </para>
+    /// <para>
+    /// <c>Set</c> AND NOT <c>Add</c>, at every one of the four store sites. The oracle writes
+    /// <c>map.Set</c> throughout, which OVERWRITES a duplicate key, whereas <c>Add</c> FAILS on one -
+    /// so a code table with two entries sharing a display value keeps the LAST, and swapping in
+    /// <c>Add</c> would keep the first and silently change which value a paste resolves to.
+    /// </para>
+    /// <para>
+    /// THE TEMPORAL RENDERINGS ARE SINGLE-SOURCED THROUGH THE THREE VALIDATORS rather than restated
+    /// here, for the reason <c>Expressions/MacroInvoker.cs</c> gives for the same choice: a value that
+    /// arrives back through a paste is re-parsed by those same validators, so the format used to write
+    /// a map value and the format used to read it must be one decision, not two.
+    /// </para>
+    /// </remarks>
+    protected OrderedMap GetColumnValueMap(in string colName)
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // :L585  map = Create n_map - BEFORE the guards, so every exit has a map to return.
+        OrderedMap map = new();
+
+        // :L587  if colName = "" or colName = "!" or colName = "?" then return map
+        if (colName.Length == 0
+            || string.Equals(colName, InvalidExpressionSentinel, StringComparison.Ordinal)
+            || string.Equals(colName, UndeterminedValueSentinel, StringComparison.Ordinal))
+        {
+            return map;
+        }
+
+        // :L589-L590  sProp = Describe(colName+".dddw.name") / if sProp <> "!" and sProp <> "?"
+        string prop = host.Describe(colName + ".dddw.name");
+        if (!IsUnreadable(prop))
+        {
+            PopulateFromDropDownDataWindow(host, colName, map);
+            return map;
+        }
+
+        // :L638-L639  sProp = Describe(colName+".edit.style") / if sProp = "checkbox"
+        prop = host.Describe(colName + ".edit.style");
+        if (string.Equals(prop, "checkbox", StringComparison.Ordinal))
+        {
+            // :L641-L642  the on value under three spellings.
+            string on = host.Describe(colName + ".checkbox.on");
+            _ = map.Set("是", on);
+            _ = map.Set("Y", on);
+            _ = map.Set("√", on);
+
+            // :L646-L648  the off value under two. THERE IS NO THIRD SPELLING - see the remarks.
+            string off = host.Describe(colName + ".checkbox.off");
+            _ = map.Set("否", off);
+            _ = map.Set("N", off);
+
+            return map;
+        }
+
+        // :L650-L659  the code-table walk.
+        long index = 1L;
+        string value = host.GetValue(colName, index);
+        while (value.Length > 0)
+        {
+            // :L653-L656  split on the tab; an entry with no tab is skipped rather than stored.
+            int tab = value.IndexOf(PropertyExpressionSeparator, StringComparison.Ordinal);
+            if (tab > 0)
+            {
+                _ = map.Set(value[..tab], value[(tab + 1)..]);
+            }
+
+            // :L657-L658
+            index++;
+            value = host.GetValue(colName, index);
+        }
+
+        // :L663
+        return map;
+    }
+
+    /// <summary>
+    /// The DDDW branch of <see cref="GetColumnValueMap"/> (<c>n_cst_dwsvc.sru:L592-L636</c>), factored
+    /// out so the three-branch selection above stays legible.
+    /// </summary>
+    /// <param name="host">The attached host.</param>
+    /// <param name="colName">The column name.</param>
+    /// <param name="map">The map to populate.</param>
+    private void PopulateFromDropDownDataWindow(
+        DataWindowServiceHost host,
+        string colName,
+        OrderedMap map)
+    {
+        // :L591 carries a COMMENTED-OUT auto-retrieve guard,
+        //       `//if IsFailed(of_AutoRetrieveDDDW(colName)) then return map`, which is carried across
+        //       as dormant and NOT revived (constraint C-B): reviving it would make this member
+        //       retrieve data as a side effect of being asked for a translation table.
+
+        // :L592  #DataWindow.GetChild(colName,ref dwc) - the return code is DISCARDED.
+        IDataWindowChild? child = null;
+        _ = host.GetChild(colName, ref child);
+
+        // :L593  if IsValidObject(dwc) - validity is established on the OBJECT, not on the code.
+        if (!Predicates.IsValidObject(child))
+        {
+            return;
+        }
+
+        // :L594-L597
+        string displayColumn = host.Describe(colName + ".dddw.displaycolumn");
+        string dataColumn = host.Describe(colName + ".dddw.datacolumn");
+        string displayColType = child!.Describe(displayColumn + ".coltype");
+        string dataColType = child.Describe(dataColumn + ".coltype");
+
+        // :L598-L599  both guards test THREE values - the two sentinels AND the empty string, which is
+        // one more than the oracle's other sentinel tests. Preserved as written.
+        if (displayColType.Length == 0 || IsUnreadable(displayColType))
+        {
+            return;
+        }
+
+        if (dataColType.Length == 0 || IsUnreadable(dataColType))
+        {
+            return;
+        }
+
+        long displayType = ConvertColumnType(displayColType);
+        long dataType = ConvertColumnType(dataColType);
+
+        // :L600-L635
+        long rowCount = child.RowCount();
+        for (long row = 1L; row <= rowCount; row++)
+        {
+            // :L602-L616  the display value, read through the six-arm switch.
+            string? display = ReadChildItemAsText(child, row, displayColumn, displayType);
+
+            // :L617  if IsNull(sDispVal) then continue
+            if (display is null)
+            {
+                continue;
+            }
+
+            // :L618-L632  the data value, read through the same six-arm switch.
+            string? data = ReadChildItemAsText(child, row, dataColumn, dataType);
+
+            // :L633  if IsNull(aVal) then continue
+            if (data is null)
+            {
+                continue;
+            }
+
+            // :L634  map.Set(sDispVal,aVal) - Set, not Add. See the remarks on GetColumnValueMap.
+            _ = map.Set(display, data);
+        }
+    }
+
+    /// <summary>
+    /// Reads one child-DataWindow item as text through the six-arm column-type switch the oracle uses
+    /// twice (<c>n_cst_dwsvc.sru:L603-L616</c> for the display value, <c>:L619-L632</c> for the data
+    /// value).
+    /// </summary>
+    /// <param name="child">The child DataWindow.</param>
+    /// <param name="row">The one-based row.</param>
+    /// <param name="column">The column name.</param>
+    /// <param name="colType">The converted <c>COL_TYPE_*</c> value.</param>
+    /// <returns>
+    /// The rendered text, or <see langword="null"/> when the item is null - which the callers turn into
+    /// a skipped row.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// ONE HELPER FOR BOTH SWITCHES, WHICH ARE TEXTUALLY IDENTICAL IN THE ORACLE apart from the local
+    /// they assign. Their only real difference is the DECLARED TYPE of that local - <c>string</c> for
+    /// the display value and <c>any</c> for the data value - and since every arm of the data switch
+    /// assigns text anyway, collapsing them loses nothing observable.
+    /// </para>
+    /// <para>
+    /// THE DEFAULT ARM IS NULL, NOT THE EMPTY STRING. The oracle's <c>choose case</c> has SIX arms and
+    /// no <c>case else</c>, so an unrecognised column type leaves the local at its initial value - and
+    /// for both a <c>string</c> and an <c>any</c> that is null, which the very next line treats as a
+    /// row to skip. Answering the empty string here would store an entry the oracle does not store.
+    /// </para>
+    /// </remarks>
+    private static string? ReadChildItemAsText(
+        IDataWindowChild child,
+        long row,
+        string column,
+        long colType)
+    {
+        return colType switch
+        {
+            // :L604-L605 / :L620-L621  already text, so no String() wrapper.
+            COL_TYPE_STRING => child.GetItemString(row, column),
+
+            // :L606-L607 / :L622-L623  String(decimal)
+            COL_TYPE_DECIMAL => child.GetItemDecimal(row, column)?.ToString(CultureInfo.InvariantCulture),
+
+            // :L608-L609 / :L624-L625  String(number) - a double, despite the arm's name.
+            COL_TYPE_INTEGER => child.GetItemNumber(row, column)?.ToString(CultureInfo.InvariantCulture),
+
+            // :L610-L611 / :L626-L627  String(datetime), single-sourced through the validator.
+            COL_TYPE_DATETIME => child.GetItemDateTime(row, column) is DateTime moment
+                ? DateTimeValidator.FormatExpressionValue(moment)
+                : null,
+
+            // :L612-L613 / :L628-L629  String(date)
+            COL_TYPE_DATE => child.GetItemDate(row, column) is DateOnly day
+                ? DateValidator.FormatValue(day)
+                : null,
+
+            // :L614-L615 / :L630-L631  String(time)
+            COL_TYPE_TIME => child.GetItemTime(row, column) is TimeOnly moment
+                ? TimeValidator.Format(moment)
+                : null,
+
+            // No `case else` in the oracle: the local keeps its initial null.
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// The three-part candidate test <see cref="GetObjectNames"/> applies, in the oracle's order
+    /// (<c>n_cst_dwsvc.sru:L700-L715</c> in the loop, repeated verbatim at <c>:L723-L738</c> for the
+    /// tail).
+    /// </summary>
+    /// <param name="host">The attached host.</param>
+    /// <param name="name">The candidate object name.</param>
+    /// <param name="sType">The type filter, or the empty string for none.</param>
+    /// <param name="band">The band filter, or the empty string for none.</param>
+    /// <returns><see langword="true"/> when the name survives all three tests.</returns>
+    /// <remarks>
+    /// FACTORED FROM THE ORACLE'S DUPLICATED BLOCK, WHICH IS THE ONE PLACE THIS PORT DOES NOT MIRROR
+    /// THE ORACLE'S SHAPE. The two blocks are textually identical apart from the variable they test, so
+    /// a single helper cannot diverge from itself the way two copies can - and the call ORDER, which is
+    /// what is observable through <c>Describe</c>, is unchanged.
+    /// </remarks>
+    private static bool MatchesObjectFilters(
+        DataWindowServiceHost host,
+        string name,
+        string sType,
+        string band)
+    {
+        // :L700-L705  the existence test: an unreadable band drops the candidate.
+        string bandOfName = host.Describe(name + ".Band");
+        if (IsUnreadable(bandOfName))
+        {
+            return false;
+        }
+
+        // :L706-L710  the optional type filter.
+        if (sType.Length > 0
+            && !string.Equals(host.Describe(name + ".Type"), sType, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // :L711-L715  the optional band filter - which describes .Band a SECOND time rather than
+        // reusing the value read above. Preserved; see the remarks on GetObjectNames.
+        return band.Length == 0
+            || string.Equals(host.Describe(name + ".Band"), band, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether a <c>Describe</c> answer is one of the two DataWindow sentinels - the port of the
+    /// <c>= "!" or = "?"</c> pair the oracle writes at a dozen sites.
+    /// </summary>
+    /// <param name="value">The answer to test.</param>
+    /// <returns><see langword="true"/> when the property was not readable.</returns>
+    private static bool IsUnreadable(string value)
+    {
+        return string.Equals(value, InvalidExpressionSentinel, StringComparison.Ordinal)
+            || string.Equals(value, UndeterminedValueSentinel, StringComparison.Ordinal);
     }
 
     /// <summary>

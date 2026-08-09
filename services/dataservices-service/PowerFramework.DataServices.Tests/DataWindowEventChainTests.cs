@@ -499,6 +499,9 @@ internal sealed class FakeEventChain : DataWindowEventChain
     public override int SetRow(long row) => Host.SetRow(row);
 
     /// <inheritdoc/>
+    public override string GetColumnName() => Host.GetColumnName();
+
+    /// <inheritdoc/>
     public override int AcceptText() => Host.AcceptText();
 
     /// <inheritdoc/>
@@ -578,6 +581,35 @@ internal sealed class FakeEventChain : DataWindowEventChain
     /// <inheritdoc/>
     public override int SetItem(long row, string column, long? value) =>
         Host.SetItem(row, column, value);
+
+    /// <inheritdoc/>
+    public override DateTime? GetItemDateTime(long row, string column) =>
+        Host.GetItemDateTime(row, column);
+
+    /// <inheritdoc/>
+    public override DateOnly? GetItemDate(long row, string column) => Host.GetItemDate(row, column);
+
+    /// <inheritdoc/>
+    public override TimeOnly? GetItemTime(long row, string column) => Host.GetItemTime(row, column);
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, DateTime? value) =>
+        Host.SetItem(row, column, value);
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, DateOnly? value) =>
+        Host.SetItem(row, column, value);
+
+    /// <inheritdoc/>
+    public override int SetItem(long row, string column, TimeOnly? value) =>
+        Host.SetItem(row, column, value);
+
+    /// <inheritdoc/>
+    public override long Find(string expression, long start, long end) =>
+        Host.Find(expression, start, end);
+
+    /// <inheritdoc/>
+    public override long InsertRow(long row) => Host.InsertRow(row);
 
     /// <inheritdoc/>
     public override string GetValue(string column, long index) => Host.GetValue(column, index);
@@ -671,7 +703,7 @@ internal sealed class FakeEventChain : DataWindowEventChain
         Host.ItemFocusChanged(row, dwo);
 
     /// <inheritdoc/>
-    public override long ItemChanged(long row, IDataWindowObject dwo, string data) =>
+    public override long ItemChanged(long row, IDataWindowObject dwo, string? data) =>
         Host.ItemChanged(row, dwo, data);
 
     /// <inheritdoc/>
