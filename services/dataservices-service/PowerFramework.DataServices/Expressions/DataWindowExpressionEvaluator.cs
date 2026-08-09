@@ -1416,6 +1416,168 @@ public sealed class FixedRowsPerPageResolver : IExpressionPageResolver
 
 
 /// <summary>
+/// How a deployment states the pagination that <c>for page</c> is measured against.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS EXISTS AT ALL, WHEN <see cref="IExpressionPageResolver"/> IS ALREADY A SEAM. The seam is
+/// reached by assigning <see cref="DataWindowExpressionEvaluator.PageResolver"/> or by passing a resolver
+/// to the constructor - both of which require a caller who knows to do it. The class default is
+/// <see cref="UnresolvedPageResolver"/>, deliberately, so an evaluator constructed without that knowledge
+/// REFUSES <c>for page</c>. That is right as a class default and wrong as a DEPLOYED one: it means the
+/// running service answers the malformed sentinel for <c>dw_sqlite.srd:L27</c>'s
+/// <c>sum(salary for page)</c> - the only <c>for page</c> expression in the repository - unless some
+/// wiring site remembers to inject a resolver. A capability that works only when someone remembers is
+/// the gap review found, and a seam is not wiring.
+/// </para>
+/// <para>
+/// SO THE DECISION IS MOVED INTO CONFIGURATION, WHERE IT IS STATED ONCE AND ATTRIBUTABLE. The deployment
+/// says which pagination its surface has; <see cref="ExpressionPageResolverFactory"/> turns that into the
+/// one resolver that expresses it; and the composition root installs it, so nothing downstream can
+/// silently fall back to the refusing default.
+/// </para>
+/// <para>
+/// NAMED FOR THE PAGINATION AND NOT FOR THE RESOLVER TYPES, because the setting outlives them: a
+/// deployment states a fact about its own surface, not a class name.
+/// </para>
+/// </remarks>
+public enum ExpressionPageResolution
+{
+    /// <summary>
+    /// No pagination is stated, so <c>for page</c> is REFUSED with the malformed sentinel and a
+    /// structured error.
+    /// </summary>
+    /// <remarks>
+    /// SELECTABLE ON PURPOSE, AND NOT THE CONFIGURED DEFAULT. A deployment that genuinely does not know
+    /// its pagination is better served by a refusal than by a number computed over the wrong rows, and
+    /// AAP 0.1.5 requires exactly that - narrow with a defined error rather than widen with a guess. It
+    /// remains the CLASS default of <see cref="DataWindowExpressionEvaluator.PageResolver"/> for the same
+    /// reason. What it must not be is what a configured, running service silently gets.
+    /// </remarks>
+    Unresolved = 0,
+
+    /// <summary>
+    /// The whole primary buffer is one page: an explicit statement that the surface is unpaginated.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CONFIGURED DEFAULT, AND IT IS EVIDENCED RATHER THAN CONVENIENT. The one surface this system
+    /// has evidence for is <c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd</c>, whose only <c>for page</c>
+    /// use is the footer sum at <c>:L27</c> and which declares no page-break band - so "this surface is
+    /// one page" is the measured truth for it, not an assumption made in the absence of one.
+    /// </para>
+    /// <para>
+    /// IT IS STILL A STATEMENT AND NOT A SHRUG. A paginated deployment MUST choose
+    /// <see cref="FixedRowsPerPage"/>, or <see cref="Unresolved"/> to get the refusal back; leaving this
+    /// value in place on a paginated surface returns the grand total where the page total was asked for,
+    /// which is the widening <see cref="IExpressionPageResolver"/> warns about. The difference between
+    /// this and a default that guesses is that here the deployment has said so, and the setting records
+    /// who said it.
+    /// </para>
+    /// </remarks>
+    WholeBuffer = 1,
+
+    /// <summary>
+    /// A fixed number of detail rows per page, taken from
+    /// <c>DataServices:ColumnExpression:PageRowsPerPage</c>.
+    /// </summary>
+    /// <remarks>
+    /// For a deployment that paginates and knows its own page size - a characterization run reproducing
+    /// a printed page, or a client that paginates itself. This service acquires no band geometry from it;
+    /// the row count is divided, nothing is laid out.
+    /// </remarks>
+    FixedRowsPerPage = 2,
+}
+
+/// <summary>
+/// Builds the one <see cref="IExpressionPageResolver"/> a stated
+/// <see cref="ExpressionPageResolution"/> means.
+/// </summary>
+/// <remarks>
+/// <para>
+/// ONE PLACE THAT MAPS THE SETTING TO A RESOLVER, so a second wiring site cannot map it differently.
+/// That is the same reasoning that puts the carrier-value mapper next to the buffers it serves and the
+/// identity projection next to its collector: a decision with one home cannot drift.
+/// </para>
+/// <para>
+/// IT LIVES BESIDE THE RESOLVERS RATHER THAN BESIDE THE OPTIONS, because it is the enum's meaning that
+/// has to stay in step with the three implementations - add a fourth resolver and this switch is where
+/// the compiler and the reader both look.
+/// </para>
+/// </remarks>
+public static class ExpressionPageResolverFactory
+{
+    /// <summary>
+    /// Creates the resolver for <paramref name="resolution"/>.
+    /// </summary>
+    /// <param name="resolution">The pagination the deployment stated.</param>
+    /// <param name="rowsPerPage">
+    /// The rows per page, used only when <paramref name="resolution"/> is
+    /// <see cref="ExpressionPageResolution.FixedRowsPerPage"/>. Must be positive in that case.
+    /// </param>
+    /// <returns>The resolver.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="resolution"/> is not a declared member, or it is
+    /// <see cref="ExpressionPageResolution.FixedRowsPerPage"/> and <paramref name="rowsPerPage"/> is not
+    /// positive.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE UNRECOGNISED ARM THROWS RATHER THAN FALLING BACK, and that is the point of having a factory.
+    /// A <c>default:</c> arm that quietly returned the refusing resolver would turn a mistyped setting -
+    /// or a fourth member someone forgot to handle here - into the exact silent-sentinel behaviour this
+    /// whole change exists to remove. The options validator rejects an out-of-range value first, so in a
+    /// configured service this arm is unreachable; it is the backstop for a caller that bypassed
+    /// validation, and it fails loudly.
+    /// </para>
+    /// <para>
+    /// The two stateless resolvers hand back their shared instances, because neither holds state and one
+    /// instance serves every evaluator.
+    /// </para>
+    /// </remarks>
+    public static IExpressionPageResolver Create(ExpressionPageResolution resolution, int rowsPerPage)
+    {
+        return resolution switch
+        {
+            ExpressionPageResolution.Unresolved => UnresolvedPageResolver.Instance,
+            ExpressionPageResolution.WholeBuffer => WholeBufferPageResolver.Instance,
+            ExpressionPageResolution.FixedRowsPerPage => CreateFixed(rowsPerPage),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(resolution),
+                resolution,
+                "The stated page resolution is not a declared ExpressionPageResolution member. A "
+                    + "deployment states Unresolved, WholeBuffer or FixedRowsPerPage; there is "
+                    + "deliberately no fallback, because a silent one would reinstate the malformed "
+                    + "sentinel for `for page` on a mistyped setting."),
+        };
+    }
+
+    /// <summary>
+    /// Creates the fixed-page resolver, reporting the row count against the setting's own name.
+    /// </summary>
+    /// <param name="rowsPerPage">The rows per page. Must be positive.</param>
+    /// <returns>The resolver.</returns>
+    /// <remarks>
+    /// A separate method purely so the argument name in the thrown exception is the SETTING's name rather
+    /// than the resolver constructor's parameter, which is what an operator reading the failure needs.
+    /// </remarks>
+    private static IExpressionPageResolver CreateFixed(int rowsPerPage)
+    {
+        if (rowsPerPage <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(rowsPerPage),
+                rowsPerPage,
+                "DataServices:ColumnExpression:PageRowsPerPage must be positive when PageResolution "
+                    + "is FixedRowsPerPage: a page of zero or fewer rows describes no pagination.");
+        }
+
+        return new FixedRowsPerPageResolver(rowsPerPage);
+    }
+}
+
+
+/// <summary>
 /// One call to a registered expression function, presented to its implementation.
 /// </summary>
 /// <remarks>
@@ -1874,6 +2036,47 @@ public sealed class DataWindowExpressionEvaluator
         _pinyinMatcher = pinyinMatcher;
 
         RegisterBuiltInFunctions();
+    }
+
+    /// <summary>
+    /// Creates an evaluator over <paramref name="host"/> with a supplied pinyin matcher AND a supplied
+    /// page resolver - the constructor the composition root uses.
+    /// </summary>
+    /// <param name="host">The DataWindow host.</param>
+    /// <param name="pinyinMatcher">
+    /// The matcher the <c>PinyinFirstLetterLike</c> function dispatches to.
+    /// </param>
+    /// <param name="pageResolver">
+    /// The pagination <c>for page</c> is measured against, normally obtained from
+    /// <see cref="ExpressionPageResolverFactory.Create(ExpressionPageResolution, int)"/> over the
+    /// deployment's own <c>DataServices:ColumnExpression</c> settings.
+    /// </param>
+    /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// WHY A CONSTRUCTOR AND NOT JUST THE SETTABLE PROPERTY. The property is how a test varies the
+    /// pagination mid-flight and it stays exactly as it was; it is not how a SERVICE should acquire its
+    /// resolver, because an assignment that a wiring site can forget is precisely how the deployed path
+    /// came to be running on <see cref="UnresolvedPageResolver"/>. Passing the resolver in means an
+    /// evaluator is never briefly wrong, and a wiring site that omits it is visible as a shorter
+    /// constructor call rather than as a missing statement somewhere after one.
+    /// </para>
+    /// <para>
+    /// THE TWO SHORTER CONSTRUCTORS ARE UNCHANGED AND KEEP THE REFUSING CLASS DEFAULT. That default is a
+    /// deliberate narrowing (AAP 0.1.5) and is right for an evaluator built by code that has stated
+    /// nothing about pagination; the finding was never that the default is wrong, but that a configured
+    /// service was silently getting it.
+    /// </para>
+    /// </remarks>
+    public DataWindowExpressionEvaluator(
+        DataWindowServiceHost host,
+        PinyinFirstLetterMatcher pinyinMatcher,
+        IExpressionPageResolver pageResolver)
+        : this(host, pinyinMatcher)
+    {
+        ArgumentNullException.ThrowIfNull(pageResolver);
+
+        _pageResolver = pageResolver;
     }
 
     /// <summary>

@@ -163,8 +163,8 @@
 //  known - and note that no crosstab schema exists anywhere in this repository either, so none may be
 //  invented. Nothing here reads a clock: there is no DateTime, DateTimeOffset, Stopwatch or
 //  Environment.TickCount, and if a clock need ever arises it goes through the single TimeProvider
-//  this service injects. In-memory MemoryStream and BinaryWriter are used to build the opaque blob;
-//  those are buffer primitives, not I/O.
+//  this service injects. The image is built as an in-memory protobuf message - the published
+//  persistence.v1.CarrierState - so there is no stream, no buffer and no encoder here at all.
 //
 //  NO SIBLING-FOLDER DEPENDENCY. Nothing here reaches into Concurrency/, Tasks/, Grpc/, Errors/,
 //  Sql/, Data/ or Transactions/. The two places the legacy calls out to its task - the error event and
@@ -226,10 +226,9 @@
 //  through ProjectReference items that already exist.
 // ==============================================================================================
 
-using System.Globalization;
-using System.Text;
 
-using Google.Protobuf;
+
+using System.Globalization;
 
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
@@ -541,89 +540,8 @@ internal readonly record struct NoUserPromptOutcome(
 
 #endregion
 
-#region The opaque payload's value tags
-
 /// <summary>
-/// The type tag that precedes every value inside a full-state payload.
-/// </summary>
-/// <remarks>
-/// <para>
-/// A carrier column value is <c>object?</c>, because the legacy column type is PowerBuilder's
-/// <c>any</c> and AAP 0.4.5.2 maps <c>any</c> to <c>object?</c>. An opaque binary payload therefore
-/// needs a discriminator, and this is it. The member set is exactly the AAP 0.4.5.2 type mapping plus
-/// the two integral widths PowerBuilder distinguishes, so nothing here is speculative:
-/// </para>
-/// <list type="bullet">
-///   <item><description><c>blob</c> to <c>byte[]</c> - see <see cref="Bytes"/>.</description></item>
-///   <item><description><c>integer</c> and <c>long</c> to <c>int</c> and <c>long</c> - see
-///     <see cref="Int32"/> and <see cref="Int64"/>.</description></item>
-///   <item><description><c>unsignedlong</c> to <c>ulong</c> - see <see cref="UInt64"/>.</description></item>
-///   <item><description><c>dec</c> and <c>decimal(n)</c> to <c>decimal</c> - see
-///     <see cref="Decimal"/>.</description></item>
-///   <item><description><c>datetime</c>, <c>date</c> and <c>time</c> to <c>DateTime</c>,
-///     <c>DateOnly</c> and <c>TimeOnly</c> - see <see cref="DateTime"/>, <see cref="DateOnly"/> and
-///     <see cref="TimeOnly"/>.</description></item>
-/// </list>
-/// <para>
-/// THE VALUES ARE FROZEN. They are written into the payload byte stream, so renumbering a member
-/// silently changes how every previously written payload decodes - the same hazard AAP 0.4.5.3 records
-/// for the preserved constant identifiers, and the reason the wire enums carry no synthetic sentinel.
-/// A new tag is therefore only ever APPENDED, never inserted.
-/// </para>
-/// <para>
-/// AN UNRECOGNISED CLR TYPE IS A DEFINED ERROR, NEVER A GUESS. The migration rule is that where a
-/// legacy behaviour cannot be reproduced the contract is narrowed with a defined error rather than
-/// widened with an approximation, so <see cref="FullStateCodec.Capture"/> raises rather than coercing
-/// an unknown value to its string form - which would round-trip as the wrong type and read as correct.
-/// </para>
-/// </remarks>
-internal enum FullStateValueTag : byte
-{
-    /// <summary>
-    /// A null value. PowerBuilder has null for value types and the ported return-code algebra depends
-    /// on it, so null is A VALUE HERE AND NOT AN ABSENCE - it must survive the round trip distinctly
-    /// from zero and from the empty string.
-    /// </summary>
-    Null = 0,
-
-    /// <summary>A <see cref="bool"/>.</summary>
-    Boolean = 1,
-
-    /// <summary>An <see cref="int"/> - PowerBuilder <c>integer</c>.</summary>
-    Int32 = 2,
-
-    /// <summary>A <see cref="long"/> - PowerBuilder <c>long</c>.</summary>
-    Int64 = 3,
-
-    /// <summary>A <see cref="ulong"/> - PowerBuilder <c>unsignedlong</c>.</summary>
-    UInt64 = 4,
-
-    /// <summary>A <see cref="double"/> - PowerBuilder <c>double</c> and <c>real</c>.</summary>
-    Double = 5,
-
-    /// <summary>A <see cref="decimal"/> - PowerBuilder <c>dec</c> and <c>decimal(n)</c>.</summary>
-    Decimal = 6,
-
-    /// <summary>A <see cref="string"/>.</summary>
-    String = 7,
-
-    /// <summary>A <see cref="byte"/> array - PowerBuilder <c>blob</c>.</summary>
-    Bytes = 8,
-
-    /// <summary>A <see cref="System.DateTime"/> - PowerBuilder <c>datetime</c>.</summary>
-    DateTime = 9,
-
-    /// <summary>A <see cref="System.DateOnly"/> - PowerBuilder <c>date</c>.</summary>
-    DateOnly = 10,
-
-    /// <summary>A <see cref="System.TimeOnly"/> - PowerBuilder <c>time</c>.</summary>
-    TimeOnly = 11,
-}
-
-#endregion
-
-/// <summary>
-/// The <c>GetFullState</c> / <c>SetFullState</c> blob codec for the DataWindow result carrier - the
+/// The <c>GetFullState</c> / <c>SetFullState</c> codec for the DataWindow result carrier - the
 /// crosstab-and-composite arm of the legacy codec selector - together with the two documented legacy
 /// defects that arm owns.
 /// </summary>
@@ -1073,7 +991,18 @@ internal static class FullStateCodec
 
         // `Data.GetFullState(ref blbData)` [:L95]. Returned normally rather than through a ref
         // parameter; see the file header for why that hazard workaround has no .NET analogue.
-        byte[] payload = Capture(source);
+        CarrierState? image = Capture(source);
+
+        if (image is null)
+        {
+            // `if ... GetFullState(ref blbData) < 0 then` has no separate arm in the oracle here - the
+            // legacy's GetFullState cannot fail on a value it produced itself - but this port CAN refuse
+            // a value outside the published value domain, and the honest report is the same fault the
+            // legacy raises when the handover fails: an internal error carrying its own text (C-B).
+            reportError(RetCode.E_INTERNAL_ERROR, TransDataFailedMessage);
+
+            return RetCode.E_INTERNAL_ERROR;
+        }
 
         // `Data.Reset()` [:L96]. AFTER the capture - see the remarks on why this is legal here and
         // forbidden mid-loop in the changeset codec.
@@ -1083,7 +1012,7 @@ internal static class FullStateCodec
         // R9: SingleChunkCount and SingleChunkIndex are a one-based count and position, not indices.
         QueryDataChunk chunk = new()
         {
-            Data = ByteString.CopyFrom(payload),
+            State = image,
             ChunkCount = SingleChunkCount,
             ChunkIndex = SingleChunkIndex,
             FullState = true,
@@ -1104,13 +1033,17 @@ internal static class FullStateCodec
         }
 
         // `blbData = Blob("")` [:L101]. The ownership drop of hazard 2 of docs/PB多线程绕坑提示.md: the
-        // sender releases what it has handed over. ByteString.CopyFrom above took a copy, so the chunk
-        // is unaffected and this frame no longer reaches the captured image. It is reproduced because
-        // the legacy does it rather than because the runtime needs it - a garbage-collected heap makes
-        // the release itself unobservable, which is precisely why omitting it silently would leave a
-        // reader unable to tell whether the line had been considered.
-        payload = [];
-
+        // sender releases what it has handed over.
+        //
+        // THE RELEASE IS NOW A NO-OP AND IS RECORDED AS ONE RATHER THAN WRITTEN AS A GESTURE. When the
+        // payload was a byte array this line reassigned the local so this frame no longer reached the
+        // captured bytes; the chunk carried a copy and was unaffected. The chunk now holds the SAME
+        // message instance this frame projected, so clearing the local would either do nothing or - if
+        // it cleared the message - destroy the chunk that has already been handed over. The legacy's
+        // intent is discharged by the fact that this frame returns immediately below and drops its only
+        // reference, and a garbage-collected heap makes the release unobservable either way. Stated here
+        // because omitting the line silently would leave a reader unable to tell whether the legacy's
+        // line had been considered.
         return RetCode.OK;
     }
 
@@ -1237,10 +1170,8 @@ internal static class FullStateCodec
     /// capability area, so they are a documented non-port rather than an omission.
     /// </para>
     /// </remarks>
-    internal static long Receive(FullStateTarget target, byte[] payload)
+    internal static long Receive(FullStateTarget target, CarrierState? state)
     {
-        ArgumentNullException.ThrowIfNull(payload);
-
         DataWindowBufferStore store = target.Store
             ?? throw new ArgumentException(
                 "The target carries no store. Resolve it with ResolveTarget rather than constructing "
@@ -1250,12 +1181,15 @@ internal static class FullStateCodec
 
         long resultCode;
 
-        // `if Len(blbData) > 0 then` [:L188].
-        if (payload.Length > 0)
+        // `if Len(blbData) > 0 then` [:L188]. AN ABSENT STATE IS THE ZERO-LENGTH BLOB: `state` maps onto
+        // a protobuf MESSAGE field, whose presence is tracked natively, so absence is the faithful
+        // reading of a blob with no bytes. It is DISTINCT from a state carrying three empty segments,
+        // which is a legitimately empty carrier rather than no payload.
+        if (state is not null)
         {
             // `rtCode = dw.SetFullState(blbData)` [:L190] - and the identical line at :L216 and :L233.
             // One shot. No preceding reset, no chunk index, no chunk count.
-            resultCode = Apply(store, payload);
+            resultCode = Apply(store, state);
         }
         else
         {
@@ -1319,19 +1253,22 @@ internal static class FullStateCodec
     /// </summary>
     /// <param name="source">The carrier to capture.</param>
     /// <returns>
-    /// The image. Never <see langword="null"/>; an empty carrier still produces a non-empty image,
-    /// because the header alone carries the format marker, the version and the processing kind. That
-    /// matters: an EMPTY payload is the legacy's "clear the target" signal
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L207-L209</c>], so a
-    /// captured image must never be mistaken for one.
+    /// The image, or <see langword="null"/> when a column holds a value outside
+    /// <c>common.v1.AnyValue</c>'s published arms. NARROWED WITH A DEFINED FAILURE RATHER THAN WIDENED
+    /// WITH A GUESS: coercing an unknown value to its string form would round-trip as the wrong type and
+    /// read as correct.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="source"/> is <see langword="null"/>.</exception>
-    /// <exception cref="NotSupportedException">
-    /// A column holds a value whose runtime type has no tag in <see cref="FullStateValueTag"/>. NARROWED
-    /// WITH A DEFINED ERROR RATHER THAN WIDENED WITH A GUESS: coercing an unknown value to its string
-    /// form would round-trip as the wrong type and read as correct.
-    /// </exception>
     /// <remarks>
+    /// <para>
+    /// A SUCCESSFUL CAPTURE IS NEVER <see langword="null"/> AND NEVER SEGMENT-LESS, even for an empty
+    /// carrier: it always carries the processing kind and the canonical three segments, two or three of
+    /// which may hold no rows. That distinction is load-bearing, because an ABSENT image is the legacy's
+    /// "clear the target" signal
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L207-L209</c>], so a
+    /// captured image must never be mistaken for one. <see cref="Send"/> discriminates the two by
+    /// testing for <see langword="null"/>, and reports the failure text rather than sending nothing.
+    /// </para>
     /// <para>
     /// Reproduces <c>Data.GetFullState(ref blbData)</c> at
     /// <c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L95</c>. RETURNED NORMALLY
@@ -1347,21 +1284,29 @@ internal static class FullStateCodec
     /// the encoding itself.
     /// </para>
     /// <para>
-    /// THE FORMAT IS OPAQUE, DETERMINISTIC AND HAND-ROLLED, and each of those three is a requirement.
-    /// OPAQUE because the published contract says so - <c>QueryDataChunk.data</c> is documented as
-    /// carrying a format that is the codecs' concern on both sides and no field describes it.
-    /// DETERMINISTIC because the parity model compares recordings byte for byte, so the same carrier
-    /// state must always produce the same bytes; that is why the buffers are written in a fixed order
-    /// and why columns are taken from <see cref="CarrierRow.AssignedColumnNumbers"/>, which is ordered
-    /// deliberately rather than left to a dictionary's unspecified key order. HAND-ROLLED because a JSON
-    /// or XML serializer would reach into the deferred Documents parser family, which C-D forbids
-    /// outright - and the temptation is real precisely because "full state" sounds like a document.
+    /// THE IMAGE IS A PUBLISHED MESSAGE AND IT IS DETERMINISTIC, and both matter. PUBLISHED because
+    /// <c>persistence.v1.CarrierState</c> is declared in <c>shared/PowerFramework.Contracts</c>, which
+    /// constraint C-A makes the only cross-service coupling: the field this image travels in used to be
+    /// an opaque <c>bytes</c> described as the codecs' private concern, and the review found the
+    /// consequence - DataServices references the contracts project alone, so it could neither produce
+    /// nor consume the very payload the C-05 and C-06 contracts hand it. DETERMINISTIC because the parity
+    /// model compares recordings byte for byte, so the same carrier state must always serialize to the
+    /// same bytes; that is why the segments are written in a fixed order and why columns are taken from
+    /// <see cref="CarrierRow.AssignedColumnNumbers"/>, which is ordered deliberately rather than left to
+    /// a dictionary's unspecified key order.
     /// </para>
     /// <para>
-    /// WHAT THE IMAGE CARRIES: the processing kind, then the three buffers in a fixed order, each with
-    /// its own row count; per row its item status and its assigned columns in ascending column order;
-    /// per column its number, its item status, its current value, and its ORIGINAL value whenever that
-    /// differs from the current one. The originals are not optional decoration - <c>updatewhere=1</c>
+    /// NO JSON AND NO XML, WHICH IS NOT A PREFERENCE. Either would reach into the deferred Documents
+    /// parser family, which C-D forbids outright, and the temptation is real precisely because "full
+    /// state" sounds like a document. Protobuf is already in the mandated stack for the service
+    /// contracts, so the image reuses it rather than introducing a serializer.
+    /// </para>
+    /// <para>
+    /// WHAT THE IMAGE CARRIES: the processing kind, then the three buffers as three
+    /// <c>CarrierBufferSegment</c> messages in canonical order, each holding its own rows; per row its
+    /// one-based ordinal, its buffer tag, its item status and its assigned columns in ascending column
+    /// order; per column its number, its item status, its current value, and its ORIGINAL value whenever
+    /// that differs from the current one. The originals are not optional decoration - <c>updatewhere=1</c>
     /// puts the ORIGINAL value of every marked column into the generated where clause, so an image
     /// carrying only current values could not express optimistic concurrency at all.
     /// </para>
@@ -1382,51 +1327,60 @@ internal static class FullStateCodec
     /// produces.
     /// </para>
     /// </remarks>
-    internal static byte[] Capture(DataWindowBufferStore source)
+    internal static CarrierState? Capture(DataWindowBufferStore source)
     {
         ArgumentNullException.ThrowIfNull(source);
 
-        using MemoryStream buffer = new();
-
-        using (BinaryWriter writer = new(buffer, PayloadEncoding, leaveOpen: true))
+        CarrierState image = new()
         {
-            writer.Write(PayloadMagic);
-            writer.Write(PayloadVersion);
-            writer.Write(source.Processing.Value);
+            // The codec discriminator travels with the image so that a receiver can RECONCILE it rather
+            // than assume it. The raw legacy value, as `Long(Describe("DataWindow.Processing"))` yields it.
+            Processing = source.Processing.Value,
+        };
 
-            foreach (DwBuffer dwBuffer in PayloadBufferOrder)
+        foreach (DwBuffer dwBuffer in PayloadBufferOrder)
+        {
+            CarrierBufferSegment segment = new() { Buffer = dwBuffer };
+            long rowCount = RowCountOf(source, dwBuffer);
+
+            // R9: rows are ONE-BASED and the bound is INCLUSIVE, matching the carrier surface - RowAt
+            // and GetItemStatus take one-based row numbers and AppendRow returns one. There is no minus
+            // one and no less-than here.
+            for (long row = ItemStatusMachine.FirstRowNumber; row <= rowCount; row++)
             {
-                writer.Write((byte)dwBuffer);
-
-                long rowCount = RowCountOf(source, dwBuffer);
-
-                writer.Write(rowCount);
-
-                // R9: rows are ONE-BASED and the bound is INCLUSIVE, matching the carrier surface -
-                // RowAt and GetItemStatus take one-based row numbers and AppendRow returns one. There is
-                // no minus one and no less-than here.
-                for (long row = ItemStatusMachine.FirstRowNumber; row <= rowCount; row++)
+                if (!TryProjectRow(source, dwBuffer, row, out DataWindowRow? projected))
                 {
-                    WriteRow(writer, source, dwBuffer, row);
+                    // A value outside the published value domain. `GetFullState` answers a code rather
+                    // than raising, so the caller reports the failure; the partial image is discarded
+                    // rather than sent. See CarrierValue for which values reach this arm and why.
+                    return null;
                 }
+
+                segment.Rows.Add(projected);
             }
+
+            // THE SEGMENT IS EMITTED EVEN WHEN EMPTY, because the contract requires one per buffer
+            // whether or not it has rows - omitting an empty one would make a conforming image
+            // indistinguishable from a truncated one.
+            image.Segments.Add(segment);
         }
 
-        return buffer.ToArray();
+        return image;
     }
 
     /// <summary>
     /// Restores a carrier from an opaque binary image, reproducing <c>SetFullState(blbData)</c>.
     /// </summary>
     /// <param name="target">The carrier to restore into. Its existing contents are REPLACED.</param>
-    /// <param name="payload">The image, as produced by <see cref="Capture"/>.</param>
+    /// <param name="state">
+    /// The image, as produced by <see cref="Capture"/>. <see langword="null"/> is malformed input rather
+    /// than the legacy's zero-length blob, which <see cref="Receive"/> handles on its own arm.
+    /// </param>
     /// <returns>
     /// <see cref="DataWindowBufferStore.DataStoreSuccess"/> when the image was restored;
     /// <see cref="DataWindowBufferStore.DataStoreFailure"/> when it could not be decoded.
     /// </returns>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="target"/> or <paramref name="payload"/> is <see langword="null"/>.
-    /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="target"/> is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
     /// Reproduces the three identical <c>SetFullState</c> calls at
@@ -1442,13 +1396,15 @@ internal static class FullStateCodec
     /// argument still throws, because that is a programming error rather than a rejected payload.
     /// </para>
     /// <para>
-    /// WHICH FAULTS COUNT AS MALFORMED IS DECIDED IN ONE PLACE - <see cref="IsPayloadFault(Exception)"/>
-    /// - AND THE LIST IS DELIBERATELY NARROW. Truncation, malformed UTF-8, a malformed 7-bit string
-    /// length, an unrecognised tag, a count that could not fit and a nonsensical numeric component are
-    /// all payload faults. An out-of-memory condition, a cancellation and a null reference are NOT:
-    /// they propagate, because the plan requires a structural fault to terminate rather than degrade
-    /// into a return code, and because swallowing an out-of-memory condition here would hide the exact
-    /// resource-exhaustion problem the count guards are placed before the allocations to prevent.
+    /// WHAT COUNTS AS MALFORMED, now that the image is a typed message rather than a byte stream. The
+    /// protobuf parser has already rejected a truncated or non-conforming payload before this method is
+    /// reached, so what remains for this method to check is SEMANTIC: a segment set that is not exactly
+    /// one per buffer in canonical order, a row filed under the wrong buffer, an undeclared item status,
+    /// a non-positive row ordinal, a column identifier that is not one-based, a duplicated column, an
+    /// original naming a column the row does not carry, a value message with no arm set, and a decimal
+    /// or temporal value outside the canonical grammar. Each answers the code. An out-of-memory
+    /// condition, a cancellation and a null reference are NOT caught anywhere here: they propagate,
+    /// because the plan requires a structural fault to terminate rather than degrade into a return code.
     /// </para>
     /// <para>
     /// THE RESTORE ORDER PER ROW IS LOAD-BEARING AND IS NOT A STYLE CHOICE. Values are written twice:
@@ -1460,302 +1416,91 @@ internal static class FullStateCodec
     /// them.
     /// </para>
     /// </remarks>
-    internal static long Apply(DataWindowBufferStore target, byte[] payload)
+    internal static long Apply(DataWindowBufferStore target, CarrierState? state)
     {
         ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(payload);
 
-        try
+        if (state is null)
         {
-            using MemoryStream buffer = new(payload, writable: false);
-            using BinaryReader reader = new(buffer, PayloadEncoding, leaveOpen: true);
-
-            if (reader.ReadUInt32() != PayloadMagic)
-            {
-                // Not an image this codec wrote. The most likely cause is a changeset payload delivered
-                // with the full-state flag set, which is the one way the two codecs can be crossed.
-                return DataWindowBufferStore.DataStoreFailure;
-            }
-
-            byte version = reader.ReadByte();
-
-            if (version != PayloadVersion)
-            {
-                return DataWindowBufferStore.DataStoreFailure;
-            }
-
-            long processing = reader.ReadInt64();
-
-            // THE REPLACEMENT. Intrinsic to restoring a complete image, which is exactly why the legacy
-            // needs no separate Reset on this arm - and NOT the changeset path's `if current = 1 then
-            // Reset()` step, which is gated on a chunk index this path does not have. It is also NOT
-            // followed by an update-reset, so the statuses restored below survive verbatim.
-            target.Reset();
-
-            target.Processing = new DataWindowProcessing(processing);
-
-            for (int bufferIndex = 0; bufferIndex < PayloadBufferOrder.Length; bufferIndex++)
-            {
-                DwBuffer dwBuffer = (DwBuffer)reader.ReadByte();
-
-                if (dwBuffer != PayloadBufferOrder[bufferIndex])
-                {
-                    return DataWindowBufferStore.DataStoreFailure;
-                }
-
-                long rowCount = reader.ReadInt64();
-
-                // BOUNDED BEFORE IT BECOMES A LOOP BOUND. A negative count, one beyond the protocol
-                // ceiling, or one whose rows could not fit in the bytes that remain is a malformed
-                // image - see the guard rationale beside MaxRowsPerBuffer.
-                if (!IsPlausibleCount(reader, rowCount, MinimumBytesPerRow, MaxRowsPerBuffer))
-                {
-                    return DataWindowBufferStore.DataStoreFailure;
-                }
-
-                // R9: the loop counts rows, not indices. It reads exactly `rowCount` rows and appends
-                // each one, so the row numbers AppendRow hands back are 1..rowCount in order.
-                for (long row = ItemStatusMachine.FirstRowNumber; row <= rowCount; row++)
-                {
-                    ReadRow(reader, target, dwBuffer);
-                }
-            }
-
-            return DataWindowBufferStore.DataStoreSuccess;
-        }
-        catch (Exception failure) when (IsPayloadFault(failure))
-        {
-            // EVERY DETERMINISTIC FAULT IN THE BYTES ANSWERS THE CODE, NOT AN EXCEPTION, because that
-            // is what the operation this reproduces does: SetFullState returns -1 on a payload it
-            // rejects and the caller at [n_cst_threading_task_sqlquery.sru:L190] stores that value and
-            // carries on. See IsPayloadFault for which faults qualify and, more importantly, which
-            // deliberately do not.
+            // No image at all. Receive's own empty-payload arm handles the legacy's zero-length blob, so
+            // reaching here with nothing means a producer sent a chunk with neither an image nor the
+            // absence that means "clear".
             return DataWindowBufferStore.DataStoreFailure;
         }
-    }
 
-    /// <summary>
-    /// Whether an exception represents a fault in the IMAGE - which
-    /// <see cref="Apply(DataWindowBufferStore, byte[])"/> answers with a code - or a fault in this code
-    /// or the host, which it must let escape.
-    /// </summary>
-    /// <param name="failure">The exception to classify.</param>
-    /// <returns><see langword="true"/> when the exception is a payload fault.</returns>
-    /// <remarks>
-    /// <para>
-    /// CENTRALISED BECAUSE AN INCOMPLETE CATCH LIST IS THE FAILURE MODE HERE, and two members of this
-    /// list were reachable and unhandled before it existed:
-    /// </para>
-    /// <para>
-    /// <see cref="DecoderFallbackException"/> - <see cref="PayloadEncoding"/> is constructed with
-    /// <c>throwOnInvalidBytes: true</c> deliberately, so that a value which cannot round-trip is a
-    /// detected fault rather than a silent replacement character. That decision means
-    /// <see cref="BinaryReader.ReadString"/> THROWS on malformed UTF-8 rather than substituting, and a
-    /// string is reachable from any column through <see cref="FullStateValueTag.String"/>. Malformed
-    /// bytes in a string value are the plainest possible example of a bad payload, and they were
-    /// escaping.
-    /// </para>
-    /// <para>
-    /// <see cref="FormatException"/> - <see cref="BinaryReader.ReadString"/> reads its length as a
-    /// 7-bit encoded integer and raises this when the encoding is malformed, which is exactly what a
-    /// corrupted or hostile byte in that position produces.
-    /// </para>
-    /// <para>
-    /// <see cref="EndOfStreamException"/> for a truncated image, <see cref="IOException"/> for a
-    /// stream-level fault while reading one, <see cref="InvalidDataException"/> for the structural
-    /// rejections this file raises by hand, <see cref="OverflowException"/> and
-    /// <see cref="ArgumentException"/> - which covers
-    /// <see cref="ArgumentOutOfRangeException"/> - for a nonsensical numeric component that reaches a
-    /// constructor, and <see cref="NotSupportedException"/> for a value shape the format cannot
-    /// express.
-    /// </para>
-    /// <para>
-    /// DELIBERATELY ABSENT, and each absence is the fail-fast posture the refactor plan requires rather
-    /// than an oversight: <see cref="OutOfMemoryException"/>, <see cref="StackOverflowException"/>,
-    /// <see cref="OperationCanceledException"/> and <see cref="NullReferenceException"/> all propagate.
-    /// A structural fault must terminate rather than degrade into a return code, and an out-of-memory
-    /// condition swallowed as "malformed payload" would hide the very resource-exhaustion problem the
-    /// count guards above exist to prevent - which is precisely why this list is narrow and why the
-    /// guards are placed BEFORE the allocations rather than relying on catching what they cause.
-    /// </para>
-    /// <para>
-    /// The sibling changeset codec classifies the same set for the same reasons. The two lists are
-    /// stated independently because the two formats are independent; sharing one would imply a shared
-    /// layout that does not exist.
-    /// </para>
-    /// </remarks>
-    private static bool IsPayloadFault(Exception failure)
-    {
-        // InvalidDataException is named EXPLICITLY and is not covered by IOException: it derives from
-        // SystemException, not from IOException, so a list that relied on the latter to catch it would
-        // silently let every structural rejection this file raises by hand escape.
-        return failure is EndOfStreamException
-            or IOException
-            or InvalidDataException
-            or DecoderFallbackException
-            or EncoderFallbackException
-            or FormatException
-            or OverflowException
-            or NotSupportedException
-            or ArgumentException;
+        // EVERY STRUCTURAL CHECK RUNS BEFORE THE RESET - see AreSegmentsCanonical for why that ordering
+        // is not a preference.
+        if (!AreSegmentsCanonical(state))
+        {
+            return DataWindowBufferStore.DataStoreFailure;
+        }
+
+        // THE PROCESSING RECONCILIATION. This arm serves the crosstab and composite kinds only, so an
+        // image whose kind does not select this codec is rejected rather than restored: the two sides
+        // would then disagree about which serialization is even applicable. An UNASSIGNED target - a
+        // carrier whose data object has not been set - adopts the image's kind, because that is not a
+        // disagreement.
+        if (!new DataWindowProcessing(state.Processing).SelectsFullStateTransfer)
+        {
+            return DataWindowBufferStore.DataStoreFailure;
+        }
+
+        if (target.Processing.Value != DataWindowProcessing.Unassigned.Value
+            && target.Processing.Value != state.Processing)
+        {
+            return DataWindowBufferStore.DataStoreFailure;
+        }
+
+        // THE REPLACEMENT. Intrinsic to restoring a complete image, which is exactly why the legacy
+        // needs no separate Reset on this arm - and NOT the changeset path's `if current = 1 then
+        // Reset()` step, which is gated on a chunk index this path does not have. It is also NOT
+        // followed by an update-reset, so the statuses restored below survive verbatim.
+        target.Reset();
+
+        target.Processing = new DataWindowProcessing(state.Processing);
+
+        for (int index = 0; index < PayloadBufferOrder.Length; index++)
+        {
+            CarrierBufferSegment segment = state.Segments[index];
+
+            foreach (DataWindowRow row in segment.Rows)
+            {
+                if (!TryReadRow(row, target, PayloadBufferOrder[index]))
+                {
+                    // A malformed row. The target has already been cleared by the reset above, which is
+                    // the legacy's own exposure on this arm rather than one added here: `SetFullState`
+                    // replaces the carrier's contents and answers -1 on a payload it rejects, and the
+                    // caller at [n_cst_threading_task_sqlquery.sru:L190] stores that value and carries
+                    // on. The structural checks are hoisted above the reset precisely so that the
+                    // detectable faults do not reach this arm.
+                    return DataWindowBufferStore.DataStoreFailure;
+                }
+            }
+        }
+
+        return DataWindowBufferStore.DataStoreSuccess;
     }
 
     #endregion
 
-    #region Payload format internals
+    #region Carrier-state projection internals
 
     /// <summary>
-    /// The four-byte marker every image begins with, spelling <c>PFWF</c> - PowerFramework Full state.
+    /// The buffers an image carries, in the fixed canonical order it carries them in.
     /// </summary>
     /// <remarks>
-    /// Its only job is to let <see cref="Apply"/> reject a payload this codec did not write, which is the
-    /// single way the two codecs can be crossed: a changeset blob delivered with the full-state flag set.
-    /// Rejecting it beats decoding it as garbage.
-    /// </remarks>
-    private const uint PayloadMagic = 0x46_57_46_50u;
-
-    /// <summary>
-    /// The image format version. Bumped only alongside a decoder that still reads every earlier version,
-    /// because stored characterization recordings are compared byte for byte.
-    /// </summary>
-    private const byte PayloadVersion = 1;
-
-    /// <summary>
-    /// The flag byte written for a column whose original value differs from its current one.
-    /// </summary>
-    private const byte OriginalValuePresent = 1;
-
-    /// <summary>
-    /// The flag byte written for a column whose original value equals its current one.
-    /// </summary>
-    private const byte OriginalValueAbsent = 0;
-
-    /// <summary>
-    /// The encoding strings are written with: UTF-8, WITH NO BYTE-ORDER MARK and THROWING on invalid
-    /// bytes.
-    /// </summary>
-    /// <remarks>
-    /// Both settings are deliberate. No mark, because the payload is a binary image rather than a text
-    /// document and a preamble would be noise inside it. Throwing rather than substituting, because a
-    /// silent replacement character is a value corruption that round-trips as if it had succeeded -
-    /// exactly the failure shape the parity model cannot detect.
-    /// </remarks>
-    private static readonly UTF8Encoding PayloadEncoding = new(
-        encoderShouldEmitUTF8Identifier: false,
-        throwOnInvalidBytes: true);
-
-    // ------------------------------------------------------------------------------------------
-    //  THE IMAGE IS UNTRUSTED INPUT, AND EVERY COUNT IN IT IS AN ALLOCATION REQUEST
-    //  ----------------------------------------------------------------------------------------
-    //  An image arrives from a peer, so every length and count it declares is a number chosen by
-    //  whoever produced the bytes. Three of them reach an allocation or an iteration bound directly:
-    //  the per-buffer row count, the per-row column count - which sizes FIVE arrays before a single
-    //  column is read - and a blob length, which BinaryReader.ReadBytes turns into `new byte[count]`
-    //  BEFORE it discovers the stream is shorter.
-    //
-    //  A NON-NEGATIVE CHECK IS NOT A BOUND: eight bytes can say long.MaxValue in a twenty-byte image.
-    //  The bound that is always exact is the REMAINING BYTES, because every element costs at least a
-    //  known minimum on the wire and a well-formed image always carries the bytes it promised. The
-    //  protocol maxima are a coarser gate in front of it, so an absurd count is rejected by name.
-    //  The arithmetic is done in `long` throughout so the product cannot overflow into a small
-    //  positive number and admit the count it was written to reject.
-    //
-    //  The sibling changeset codec states the same reasoning at greater length beside its own
-    //  constants; the two formats are independent, so each carries its own limits rather than sharing
-    //  them - a shared constant would imply a shared layout that does not exist.
-    // ------------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// The largest row count one buffer of an image may declare: 1,048,576.
-    /// </summary>
-    /// <remarks>
-    /// A coarse sanity gate, far above anything the evidenced fixture produces - the sole updatable
-    /// DataWindow in the repository is a six-column <c>COMPANY</c> table
-    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>]. Declared as
-    /// <see cref="long"/> because this codec writes its row counts as <see cref="long"/>, matching the
-    /// legacy's own row type.
-    /// </remarks>
-    private const long MaxRowsPerBuffer = 1L << 20;
-
-    /// <summary>
-    /// The largest column count one row of an image may declare: 32,768.
-    /// </summary>
-    /// <remarks>
-    /// This is the count that matters most: <see cref="ReadRow"/> sizes five arrays from it before
-    /// reading any column. The legacy's own documented crosstab limitation shows a DataWindow's column
-    /// count is bounded in practice [<c>n_cst_thread_task_sqlquery.sru:L673</c>], and this ceiling sits
-    /// far above any real one.
-    /// </remarks>
-    private const long MaxColumnsPerRow = 1L << 15;
-
-    /// <summary>
-    /// The fewest bytes one row of an image can occupy: its status ordinal plus its column count.
-    /// </summary>
-    /// <remarks>
-    /// Measured from <see cref="WriteRow"/>: a row writes its status through
-    /// <see cref="WriteItemStatus"/> and then an <see cref="int"/> column count. A row with no columns
-    /// is legal and costs exactly this, which makes the value a true minimum.
-    /// </remarks>
-    private const long MinimumBytesPerRow = sizeof(int) + sizeof(int);
-
-    /// <summary>
-    /// The fewest bytes one column entry of an image can occupy: its number, its status, its
-    /// original-value presence flag, and one value tag.
-    /// </summary>
-    /// <remarks>
-    /// Measured from <see cref="WriteRow"/>'s column loop: an <see cref="int"/> column number, the
-    /// status, the one-byte presence flag, then the current value - which is at minimum a single tag
-    /// byte, exactly what <see cref="FullStateValueTag.Null"/> costs. The original value is absent
-    /// whenever it equals the current one, so it contributes nothing to the minimum.
-    /// </remarks>
-    private const long MinimumBytesPerColumn = sizeof(int) + sizeof(int) + 1 + 1;
-
-    /// <summary>
-    /// Whether <paramref name="count"/> elements of at least <paramref name="minimumBytesPerElement"/>
-    /// bytes each could still fit in what remains of <paramref name="reader"/>'s stream, and is within
-    /// <paramref name="protocolMaximum"/>.
-    /// </summary>
-    /// <param name="reader">The reader positioned immediately after the count was read.</param>
-    /// <param name="count">The declared count, which may be any value the image chose.</param>
-    /// <param name="minimumBytesPerElement">The fewest bytes one element can occupy on the wire.</param>
-    /// <param name="protocolMaximum">The coarse ceiling this kind of count is subject to.</param>
-    /// <returns>
-    /// <see langword="true"/> when the count may be used as a loop bound or an allocation size;
-    /// <see langword="false"/> when it must be rejected BEFORE either.
-    /// </returns>
-    /// <remarks>
-    /// A negative count is rejected here as well, so callers need no separate sign test and cannot
-    /// forget one. The multiplication is <see cref="long"/> arithmetic and the operands are bounded by
-    /// <paramref name="protocolMaximum"/> before it happens, so it cannot overflow.
-    /// </remarks>
-    private static bool IsPlausibleCount(
-        BinaryReader reader,
-        long count,
-        long minimumBytesPerElement,
-        long protocolMaximum)
-    {
-        if (count < 0L || count > protocolMaximum)
-        {
-            return false;
-        }
-
-        long remaining = reader.BaseStream.Length - reader.BaseStream.Position;
-
-        return count * minimumBytesPerElement <= remaining;
-    }
-
-    /// <summary>
-    /// The fixed order the three buffers are written and read in.
-    /// </summary>
-    /// <remarks>
-    /// Ascending <see cref="DwBuffer"/> value: <c>Primary!</c>, <c>Delete!</c>, then <c>Filter!</c>. FIXED
-    /// RATHER THAN ENUMERATED FROM THE ENUM TYPE, because reflecting over the enum would make the payload
-    /// layout depend on member declaration order in a generated file - a dependency no reader of either
-    /// side would expect. The order is written into the bytes and verified on read, so a mismatch is
-    /// caught rather than silently applied to the wrong buffer.
+    /// THE ORDER IS PART OF THE PUBLISHED CONTRACT rather than a private layout detail:
+    /// <c>persistence.v1.CarrierState</c> requires exactly one segment per buffer IN THIS ORDER, and
+    /// <see cref="Apply(DataWindowBufferStore, CarrierState?)"/> rejects any other arrangement. It also
+    /// keeps the serialized bytes identical for identical data, which is what a golden-master comparison
+    /// depends on.
     /// </remarks>
     private static readonly DwBuffer[] PayloadBufferOrder =
-        [DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter];
+    [
+        DwBuffer.Primary,
+        DwBuffer.Delete,
+        DwBuffer.Filter,
+    ];
 
     /// <summary>
     /// Rejects a carrier whose processing kind belongs to the sibling codec's arm.
@@ -1789,31 +1534,14 @@ internal static class FullStateCodec
     }
 
     /// <summary>
-    /// Returns the row count of one buffer, using the carrier's own count for that buffer.
+    /// Reads a buffer's row count without duplicating the carrier's own accessors.
     /// </summary>
-    /// <param name="store">The carrier.</param>
-    /// <param name="buffer">Which buffer to count.</param>
-    /// <returns>The number of rows, as a one-based count.</returns>
-    /// <exception cref="InvalidDataException"><paramref name="buffer"/> is not a declared buffer.</exception>
-    /// <remarks>
-    /// The three counts are DIFFERENT MEMBERS in the legacy and are not interchangeable: <c>RowCount()</c>
-    /// for <c>Primary!</c>, <c>DeletedCount()</c> for <c>Delete!</c> and <c>FilteredCount()</c> for
-    /// <c>Filter!</c>. Note that <c>Filter!</c>'s ROW ORDER IS INVERTED relative to the source - the
-    /// legacy iterates it backwards for exactly that reason
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L235-L237</c>] - so this
-    /// codec preserves the buffer's order AS THE CARRIER REPORTS IT and never reverses it. Capture and
-    /// restore both walk forwards, which round-trips the order the carrier holds; reversing either would
-    /// produce wrong data that a row-count assertion could not catch (R9).
-    /// <para>
-    /// THE DEFAULT ARM IS UNREACHABLE AND IS REQUIRED ANYWAY, WHICH IS WHY IT IS THE ONE THING IN THIS
-    /// FILE NO TEST COVERS. This method is private and every call passes a member of
-    /// <see cref="PayloadBufferOrder"/>, so no fourth value can arrive; but a switch expression over an
-    /// enumeration without a catch-all raises the exhaustiveness warning CS8524, and
-    /// <c>TreatWarningsAsErrors</c> makes that a build failure. The arm therefore exists to satisfy the
-    /// compiler, throws rather than answering a plausible count, and is recorded here as a deliberate
-    /// coverage gap instead of being papered over with a test that reaches it by reflection.
-    /// </para>
-    /// </remarks>
+    /// <param name="store">The carrier to read.</param>
+    /// <param name="buffer">The buffer to count.</param>
+    /// <returns>The row count.</returns>
+    /// <exception cref="NotSupportedException">
+    /// <paramref name="buffer"/> is not one of the three declared buffers.
+    /// </exception>
     private static long RowCountOf(DataWindowBufferStore store, DwBuffer buffer)
     {
         return buffer switch
@@ -1821,451 +1549,268 @@ internal static class FullStateCodec
             DwBuffer.Primary => store.RowCount(),
             DwBuffer.Delete => store.DeletedCount(),
             DwBuffer.Filter => store.FilteredCount(),
-            _ => throw new InvalidDataException(
-                "The payload names a buffer that is not Primary, Delete or Filter. The legacy model has "
-                    + "no fourth buffer and this port declares none."),
+            _ => throw new NotSupportedException(
+                $"The buffer {buffer} is not one of the three PowerBuilder buffers an image carries. "
+                    + "The legacy declares exactly Primary!, Delete! and Filter!."),
         };
     }
 
     /// <summary>
-    /// Writes one row - its item status, then each assigned column in ascending column order.
+    /// Projects one row onto the published row message.
     /// </summary>
-    /// <param name="writer">The payload writer.</param>
-    /// <param name="source">The carrier being captured.</param>
-    /// <param name="buffer">The buffer the row belongs to.</param>
-    /// <param name="row">The one-based row number. R9: never rebased.</param>
-    private static void WriteRow(
-        BinaryWriter writer,
+    /// <param name="source">The carrier to read.</param>
+    /// <param name="buffer">The buffer the row is in.</param>
+    /// <param name="row">The one-based row number.</param>
+    /// <param name="projected">
+    /// The projection, or <see langword="null"/> when a value is unrepresentable.
+    /// </param>
+    /// <returns><see langword="false"/> when a value is outside the published value domain.</returns>
+    /// <remarks>
+    /// <para>
+    /// EVERY ROW IS CARRIED, unlike the changeset codec's eligibility test: this is a FULL STATE, so a
+    /// row's status selects nothing and an unmodified row travels with the rest.
+    /// </para>
+    /// <para>
+    /// AN ORIGINAL IS EMITTED ONLY WHEN IT DIFFERS FROM THE CURRENT VALUE, which the contract defines as
+    /// the encoding of "unchanged since the last baseline": the carrier answers the current value when no
+    /// original was captured, so the two statements are the same one. This replaces the old format's
+    /// present/absent flag byte with FIELD PRESENCE, which says the same thing in the published shape.
+    /// Blob comparison is BY VALUE, because the carrier hands out defensive copies and reference equality
+    /// would emit an original for every blob column whether or not it changed.
+    /// </para>
+    /// </remarks>
+    private static bool TryProjectRow(
         DataWindowBufferStore source,
         DwBuffer buffer,
-        long row)
+        long row,
+        out DataWindowRow? projected)
     {
-        // The column-zero sentinel means "the row itself" and is reached through ItemStatusMachine
-        // rather than by writing a bare 0 (R9 item 4).
-        ItemStatus rowStatus = source.GetItemStatus(row, ItemStatusMachine.RowStatusColumn, buffer);
+        projected = null;
 
-        writer.Write((int)rowStatus);
+        // The column-zero sentinel means "the row itself" and is reached through ItemStatusMachine rather
+        // than by writing a bare 0 (R9 item 4).
+        DataWindowRow built = new()
+        {
+            Buffer = buffer,
+            Row = row,
+            ItemStatus = source.GetItemStatus(row, ItemStatusMachine.RowStatusColumn, buffer),
+        };
 
         CarrierRow carrierRow = source.RowAt(row, buffer);
 
-        // Materialised before the count is written, because the count and the sequence that follows it
-        // must come from ONE enumeration. AssignedColumnNumbers is ordered ascending deliberately, which
-        // is what makes the byte layout reproducible across runs.
-        int[] columnNumbers = [.. carrierRow.AssignedColumnNumbers];
-
-        writer.Write(columnNumbers.Length);
-
-        foreach (int columnNumber in columnNumbers)
+        // AssignedColumnNumbers is ordered ascending deliberately, which is what makes the projection
+        // reproducible across runs.
+        foreach (int columnNumber in carrierRow.AssignedColumnNumbers)
         {
-            writer.Write(columnNumber);
-            writer.Write((int)source.GetItemStatus(row, columnNumber, buffer));
-
             object? current = carrierRow.GetValue(columnNumber);
+
+            if (!CarrierValue.TryToWire(current, out AnyValue? currentValue))
+            {
+                return false;
+            }
+
+            built.Columns.Add(new ColumnValue
+            {
+                // POSITIONAL, LIKE THE LEGACY BLOB: GetFullState carries ordinals and no names, so
+                // column_name is left empty and column_id is the authoritative identifier.
+                ColumnId = columnNumber,
+                Value = currentValue,
+                ItemStatus = source.GetItemStatus(row, columnNumber, buffer),
+            });
+
             object? original = carrierRow.GetOriginalValue(columnNumber);
 
-            // The carrier answers the CURRENT value when no original was captured, so equality here means
-            // "not modified since the last baseline" and the original need not travel. Reference equality
-            // for a blob makes this conservative rather than wrong: two equal byte arrays are written as
-            // distinct, which round-trips correctly and merely costs bytes.
-            bool originalDiffers = !Equals(current, original);
-
-            writer.Write(originalDiffers ? OriginalValuePresent : OriginalValueAbsent);
-
-            WriteValue(writer, current);
-
-            if (originalDiffers)
+            if (ValuesMatch(current, original))
             {
-                WriteValue(writer, original);
+                continue;
             }
+
+            if (!CarrierValue.TryToWire(original, out AnyValue? originalValue))
+            {
+                return false;
+            }
+
+            built.OriginalValues.Add(new ColumnValue
+            {
+                ColumnId = columnNumber,
+                Value = originalValue,
+            });
         }
+
+        projected = built;
+
+        return true;
     }
 
     /// <summary>
-    /// Reads one row and appends it to <paramref name="target"/>, restoring its values, its originals and
-    /// its statuses in the order that makes each of the three land correctly.
+    /// Whether two carrier values are the same value, comparing a <c>blob</c> by content.
     /// </summary>
-    /// <param name="reader">The payload reader.</param>
+    /// <param name="left">One value.</param>
+    /// <param name="right">The other.</param>
+    /// <returns><see langword="true"/> when they are equal.</returns>
+    private static bool ValuesMatch(object? left, object? right)
+    {
+        if (left is byte[] leftBlob && right is byte[] rightBlob)
+        {
+            return leftBlob.AsSpan().SequenceEqual(rightBlob);
+        }
+
+        return Equals(left, right);
+    }
+
+    /// <summary>
+    /// Validates an inbound image against the contract's exactly-one-segment-per-buffer-in-canonical-order
+    /// rule, BEFORE the target is touched.
+    /// </summary>
+    /// <param name="state">The inbound state.</param>
+    /// <returns><see langword="false"/> when the image is structurally invalid.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE CHECK RUNS BEFORE THE REPLACEMENT, AND THAT ORDERING IS DELIBERATE. This arm RESETS the target
+    /// and restores an image into it, so a fault detected after the reset would leave the target empty
+    /// while the call reports a rejected payload - strictly worse than leaving it untouched.
+    /// </para>
+    /// <para>
+    /// COUNTING THE SEGMENTS IS NOT THE RULE. Three segments all tagged Primary satisfies a count and
+    /// loads the Delete! and Filter! rows into the primary buffer; a Filter! row filed inside the Primary
+    /// segment is read in the wrong direction, because the Filter buffer's row order is INVERTED relative
+    /// to the source [<c>n_cst_thread_task_sqlupdate.sru:L235-L238</c>]. Neither failure disagrees with
+    /// any row count.
+    /// </para>
+    /// </remarks>
+    private static bool AreSegmentsCanonical(CarrierState state)
+    {
+        if (state.Segments.Count != PayloadBufferOrder.Length)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < PayloadBufferOrder.Length; index++)
+        {
+            CarrierBufferSegment segment = state.Segments[index];
+
+            // POSITIONAL EQUALITY, which covers duplication, omission, reordering and an undeclared value
+            // in one test.
+            if (segment.Buffer != PayloadBufferOrder[index])
+            {
+                return false;
+            }
+
+            foreach (DataWindowRow row in segment.Rows)
+            {
+                if (row.Buffer != segment.Buffer
+                    || row.Row < ItemStatusMachine.FirstRowNumber
+                    || !Enum.IsDefined(row.ItemStatus))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads one inbound row and appends it to <paramref name="target"/>, restoring its values, its
+    /// originals and its statuses in the order that makes each of the three land correctly.
+    /// </summary>
+    /// <param name="row">The inbound row.</param>
     /// <param name="target">The carrier being restored.</param>
     /// <param name="buffer">The buffer the row belongs to.</param>
-    /// <exception cref="InvalidDataException">The row is structurally invalid.</exception>
-    private static void ReadRow(BinaryReader reader, DataWindowBufferStore target, DwBuffer buffer)
-    {
-        ItemStatus rowStatus = ReadItemStatus(reader);
-
-        int columnCount = reader.ReadInt32();
-
-        // BOUNDED BEFORE THE FIVE ALLOCATIONS BELOW. They are sized from this number before a single
-        // column has been read, so an unbounded count of int.MaxValue would demand gigabytes and raise
-        // OutOfMemoryException instead of answering the failure code Apply is contracted to return.
-        if (!IsPlausibleCount(reader, columnCount, MinimumBytesPerColumn, MaxColumnsPerRow))
-        {
-            throw new InvalidDataException(
-                "A row declares a column count that is negative, beyond the protocol maximum, or "
-                    + "larger than the bytes that remain could hold, so the image is not one this "
-                    + "codec wrote.");
-        }
-
-        // R9: AppendRow RETURNS the new row's ONE-BASED number - the post-add count, with no minus one -
-        // and every subsequent call in this method addresses the row by that number.
-        long row = target.AppendRow(buffer, ItemStatus.NotModified);
-
-        CarrierRow carrierRow = target.RowAt(row, buffer);
-
-        int[] columnNumbers = new int[columnCount];
-        object?[] currentValues = new object?[columnCount];
-        object?[] originalValues = new object?[columnCount];
-        ItemStatus[] columnStatuses = new ItemStatus[columnCount];
-        bool[] originalDiffers = new bool[columnCount];
-
-        // Zero-based purely because these are CLR array slots for a fixed-size decode buffer, not row or
-        // column positions. Every column NUMBER they hold stays one-based (R9 item 3).
-        for (int slot = 0; slot < columnCount; slot++)
-        {
-            int columnNumber = reader.ReadInt32();
-
-            if (columnNumber < ItemStatusMachine.FirstColumnNumber)
-            {
-                throw new InvalidDataException(
-                    "A row names a column number below the one-based floor, so the image is not one this "
-                        + "codec wrote. Column numbers are never rebased in this port.");
-            }
-
-            columnNumbers[slot] = columnNumber;
-            columnStatuses[slot] = ReadItemStatus(reader);
-            originalDiffers[slot] = ReadOriginalPresence(reader);
-            currentValues[slot] = ReadValue(reader);
-            originalValues[slot] = originalDiffers[slot] ? ReadValue(reader) : currentValues[slot];
-        }
-
-        // PASS 1 - the ORIGINAL values. Written first so that the baseline below captures the state the
-        // database last saw, which is what `updatewhere=1` puts into its generated where clause.
-        for (int slot = 0; slot < columnCount; slot++)
-        {
-            target.SetItemValue(row, columnNumbers[slot], buffer, originalValues[slot]);
-        }
-
-        // RE-BASELINE. Clears the captured originals so that original equals current, and clears the
-        // statuses - which is why the statuses are stamped afterwards rather than before.
-        carrierRow.Baseline();
-
-        // PASS 2 - the CURRENT values, only where they differ. Each write captures the original exactly
-        // once, and the value it captures is the one pass 1 established.
-        for (int slot = 0; slot < columnCount; slot++)
-        {
-            if (originalDiffers[slot])
-            {
-                target.SetItemValue(row, columnNumbers[slot], buffer, currentValues[slot]);
-            }
-        }
-
-        // STATUSES LAST. Column statuses through their one-based column numbers, then the row's own
-        // status through the column-zero sentinel.
-        for (int slot = 0; slot < columnCount; slot++)
-        {
-            target.SetItemStatus(row, columnNumbers[slot], buffer, columnStatuses[slot]);
-        }
-
-        target.SetItemStatus(row, ItemStatusMachine.RowStatusColumn, buffer, rowStatus);
-    }
-
-    #endregion
-
-    #region Tagged value encoding
-
-    /// <summary>
-    /// Writes one column value, tagged with its runtime type.
-    /// </summary>
-    /// <param name="writer">The payload writer.</param>
-    /// <param name="value">
-    /// The value. <see langword="null"/> IS A VALUE HERE AND NOT AN ABSENCE - PowerBuilder has null for
-    /// value types, the ported tri-state return-code algebra depends on it, and collapsing it to zero
-    /// would convert "neither succeeded nor failed" into "succeeded".
-    /// </param>
-    /// <exception cref="NotSupportedException">
-    /// The value's runtime type has no tag. Deliberately fatal: the alternative - writing the value's
-    /// string form - produces an image that decodes to the wrong type and reads as correct.
-    /// </exception>
-    private static void WriteValue(BinaryWriter writer, object? value)
-    {
-        switch (value)
-        {
-            case null:
-                writer.Write((byte)FullStateValueTag.Null);
-                break;
-
-            case bool booleanValue:
-                writer.Write((byte)FullStateValueTag.Boolean);
-                writer.Write(booleanValue);
-                break;
-
-            case int int32Value:
-                writer.Write((byte)FullStateValueTag.Int32);
-                writer.Write(int32Value);
-                break;
-
-            case long int64Value:
-                writer.Write((byte)FullStateValueTag.Int64);
-                writer.Write(int64Value);
-                break;
-
-            case ulong unsignedValue:
-                writer.Write((byte)FullStateValueTag.UInt64);
-                writer.Write(unsignedValue);
-                break;
-
-            case double doubleValue:
-                writer.Write((byte)FullStateValueTag.Double);
-                writer.Write(doubleValue);
-                break;
-
-            case decimal decimalValue:
-                writer.Write((byte)FullStateValueTag.Decimal);
-
-                // Written as its four component integers rather than through a numeric conversion, so
-                // that SCALE SURVIVES. The fixture's salary column is declared decimal(2) against a REAL
-                // database column [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469], a mismatch
-                // the migration preserves as a defect, and a round trip that silently renormalised 1.50
-                // to 1.5 would erase exactly that kind of evidence.
-                foreach (int component in decimal.GetBits(decimalValue))
-                {
-                    writer.Write(component);
-                }
-
-                break;
-
-            case string stringValue:
-                writer.Write((byte)FullStateValueTag.String);
-                writer.Write(stringValue);
-                break;
-
-            case byte[] blobValue:
-                writer.Write((byte)FullStateValueTag.Bytes);
-                writer.Write(blobValue.Length);
-                writer.Write(blobValue);
-                break;
-
-            case DateTime dateTimeValue:
-                writer.Write((byte)FullStateValueTag.DateTime);
-                writer.Write(dateTimeValue.Ticks);
-
-                // The kind travels with the ticks. Dropping it would turn an unspecified timestamp into a
-                // local or UTC one on the far side, which is a value change disguised as a formatting
-                // detail.
-                writer.Write((byte)dateTimeValue.Kind);
-                break;
-
-            case DateOnly dateValue:
-                writer.Write((byte)FullStateValueTag.DateOnly);
-                writer.Write(dateValue.DayNumber);
-                break;
-
-            case TimeOnly timeValue:
-                writer.Write((byte)FullStateValueTag.TimeOnly);
-                writer.Write(timeValue.Ticks);
-                break;
-
-            default:
-                throw new NotSupportedException(
-                    "A column holds a value of type '"
-                        + value.GetType().FullName
-                        + "', which has no tag in FullStateValueTag. The full-state image is narrowed "
-                        + "with this defined error rather than widened with a guess: coercing an unknown "
-                        + "value to its string form would round-trip as the wrong type and read as "
-                        + "correct. Add a tag - APPENDED, never inserted, because the values are written "
-                        + "into the payload - together with its writer and reader arms.");
-        }
-    }
-
-    /// <summary>
-    /// Reads one tagged column value.
-    /// </summary>
-    /// <param name="reader">The payload reader.</param>
-    /// <returns>The value, which may legitimately be <see langword="null"/>.</returns>
-    /// <exception cref="InvalidDataException">The tag is unrecognised or a length is negative.</exception>
-    private static object? ReadValue(BinaryReader reader)
-    {
-        FullStateValueTag tag = (FullStateValueTag)reader.ReadByte();
-
-        switch (tag)
-        {
-            case FullStateValueTag.Null:
-                return null;
-
-            case FullStateValueTag.Boolean:
-                return reader.ReadBoolean();
-
-            case FullStateValueTag.Int32:
-                return reader.ReadInt32();
-
-            case FullStateValueTag.Int64:
-                return reader.ReadInt64();
-
-            case FullStateValueTag.UInt64:
-                return reader.ReadUInt64();
-
-            case FullStateValueTag.Double:
-                return reader.ReadDouble();
-
-            case FullStateValueTag.Decimal:
-                int[] components =
-                [
-                    reader.ReadInt32(),
-                    reader.ReadInt32(),
-                    reader.ReadInt32(),
-                    reader.ReadInt32(),
-                ];
-
-                try
-                {
-                    return new decimal(components);
-                }
-                catch (ArgumentException invalidComponents)
-                {
-                    // A decimal whose component integers are not a legal encoding. Reported as image
-                    // corruption so that Apply answers the failure code rather than escaping.
-                    throw new InvalidDataException(
-                        "The image carries a decimal whose component integers are not a valid encoding.",
-                        invalidComponents);
-                }
-
-            case FullStateValueTag.String:
-                return reader.ReadString();
-
-            case FullStateValueTag.Bytes:
-                int length = reader.ReadInt32();
-
-                // BOUNDED BEFORE THE READ, NOT AFTER IT. ReadBytes allocates `new byte[length]` up
-                // front and only then discovers the stream is shorter, so a declared length of
-                // int.MaxValue reserves two gigabytes before failing. A blob element is one byte, so
-                // the remaining-byte rule is the exact bound here and no invented ceiling is wanted.
-                if (!IsPlausibleCount(reader, length, minimumBytesPerElement: 1L, protocolMaximum: int.MaxValue))
-                {
-                    throw new InvalidDataException(
-                        "The image declares a blob length that is negative or longer than the bytes "
-                            + "that remain, so it is not one this codec wrote.");
-                }
-
-                // ReadBytes may legitimately return fewer bytes than asked for at the end of a stream, so
-                // the shortfall is checked rather than assumed away - an unchecked read would silently
-                // substitute a truncated blob for the real one.
-                byte[] blob = reader.ReadBytes(length);
-
-                if (blob.Length != length)
-                {
-                    throw new EndOfStreamException(
-                        "The image ends inside a blob value, so it is truncated.");
-                }
-
-                return blob;
-
-            case FullStateValueTag.DateTime:
-                long ticks = reader.ReadInt64();
-                byte kind = reader.ReadByte();
-
-                if (!Enum.IsDefined((DateTimeKind)kind))
-                {
-                    throw new InvalidDataException(
-                        "The image carries a timestamp with an undefined DateTimeKind.");
-                }
-
-                try
-                {
-                    return new DateTime(ticks, (DateTimeKind)kind);
-                }
-                catch (ArgumentOutOfRangeException outOfRange)
-                {
-                    throw new InvalidDataException(
-                        "The image carries a timestamp outside the representable range.",
-                        outOfRange);
-                }
-
-            case FullStateValueTag.DateOnly:
-                int dayNumber = reader.ReadInt32();
-
-                try
-                {
-                    return DateOnly.FromDayNumber(dayNumber);
-                }
-                catch (ArgumentOutOfRangeException outOfRange)
-                {
-                    throw new InvalidDataException(
-                        "The image carries a date outside the representable range.",
-                        outOfRange);
-                }
-
-            case FullStateValueTag.TimeOnly:
-                long timeTicks = reader.ReadInt64();
-
-                try
-                {
-                    return new TimeOnly(timeTicks);
-                }
-                catch (ArgumentOutOfRangeException outOfRange)
-                {
-                    throw new InvalidDataException(
-                        "The image carries a time of day outside the representable range.",
-                        outOfRange);
-                }
-
-            default:
-                throw new InvalidDataException(
-                    "The image carries value tag "
-                        + ((byte)tag).ToString(CultureInfo.InvariantCulture)
-                        + ", which this codec does not recognise. Tags are only ever appended, so an "
-                        + "unknown tag means the image was written by a newer or a different encoder.");
-        }
-    }
-
-    /// <summary>
-    /// Reads an item status, rejecting a value outside the published four-member domain.
-    /// </summary>
-    /// <param name="reader">The payload reader.</param>
-    /// <returns>The status.</returns>
-    /// <exception cref="InvalidDataException">The value is not a declared status.</exception>
+    /// <returns><see langword="false"/> when the row is structurally invalid.</returns>
     /// <remarks>
-    /// The domain is the generated <see cref="ItemStatus"/> enum and this port ADDS NO MEMBER TO IT: the
-    /// four legal values are <c>NotModified!</c>, <c>DataModified!</c>, <c>New!</c> and
-    /// <c>NewModified!</c>. Validating on read rather than casting blindly keeps a corrupt image from
-    /// planting a status no legacy path can produce, which would then read as a legitimate state
-    /// everywhere downstream.
+    /// AN ORIGINAL NAMING A COLUMN THE ROW DOES NOT CARRY IS REJECTED, and a DUPLICATED column number is
+    /// rejected in either list: the first would leave a value applied to a column that is not there, and
+    /// the second would write one column twice, capturing the wrong original on the second write.
     /// </remarks>
-    private static ItemStatus ReadItemStatus(BinaryReader reader)
+    private static bool TryReadRow(DataWindowRow row, DataWindowBufferStore target, DwBuffer buffer)
     {
-        int raw = reader.ReadInt32();
+        Dictionary<int, object?> originals = [];
 
-        if (!Enum.IsDefined((ItemStatus)raw))
+        foreach (ColumnValue original in row.OriginalValues)
         {
-            throw new InvalidDataException(
-                "The image carries item status "
-                    + raw.ToString(CultureInfo.InvariantCulture)
-                    + ", which is not one of the four published values. This port adds no fifth status.");
+            if (!IsColumnNumber(original.ColumnId)
+                || !CarrierValue.TryFromWire(original.Value, out object? originalValue)
+                || !originals.TryAdd((int)original.ColumnId, originalValue))
+            {
+                return false;
+            }
         }
 
-        return (ItemStatus)raw;
+        List<(int ColumnNumber, ItemStatus Status, object? Current, object? Original)> columns = [];
+        HashSet<int> seen = [];
+
+        foreach (ColumnValue column in row.Columns)
+        {
+            if (!IsColumnNumber(column.ColumnId)
+                || !seen.Add((int)column.ColumnId)
+                || !CarrierValue.TryFromWire(column.Value, out object? current))
+            {
+                return false;
+            }
+
+            int columnNumber = (int)column.ColumnId;
+
+            // An omitted per-column status is the contract's "no status was supplied", which on this path
+            // means the column is not modified in its own right.
+            ItemStatus columnStatus = column.HasItemStatus ? column.ItemStatus : ItemStatus.NotModified;
+
+            if (!Enum.IsDefined(columnStatus))
+            {
+                return false;
+            }
+
+            columns.Add((
+                columnNumber,
+                columnStatus,
+                current,
+                originals.TryGetValue(columnNumber, out object? original) ? original : current));
+        }
+
+        foreach (int columnNumber in originals.Keys)
+        {
+            if (!seen.Contains(columnNumber))
+            {
+                return false;
+            }
+        }
+
+        // R9: AppendRow answers the new row's ONE-BASED number, which is the post-add count and not a
+        // zero-based index.
+        long appendedRowNumber = target.AppendRow(buffer, ItemStatus.NotModified);
+        CarrierRow appended = target.RowAt(appendedRowNumber, buffer);
+
+        // THE THREE-STEP RESTORE. The originals first, then the baseline, then the currents - see the
+        // remarks on Apply for why the order is load-bearing and not a style choice.
+        foreach ((int columnNumber, _, _, object? original) in columns)
+        {
+            appended.SetValue(columnNumber, original);
+        }
+
+        appended.Baseline();
+
+        foreach ((int columnNumber, ItemStatus status, object? current, _) in columns)
+        {
+            appended.SetValue(columnNumber, current);
+            appended.SetColumnStatus(columnNumber, status);
+        }
+
+        // LAST, because Baseline clears it.
+        appended.Status = row.ItemStatus;
+
+        return true;
     }
 
     /// <summary>
-    /// Reads the flag that says whether a column's original value follows its current one.
+    /// Whether a wire column identifier names a real column.
     /// </summary>
-    /// <param name="reader">The payload reader.</param>
-    /// <returns>
-    /// <see langword="true"/> when an original value follows; <see langword="false"/> when the original
-    /// equals the current value and was therefore not written.
-    /// </returns>
-    /// <exception cref="InvalidDataException">The flag byte is neither of the two legal values.</exception>
-    private static bool ReadOriginalPresence(BinaryReader reader)
-    {
-        byte flag = reader.ReadByte();
-
-        return flag switch
-        {
-            OriginalValueAbsent => false,
-            OriginalValuePresent => true,
-            _ => throw new InvalidDataException(
-                "The image carries an original-value flag that is neither 0 nor 1, so it is not one this "
-                    + "codec wrote."),
-        };
-    }
+    /// <param name="columnId">The wire identifier.</param>
+    /// <returns><see langword="true"/> when it names a column.</returns>
+    /// <remarks>
+    /// R9: ONE-BASED. Zero is the row-status sentinel and never addresses a value.
+    /// </remarks>
+    private static bool IsColumnNumber(long columnId) =>
+        columnId >= ItemStatusMachine.FirstColumnNumber && columnId <= int.MaxValue;
 
     #endregion
 }

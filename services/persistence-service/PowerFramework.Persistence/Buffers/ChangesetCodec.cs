@@ -174,11 +174,13 @@
 //  Declaring a second spelling of either would be the wire-compatibility defect that
 //  common.v1.proto's own enum notes warn about.
 //
-//  NO JSON AND NO XML (C-D). The changeset payload is an OPAQUE BINARY BLOB, and re-expressing it as
-//  document serialization would reach into the deferred Documents parser family, which is forbidden
-//  outright. The format below is written with BinaryWriter and BinaryReader from the BCL: fixed
-//  little-endian layout, deterministic byte-for-byte for equal input, which is what a golden-master
-//  comparison requires.
+//  NO JSON AND NO XML (C-D). The changeset payload is the PUBLISHED persistence.v1.CarrierState
+//  message, and re-expressing it as document serialization would reach into the deferred Documents
+//  parser family, which is forbidden outright. It used to be an opaque binary blob written with
+//  BinaryWriter, and that was the defect a review found: a format owned privately here cannot be
+//  implemented by a consumer that references only the contracts project. Protobuf's own canonical
+//  encoding is deterministic byte-for-byte for equal input, which is what a golden-master comparison
+//  requires, and it is a published format rather than a private one.
 //
 //  NO PRESENTATION, AND THE EVIDENCE IS AN ASYMMETRY (C-D). The DataWindow receiver arm suspends
 //  redraw before the first chunk and calls a group recalculation plus a redraw restore after the last
@@ -259,9 +261,8 @@
 //  constraint would make the ledger less auditable, not more.
 // ==============================================================================================
 
-using System.Globalization;
-using System.Text;
 using PowerFramework.Contracts.Common.V1;
+using PowerFramework.Contracts.Persistence.V1;
 
 // COLLISION RESOLUTION (AAP 0.4.5.1). PowerBuilder resolved one flat global namespace by library
 // list order, so this port has no import statements to rewrite - it has namespaces to CREATE plus
@@ -442,10 +443,10 @@ internal sealed record ChangesetSourceDefinition
 /// </para>
 /// <para>
 /// C-K - A CLASS RATHER THAN A RECORD, DELIBERATELY. A record would synthesize value equality over
-/// <see cref="Payload"/>, and <see cref="ReadOnlyMemory{T}"/> equality compares the underlying
-/// reference, offset and length rather than the bytes - so two chunks carrying identical bytes in
-/// different buffers would compare unequal while looking as though they should not. Since no
-/// behaviour here needs chunk equality, the safer shape is one that does not offer it.
+/// <see cref="State"/>, and a generated protobuf message's equality is a deep field comparison whose
+/// cost and whose treatment of an absent state are both surprising at a call site that only wanted to
+/// know whether two chunks were the same delivery. Since no behaviour here needs chunk equality, the
+/// safer shape is one that does not offer it.
 /// </para>
 /// </remarks>
 internal sealed class ChangesetChunk
@@ -489,21 +490,39 @@ internal sealed class ChangesetChunk
     /// <c>if current = 1</c> reset test [<c>:L192</c>, <c>:L218</c>, <c>:L235</c>] would silently
     /// never fire for a zero-based stream and the target would accumulate rows across sequences.
     /// </remarks>
-    internal ChangesetChunk(ReadOnlyMemory<byte> payload, long chunkCount, long chunkIndex)
+    internal ChangesetChunk(CarrierState? state, long chunkCount, long chunkIndex)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkCount);
         ArgumentOutOfRangeException.ThrowIfLessThan(chunkIndex, 1L);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(chunkIndex, chunkCount);
 
-        Payload = payload;
+        State = state;
         ChunkCount = chunkCount;
         ChunkIndex = chunkIndex;
     }
 
     /// <summary>
-    /// The serialized changeset, opaque to everything outside this file. Legacy <c>ref blob blbdata</c>.
+    /// The changeset this chunk carries, as the PUBLISHED typed carrier state, or
+    /// <see langword="null"/> for the legacy's zero-length blob. Legacy <c>ref blob blbdata</c>.
     /// </summary>
-    internal ReadOnlyMemory<byte> Payload { get; }
+    /// <remarks>
+    /// <para>
+    /// TYPED RATHER THAN OPAQUE BYTES, AND THE CHANGE IS NOT INTERNAL TIDYING. The published
+    /// <c>persistence.v1.QueryDataChunk.state</c> used to be a <c>bytes</c> field whose format was
+    /// declared the codecs' private concern on both sides, which left DataServices - which references
+    /// only the contracts project - unable to decode it without duplicating this file or taking a
+    /// project reference on Persistence internals. Section 2b of <c>persistence.v1.proto</c> records
+    /// the full reasoning.
+    /// </para>
+    /// <para>
+    /// <see langword="null"/> IS THE ZERO-LENGTH BLOB, and the mapping is exact rather than a
+    /// convention invented here: <c>state</c> is a MESSAGE field, so protobuf tracks its presence
+    /// natively, and an absent state is what the receive side's <c>if Len(blbData) &gt; 0</c> test
+    /// [<c>n_cst_threading_task_sqlquery.sru:L188</c>] reads as false. It is DISTINCT from a state
+    /// carrying three empty segments, which is a legitimately empty result rather than no payload.
+    /// </para>
+    /// </remarks>
+    internal CarrierState? State { get; }
 
     /// <summary>
     /// The total number of chunks in this sequence. Legacy <c>count</c>, argument 2 of the handover.
@@ -553,7 +572,7 @@ internal sealed class ChangesetChunk
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L188-L210</c>]. The
     /// send side produces this shape on its empty-result arm at <c>:L230</c>.
     /// </remarks>
-    internal bool IsEmptyPayload => Payload.IsEmpty;
+    internal bool IsEmptyPayload => State is null;
 }
 
 /// <summary>
@@ -580,15 +599,18 @@ internal sealed class ChangesetChildPayload
     /// The column name, resolved by the legacy from the column's own Name property at
     /// <c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L119</c>.
     /// </param>
-    /// <param name="payload">The serialized child changeset. Empty means "clear the child".</param>
+    /// <param name="state">
+    /// The child changeset as published typed carrier state, or <see langword="null"/> for the
+    /// legacy's zero-length blob, which means "clear the child".
+    /// </param>
     /// <exception cref="ArgumentException"><paramref name="columnName"/> is empty or whitespace.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="columnName"/> is <see langword="null"/>.</exception>
-    internal ChangesetChildPayload(string columnName, ReadOnlyMemory<byte> payload)
+    internal ChangesetChildPayload(string columnName, CarrierState? state)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(columnName);
 
         ColumnName = columnName;
-        Payload = payload;
+        State = state;
     }
 
     /// <summary>
@@ -597,9 +619,11 @@ internal sealed class ChangesetChildPayload
     internal string ColumnName { get; }
 
     /// <summary>
-    /// The serialized child changeset. Legacy <c>ref blob blbdata</c>.
+    /// The child changeset as published typed carrier state, or <see langword="null"/> for the legacy's
+    /// zero-length blob. Legacy <c>ref blob blbdata</c>. See <see cref="ChangesetChunk.State"/> for why
+    /// this is typed and why absence rather than emptiness carries the zero-length reading.
     /// </summary>
-    internal ReadOnlyMemory<byte> Payload { get; }
+    internal CarrierState? State { get; }
 
     /// <summary>
     /// Whether the payload is empty, which the child receiver treats as success without applying
@@ -611,7 +635,7 @@ internal sealed class ChangesetChildPayload
     /// that the child receiver has ALREADY reset its target by this point [<c>:L103</c>], so an empty
     /// payload still clears the child - it just does so unconditionally rather than on this branch.
     /// </remarks>
-    internal bool IsEmptyPayload => Payload.IsEmpty;
+    internal bool IsEmptyPayload => State is null;
 }
 
 /// <summary>
@@ -833,8 +857,8 @@ internal interface IChangesetPayloadCodec
     /// Encodes the changed rows of <paramref name="source"/> into a payload.
     /// </summary>
     /// <param name="source">The carrier to read. Not modified.</param>
-    /// <param name="payload">
-    /// The encoded payload, or an empty payload when the result is not
+    /// <param name="state">
+    /// The projected carrier state, or <see langword="null"/> when the result is not
     /// <see cref="DataWindowBufferStore.DataStoreSuccess"/>.
     /// </param>
     /// <returns>
@@ -845,13 +869,13 @@ internal interface IChangesetPayloadCodec
     /// Reproduces <c>GetChanges(ref blbData)</c>. See DECISION 5 for why the managed shape returns the
     /// payload through <see langword="out"/> rather than through a <c>ref</c> parameter.
     /// </remarks>
-    long TryEncode(DataWindowBufferStore source, out ReadOnlyMemory<byte> payload);
+    long TryEncode(DataWindowBufferStore source, out CarrierState? state);
 
     /// <summary>
     /// Applies a payload onto <paramref name="target"/>, merging its rows into the target's buffers.
     /// </summary>
     /// <param name="target">The carrier to write.</param>
-    /// <param name="payload">The payload to apply.</param>
+    /// <param name="state">The carrier state to apply. <see langword="null"/> is malformed input.</param>
     /// <returns>
     /// <see cref="DataWindowBufferStore.DataStoreSuccess"/> on a clean apply,
     /// <see cref="DataWindowBufferStore.DataStoreFailure"/> on a malformed payload, or a value greater
@@ -862,38 +886,60 @@ internal interface IChangesetPayloadCodec
     /// THROW: the legacy reacts to a code, and an exception escaping here would be a failure mode the
     /// oracle does not have (C-B).
     /// </remarks>
-    long TryApply(DataWindowBufferStore target, ReadOnlyMemory<byte> payload);
+    long TryApply(DataWindowBufferStore target, CarrierState? state);
 }
 
 /// <summary>
-/// The default opaque binary changeset format: a fixed little-endian layout carrying, for each of the
-/// three buffers, every changed row with its item status, its per-column item statuses, and both the
-/// current and the ORIGINAL value of every column it has one for.
+/// The default carrier-state projection: for each of the three buffers, every changed row with its
+/// item status, its per-column item statuses, and both the current and the ORIGINAL value of every
+/// column it has one for - expressed as the PUBLISHED <see cref="CarrierState"/> message.
 /// </summary>
 /// <remarks>
+/// <para>
+/// WHY THIS IS A PROJECTION AND NOT A SERIALIZER ANY MORE. This type used to write an opaque
+/// little-endian byte format of its own invention, and the published contract described the resulting
+/// field as "opaque - its internal format is the changeset and full-state codecs' concern on both
+/// sides". That is not implementable across the boundary it sat on: DataServices references ONLY
+/// <c>shared/PowerFramework.Contracts</c> (constraint C-A), so a format owned privately here left the
+/// consumer with two choices, both forbidden - duplicate this file, or take a project reference on
+/// Persistence internals. Section 2b of <c>persistence.v1.proto</c> records the finding and the
+/// resolution; this type is the send-and-receive half of it.
+/// </para>
 /// <para>
 /// WHY BOTH VALUES PER COLUMN, AND WHY THAT IS NOT OPTIONAL. The golden-master fixture declares
 /// <c>updatewhere=1</c> [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>] with
 /// <c>updatewhereclause=yes</c> on all six columns [<c>:L8-L13</c>], so the generated update
 /// statement's where clause carries the key column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE
 /// COLUMN. A payload that carried only current values could not express optimistic concurrency at all,
-/// and the row loss would be invisible until a conflict silently failed to be detected.
+/// and the row loss would be invisible until a conflict silently failed to be detected. That is why
+/// <see cref="DataWindowRow.OriginalValues"/> is populated here and not treated as a retrieve-path
+/// nicety.
 /// </para>
 /// <para>
-/// NO JSON AND NO XML (C-D). Reimplementing this as document serialization would reach into the
-/// deferred Documents parser family. <see cref="BinaryWriter"/> and <see cref="BinaryReader"/> write
-/// and read little-endian on every platform, so equal input yields byte-identical output, which is
-/// the repeatability the Golden-Master technique requires of both master and candidate.
+/// NO JSON AND NO XML (C-D), AND NO HAND-ROLLED BINARY EITHER. Document serialization would reach into
+/// the deferred Documents parser family; a private binary format is what the review found
+/// unimplementable. Protobuf's own canonical encoding is deterministic for the shapes used here - the
+/// generated writer emits fields in ascending number and this projection fills every repeated field in
+/// a fixed order - so equal input yields byte-identical output, which is the repeatability the
+/// Golden-Master technique requires of both master and candidate.
 /// </para>
 /// <para>
-/// DETERMINISM DETAILS THAT MATTER. Columns are written in ASCENDING COLUMN NUMBER, taken from
-/// <see cref="CarrierRow.AssignedColumnNumbers"/>, which is ordered for exactly this reason - a
-/// dictionary's enumeration order is unspecified and would make the byte layout vary between runs.
-/// Buffers are written in the fixed order primary, delete, filter. A decimal is written through
-/// <see cref="decimal.GetBits(decimal, Span{int})"/>, which is lossless AND preserves the declared
-/// scale, so the fixture's <c>salary decimal(2)</c> round-trips as a two-place decimal rather than
-/// being normalised. Text is UTF-8 with an explicit non-throwing-free encoder so that an unpaired
-/// surrogate is a payload fault answered with a code rather than an escaping exception.
+/// DETERMINISM DETAILS THAT MATTER, AND THEY ARE THE SAME ONES AS BEFORE. Columns are emitted in
+/// ASCENDING COLUMN NUMBER, taken from <see cref="CarrierRow.AssignedColumnNumbers"/>, which is ordered
+/// for exactly this reason - a dictionary's enumeration order is unspecified and would make the payload
+/// vary between runs. Segments are emitted in the fixed canonical order primary, delete, filter. A
+/// decimal travels as canonical invariant TEXT through <see cref="CarrierValue"/>, which preserves the
+/// declared scale, so the fixture's <c>salary decimal(2)</c> round-trips as a two-place decimal rather
+/// than being normalised.
+/// </para>
+/// <para>
+/// THE VALUE DOMAIN IS THE PUBLISHED ONE. <see cref="CarrierValue"/> is the single mapping onto
+/// <c>common.v1.AnyValue</c>'s eleven arms, and it WIDENS on the way out per the contract's own rule -
+/// a <see cref="short"/> reads back as a <see cref="long"/>. A value outside those arms, of which
+/// <see cref="TimeSpan"/> is the reachable case, is answered with
+/// <see cref="DataWindowBufferStore.DataStoreFailure"/> rather than encoded: that is the legacy's own
+/// <c>if ... GetChanges(ref blbData) &lt; 0 then</c> arm, and the reasoning is on
+/// <see cref="CarrierValue"/> itself.
 /// </para>
 /// <para>
 /// WHICH ROWS COUNT AS CHANGED. For <c>Primary!</c> and <c>Filter!</c>, a row is included when
@@ -908,35 +954,22 @@ internal interface IChangesetPayloadCodec
 /// status, because a row's presence in that buffer IS the change.
 /// </para>
 /// <para>
-/// C-H. Nothing here touches storage, a clock, a socket or a file, so the whole format is exercisable
-/// with no database and no container.
+/// C-H. Nothing here touches storage, a clock, a socket or a file, so the whole projection is
+/// exercisable with no database and no container.
 /// </para>
 /// </remarks>
 internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 {
     /// <summary>
-    /// The four leading bytes of every payload, so that a payload from another producer is rejected
-    /// with a code rather than misread.
+    /// The buffers projected, in the fixed canonical order they are projected in.
     /// </summary>
-    private const uint PayloadMagic = 0x43574650u;
-
-    /// <summary>
-    /// The format version this codec writes and is the only version it reads.
-    /// </summary>
-    private const byte PayloadVersion = 1;
-
-    /// <summary>
-    /// The reserved flag byte, written as zero and required to be zero on read. It exists so that a
-    /// future format can signal an additive change without moving any existing field.
-    /// </summary>
-    private const byte ReservedFlags = 0;
-
-    /// <summary>
-    /// The buffers written, in the fixed order they are written in. The order is part of the format:
-    /// varying it would change the byte layout for identical data and break the golden-master
-    /// comparison.
-    /// </summary>
-    private static readonly DwBuffer[] SerializedBuffers =
+    /// <remarks>
+    /// THE ORDER IS PART OF THE CONTRACT, not an implementation detail: <c>persistence.v1.CarrierState</c>
+    /// requires exactly one segment per buffer IN THIS ORDER, and <see cref="TryApply"/> rejects any
+    /// other arrangement. Varying it would also change the serialized bytes for identical data and break
+    /// the golden-master comparison.
+    /// </remarks>
+    internal static readonly DwBuffer[] SerializedBuffers =
     [
         DwBuffer.Primary,
         DwBuffer.Delete,
@@ -944,435 +977,423 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     ];
 
     /// <summary>
-    /// A UTF-8 encoder that reports malformed input instead of substituting replacement characters, so
-    /// that a value which cannot round-trip is a detected payload fault rather than silent corruption.
+    /// The row-status sentinel column, restated locally so no literal zero appears below.
     /// </summary>
-    private static readonly UTF8Encoding StrictUtf8 = new(
-        encoderShouldEmitUTF8Identifier: false,
-        throwOnInvalidBytes: true);
-
-    // ------------------------------------------------------------------------------------------
-    //  THE PAYLOAD IS UNTRUSTED INPUT, AND EVERY COUNT IN IT IS AN ALLOCATION REQUEST
-    //  ----------------------------------------------------------------------------------------
-    //  This is the one place the receive path is not merely a mirror of the send path. A payload
-    //  arrives over C-05's Query stream from a peer, so every length and count it declares is a
-    //  number chosen by whoever produced the bytes - and three of them are handed STRAIGHT to an
-    //  allocation:
-    //
-    //      the per-row column count   -> four arrays of that length, allocated before a single
-    //                                    column has been read
-    //      a blob length              -> BinaryReader.ReadBytes allocates `new byte[count]` up
-    //                                    front, BEFORE discovering the stream is shorter
-    //      the per-segment row count  -> the iteration bound of the row loop
-    //
-    //  A NON-NEGATIVE CHECK IS NOT A BOUND. Four bytes can say 2,147,483,647 in a payload that is
-    //  twelve bytes long, and the reader would try to reserve gigabytes before failing. The failure
-    //  would be an OutOfMemoryException escaping this codec - not the -1 the legacy's callers test
-    //  for - and on a shared host it takes more than this request down with it.
-    //
-    //  THE BOUND THAT IS ALWAYS CORRECT IS THE REMAINING BYTES. Every element of every count costs
-    //  at least a known minimum number of bytes on the wire, so `count * minimumElementBytes` can
-    //  never legitimately exceed what is left in the stream. That single rule is exact - it rejects
-    //  nothing a well-formed payload can contain, because a well-formed payload always carries the
-    //  bytes it promised - and it needs no tuning. The protocol maxima below sit in front of it as a
-    //  second, coarser gate so that a hostile count is rejected on sight rather than after an
-    //  arithmetic comparison, and so the intent is legible to a reader.
-    //
-    //  All arithmetic is done in `long` (or `checked`) so the multiplication itself cannot overflow
-    //  into a small positive number and defeat the comparison - which is the classic way this kind
-    //  of guard is written and then silently bypassed.
-    // ------------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// The largest row count a single buffer segment may declare: 1,048,576.
-    /// </summary>
-    /// <remarks>
-    /// A coarse sanity gate rather than a capacity statement, and it is deliberately far above
-    /// anything the evidenced fixture produces - the sole updatable DataWindow in the repository is a
-    /// six-column <c>COMPANY</c> table [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14]. It exists
-    /// so that an absurd count is rejected by name, with a legible reason, rather than only by the
-    /// remaining-byte arithmetic. The remaining-byte rule is the tighter of the two in every real
-    /// case, because a row costs far more than one byte.
-    /// </remarks>
-    private const long MaxRowsPerBufferSegment = 1L << 20;
-
-    /// <summary>
-    /// The largest column count a single row may declare: 32,768.
-    /// </summary>
-    /// <remarks>
-    /// This is the count that matters most, because it is the one multiplied by four array
-    /// allocations before any column is read. The legacy's own documented crosstab limitation shows a
-    /// DataWindow's column count is bounded in practice
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L673</c>], and this
-    /// ceiling is far above any real one.
-    /// </remarks>
-    private const long MaxColumnsPerRow = 1L << 15;
-
-    /// <summary>
-    /// The fewest bytes one row of a buffer segment can occupy: its status ordinal plus its column
-    /// count.
-    /// </summary>
-    /// <remarks>
-    /// Measured from <see cref="WriteBufferSegment"/> and <see cref="TryReadRow"/>: a row always
-    /// writes an <see cref="int"/> status ordinal and an <see cref="int"/> column count, so four plus
-    /// four. A row with no columns is legal and costs exactly this, which is what makes the value a
-    /// true minimum rather than an estimate.
-    /// </remarks>
-    private const long MinimumBytesPerRow = sizeof(int) + sizeof(int);
-
-    /// <summary>
-    /// The fewest bytes one column entry can occupy: its number, its status ordinal, and one value tag
-    /// for each of its current and original values.
-    /// </summary>
-    /// <remarks>
-    /// Measured from the write loop in <see cref="WriteBufferSegment"/>: an <see cref="int"/> column
-    /// number, an <see cref="int"/> status ordinal, then two values each of which is at minimum a
-    /// single tag byte - which is exactly what <see cref="ValueTag.Null"/> costs.
-    /// </remarks>
-    private const long MinimumBytesPerColumn = sizeof(int) + sizeof(int) + 1 + 1;
-
-    /// <summary>
-    /// Whether <paramref name="count"/> elements of at least <paramref name="minimumBytesPerElement"/>
-    /// bytes each could still fit in what remains of <paramref name="reader"/>'s stream, and is within
-    /// <paramref name="protocolMaximum"/>.
-    /// </summary>
-    /// <param name="reader">The reader positioned immediately after the count was read.</param>
-    /// <param name="count">The declared count, which may be any <see cref="int"/> the payload chose.</param>
-    /// <param name="minimumBytesPerElement">
-    /// The fewest bytes one element can occupy on the wire. Must be positive, or the check would be
-    /// vacuous.
-    /// </param>
-    /// <param name="protocolMaximum">The coarse ceiling this kind of count is subject to.</param>
-    /// <returns>
-    /// <see langword="true"/> when the count is plausible and may be used as a loop bound or an
-    /// allocation size; <see langword="false"/> when it must be rejected BEFORE either.
-    /// </returns>
-    /// <remarks>
-    /// <para>
-    /// The comparison is performed in <see cref="long"/> so that
-    /// <c>count * minimumBytesPerElement</c> cannot overflow: the widest possible product is
-    /// <see cref="int.MaxValue"/> multiplied by a small constant, which a 64-bit signed integer holds
-    /// comfortably. Doing it in <see cref="int"/> is how a guard of this shape ends up wrapping to a
-    /// small positive number and admitting the very count it was written to reject.
-    /// </para>
-    /// <para>
-    /// A negative count is rejected here too, so callers need no separate sign test and cannot forget
-    /// one.
-    /// </para>
-    /// </remarks>
-    private static bool IsPlausibleCount(
-        BinaryReader reader,
-        int count,
-        long minimumBytesPerElement,
-        long protocolMaximum)
-    {
-        if (count < 0 || count > protocolMaximum)
-        {
-            return false;
-        }
-
-        long remaining = reader.BaseStream.Length - reader.BaseStream.Position;
-
-        return count * minimumBytesPerElement <= remaining;
-    }
-
-    /// <summary>
-    /// The discriminator written before every column value, preserving the exact runtime type so that a
-    /// round trip yields the value it started as rather than a widened substitute.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// C-K - WHY EVERY INTEGRAL WIDTH GETS ITS OWN TAG INSTEAD OF ALL COLLAPSING TO 64 BITS.
-    /// Collapsing them would preserve the NUMBER and destroy the TYPE, and the two are not
-    /// interchangeable here: the refactor plan maps PowerBuilder's <c>any</c> onto <c>object?</c>, so a
-    /// column value's runtime type is part of what a carrier holds, and a round-trip assertion over
-    /// <c>object</c> would fail for a widened value even though the number matched. The tag set covers
-    /// the PowerBuilder scalar family and its declared .NET mapping - string, boolean, the integral
-    /// widths, the two floating widths, decimal, the date and time trio, and blob - and NOTHING ELSE.
-    /// An unmapped type is a payload fault, which is one of the two ways the
-    /// <c>GetChanges Failed</c> arm becomes reachable.
-    /// </para>
-    /// </remarks>
-    private enum ValueTag : byte
-    {
-        /// <summary>No value. PowerBuilder has null for value types and the tri-state predicates depend on it, so null is a first-class value here and never collapses to zero.</summary>
-        Null = 0,
-
-        /// <summary>A <see cref="string"/>, length-prefixed UTF-8.</summary>
-        Text = 1,
-
-        /// <summary>A <see cref="bool"/>.</summary>
-        Boolean = 2,
-
-        /// <summary>A <see cref="byte"/>.</summary>
-        Byte = 3,
-
-        /// <summary>A <see cref="short"/>.</summary>
-        Int16 = 4,
-
-        /// <summary>An <see cref="int"/>, which is PowerBuilder's own <c>long</c>.</summary>
-        Int32 = 5,
-
-        /// <summary>A <see cref="long"/>, which is PowerBuilder's <c>longlong</c>.</summary>
-        Int64 = 6,
-
-        /// <summary>A <see cref="uint"/>, which is PowerBuilder's <c>unsignedlong</c>.</summary>
-        UInt32 = 7,
-
-        /// <summary>A <see cref="ulong"/>.</summary>
-        UInt64 = 8,
-
-        /// <summary>A <see cref="float"/>, PowerBuilder's <c>real</c>.</summary>
-        Single = 9,
-
-        /// <summary>A <see cref="double"/>.</summary>
-        Double = 10,
-
-        /// <summary>A <see cref="decimal"/>, written as its four constituent words so that scale survives.</summary>
-        Decimal = 11,
-
-        /// <summary>A <see cref="DateTime"/>, written as ticks plus kind.</summary>
-        DateTime = 12,
-
-        /// <summary>A <see cref="DateOnly"/>, PowerBuilder's <c>date</c>.</summary>
-        Date = 13,
-
-        /// <summary>A <see cref="TimeOnly"/>, PowerBuilder's <c>time</c>.</summary>
-        Time = 14,
-
-        /// <summary>A <see cref="TimeSpan"/>.</summary>
-        Interval = 15,
-
-        /// <summary>A byte sequence, PowerBuilder's <c>blob</c>.</summary>
-        Blob = 16,
-    }
+    private const int RowStatusColumn = ItemStatusMachine.RowStatusColumn;
 
     /// <inheritdoc/>
-    public long TryEncode(DataWindowBufferStore source, out ReadOnlyMemory<byte> payload)
+    public long TryEncode(DataWindowBufferStore source, out CarrierState? state)
     {
         ArgumentNullException.ThrowIfNull(source);
 
-        payload = ReadOnlyMemory<byte>.Empty;
+        state = null;
 
-        try
+        CarrierState projected = new()
         {
-            using MemoryStream buffer = new();
+            // The codec discriminator travels so that an apply cannot silently move a carrier onto the
+            // other codec's arm. The raw legacy value, as `Long(Describe("DataWindow.Processing"))`
+            // yields it.
+            Processing = source.Processing.Value,
+        };
 
-            // `leaveOpen: true` so the stream survives the writer's disposal and can be read from.
-            using (BinaryWriter writer = new(buffer, StrictUtf8, leaveOpen: true))
+        foreach (DwBuffer dwBuffer in SerializedBuffers)
+        {
+            if (!TryProjectBufferSegment(source, dwBuffer, out CarrierBufferSegment? segment))
             {
-                writer.Write(PayloadMagic);
-                writer.Write(PayloadVersion);
-                writer.Write(ReservedFlags);
-
-                // The processing kind travels with the payload so that an apply cannot silently move a
-                // carrier onto the other codec's arm. It is written as the raw legacy value.
-                writer.Write(source.Processing.Value);
-                writer.Write(SerializedBuffers.Length);
-
-                foreach (DwBuffer dwBuffer in SerializedBuffers)
-                {
-                    WriteBufferSegment(writer, source, dwBuffer);
-                }
+                // A value this boundary cannot express. `GetChanges` answers a code, never an
+                // exception, so this becomes the -1 the legacy's `if ... GetChanges(ref blbData) < 0
+                // then` arm tests for (C-B). The partially built state is discarded rather than sent.
+                return DataWindowBufferStore.DataStoreFailure;
             }
 
-            payload = buffer.ToArray();
-
-            return DataWindowBufferStore.DataStoreSuccess;
+            projected.Segments.Add(segment);
         }
-        catch (Exception failure) when (IsPayloadFault(failure))
-        {
-            // `GetChanges` answers a code, never an exception, so a value this format cannot express -
-            // an unmapped runtime type, or text that is not valid UTF-8 - becomes the -1 the legacy's
-            // `if ... GetChanges(ref blbData) < 0 then` arm tests for (C-B).
-            payload = ReadOnlyMemory<byte>.Empty;
 
-            return DataWindowBufferStore.DataStoreFailure;
-        }
+        state = projected;
+
+        return DataWindowBufferStore.DataStoreSuccess;
     }
 
     /// <inheritdoc/>
-    public long TryApply(DataWindowBufferStore target, ReadOnlyMemory<byte> payload)
+    public long TryApply(DataWindowBufferStore target, CarrierState? state)
     {
         ArgumentNullException.ThrowIfNull(target);
 
-        try
+        // =========================================================================================
+        //  EVERY STRUCTURAL CHECK RUNS BEFORE THE FIRST MUTATION, AND THAT ORDERING IS THE POINT.
+        //  -------------------------------------------------------------------------------------
+        //  This apply MERGES rows into a live target - it does not replace it - so a fault detected
+        //  half way through would leave the target holding some of a payload it then reports as
+        //  rejected, and the caller has no way to unwind that. The legacy has the same shape and the
+        //  same exposure, which is why the checks are hoisted rather than interleaved.
+        //
+        //  WHAT IS CHECKED, AND WHY COUNTING THE SEGMENTS IS NOT ENOUGH. `persistence.v1.CarrierState`
+        //  requires EXACTLY ONE segment per buffer in canonical order. A check that only counted three
+        //  would accept three segments all tagged Primary - which loads the Delete! and Filter! rows
+        //  into the primary buffer and returns a row count nothing disagrees with. It would equally
+        //  accept a Filter! row filed inside the Primary segment, and the Filter buffer's row order is
+        //  INVERTED relative to the source [n_cst_thread_task_sqlupdate.sru:L235-L238], so a mis-filed
+        //  row is read in the wrong direction and pairs with the wrong data.
+        //
+        //  AND THE PROCESSING KIND IS RECONCILED RATHER THAN ADOPTED. It used to be read and discarded
+        //  under the reading that "detection is the caller's business". It is not: the two sides built
+        //  their carriers from their own definitions, so a disagreement means they disagree about which
+        //  serialization is even applicable, and merging a crosstab image into a tabular carrier is the
+        //  outcome of trusting the sender. An UNASSIGNED target - a carrier whose data object has not
+        //  been set - adopts the payload's kind instead, because that is not a disagreement.
+        // =========================================================================================
+        if (state is null)
         {
-            using MemoryStream buffer = new(payload.ToArray(), writable: false);
-            using BinaryReader reader = new(buffer, StrictUtf8, leaveOpen: true);
+            // No payload at all. The caller's own empty-payload arm handles the legacy's zero-length
+            // blob; reaching here with null means a producer sent a chunk with neither.
+            return DataWindowBufferStore.DataStoreFailure;
+        }
 
-            if (reader.ReadUInt32() != PayloadMagic)
+        if (!TryValidateSegments(state, target, out DwBuffer[]? order) || order is null)
+        {
+            return DataWindowBufferStore.DataStoreFailure;
+        }
+
+        // A pre-flight read of every value, so that an unrepresentable one is refused before any row is
+        // admitted. The rows are materialised in the same pass, in canonical buffer order.
+        List<(DwBuffer Buffer, DataWindowRow Row, List<AdmittedColumn> Columns)> admitted = [];
+
+        for (int index = 0; index < order.Length; index++)
+        {
+            CarrierBufferSegment segment = state.Segments[index];
+
+            foreach (DataWindowRow row in segment.Rows)
             {
-                return DataWindowBufferStore.DataStoreFailure;
-            }
-
-            if (reader.ReadByte() != PayloadVersion || reader.ReadByte() != ReservedFlags)
-            {
-                return DataWindowBufferStore.DataStoreFailure;
-            }
-
-            // Read and discard: the value is carried so that a mismatch is DETECTABLE, and detection
-            // is the caller's business - Grpc/QueryService.cs selects the codec from the chunk's own
-            // full-state flag, which is the selector the legacy uses.
-            _ = reader.ReadInt64();
-
-            int segmentCount = reader.ReadInt32();
-
-            if (segmentCount != SerializedBuffers.Length)
-            {
-                return DataWindowBufferStore.DataStoreFailure;
-            }
-
-            for (int segment = 0; segment < segmentCount; segment++)
-            {
-                if (!TryReadBufferSegment(reader, target))
+                if (!TryReadRow(row, out List<AdmittedColumn>? columns) || columns is null)
                 {
                     return DataWindowBufferStore.DataStoreFailure;
                 }
+
+                admitted.Add((order[index], row, columns));
             }
-
-            return DataWindowBufferStore.DataStoreSuccess;
         }
-        catch (Exception failure) when (IsPayloadFault(failure))
+
+        // Adopt the payload's kind only when the target has none of its own - see the banner.
+        if (target.Processing.Value == DataWindowProcessing.Unassigned.Value)
         {
-            // A truncated, reordered or foreign payload answers -1 exactly as `SetChanges` does. It
-            // must NOT throw: the legacy reacts to a code, and every receive-side call site tests one.
-            return DataWindowBufferStore.DataStoreFailure;
+            target.Processing = new DataWindowProcessing(state.Processing);
         }
+
+        foreach ((DwBuffer dwBuffer, DataWindowRow row, List<AdmittedColumn> columns) in admitted)
+        {
+            Admit(target, dwBuffer, row, columns);
+        }
+
+        return DataWindowBufferStore.DataStoreSuccess;
     }
 
     /// <summary>
-    /// Whether an exception represents a payload fault this codec answers with a code rather than a
-    /// programming fault it must let escape.
+    /// One column of an inbound row, already read into carrier values.
     /// </summary>
-    /// <param name="failure">The exception to classify.</param>
-    /// <returns><see langword="true"/> when the exception is a payload fault.</returns>
-    /// <remarks>
-    /// DELIBERATELY NARROW. A truncated payload raises <see cref="EndOfStreamException"/>, malformed
-    /// text raises <see cref="DecoderFallbackException"/> or
-    /// <see cref="EncoderFallbackException"/>, a nonsensical count raises
-    /// <see cref="ArgumentOutOfRangeException"/> or <see cref="OverflowException"/>, an unmapped
-    /// runtime type raises <see cref="NotSupportedException"/>, and a corrupt decimal word set raises
-    /// <see cref="ArgumentException"/>. Everything else - a null reference, an out-of-memory condition,
-    /// a cancellation - is a fault of THIS code or of the host and is allowed to propagate, because the
-    /// refactor plan requires structural faults fail fast rather than degrade into a return code.
-    /// </remarks>
-    private static bool IsPayloadFault(Exception failure)
-    {
-        return failure is EndOfStreamException
-            or IOException
-            or DecoderFallbackException
-            or EncoderFallbackException
-            or FormatException
-            or OverflowException
-            or NotSupportedException
-            or ArgumentException;
-    }
+    /// <param name="ColumnNumber">The one-based column number. R9: never rebased.</param>
+    /// <param name="Status">That column's own item status.</param>
+    /// <param name="Current">The current value.</param>
+    /// <param name="Original">
+    /// The value at the last baseline. Equal to <paramref name="Current"/> when the payload omitted an
+    /// original, which the contract defines as "unchanged since the baseline".
+    /// </param>
+    private readonly record struct AdmittedColumn(
+        int ColumnNumber,
+        ItemStatus Status,
+        object? Current,
+        object? Original);
 
     /// <summary>
-    /// Writes one buffer's changed rows.
+    /// Projects one buffer's eligible rows onto a segment.
     /// </summary>
-    /// <param name="writer">The writer.</param>
     /// <param name="source">The carrier to read.</param>
-    /// <param name="dwBuffer">The buffer to write.</param>
-    private static void WriteBufferSegment(
-        BinaryWriter writer,
+    /// <param name="dwBuffer">The buffer to project.</param>
+    /// <param name="segment">The segment, or <see langword="null"/> when a value is unrepresentable.</param>
+    /// <returns><see langword="false"/> when a value is outside the published value domain.</returns>
+    /// <remarks>
+    /// AN EMPTY SEGMENT IS STILL EMITTED, because the contract requires one segment per buffer whether
+    /// or not it has rows - on a freshly retrieved carrier the delete segment is normally empty, and
+    /// omitting it would make a conforming payload indistinguishable from a truncated one.
+    /// </remarks>
+    private static bool TryProjectBufferSegment(
         DataWindowBufferStore source,
-        DwBuffer dwBuffer)
+        DwBuffer dwBuffer,
+        out CarrierBufferSegment? segment)
     {
+        segment = null;
+
+        CarrierBufferSegment projected = new() { Buffer = dwBuffer };
         long rowCount = RowCountOf(source, dwBuffer);
 
-        // Collected before writing because the count has to precede the rows and only the changed
-        // rows are written. R9 item 3: the collected values are ONE-BASED row numbers.
-        List<long> changedRows = [];
-
+        // R9: rows are ONE-BASED and the bound is INCLUSIVE, matching the carrier surface. There is no
+        // minus one and no less-than here.
         for (long rowNumber = ItemStatusMachine.FirstRowNumber; rowNumber <= rowCount; rowNumber++)
         {
-            // The column-zero sentinel reads the ROW's own status, not a column's; it is resolved by
-            // ItemStatusMachine rather than compared against a bare zero here (R9 item 4).
-            ItemStatus status = source.GetItemStatus(
-                rowNumber,
-                ItemStatusMachine.RowStatusColumn,
-                dwBuffer);
+            ItemStatus rowStatus = source.GetItemStatus(rowNumber, RowStatusColumn, dwBuffer);
 
-            if (IsPayloadRow(dwBuffer, status))
+            if (!IsPayloadRow(dwBuffer, rowStatus))
             {
-                changedRows.Add(rowNumber);
+                continue;
             }
-        }
 
-        writer.Write((int)dwBuffer);
-        writer.Write(changedRows.Count);
-
-        foreach (long rowNumber in changedRows)
-        {
-            CarrierRow row = source.RowAt(rowNumber, dwBuffer);
-
-            writer.Write((int)row.Status);
-
-            // Materialised once: the ordered enumeration is walked twice, for the count and for the
-            // values, and it must yield the same sequence both times.
-            List<int> columnNumbers = [.. row.AssignedColumnNumbers];
-
-            writer.Write(columnNumbers.Count);
-
-            foreach (int columnNumber in columnNumbers)
-            {
-                // R9: a COLUMN number, one-based, matching the fixture's declared ids 1 through 6
-                // [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L21-L26]. Never rebased.
-                writer.Write(columnNumber);
-                writer.Write((int)row.GetColumnStatus(columnNumber));
-                WriteValue(writer, row.GetValue(columnNumber));
-                WriteValue(writer, row.GetOriginalValue(columnNumber));
-            }
-        }
-    }
-
-    /// <summary>
-    /// Reads one buffer's rows and merges them into <paramref name="target"/>.
-    /// </summary>
-    /// <param name="reader">The reader.</param>
-    /// <param name="target">The carrier to write.</param>
-    /// <returns><see langword="false"/> when the segment is structurally invalid.</returns>
-    private static bool TryReadBufferSegment(BinaryReader reader, DataWindowBufferStore target)
-    {
-        int bufferOrdinal = reader.ReadInt32();
-
-        if (!Enum.IsDefined((DwBuffer)bufferOrdinal))
-        {
-            return false;
-        }
-
-        DwBuffer dwBuffer = (DwBuffer)bufferOrdinal;
-        int rowCount = reader.ReadInt32();
-
-        // BOUNDED BEFORE IT BECOMES A LOOP BOUND. A negative count, one beyond the protocol ceiling,
-        // or one whose rows could not possibly fit in the bytes that remain is a malformed payload and
-        // answers the legacy failure code - see the guard rationale beside MaxRowsPerBufferSegment.
-        if (!IsPlausibleCount(reader, rowCount, MinimumBytesPerRow, MaxRowsPerBufferSegment))
-        {
-            return false;
-        }
-
-        for (int row = 0; row < rowCount; row++)
-        {
-            if (!TryReadRow(reader, target, dwBuffer))
+            if (!TryProjectRow(source, dwBuffer, rowNumber, rowStatus, out DataWindowRow? row))
             {
                 return false;
             }
+
+            projected.Rows.Add(row);
         }
+
+        segment = projected;
 
         return true;
     }
 
     /// <summary>
-    /// Reads one row and admits it to <paramref name="target"/>, restoring both its current and its
-    /// original column values.
+    /// Projects one row onto the published row message.
     /// </summary>
-    /// <param name="reader">The reader.</param>
-    /// <param name="target">The carrier to write.</param>
-    /// <param name="dwBuffer">The buffer to admit the row into.</param>
+    /// <param name="source">The carrier to read.</param>
+    /// <param name="dwBuffer">The buffer the row is in.</param>
+    /// <param name="rowNumber">The one-based row number.</param>
+    /// <param name="rowStatus">The row's own status, already read through the column-zero sentinel.</param>
+    /// <param name="row">The projection, or <see langword="null"/> when a value is unrepresentable.</param>
+    /// <returns><see langword="false"/> when a value is outside the published value domain.</returns>
+    /// <remarks>
+    /// AN ORIGINAL IS EMITTED ONLY WHEN IT DIFFERS FROM THE CURRENT VALUE, which the contract defines as
+    /// the encoding of "unchanged since the last baseline": the carrier answers the current value when no
+    /// original was captured, so the two statements are the same one. Blob comparison is by VALUE here -
+    /// the carrier hands out defensive copies, so reference equality would emit an original for every
+    /// blob column whether or not it changed.
+    /// </remarks>
+    private static bool TryProjectRow(
+        DataWindowBufferStore source,
+        DwBuffer dwBuffer,
+        long rowNumber,
+        ItemStatus rowStatus,
+        out DataWindowRow? row)
+    {
+        row = null;
+
+        CarrierRow carrierRow = source.RowAt(rowNumber, dwBuffer);
+
+        DataWindowRow projected = new()
+        {
+            Buffer = dwBuffer,
+            Row = rowNumber,
+            ItemStatus = rowStatus,
+        };
+
+        // Materialised once: the ordered enumeration is walked once here, and ascending order is what
+        // makes the payload reproducible across runs.
+        foreach (int columnNumber in carrierRow.AssignedColumnNumbers)
+        {
+            object? current = carrierRow.GetValue(columnNumber);
+
+            if (!CarrierValue.TryToWire(current, out AnyValue? currentValue))
+            {
+                return false;
+            }
+
+            projected.Columns.Add(new ColumnValue
+            {
+                // POSITIONAL, LIKE THE LEGACY BLOB. `GetChanges` carries ordinals and no names at all,
+                // so column_name is left empty here and column_id is the authoritative identifier -
+                // common.v1.DataWindowRow.columns records the same note for a reader of the contract.
+                ColumnId = columnNumber,
+                Value = currentValue,
+                ItemStatus = source.GetItemStatus(rowNumber, columnNumber, dwBuffer),
+            });
+
+            object? original = carrierRow.GetOriginalValue(columnNumber);
+
+            if (ValuesMatch(current, original))
+            {
+                continue;
+            }
+
+            if (!CarrierValue.TryToWire(original, out AnyValue? originalValue))
+            {
+                return false;
+            }
+
+            projected.OriginalValues.Add(new ColumnValue
+            {
+                ColumnId = columnNumber,
+                Value = originalValue,
+            });
+        }
+
+        row = projected;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether two carrier values are the same value, comparing a <c>blob</c> by content.
+    /// </summary>
+    /// <param name="left">One value.</param>
+    /// <param name="right">The other.</param>
+    /// <returns><see langword="true"/> when they are equal.</returns>
+    private static bool ValuesMatch(object? left, object? right)
+    {
+        if (left is byte[] leftBlob && right is byte[] rightBlob)
+        {
+            return leftBlob.AsSpan().SequenceEqual(rightBlob);
+        }
+
+        return Equals(left, right);
+    }
+
+    /// <summary>
+    /// Validates the segment set against the contract's exactly-one-per-buffer-in-canonical-order rule.
+    /// </summary>
+    /// <param name="state">The inbound state.</param>
+    /// <param name="target">The carrier being applied onto, for the processing reconciliation.</param>
+    /// <param name="order">The canonical buffer order, positionally aligned with the segments.</param>
+    /// <returns><see langword="false"/> when the state is structurally invalid.</returns>
+    private static bool TryValidateSegments(
+        CarrierState state,
+        DataWindowBufferStore target,
+        out DwBuffer[]? order)
+    {
+        order = null;
+
+        if (state.Segments.Count != SerializedBuffers.Length)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < SerializedBuffers.Length; index++)
+        {
+            CarrierBufferSegment segment = state.Segments[index];
+
+            // POSITIONAL EQUALITY, which covers duplication, omission, reordering and an undeclared
+            // value in one test: segment n must be buffer n of the canonical order, and the generated
+            // enum property returns the raw number for a value outside the domain, so an invented
+            // buffer cannot equal any canonical one.
+            if (segment.Buffer != SerializedBuffers[index])
+            {
+                return false;
+            }
+
+            foreach (DataWindowRow row in segment.Rows)
+            {
+                // A row whose own tag disagrees with its segment. See the banner in TryApply for what
+                // accepting one costs.
+                if (row.Buffer != segment.Buffer)
+                {
+                    return false;
+                }
+
+                if (row.Row < ItemStatusMachine.FirstRowNumber || !Enum.IsDefined(row.ItemStatus))
+                {
+                    return false;
+                }
+            }
+        }
+
+        // THE PROCESSING RECONCILIATION. An unassigned target adopts; a disagreeing one refuses.
+        if (target.Processing.Value != DataWindowProcessing.Unassigned.Value
+            && target.Processing.Value != state.Processing)
+        {
+            return false;
+        }
+
+        order = SerializedBuffers;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads one inbound row's columns into carrier values, rejecting a malformed one.
+    /// </summary>
+    /// <param name="row">The inbound row.</param>
+    /// <param name="columns">The columns, in payload order.</param>
     /// <returns><see langword="false"/> when the row is structurally invalid.</returns>
+    /// <remarks>
+    /// AN ORIGINAL NAMING A COLUMN THE ROW DOES NOT CARRY IS REJECTED, and a DUPLICATED column number is
+    /// rejected in either list. Both would leave the restore below reading a column that is not there or
+    /// applying one twice, and the second write would capture the wrong original.
+    /// </remarks>
+    private static bool TryReadRow(DataWindowRow row, out List<AdmittedColumn>? columns)
+    {
+        columns = null;
+
+        Dictionary<int, object?> originals = [];
+
+        foreach (ColumnValue original in row.OriginalValues)
+        {
+            if (!IsColumnNumber(original.ColumnId)
+                || !CarrierValue.TryFromWire(original.Value, out object? originalValue)
+                || !originals.TryAdd((int)original.ColumnId, originalValue))
+            {
+                return false;
+            }
+        }
+
+        List<AdmittedColumn> read = [];
+        HashSet<int> seen = [];
+
+        foreach (ColumnValue column in row.Columns)
+        {
+            if (!IsColumnNumber(column.ColumnId)
+                || !seen.Add((int)column.ColumnId)
+                || !CarrierValue.TryFromWire(column.Value, out object? currentValue))
+            {
+                return false;
+            }
+
+            int columnNumber = (int)column.ColumnId;
+
+            // An omitted per-column status is the contract's "no status was supplied", which on this
+            // path means the column is not modified in its own right.
+            ItemStatus columnStatus = column.HasItemStatus
+                ? column.ItemStatus
+                : ItemStatus.NotModified;
+
+            if (!Enum.IsDefined(columnStatus))
+            {
+                return false;
+            }
+
+            read.Add(new AdmittedColumn(
+                columnNumber,
+                columnStatus,
+                currentValue,
+                originals.TryGetValue(columnNumber, out object? original) ? original : currentValue));
+        }
+
+        // Every original must have named a column the row actually carries.
+        foreach (int columnNumber in originals.Keys)
+        {
+            if (!seen.Contains(columnNumber))
+            {
+                return false;
+            }
+        }
+
+        columns = read;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a wire column identifier names a real column.
+    /// </summary>
+    /// <remarks>
+    /// R9: ONE-BASED. Zero is the row-status sentinel and never addresses a value, and anything past
+    /// <see cref="int.MaxValue"/> cannot be a column ordinal on a carrier whose columns are ints.
+    /// </remarks>
+    private static bool IsColumnNumber(long columnId) =>
+        columnId >= ItemStatusMachine.FirstColumnNumber && columnId <= int.MaxValue;
+
+    /// <summary>
+    /// Admits one already-validated row into the target carrier.
+    /// </summary>
+    /// <param name="target">The carrier to write.</param>
+    /// <param name="dwBuffer">The buffer to admit into.</param>
+    /// <param name="row">The inbound row, for its own status.</param>
+    /// <param name="columns">The columns read from it.</param>
     /// <remarks>
     /// <para>
     /// THE THREE-STEP RESTORE, AND WHY IT IS NOT ONE ASSIGNMENT.
@@ -1391,76 +1412,31 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// <see cref="CarrierRow.Baseline"/> clears both.
     /// </para>
     /// </remarks>
-    private static bool TryReadRow(
-        BinaryReader reader,
+    private static void Admit(
         DataWindowBufferStore target,
-        DwBuffer dwBuffer)
+        DwBuffer dwBuffer,
+        DataWindowRow row,
+        List<AdmittedColumn> columns)
     {
-        int statusOrdinal = reader.ReadInt32();
-
-        if (!Enum.IsDefined((ItemStatus)statusOrdinal))
-        {
-            return false;
-        }
-
-        int columnCount = reader.ReadInt32();
-
-        // BOUNDED BEFORE THE FOUR ALLOCATIONS BELOW, which is the whole reason this guard exists here
-        // rather than inside the loop: the arrays are sized from this number before a single column has
-        // been read, so a count of int.MaxValue in a twelve-byte payload would demand gigabytes and
-        // raise OutOfMemoryException instead of answering -1.
-        if (!IsPlausibleCount(reader, columnCount, MinimumBytesPerColumn, MaxColumnsPerRow))
-        {
-            return false;
-        }
-
-        int[] columnNumbers = new int[columnCount];
-        ItemStatus[] columnStatuses = new ItemStatus[columnCount];
-        object?[] currentValues = new object?[columnCount];
-        object?[] originalValues = new object?[columnCount];
-
-        for (int index = 0; index < columnCount; index++)
-        {
-            columnNumbers[index] = reader.ReadInt32();
-
-            if (columnNumbers[index] < ItemStatusMachine.FirstColumnNumber)
-            {
-                return false;
-            }
-
-            int columnStatusOrdinal = reader.ReadInt32();
-
-            if (!Enum.IsDefined((ItemStatus)columnStatusOrdinal))
-            {
-                return false;
-            }
-
-            columnStatuses[index] = (ItemStatus)columnStatusOrdinal;
-            currentValues[index] = ReadValue(reader);
-            originalValues[index] = ReadValue(reader);
-        }
-
         // R9: AppendRow answers the new row's ONE-BASED number, which is the post-add count and not a
         // zero-based index. It is handed straight to RowAt, whose surface is one-based too.
         long appendedRowNumber = target.AppendRow(dwBuffer, ItemStatus.NotModified);
         CarrierRow appended = target.RowAt(appendedRowNumber, dwBuffer);
 
-        for (int index = 0; index < columnCount; index++)
+        foreach (AdmittedColumn column in columns)
         {
-            appended.SetValue(columnNumbers[index], originalValues[index]);
+            appended.SetValue(column.ColumnNumber, column.Original);
         }
 
         appended.Baseline();
 
-        for (int index = 0; index < columnCount; index++)
+        foreach (AdmittedColumn column in columns)
         {
-            appended.SetValue(columnNumbers[index], currentValues[index]);
-            appended.SetColumnStatus(columnNumbers[index], columnStatuses[index]);
+            appended.SetValue(column.ColumnNumber, column.Current);
+            appended.SetColumnStatus(column.ColumnNumber, column.Status);
         }
 
-        appended.Status = (ItemStatus)statusOrdinal;
-
-        return true;
+        appended.Status = row.ItemStatus;
     }
 
     /// <summary>
@@ -1520,265 +1496,6 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
                 $"The buffer {dwBuffer} is not one of the three PowerBuilder buffers this payload "
                     + "format carries. The legacy declares exactly Primary!, Delete! and Filter!."),
         };
-    }
-
-    /// <summary>
-    /// Writes one column value with its type tag.
-    /// </summary>
-    /// <param name="writer">The writer.</param>
-    /// <param name="value">The value. <see langword="null"/> is a value, not an absence.</param>
-    /// <exception cref="NotSupportedException">
-    /// The value's runtime type is outside the PowerBuilder scalar family this format carries.
-    /// </exception>
-    private static void WriteValue(BinaryWriter writer, object? value)
-    {
-        switch (value)
-        {
-            case null:
-                writer.Write((byte)ValueTag.Null);
-                break;
-
-            case string text:
-                writer.Write((byte)ValueTag.Text);
-                writer.Write(text);
-                break;
-
-            case bool flag:
-                writer.Write((byte)ValueTag.Boolean);
-                writer.Write(flag);
-                break;
-
-            case byte number:
-                writer.Write((byte)ValueTag.Byte);
-                writer.Write(number);
-                break;
-
-            case short number:
-                writer.Write((byte)ValueTag.Int16);
-                writer.Write(number);
-                break;
-
-            case int number:
-                writer.Write((byte)ValueTag.Int32);
-                writer.Write(number);
-                break;
-
-            case long number:
-                writer.Write((byte)ValueTag.Int64);
-                writer.Write(number);
-                break;
-
-            case uint number:
-                writer.Write((byte)ValueTag.UInt32);
-                writer.Write(number);
-                break;
-
-            case ulong number:
-                writer.Write((byte)ValueTag.UInt64);
-                writer.Write(number);
-                break;
-
-            case float number:
-                writer.Write((byte)ValueTag.Single);
-                writer.Write(number);
-                break;
-
-            case double number:
-                writer.Write((byte)ValueTag.Double);
-                writer.Write(number);
-                break;
-
-            case decimal number:
-                writer.Write((byte)ValueTag.Decimal);
-                WriteDecimal(writer, number);
-                break;
-
-            case DateTime moment:
-                writer.Write((byte)ValueTag.DateTime);
-                writer.Write(moment.Ticks);
-                writer.Write((byte)moment.Kind);
-                break;
-
-            case DateOnly day:
-                writer.Write((byte)ValueTag.Date);
-                writer.Write(day.DayNumber);
-                break;
-
-            case TimeOnly timeOfDay:
-                writer.Write((byte)ValueTag.Time);
-                writer.Write(timeOfDay.Ticks);
-                break;
-
-            case TimeSpan interval:
-                writer.Write((byte)ValueTag.Interval);
-                writer.Write(interval.Ticks);
-                break;
-
-            case byte[] bytes:
-                writer.Write((byte)ValueTag.Blob);
-                writer.Write(bytes.Length);
-                writer.Write(bytes);
-                break;
-
-            default:
-                throw new NotSupportedException(
-                    $"A column value of type {value.GetType()} is outside the PowerBuilder scalar "
-                        + "family this changeset format carries. The mapped set is string, boolean, "
-                        + "the integral widths, single, double, decimal, DateTime, DateOnly, "
-                        + "TimeOnly, TimeSpan and blob.");
-        }
-    }
-
-    /// <summary>
-    /// Reads one column value.
-    /// </summary>
-    /// <param name="reader">The reader.</param>
-    /// <returns>The decoded value.</returns>
-    /// <exception cref="NotSupportedException">The type tag is not one this format writes.</exception>
-    private static object? ReadValue(BinaryReader reader)
-    {
-        byte tag = reader.ReadByte();
-
-        return (ValueTag)tag switch
-        {
-            ValueTag.Null => null,
-            ValueTag.Text => reader.ReadString(),
-            ValueTag.Boolean => reader.ReadBoolean(),
-            ValueTag.Byte => reader.ReadByte(),
-            ValueTag.Int16 => reader.ReadInt16(),
-            ValueTag.Int32 => reader.ReadInt32(),
-            ValueTag.Int64 => reader.ReadInt64(),
-            ValueTag.UInt32 => reader.ReadUInt32(),
-            ValueTag.UInt64 => reader.ReadUInt64(),
-            ValueTag.Single => reader.ReadSingle(),
-            ValueTag.Double => reader.ReadDouble(),
-            ValueTag.Decimal => ReadDecimal(reader),
-            ValueTag.DateTime => ReadDateTime(reader),
-            ValueTag.Date => DateOnly.FromDayNumber(reader.ReadInt32()),
-            ValueTag.Time => new TimeOnly(reader.ReadInt64()),
-            ValueTag.Interval => new TimeSpan(reader.ReadInt64()),
-            ValueTag.Blob => ReadBlob(reader),
-            _ => throw new NotSupportedException(
-                string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"The changeset payload carries an unknown value tag {tag}.")),
-        };
-    }
-
-    /// <summary>
-    /// Reads a length-prefixed byte sequence, rejecting both a negative length and a truncated body.
-    /// </summary>
-    /// <param name="reader">The reader.</param>
-    /// <returns>The bytes.</returns>
-    /// <exception cref="EndOfStreamException">
-    /// The encoded length is negative, or fewer bytes remain than the length promised. Both are the
-    /// same fault from the format's point of view - a length that cannot be honoured - and both are
-    /// classified as a payload fault by <see cref="IsPayloadFault(Exception)"/>, so both answer the
-    /// legacy failure code.
-    /// </exception>
-    /// <remarks>
-    /// <para>
-    /// <see cref="BinaryReader.ReadBytes"/> answers a SHORT ARRAY at end of stream rather than
-    /// throwing, so the length is verified explicitly. Without that check a truncated payload would
-    /// decode into a silently shortened blob and answer success, which is the one outcome worse than
-    /// answering the failure code the legacy tests for.
-    /// </para>
-    /// <para>
-    /// THE LENGTH IS CHECKED AGAINST THE REMAINING BYTES BEFORE THE READ, NOT AFTER IT, and the
-    /// ordering is the entire point. <see cref="BinaryReader.ReadBytes"/> allocates
-    /// <c>new byte[count]</c> up front and only then discovers the stream is shorter, so a declared
-    /// length of <see cref="int.MaxValue"/> reserves two gigabytes before failing. Comparing first
-    /// makes the outcome the legacy failure code instead of an <see cref="OutOfMemoryException"/>
-    /// escaping this codec, and it costs one subtraction. The post-read length check is retained
-    /// because a stream is not obliged to return everything it appears to hold.
-    /// </para>
-    /// </remarks>
-    private static byte[] ReadBlob(BinaryReader reader)
-    {
-        int length = reader.ReadInt32();
-
-        // A blob element is one byte, so the remaining-byte rule IS the exact bound here: a blob can
-        // never legitimately be longer than what is left. No separate protocol ceiling is needed or
-        // wanted - inventing one would cap a value the format otherwise permits.
-        if (!IsPlausibleCount(reader, length, minimumBytesPerElement: 1, protocolMaximum: int.MaxValue))
-        {
-            throw new EndOfStreamException(
-                "The changeset payload declared a blob longer than the bytes that remain.");
-        }
-
-        byte[] bytes = reader.ReadBytes(length);
-
-        if (bytes.Length != length)
-        {
-            throw new EndOfStreamException(
-                "The changeset payload declared a blob longer than the bytes that remain.");
-        }
-
-        return bytes;
-    }
-
-    /// <summary>
-    /// Writes a decimal as its four constituent words, which is lossless and preserves the declared
-    /// scale.
-    /// </summary>
-    /// <param name="writer">The writer.</param>
-    /// <param name="value">The value.</param>
-    /// <remarks>
-    /// The fixture declares <c>salary decimal(2)</c>
-    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L12</c>], and scale is observable: normalising
-    /// 1500.00 to 1500 would silently change the scale the legacy declared. Writing the words rather
-    /// than text also removes any dependence on a format provider.
-    /// </remarks>
-    private static void WriteDecimal(BinaryWriter writer, decimal value)
-    {
-        Span<int> words = stackalloc int[4];
-
-        _ = decimal.GetBits(value, words);
-
-        for (int index = 0; index < words.Length; index++)
-        {
-            writer.Write(words[index]);
-        }
-    }
-
-    /// <summary>
-    /// Reads a decimal written by <see cref="WriteDecimal"/>.
-    /// </summary>
-    /// <param name="reader">The reader.</param>
-    /// <returns>The value, with its original scale.</returns>
-    /// <exception cref="ArgumentException">The four words are not a valid decimal.</exception>
-    private static decimal ReadDecimal(BinaryReader reader)
-    {
-        Span<int> words = stackalloc int[4];
-
-        for (int index = 0; index < words.Length; index++)
-        {
-            words[index] = reader.ReadInt32();
-        }
-
-        return new decimal(words);
-    }
-
-    /// <summary>
-    /// Reads a date and time written as ticks plus kind.
-    /// </summary>
-    /// <param name="reader">The reader.</param>
-    /// <returns>The value, with its original kind.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">The ticks or the kind are out of range.</exception>
-    private static DateTime ReadDateTime(BinaryReader reader)
-    {
-        long ticks = reader.ReadInt64();
-        byte kind = reader.ReadByte();
-
-        if (!Enum.IsDefined((DateTimeKind)kind))
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(reader),
-                kind,
-                "The changeset payload carries an undefined DateTimeKind.");
-        }
-
-        return new DateTime(ticks, (DateTimeKind)kind);
     }
 }
 
@@ -2640,7 +2357,7 @@ internal sealed class ChangesetCodec
             // zero, and the payload is empty, which is what tells the receiving side to CLEAR.
             _ = await sink
                 .SendChunkAsync(
-                    new ChangesetChunk(ReadOnlyMemory<byte>.Empty, 1L, 1L),
+                    new ChangesetChunk(state: null, 1L, 1L),
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -2736,7 +2453,7 @@ internal sealed class ChangesetCodec
         DataWindowBufferStore source = request.Source;
         long chunkSize = request.ChunkSize;
         long chunksSent = 0L;
-        ReadOnlyMemory<byte> payloadInFlight = ReadOnlyMemory<byte>.Empty;
+        CarrierState? payloadInFlight = null;
 
         // DECISION 3 - THE THIRD, LATENT QUIRK. `long nRow,nRowCnt,nFilterCnt` is declared ONCE,
         // OUTSIDE the chunk loop [:L75], and nFilterCnt is assigned ONLY inside the guard at :L164.
@@ -2804,7 +2521,7 @@ internal sealed class ChangesetCodec
                 return new ChunkLoopResult(
                     RetCode.E_INTERNAL_ERROR,
                     chunksSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     GetChangesFailedText);
             }
 
@@ -2848,7 +2565,7 @@ internal sealed class ChangesetCodec
                 return new ChunkLoopResult(
                     RetCode.E_INTERNAL_ERROR,
                     chunksSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     TransDataFailedText);
             }
 
@@ -2856,7 +2573,7 @@ internal sealed class ChangesetCodec
 
             // `blbData = Blob("")` [:L187]. DECISION 6 - the ownership handover is complete, so the
             // sender drops the payload.
-            payloadInFlight = ReadOnlyMemory<byte>.Empty;
+            payloadInFlight = null;
 
             // `if nChunkIdx < nChunkCnt then if Not of_Wait(0.02) then return RetCode.CANCELLED`
             // [:L188-L190]. No yield after the LAST chunk, which is why the condition is strict.
@@ -2866,13 +2583,13 @@ internal sealed class ChangesetCodec
                 return new ChunkLoopResult(
                     RetCode.CANCELLED,
                     chunksSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     null);
             }
         }
 
         // `Destroy dsTmp` [:L192]. No counterpart is needed or wanted - see CreateTemporaryCarrier.
-        return new ChunkLoopResult(RetCode.OK, chunksSent, payloadInFlight.IsEmpty, null);
+        return new ChunkLoopResult(RetCode.OK, chunksSent, payloadInFlight is null, null);
     }
 
     /// <summary>
@@ -2908,7 +2625,7 @@ internal sealed class ChangesetCodec
         DataWindowBufferStore source = request.Source;
         long chunkSize = request.ChunkSize;
         long chunksSent = 0L;
-        ReadOnlyMemory<byte> payloadInFlight = ReadOnlyMemory<byte>.Empty;
+        CarrierState? payloadInFlight = null;
 
         // DECISION 3 again: the same hoisted, never-cleared filtered count [:L75], whose stale value
         // reaches the discard at :L214 on an iteration where the guard at :L199 is false.
@@ -2947,7 +2664,7 @@ internal sealed class ChangesetCodec
                 return new ChunkLoopResult(
                     RetCode.E_INTERNAL_ERROR,
                     chunksSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     GetChangesFailedText);
             }
 
@@ -2995,14 +2712,14 @@ internal sealed class ChangesetCodec
                 return new ChunkLoopResult(
                     RetCode.E_INTERNAL_ERROR,
                     chunksSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     TransDataFailedText);
             }
 
             chunksSent++;
 
             // `blbData = Blob("")` [:L223]. DECISION 6.
-            payloadInFlight = ReadOnlyMemory<byte>.Empty;
+            payloadInFlight = null;
 
             // `if nChunkIdx < nChunkCnt then if Not of_Wait(0.02) then return RetCode.CANCELLED`
             // [:L224-L226].
@@ -3012,12 +2729,12 @@ internal sealed class ChangesetCodec
                 return new ChunkLoopResult(
                     RetCode.CANCELLED,
                     chunksSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     null);
             }
         }
 
-        return new ChunkLoopResult(RetCode.OK, chunksSent, payloadInFlight.IsEmpty, null);
+        return new ChunkLoopResult(RetCode.OK, chunksSent, payloadInFlight is null, null);
     }
 
     /// <summary>
@@ -3067,7 +2784,7 @@ internal sealed class ChangesetCodec
         ArgumentNullException.ThrowIfNull(sink);
 
         int childrenSent = 0;
-        ReadOnlyMemory<byte> payloadInFlight = ReadOnlyMemory<byte>.Empty;
+        CarrierState? payloadInFlight = null;
 
         // `for nIndex = 1 to nCount` [:L114], narrowed to the columns that passed both filters. The
         // list order IS the legacy's column order, so the handover sequence is unchanged.
@@ -3099,7 +2816,7 @@ internal sealed class ChangesetCodec
                 return new ChangesetChildTransferOutcome(
                     RetCode.E_INTERNAL_ERROR,
                     childrenSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     errorText);
             }
 
@@ -3123,14 +2840,14 @@ internal sealed class ChangesetCodec
                 return new ChangesetChildTransferOutcome(
                     RetCode.E_INTERNAL_ERROR,
                     childrenSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     errorText);
             }
 
             childrenSent++;
 
             // `blbData = Blob("")` [:L138].
-            payloadInFlight = ReadOnlyMemory<byte>.Empty;
+            payloadInFlight = null;
 
             // `if of_IsCancelled() then return RetCode.CANCELLED` [:L139] - INSIDE the loop, so a
             // cancellation stops the walk rather than merely being noticed after it.
@@ -3139,7 +2856,7 @@ internal sealed class ChangesetCodec
                 return new ChangesetChildTransferOutcome(
                     RetCode.CANCELLED,
                     childrenSent,
-                    payloadInFlight.IsEmpty,
+                    payloadInFlight is null,
                     null);
             }
         }
@@ -3152,14 +2869,14 @@ internal sealed class ChangesetCodec
             return new ChangesetChildTransferOutcome(
                 RetCode.CANCELLED,
                 childrenSent,
-                payloadInFlight.IsEmpty,
+                payloadInFlight is null,
                 null);
         }
 
         return new ChangesetChildTransferOutcome(
             RetCode.OK,
             childrenSent,
-            payloadInFlight.IsEmpty,
+            payloadInFlight is null,
             null);
     }
 
@@ -3401,7 +3118,7 @@ internal sealed class ChangesetCodec
 
             // `rtCode = dw.SetChanges(blbData)` [:L197, :L221, :L238]. Chunks after the first ACCUMULATE
             // onto the target, which is why the reset above is gated on the first chunk alone.
-            result = _payloadCodec.TryApply(target, chunk.Payload);
+            result = _payloadCodec.TryApply(target, chunk.State);
 
             // `if count = current then dw.ResetUpdate()` [:L198-L199, :L222-L223, :L239-L240]. Run
             // UNCONDITIONALLY on the last chunk, without consulting the apply result - the legacy does
@@ -3523,7 +3240,7 @@ internal sealed class ChangesetCodec
         // [:L104-L108, :L117-L121, :L129-L133].
         long result = payload.IsEmptyPayload
             ? DataWindowBufferStore.DataStoreSuccess
-            : _payloadCodec.TryApply(childTarget, payload.Payload);
+            : _payloadCodec.TryApply(childTarget, payload.State);
 
         // `blbData = Blob("")` [:L139] - the payload belongs to the caller and is not retained.
 

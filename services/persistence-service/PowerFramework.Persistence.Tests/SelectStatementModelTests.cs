@@ -91,16 +91,17 @@ public sealed class SelectStatementModelTests
     // ==========================================================================================
 
     /// <summary>
-    /// The model publishes exactly the surface the native prototypes declare: 39 ported members plus
-    /// the one static factory, with the two metadata members deliberately absent.
+    /// The model publishes exactly the surface the native prototypes declare, plus one member the port
+    /// needs and the native does not, plus the one static factory - with the two metadata members
+    /// deliberately absent.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// TIER 1 - TRACEABLE. <c>n_sql.sru</c> declares 41 prototypes at <c>L9-L49</c>. Two are not
-    /// ported - <c>copyright()</c> at <c>L9</c> and <c>getversion()</c> at <c>L10</c>, which report a
+    /// TIER 1 - TRACEABLE for the 39. <c>n_sql.sru</c> declares 41 prototypes at <c>L9-L49</c>. Two are
+    /// not ported - <c>copyright()</c> at <c>L9</c> and <c>getversion()</c> at <c>L10</c>, which report a
     /// vendor string and the pfw.dll build number and are framework-metadata boilerplate present on
     /// every PBNI class in the estate. Porting them would fabricate a version number for an assembly
-    /// whose version already comes from <c>Directory.Build.props</c>. So 39 members ship, plus
+    /// whose version already comes from <c>Directory.Build.props</c>. So 39 ported members ship, plus
     /// <c>ParseSql</c> reproducing <c>parsesql.srf:L10-L14</c>.
     /// </para>
     /// <para>
@@ -108,9 +109,20 @@ public sealed class SelectStatementModelTests
     /// invisible in review: 6 clause kinds x 3 operations x 2 arities is 36, plus
     /// <c>Parse</c>, <c>GetSql</c> and <c>GetSelectCount</c> is 39.
     /// </para>
+    /// <para>
+    /// TIER 3 - PORT-LOCAL for the fortieth. <c>GetSqlWithoutTerminator</c> has no native counterpart
+    /// and exists because a review found that the paging rewriters embed this statement's text inside a
+    /// larger one - <c>SELECT TOP n * FROM (</c> + text + <c>) pfwPagedSQL_Tbl WHERE ...</c> - so a
+    /// trailing <c>;</c> retained in that text terminated the generated statement in the middle and
+    /// silently discarded the paging. The native has no such member because the native's own callers
+    /// have the same defect; adding one here is what lets <c>GetSql</c> stay byte-for-byte faithful to
+    /// its input while the rewriters read a body with no terminator in it. The sibling
+    /// <c>StatementTerminator</c> is a PROPERTY, so its accessor is special-named and does not appear in
+    /// this census - it is asserted separately below.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void TheModel_PublishesExactlyTheThirtyNinePortedMembersPlusTheFactory()
+    public void TheModel_PublishesTheThirtyNinePortedMembersPlusTheTerminatorReadAndTheFactory()
     {
         string[] clauses = ["Column", "Table", "Where", "Group", "Having", "Order"];
 
@@ -119,7 +131,7 @@ public sealed class SelectStatementModelTests
             .Where(method => !method.IsSpecialName)
             .ToArray();
 
-        Assert.Equal(39, instanceMembers.Length);
+        Assert.Equal(40, instanceMembers.Length);
 
         foreach (string clause in clauses)
         {
@@ -135,6 +147,11 @@ public sealed class SelectStatementModelTests
         Assert.Single(instanceMembers, m => m.Name == "Parse");
         Assert.Single(instanceMembers, m => m.Name == "GetSql");
         Assert.Single(instanceMembers, m => m.Name == "GetSelectCount");
+
+        // The one port-local member, and the property beside it. Named explicitly so that the count
+        // above cannot be satisfied by some other accidental addition.
+        Assert.Single(instanceMembers, m => m.Name == "GetSqlWithoutTerminator");
+        Assert.NotNull(typeof(SelectStatementModel).GetProperty("StatementTerminator"));
 
         // The two metadata prototypes are NOT ported.
         Assert.DoesNotContain("Copyright", instanceMembers.Select(m => m.Name));
@@ -223,6 +240,139 @@ public sealed class SelectStatementModelTests
         SelectStatementModel model = Parsed(sql);
 
         Assert.Equal(sql, model.GetSql());
+    }
+
+    // ==========================================================================================
+    //  THE STATEMENT TERMINATOR - SEPARATED AT PARSE, RE-ATTACHED AT THE OUTERMOST END
+    //  ------------------------------------------------------------------------------------------
+    //  TIER 3 - PORT-LOCAL, and it exists because a review found a defect the round-trip theory
+    //  above could not see. `SELECT a FROM t;` round-trips byte for byte whether the semicolon is
+    //  held separately or kept inside the body, so that theory passes either way. What it cannot see
+    //  is that the paging rewriters EMBED this text inside a larger statement, and a semicolon inside
+    //  the body then sits in the MIDDLE of the generated SQL - so everything the rewriter appends
+    //  after it is unreachable and the paging silently disappears.
+    //
+    //  The cases below therefore pin all three halves of the resolution: the body carries no
+    //  terminator, GetSql re-attaches it so the round trip stays byte-exact, and multi-statement
+    //  input is refused outright rather than guessed at.
+    // ==========================================================================================
+
+    /// <summary>
+    /// A trailing terminator is held apart from the body, so the two reads differ by exactly it.
+    /// </summary>
+    /// <param name="sql">The statement as supplied.</param>
+    /// <param name="expectedBody">The body the rewriters must see.</param>
+    /// <param name="expectedTerminator">The terminator, with the whitespace that followed it.</param>
+    [Theory]
+    [InlineData("SELECT a FROM t;", "SELECT a FROM t", ";")]
+    [InlineData("SELECT a FROM t ;", "SELECT a FROM t ", ";")]
+    [InlineData("SELECT a FROM t;  ", "SELECT a FROM t", ";  ")]
+    [InlineData("SELECT a FROM t;\n", "SELECT a FROM t", ";\n")]
+    [InlineData("  SELECT a FROM t;  ", "  SELECT a FROM t", ";  ")]
+    [InlineData("SELECT a FROM t", "SELECT a FROM t", "")]
+    [InlineData(
+        "SELECT a FROM t UNION SELECT b FROM u;",
+        "SELECT a FROM t UNION SELECT b FROM u",
+        ";")]
+    public void ATrailingTerminatorIsHeldApartFromTheBody(
+        string sql,
+        string expectedBody,
+        string expectedTerminator)
+    {
+        SelectStatementModel model = Parsed(sql);
+
+        Assert.Equal(expectedBody, model.GetSqlWithoutTerminator());
+        Assert.Equal(expectedTerminator, model.StatementTerminator);
+
+        // AND THE FAITHFUL READ IS STILL BYTE-EXACT, which is the obligation the separation must not
+        // break: a dropped terminator is a diff in a recording comparison.
+        Assert.Equal(sql, model.GetSql());
+    }
+
+    /// <summary>
+    /// A semicolon that is DATA rather than structure is not a terminator, so nothing is separated.
+    /// </summary>
+    /// <param name="sql">The statement whose semicolon sits inside a literal, an identifier or a comment.</param>
+    [Theory]
+    [InlineData("SELECT 'a;b' AS lit FROM t")]
+    [InlineData("SELECT \"a;b\" FROM t")]
+    [InlineData("SELECT [a;b] FROM t")]
+    [InlineData("SELECT a /* ; */ FROM t")]
+    [InlineData("SELECT a -- ;\n FROM t")]
+    public void ASemicolonInsideALiteralOrACommentIsNotATerminator(string sql)
+    {
+        SelectStatementModel model = Parsed(sql);
+
+        Assert.Equal(string.Empty, model.StatementTerminator);
+        Assert.Equal(sql, model.GetSqlWithoutTerminator());
+        Assert.Equal(sql, model.GetSql());
+    }
+
+    /// <summary>
+    /// MULTI-STATEMENT INPUT IS REFUSED, which is a narrowing with a defined error rather than a
+    /// widening with a guess (AAP 0.1.5).
+    /// </summary>
+    /// <remarks>
+    /// The legacy parser is a closed binary whose behaviour on two statements cannot be observed from
+    /// this repository, and every consumer of a rewritten statement splices the result into a
+    /// DataWindow's select property [<c>n_cst_thread_task_sqlquery.sru:L709</c>] - which expects ONE
+    /// statement. Refusing routes it to the caller's own fail-fast arm [<c>:L314</c>]. Note the
+    /// trailing-comment case: a semicolon followed by anything but whitespace is a separator, and
+    /// deciding which trailing text is inert would require an oracle this repository does not have.
+    /// </remarks>
+    /// <param name="sql">The multi-statement input.</param>
+    [Theory]
+    [InlineData("SELECT a FROM t; SELECT b FROM u")]
+    [InlineData("SELECT a FROM t; DELETE FROM t")]
+    [InlineData("SELECT a FROM t;;")]
+    [InlineData("SELECT a FROM t; ;")]
+    [InlineData("SELECT a FROM t; -- done")]
+    [InlineData("SELECT a FROM t; /* done */")]
+    [InlineData("SELECT a FROM (SELECT b; FROM u) x")]
+    [InlineData(";")]
+    [InlineData("; SELECT a FROM t")]
+    [InlineData(";SELECT a FROM t")]
+    public void MultiStatementInputIsRefusedAndLeavesTheModelEmpty(string sql)
+    {
+        SelectStatementModel model = new();
+
+        Assert.False(model.Parse(sql));
+        Assert.Equal(0, model.GetSelectCount());
+        Assert.Equal(string.Empty, model.GetSql());
+        Assert.Equal(string.Empty, model.GetSqlWithoutTerminator());
+        Assert.Equal(string.Empty, model.StatementTerminator);
+    }
+
+    /// <summary>
+    /// A FAILED PARSE CLEARS A TERMINATOR THE PREVIOUS ONE HELD, so no state survives into a model the
+    /// caller has been told is empty.
+    /// </summary>
+    [Fact]
+    public void AFailedParseClearsTheTerminatorTheEarlierParseHeld()
+    {
+        SelectStatementModel model = new();
+
+        Assert.True(model.Parse("SELECT a FROM t;"));
+        Assert.Equal(";", model.StatementTerminator);
+
+        Assert.False(model.Parse("SELECT a FROM (t"));
+        Assert.Equal(string.Empty, model.StatementTerminator);
+        Assert.Equal(string.Empty, model.GetSql());
+    }
+
+    /// <summary>
+    /// A MODIFICATION LANDS INSIDE THE BODY, ahead of the terminator, which is the property that makes
+    /// the separation useful rather than merely tidy.
+    /// </summary>
+    [Fact]
+    public void AModifiedStatementKeepsItsTerminatorAtTheVeryEnd()
+    {
+        SelectStatementModel model = Parsed("SELECT a FROM t;");
+
+        Assert.True(model.ModifyWhere(Enums.SQL_MS_REPLACE, "b = 1"));
+
+        Assert.Equal("SELECT a FROM t WHERE b = 1", model.GetSqlWithoutTerminator());
+        Assert.Equal("SELECT a FROM t WHERE b = 1;", model.GetSql());
     }
 
     /// <summary>

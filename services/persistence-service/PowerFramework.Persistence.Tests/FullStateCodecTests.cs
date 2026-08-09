@@ -322,7 +322,13 @@ public sealed class FullStateCodecTests
         Assert.Equal(1L, chunk.ChunkCount);
         Assert.Equal(1L, chunk.ChunkIndex);
         Assert.True(chunk.FullState);
-        Assert.NotEmpty(chunk.Data.ToByteArray());
+
+        // A CAPTURED IMAGE IS PRESENT AND CARRIES THE CANONICAL THREE SEGMENTS, which is what
+        // distinguishes it from the ABSENT state that means "clear the target" [:L207-L209].
+        Assert.NotNull(chunk.State);
+        Assert.Equal(
+            [DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter],
+            chunk.State.Segments.Select(segment => segment.Buffer));
     }
 
     /// <summary>
@@ -372,7 +378,7 @@ public sealed class FullStateCodecTests
 
         Assert.Equal(
             DataWindowBufferStore.DataStoreSuccess,
-            FullStateCodec.Apply(restored, captured[0].Data.ToByteArray()));
+            FullStateCodec.Apply(restored, captured[0].State));
         Assert.Equal(1L, restored.RowCount());
         Assert.Equal(1L, restored.FilteredCount());
     }
@@ -916,7 +922,7 @@ public sealed class FullStateCodecTests
         SeedRow(source, DwBuffer.Primary, "one", ItemStatus.DataModified);
         SeedRow(source, DwBuffer.Filter, "two");
 
-        byte[] image = FullStateCodec.Capture(source);
+        CarrierState? image = FullStateCodec.Capture(source);
 
         DataWindowBufferStore store = new();
         DataWindowBufferStore taskCarrier = new();
@@ -988,7 +994,7 @@ public sealed class FullStateCodecTests
         DataWindowBufferStore source = NewCrosstabCarrier();
         SeedRow(source, DwBuffer.Primary, "fresh", ItemStatus.NewModified);
 
-        byte[] image = FullStateCodec.Capture(source);
+        CarrierState? image = FullStateCodec.Capture(source);
 
         // A target that ALREADY holds rows. Applying must replace them, not append to them.
         DataWindowBufferStore target = new();
@@ -1025,7 +1031,7 @@ public sealed class FullStateCodecTests
 
         long result = FullStateCodec.Receive(
             FullStateCodec.ResolveTarget(null, false, target),
-            []);
+            state: null);
 
         Assert.Equal(DataWindowBufferStore.DataStoreSuccess, result);
         Assert.Equal(0L, target.RowCount());
@@ -1055,60 +1061,49 @@ public sealed class FullStateCodecTests
     }
 
     /// <summary>
-    /// A payload this codec did not write is REJECTED with the failure code rather than decoded as
-    /// garbage. The realistic cause is the one way the two codecs can be crossed: a changeset blob
-    /// delivered with the full-state flag set.
+    /// AN IMAGE BELONGING TO THE OTHER CODEC IS REJECTED rather than restored. This is the one way the two
+    /// codecs can be crossed: a CHANGESET image - one whose processing kind selects the changeset arm -
+    /// delivered with the full-state flag set. It is now a SEMANTIC rejection rather than a framing one,
+    /// because both codecs publish the same message type and only the processing kind separates them.
     /// </summary>
-    [Fact]
-    public void Receive_RejectsAPayloadThisCodecDidNotWrite_UnitLevelNoOracle()
+    /// <param name="changesetKind">A processing kind that selects the changeset arm.</param>
+    [Theory]
+    [MemberData(nameof(ChangesetProcessingKinds))]
+    public void Receive_RejectsAnImageBelongingToTheChangesetArm_UnitLevelNoOracle(long changesetKind)
     {
         DataWindowBufferStore target = new();
         SeedRow(target, DwBuffer.Primary, "untouched");
 
+        // Captured from a carrier of the OTHER kind, so the image is well formed and merely belongs
+        // elsewhere - which is precisely the crossing worth stating.
+        DataWindowBufferStore foreign = new() { Processing = new DataWindowProcessing(changesetKind) };
+
+        SeedRow(foreign, DwBuffer.Primary, "changeset row");
+
         long result = FullStateCodec.Receive(
             FullStateCodec.ResolveTarget(null, false, target),
-            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+            FullStateCodec.Capture(foreign));
 
         Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
     }
 
     /// <summary>
-    /// A TRUNCATED image is rejected the way <c>SetFullState</c> rejects a payload - by ANSWERING the
-    /// failure code, not by throwing - because the legacy caller stores that value and carries on.
-    /// </summary>
-    [Theory]
-    [InlineData(1)]
-    [InlineData(4)]
-    [InlineData(9)]
-    [InlineData(13)]
-    public void Receive_RejectsATruncatedImageWithoutThrowing_UnitLevelNoOracle(int keptBytes)
-    {
-        DataWindowBufferStore source = NewCrosstabCarrier();
-        SeedRow(source, DwBuffer.Primary, "a");
-
-        byte[] image = FullStateCodec.Capture(source);
-        byte[] truncated = image[..keptBytes];
-
-        DataWindowBufferStore target = new();
-
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            FullStateCodec.Receive(FullStateCodec.ResolveTarget(null, false, target), truncated));
-    }
-
-    /// <summary>
     /// Null arguments still throw, because a null reference is a programming error rather than a rejected
-    /// payload.
+    /// payload - with ONE deliberate exception, which is the image itself.
     /// </summary>
+    /// <remarks>
+    /// An ABSENT image is not a null-argument fault: it is the legacy's zero-length blob, which
+    /// <see cref="FullStateCodec.Receive"/> answers on its own clear arm [<c>:L207-L209</c>] and
+    /// <see cref="FullStateCodec.Apply"/> answers with the failure code. Both are asserted elsewhere in
+    /// this suite; what is asserted here is that the TARGET and the CARRIER still fail fast.
+    /// </remarks>
     [Fact]
     public void ReceiveAndApplyRejectNullArguments_UnitLevelNoOracle()
     {
         DataWindowBufferStore target = new();
 
-        Assert.Throws<ArgumentNullException>(
-            () => FullStateCodec.Receive(FullStateCodec.ResolveTarget(null, false, target), null!));
-        Assert.Throws<ArgumentNullException>(() => FullStateCodec.Apply(target, null!));
-        Assert.Throws<ArgumentNullException>(() => FullStateCodec.Apply(null!, []));
+        Assert.Throws<ArgumentNullException>(() => FullStateCodec.Apply(null!, SomeImage()));
+        Assert.Throws<ArgumentNullException>(() => FullStateCodec.Apply(null!, state: null));
         Assert.Throws<ArgumentNullException>(() => FullStateCodec.ResolveTarget(target, true, null!));
     }
 
@@ -1119,7 +1114,7 @@ public sealed class FullStateCodecTests
     [Fact]
     public void Receive_RejectsATargetWithNoStore_UnitLevelNoOracle()
     {
-        Assert.Throws<ArgumentException>(() => FullStateCodec.Receive(default, []));
+        Assert.Throws<ArgumentException>(() => FullStateCodec.Receive(default, SomeImage()));
     }
 
     #endregion
@@ -1147,7 +1142,7 @@ public sealed class FullStateCodecTests
         SeedRow(source, DwBuffer.Filter, "f2", ItemStatus.DataModified);
         SeedRow(source, DwBuffer.Delete, "d1", ItemStatus.DataModified);
 
-        byte[] image = FullStateCodec.Capture(source);
+        CarrierState? image = FullStateCodec.Capture(source);
 
         DataWindowBufferStore restored = new();
 
@@ -1232,14 +1227,18 @@ public sealed class FullStateCodecTests
     }
 
     /// <summary>
-    /// EVERY TAGGED VALUE TYPE ROUND-TRIPS WITH ITS RUNTIME TYPE INTACT, null included. Null is A VALUE
-    /// here and not an absence - PowerBuilder has null for value types and the ported tri-state algebra
-    /// depends on it, so it must survive distinctly from zero and from the empty string.
+    /// EVERY PUBLISHED VALUE ARM ROUND-TRIPS ONTO THE CARRIER TYPE THE CONTRACT DECLARES FOR IT, null
+    /// included. Null is A VALUE here and not an absence - PowerBuilder has null for value types and the
+    /// ported tri-state algebra depends on it, so it must survive distinctly from zero and from the empty
+    /// string.
     /// </summary>
+    /// <param name="value">The value written into the source carrier.</param>
+    /// <param name="expected">The value - and runtime type - expected back out.</param>
     [Theory]
-    [MemberData(nameof(EveryTaggedValue))]
-    public void CaptureAndApplyRoundTripPreservesEveryTaggedValueType_SyntheticCrosstabNoOracle(
-        object? value)
+    [MemberData(nameof(EveryPublishedValueArm))]
+    public void CaptureAndApplyRoundTripPreservesEveryPublishedValueArm_SyntheticCrosstabNoOracle(
+        object? value,
+        object? expected)
     {
         DataWindowBufferStore source = NewCrosstabCarrier();
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
@@ -1254,56 +1253,96 @@ public sealed class FullStateCodecTests
 
         object? actual = restored.GetItemValue(1L, 1, DwBuffer.Primary);
 
-        if (value is byte[] expectedBlob)
+        if (expected is byte[] expectedBlob)
         {
             Assert.Equal(expectedBlob, Assert.IsType<byte[]>(actual));
 
             return;
         }
 
-        Assert.Equal(value, actual);
+        Assert.Equal(expected, actual);
 
-        if (value is not null)
+        if (expected is not null)
         {
-            Assert.IsType(value.GetType(), actual);
+            Assert.IsType(expected.GetType(), actual);
         }
     }
 
     /// <summary>
-    /// One value per <c>FullStateValueTag</c> member, plus the cases that a careless encoding would lose:
-    /// a trailing-zero decimal whose SCALE must survive, all three <c>DateTimeKind</c> values, and an
-    /// empty blob.
+    /// One value per <c>common.v1.AnyValue</c> arm, paired with the carrier type it comes back as, plus
+    /// the cases that a careless encoding would lose: a trailing-zero decimal whose SCALE must survive,
+    /// all three <c>DateTimeKind</c> values, and an empty blob.
     /// </summary>
-    public static TheoryData<object?> EveryTaggedValue =>
-    [
-        // CAST DELIBERATELY. A bare `null` here binds to TheoryData's row-typed Add overload rather
-        // than its value-typed one, because TheoryDataRow<object?> is more derived than object, and
-        // that overload's parameter is non-nullable - error CS8625. The cast makes the value-typed
-        // overload the only applicable one, which is what carries null through as A VALUE.
-        (object?)null,
-        true,
-        false,
-        42,
-        int.MinValue,
-        9_000_000_000L,
-        long.MaxValue,
-        ulong.MaxValue,
-        1.5d,
-        double.NegativeInfinity,
-        1.50m,
-        -0.000_001m,
-        decimal.MaxValue,
-        "",
-        "salary A age D",
-        "多线程",
-        new byte[] { 1, 2, 3, 250 },
-        Array.Empty<byte>(),
-        new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Utc),
-        new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Local),
-        new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Unspecified),
-        new DateOnly(1978, 6, 30),
-        new TimeOnly(23, 59, 59, 999),
-    ];
+    /// <remarks>
+    /// <para>
+    /// THE PAIRING IS THE POINT, because <c>AnyValue</c>'s numeric arms are DELIBERATELY WIDE - one
+    /// signed integer arm, one unsigned, one floating - and that widening is the contract's own decision
+    /// rather than this codec's. An <see cref="int"/> travels as the signed arm and returns as
+    /// <see cref="long"/>; a <see cref="uint"/> returns as <see cref="ulong"/>; a <see cref="float"/>
+    /// returns as <see cref="double"/>. Nothing loses magnitude, sign, precision or scale - only the
+    /// declared width changes, and stating it here is what keeps it visible rather than leaving a consumer
+    /// to discover it by casting and throwing.
+    /// </para>
+    /// <para>
+    /// The three <see cref="DateTime"/> kinds all return <see cref="DateTimeKind.Unspecified"/>, because
+    /// the contract's datetime form is UNZONED - PowerBuilder's <c>datetime</c> carries no zone either, so
+    /// preserving a kind would invent information the oracle does not have.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<object?, object?> EveryPublishedValueArm =>
+        new()
+        {
+            // CAST DELIBERATELY. A bare `null` binds to TheoryData's row-typed Add overload rather than
+            // its value-typed one, because TheoryDataRow<object?> is more derived than object, and that
+            // overload's parameter is non-nullable - error CS8625. The cast makes the value-typed
+            // overload the only applicable one, which is what carries null through as A VALUE.
+            { (object?)null, (object?)null },
+            { true, true },
+            { false, false },
+
+            // The signed integer family, widened onto the one signed arm.
+            { 42, 42L },
+            { int.MinValue, (long)int.MinValue },
+            { 9_000_000_000L, 9_000_000_000L },
+            { long.MaxValue, long.MaxValue },
+
+            // The unsigned family, widened onto the one unsigned arm.
+            { ulong.MaxValue, ulong.MaxValue },
+
+            // The floating family. Both values below are exactly representable, so the equality is exact.
+            { 1.5d, 1.5d },
+            { double.NegativeInfinity, double.NegativeInfinity },
+
+            // Decimals keep their own arm so that scale survives - see the scale test below.
+            { 1.50m, 1.50m },
+            { -0.000_001m, -0.000_001m },
+            { decimal.MaxValue, decimal.MaxValue },
+
+            { string.Empty, string.Empty },
+            { "salary A age D", "salary A age D" },
+            { "多线程", "多线程" },
+            { new byte[] { 1, 2, 3, 250 }, new byte[] { 1, 2, 3, 250 } },
+            { Array.Empty<byte>(), Array.Empty<byte>() },
+
+            // The unzoned datetime form: three kinds in, Unspecified out, value identical.
+            {
+                new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Utc),
+                new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Unspecified)
+            },
+            {
+                new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Local),
+                new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Unspecified)
+            },
+            {
+                new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Unspecified),
+                new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Unspecified)
+            },
+
+            { new DateOnly(1978, 6, 30), new DateOnly(1978, 6, 30) },
+
+            // Millisecond resolution is inside the canonical six-digit fraction and survives exactly.
+            { new TimeOnly(23, 59, 59, 999), new TimeOnly(23, 59, 59, 999) },
+        };
 
     /// <summary>
     /// DECIMAL SCALE SURVIVES. The fixture's salary column is declared <c>decimal(2)</c> against a REAL
@@ -1367,18 +1406,30 @@ public sealed class FullStateCodecTests
             return store;
         }
 
-        Assert.Equal(FullStateCodec.Capture(Build()), FullStateCodec.Capture(Build()));
+        CarrierState? first = FullStateCodec.Capture(Build());
+        CarrierState? second = FullStateCodec.Capture(Build());
+
+        Assert.Equal(first, second);
+
+        // The BYTES too, because a recording holds bytes rather than a message instance.
+        Assert.Equal(first!.ToByteArray(), second!.ToByteArray());
     }
 
     /// <summary>
-    /// A CAPTURED IMAGE IS NEVER EMPTY, even for an empty carrier, because an EMPTY payload is the
-    /// legacy's "clear the target" signal [<c>:L207-L209</c>]. Confusing the two would silently turn a
-    /// legitimately empty result into a clear.
+    /// A CAPTURED IMAGE IS NEVER ABSENT AND NEVER SEGMENT-LESS, even for an empty carrier, because an
+    /// ABSENT image is the legacy's "clear the target" signal [<c>:L207-L209</c>]. Confusing the two
+    /// would silently turn a legitimately empty result into a clear.
     /// </summary>
     [Fact]
-    public void Capture_NeverProducesAnEmptyImage_UnitLevelNoOracle()
+    public void Capture_NeverProducesAnAbsentImage_UnitLevelNoOracle()
     {
-        Assert.NotEmpty(FullStateCodec.Capture(NewCrosstabCarrier()));
+        CarrierState? empty = FullStateCodec.Capture(NewCrosstabCarrier());
+
+        Assert.NotNull(empty);
+        Assert.Equal(
+            [DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter],
+            empty.Segments.Select(segment => segment.Buffer));
+        Assert.All(empty.Segments, segment => Assert.Empty(segment.Rows));
 
         DataWindowBufferStore target = new();
         SeedRow(target, DwBuffer.Primary, "kept");
@@ -1394,22 +1445,50 @@ public sealed class FullStateCodecTests
     }
 
     /// <summary>
-    /// AN UNTAGGED VALUE TYPE IS A DEFINED ERROR RATHER THAN A GUESS. Coercing it to its string form would
-    /// round-trip as the wrong type and read as correct, so the contract is narrowed instead of widened.
+    /// AN UNREPRESENTABLE VALUE IS A DEFINED FAILURE RATHER THAN A GUESS. Coercing it to its string form
+    /// would round-trip as the wrong type and read as correct, so the contract is narrowed instead of
+    /// widened.
     /// </summary>
-    [Fact]
-    public void Capture_RaisesADefinedErrorForAnUntaggedValueType_UnitLevelNoOracle()
+    /// <remarks>
+    /// ANSWERED AS AN ABSENT IMAGE RATHER THAN AS AN EXCEPTION, which is a deliberate change of failure
+    /// channel and not a relaxation. The operation this reproduces - <c>GetFullState</c> - answers a CODE,
+    /// and every legacy call site tests one [<c>:L95-L99</c>]; an escaping exception would be a failure
+    /// mode the oracle does not have (C-B) and would surface as a 500 rather than as the transfer failure
+    /// the contract publishes. <see cref="FullStateCodec.Send"/> converts the absence into the verbatim
+    /// failure text and the internal-error code, which the sibling send tests assert.
+    /// </remarks>
+    /// <param name="unrepresentable">A value outside the published <c>AnyValue</c> arms.</param>
+    [Theory]
+    [MemberData(nameof(UnrepresentableValues))]
+    public void Capture_AnswersAnAbsentImageForAnUnrepresentableValue_UnitLevelNoOracle(
+        object unrepresentable)
     {
         DataWindowBufferStore source = NewCrosstabCarrier();
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
 
-        source.SetItemValue(row, 1, DwBuffer.Primary, new Uri("https://example.invalid/"));
+        source.SetItemValue(row, 1, DwBuffer.Primary, unrepresentable);
 
-        NotSupportedException failure =
-            Assert.Throws<NotSupportedException>(() => FullStateCodec.Capture(source));
-
-        Assert.Contains("FullStateValueTag", failure.Message, StringComparison.Ordinal);
+        Assert.Null(FullStateCodec.Capture(source));
     }
+
+    /// <summary>
+    /// The values the published <c>AnyValue</c> arms cannot express, one per reason.
+    /// </summary>
+    public static TheoryData<object> UnrepresentableValues =>
+        new()
+        {
+            // No arm for an arbitrary reference type.
+            new Uri("https://example.invalid/"),
+
+            // TimeValue is a TIME OF DAY rather than a duration, so a TimeSpan has no arm either -
+            // mapping it onto one would read back as a TimeOnly meaning something different.
+            TimeSpan.FromMinutes(90L),
+
+            // Finer than the canonical six-digit fraction, so it cannot be rendered without dropping
+            // information, and truncating would make a recording comparison pass on a value nobody wrote.
+            new DateTime(2022, 4, 14, 13, 45, 30, DateTimeKind.Unspecified).AddTicks(1L),
+            new TimeOnly(23, 59, 59).Add(TimeSpan.FromTicks(1L)),
+        };
 
     /// <summary>
     /// <see cref="FullStateCodec.Capture"/> is deliberately KIND-AGNOSTIC, because the legacy checks the
@@ -1420,7 +1499,10 @@ public sealed class FullStateCodecTests
     [MemberData(nameof(ChangesetProcessingKinds))]
     public void Capture_DoesNotItselfGuardTheProcessingKind_UnitLevelNoOracle(long kind)
     {
-        Assert.NotEmpty(FullStateCodec.Capture(NewCrosstabCarrier(kind)));
+        CarrierState? image = FullStateCodec.Capture(NewCrosstabCarrier(kind));
+
+        Assert.NotNull(image);
+        Assert.Equal(kind, image.Processing);
     }
 
     /// <summary>
@@ -1434,450 +1516,589 @@ public sealed class FullStateCodecTests
 
     #endregion
 
-    #region Corrupt-image rejection - every defensive decode path
+    #region Malformed-image rejection - every defensive decode path
 
-    // THE BYTE OFFSETS BELOW ARE DERIVED FROM THE FORMAT, NOT GUESSED, and they hold for an image of a
-    // carrier holding exactly ONE Primary! row with exactly ONE assigned column:
+    // ==========================================================================================
+    //  WHAT THIS REGION USED TO ASSERT, AND WHY IT NO LONGER DOES.
+    //  ----------------------------------------------------------------------------------------
+    //  It was written against a private binary image owned by this assembly, so it worked from
+    //  DOCUMENTED BYTE OFFSETS: a format version byte, a buffer tag byte, little-endian row and column
+    //  counts, an original-value presence flag, a value tag byte, a seven-bit string length, a
+    //  DateTimeKind byte, and three hand-built maximal counts that proved a length was bounded before
+    //  it reached `new byte[length]`. Every one of those tested a FRAMING LAYER that no longer exists.
     //
-    //      0..3    magic                       13      first buffer tag (Primary! = 0)
-    //      4       format version              14..21  that buffer's row count
-    //      5..12   processing kind             22..25  row 1 item status
-    //                                          26..29  row 1 column count
-    //                                          30..33  column number
-    //                                          34..37  column item status
-    //                                          38      original-value presence flag
-    //                                          39      value tag
-    //                                          40..    value payload
+    //  The image is now `persistence.v1.CarrierState`, a published message (constraint C-A), because
+    //  the review found what the private format cost: `QueryDataChunk.data` was an opaque `bytes` field
+    //  described as the codecs' own concern, and DataServices - which references the contracts project
+    //  and nothing else - could therefore neither produce nor consume the payload the C-05 and C-06
+    //  contracts hand it. Framing, truncation, length bounding and UTF-8 validity are now the generated
+    //  parser's concern, and a malformed frame never reaches this codec at all.
     //
-    // Patching one field at a time is what isolates each rejection path. EVERY CASE MUST ANSWER THE
-    // FAILURE CODE RATHER THAN THROW, because that is what SetFullState does with a payload it rejects
-    // and the legacy caller stores that value and carries on [n_cst_threading_task_sqlquery.sru:L190].
-    private const int VersionOffset = 4;
-    private const int FirstBufferTagOffset = 13;
-    private const int FirstBufferRowCountOffset = 14;
-    private const int RowStatusOffset = 22;
-    private const int ColumnCountOffset = 26;
-    private const int ColumnNumberOffset = 30;
-    private const int ColumnStatusOffset = 34;
-    private const int OriginalPresenceOffset = 38;
-    private const int ValueTagOffset = 39;
-    private const int ValuePayloadOffset = 40;
+    //  WHAT REPLACED THEM IS NOT A REDUCTION. A well-formed protobuf message can still be a nonsense
+    //  image, and every semantic check the byte-level tests were mixed in with is still asserted here,
+    //  several of them for the first time: a segment roster that is not exactly one per buffer in
+    //  canonical order, a row filed under the wrong buffer, a non-positive row ordinal, an undeclared
+    //  item status, a column identifier that is not one-based, a duplicated column, an original naming
+    //  a column the row never carried, a value message with no arm set, and decimal or temporal text
+    //  outside the canonical grammar.
+    //
+    //  ONE ASYMMETRY WITH THE SIBLING CHANGESET SUITE IS DELIBERATE AND IS NOT A GAP. This codec RESETS
+    //  the target as part of restoring a complete image, so a fault found after the reset leaves the
+    //  target empty rather than holding its previous contents. That is the legacy's own exposure -
+    //  `SetFullState` replaces the carrier's contents and answers -1 on a payload it rejects
+    //  [n_cst_threading_task_sqlquery.sru:L190] - so it is reproduced rather than corrected. Every
+    //  STRUCTURALLY detectable fault is nevertheless hoisted ABOVE the reset, which is what the
+    //  roster and processing tests below assert by checking the target still holds its rows.
+    // ==========================================================================================
 
     /// <summary>
-    /// Captures an image of a carrier holding one Primary! row whose column one holds
-    /// <paramref name="value"/>, so that the documented offsets above apply to it.
+    /// A well-formed image of a carrier holding one Primary! row with one assigned column, for the tests
+    /// whose subject is an argument check rather than the image.
     /// </summary>
-    /// <param name="value">The single column value.</param>
-    /// <returns>The image.</returns>
-    private static byte[] SingleRowImage(object? value)
+    private static CarrierState SomeImage()
     {
         DataWindowBufferStore source = NewCrosstabCarrier();
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
 
-        source.SetItemValue(row, 1, DwBuffer.Primary, value);
+        source.SetItemValue(row, 1, DwBuffer.Primary, "value");
         source.SetItemStatus(row, 1, DwBuffer.Primary, ItemStatus.DataModified);
         source.SetItemStatus(row, 0, DwBuffer.Primary, ItemStatus.DataModified);
 
-        return FullStateCodec.Capture(source);
-    }
+        CarrierState? image = FullStateCodec.Capture(source);
 
-    /// <summary>
-    /// Applies an image to a fresh carrier and answers the result code.
-    /// </summary>
-    /// <param name="image">The image, corrupt or otherwise.</param>
-    /// <returns>The result of the apply.</returns>
-    private static long ApplyToFreshCarrier(byte[] image)
-    {
-        return FullStateCodec.Apply(new DataWindowBufferStore(), image);
-    }
-
-    /// <summary>Overwrites one byte and answers the image.</summary>
-    /// <param name="image">The image to patch in place.</param>
-    /// <param name="offset">The byte offset.</param>
-    /// <param name="value">The replacement byte.</param>
-    /// <returns><paramref name="image"/>.</returns>
-    private static byte[] PatchByte(byte[] image, int offset, byte value)
-    {
-        image[offset] = value;
+        Assert.NotNull(image);
 
         return image;
     }
 
-    /// <summary>Overwrites a little-endian 32-bit field and answers the image.</summary>
-    /// <param name="image">The image to patch in place.</param>
-    /// <param name="offset">The byte offset of the field.</param>
-    /// <param name="value">The replacement value.</param>
-    /// <returns><paramref name="image"/>.</returns>
-    private static byte[] PatchInt32(byte[] image, int offset, int value)
-    {
-        BitConverter.GetBytes(value).CopyTo(image, offset);
+    /// <summary>Builds an image from an explicit segment roster, canonical or not.</summary>
+    /// <param name="segments">The segments, in the order they are to appear.</param>
+    private static CarrierState ImageWith(params CarrierBufferSegment[] segments) =>
+        ImageWith(FullStateProcessingKind, segments);
 
-        return image;
-    }
-
-    /// <summary>Overwrites a little-endian 64-bit field and answers the image.</summary>
-    /// <param name="image">The image to patch in place.</param>
-    /// <param name="offset">The byte offset of the field.</param>
-    /// <param name="value">The replacement value.</param>
-    /// <returns><paramref name="image"/>.</returns>
-    private static byte[] PatchInt64(byte[] image, int offset, long value)
+    /// <summary>Builds an image from an explicit segment roster and processing kind.</summary>
+    /// <param name="processing">The processing kind to declare.</param>
+    /// <param name="segments">The segments, in the order they are to appear.</param>
+    private static CarrierState ImageWith(long processing, params CarrierBufferSegment[] segments)
     {
-        BitConverter.GetBytes(value).CopyTo(image, offset);
+        CarrierState image = new() { Processing = processing };
+
+        image.Segments.AddRange(segments);
 
         return image;
     }
 
     /// <summary>
-    /// An image whose FORMAT VERSION this codec does not know is rejected rather than decoded on the
-    /// assumption that the layout is unchanged.
+    /// Builds an image with the canonical three segments, filing each row into the segment its own buffer
+    /// tag names, so that only the fault under test is faulty.
     /// </summary>
-    [Theory]
-    [InlineData((byte)0)]
-    [InlineData((byte)2)]
-    [InlineData((byte)255)]
-    public void Apply_RejectsAnUnknownFormatVersion_UnitLevelNoOracle(byte version)
+    /// <param name="rows">The rows to file.</param>
+    private static CarrierState CanonicalImageWith(params DataWindowRow[] rows)
     {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchByte(SingleRowImage("a"), VersionOffset, version)));
+        return ImageWith(
+            FullStateProcessingKind,
+            [
+                .. new[] { DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter }.Select(dwBuffer =>
+                    Segment(dwBuffer, [.. rows.Where(row => row.Buffer == dwBuffer)])),
+            ]);
     }
 
-    /// <summary>
-    /// The buffer order is written into the image and VERIFIED ON READ, so a mismatch is caught rather
-    /// than silently applied to the wrong buffer - which would move rows between Primary!, Delete! and
-    /// Filter! and pass every count assertion.
-    /// </summary>
-    [Theory]
-    [InlineData((byte)1)]
-    [InlineData((byte)2)]
-    [InlineData((byte)7)]
-    public void Apply_RejectsAnImageWhoseBufferOrderDisagrees_UnitLevelNoOracle(byte bufferTag)
+    /// <summary>Builds one buffer segment.</summary>
+    /// <param name="dwBuffer">The buffer tag to declare.</param>
+    /// <param name="rows">The rows it carries.</param>
+    private static CarrierBufferSegment Segment(DwBuffer dwBuffer, params DataWindowRow[] rows)
     {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchByte(SingleRowImage("a"), FirstBufferTagOffset, bufferTag)));
+        CarrierBufferSegment segment = new() { Buffer = dwBuffer };
+
+        segment.Rows.AddRange(rows);
+
+        return segment;
     }
 
-    /// <summary>
-    /// A NEGATIVE row count is structurally impossible - row counts are one-based counts - and is
-    /// rejected instead of being fed to a loop.
-    /// </summary>
-    [Fact]
-    public void Apply_RejectsANegativeRowCount_UnitLevelNoOracle()
+    /// <summary>Builds one inbound row.</summary>
+    /// <param name="dwBuffer">The row's own buffer tag.</param>
+    /// <param name="row">The one-based row ordinal. R9: never rebased.</param>
+    /// <param name="status">The row's item status.</param>
+    /// <param name="columns">The current values, or none.</param>
+    /// <param name="originals">The original values, or none.</param>
+    private static DataWindowRow Row(
+        DwBuffer dwBuffer,
+        long row,
+        ItemStatus status,
+        ColumnValue[]? columns = null,
+        ColumnValue[]? originals = null)
     {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt64(SingleRowImage("a"), FirstBufferRowCountOffset, -1L)));
-    }
-
-    /// <summary>
-    /// A NEGATIVE column count, likewise.
-    /// </summary>
-    [Fact]
-    public void Apply_RejectsANegativeColumnCount_UnitLevelNoOracle()
-    {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt32(SingleRowImage("a"), ColumnCountOffset, -1)));
-    }
-
-    /// <summary>
-    /// A COLUMN NUMBER BELOW THE ONE-BASED FLOOR is rejected. R9: column numbers are never rebased in
-    /// this port, so a zero here means the image was written by something that rebased them - and
-    /// accepting it would shift every column by one while leaving every column count intact, which is
-    /// precisely the defect class no count assertion can detect.
-    /// </summary>
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void Apply_RejectsAColumnNumberBelowTheOneBasedFloor_UnitLevelNoOracle(int columnNumber)
-    {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt32(SingleRowImage("a"), ColumnNumberOffset, columnNumber)));
-    }
-
-    /// <summary>
-    /// AN ITEM STATUS OUTSIDE THE PUBLISHED FOUR-MEMBER DOMAIN IS REJECTED. This port adds no fifth
-    /// status, so a corrupt image must not be able to plant one that then reads as legitimate everywhere
-    /// downstream. Both the row status and the column status are validated.
-    /// </summary>
-    [Theory]
-    [InlineData(RowStatusOffset, 4)]
-    [InlineData(RowStatusOffset, -1)]
-    [InlineData(RowStatusOffset, 99)]
-    [InlineData(ColumnStatusOffset, 4)]
-    [InlineData(ColumnStatusOffset, int.MaxValue)]
-    public void Apply_RejectsAnItemStatusOutsideThePublishedDomain_UnitLevelNoOracle(
-        int offset,
-        int status)
-    {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt32(SingleRowImage("a"), offset, status)));
-    }
-
-    /// <summary>
-    /// The original-value presence flag has exactly two legal values; anything else means the image was
-    /// not written by this codec.
-    /// </summary>
-    [Theory]
-    [InlineData((byte)2)]
-    [InlineData((byte)255)]
-    public void Apply_RejectsAnInvalidOriginalValuePresenceFlag_UnitLevelNoOracle(byte flag)
-    {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchByte(SingleRowImage("a"), OriginalPresenceOffset, flag)));
-    }
-
-    /// <summary>
-    /// AN UNRECOGNISED VALUE TAG IS REJECTED. Tags are only ever appended, so an unknown one means the
-    /// image came from a newer or a different encoder and its layout cannot be assumed.
-    /// </summary>
-    [Theory]
-    [InlineData((byte)12)]
-    [InlineData((byte)200)]
-    public void Apply_RejectsAnUnrecognisedValueTag_UnitLevelNoOracle(byte tag)
-    {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchByte(SingleRowImage("a"), ValueTagOffset, tag)));
-    }
-
-    /// <summary>
-    /// A NEGATIVE BLOB LENGTH is rejected, and a length longer than the remaining bytes is reported as a
-    /// truncation rather than silently substituting a short blob for the real one.
-    /// </summary>
-    [Theory]
-    [InlineData(-1)]
-    [InlineData(1_000_000)]
-    public void Apply_RejectsAnInvalidBlobLength_UnitLevelNoOracle(int length)
-    {
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(
-                PatchInt32(SingleRowImage(new byte[] { 1, 2, 3 }), ValuePayloadOffset, length)));
-    }
-
-    /// <summary>
-    /// A timestamp whose KIND byte is not a defined <see cref="DateTimeKind"/> is rejected. The kind
-    /// travels with the ticks precisely because dropping it would turn an unspecified timestamp into a
-    /// local or UTC one, so an undefined value cannot be quietly defaulted either.
-    /// </summary>
-    [Theory]
-    [InlineData((byte)3)]
-    [InlineData((byte)200)]
-    public void Apply_RejectsATimestampWithAnUndefinedKind_UnitLevelNoOracle(byte kind)
-    {
-        byte[] image = SingleRowImage(new DateTime(2022, 4, 14, 0, 0, 0, DateTimeKind.Utc));
-
-        // The kind byte follows the eight ticks bytes.
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchByte(image, ValuePayloadOffset + 8, kind)));
-    }
-
-    /// <summary>
-    /// A timestamp, date or time of day OUTSIDE ITS REPRESENTABLE RANGE is rejected rather than escaping
-    /// as an out-of-range exception from inside the decoder.
-    /// </summary>
-    [Fact]
-    public void Apply_RejectsTemporalValuesOutsideTheirRepresentableRange_UnitLevelNoOracle()
-    {
-        byte[] timestamp = SingleRowImage(new DateTime(2022, 4, 14, 0, 0, 0, DateTimeKind.Utc));
-        byte[] date = SingleRowImage(new DateOnly(2022, 4, 14));
-        byte[] time = SingleRowImage(new TimeOnly(12, 0));
-
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt64(timestamp, ValuePayloadOffset, long.MaxValue)));
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt32(date, ValuePayloadOffset, int.MaxValue)));
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt64(time, ValuePayloadOffset, long.MaxValue)));
-    }
-
-    /// <summary>
-    /// A decimal whose four component integers are not a legal encoding is rejected. The components are
-    /// written verbatim so that SCALE survives, which is exactly why an illegal scale has to be caught on
-    /// the way back in.
-    /// </summary>
-    [Fact]
-    public void Apply_RejectsADecimalWithAnIllegalComponentEncoding_UnitLevelNoOracle()
-    {
-        byte[] image = SingleRowImage(1.50m);
-
-        // The fourth component carries the sign and the scale. A scale of 255 is not representable.
-        Assert.Equal(
-            DataWindowBufferStore.DataStoreFailure,
-            ApplyToFreshCarrier(PatchInt32(image, ValuePayloadOffset + 12, 0x00FF_0000)));
-    }
-
-    // ==========================================================================================
-    //  THE TWO STRING FAULTS, WHICH ARE THE ONES THAT USED TO ESCAPE
-    //  ----------------------------------------------------------------------------------------
-    //  A string value is written through BinaryWriter.Write(string), which emits a 7-BIT ENCODED
-    //  LENGTH followed by the UTF-8 bytes, and it is read back through BinaryReader.ReadString. The
-    //  encoding this codec uses is deliberately constructed with throwOnInvalidBytes: true, so that a
-    //  value which cannot round-trip is a DETECTED fault rather than a silent replacement character.
-    //  That decision has a consequence the decode path has to honour: malformed bytes make ReadString
-    //  THROW, and a malformed 7-bit length makes it throw something different again.
-    //
-    //  Both faults are as plainly "the payload is bad" as a truncation is, and both must therefore
-    //  answer the failure code SetFullState answers [n_cst_threading_task_sqlquery.sru:L190]. Neither
-    //  is reachable by patching a field offset - one needs invalid UTF-8 in the value bytes and the
-    //  other needs an illegal continuation pattern in the length prefix - which is why they are built
-    //  by hand and why they went unnoticed.
-    // ==========================================================================================
-
-    /// <summary>
-    /// A string value whose bytes are not valid UTF-8 is rejected with the failure code rather than
-    /// escaping as a decoder exception.
-    /// </summary>
-    /// <remarks>
-    /// <c>0xC3</c> introduces a two-byte sequence and <c>0x28</c> cannot continue one, so the pair is
-    /// invalid UTF-8 in the one way a strict decoder is obliged to notice. The length prefix stays
-    /// honest at two bytes, so this test isolates the DECODE fault from any length fault.
-    /// </remarks>
-    [Fact]
-    public void Apply_RejectsMalformedUtf8InAStringValue_UnitLevelNoOracle()
-    {
-        // "ab" is two ASCII bytes, so its 7-bit length prefix is the single byte 0x02 and the two value
-        // bytes sit immediately after it - which is what makes the substitution below exact.
-        byte[] image = SingleRowImage("ab");
-
-        Assert.Equal(0x02, image[ValuePayloadOffset]);
-
-        image[ValuePayloadOffset + 1] = 0xC3;   // leads a two-byte sequence
-        image[ValuePayloadOffset + 2] = 0x28;   // cannot continue one
-
-        Assert.Equal(DataWindowBufferStore.DataStoreFailure, ApplyToFreshCarrier(image));
-    }
-
-    /// <summary>
-    /// A string value whose 7-BIT ENCODED LENGTH PREFIX is malformed is rejected with the failure code.
-    /// </summary>
-    /// <remarks>
-    /// Every byte of a 7-bit encoded integer but the last sets its high bit, and the encoding admits at
-    /// most five bytes. Five continuation bytes in a row therefore describe no integer at all, which
-    /// raises a format fault from inside the length read - before any character has been decoded.
-    /// </remarks>
-    [Fact]
-    public void Apply_RejectsAMalformedSevenBitStringLength_UnitLevelNoOracle()
-    {
-        byte[] image = SingleRowImage("abcdefgh");
-
-        Assert.Equal(0x08, image[ValuePayloadOffset]);
-
-        for (int offset = 0; offset < 5; offset++)
+        DataWindowRow projected = new()
         {
-            image[ValuePayloadOffset + offset] = 0xFF;
+            Buffer = dwBuffer,
+            Row = row,
+            ItemStatus = status,
+        };
+
+        projected.Columns.AddRange(columns ?? []);
+        projected.OriginalValues.AddRange(originals ?? []);
+
+        return projected;
+    }
+
+    /// <summary>Builds one column value through the same mapper the encoder uses.</summary>
+    /// <param name="columnId">The column number to declare, valid or not.</param>
+    /// <param name="value">The value, which must be one the mapper can express.</param>
+    /// <param name="status">The column's own status, or none for an absent one.</param>
+    private static ColumnValue Column(long columnId, object? value, ItemStatus? status = null)
+    {
+        Assert.True(
+            CarrierValue.TryToWire(value, out AnyValue? wire),
+            "A builder value must be representable; an unrepresentable one belongs in its own test.");
+
+        ColumnValue column = new() { ColumnId = columnId, Value = wire };
+
+        if (status is not null)
+        {
+            column.ItemStatus = status.Value;
         }
 
-        Assert.Equal(DataWindowBufferStore.DataStoreFailure, ApplyToFreshCarrier(image));
-    }
-
-    // ==========================================================================================
-    //  THE COUNTS A HOSTILE IMAGE CAN WEAPONISE, REJECTED BEFORE THEY REACH AN ALLOCATION
-    //  ----------------------------------------------------------------------------------------
-    //  An image arrives from a peer, so its row count, its per-row column count and any blob length
-    //  are numbers chosen by whoever produced the bytes. The column count is the sharpest of the
-    //  three, because ReadRow sizes FIVE arrays from it before reading a single column, and a blob
-    //  length is next, because ReadBytes allocates from it BEFORE discovering the stream is shorter.
-    //
-    //  A negative value was already rejected, and the sibling cases above cover that. What these
-    //  cases add is the MAXIMAL POSITIVE value, which a negative check does not touch, together with
-    //  the assertion that matters more than the result code: THE ANSWER IS PRODUCED WITHOUT
-    //  ALLOCATING. A decoder that reserved gigabytes and then failed would return the same code on a
-    //  host with the memory to spare, and would take the host down on one without.
-    // ==========================================================================================
-
-    /// <summary>
-    /// An image declaring <see cref="long.MaxValue"/> rows in a buffer is rejected before the row loop
-    /// starts, and without allocating.
-    /// </summary>
-    [Fact]
-    public void Apply_RejectsAnOversizedRowCountBeforeAllocating_UnitLevelNoOracle()
-    {
-        AssertRejectedWithoutAllocating(
-            PatchInt64(SingleRowImage("a"), FirstBufferRowCountOffset, long.MaxValue));
+        return column;
     }
 
     /// <summary>
-    /// An image declaring <see cref="int.MaxValue"/> columns on a row is rejected before the five decode
-    /// arrays are sized from it, and without allocating.
+    /// The crosstab processing kind this codec owns, so that no bare literal appears in the builders.
     /// </summary>
-    [Fact]
-    public void Apply_RejectsAnOversizedColumnCountBeforeAllocating_UnitLevelNoOracle()
+    private const long FullStateProcessingKind = 4L;
+
+    /// <summary>
+    /// Segment rosters that are not the canonical three, each of which must be refused.
+    /// </summary>
+    public static TheoryData<string, CarrierState> NonCanonicalRosters =>
+        AsTheoryData(NonCanonicalRosterCases);
+
+    /// <summary>The roster faults themselves, enumerable independently of the theory wrapper.</summary>
+    private static IEnumerable<(string Because, CarrierState Image)> NonCanonicalRosterCases()
     {
-        AssertRejectedWithoutAllocating(
-            PatchInt32(SingleRowImage("a"), ColumnCountOffset, int.MaxValue));
+        return
+        [
+            ("no segments at all", ImageWith()),
+            ("one segment", ImageWith(Segment(DwBuffer.Primary))),
+            ("two segments", ImageWith(Segment(DwBuffer.Primary), Segment(DwBuffer.Delete))),
+            (
+                "a fourth segment",
+                ImageWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Filter),
+                    Segment(DwBuffer.Primary))
+            ),
+            (
+                "three segments all tagged Primary",
+                ImageWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Primary))
+            ),
+            (
+                "the canonical three in reverse order",
+                ImageWith(
+                    Segment(DwBuffer.Filter),
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Primary))
+            ),
+            (
+                "Delete and Primary transposed",
+                ImageWith(
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "Delete omitted and Filter duplicated",
+                ImageWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Filter),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "a buffer ordinal outside the published domain",
+                ImageWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Delete),
+                    Segment((DwBuffer)99))
+            ),
+        ];
     }
 
     /// <summary>
-    /// An image declaring <see cref="int.MaxValue"/> blob bytes is rejected before
-    /// <see cref="BinaryReader.ReadBytes"/> allocates from the length, and without allocating.
+    /// A NON-CANONICAL ROSTER IS REFUSED BEFORE THE RESET, so the target still holds what it held.
     /// </summary>
-    [Fact]
-    public void Apply_RejectsAnOversizedBlobLengthBeforeAllocating_UnitLevelNoOracle()
+    /// <param name="because">The roster fault, named so a failure message identifies the case.</param>
+    /// <param name="image">The non-canonical image.</param>
+    [Theory]
+    [MemberData(nameof(NonCanonicalRosters))]
+    public void Apply_RefusesANonCanonicalRosterWithoutResettingTheTarget_UnitLevelNoOracle(
+        string because,
+        CarrierState image)
     {
-        AssertRejectedWithoutAllocating(
-            PatchInt32(SingleRowImage(new byte[] { 1, 2, 3 }), ValuePayloadOffset, int.MaxValue));
-    }
+        DataWindowBufferStore target = NewCrosstabCarrier();
 
-    /// <summary>
-    /// Asserts that <paramref name="image"/> answers the failure code and that producing that answer
-    /// allocated a trivial amount of memory.
-    /// </summary>
-    /// <param name="image">The hand-patched image declaring a maximal count.</param>
-    /// <remarks>
-    /// <para>
-    /// The budget is generous rather than tight on purpose: the decoder legitimately constructs a
-    /// stream, a reader and a carrier, all of which allocate, and this assertion must not become
-    /// brittle against a change in any of them. What it has to separate is KILOBYTES from GIGABYTES,
-    /// and a one-megabyte budget does that with three orders of magnitude to spare.
-    /// </para>
-    /// <para>
-    /// The reading is per-thread and counts allocation REQUESTS rather than surviving objects, which is
-    /// exactly the quantity of interest here.
-    /// </para>
-    /// <para>
-    /// THE CARRIER'S STATE IS DELIBERATELY NOT ASSERTED, and the reason is a real property of this
-    /// codec rather than a gap in the test. <c>Apply</c> RESETS the target and then restores into it,
-    /// and <see cref="FullStateCodec"/>'s row restore appends the row BEFORE decoding its columns -
-    /// which it must, because the three-pass value restore addresses the row by the number
-    /// <c>AppendRow</c> hands back. So a fault detected part-way through a row leaves that row present
-    /// and incomplete. That matches the operation being reproduced: <c>SetFullState</c> answering -1
-    /// leaves the DataStore in an unspecified state and the legacy caller reads the CODE, not the
-    /// carrier [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L190</c>].
-    /// Asserting emptiness here would therefore be asserting a guarantee the legacy does not give, and
-    /// changing the append ordering to provide one would be a behavioural change (C-B). The sibling
-    /// changeset codec IS asserted for emptiness, because its row decode reads every column into local
-    /// arrays before admitting anything.
-    /// </para>
-    /// </remarks>
-    private static void AssertRejectedWithoutAllocating(byte[] image)
-    {
-        const long allocationBudgetBytes = 1L << 20;
-
-        DataWindowBufferStore target = new();
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        SeedRow(target, DwBuffer.Primary, "untouched");
 
         long result = FullStateCodec.Apply(target, image);
 
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(
+            result == DataWindowBufferStore.DataStoreFailure,
+            $"An image with {because} answered {result} rather than the failure code.");
 
-        Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
+        // THE HOISTED-CHECK PROPERTY: a structurally detectable fault is found BEFORE the reset, so the
+        // target's existing contents survive the refusal.
+        Assert.Equal(1L, target.RowCount());
+        Assert.Equal("untouched", target.GetItemValue(1L, 1, DwBuffer.Primary));
+    }
+
+    /// <summary>
+    /// Row-level and column-level faults inside an otherwise canonical roster.
+    /// </summary>
+    public static TheoryData<string, CarrierState> MalformedRowContent =>
+        AsTheoryData(MalformedRowContentCases);
+
+    /// <summary>The content faults themselves, enumerable independently of the theory wrapper.</summary>
+    private static IEnumerable<(string Because, CarrierState Image)> MalformedRowContentCases()
+    {
+        return
+        [
+            (
+                "a Filter row filed inside the Primary segment",
+                ImageWith(
+                    Segment(DwBuffer.Primary, Row(DwBuffer.Filter, 1L, ItemStatus.DataModified)),
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "a Primary row filed inside the Delete segment",
+                ImageWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Delete, Row(DwBuffer.Primary, 1L, ItemStatus.DataModified)),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "a zero row ordinal",
+                CanonicalImageWith(Row(DwBuffer.Primary, 0L, ItemStatus.DataModified))
+            ),
+            (
+                "a negative row ordinal",
+                CanonicalImageWith(Row(DwBuffer.Primary, -1L, ItemStatus.DataModified))
+            ),
+            (
+                "an item status outside the published domain",
+                CanonicalImageWith(Row(DwBuffer.Primary, 1L, (ItemStatus)99))
+            ),
+            (
+                "column number zero, which is the row-status sentinel",
+                CanonicalImageWith(
+                    Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(0L, 42)]))
+            ),
+            (
+                "a negative column number",
+                CanonicalImageWith(
+                    Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(-3L, 42)]))
+            ),
+            (
+                "the same column number twice",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42), Column(1L, 43)]))
+            ),
+            (
+                "an original naming a column the row never carried",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42)],
+                        [Column(2L, 41)]))
+            ),
+            (
+                "the same column number twice among the originals",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42)],
+                        [Column(1L, 41), Column(1L, 40)]))
+            ),
+            (
+                "a per-column item status outside the published domain",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42, (ItemStatus)99)]))
+            ),
+            (
+                "a value message with no arm set at all",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [new ColumnValue { ColumnId = 1L, Value = new AnyValue() }]))
+            ),
+            (
+                "a column carrying no value message",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [new ColumnValue { ColumnId = 1L }]))
+            ),
+            (
+                "decimal text outside the canonical grammar",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [
+                            new ColumnValue
+                            {
+                                ColumnId = 1L,
+                                Value = new AnyValue
+                                {
+                                    DecimalValue = new DecimalValue { Value = "1.5e3" },
+                                },
+                            },
+                        ]))
+            ),
+            (
+                "date text outside the canonical grammar",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [
+                            new ColumnValue
+                            {
+                                ColumnId = 1L,
+                                Value = new AnyValue
+                                {
+                                    DateValue = new DateValue { Value = "30/06/1978" },
+                                },
+                            },
+                        ]))
+            ),
+            (
+                "time text outside the canonical grammar",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [
+                            new ColumnValue
+                            {
+                                ColumnId = 1L,
+                                Value = new AnyValue
+                                {
+                                    TimeValue = new TimeValue { Value = "11:59 PM" },
+                                },
+                            },
+                        ]))
+            ),
+            (
+                "datetime text missing its separator",
+                CanonicalImageWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [
+                            new ColumnValue
+                            {
+                                ColumnId = 1L,
+                                Value = new AnyValue
+                                {
+                                    DatetimeValue = new DateTimeValue
+                                    {
+                                        Value = "2022-04-14 13:45:30",
+                                    },
+                                },
+                            },
+                        ]))
+            ),
+        ];
+    }
+
+    /// <summary>
+    /// MALFORMED ROW CONTENT ANSWERS THE FAILURE CODE RATHER THAN THROWING.
+    /// </summary>
+    /// <param name="because">The content fault, named so a failure message identifies the case.</param>
+    /// <param name="image">The malformed image.</param>
+    /// <remarks>
+    /// The target is NOT asserted to be untouched here, and that omission is deliberate: a row-level
+    /// fault is discovered after the reset this codec performs as part of restoring a complete image, and
+    /// that exposure is the legacy's own [<c>:L190</c>] rather than one added here. The sibling roster
+    /// theory asserts the hoisted half.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(MalformedRowContent))]
+    public void Apply_RefusesMalformedRowContentWithoutThrowing_UnitLevelNoOracle(
+        string because,
+        CarrierState image)
+    {
+        long result = FullStateCodec.Apply(new DataWindowBufferStore(), image);
 
         Assert.True(
-            allocated < allocationBudgetBytes,
-            $"Decoding a {image.Length}-byte image that declared a maximal count allocated {allocated} "
-                + $"bytes, over the {allocationBudgetBytes}-byte budget. The count is reaching an "
-                + "allocation before it is bounded.");
+            result == DataWindowBufferStore.DataStoreFailure,
+            $"An image with {because} answered {result} rather than the failure code.");
+    }
+
+    /// <summary>
+    /// AN ABSENT IMAGE IS THE FAILURE CODE ON THIS PATH, not the clear arm. The clear arm belongs to
+    /// <see cref="FullStateCodec.Receive"/>, which tests for it before consulting the decode at all
+    /// [<c>:L207-L209</c>]; reaching the decode with nothing means a producer sent a chunk with neither an
+    /// image nor the absence that means "clear".
+    /// </summary>
+    [Fact]
+    public void Apply_RefusesAnAbsentImage_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore target = NewCrosstabCarrier();
+
+        SeedRow(target, DwBuffer.Primary, "untouched");
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            FullStateCodec.Apply(target, state: null));
+
+        Assert.Equal(1L, target.RowCount());
+    }
+
+    /// <summary>
+    /// AN IMAGE WHOSE PROCESSING KIND DOES NOT SELECT THIS CODEC IS REFUSED BEFORE THE RESET. The two
+    /// sides would otherwise disagree about which serialization is even applicable, and merging a
+    /// changeset image into a crosstab carrier is what trusting the sender costs.
+    /// </summary>
+    /// <param name="changesetKind">A processing kind belonging to the changeset arm.</param>
+    [Theory]
+    [MemberData(nameof(ChangesetProcessingKinds))]
+    public void Apply_RefusesAnImageBelongingToTheChangesetArm_UnitLevelNoOracle(long changesetKind)
+    {
+        DataWindowBufferStore target = NewCrosstabCarrier();
+
+        SeedRow(target, DwBuffer.Primary, "untouched");
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            FullStateCodec.Apply(target, CanonicalImageWith(changesetKind)));
+
+        Assert.Equal(1L, target.RowCount());
+    }
+
+    /// <summary>
+    /// A FULL-STATE IMAGE WHOSE KIND DISAGREES WITH THE TARGET'S IS REFUSED, even though both kinds select
+    /// this codec: crosstab and composite are different shapes and one is not restorable into the other.
+    /// </summary>
+    [Fact]
+    public void Apply_RefusesAFullStateImageWhoseKindDisagreesWithTheTarget_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore target = NewCrosstabCarrier(4L);
+
+        SeedRow(target, DwBuffer.Primary, "untouched");
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            FullStateCodec.Apply(target, CanonicalImageWith(5L)));
+
+        Assert.Equal(1L, target.RowCount());
+        Assert.Equal(4L, target.Processing.Value);
+    }
+
+    /// <summary>
+    /// AN UNASSIGNED TARGET ADOPTS THE IMAGE'S KIND, because that is not a disagreement. This is the arm
+    /// every round-trip test in this suite depends on, since a freshly constructed carrier has no kind.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(FullStateProcessingKinds))]
+    public void Apply_LetsAnUnassignedTargetAdoptTheImagesKind_UnitLevelNoOracle(long kind)
+    {
+        DataWindowBufferStore target = new();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            FullStateCodec.Apply(
+                target,
+                CanonicalImageWith(
+                    kind,
+                    Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(1L, "adopted")]))));
+
+        Assert.Equal(kind, target.Processing.Value);
+        Assert.Equal("adopted", target.GetItemValue(1L, 1, DwBuffer.Primary));
+    }
+
+    /// <summary>
+    /// Builds a canonical image with an explicit processing kind and rows.
+    /// </summary>
+    /// <param name="processing">The processing kind to declare.</param>
+    /// <param name="rows">The rows to file.</param>
+    private static CarrierState CanonicalImageWith(long processing, params DataWindowRow[] rows)
+    {
+        return ImageWith(
+            processing,
+            [
+                .. new[] { DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter }.Select(dwBuffer =>
+                    Segment(dwBuffer, [.. rows.Where(row => row.Buffer == dwBuffer)])),
+            ]);
+    }
+
+    /// <summary>
+    /// NO MALFORMED IMAGE EVER ESCAPES AS AN EXCEPTION. Driven over the union of both matrices plus the
+    /// absent image, so a case added to either is covered here for free rather than needing a second
+    /// entry.
+    /// </summary>
+    [Fact]
+    public void Apply_NeverThrowsForAnyMalformedImage_UnitLevelNoOracle()
+    {
+        List<CarrierState?> candidates = [null];
+
+        candidates.AddRange(NonCanonicalRosterCases().Select(entry => (CarrierState?)entry.Image));
+        candidates.AddRange(MalformedRowContentCases().Select(entry => (CarrierState?)entry.Image));
+
+        foreach (CarrierState? candidate in candidates)
+        {
+            long result = FullStateCodec.Apply(new DataWindowBufferStore(), candidate);
+
+            Assert.True(
+                result == DataWindowBufferStore.DataStoreSuccess
+                    || result == DataWindowBufferStore.DataStoreFailure,
+                $"A malformed image answered {result}, which is neither success nor failure.");
+        }
+    }
+
+    /// <summary>
+    /// Wraps a named-case producer as the theory data a <see cref="MemberDataAttribute"/> consumes.
+    /// </summary>
+    /// <param name="cases">The producer.</param>
+    /// <remarks>
+    /// The cases are authored as a plain sequence rather than directly as theory data so that a test which
+    /// needs the IMAGES ALONE - the exception sweep above - can enumerate them without reaching through
+    /// the theory wrapper's row shape. Every case therefore has exactly one definition site.
+    /// </remarks>
+    private static TheoryData<string, CarrierState> AsTheoryData(
+        Func<IEnumerable<(string Because, CarrierState Image)>> cases)
+    {
+        TheoryData<string, CarrierState> data = [];
+
+        foreach ((string because, CarrierState image) in cases())
+        {
+            data.Add(because, image);
+        }
+
+        return data;
     }
 
     #endregion
@@ -1932,7 +2153,7 @@ public sealed class FullStateCodecTests
             DataWindowBufferStore.DataStoreSuccess,
             FullStateCodec.Receive(
                 FullStateCodec.ResolveTarget(receiver, true, new DataWindowBufferStore()),
-                chunk.Data.ToByteArray()));
+                chunk.State));
 
         Assert.Equal(1L, receiver.RowCount());
         Assert.Equal(1L, receiver.FilteredCount());

@@ -789,42 +789,14 @@ message CloseValidationSessionResponse {
 //  is part of that state rather than something recomputable from the current row.
 // ==============================================================================================
 
-// DataWindowRow - one row, buffer-tagged and status-tagged.
-message DataWindowRow {
-  // Which buffer the row sits in. common.v1.DwBuffer records that THE FILTER BUFFER'S ROW ORDER IS
-  // INVERTED relative to the source, so `row` does not count the same way across buffers.
-  //
-  // ALWAYS MEANINGFUL, SO NO EXPLICIT PRESENCE - a row is in exactly one buffer, always. The zero
-  // value is DW_BUFFER_PRIMARY, matching PowerBuilder's own unassigned-`dwbuffer` default, so an
-  // untagged row reads as a Primary row. That is the right default and it is also a trap for a lazy
-  // producer: a Delete! or Filter! row MUST carry its tag explicitly, because silence means Primary
-  // and a mis-tagged Filter row would be counted in the wrong direction.
-  common.v1.DwBuffer buffer = 1;
-
-  // ONE-BASED row ordinal within that buffer.
-  int64 row = 2;
-
-  // THE ROW'S OWN status, read the legacy way with column index 0 - the convention common.v1
-  // documents on ItemStatus, and the one the legacy uses at [se_cst_dw.sru:L190] and
-  // [:L335]: GetItemStatus(row, Long(dwo.ID), Primary!) for a column, GetItemStatus(row, 0, buffer)
-  // for the row.
-  common.v1.ItemStatus item_status = 3;
-
-  // The row's CURRENT column values. Each common.v1.ColumnValue carries the column name, the
-  // one-based ordinal and, where it is meaningful, that column's own status.
-  repeated common.v1.ColumnValue columns = 4;
-
-  // The ORIGINAL values of the columns marked for the concurrency comparison.
-  //
-  // POPULATED ON THE UPDATE PATH AND NORMALLY EMPTY ON RETRIEVE. It is declared on this message
-  // rather than on a separate update-only row type because a row is one thing whichever direction it
-  // travels, and a second row shape would drift. common.v1.ConflictDetail records why both values
-  // must be able to travel: the one updatable DataWindow in the repository declares `updatewhere=1`
-  // and marks ALL SIX columns `updatewhereclause=yes`, so the generated WHERE clause carries the key
-  // column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. A payload carrying only current values
-  // could not express what the failed statement compared.
-  repeated common.v1.ColumnValue original_values = 5;
-}
+// DataWindowRow MOVED TO common.v1.proto, AND THE MOVE IS THE C-A ADMISSION TEST APPLIED (C-K).
+// It is declared as common.v1.DataWindowRow because BOTH boundary definitions now need it: this file
+// produces and consumes it on RetrieveChunk and on the update rows below, and persistence.v1's
+// CarrierState carries it inside every buffer segment of C-05's query chunks and C-06's update input.
+// One definition in the shared vocabulary is what lets both name the same descriptor; a per-file copy
+// would be two types that serialise alike until one of them gained a field. The full rationale, the
+// buffer-tag trap, the positional-changeset note on column_name and the omit-when-unchanged rule for
+// original_values all travel with the definition rather than being restated here.
 
 message RetrieveRequest {
   string datawindow_handle = 1;
@@ -852,7 +824,7 @@ message RetrieveRequest {
 
 message RetrieveChunk {
   // The rows in this delivery.
-  repeated DataWindowRow rows = 1;
+  repeated common.v1.DataWindowRow rows = 1;
 
   // THE PER-DELIVERY ROW COUNT, mirroring `ondatareceived`'s second parameter. Redundant with
   // rows.size() by construction and carried anyway, because the legacy event carries it as its own
@@ -1655,9 +1627,9 @@ message UpdateRequest {
   string session_id = 2;
 
   // The rows to submit. EACH ROW MUST CARRY BOTH ITS CURRENT AND ITS ORIGINAL VALUES for every marked
-  // column - see DataWindowRow.original_values and common.v1.ConflictDetail for why the original-value
-  // shadow is not optional under `updatewhere=1`.
-  repeated DataWindowRow rows = 3;
+  // column - see common.v1.DataWindowRow.original_values and common.v1.ConflictDetail for why the
+  // original-value shadow is not optional under `updatewhere=1`.
+  repeated common.v1.DataWindowRow rows = 3;
 
   // ========== THE UPDATE FLAGS ARE NOT PARAMETERS. THE LEGACY FIXES THEM, SO THIS CONTRACT
   //            REMOVES THEM RATHER THAN PUBLISHING A CHOICE THE ORACLE DOES NOT OFFER ==========

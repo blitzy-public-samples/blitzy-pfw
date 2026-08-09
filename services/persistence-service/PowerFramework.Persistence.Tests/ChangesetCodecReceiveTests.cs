@@ -13,6 +13,7 @@
 // ==============================================================================================
 
 using System.Globalization;
+using Google.Protobuf;
 
 namespace PowerFramework.Persistence.Tests;
 
@@ -24,7 +25,7 @@ public sealed class ChangesetCodecReceiveTests
     }
 
     /// <summary>Encodes a carrier with the real format so a receive test has a genuine payload.</summary>
-    private static ReadOnlyMemory<byte> Encode(DataWindowBufferStore source)
+    private static CarrierState Encode(DataWindowBufferStore source)
     {
         ChangesetPayloadCodec payloadCodec = new();
 
@@ -42,9 +43,33 @@ public sealed class ChangesetCodecReceiveTests
 
         Assert.Equal(
             DataWindowBufferStore.DataStoreSuccess,
-            payloadCodec.TryEncode(source, out ReadOnlyMemory<byte> payload));
+            payloadCodec.TryEncode(source, out CarrierState? payload));
 
-        return payload;
+        return payload!;
+    }
+
+    /// <summary>
+    /// A carrier state that is merely PRESENT, for the receive tests whose subject is the receiver's own
+    /// control flow rather than the image.
+    /// </summary>
+    /// <remarks>
+    /// Those tests pair this with a <see cref="ScriptedPayloadCodec"/>, so the image is never decoded and
+    /// its content is irrelevant - what matters is that it is not <see langword="null"/>, because
+    /// <see cref="ChangesetChunk.IsEmptyPayload"/> is what selects the receiver's empty-payload arm
+    /// [<c>n_cst_threading_task_sqlquery.sru:L194-L196</c>]. It is nevertheless built CONFORMING - the
+    /// canonical three segments in canonical order - so that a future test which does decode it is not
+    /// silently exercising a rejection.
+    /// </remarks>
+    private static CarrierState SomeState()
+    {
+        CarrierState state = new() { Processing = 1L };
+
+        foreach (DwBuffer dwBuffer in ChangesetPayloadCodec.SerializedBuffers)
+        {
+            state.Segments.Add(new CarrierBufferSegment { Buffer = dwBuffer });
+        }
+
+        return state;
     }
 
     [Fact]
@@ -54,7 +79,7 @@ public sealed class ChangesetCodecReceiveTests
         // The reset is LEGAL here because it PRECEDES the apply; chunks after the first must accumulate,
         // which is why it is gated on the first chunk alone.
         ChangesetCodec codec = CreateCodec();
-        ReadOnlyMemory<byte> payload = Encode(FixtureCarrier.Create(primaryRows: 2L));
+        CarrierState payload = Encode(FixtureCarrier.Create(primaryRows: 2L));
 
         // The target starts with rows that a first chunk must clear away.
         DataWindowBufferStore target = FixtureCarrier.Create(primaryRows: 4L);
@@ -89,7 +114,7 @@ public sealed class ChangesetCodecReceiveTests
         // and it is NOT presentational - it appears in all three receiver arms, unlike GroupCalc and
         // SetRedraw, which appear only in the DataWindow arm and are the documented non-port.
         ChangesetCodec codec = CreateCodec();
-        ReadOnlyMemory<byte> payload = Encode(FixtureCarrier.Create(primaryRows: 2L));
+        CarrierState payload = Encode(FixtureCarrier.Create(primaryRows: 2L));
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
         ChangesetApplyOutcome outcome = codec.ApplyChunk(
@@ -115,7 +140,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetApplyOutcome outcome = codec.ApplyChunk(
             target,
-            new ChangesetChunk(ReadOnlyMemory<byte>.Empty, 1L, 1L),
+            new ChangesetChunk(state: null, 1L, 1L),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(DataWindowBufferStore.DataStoreSuccess, outcome.Result);
@@ -146,7 +171,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetApplyOutcome outcome = codec.ApplyChunk(
             target,
-            new ChangesetChunk(new byte[] { 1, 2, 3 }, 1L, 1L),
+            new ChangesetChunk(SomeState(), 1L, 1L),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(DataWindowBufferStore.DataStoreFailure, outcome.Result);
@@ -171,7 +196,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetApplyOutcome outcome = codec.ApplyChunk(
             target,
-            new ChangesetChunk(new byte[] { 9 }, 1L, 1L),
+            new ChangesetChunk(SomeState(), 1L, 1L),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(DataWindowBufferStore.DataStoreFailure, outcome.Result);
@@ -193,7 +218,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetApplyOutcome outcome = codec.ApplyChunk(
             target,
-            new ChangesetChunk(ReadOnlyMemory<byte>.Empty, 1L, 1L),
+            new ChangesetChunk(state: null, 1L, 1L),
             cancellation.Token);
 
         Assert.Equal(DataWindowBufferStore.EventContinue, outcome.Result);
@@ -218,7 +243,7 @@ public sealed class ChangesetCodecReceiveTests
         // expression evaluator, which the refactor plan assigns to DataServices, so the flag is surfaced
         // and nothing is silently dropped.
         ChangesetCodec codec = CreateCodec();
-        ReadOnlyMemory<byte> payload = Encode(FixtureCarrier.Create(primaryRows: 2L));
+        CarrierState payload = Encode(FixtureCarrier.Create(primaryRows: 2L));
         DataWindowBufferStore child = FixtureCarrier.Create(primaryRows: 5L);
 
         ChangesetChildApplyOutcome outcome = codec.ApplyChildPayload(
@@ -248,7 +273,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetChildApplyOutcome outcome = codec.ApplyChildPayload(
             child,
-            new ChangesetChildPayload("age", ReadOnlyMemory<byte>.Empty),
+            new ChangesetChildPayload("age", state: null),
             new ChangesetSourceDefinition { SortExpression = "?", FilterExpression = string.Empty },
             TestContext.Current.CancellationToken);
 
@@ -271,7 +296,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetChildApplyOutcome outcome = codec.ApplyChildPayload(
             child,
-            new ChangesetChildPayload("age", new byte[] { 7 }),
+            new ChangesetChildPayload("age", SomeState()),
             FixtureCarrier.SortedDefinition,
             TestContext.Current.CancellationToken);
 
@@ -296,7 +321,7 @@ public sealed class ChangesetCodecReceiveTests
 
         ChangesetChildApplyOutcome outcome = codec.ApplyChildPayload(
             child,
-            new ChangesetChildPayload("age", ReadOnlyMemory<byte>.Empty),
+            new ChangesetChildPayload("age", state: null),
             FixtureCarrier.SortedDefinition,
             cancellation.Token);
 
@@ -328,7 +353,7 @@ public sealed class ChangesetCodecReceiveTests
         Assert.Null(outcome.ErrorText);
 
         Assert.Equal(["age", "address"], sink.Children.Select(child => child.ColumnName));
-        Assert.All(sink.Children, child => Assert.NotEmpty(child.Payload));
+        Assert.All(sink.Children, child => Assert.NotNull(child.State));
 
         // Both children were reset AFTER their capture.
         Assert.Equal(0L, first.RowCount());
@@ -482,49 +507,124 @@ public sealed class ChangesetCodecReceiveTests
 }
 
 /// <summary>
-/// The opaque binary payload format itself: which rows it carries, that it round-trips both value sets
-/// exactly, and that every malformed input answers a CODE rather than throwing.
+/// The published carrier-state projection itself: which rows it carries, that both value sets survive the
+/// round trip onto their declared carrier types, and that every structurally invalid state answers a CODE
+/// rather than throwing - refused in full, before a single row reaches the target.
 /// </summary>
+/// <remarks>
+/// <para>
+/// WHAT THIS SUITE USED TO ASSERT, AND WHY IT NO LONGER DOES. It was written against a private binary
+/// payload owned by this assembly, so more than half of it - a format magic, a format version, a reserved
+/// flag byte, single-byte mutation sweeps, truncation sweeps, and three hand-built weaponised counts that
+/// proved a length was bounded before it reached <c>new byte[length]</c> - tested a FRAMING LAYER that no
+/// longer exists. The chunk payload is now <c>persistence.v1.CarrierState</c>, a published message
+/// (constraint C-A), and framing, bounds and truncation are protobuf's concern rather than this codec's:
+/// a truncated or foreign frame never reaches <see cref="ChangesetPayloadCodec"/> at all, because the
+/// generated parser rejects it at the transport edge.
+/// </para>
+/// <para>
+/// WHAT REPLACED THEM IS NOT A REDUCTION. The framing checks are gone because the framing is gone; the
+/// SEMANTIC checks they were mixed in with are all still here and several are new, because a well-formed
+/// protobuf message can still be a nonsense carrier image: three segments all tagged Primary, a Filter!
+/// row filed inside the Primary segment, a zero row ordinal, an undefined item status, column number
+/// zero, a duplicated column, an original naming a column the row never carried, or a processing kind
+/// that disagrees with the target's. Every one of those is a way to load the wrong rows into the wrong
+/// buffer and get a row count nothing disagrees with, and every one of them is asserted below.
+/// </para>
+/// </remarks>
 public sealed class ChangesetPayloadCodecTests
 {
     /// <summary>
-    /// The PowerBuilder scalar family and its declared .NET mapping. Each case asserts that the RUNTIME
-    /// TYPE survives as well as the value: the refactor plan maps PowerBuilder's <c>any</c> onto
-    /// <c>object?</c>, so a widened integer would compare unequal even though the number matched.
+    /// The PowerBuilder scalar family and the carrier type each one round-trips as.
     /// </summary>
-    public static TheoryData<object> ValueRoundTripCases =>
+    /// <remarks>
+    /// <para>
+    /// EACH CASE IS AN INPUT AND ITS EXPECTED RESTORED VALUE, NOT A SINGLE VALUE ASSERTED AGAINST ITSELF,
+    /// AND THE DIFFERENCE IS THE POINT. <c>common.v1.AnyValue</c> publishes eleven arms, and the numeric
+    /// ones are DELIBERATELY WIDE: one signed integer arm, one unsigned, one floating. That is the
+    /// contract's own decision - documented on the message as the widening rule - and it means a
+    /// <see cref="byte"/>, a <see cref="short"/> and an <see cref="int"/> all travel as the signed arm and
+    /// all come back as <see cref="long"/>, a <see cref="uint"/> comes back as <see cref="ulong"/>, and a
+    /// <see cref="float"/> comes back as <see cref="double"/>.
+    /// </para>
+    /// <para>
+    /// The private format this suite used to exercise over-provisioned a distinct tag per runtime type, so
+    /// its predecessor asserted exact runtime-type identity and passed. Stating the widening as an
+    /// input-to-expected matrix is what makes it VISIBLE rather than something a reader discovers when a
+    /// consumer casts to <see cref="int"/> and throws. The values themselves are exact either way: nothing
+    /// here loses magnitude, sign, precision or scale.
+    /// </para>
+    /// <para>
+    /// The three <see cref="DateTime"/> cases differ only in their <see cref="DateTimeKind"/> and all three
+    /// expect <see cref="DateTimeKind.Unspecified"/>, because the contract's datetime form is UNZONED -
+    /// PowerBuilder's <c>datetime</c> carries no zone either, so preserving a kind would invent
+    /// information the oracle does not have.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<object, object> ValueRoundTripCases =>
         new()
         {
-            "a string",
-            string.Empty,
-            "汉字 and an emoji \U0001F600",
-            true,
-            false,
-            (byte)7,
-            (short)-9,
-            42,
-            long.MinValue,
-            (uint)4000000000,
-            ulong.MaxValue,
-            1.5f,
-            -2.25d,
-            1500.00m,
-            0.000001m,
-            new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc),
-            new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Local),
-            new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified),
-            new DateOnly(1990, 6, 15),
-            new TimeOnly(13, 45, 30),
-            TimeSpan.FromMinutes(90),
-            new byte[] { 0, 1, 250, 255 },
-            Array.Empty<byte>(),
+            { "a string", "a string" },
+            { string.Empty, string.Empty },
+            { "汉字 and an emoji \U0001F600", "汉字 and an emoji \U0001F600" },
+            { true, true },
+            { false, false },
+
+            // The signed integer family, all widened onto the one signed arm.
+            { (byte)7, 7L },
+            { (short)-9, -9L },
+            { 42, 42L },
+            { long.MinValue, long.MinValue },
+
+            // The unsigned family, all widened onto the one unsigned arm.
+            { (uint)4000000000, 4000000000UL },
+            { ulong.MaxValue, ulong.MaxValue },
+
+            // The floating family. 1.5 and -2.25 are both exactly representable in binary32 and binary64,
+            // so the widening is lossless here and the equality is exact rather than approximate.
+            { 1.5f, 1.5d },
+            { -2.25d, -2.25d },
+
+            // Decimals keep their own arm precisely so scale survives - see ADecimalKeepsItsDeclaredScale.
+            { 1500.00m, 1500.00m },
+            { 0.000001m, 0.000001m },
+
+            // The unzoned datetime form: three kinds in, Unspecified out, value identical.
+            {
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc),
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified)
+            },
+            {
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Local),
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified)
+            },
+            {
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified),
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified)
+            },
+
+            // Microsecond resolution is inside the canonical grammar and survives exactly.
+            {
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified).AddTicks(123450L),
+                new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified).AddTicks(123450L)
+            },
+
+            { new DateOnly(1990, 6, 15), new DateOnly(1990, 6, 15) },
+            { new TimeOnly(13, 45, 30), new TimeOnly(13, 45, 30) },
+            { new byte[] { 0, 1, 250, 255 }, new byte[] { 0, 1, 250, 255 } },
+            { Array.Empty<byte>(), Array.Empty<byte>() },
         };
 
+    /// <summary>
+    /// Every runtime type the boundary maps arrives as the carrier type the contract declares for it.
+    /// </summary>
+    /// <param name="value">The value written into the source carrier.</param>
+    /// <param name="expected">The value - and runtime type - expected back out of the target carrier.</param>
     [Theory]
     [MemberData(nameof(ValueRoundTripCases))]
-    public void EveryMappedValueTypeRoundTripsExactly(object value)
+    public void EveryMappedValueTypeRoundTripsOntoItsDeclaredCarrierType(object value, object expected)
     {
-        AssertColumnValueRoundTrips(value);
+        AssertColumnValueRoundTrips(value, expected);
     }
 
     [Fact]
@@ -532,11 +632,12 @@ public sealed class ChangesetPayloadCodecTests
     {
         // PowerBuilder has null for value types and the framework's tri-state predicates depend on it, so
         // null is a FIRST-CLASS VALUE here. Collapsing it to zero on the wire would convert "neither
-        // succeeded nor failed" into "succeeded" for anything reading it back.
-        AssertColumnValueRoundTrips(null);
+        // succeeded nor failed" into "succeeded" for anything reading it back - which is why the contract
+        // spends a whole AnyValue arm on it rather than relying on an absent field.
+        AssertColumnValueRoundTrips(null, null);
     }
 
-    private static void AssertColumnValueRoundTrips(object? value)
+    private static void AssertColumnValueRoundTrips(object? value, object? expected)
     {
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
@@ -547,13 +648,24 @@ public sealed class ChangesetPayloadCodecTests
 
         Assert.Equal(
             DataWindowBufferStore.DataStoreSuccess,
-            codec.TryEncode(source, out ReadOnlyMemory<byte> payload));
+            codec.TryEncode(source, out CarrierState? state));
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, payload));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
         Assert.Equal(1L, target.RowCount());
-        Assert.Equal(value, target.GetItemValue(1L, 1, DwBuffer.Primary));
+
+        object? restored = target.GetItemValue(1L, 1, DwBuffer.Primary);
+
+        Assert.Equal(expected, restored);
+
+        // The runtime type is asserted SEPARATELY from the value, because Assert.Equal on two boxed
+        // numbers of different widths can succeed while the cast a consumer performs throws. A null
+        // expectation has no type to assert.
+        if (expected is not null)
+        {
+            Assert.IsType(expected.GetType(), restored);
+        }
     }
 
     [Fact]
@@ -561,7 +673,8 @@ public sealed class ChangesetPayloadCodecTests
     {
         // The fixture declares `salary decimal(2)` [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L12], and
         // the scale is OBSERVABLE: normalising 1500.00 to 1500 would silently change what the legacy
-        // declared. The four constituent words carry it losslessly.
+        // declared. The contract's DecimalValue carries canonical invariant TEXT rather than a double for
+        // exactly this reason, and decimal.ToString preserves the trailing zeroes.
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
 
@@ -569,11 +682,17 @@ public sealed class ChangesetPayloadCodecTests
 
         ChangesetPayloadCodec codec = new();
 
-        _ = codec.TryEncode(source, out ReadOnlyMemory<byte> payload);
+        _ = codec.TryEncode(source, out CarrierState? state);
+
+        // Asserted on the WIRE too, not only after the round trip: a scale that survived only because
+        // both ends happened to normalise identically would still be wrong on the published boundary.
+        Assert.Equal(
+            "1500.00",
+            state!.Segments[0].Rows[0].Columns[0].Value.DecimalValue.Value);
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        _ = codec.TryApply(target, payload);
+        _ = codec.TryApply(target, state);
 
         object? restored = target.GetItemValue(1L, 5, DwBuffer.Primary);
 
@@ -587,7 +706,8 @@ public sealed class ChangesetPayloadCodecTests
         // THE STATE A NAIVE ROWSET WOULD LOSE. `updatewhere=1` [dw_sqlite.srd:L14] with
         // `updatewhereclause=yes` on all six columns [:L8-L13] puts the ORIGINAL value of every
         // updateable column into the generated where clause, so a payload carrying only current values
-        // could not express optimistic concurrency at all.
+        // could not express optimistic concurrency at all. This is the single assertion that justifies
+        // `common.v1.DataWindowRow` carrying `original_values` beside `columns`.
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
 
@@ -601,15 +721,80 @@ public sealed class ChangesetPayloadCodecTests
 
         ChangesetPayloadCodec codec = new();
 
-        _ = codec.TryEncode(source, out ReadOnlyMemory<byte> payload);
+        _ = codec.TryEncode(source, out CarrierState? state);
+
+        // Both halves are visible on the published message, in the two separate repeated fields.
+        DataWindowRow projected = state!.Segments[0].Rows[0];
+
+        Assert.Equal(31L, projected.Columns[0].Value.Int64Value);
+        Assert.Equal(30L, Assert.Single(projected.OriginalValues).Value.Int64Value);
+        Assert.Equal(3L, projected.OriginalValues[0].ColumnId);
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, payload));
-        Assert.Equal(31, target.GetItemValue(1L, 3, DwBuffer.Primary));
-        Assert.Equal(30, target.GetItemOriginalValue(1L, 3, DwBuffer.Primary));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(31L, target.GetItemValue(1L, 3, DwBuffer.Primary));
+        Assert.Equal(30L, target.GetItemOriginalValue(1L, 3, DwBuffer.Primary));
         Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 0, DwBuffer.Primary));
         Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 3, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void AColumnWhoseOriginalEqualsItsCurrentIsOmittedAndReadsBackAsUnchanged()
+    {
+        // The contract states the producer rule explicitly on common.v1.DataWindowRow: a column whose
+        // original equals its current MAY be omitted from `original_values`, and an omission READS AS
+        // "unchanged since the last baseline". Both halves are asserted here - the encoder's omission and
+        // the decoder's reading - because a decoder that defaulted an absent original to null instead
+        // would put a null into every generated where clause and match no row at all.
+        DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
+
+        _ = source.SetItemValue(row, 2, DwBuffer.Primary, "Contoso");
+        source.RowAt(row, DwBuffer.Primary).Baseline();
+
+        // THE ROW STATUS IS STAMPED AFTER THE BASELINE, and the order is not cosmetic: baselining CLEARS
+        // the statuses, so a row stamped before it reads as unmodified afterwards and the extraction
+        // would not carry it at all. This is the same ordering the send path uses
+        // [n_cst_thread_task_sqlquery.sru:L196-L198].
+        _ = source.SetItemStatus(row, 0, DwBuffer.Primary, ItemStatus.DataModified);
+
+        ChangesetPayloadCodec codec = new();
+
+        _ = codec.TryEncode(source, out CarrierState? state);
+
+        DataWindowRow projected = state!.Segments[0].Rows[0];
+
+        Assert.Equal("Contoso", Assert.Single(projected.Columns).Value.StringValue);
+        Assert.Empty(projected.OriginalValues);
+
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal("Contoso", target.GetItemValue(1L, 2, DwBuffer.Primary));
+        Assert.Equal("Contoso", target.GetItemOriginalValue(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void ACarrierChangesetIsPositionalSoNoColumnNameTravels()
+    {
+        // The contract records this as a producer rule on common.v1.DataWindowRow: on a carrier changeset
+        // the rows are POSITIONAL, so `column_name` is empty and `column_id` is authoritative. Stating it
+        // as a test stops a well-meaning future change from populating the name "for readability" and
+        // making two producers disagree about which field a consumer must trust.
+        DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
+
+        _ = source.SetItemValue(row, 4, DwBuffer.Primary, "Redmond");
+
+        ChangesetPayloadCodec codec = new();
+
+        _ = codec.TryEncode(source, out CarrierState? state);
+
+        ColumnValue projected = Assert.Single(state!.Segments[0].Rows[0].Columns);
+
+        Assert.Equal(string.Empty, projected.ColumnName);
+        Assert.Equal(4L, projected.ColumnId);
     }
 
     [Theory]
@@ -626,11 +811,11 @@ public sealed class ChangesetPayloadCodecTests
 
         ChangesetPayloadCodec codec = new();
 
-        _ = codec.TryEncode(source, out ReadOnlyMemory<byte> payload);
+        _ = codec.TryEncode(source, out CarrierState? state);
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        _ = codec.TryApply(target, payload);
+        _ = codec.TryApply(target, state);
 
         Assert.Equal(expected ? 1L : 0L, target.RowCount());
         Assert.Equal(expected ? 1L : 0L, target.FilteredCount());
@@ -649,19 +834,50 @@ public sealed class ChangesetPayloadCodecTests
 
         ChangesetPayloadCodec codec = new();
 
-        _ = codec.TryEncode(source, out ReadOnlyMemory<byte> payload);
+        _ = codec.TryEncode(source, out CarrierState? state);
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, payload));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
         Assert.Equal(2L, target.DeletedCount());
     }
 
     [Fact]
+    public void EveryEncodedStateCarriesTheCanonicalThreeSegmentsEvenWhenTwoAreEmpty()
+    {
+        // The encoder is the reference producer for its own decoder, so the shape it emits is worth
+        // pinning independently: exactly three segments, in Primary / Delete / Filter order, present even
+        // when they hold nothing. An encoder that omitted an empty segment would produce a state its own
+        // TryApply refuses.
+        DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
+
+        _ = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
+
+        ChangesetPayloadCodec codec = new();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryEncode(source, out CarrierState? state));
+
+        Assert.Equal(1L, state!.Processing);
+        Assert.Equal(
+            [DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter],
+            state.Segments.Select(segment => segment.Buffer));
+        Assert.Equal([1, 0, 0], state.Segments.Select(segment => segment.Rows.Count));
+    }
+
+    // ==========================================================================================
+    //  THE UNREPRESENTABLE VALUES: A CODE, NEVER A THROW, AND NEVER A TRUNCATION
+    //  ----------------------------------------------------------------------------------------
+    //  Two of the legacy's `if ... GetChanges(ref blbData) < 0 then` arms [:L129, :L171, :L205] become
+    //  reachable this way, and every receive-side call site tests a CODE [:L197, :L221, :L238]. An
+    //  escaping exception would be a failure mode the oracle does not have (C-B), and it would surface
+    //  as a 500 rather than as the failure result the contract publishes.
+    // ==========================================================================================
+
+    [Fact]
     public void AnUnmappedRuntimeTypeAnswersTheFailureCodeAndNeverThrows()
     {
-        // This is one of the two ways the legacy's `if ... GetChanges(ref blbData) < 0 then` arm
-        // [:L129, :L171, :L205] becomes reachable, and the code must be a CODE: the legacy reacts to one.
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
 
@@ -671,314 +887,431 @@ public sealed class ChangesetPayloadCodecTests
 
         Assert.Equal(
             DataWindowBufferStore.DataStoreFailure,
-            codec.TryEncode(source, out ReadOnlyMemory<byte> payload));
+            codec.TryEncode(source, out CarrierState? state));
 
-        Assert.True(payload.IsEmpty);
+        // The partially built state is DISCARDED rather than sent, so a caller that ignored the code
+        // cannot hand a half-projected image to the sink.
+        Assert.Null(state);
     }
 
     [Fact]
-    public void AMalformedPayloadAnswersTheFailureCodeAndNeverThrows()
+    public void ATimeSpanIsUnrepresentableRatherThanCoercedOntoTheTimeArm()
     {
-        // Every receive-side call site tests a code [:L197, :L221, :L238], so a truncated, reordered or
-        // foreign payload must answer -1 exactly as SetChanges does.
-        ChangesetPayloadCodec codec = new();
-        DataWindowBufferStore source = FixtureCarrier.Create(primaryRows: 2L);
-
-        for (long row = 1L; row <= source.RowCount(); row++)
-        {
-            _ = source.SetItemStatus(row, 0, DwBuffer.Primary, ItemStatus.DataModified);
-        }
-
-        _ = codec.TryEncode(source, out ReadOnlyMemory<byte> payload);
-
-        byte[] whole = payload.ToArray();
-
-        Assert.All(
-            new[]
-            {
-                Array.Empty<byte>(),                        // nothing at all
-                new byte[] { 1, 2, 3 },                     // too short for the header
-                new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 1, 0 },// a foreign magic
-                whole[..(whole.Length / 2)],                // truncated mid-row
-                Corrupt(whole, 4, 99),                      // an unknown format version
-                Corrupt(whole, 5, 42),                      // a non-zero reserved flag
-            },
-            malformed => Assert.Equal(
-                DataWindowBufferStore.DataStoreFailure,
-                codec.TryApply(
-                    new DataWindowBufferStore { Processing = new DataWindowProcessing(1L) },
-                    malformed)));
-    }
-
-    [Fact]
-    public void NoCorruptionOfAnyByteEverEscapesAsAnException()
-    {
-        // THE CONTRACT THIS ASSERTS IS THE WHOLE REASON THE DECODER IS WRITTEN THE WAY IT IS. Every
-        // receive-side call site tests a CODE [n_cst_threading_task_sqlquery.sru:L197, :L221, :L238], so
-        // a payload that is truncated, reordered, foreign or bit-rotted must answer -1 the way SetChanges
-        // does. An escaping exception would be a failure mode the oracle does not have (C-B), and it
-        // would surface as a 500 rather than as the conflict-or-failure result the contract publishes.
-        //
-        // Driven as an exhaustive single-byte mutation plus an exhaustive truncation over a real payload,
-        // because the interesting arms - an undefined buffer ordinal, a negative count, an undefined item
-        // status, a zero column number, an unknown value tag, an undefined date kind, a blob length past
-        // the end - are all reachable by corrupting one byte, and enumerating them by offset would be
-        // brittle against any future field.
-        //
-        // THE MUTATION ALPHABET IS BOUNDED ON PURPOSE, AND THE OMISSION IS THE POINT. It excludes 0x7F,
-        // which is the ONE byte value that turns the high byte of a length or count field into a
-        // MAXIMAL POSITIVE number - roughly two billion - and so turns this test from a decoder test
-        // into a request that the decoder reserve gigabytes. Even now that the decoder bounds every
-        // count against the bytes that remain before it allocates, asking it to do that from a
-        // shotgun loop would make THIS TEST's safety depend on the very production guard the suite is
-        // supposed to be able to fail independently: if the guard regressed, the test host would die
-        // rather than report a failure, and a dead host reports nothing useful.
-        //
-        // 0x00, 0x01 and 0xFF keep every structural arm reachable while keeping every derived count
-        // small or negative - 0xFF in a high byte yields a NEGATIVE count, which is rejected on sight.
-        // The maximal-positive cases are covered deliberately and safely instead, by the three
-        // hand-built oversized-count tests below, which additionally assert that the rejection happens
-        // BEFORE any allocation rather than merely that it happens.
-        ChangesetPayloadCodec codec = new();
+        // The contract's TimeValue is a TIME OF DAY, not a duration, and PowerBuilder's `time` is the
+        // same. Mapping a 90-minute TimeSpan onto it would render "01:30:00" and read back a TimeOnly -
+        // a value that compares unequal to what was written and means something different. Refusing is
+        // the narrowing the plan mandates: a defined error, never a widened guess.
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
 
-        // A row spanning several tag kinds, so the mutation reaches the value decoders too.
-        _ = source.SetItemValue(row, 1, DwBuffer.Primary, 42);
-        _ = source.SetItemValue(row, 2, DwBuffer.Primary, "abc");
-        _ = source.SetItemValue(row, 3, DwBuffer.Primary, new byte[] { 1, 2, 3 });
-        _ = source.SetItemValue(
-            row,
-            4,
-            DwBuffer.Primary,
-            new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+        _ = source.SetItemValue(row, 1, DwBuffer.Primary, TimeSpan.FromMinutes(90));
 
-        _ = codec.TryEncode(source, out ReadOnlyMemory<byte> payload);
+        ChangesetPayloadCodec codec = new();
 
-        byte[] whole = payload.ToArray();
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            codec.TryEncode(source, out CarrierState? state));
 
-        Assert.NotEmpty(whole);
-
-        foreach (byte replacement in new byte[] { 0x00, 0x01, 0xFF })
-        {
-            for (int offset = 0; offset < whole.Length; offset++)
-            {
-                byte[] mutated = [.. whole];
-
-                mutated[offset] = replacement;
-
-                AssertAnswersACodeAndDoesNotThrow(codec, mutated);
-            }
-        }
-
-        for (int length = 0; length < whole.Length; length++)
-        {
-            AssertAnswersACodeAndDoesNotThrow(codec, whole[..length]);
-        }
+        Assert.Null(state);
     }
 
+    [Theory]
+    [MemberData(nameof(SubMicrosecondCases))]
+    public void SubMicrosecondPrecisionIsRefusedRatherThanSilentlyTruncated(object value)
+    {
+        // The canonical fractional form is six digits - microseconds - so a tick-resolution value cannot
+        // be rendered without dropping information. Truncating would make an equality test that a
+        // characterization recording relies on pass with a value nobody wrote.
+        DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
+
+        _ = source.SetItemValue(row, 1, DwBuffer.Primary, value);
+
+        ChangesetPayloadCodec codec = new();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            codec.TryEncode(source, out CarrierState? state));
+
+        Assert.Null(state);
+    }
+
+    /// <summary>
+    /// The two temporal types whose .NET resolution is finer than the contract's canonical form.
+    /// </summary>
+    public static TheoryData<object> SubMicrosecondCases =>
+        new()
+        {
+            new TimeOnly(13, 45, 30).Add(TimeSpan.FromTicks(1L)),
+            new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified).AddTicks(1L),
+        };
+
     // ==========================================================================================
-    //  THE THREE COUNTS A PAYLOAD CAN WEAPONISE, EACH REJECTED BEFORE IT REACHES AN ALLOCATION
+    //  THE SEGMENT ROSTER: WHY COUNTING TO THREE IS NOT ENOUGH
     //  ----------------------------------------------------------------------------------------
-    //  A payload arrives over the wire, so every count in it is a number chosen by whoever produced
-    //  the bytes, and three of them are handed straight to an allocation or an iteration bound: the
-    //  per-segment row count, the per-row column count - which sizes FOUR arrays before a single
-    //  column has been read - and a blob length, which BinaryReader.ReadBytes turns into
-    //  `new byte[length]` BEFORE discovering the stream is shorter.
+    //  `persistence.v1.CarrierState` requires EXACTLY ONE segment per buffer IN CANONICAL ORDER, and
+    //  the decoder tests that positionally. A decoder that only counted three segments would accept
+    //  three all tagged Primary - which loads the Delete! and Filter! rows into the primary buffer and
+    //  answers a row count nothing disagrees with. It would equally accept a Filter! row filed inside
+    //  the Primary segment, and the Filter buffer's row order is INVERTED relative to the source
+    //  [n_cst_thread_task_sqlupdate.sru:L235-L238], so a mis-filed row is then read in the wrong
+    //  direction and pairs with the wrong data.
     //
-    //  Each test below hands the decoder a payload of a few dozen bytes that declares int.MaxValue,
-    //  and asserts two things rather than one:
-    //
-    //    1. the answer is the legacy failure code, not an escaping exception; and
-    //    2. THE THREAD ALLOCATED ALMOST NOTHING WHILE PRODUCING IT, which is what distinguishes
-    //       "bounded before the allocation" from "the allocation happened to fail". A decoder that
-    //       reserved two gigabytes and then threw would satisfy (1) on some hosts and never (2).
-    //
-    //  Built by hand rather than by mutating a real payload, because a maximal count is a WHOLE FIELD
-    //  and a hand-built payload is the only way to set one without also asking a shotgun loop to
-    //  produce it - see the alphabet note in NoCorruptionOfAnyByteEverEscapesAsAnException.
+    //  EVERY CASE BELOW ALSO ASSERTS THAT NOTHING WAS ADMITTED. This apply MERGES into a live target
+    //  rather than replacing it, so a fault detected half way through would leave the target holding
+    //  part of an image it then reports as rejected, and the caller has no way to unwind that.
     // ==========================================================================================
 
     /// <summary>
-    /// A segment declaring <see cref="int.MaxValue"/> rows in a payload that contains none is rejected
-    /// before the row loop starts.
+    /// Segment rosters that are not the canonical three, each of which must be refused.
     /// </summary>
+    public static TheoryData<string, CarrierState> NonCanonicalRosters =>
+        AsTheoryData(NonCanonicalRosterCases);
+
+    /// <summary>The roster faults themselves, enumerable independently of the theory wrapper.</summary>
+    private static IEnumerable<(string Because, CarrierState State)> NonCanonicalRosterCases()
+    {
+        return
+        [
+            ("no segments at all", StateWith()),
+            ("one segment", StateWith(Segment(DwBuffer.Primary))),
+            (
+                "two segments",
+                StateWith(Segment(DwBuffer.Primary), Segment(DwBuffer.Delete))
+            ),
+            (
+                "a fourth segment",
+                StateWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Filter),
+                    Segment(DwBuffer.Primary))
+            ),
+            (
+                "three segments all tagged Primary",
+                StateWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Primary))
+            ),
+            (
+                "the canonical three in reverse order",
+                StateWith(
+                    Segment(DwBuffer.Filter),
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Primary))
+            ),
+            (
+                "Delete and Primary transposed",
+                StateWith(
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "Delete omitted and Filter duplicated",
+                StateWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Filter),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "a buffer ordinal outside the published domain",
+                StateWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Delete),
+                    Segment((DwBuffer)99))
+            ),
+        ];
+    }
+
+    /// <param name="because">The roster fault, named so a failure message identifies the case.</param>
+    /// <param name="state">The non-canonical state.</param>
+    [Theory]
+    [MemberData(nameof(NonCanonicalRosters))]
+    public void ASegmentRosterThatIsNotTheCanonicalThreeIsRefusedWithoutAdmittingAnything(
+        string because,
+        CarrierState state)
+    {
+        AssertRefusedWithoutAdmitting(state, because);
+    }
+
+    /// <summary>
+    /// Row-level and column-level faults inside an otherwise canonical roster, each of which must be
+    /// refused before anything is admitted.
+    /// </summary>
+    public static TheoryData<string, CarrierState> MalformedRowContent =>
+        AsTheoryData(MalformedRowContentCases);
+
+    /// <summary>The content faults themselves, enumerable independently of the theory wrapper.</summary>
+    private static IEnumerable<(string Because, CarrierState State)> MalformedRowContentCases()
+    {
+        return
+        [
+            (
+                "a Filter row filed inside the Primary segment",
+                StateWith(
+                    Segment(DwBuffer.Primary, Row(DwBuffer.Filter, 1L, ItemStatus.DataModified)),
+                    Segment(DwBuffer.Delete),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "a Primary row filed inside the Delete segment",
+                StateWith(
+                    Segment(DwBuffer.Primary),
+                    Segment(DwBuffer.Delete, Row(DwBuffer.Primary, 1L, ItemStatus.DataModified)),
+                    Segment(DwBuffer.Filter))
+            ),
+            (
+                "a zero row ordinal",
+                CanonicalStateWith(Row(DwBuffer.Primary, 0L, ItemStatus.DataModified))
+            ),
+            (
+                "a negative row ordinal",
+                CanonicalStateWith(Row(DwBuffer.Primary, -1L, ItemStatus.DataModified))
+            ),
+            (
+                "an item status outside the published domain",
+                CanonicalStateWith(Row(DwBuffer.Primary, 1L, (ItemStatus)99))
+            ),
+            (
+                "column number zero, which is the row-status sentinel",
+                CanonicalStateWith(
+                    Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(0L, 42)]))
+            ),
+            (
+                "a negative column number",
+                CanonicalStateWith(
+                    Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(-3L, 42)]))
+            ),
+            (
+                "the same column number twice",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42), Column(1L, 43)]))
+            ),
+            (
+                "an original naming a column the row never carried",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42)],
+                        [Column(2L, 41)]))
+            ),
+            (
+                "the same column number twice among the originals",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42)],
+                        [Column(1L, 41), Column(1L, 40)]))
+            ),
+            (
+                "a per-column item status outside the published domain",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [Column(1L, 42, (ItemStatus)99)]))
+            ),
+            (
+                "a value message with no arm set at all",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [new ColumnValue { ColumnId = 1L, Value = new AnyValue() }]))
+            ),
+            (
+                "a column carrying no value message",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [new ColumnValue { ColumnId = 1L }]))
+            ),
+            (
+                "decimal text outside the canonical grammar",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [
+                            new ColumnValue
+                            {
+                                ColumnId = 1L,
+                                Value = new AnyValue
+                                {
+                                    DecimalValue = new DecimalValue { Value = "1.5e3" },
+                                },
+                            },
+                        ]))
+            ),
+            (
+                "date text outside the canonical grammar",
+                CanonicalStateWith(
+                    Row(
+                        DwBuffer.Primary,
+                        1L,
+                        ItemStatus.DataModified,
+                        [
+                            new ColumnValue
+                            {
+                                ColumnId = 1L,
+                                Value = new AnyValue
+                                {
+                                    DateValue = new DateValue { Value = "15/06/1990" },
+                                },
+                            },
+                        ]))
+            ),
+        ];
+    }
+
+    /// <param name="because">The content fault, named so a failure message identifies the case.</param>
+    /// <param name="state">The malformed state.</param>
+    [Theory]
+    [MemberData(nameof(MalformedRowContent))]
+    public void MalformedRowContentIsRefusedWithoutAdmittingAnything(string because, CarrierState state)
+    {
+        AssertRefusedWithoutAdmitting(state, because);
+    }
+
     [Fact]
-    public void AnOversizedRowCountIsRejectedBeforeAnyAllocation()
+    public void AGoodRowIsNotAdmittedWhenALaterSegmentCarriesABadOne()
     {
-        using MemoryStream buffer = new();
-        using BinaryWriter writer = new(buffer);
+        // THE ORDERING PROPERTY, ASSERTED DIRECTLY. The fault is in the LAST segment and the first
+        // segment is perfectly valid, so an interleaved decoder would have written the primary row before
+        // discovering the problem and then reported a rejection the target does not reflect.
+        CarrierState state = StateWith(
+            Segment(
+                DwBuffer.Primary,
+                Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(1L, 42)])),
+            Segment(DwBuffer.Delete),
+            Segment(DwBuffer.Filter, Row(DwBuffer.Filter, 0L, ItemStatus.DataModified)));
 
-        WriteHeader(writer, segmentCount: 3);
-        writer.Write(0);                // DW_BUFFER_PRIMARY
-        writer.Write(int.MaxValue);     // the weaponised row count
-        writer.Flush();
-
-        AssertRejectedWithoutAllocating(buffer.ToArray());
+        AssertRefusedWithoutAdmitting(state, "a valid primary row ahead of an invalid filter row");
     }
 
-    /// <summary>
-    /// A row declaring <see cref="int.MaxValue"/> columns is rejected before the four decode arrays are
-    /// sized from it.
-    /// </summary>
     [Fact]
-    public void AnOversizedColumnCountIsRejectedBeforeAnyAllocation()
+    public void AnUnrepresentableValueInALaterRowStopsTheWholeApply()
     {
-        using MemoryStream buffer = new();
-        using BinaryWriter writer = new(buffer);
+        // The pre-flight read exists for exactly this: an AnyValue that cannot be read back is discovered
+        // BEFORE the first admission, not on the third row.
+        CarrierState state = CanonicalStateWith(
+            Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(1L, 42)]),
+            Row(DwBuffer.Primary, 2L, ItemStatus.DataModified, [Column(1L, 43)]),
+            Row(
+                DwBuffer.Primary,
+                3L,
+                ItemStatus.DataModified,
+                [new ColumnValue { ColumnId = 1L, Value = new AnyValue() }]));
 
-        WriteHeader(writer, segmentCount: 3);
-        writer.Write(0);                                    // DW_BUFFER_PRIMARY
-        writer.Write(1);                                    // one row, which is honest
-        writer.Write((int)ItemStatus.DataModified);          // that row's own status
-        writer.Write(int.MaxValue);                          // the weaponised column count
-        writer.Flush();
-
-        AssertRejectedWithoutAllocating(buffer.ToArray());
+        AssertRefusedWithoutAdmitting(state, "two good rows ahead of an unreadable value");
     }
 
-    /// <summary>
-    /// A blob value declaring <see cref="int.MaxValue"/> bytes is rejected before
-    /// <see cref="BinaryReader.ReadBytes"/> allocates from the length.
-    /// </summary>
-    /// <remarks>
-    /// The value tag is written as its numeric byte because the tag enumeration is private to the
-    /// codec - which is correct, since it is format detail rather than API. 16 is the blob tag, and the
-    /// number is asserted indirectly by every round-trip test in this suite that carries a blob.
-    /// </remarks>
+    // ==========================================================================================
+    //  THE PROCESSING KIND IS RECONCILED, NOT ADOPTED
+    //  ----------------------------------------------------------------------------------------
+    //  It used to be read and discarded, under the reading that detection is the caller's business. It
+    //  is not: the two sides built their carriers from their own definitions, so a disagreement means
+    //  they disagree about which serialization is even applicable, and merging a crosstab image into a
+    //  tabular carrier is what trusting the sender costs. An UNASSIGNED target - a carrier whose data
+    //  object has not been set - is not a disagreement, so it adopts.
+    // ==========================================================================================
+
     [Fact]
-    public void AnOversizedBlobLengthIsRejectedBeforeAnyAllocation()
+    public void AProcessingKindThatDisagreesWithTheTargetIsRefused()
     {
-        const byte blobValueTag = 16;
-
-        using MemoryStream buffer = new();
-        using BinaryWriter writer = new(buffer);
-
-        WriteHeader(writer, segmentCount: 3);
-        writer.Write(0);                                    // DW_BUFFER_PRIMARY
-        writer.Write(1);                                    // one row
-        writer.Write((int)ItemStatus.DataModified);          // its status
-        writer.Write(1);                                    // one column
-        writer.Write(1);                                    // column number 1, one-based
-        writer.Write((int)ItemStatus.DataModified);          // that column's status
-        writer.Write(blobValueTag);                          // the current value is a blob
-        writer.Write(int.MaxValue);                          // the weaponised blob length
-        writer.Flush();
-
-        AssertRejectedWithoutAllocating(buffer.ToArray());
-    }
-
-    /// <summary>
-    /// Writes the six-field payload header: magic, version, reserved flags, processing kind and the
-    /// segment count.
-    /// </summary>
-    /// <param name="writer">The writer to write to.</param>
-    /// <param name="segmentCount">The segment count to declare.</param>
-    private static void WriteHeader(BinaryWriter writer, int segmentCount)
-    {
-        writer.Write(0x43574650u);  // the format magic
-        writer.Write((byte)1);      // the format version
-        writer.Write((byte)0);      // the reserved flags
-        writer.Write(1L);           // the processing kind
-        writer.Write(segmentCount);
-    }
-
-    /// <summary>
-    /// Asserts that <paramref name="payload"/> answers the legacy failure code AND that producing that
-    /// answer allocated a trivial amount of memory, which is what proves the count was rejected before
-    /// it reached an allocation.
-    /// </summary>
-    /// <param name="payload">The hand-built malformed payload.</param>
-    /// <remarks>
-    /// <para>
-    /// The budget is deliberately generous rather than tight: the decoder legitimately copies the
-    /// payload and constructs a stream, a reader and a target carrier, all of which allocate, and the
-    /// test must not become brittle against a change in any of them. What it has to separate is
-    /// KILOBYTES from GIGABYTES, and a budget three orders of magnitude below the smallest weaponised
-    /// allocation does that with room to spare.
-    /// </para>
-    /// <para>
-    /// The measurement is per-thread and excludes collection, so it counts allocation REQUESTS rather
-    /// than surviving objects - which is exactly the quantity of interest. xunit runs a single test
-    /// method on one thread, so the reading is not polluted by siblings.
-    /// </para>
-    /// </remarks>
-    private static void AssertRejectedWithoutAllocating(byte[] payload)
-    {
-        const long allocationBudgetBytes = 1L << 20;
+        CarrierState state = CanonicalStateWith(
+            processing: 2L,
+            Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(1L, 42)]));
 
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-
-        long result = codec.TryApply(target, payload);
-
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-
-        Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
-
-        Assert.True(
-            allocated < allocationBudgetBytes,
-            $"Decoding a {payload.Length}-byte payload that declared int.MaxValue elements allocated "
-                + $"{allocated} bytes, which is over the {allocationBudgetBytes}-byte budget. The count "
-                + "is reaching an allocation before it is bounded.");
-
-        // Nothing was admitted to the carrier either: a partially applied image is worse than a
-        // rejected one, because the caller's next read would see rows the payload never justified.
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, codec.TryApply(target, state));
         Assert.Equal(0L, target.RowCount());
-        Assert.Equal(0L, target.DeletedCount());
-        Assert.Equal(0L, target.FilteredCount());
+
+        // And the target's own kind is untouched by the refusal.
+        Assert.Equal(1L, target.Processing.Value);
     }
 
     [Fact]
-    public void AHandBuiltPayloadWithTheWrongSegmentCountAnswersFailure()
+    public void AnUnassignedTargetAdoptsThePayloadsProcessingKind()
     {
-        // The format writes one segment per buffer and exactly three buffers exist, so a payload claiming
-        // any other number cannot be this format's. Built by hand rather than mutated, because the count
-        // is a whole field and a plausible-but-wrong value is the case worth stating.
+        CarrierState state = CanonicalStateWith(
+            processing: 2L,
+            Row(DwBuffer.Primary, 1L, ItemStatus.DataModified, [Column(1L, 42)]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = DataWindowProcessing.Unassigned };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(2L, target.Processing.Value);
+        Assert.Equal(1L, target.RowCount());
+    }
+
+    [Fact]
+    public void AnAbsentStateIsRefusedBecauseTheCallerOwnsTheEmptyPayloadArm()
+    {
+        // A NULL STATE IS NOT THE LEGACY'S ZERO-LENGTH BLOB. The receiver has its own empty-payload arm
+        // for that [n_cst_threading_task_sqlquery.sru:L194-L196], reached before the codec is consulted;
+        // reaching the codec with nothing means a producer sent a chunk with neither a payload nor the
+        // emptiness the caller checks for, and that is a fault rather than an empty transfer.
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, codec.TryApply(target, state: null));
+        Assert.Equal(0L, target.RowCount());
+    }
+
+    [Fact]
+    public void NoStructurallyInvalidStateEverEscapesAsAnException()
+    {
+        // THE CONTRACT THIS ASSERTS IS THE WHOLE REASON THE DECODER IS WRITTEN THE WAY IT IS. Every
+        // receive-side call site tests a CODE [n_cst_threading_task_sqlquery.sru:L197, :L221, :L238], so
+        // every rejected image must answer -1 the way SetChanges does. Driven over the union of both
+        // malformed matrices plus the absent state, so a future case added to either is covered here for
+        // free rather than needing a second entry.
         ChangesetPayloadCodec codec = new();
 
-        foreach (int segmentCount in new[] { 0, 1, 2, 4, -1 })
+        List<CarrierState?> candidates = [null];
+
+        candidates.AddRange(NonCanonicalRosterCases().Select(entry => (CarrierState?)entry.State));
+        candidates.AddRange(MalformedRowContentCases().Select(entry => (CarrierState?)entry.State));
+
+        foreach (CarrierState? candidate in candidates)
         {
-            using MemoryStream buffer = new();
-            using BinaryWriter writer = new(buffer);
+            DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-            writer.Write(0x43574650u);  // the format magic
-            writer.Write((byte)1);      // the format version
-            writer.Write((byte)0);      // the reserved flags
-            writer.Write(1L);           // the processing kind
-            writer.Write(segmentCount);
-            writer.Flush();
+            long result = codec.TryApply(target, candidate);
 
-            Assert.Equal(
-                DataWindowBufferStore.DataStoreFailure,
-                codec.TryApply(
-                    new DataWindowBufferStore { Processing = new DataWindowProcessing(1L) },
-                    buffer.ToArray()));
+            Assert.True(
+                result == DataWindowBufferStore.DataStoreSuccess
+                    || result == DataWindowBufferStore.DataStoreFailure,
+                $"A malformed state answered {result}, which is neither success nor failure.");
         }
     }
 
-    private static void AssertAnswersACodeAndDoesNotThrow(
-        ChangesetPayloadCodec codec,
-        ReadOnlyMemory<byte> candidate)
-    {
-        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
-
-        long result = codec.TryApply(target, candidate);
-
-        Assert.True(
-            result == DataWindowBufferStore.DataStoreSuccess
-                || result == DataWindowBufferStore.DataStoreFailure,
-            $"A corrupted payload answered {result}, which is neither success nor failure.");
-    }
-
     [Fact]
-    public void EncodingTheSameCarrierTwiceProducesByteIdenticalPayloads()
+    public void EncodingTheSameCarrierTwiceProducesIdenticalStatesAndIdenticalBytes()
     {
         // The Golden-Master technique's one hard prerequisite is repeatability. Column order is ascending
-        // and the buffer order is fixed, so equal input must yield equal bytes - otherwise a stored
-        // recording could never be compared against a fresh capture.
+        // and the buffer order is fixed, so equal input must yield an equal message AND equal bytes -
+        // otherwise a stored recording could never be compared against a fresh capture. The byte
+        // assertion is kept alongside the message assertion because it is the bytes a recording holds.
         ChangesetPayloadCodec codec = new();
 
         DataWindowBufferStore first = FixtureCarrier.Create(primaryRows: 3L, filteredRows: 2L);
@@ -997,18 +1330,184 @@ public sealed class ChangesetPayloadCodecTests
             }
         }
 
-        _ = codec.TryEncode(first, out ReadOnlyMemory<byte> firstPayload);
-        _ = codec.TryEncode(second, out ReadOnlyMemory<byte> secondPayload);
+        _ = codec.TryEncode(first, out CarrierState? firstState);
+        _ = codec.TryEncode(second, out CarrierState? secondState);
 
-        Assert.Equal(firstPayload.ToArray(), secondPayload.ToArray());
+        Assert.Equal(firstState, secondState);
+        Assert.Equal(firstState!.ToByteArray(), secondState!.ToByteArray());
     }
 
-    private static byte[] Corrupt(byte[] payload, int offset, byte value)
+    [Fact]
+    public void ColumnsAreProjectedInAscendingColumnOrderWhateverOrderTheyWereWritten()
     {
-        byte[] copy = [.. payload];
+        // The ascending order is what makes the byte-identical property above hold at all, so it is
+        // asserted directly rather than only through its consequence.
+        DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
 
-        copy[offset] = value;
+        _ = source.SetItemValue(row, 5, DwBuffer.Primary, 500.00m);
+        _ = source.SetItemValue(row, 1, DwBuffer.Primary, 1);
+        _ = source.SetItemValue(row, 3, DwBuffer.Primary, 30);
 
-        return copy;
+        ChangesetPayloadCodec codec = new();
+
+        _ = codec.TryEncode(source, out CarrierState? state);
+
+        Assert.Equal(
+            [1L, 3L, 5L],
+            state!.Segments[0].Rows[0].Columns.Select(column => column.ColumnId));
+    }
+
+    // ==========================================================================================
+    //  THE TYPED-STATE BUILDERS
+    //  ----------------------------------------------------------------------------------------
+    //  Hand-built states rather than mutated encoder output, because the faults worth stating are
+    //  WHOLE FIELDS - a buffer tag, a row ordinal, a duplicated column number - and a mutation sweep
+    //  over serialized bytes would test the generated parser rather than this decoder.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Wraps a named-case producer as the theory data a <see cref="MemberDataAttribute"/> consumes.
+    /// </summary>
+    /// <param name="cases">The producer.</param>
+    /// <remarks>
+    /// The cases are authored as a plain sequence rather than directly as theory data so that a test which
+    /// needs the STATES ALONE - the exception sweep below - can enumerate them without reaching through
+    /// the theory wrapper's row shape. Every case therefore has exactly one definition site, and a case
+    /// added to either matrix is covered by the sweep for free.
+    /// </remarks>
+    private static TheoryData<string, CarrierState> AsTheoryData(
+        Func<IEnumerable<(string Because, CarrierState State)>> cases)
+    {
+        TheoryData<string, CarrierState> data = [];
+
+        foreach ((string because, CarrierState state) in cases())
+        {
+            data.Add(because, state);
+        }
+
+        return data;
+    }
+
+    /// <summary>Builds a state from an explicit segment roster, canonical or not.</summary>
+    /// <param name="segments">The segments, in the order they are to appear.</param>
+    private static CarrierState StateWith(params CarrierBufferSegment[] segments) =>
+        StateWith(1L, segments);
+
+    /// <summary>Builds a state from an explicit segment roster and processing kind.</summary>
+    /// <param name="processing">The processing kind to declare.</param>
+    /// <param name="segments">The segments, in the order they are to appear.</param>
+    private static CarrierState StateWith(long processing, params CarrierBufferSegment[] segments)
+    {
+        CarrierState state = new() { Processing = processing };
+
+        state.Segments.AddRange(segments);
+
+        return state;
+    }
+
+    /// <summary>
+    /// Builds a state with the canonical three segments, filing each row into the segment its own buffer
+    /// tag names, so that only the fault under test is faulty.
+    /// </summary>
+    /// <param name="rows">The rows to file.</param>
+    private static CarrierState CanonicalStateWith(params DataWindowRow[] rows) =>
+        CanonicalStateWith(1L, rows);
+
+    /// <summary>
+    /// Builds a state with the canonical three segments and an explicit processing kind.
+    /// </summary>
+    /// <param name="processing">The processing kind to declare.</param>
+    /// <param name="rows">The rows to file.</param>
+    private static CarrierState CanonicalStateWith(long processing, params DataWindowRow[] rows)
+    {
+        return StateWith(
+            processing,
+            [
+                .. ChangesetPayloadCodec.SerializedBuffers.Select(dwBuffer =>
+                    Segment(dwBuffer, [.. rows.Where(row => row.Buffer == dwBuffer)])),
+            ]);
+    }
+
+    /// <summary>Builds one buffer segment.</summary>
+    /// <param name="dwBuffer">The buffer tag to declare.</param>
+    /// <param name="rows">The rows it carries.</param>
+    private static CarrierBufferSegment Segment(DwBuffer dwBuffer, params DataWindowRow[] rows)
+    {
+        CarrierBufferSegment segment = new() { Buffer = dwBuffer };
+
+        segment.Rows.AddRange(rows);
+
+        return segment;
+    }
+
+    /// <summary>Builds one inbound row.</summary>
+    /// <param name="dwBuffer">The row's own buffer tag.</param>
+    /// <param name="row">The one-based row ordinal. R9: never rebased.</param>
+    /// <param name="status">The row's item status.</param>
+    /// <param name="columns">The current values, or none.</param>
+    /// <param name="originals">The original values, or none.</param>
+    private static DataWindowRow Row(
+        DwBuffer dwBuffer,
+        long row,
+        ItemStatus status,
+        ColumnValue[]? columns = null,
+        ColumnValue[]? originals = null)
+    {
+        DataWindowRow projected = new()
+        {
+            Buffer = dwBuffer,
+            Row = row,
+            ItemStatus = status,
+        };
+
+        projected.Columns.AddRange(columns ?? []);
+        projected.OriginalValues.AddRange(originals ?? []);
+
+        return projected;
+    }
+
+    /// <summary>Builds one column value through the same mapper the encoder uses.</summary>
+    /// <param name="columnId">The column number to declare, valid or not.</param>
+    /// <param name="value">The value, which must be one the mapper can express.</param>
+    /// <param name="status">The column's own status, or none for an absent one.</param>
+    private static ColumnValue Column(long columnId, object? value, ItemStatus? status = null)
+    {
+        Assert.True(
+            CarrierValue.TryToWire(value, out AnyValue? wire),
+            "A builder value must be representable; an unrepresentable one belongs in its own test.");
+
+        ColumnValue column = new() { ColumnId = columnId, Value = wire };
+
+        if (status is not null)
+        {
+            column.ItemStatus = status.Value;
+        }
+
+        return column;
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="state"/> answers the legacy failure code and that the target is
+    /// completely untouched afterwards.
+    /// </summary>
+    /// <param name="state">The malformed state.</param>
+    /// <param name="because">The fault, quoted into the failure message.</param>
+    private static void AssertRefusedWithoutAdmitting(CarrierState state, string because)
+    {
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        long result = codec.TryApply(target, state);
+
+        Assert.True(
+            result == DataWindowBufferStore.DataStoreFailure,
+            $"A state with {because} answered {result} rather than the failure code.");
+
+        // A PARTIALLY APPLIED IMAGE IS WORSE THAN A REJECTED ONE, because the caller's next read would
+        // see rows the payload never justified.
+        Assert.Equal(0L, target.RowCount());
+        Assert.Equal(0L, target.DeletedCount());
+        Assert.Equal(0L, target.FilteredCount());
     }
 }

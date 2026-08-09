@@ -513,7 +513,7 @@ public sealed class GeneratedStubPresenceTests
 
     private static readonly string[] AuthoredMessageRoster =
     [
-        // ---- common.v1.proto  (16 authored messages) ----
+        // ---- common.v1.proto  (20 authored messages) ----
         "common.v1.RetCode",
         "common.v1.XmlParseStatus",
         "common.v1.SqliteResultCode",
@@ -523,6 +523,14 @@ public sealed class GeneratedStubPresenceTests
         "common.v1.DateTimeValue",
         "common.v1.AnyValue",
         "common.v1.ColumnValue",
+        // PROMOTED FROM dataservices.v1 INTO THE SHARED VOCABULARY. Both boundary definitions now
+        // declare a row: C-03's RetrieveChunk and update rows, and persistence.v1's CarrierState
+        // inside every buffer segment of C-05's chunks and C-06's update input. The C-A admission
+        // test therefore puts ONE definition here, exactly as it did for IdentityColumnData.
+        "common.v1.DataWindowRow",
+        // The per-element presence wrapper the identity round trip needs: GetItemNumber answers null
+        // for a null item and a repeated scalar has no way to say so.
+        "common.v1.NullableInt64",
         "common.v1.DbError",
         "common.v1.ConflictRow",
         "common.v1.ConflictDetail",
@@ -530,7 +538,7 @@ public sealed class GeneratedStubPresenceTests
         "common.v1.RichErrorTrailer",
         "common.v1.RichErrorBinding",
         "common.v1.RichError",
-        // ---- dataservices.v1.proto  (142 authored messages) ----
+        // ---- dataservices.v1.proto  (141 authored messages) ----
         "dataservices.v1.DwObjectRef",
         "dataservices.v1.SequencingToken",
         "dataservices.v1.Veto",
@@ -541,7 +549,7 @@ public sealed class GeneratedStubPresenceTests
         "dataservices.v1.OpenValidationSessionResponse",
         "dataservices.v1.CloseValidationSessionRequest",
         "dataservices.v1.CloseValidationSessionResponse",
-        "dataservices.v1.DataWindowRow",
+        // DataWindowRow is DELIBERATELY ABSENT here - it moved to common.v1 above.
         "dataservices.v1.RetrieveRequest",
         "dataservices.v1.RetrieveChunk",
         "dataservices.v1.InitContextMenuEvent",
@@ -673,12 +681,18 @@ public sealed class GeneratedStubPresenceTests
         "dataservices.v1.InvokeMethodResponse",
         "dataservices.v1.TraceChannelRequest",
         "dataservices.v1.TraceRecord",
-        // ---- persistence.v1.proto  (86 authored messages) ----
+        // ---- persistence.v1.proto  (88 authored messages) ----
         "persistence.v1.TaskHandle",
         "persistence.v1.SessionHandle",
         "persistence.v1.OperationStatus",
         "persistence.v1.PositionalParameter",
         "persistence.v1.SqlClauseSpec",
+        // The typed carrier that replaced the opaque `bytes` payload on C-05's chunks and C-06's
+        // update input. Declared HERE and not in common.v1 by the same admission test that promoted
+        // DataWindowRow: only ONE sibling declares these two, so the shared vocabulary stays the set
+        // of types both files genuinely need.
+        "persistence.v1.CarrierBufferSegment",
+        "persistence.v1.CarrierState",
         "persistence.v1.QuerySpec",
         "persistence.v1.CreateQueryTaskRequest",
         "persistence.v1.CreateQueryTaskResponse",
@@ -1828,7 +1842,11 @@ public sealed class GeneratedStubPresenceTests
             + $"[{string.Join(", ", unlisted)}]. Adding a message to the inventory in the same change that "
             + "adds it to the definition is what keeps the published surface a reviewed one.");
 
-        Assert.Equal(244, authored.Length);
+        // 247 = 20 in common.v1 + 141 in dataservices.v1 + 88 in persistence.v1, less no map entries.
+        // The count moved from 244 with the carrier-state typing: common.v1 gained DataWindowRow
+        // (PROMOTED out of dataservices.v1, which therefore lost it) and NullableInt64, and
+        // persistence.v1 gained CarrierBufferSegment and CarrierState - a net of three.
+        Assert.Equal(247, authored.Length);
         Assert.Equal(authored.Length, AuthoredMessageRoster.Distinct(StringComparer.Ordinal).Count());
     }
 

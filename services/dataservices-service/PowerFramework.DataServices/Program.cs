@@ -58,6 +58,7 @@ using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Clients;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Endpoints;
+using PowerFramework.DataServices.Expressions;
 using PowerFramework.Shared.Kernel;
 using PowerFramework.Shared.Localization;
 
@@ -101,6 +102,46 @@ builder.Services
 // deterministic double for the whole host.
 // --------------------------------------------------------------------------------------------------
 builder.Services.AddSingleton(TimeProvider.System);
+
+// --------------------------------------------------------------------------------------------------
+// 2b. THE `for page` PAGE RESOLVER - WIRED HERE BECAUSE A SEAM IS NOT WIRING
+//
+// The expression evaluator's CLASS default is UnresolvedPageResolver, which REFUSES `for page` rather
+// than widening it to every row - a deliberate narrowing (AAP 0.1.5) and the right default for an
+// evaluator built by code that has stated nothing about pagination. It is the wrong thing for a
+// CONFIGURED, RUNNING SERVICE to be silently using, and that is exactly what it was: the sole
+// `for page` expression in the repository, dw_sqlite.srd:L27's `sum(salary for page)`, answered the
+// malformed sentinel in the deployed path unless a wiring site remembered to inject a resolver.
+//
+// The pagination is therefore STATED ONCE, in DataServices:ColumnExpression:PageResolution, and turned
+// into the one resolver that expresses it by ExpressionPageResolverFactory - which lives beside the
+// three resolver implementations so the mapping cannot drift from them. The deployed default is
+// WholeBuffer, an explicit statement that the sole evidenced surface is unpaginated: dw_sqlite.srd
+// declares no page-break band. A paginated deployment states FixedRowsPerPage with a row count, or
+// Unresolved to get the refusal back; the options validator rejects every other combination at
+// startup, so this factory call cannot silently pick a resolver from a mistyped setting.
+//
+// A SINGLETON because all three resolvers are stateless value-like objects and one instance serves
+// every evaluator - the two parameterless ones are shared instances already. Evaluators take it
+// through their three-argument constructor rather than assigning the property afterwards, so an
+// evaluator is never briefly running on the refusing default.
+//
+// NO EVALUATOR IS REGISTERED HERE, and that is not an omission: DataWindowExpressionEvaluator binds to
+// a DataWindowServiceHost, which is per-session state that the C-04 service layer creates and owns.
+// Registering the resolver is what makes that layer's construction correct by default whenever it is
+// written; registering an evaluator would mean inventing a host lifetime the contract has not defined.
+// --------------------------------------------------------------------------------------------------
+builder.Services.AddSingleton<IExpressionPageResolver>(static serviceProvider =>
+{
+    ColumnExpressionOptions columnExpression = serviceProvider
+        .GetRequiredService<IOptions<DataServicesOptions>>()
+        .Value
+        .ColumnExpression;
+
+    return ExpressionPageResolverFactory.Create(
+        columnExpression.PageResolution,
+        columnExpression.PageRowsPerPage);
+});
 
 // --------------------------------------------------------------------------------------------------
 // 3. LOCALIZATION - A CONFIRMED REQUIREMENT OF THIS SERVICE, NOT A CONDITIONAL ONE

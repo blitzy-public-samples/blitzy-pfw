@@ -897,6 +897,91 @@ message ColumnValue {
   optional ItemStatus item_status = 4;
 }
 
+// DataWindowRow - one row, buffer-tagged and status-tagged.
+//
+// WHY THIS MESSAGE IS IN THE COMMON FILE (the C-A admission test, C-K).
+// It was originally declared in dataservices.v1.proto, and it moved here for one reason: BOTH
+// siblings now need it. C-03's RetrieveChunk and its update rows produce and consume it, and
+// persistence.v1's CarrierState carries it inside every buffer segment of C-05's query chunks and
+// C-06's update input. Two consumers, so one definition, here - exactly the ruling IdentityColumnData
+// records below. A per-file copy would be two types that serialise alike until one of them gained a
+// field, and this payload is the kind whose drift is invisible: both copies would carry a buffer tag,
+// a row ordinal, a status and two value lists, and only the FIELD NUMBERS would differ.
+//
+// WHY A FLAT ROWSET WOULD NOT DO, stated here because it is the obvious simplification and it is
+// wrong: the legacy result carrier derives from a `datastore`, so it IS a DataWindow complete with
+// buffers and per-item statuses, and the original-value shadow the update contract compares against
+// is part of that state rather than something recomputable from the current row.
+message DataWindowRow {
+  // Which buffer the row sits in. DwBuffer above records that THE FILTER BUFFER'S ROW ORDER IS
+  // INVERTED relative to the source, so `row` does not count the same way across buffers.
+  //
+  // ALWAYS MEANINGFUL, SO NO EXPLICIT PRESENCE - a row is in exactly one buffer, always. The zero
+  // value is DW_BUFFER_PRIMARY, matching PowerBuilder's own unassigned-`dwbuffer` default, so an
+  // untagged row reads as a Primary row. That is the right default and it is also a trap for a lazy
+  // producer: a Delete! or Filter! row MUST carry its tag explicitly, because silence means Primary
+  // and a mis-tagged Filter row would be counted in the wrong direction.
+  DwBuffer buffer = 1;
+
+  // ONE-BASED row ordinal within that buffer.
+  int64 row = 2;
+
+  // THE ROW'S OWN status, read the legacy way with column index 0 - the convention ItemStatus
+  // documents above, and the one the legacy uses at [se_cst_dw.sru:L190] and [:L335]:
+  // GetItemStatus(row, Long(dwo.ID), Primary!) for a column, GetItemStatus(row, 0, buffer) for the
+  // row.
+  ItemStatus item_status = 3;
+
+  // The row's CURRENT column values. Each ColumnValue carries the column name, the one-based ordinal
+  // and, where it is meaningful, that column's own status.
+  //
+  // A NOTE FOR PRODUCERS OF A CARRIER CHANGESET, so an empty name is not read as an omission. The
+  // legacy's cross-thread carrier serialization is POSITIONAL - `GetChanges(ref blob)` carries column
+  // ORDINALS and no names at all - so a row projected from a carrier's changeset leaves
+  // ColumnValue.column_name empty and column_id is the authoritative identifier there. A row
+  // projected from a live DataWindow, as C-03's retrieve path does, carries both.
+  repeated ColumnValue columns = 4;
+
+  // The ORIGINAL values of the columns marked for the concurrency comparison.
+  //
+  // POPULATED ON THE UPDATE PATH AND NORMALLY EMPTY ON RETRIEVE. It is declared on this message
+  // rather than on a separate update-only row type because a row is one thing whichever direction it
+  // travels, and a second row shape would drift. ConflictDetail below records why both values must be
+  // able to travel: the one updatable DataWindow in the repository declares `updatewhere=1` and marks
+  // ALL SIX columns `updatewhereclause=yes`, so the generated WHERE clause carries the key column
+  // PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. A payload carrying only current values could
+  // not express what the failed statement compared.
+  //
+  // A COLUMN WHOSE ORIGINAL EQUALS ITS CURRENT MAY BE OMITTED HERE, and a consumer must read an
+  // omission as "unchanged since the last baseline" rather than as "no original exists": the carrier
+  // answers the current value when no original was captured, so the two statements are the same one.
+  repeated ColumnValue original_values = 5;
+}
+
+// NullableInt64 - an int64 that can also say "no value".
+//
+// WHY A WRAPPER MESSAGE RATHER THAN A BARE repeated int64 (C-K). A repeated scalar field cannot
+// express a missing element: proto3 has no presence on the elements of a packed scalar array, so a
+// null would have to be COERCED to some number or DROPPED, and both are silent data loss inside a
+// payload that a consumer cannot audit. A repeated MESSAGE field gives every element its own presence
+// bit, so "null" travels as an element whose `value` is simply not set, and the array's LENGTH and
+// ORDER survive unchanged - which matters because IdentityColumnData's two arrays are order-bearing.
+//
+// WHERE THE NULL COMES FROM, so the wrapper does not read as defensive plurality. The legacy collects
+// identity values with `GetItemNumber`, which ANSWERS NULL for a null item, and PowerScript stores
+// that null straight into the array it hands to the callback
+// [n_cst_threading_task_sqlupdate.sru:L144, :L160]. Collapsing it to zero would make a null
+// indistinguishable from a legitimate identity value of zero.
+//
+// google.protobuf.Int64Value from wrappers.proto has the same shape and is deliberately NOT used:
+// AAP 0.5's dependency inventory authorises no package carrying the well-known types beyond
+// descriptor.proto, and 0.5.3 is explicit that a package outside the inventory is scope creep. The
+// alternative is one four-line message.
+message NullableInt64 {
+  // Set to state the value. UNSET means the element is null - never set it to 0 to mean "absent".
+  optional int64 value = 1;
+}
+
 
 // ==============================================================================================
 //  SECTION 8 - DbError : THE LEGACY DATABASE-ERROR STRUCTURE, MIRRORED FIELD FOR FIELD
@@ -1155,11 +1240,33 @@ message IdentityColumnData {
 
   // Values from the PRIMARY buffer, in FORWARD collection order [:L228-L233]. Read with
   // GetItemNumber, hence a numeric array.
-  repeated int64 primary_values = 2;
+  //
+  // ============ EVERY ELEMENT CARRIES PRESENCE, BECAUSE A NULL IDENTITY IS REPRESENTABLE ========
+  // The element type is NullableInt64 and not a bare int64, and the reason is data loss rather than
+  // taste. `GetItemNumber` ANSWERS NULL for a null item and PowerScript stores that null into the
+  // array it hands to the callback [n_cst_threading_task_sqlupdate.sru:L144, :L160], so a null
+  // identity value is a state the oracle can produce. A `repeated int64` has no per-element presence,
+  // so such a value could only be COERCED to 0 - making it indistinguishable from a legitimate
+  // identity of 0 - or DROPPED, which would shorten the array and silently re-pair every value after
+  // it with the wrong row. Both failures return a plausible response that no count disagrees with.
+  //
+  // THE WRAPPER CHANGES NOTHING ELSE. The field is still repeated, still field 2, still separate from
+  // filter_values, and still in collection order. A producer emits one element per collected value,
+  // in order, with `value` set; it emits an element with `value` UNSET for a null. A consumer must
+  // test presence per element and must not treat an unset element as zero.
+  //
+  // On the sole evidenced fixture a null cannot arise - `id` is an INTEGER PRIMARY KEY AUTOINCREMENT
+  // marked `key=yes identity=yes` [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8] and the database
+  // always assigns it - so this is the contract being able to say what the oracle can produce rather
+  // than a case the fixture exercises.
+  // ==========================================================================================
+  repeated NullableInt64 primary_values = 2;
 
   // Values from the FILTER buffer, in BACKWARD collection order [:L237-L241]. The order is the
   // legacy's and must be transmitted, and relayed, as collected - see the block above.
-  repeated int64 filter_values = 3;
+  //
+  // Same element type and the same presence rule as primary_values, for the same reason.
+  repeated NullableInt64 filter_values = 3;
 }
 
 

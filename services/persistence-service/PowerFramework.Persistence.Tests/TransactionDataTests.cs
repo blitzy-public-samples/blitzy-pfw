@@ -201,7 +201,12 @@ public sealed class TransactionDataTests
         Assert.Equal(string.Empty, subject.ServerName);
         Assert.Equal(string.Empty, subject.Database);
         Assert.Equal(string.Empty, subject.LogId);
-        Assert.Equal(string.Empty, subject.LogPass);
+
+        // THE CREDENTIAL IS READ THROUGH THE NAMED DOOR, because the property has no getter any more.
+        // The test assembly can reach it only because the csproj grants InternalsVisibleTo, which is what
+        // keeps the write-only posture testable instead of merely asserted.
+        Assert.Equal(string.Empty, subject.RevealLogPassForConnect());
+        Assert.False(subject.HasCredential);
         Assert.Equal(string.Empty, subject.DbParm);
         Assert.Equal(string.Empty, subject.Lock);
         Assert.Equal(string.Empty, subject.UserParm);
@@ -236,6 +241,19 @@ public sealed class TransactionDataTests
         {
             Assert.Contains(name, properties.Keys);
             Assert.Equal(type, properties[name].PropertyType);
+        }
+
+        // NINE MEMBERS, AND EXACTLY ONE OF THEM IS WRITE-ONLY. The census is the right place to pin this
+        // because a reintroduced getter is precisely the kind of change that looks like a convenience and
+        // reopens the credential-exposure finding. Every other member reads; this one does not.
+        Assert.False(properties[nameof(TransactionData.LogPass)].CanRead);
+
+        foreach ((string name, Type _) in expected)
+        {
+            if (name != nameof(TransactionData.LogPass))
+            {
+                Assert.True(properties[name].CanRead, name);
+            }
         }
     }
 
@@ -274,7 +292,8 @@ public sealed class TransactionDataTests
         TransactionData moved = ReceiverWithOnlyTheTwoSet().WithConnectionFieldsFrom(FullyPopulated());
 
         // The password really did move - proven positively, so the assertion below is not vacuous.
-        Assert.Equal(SyntheticPassword, moved.LogPass);
+        Assert.Equal(SyntheticPassword, moved.RevealLogPassForConnect());
+        Assert.True(moved.HasCredential);
 
         string rendered = moved.ToString();
 
@@ -439,7 +458,8 @@ public sealed class TransactionDataTests
         Assert.Equal(SyntheticLock, revived.Lock);
         Assert.True(revived.AutoCommit);
 
-        Assert.Equal(string.Empty, revived.LogPass);
+        Assert.Equal(string.Empty, revived.RevealLogPassForConnect());
+        Assert.False(revived.HasCredential);
         Assert.Equal(string.Empty, revived.DbParm);
         Assert.Equal(string.Empty, revived.UserParm);
 
@@ -630,13 +650,125 @@ public sealed class TransactionDataTests
         Assert.Equal(source.ServerName, result.ServerName);
         Assert.Equal(source.Database, result.Database);
         Assert.Equal(source.LogId, result.LogId);
-        Assert.Equal(source.LogPass, result.LogPass);
+        Assert.Equal(source.RevealLogPassForConnect(), result.RevealLogPassForConnect());
         Assert.Equal(source.DbParm, result.DbParm);
         Assert.Equal(source.Lock, result.Lock);
 
         // The two the legacy touches in NEITHER direction.
         Assert.Equal(keeper.AutoCommit, result.AutoCommit);
         Assert.Equal(keeper.UserParm, result.UserParm);
+    }
+
+    /// <summary>
+    /// Asserts the SIX non-credential connection fields came from <paramref name="source"/> and that
+    /// THREE members were kept from <paramref name="keeper"/> - the two the legacy never moves, plus the
+    /// credential, which this port deliberately does not move outbound.
+    /// </summary>
+    /// <param name="result">The descriptor produced by the transfer.</param>
+    /// <param name="source">The descriptor the six were supposed to come from.</param>
+    /// <param name="keeper">The descriptor the three were supposed to be kept from.</param>
+    /// <remarks>
+    /// SEPARATE FROM THE INBOUND AUDIT, AND THAT SEPARATION IS THE FINDING EXPRESSED AS A TEST. One audit
+    /// used to serve both directions because the legacy's two accessors move the same seven fields - and
+    /// the legacy really does move the password outbound [n_cst_thread_trans.sru:L414]. AAP 0.4.2.6 makes
+    /// LogPass write-only: never echoed in a response, and an outbound accessor that returns it to its
+    /// caller IS that echo. So the two directions are no longer symmetric, and using one helper for both
+    /// would make the asymmetry invisible.
+    /// </remarks>
+    private static void AssertSixMovedAndThreeKept(
+        in TransactionData result,
+        in TransactionData source,
+        in TransactionData keeper)
+    {
+        // The six, in the oracle's assignment order LESS the credential [:L410-L416].
+        Assert.Equal(source.Dbms, result.Dbms);
+        Assert.Equal(source.ServerName, result.ServerName);
+        Assert.Equal(source.Database, result.Database);
+        Assert.Equal(source.LogId, result.LogId);
+        Assert.Equal(source.DbParm, result.DbParm);
+        Assert.Equal(source.Lock, result.Lock);
+
+        // The two the legacy touches in NEITHER direction.
+        Assert.Equal(keeper.AutoCommit, result.AutoCommit);
+        Assert.Equal(keeper.UserParm, result.UserParm);
+
+        // AND THE THIRD: the caller keeps whatever credential it already held. Stated as an equality
+        // against the keeper rather than against empty, because the outbound path must be a strict
+        // NON-EVENT for this member - it neither discloses the connection's password nor destroys the
+        // caller's own, and clearing would be its own behaviour change.
+        Assert.Equal(keeper.RevealLogPassForConnect(), result.RevealLogPassForConnect());
+        Assert.Equal(keeper.HasCredential, result.HasCredential);
+    }
+
+    /// <summary>
+    /// The outbound path never hands the connection's own password back, whatever the caller held.
+    /// </summary>
+    /// <remarks>
+    /// THE FINDING, ASSERTED DIRECTLY AND FROM BOTH STARTING STATES. A caller that held NO credential must
+    /// not acquire one, which is the disclosure; a caller that held ITS OWN must keep exactly that, which
+    /// is the non-destruction. Driven through the real accessor rather than the fold, so it also proves the
+    /// accessor reaches for the right one of the two folds.
+    /// </remarks>
+    [Fact]
+    public void GetTransactionData_NeverEchoesTheConnectionsPassword()
+    {
+        TransactionData connection = FullyPopulated();
+
+        // 1. A caller holding nothing acquires nothing.
+        TransactionData empty = ReceiverWithOnlyTheTwoSet();
+        string diagnostic = string.Empty;
+
+        Assert.Equal(RetCode.OK, connection.GetTransactionData(ref empty, ref diagnostic));
+        Assert.Equal(string.Empty, empty.RevealLogPassForConnect());
+        Assert.False(empty.HasCredential);
+
+        // But the rest of the descriptor DID arrive, so the assertion above is not vacuous.
+        Assert.Equal(connection.Dbms, empty.Dbms);
+        Assert.Equal(connection.DbParm, empty.DbParm);
+
+        // 2. A caller holding its own keeps exactly that, rather than being overwritten or cleared.
+        const string callersOwn = "caller-supplied-value-not-the-connections";
+        TransactionData own = ReceiverWithOnlyTheTwoSet() with { LogPass = callersOwn };
+
+        Assert.Equal(RetCode.OK, connection.GetTransactionData(ref own, ref diagnostic));
+        Assert.Equal(callersOwn, own.RevealLogPassForConnect());
+        Assert.True(own.HasCredential);
+
+        // 3. And the convenience overload, which fills a freshly cleared descriptor, cannot leak either.
+        Assert.False(connection.GetTransactionData().HasCredential);
+    }
+
+    /// <summary>
+    /// The two folds are named for their directions, and the credential moves in exactly one of them.
+    /// </summary>
+    [Fact]
+    public void TheTwoFoldsAreDirectionalAndTheCredentialMovesOnlyInbound()
+    {
+        TransactionData source = FullyPopulated();
+        TransactionData receiver = ReceiverWithOnlyTheTwoSet();
+
+        TransactionData inbound = receiver.WithConnectionFieldsFrom(source);
+        TransactionData outbound = receiver.WithConnectionFieldsFromExcludingCredential(source);
+
+        Assert.Equal(source.RevealLogPassForConnect(), inbound.RevealLogPassForConnect());
+        Assert.Equal(string.Empty, outbound.RevealLogPassForConnect());
+
+        // AND THE CREDENTIAL IS THE ONLY DIFFERENCE between the two folds: clear it on the inbound
+        // result and the two become equal. That is what makes this a single scoped omission rather than
+        // a second, quietly different transfer.
+        Assert.Equal(inbound with { LogPass = null }, outbound);
+        Assert.NotEqual(inbound, outbound);
+    }
+
+    /// <summary>
+    /// The excluding fold tolerates the source and the instance sharing storage, like its sibling.
+    /// </summary>
+    [Fact]
+    public void WithConnectionFieldsFromExcludingCredential_IsSafeWhenTheSourceAndTheInstanceShareStorage()
+    {
+        TransactionData subject = FullyPopulated();
+
+        Assert.Equal(subject, subject.WithConnectionFieldsFromExcludingCredential(in subject));
     }
 
     /// <summary>
@@ -689,10 +821,12 @@ public sealed class TransactionDataTests
 
     /// <summary>
     /// OUTBOUND: <c>of_gettransdata(ref, ref)</c> fills the caller's descriptor from the connection's
-    /// own state and leaves the CALLER's two alone [n_cst_thread_trans.sru:L410-L416].
+    /// own state, leaves the CALLER's two alone [n_cst_thread_trans.sru:L410-L416] AND leaves the caller's
+    /// credential alone - the one line of the oracle's accessor this port deliberately does not
+    /// reproduce [<c>:L414</c>, against AAP 0.4.2.6's write-only rule].
     /// </summary>
     [Fact]
-    public void GetTransactionData_Outbound_MovesTheSevenAndLeavesTheCallersTwo()
+    public void GetTransactionData_Outbound_MovesTheSixAndLeavesTheCallersThree()
     {
         TransactionData connection = FullyPopulated();
         TransactionData caller = ReceiverWithOnlyTheTwoSet();
@@ -703,7 +837,7 @@ public sealed class TransactionDataTests
 
         Assert.Equal(RetCode.OK, code);
         Assert.Equal(string.Empty, diagnostic);
-        AssertSevenMovedAndTwoKept(caller, connection, callerBefore);
+        AssertSixMovedAndThreeKept(caller, connection, callerBefore);
     }
 
     /// <summary>
@@ -735,9 +869,14 @@ public sealed class TransactionDataTests
             .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.Static)
             .Where(method => method.Name.StartsWith("With", StringComparison.Ordinal))];
 
-        MethodInfo only = Assert.Single(withMethods);
-        Assert.Equal(nameof(TransactionData.WithConnectionFieldsFrom), only.Name);
-        Assert.Single(only.GetParameters());
+        // TWO FOLDS NOW, ONE PER DIRECTION, and neither moves all nine. The count is pinned so a third
+        // fold - or a resurrected all-nine one - cannot land unnoticed.
+        Assert.Equal(2, withMethods.Length);
+        Assert.Contains(nameof(TransactionData.WithConnectionFieldsFrom), withMethods.Select(m => m.Name));
+        Assert.Contains(
+            nameof(TransactionData.WithConnectionFieldsFromExcludingCredential),
+            withMethods.Select(m => m.Name));
+        Assert.All(withMethods, method => Assert.Single(method.GetParameters()));
 
         bool anyIncludeAllParameter = typeof(TransactionData)
             .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.Static)
@@ -829,7 +968,7 @@ public sealed class TransactionDataTests
 
         if (expectedCopy)
         {
-            AssertSevenMovedAndTwoKept(caller, connection, callerBefore);
+            AssertSixMovedAndThreeKept(caller, connection, callerBefore);
         }
         else
         {
@@ -895,7 +1034,7 @@ public sealed class TransactionDataTests
 
         // And specifically NOT the connection's own seven - the copy really was skipped.
         Assert.NotEqual(connection.Dbms, caller.Dbms);
-        Assert.Equal(string.Empty, caller.LogPass);
+        Assert.Equal(string.Empty, caller.RevealLogPassForConnect());
     }
 
     /// <summary>
@@ -978,7 +1117,7 @@ public sealed class TransactionDataTests
         string diagnostic = string.Empty;
 
         Assert.Equal(RetCode.OK, source.GetTransactionData(ref caller, ref diagnostic, null));
-        AssertSevenMovedAndTwoKept(caller, source, callerBefore);
+        AssertSixMovedAndThreeKept(caller, source, callerBefore);
     }
 
     /// <summary>
@@ -1041,17 +1180,18 @@ public sealed class TransactionDataTests
     }
 
     /// <summary>
-    /// On the normal path the convenience overload returns the seven connection fields with the two
-    /// omitted members CLEARED, because the descriptor it fills starts life cleared [:L395].
+    /// On the normal path the convenience overload returns the six non-credential connection fields with
+    /// the two omitted members CLEARED, because the descriptor it fills starts life cleared [:L395] - and
+    /// with the credential cleared too, because it starts cleared and nothing fills it.
     /// </summary>
     [Fact]
-    public void GetTransactionData_ConvenienceOverload_ReturnsTheSevenWithTheTwoCleared()
+    public void GetTransactionData_ConvenienceOverload_ReturnsTheSixWithTheOthersCleared()
     {
         TransactionData connection = FullyPopulated();
 
         TransactionData returned = connection.GetTransactionData();
 
-        AssertSevenMovedAndTwoKept(returned, connection, TransactionData.Empty);
+        AssertSixMovedAndThreeKept(returned, connection, TransactionData.Empty);
         Assert.False(returned.AutoCommit);
         Assert.Equal(string.Empty, returned.UserParm);
 

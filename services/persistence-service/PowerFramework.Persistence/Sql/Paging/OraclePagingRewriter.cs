@@ -542,11 +542,26 @@ internal sealed class OraclePagingRewriter : IPagingRewriter
         // performance benefit is claimed for it.
         //
         // Arithmetic is done in `long`, the mapping the transformation plan gives PowerBuilder's
-        // `long`. NO overflow check is added, because the oracle has none: a widened accumulator
-        // cannot produce a DIFFERENT statement for any input the legacy handled, and a guard here
-        // would invent a failure mode the specification does not have.
-        long upperRowNumber = request.PageSize * request.PageIndex;            // [:L394] and [:L395]
-        long lowerRowNumber = request.PageSize * (request.PageIndex - 1) + 1;  // [:L395], ONE BASED
+        // `long`, and it is CHECKED.
+        //
+        // THE UNCHECKED READING WAS WRONG AND A REVIEW FOUND IT. The argument used to run: the oracle
+        // has no overflow check, so adding one invents a failure mode the specification does not have.
+        // It does not hold, for two reasons. First, an unchecked product does not preserve legacy
+        // behaviour - it INVENTS behaviour of its own: `PageSize * PageIndex` wraps to a NEGATIVE
+        // number, and `BETWEEN <negative> AND <negative>` is a statement that silently matches no row
+        // rather than one that reports a fault, which is the worst of the three possible outcomes.
+        // Second, the widths differ: PowerScript `long` is 32-bit [:L36-L37] while these fields are
+        // 64-bit, so the wrap point is not the legacy's either - there is no legacy behaviour here to
+        // be faithful to.
+        //
+        // THE GUARD THAT MATTERS IS UPSTREAM, in PagingRewriteRequest.HasRepresentablePagingProducts,
+        // which the dispatcher tests BEFORE any statement is parsed and answers the same
+        // invalid-paging outcome the oracle's own bounds test answers [:L307-L310]. `checked` here is
+        // the backstop for a caller that reaches this arm directly - which is to say a test - so that
+        // such a caller gets an exception rather than a plausible-looking statement built on a
+        // negative bound.
+        long upperRowNumber = checked(request.PageSize * request.PageIndex);        // [:L394], [:L395]
+        long lowerRowNumber = checked((request.PageSize * (request.PageIndex - 1)) + 1);  // ONE BASED
 
         // INVARIANT CULTURE IS MANDATORY. PowerBuilder's `String(long)` emits plain digits with no
         // group separator and a culture-independent sign, so a culture-sensitive conversion here
@@ -588,7 +603,14 @@ internal sealed class OraclePagingRewriter : IPagingRewriter
         // READ HERE, INSIDE THE CONCATENATION, AND THEREFORE AFTER THE STRIP ABOVE. This single call
         // position is what guarantees the innermost derived table carries no ORDER BY. Hoisting it
         // above the strip would be a one-line change that still compiles, still parses and is wrong.
-        builder.Append(statement.GetSql());
+        //
+        // THE UNTERMINATED READ, AND THE DISTINCTION IS NOT COSMETIC. This text becomes the INNERMOST
+        // DERIVED TABLE - the very next character appended is `)` and three more nesting levels of
+        // statement follow it - so a trailing `;` retained here would terminate the whole generated
+        // statement inside the first parenthesis and silently discard the row-number projection, both
+        // WHERE clauses and every alias. A review found exactly that. The caller's own terminator is
+        // re-attached at the OUTERMOST end below.
+        builder.Append(statement.GetSqlWithoutTerminator());
 
         // ") " + <inner-inner alias> + ") " + <inner alias> + " WHERE " + <row-number alias> + " <= "
         // The first `)` closes the innermost derived table and is followed by its alias; the second
@@ -628,6 +650,13 @@ internal sealed class OraclePagingRewriter : IPagingRewriter
         builder.Append(lowerRowNumberText);
         builder.Append(" AND ");
         builder.Append(upperRowNumberText);
+
+        // THE CALLER'S TERMINATOR, RE-ATTACHED AT THE OUTERMOST END AND NOWHERE ELSE. Empty for a
+        // statement that carried none, which is every statement the legacy fixtures supply, so this
+        // appends nothing at all on the measured path and the byte-exact expectations are unchanged.
+        // For a statement that DID carry one, this is the only position where a terminator is still a
+        // terminator rather than a truncation.
+        builder.Append(statement.StatementTerminator);
 
         // [:L403] `return RetCode.OK`, reached at [:L399] once the arm falls out of the choose case.
         // THE RESULT IS THE CONCATENATION ITSELF. The other arm finishes with a re-read of the model

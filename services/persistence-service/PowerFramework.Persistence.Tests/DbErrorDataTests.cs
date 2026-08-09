@@ -66,6 +66,7 @@
 //  against.
 // ==============================================================================================
 
+using System.Text.Json;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Persistence.Errors;
 using Xunit;
@@ -631,11 +632,16 @@ public sealed class DbErrorDataTests
     // ==========================================================================================
 
     /// <summary>
-    /// The compiler-generated <c>ToString()</c> renders the members in declaration order, which is
-    /// the oracle's order [dberrordata.srs:L4-L8] and the wire mirror's field order. Asserted as
-    /// relative positions rather than as one exact string so the test pins the ORDER without
-    /// becoming a brittle snapshot of the record formatting.
+    /// The renderer names the members in declaration order, which is the oracle's order
+    /// [dberrordata.srs:L4-L8] and the wire mirror's field order. Asserted as relative positions
+    /// rather than as one exact string so the test pins the ORDER without becoming a brittle snapshot.
     /// </summary>
+    /// <remarks>
+    /// <c>ToString()</c> IS HAND-WRITTEN RATHER THAN COMPILER-GENERATED, and this test is why the
+    /// hand-written one still names every member: withholding the statement's VALUE is the point, and
+    /// dropping the member NAME with it would have made the diagnostic unreadable and broken the wire
+    /// mirror's ordering guarantee at the same time. The withholding itself is asserted separately below.
+    /// </remarks>
     [Fact]
     public void ToString_RendersMembersInLegacyDeclarationOrder()
     {
@@ -678,6 +684,173 @@ public sealed class DbErrorDataTests
     /// numeric value of <c>RetCode.E_INVALID_TRANSACTION</c> to mirror :L177 without restating the
     /// preserved constant spelling in this file.
     /// </summary>
+    // ==========================================================================================
+    //  THE CONTAINMENT OF THE RAW PAYLOAD - three doors, each closed and each tested
+    // ==========================================================================================
+
+    /// <summary>
+    /// The raw payload type is <see langword="internal"/>, so no consumer outside this assembly can
+    /// hold it - and therefore cannot print it, serialize it or hand it anywhere.
+    /// </summary>
+    /// <remarks>
+    /// THE FIRST OF THE THREE DOORS. As a public type this payload could cross an assembly boundary
+    /// carrying the complete generated statement with its interpolated literal values; the only shape
+    /// that may now cross is the redacted wire <c>DbError</c>. This suite can still construct one only
+    /// because the csproj grants it <c>InternalsVisibleTo</c>, which is what makes the containment
+    /// testable rather than merely asserted - and note that <c>ToDbError</c> and the payload overload of
+    /// <c>SqlRedactor.Redact</c> followed the payload down to internal for the same reason.
+    /// </remarks>
+    [Fact]
+    public void TheRawPayloadIsInternalSoItCannotLeaveThisAssembly()
+    {
+        Assert.False(typeof(DbErrorData).IsPublic);
+        Assert.True(typeof(DbErrorData).IsNotPublic);
+
+        // The two members that take or return it went with it, so there is no public signature left
+        // through which an outside caller could obtain one.
+        Assert.False(typeof(DbErrorDataExtensions).IsPublic);
+        Assert.DoesNotContain(
+            typeof(SqlRedactor)
+                .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance),
+            method => method.ReturnType == typeof(DbErrorData));
+
+        // But the STRING member of the abstraction stays public: nothing about containing the payload
+        // narrows the redactor itself, which every caller still needs.
+        Assert.True(typeof(ISqlRedactor).IsPublic);
+        Assert.True(typeof(SqlRedactor).IsPublic);
+    }
+
+    /// <summary>
+    /// <c>ToString()</c> never renders the statement text - which the compiler-generated renderer did,
+    /// in full.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SECOND DOOR, AND THE ONE THAT NEEDED NO BYPASS TO OPEN. A record's generated renderer prints
+    /// every member, so <c>logger.LogError("update failed: {Error}", dbErrData)</c> - the single most
+    /// natural line anyone would write at a database-error site - emitted the whole statement into the
+    /// log. The redactor could not help: it was never called.
+    /// </para>
+    /// <para>
+    /// The statement below is shaped like a real interpolated one so that the assertion is meaningful:
+    /// it carries a quoted name, a bare number and a blob, which are the three literal forms
+    /// <c>DisableBind=1</c> produces.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ToString_NeverRendersTheStatementText()
+    {
+        const string statement =
+            "UPDATE COMPANY SET NAME = 'Alice', SALARY = 12345, ADDRESS = 0xDEADBEEF WHERE ID = 7";
+
+        string rendered = DbErrorData
+            .FromStatement(-1, "constraint violated", statement, DwBuffer.Primary, 1)
+            .ToString();
+
+        Assert.DoesNotContain(statement, rendered, StringComparison.Ordinal);
+
+        foreach (string fragment in new[] { "Alice", "12345", "0xDEADBEEF", "UPDATE", "COMPANY", "SET" })
+        {
+            Assert.DoesNotContain(fragment, rendered, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// What the renderer DOES say about the statement: that one was present, and how long it was.
+    /// </summary>
+    /// <remarks>
+    /// PRESENCE AND LENGTH ARE STRUCTURE, NOT DATA, and they are what a reader needs in order to
+    /// correlate a local diagnostic with the redacted wire payload for the same failure. An absent
+    /// statement renders distinctly from a present one, because six of the nine legacy raise sites leave
+    /// it empty and "no statement" is a materially different diagnostic from "a statement I am not
+    /// showing you".
+    /// </remarks>
+    [Fact]
+    public void ToString_RendersThePresenceAndLengthOfTheStatementAndNothingElseAboutIt()
+    {
+        const string statement = "SELECT 1";
+
+        string present = DbErrorData
+            .FromStatement(-1, "synthetic", statement, DwBuffer.Primary, 1)
+            .ToString();
+
+        Assert.Contains("<withheld, 8 chars>", present, StringComparison.Ordinal);
+
+        string absent = DbErrorData.FromTransaction(-1, "synthetic").ToString();
+
+        Assert.Contains("<none>", absent, StringComparison.Ordinal);
+        Assert.DoesNotContain("withheld", absent, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The other four members render in full, including the driver's message text (C-B).
+    /// </summary>
+    /// <remarks>
+    /// WITHHOLDING MORE WOULD PROTECT NOTHING AND COST SOMETHING. The outward projection copies the
+    /// provider code, the message, the buffer and the row through untouched, so those four are already
+    /// published on the wire; hiding them locally would make the local diagnostic strictly less useful
+    /// than the payload it exists to help interpret. That includes the one Chinese diagnostic the legacy
+    /// synthesizes [n_cst_thread_task_sqlupdate.sru:L190], which is asserted by name.
+    /// </remarks>
+    [Fact]
+    public void ToString_RendersTheOtherFourMembersInFull()
+    {
+        string rendered = new DbErrorData
+        {
+            SqlDbCode = -28,
+            SqlErrText = DbErrorMessages.NoUpdatableTable,
+            SqlSyntax = "SELECT 1",
+            Buffer = DwBuffer.Filter,
+            Row = 42,
+        }.ToString();
+
+        Assert.Contains("-28", rendered, StringComparison.Ordinal);
+        Assert.Contains(DbErrorMessages.NoUpdatableTable, rendered, StringComparison.Ordinal);
+        Assert.Contains("Filter", rendered, StringComparison.Ordinal);
+        Assert.Contains("42", rendered, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Serializing the payload cannot emit the statement, even from inside this assembly.
+    /// </summary>
+    /// <remarks>
+    /// THE THIRD DOOR. Internal visibility stops an outside consumer, but every member had a public
+    /// getter, so any serializer reached inside this assembly wrote the statement out - a leak reached
+    /// through a different default rather than a different intention. <c>[JsonIgnore]</c> on the member
+    /// closes it. The other four members still serialize, so the attribute is scoped to the one value
+    /// that must not travel unmasked rather than disabling serialization wholesale.
+    /// </remarks>
+    [Fact]
+    public void SerializingThePayloadCannotEmitTheStatement()
+    {
+        const string statement = "UPDATE COMPANY SET NAME = 'Alice' WHERE ID = 7";
+
+        string json = JsonSerializer.Serialize(
+            DbErrorData.FromStatement(-1, "synthetic", statement, DwBuffer.Delete, 3));
+
+        Assert.DoesNotContain("Alice", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("SqlSyntax", json, StringComparison.Ordinal);
+
+        // The rest of the payload is unaffected: this is a scoped exclusion, not a blanket one.
+        Assert.Contains("SqlErrText", json, StringComparison.Ordinal);
+        Assert.Contains("synthetic", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sanctioned door stays open and still masks: containment did not narrow the wire path.
+    /// </summary>
+    [Fact]
+    public void TheSanctionedOutwardPathStillWorksAndStillMasks()
+    {
+        DbError wire = DbErrorData
+            .FromStatement(-1, "synthetic", "UPDATE COMPANY SET NAME = 'Alice'", DwBuffer.Primary, 1)
+            .ToDbError();
+
+        Assert.DoesNotContain("Alice", wire.Sqlsyntax, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, wire.Sqlsyntax, StringComparison.Ordinal);
+        Assert.Equal("synthetic", wire.Sqlerrtext);
+    }
+
     private static long PopulateOnConnectFailure(ref DbErrorData dbErrData, long code, string text)
     {
         dbErrData = dbErrData with { SqlDbCode = code, SqlErrText = text };

@@ -146,6 +146,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Microsoft.Extensions.Options;
+using PowerFramework.DataServices.Expressions;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.DataServices.Configuration;
@@ -435,11 +436,24 @@ public sealed class ContextMenuOptions
 /// Column-expression engine behaviour. Bound from <c>DataServices:ColumnExpression</c>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Ported from <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru</c>, at
-/// 2,435 lines the largest in-scope legacy object. Only the three values the legacy object exposes
-/// as varying state appear here. Its grammar sentinels, its tri-state calculation cache and its
+/// 2,435 lines the largest in-scope legacy object. THREE of the settings below are the values that
+/// object exposes as varying state. Its grammar sentinels, its tri-state calculation cache and its
 /// variable-kind discriminators are engine internals, and a value no deployment may vary is not a
 /// setting.
+/// </para>
+/// <para>
+/// THE FOURTH AND FIFTH SETTINGS ARE NOT LEGACY DEFAULTS, AND MUST NOT BE READ AS ONE.
+/// <see cref="PageResolution"/> and <see cref="PageRowsPerPage"/> have no counterpart in the legacy
+/// object at all, because the legacy is an in-process library inside a PowerBuilder application that
+/// OWNED its own band geometry: <c>for page</c> simply asked the runtime which rows were on the page.
+/// Decomposition put that geometry in the deferred DesignSystem, reserved at <c>/v1/design/**</c>
+/// (AAP 0.4.4), so the headless half has to be TOLD the pagination - and being told once, in
+/// configuration, is what makes the answer attributable to a stated fact rather than to a default.
+/// They are annotated as new rather than dressed as preserved, because a fabricated legacy locator
+/// would be worse than no locator.
+/// </para>
 /// </remarks>
 public sealed class ColumnExpressionOptions
 {
@@ -520,6 +534,69 @@ public sealed class ColumnExpressionOptions
     /// </remarks>
     [Range(1, int.MaxValue)]
     public int CalcStackInitialCapacity { get; set; } = 20;
+
+    /// <summary>
+    /// The pagination that <c>for page</c> aggregates are measured against. Defaults to
+    /// <see cref="ExpressionPageResolution.WholeBuffer"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>NOT A PRESERVED LEGACY DEFAULT - see the note on this class.</b> The legacy had no such setting
+    /// because a PowerBuilder application owned its own band geometry and <c>for page</c> asked the
+    /// runtime which rows were on the page. That geometry is the deferred DesignSystem's half, so the
+    /// headless engine takes the range from <see cref="IExpressionPageResolver"/> and this setting is how
+    /// a deployment states which one it means.
+    /// </para>
+    /// <para>
+    /// <b>WHY IT EXISTS: WITHOUT IT, THE DEPLOYED SERVICE REFUSED <c>for page</c> ENTIRELY.</b> The
+    /// evaluator's class default is <see cref="UnresolvedPageResolver"/> - correct for an evaluator built
+    /// by code that has stated nothing - so
+    /// <c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L27</c>'s <c>sum(salary for page)</c>, the only
+    /// <c>for page</c> expression in the repository, answered the malformed sentinel in the running
+    /// service unless some wiring site remembered to inject a resolver. A capability that works only when
+    /// someone remembers is not wired.
+    /// </para>
+    /// <para>
+    /// <b>THE DEFAULT IS <see cref="ExpressionPageResolution.WholeBuffer"/>, AND IT IS EVIDENCED.</b> The
+    /// one surface this system has evidence for declares no page-break band and its only <c>for page</c>
+    /// use is a footer sum over a four-row fixture, so "this surface is one page" is measured rather than
+    /// assumed. It is still a STATEMENT: a paginated deployment must choose
+    /// <see cref="ExpressionPageResolution.FixedRowsPerPage"/>, or
+    /// <see cref="ExpressionPageResolution.Unresolved"/> to restore the refusal, because leaving this
+    /// value in place on a paginated surface returns the grand total where the page total was asked for.
+    /// </para>
+    /// <para>
+    /// The validator rejects any value outside the three declared members, so a mistyped setting fails
+    /// startup rather than silently selecting a resolver.
+    /// </para>
+    /// </remarks>
+    public ExpressionPageResolution PageResolution { get; set; } = ExpressionPageResolution.WholeBuffer;
+
+    /// <summary>
+    /// The number of detail rows on a page, used only when <see cref="PageResolution"/> is
+    /// <see cref="ExpressionPageResolution.FixedRowsPerPage"/>. Defaults to <c>0</c>, meaning unstated.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>NOT A PRESERVED LEGACY DEFAULT</b>, for the same reason as <see cref="PageResolution"/>: the
+    /// legacy derived a page from band heights, which this service does not have.
+    /// </para>
+    /// <para>
+    /// <b>THE VALIDATOR ENFORCES THE COUPLING IN BOTH DIRECTIONS, and the second direction is the one
+    /// worth stating.</b> A value is REQUIRED and must be positive when the mode is
+    /// <see cref="ExpressionPageResolution.FixedRowsPerPage"/> - a page of zero rows describes no
+    /// pagination. And a positive value is REFUSED when the mode is anything else, rather than being
+    /// ignored: an operator who wrote <c>PageRowsPerPage: 50</c> and left the mode alone has stated a
+    /// pagination that would not be applied, and silently ignoring it is how a page total becomes a grand
+    /// total with nothing in the configuration to show why.
+    /// </para>
+    /// <para>
+    /// Zero rather than a nullable integer, because zero is already the "no pagination at all" value the
+    /// resolver itself rejects, so it carries the unstated meaning without a second kind of absence.
+    /// </para>
+    /// </remarks>
+    [Range(0, int.MaxValue)]
+    public int PageRowsPerPage { get; set; }
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1350,11 +1427,12 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
         // the legacy, whose declarations at n_cst_dwsvc_contextmenu.sru:L49-L53 are directly
         // assignable rather than guarded. There is nothing here to check, so nothing is checked.
 
-        // --- ColumnExpression: the two numeric bounds carried by its annotations ----------------
+        // --- ColumnExpression: the numeric bounds, plus the page-resolution coupling -------------
         path = string.Concat(prefix, ":ColumnExpression");
         if (EnsureGroupBound(options.ColumnExpression, path, failures))
         {
             AppendAnnotationFailures(options.ColumnExpression, path, failures);
+            AppendPageResolutionFailures(options.ColumnExpression, path, failures);
         }
 
         // --- DropDownSearch: DELIBERATELY UNVALIDATED, and the omission is the rule --------------
@@ -1487,6 +1565,74 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
             {
                 failures.Add(string.Concat(configurationPath, " ", message));
             }
+        }
+    }
+
+    /// <summary>
+    /// Appends failures for the page-resolution pair: an undeclared mode, and a row count that
+    /// contradicts the mode in either direction.
+    /// </summary>
+    /// <param name="options">The bound column-expression group.</param>
+    /// <param name="configurationPath">The group's configuration path, for the message.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// <para>
+    /// EXPRESSED HERE RATHER THAN AS ATTRIBUTES BECAUSE NO SINGLE ATTRIBUTE CAN SAY "these two must
+    /// agree". The <c>[Range]</c> annotation on the row count already bounds it on its own; what it cannot
+    /// state is that the bound depends on a sibling's value.
+    /// </para>
+    /// <para>
+    /// THE UNDECLARED-MODE CHECK IS NOT REDUNDANT WITH THE ENUM TYPE. Configuration binding will happily
+    /// produce <c>(ExpressionPageResolution)7</c> from the string <c>"7"</c>, and the factory's
+    /// unrecognised arm throws for it - which is the right backstop and the wrong FIRST failure, because
+    /// an operator gets an exception from a resolver instead of a named configuration path. Checking here
+    /// means a mistyped mode fails startup naming the setting.
+    /// </para>
+    /// <para>
+    /// THE ROW COUNT IS CHECKED IN BOTH DIRECTIONS, and the second is the one that catches a real
+    /// mistake: a positive count with a mode that ignores it is a stated pagination that would not be
+    /// applied, so it is REFUSED rather than passed over. Silently ignoring it is how a page total becomes
+    /// a grand total with nothing in the configuration to show why.
+    /// </para>
+    /// </remarks>
+    private static void AppendPageResolutionFailures(
+        ColumnExpressionOptions options,
+        string configurationPath,
+        List<string> failures)
+    {
+        if (!Enum.IsDefined(options.PageResolution))
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":PageResolution must be Unresolved, WholeBuffer or FixedRowsPerPage. It states the ",
+                "pagination that `for page` aggregates are measured against - see ",
+                "ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L27 for the only such expression in the ",
+                "repository - and there is deliberately no fallback for an unrecognised value."));
+
+            // No point testing the coupling against a mode that is not a mode.
+            return;
+        }
+
+        if (options.PageResolution == ExpressionPageResolution.FixedRowsPerPage)
+        {
+            if (options.PageRowsPerPage <= 0)
+            {
+                failures.Add(string.Concat(
+                    configurationPath,
+                    ":PageRowsPerPage must be positive when PageResolution is FixedRowsPerPage: a page ",
+                    "of zero or fewer rows describes no pagination at all."));
+            }
+
+            return;
+        }
+
+        if (options.PageRowsPerPage != 0)
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":PageRowsPerPage must be 0 unless PageResolution is FixedRowsPerPage. It is refused ",
+                "rather than ignored because a stated page size that is not applied is how a page ",
+                "total silently becomes a grand total, with nothing in the configuration to show why."));
         }
     }
 

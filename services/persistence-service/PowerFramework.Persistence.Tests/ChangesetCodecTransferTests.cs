@@ -45,13 +45,13 @@ public sealed class ChangesetCodecTransferTests
     {
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        foreach ((byte[] payload, long chunkCount, long chunkIndex, bool fullState) in sink.Chunks)
+        foreach ((CarrierState? state, long chunkCount, long chunkIndex, bool fullState) in sink.Chunks)
         {
             Assert.False(fullState);
 
             ChangesetApplyOutcome outcome = codec.ApplyChunk(
                 target,
-                new ChangesetChunk(payload, chunkCount, chunkIndex),
+                new ChangesetChunk(state, chunkCount, chunkIndex),
                 cancellationToken);
 
             Assert.Equal(DataWindowBufferStore.DataStoreSuccess, outcome.Result);
@@ -131,9 +131,14 @@ public sealed class ChangesetCodecTransferTests
         Assert.True(outcome.PayloadCleared);
         Assert.Null(outcome.ErrorText);
 
-        (byte[] payload, long chunkCount, long chunkIndex, bool fullState) = Assert.Single(sink.Chunks);
+        (CarrierState? state, long chunkCount, long chunkIndex, bool fullState) =
+            Assert.Single(sink.Chunks);
 
-        Assert.Empty(payload);
+        // THE EMPTY-CARRIER ARM SENDS NO STATE AT ALL, which is this contract's spelling of the legacy's
+        // zero-length blob [:L230] - and it is what tells the receiving side to CLEAR rather than merge.
+        // A state carrying three EMPTY segments would be a different message with a different meaning:
+        // "here is an image, and it happens to hold nothing".
+        Assert.Null(state);
         Assert.Equal(1L, chunkCount);
         Assert.Equal(1L, chunkIndex);
         Assert.False(fullState);
@@ -253,12 +258,13 @@ public sealed class ChangesetCodecTransferTests
 
         long expectedIndex = 1L;
 
-        foreach ((byte[] payload, long chunkCount, long chunkIndex, bool fullState) in sink.Chunks)
+        foreach ((CarrierState? state, long chunkCount, long chunkIndex, bool fullState) in sink.Chunks)
         {
             Assert.False(fullState);
             Assert.Equal(4L, chunkCount);
             Assert.Equal(expectedIndex, chunkIndex);
-            Assert.NotEmpty(payload);
+            Assert.NotNull(state);
+            Assert.NotEmpty(state.Segments);
             expectedIndex++;
         }
     }
@@ -404,7 +410,7 @@ public sealed class ChangesetCodecTransferTests
 
         // Each recorded copy is still intact, which proves the clear released the SENDER's reference
         // rather than mutating a payload the receiver already owns.
-        Assert.All(sink.Chunks, chunk => Assert.NotEmpty(chunk.Payload));
+        Assert.All(sink.Chunks, chunk => Assert.NotNull(chunk.State));
     }
 
     [Theory]

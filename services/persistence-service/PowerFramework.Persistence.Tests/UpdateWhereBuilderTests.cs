@@ -220,10 +220,40 @@ public sealed class UpdateWhereBuilderTests
     }
 
     [Fact]
-    public void BuildModificationString_AlwaysEmitsTheUpdateTable_EvenWhenTheNameIsEmpty()
+    public void BuildModificationString_EmitsTheUpdateTableUnconditionally_ForEveryNameItAdmits()
     {
-        // :L143 is unconditional. Add-time validation is what normally prevents an empty name, and the
-        // builder deliberately does not re-check it - so this emits `= ''` rather than failing.
+        // :L143 IS UNCONDITIONAL, and this is what "unconditional" now means: the line is emitted with
+        // no regard to whether any OTHER field was stated - no updatable-column count, no key-column
+        // count, no identity column, neither optional setting, and a column count of zero so the reset
+        // pass emits nothing at all. The only thing that can stop it is the name itself failing the
+        // identifier grammar, which the sibling test below covers.
+        UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
+            "COMPANY",
+            ["a"],
+            ["a"],
+            string.Empty,
+            updateWhere: null,
+            updateKeyInPlace: null);
+
+        FakeUpdateTarget target = new() { ColumnCount = 0 };
+        target.ColumnIds["a" + UpdateWhereBuilder.ColumnIdSuffix] = 1;
+
+        ModificationScriptResult result =
+            UpdateWhereBuilder.BuildModificationString(descriptor, target);
+
+        Assert.True(result.IsSucceeded);
+        Assert.EndsWith("DataWindow.Table.UpdateTable = 'COMPANY'", result.Script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildModificationString_RefusesAnEmptyUpdateTableRatherThanEmittingAnEmptyQuotedName()
+    {
+        // THE NARROWED ARM, AND WHY THE NARROWING IS THE POINT. This case previously succeeded and
+        // emitted `DataWindow.Table.UpdateTable = ''`, which the legacy would also have emitted - the
+        // builder trusted add-time validation to have rejected an empty name first. Across a network
+        // boundary that trust is misplaced: persistence.v1.TableUpdateContract carries the name from a
+        // remote caller, and a descriptor can also be built through Create or a `with` expression
+        // without passing the admission boundary at all. So the builder is fail-closed and refuses.
         UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
             string.Empty,
             ["a"],
@@ -238,8 +268,13 @@ public sealed class UpdateWhereBuilderTests
         ModificationScriptResult result =
             UpdateWhereBuilder.BuildModificationString(descriptor, target);
 
-        Assert.True(result.IsSucceeded);
-        Assert.EndsWith("DataWindow.Table.UpdateTable = ''", result.Script, StringComparison.Ordinal);
+        Assert.False(result.IsSucceeded);
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, result.Code);
+        Assert.Equal(UpdateWhereBuilder.UnsafeUpdateTableMessage, result.ErrorText);
+
+        // AND THE DIAGNOSTIC CARRIES NO SCRIPT FRAGMENT. The offending text is the caller's own, so
+        // echoing it into a message that may be logged would put caller-chosen script in the log.
+        Assert.DoesNotContain("DataWindow", result.ErrorText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -408,10 +443,12 @@ public sealed class UpdateWhereBuilderTests
     }
 
     [Fact]
-    public void BuildModificationString_WhitespaceIdentityColumn_IsTreatedAsPresent()
+    public void BuildModificationString_WhitespaceIdentityColumn_IsPresentToTheOraclesTestAndRefusedByTheGrammar()
     {
-        // :L127 is the exact comparison `<> ""`, so a single space counts as present. A
-        // whitespace-aware test would have skipped it and diverged.
+        // BOTH HALVES IN ONE TEST, BECAUSE THE INTERESTING FACT IS THAT THEY DISAGREE. :L127 is the
+        // exact comparison `<> ""`, so a single space counts as PRESENT - and HasIdentityColumn is
+        // asserted here to prove that transcription is untouched. A whitespace-aware presence test
+        // would have skipped the column entirely and diverged from the oracle.
         UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
             FixtureTable,
             FixtureColumns,
@@ -420,10 +457,41 @@ public sealed class UpdateWhereBuilderTests
             updateWhere: null,
             updateKeyInPlace: null);
 
+        Assert.True(descriptor.HasIdentityColumn);
+
+        // Being PRESENT is what sends it to the grammar, and the grammar refuses it: a space is not an
+        // identifier, so ` .Identity = yes` - a line naming no column at all - is never emitted.
         ModificationScriptResult result =
             UpdateWhereBuilder.BuildModificationString(descriptor, FixtureTarget());
 
-        Assert.Contains(" .Identity = yes", result.Script, StringComparison.Ordinal);
+        Assert.False(result.IsSucceeded);
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, result.Code);
+        Assert.Equal(UpdateWhereBuilder.InvalidColumnNameMessage + " ", result.ErrorText);
+        Assert.DoesNotContain(".Identity = yes", result.Script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildModificationString_AnAbsentIdentityColumnNeverReachesTheGrammar()
+    {
+        // THE ORDERING THAT MATTERS: the grammar sits INSIDE the presence test, so an empty identity
+        // column - which is legal and means "this table has no auto-increment column" [:L127] - is not
+        // handed to a check that would refuse it for being empty. Getting this backwards would reject
+        // every table without an identity column, which is most of them.
+        UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
+            FixtureTable,
+            FixtureColumns,
+            [FixtureKeyColumn],
+            identityColumn: string.Empty,
+            updateWhere: null,
+            updateKeyInPlace: null);
+
+        Assert.False(descriptor.HasIdentityColumn);
+
+        ModificationScriptResult result =
+            UpdateWhereBuilder.BuildModificationString(descriptor, FixtureTarget());
+
+        Assert.True(result.IsSucceeded);
+        Assert.DoesNotContain(".Identity = yes", result.Script, StringComparison.Ordinal);
     }
 
     #endregion
@@ -618,14 +686,34 @@ public sealed class UpdateWhereBuilderTests
     }
 
     [Fact]
-    public void AddUpdatableTable_WhitespaceName_IsAcceptedBecauseTheOracleComparesAgainstEmptyExactly()
+    public void AddUpdatableTable_WhitespaceName_PassesTheOraclesArmAndIsThenRefusedByTheGrammar()
     {
+        // THE ONE OBSERVABLE NARROWING IN THIS FILE, ASSERTED FROM BOTH SIDES SO NEITHER CAN DRIFT.
+        // IsAcceptable is the oracle's `name = ""` arm and STILL ADMITS a single space - that
+        // transcription is unchanged and is asserted directly. IsScriptSafe is the new boundary guard
+        // and refuses it, because a table name of one space is not a table any database has and the
+        // contract now carries the name from a remote caller.
+        UpdatableTableDescriptor probe = UpdatableTableDescriptor.Create(
+            " ",
+            FixtureColumns,
+            [FixtureKeyColumn],
+            "id",
+            updateWhere: null,
+            updateKeyInPlace: null);
+
+        Assert.True(probe.IsAcceptable);
+        Assert.False(probe.IsScriptSafe);
+
         UpdatableTableCollection tables = new();
 
         long code = tables.AddUpdatableTable(" ", FixtureColumns, [FixtureKeyColumn], "id");
 
-        Assert.Equal(RetCode.OK, code);
-        Assert.Equal(" ", tables.DescriptorAt(1).Name);
+        // THE SAME CODE THE ORACLE'S OWN ARMS ANSWER, deliberately - a caller already handles it, and
+        // the two refusals mean the same thing: this descriptor was not admitted.
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, code);
+
+        // AND NOTHING WAS STORED, so a refused descriptor cannot be reached through DescriptorAt.
+        Assert.Equal(0, tables.UpperBound);
     }
 
     [Fact]
@@ -1642,6 +1730,430 @@ public sealed class UpdateWhereBuilderTests
         Assert.Equal(7L, refresh.Row);
         Assert.Equal(3, refresh.ColumnNumber);
         Assert.Equal(new KeyColumnRefresh(7L, 3), refresh);
+    }
+
+    #endregion
+
+
+    #region The identifier grammar - the guard the legacy does not have and this boundary must
+
+    /// <summary>
+    /// Every character sequence that could end the assignment it is in, or begin one the caller wrote.
+    /// </summary>
+    /// <remarks>
+    /// EACH CASE IS A DISTINCT MECHANISM RATHER THAN A VARIATION, because a blocklist-shaped guard
+    /// passes a list like this and still fails on the character nobody listed. The grammar admits only
+    /// segment characters, so these all fall out of one rule - and the matrix is what proves it.
+    /// </remarks>
+    public static TheoryData<string, string?> RefusedNames =>
+        new()
+        {
+            { "null", null },
+            { "empty", "" },
+            { "a single space - not a column, and not a table", " " },
+            { "leading space", " id" },
+            { "trailing space", "id " },
+            { "interior space, which would make it two script tokens", "my id" },
+            { "a line feed, which is the script's own line separator", "id\nname" },
+            { "a carriage return", "id\rname" },
+            { "a tab", "id\tname" },
+            { "a null character", "id\0name" },
+            { "an apostrophe, which closes a quoted value", "id'" },
+            { "a double quote", "id\"" },
+            { "a backtick", "id`" },
+            { "a tilde, PowerScript's escape character", "id~n" },
+            { "an equals sign, the assignment operator itself", "id=name" },
+            { "a leading dot", ".id" },
+            { "a trailing dot", "id." },
+            { "a semicolon", "id;" },
+            { "a comma, which would make it a list", "id,name" },
+            { "a digit first, which is not an identifier", "1id" },
+            { "an opening bracket", "id[1]" },
+            { "a parenthesis", "count(id)" },
+            { "a hyphen", "my-id" },
+            { "an asterisk", "*" },
+            { "PROPERTY INJECTION - a second assignment that disables concurrency checking", "age\nDataWindow.Table.UpdateWhere = '0'" },
+            { "PROPERTY INJECTION - an attribute hijack on a real column", "id.Key = no\nid.Update" },
+            { "UPDATE-TABLE REDIRECTION - closes the quote and retargets the update", "COMPANY' \nDataWindow.Table.UpdateTable = 'SALARIES" },
+        };
+
+    /// <param name="because">Why the name is refused, so a failure message names the mechanism.</param>
+    /// <param name="name">The candidate name.</param>
+    [Theory]
+    [MemberData(nameof(RefusedNames))]
+    public void TheColumnGrammarRefusesAnythingThatIsNotOneIdentifierSegment(string because, string? name)
+    {
+        Assert.False(UpdateWhereBuilder.IsScriptSafeColumnName(name), because);
+    }
+
+    /// <param name="because">Why the name is refused, so a failure message names the mechanism.</param>
+    /// <param name="name">The candidate name.</param>
+    /// <remarks>
+    /// THE TABLE GRAMMAR IS NOT LOOSER EXCEPT IN ONE RESPECT. It admits dots BETWEEN segments so a
+    /// schema-qualified name passes, and this theory drives the SAME matrix to prove that is the only
+    /// difference - every other refusal above holds for a table name too. The three dot cases in the
+    /// matrix are malformed qualification rather than qualification, so they are refused here as well.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(RefusedNames))]
+    public void TheTableGrammarRefusesTheSameFormsExceptWellFormedQualification(string because, string? name)
+    {
+        Assert.False(UpdateWhereBuilder.IsScriptSafeTableName(name), because);
+    }
+
+    /// <summary>
+    /// Well-formed dotted names: refused as a COLUMN, admitted as a TABLE.
+    /// </summary>
+    /// <remarks>
+    /// SEPARATE FROM <see cref="RefusedNames"/> BECAUSE THEY ARE NOT UNIVERSALLY REFUSED, and folding
+    /// them in would have forced the table theory to make an exception - which is how a matrix stops
+    /// proving anything. Each of these is a legitimate schema-qualified table name AND an attribute
+    /// hijack when used as a column: <c>id.Key</c> passed as an updatable column emits
+    /// <c>id.Key.Update = yes</c>, aiming the assignment at a property rather than a column.
+    /// </remarks>
+    public static TheoryData<string> DottedNames =>
+        [
+            "id.Key",
+            "id.Update",
+            "id.Identity",
+            "dbo.COMPANY",
+            "a.b.c",
+        ];
+
+    /// <param name="name">The dotted name.</param>
+    [Theory]
+    [MemberData(nameof(DottedNames))]
+    public void ADottedNameIsRefusedAsAColumnAndAdmittedAsATable(string name)
+    {
+        Assert.False(UpdateWhereBuilder.IsScriptSafeColumnName(name));
+        Assert.True(UpdateWhereBuilder.IsScriptSafeTableName(name));
+    }
+
+    /// <param name="name">The dotted name.</param>
+    /// <remarks>
+    /// AND THE ASYMMETRY IS WIRED IN, not merely available on the predicates: the same name that is a
+    /// perfectly good table is refused when it arrives in any of the three column positions.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(DottedNames))]
+    public void ADottedNameIsRefusedInEveryColumnPositionAndAcceptedAsTheTable(string name)
+    {
+        UpdatableTableCollection tables = new();
+
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            tables.AddUpdatableTable(FixtureTable, [name], ["id"], string.Empty));
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            tables.AddUpdatableTable(FixtureTable, ["age"], [name], string.Empty));
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            tables.AddUpdatableTable(FixtureTable, ["age"], ["id"], name));
+        Assert.Equal(0, tables.UpperBound);
+
+        Assert.Equal(
+            RetCode.OK,
+            tables.AddUpdatableTable(name, ["age"], ["id"], string.Empty));
+        Assert.Equal(name, tables.DescriptorAt(1).Name);
+    }
+
+    /// <summary>
+    /// Every ordinary name, including the awkward ones, still passes.
+    /// </summary>
+    /// <remarks>
+    /// A GUARD THAT REFUSES LEGITIMATE INPUT IS A BEHAVIOUR CHANGE, so the accepting half of the
+    /// grammar is pinned as carefully as the refusing half. The fixture's own six columns are here
+    /// because they are the only column names in the repository with evidence behind them
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L13</c>].
+    /// </remarks>
+    public static TheoryData<string> AdmittedColumnNames =>
+        [
+            "id",
+            "name",
+            "age",
+            "address",
+            "salary",
+            "birth",
+            "ID",
+            "NAME",
+            "_internal",
+            "updated_at",
+            "column1",
+            "col_2_b",
+            "x$y",
+            "temp#1",
+            "aVeryLongButPerfectlyOrdinaryColumnNameThatGoesOnForAWhile",
+            "\u5217\u540d",
+            "n\u00e4me",
+        ];
+
+    /// <param name="name">The candidate name.</param>
+    [Theory]
+    [MemberData(nameof(AdmittedColumnNames))]
+    public void TheColumnGrammarAdmitsEveryOrdinaryColumnName(string name)
+    {
+        Assert.True(UpdateWhereBuilder.IsScriptSafeColumnName(name));
+
+        // AND EVERY COLUMN NAME IS ALSO A LEGAL TABLE NAME, since an unqualified table name is exactly
+        // one segment. The reverse does not hold, which the qualification theory below covers.
+        Assert.True(UpdateWhereBuilder.IsScriptSafeTableName(name));
+    }
+
+    /// <summary>
+    /// Schema-qualified table names pass; malformed qualification does not.
+    /// </summary>
+    public static TheoryData<string, bool> QualifiedTableNames =>
+        new()
+        {
+            { "COMPANY", true },
+            { "dbo.COMPANY", true },
+            { "SCHEMA.TABLE", true },
+            { "server.db.dbo.COMPANY", true },
+            { "_s._t", true },
+            { "dbo..COMPANY", false },
+            { "dbo.", false },
+            { ".COMPANY", false },
+            { "dbo.1COMPANY", false },
+            { "dbo.COMPANY'", false },
+            { "dbo. COMPANY", false },
+        };
+
+    /// <param name="name">The candidate table name.</param>
+    /// <param name="admitted">Whether it should be admitted.</param>
+    [Theory]
+    [MemberData(nameof(QualifiedTableNames))]
+    public void TheTableGrammarAdmitsQualificationAndRefusesMalformedQualification(string name, bool admitted)
+    {
+        Assert.Equal(admitted, UpdateWhereBuilder.IsScriptSafeTableName(name));
+    }
+
+    [Fact]
+    public void AQualifiedNameIsATableNameAndNeverAColumnName()
+    {
+        // THE ASYMMETRY, STATED DIRECTLY. A table name lands inside a QUOTED value where a dot is
+        // ordinary text; a column name lands UNQUOTED as the assignment target, where a dot chooses the
+        // attribute. Admitting dots for both would reopen exactly the injection the column rule closes.
+        Assert.True(UpdateWhereBuilder.IsScriptSafeTableName("dbo.COMPANY"));
+        Assert.False(UpdateWhereBuilder.IsScriptSafeColumnName("dbo.COMPANY"));
+    }
+
+    /// <summary>
+    /// The four positions a name occupies, each refused at the admission boundary.
+    /// </summary>
+    /// <remarks>
+    /// DRIVEN THROUGH AddUpdatableTable RATHER THAN THROUGH THE PREDICATE, so this asserts the guard is
+    /// actually WIRED IN at each of the four positions rather than merely available. A guard the front
+    /// door does not call is not a guard.
+    /// </remarks>
+    public static TheoryData<string, string, string[], string[], string> InjectedPositions =>
+        new()
+        {
+            {
+                "the table name - update-table redirection",
+                "COMPANY' \nDataWindow.Table.UpdateTable = 'SALARIES",
+                ["age"],
+                ["id"],
+                "id"
+            },
+            {
+                "an updatable column - property injection disabling the concurrency check",
+                FixtureTable,
+                ["age\nDataWindow.Table.UpdateWhere = '0'"],
+                ["id"],
+                "id"
+            },
+            {
+                "a key column - attribute hijack",
+                FixtureTable,
+                ["age"],
+                ["id.Key = no\nage"],
+                "id"
+            },
+            {
+                "the identity column",
+                FixtureTable,
+                ["age"],
+                ["id"],
+                "id\nDataWindow.Table.UpdateKeyinPlace = yes"
+            },
+        };
+
+    /// <param name="position">Which position carries the injection.</param>
+    /// <param name="table">The table name.</param>
+    /// <param name="updatable">The updatable columns.</param>
+    /// <param name="keys">The key columns.</param>
+    /// <param name="identity">The identity column.</param>
+    [Theory]
+    [MemberData(nameof(InjectedPositions))]
+    public void TheAdmissionBoundaryRefusesAnInjectionInAnyOfTheFourPositions(
+        string position,
+        string table,
+        string[] updatable,
+        string[] keys,
+        string identity)
+    {
+        UpdatableTableCollection tables = new();
+
+        long code = tables.AddUpdatableTable(table, updatable, keys, identity);
+
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, code);
+        Assert.Equal(0, tables.UpperBound);
+        Assert.False(tables.MultiTableUpdate, position);
+
+        // AND THE SIX-ARGUMENT FORM REFUSES IT TOO, since the four-argument form delegates to it and a
+        // caller stating both optional settings must not find a wider door.
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            tables.AddUpdatableTable(table, updatable, keys, identity, 1L, false));
+        Assert.Equal(0, tables.UpperBound);
+    }
+
+    /// <param name="position">Which position carries the injection.</param>
+    /// <param name="table">The table name.</param>
+    /// <param name="updatable">The updatable columns.</param>
+    /// <param name="keys">The key columns.</param>
+    /// <param name="identity">The identity column.</param>
+    /// <remarks>
+    /// THE SECOND DOOR. A descriptor can be built through Create or a <c>with</c> expression without
+    /// ever passing the admission boundary - the descriptor's own remarks acknowledge both as open - so
+    /// the builder is fail-closed independently. This drives the identical matrix straight into
+    /// <c>BuildModificationString</c> to prove it.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(InjectedPositions))]
+    public void TheBuilderRefusesAnInjectionEvenWhenTheDescriptorBypassedTheBoundary(
+        string position,
+        string table,
+        string[] updatable,
+        string[] keys,
+        string identity)
+    {
+        UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
+            table,
+            updatable,
+            keys,
+            identity,
+            updateWhere: null,
+            updateKeyInPlace: null);
+
+        FakeUpdateTarget target = FixtureTarget();
+
+        // Make every key column resolvable so a refusal cannot be mistaken for the oracle's own
+        // non-positive-identifier failure at :L119.
+        foreach (string key in keys)
+        {
+            target.ColumnIds[key + UpdateWhereBuilder.ColumnIdSuffix] = 1;
+        }
+
+        ModificationScriptResult result =
+            UpdateWhereBuilder.BuildModificationString(descriptor, target);
+
+        Assert.False(result.IsSucceeded, position);
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, result.Code);
+
+        // NOTHING THE CALLER WROTE REACHED THE SCRIPT. The failed result carries an empty script, so
+        // there is no half-built text for a caller to hand to Modify by mistake.
+        Assert.Equal(string.Empty, result.Script);
+    }
+
+    [Fact]
+    public void AnUnsafeKeyColumnNameNeverReachesDescribe()
+    {
+        // DESCRIBE TAKES A SPACE-SEPARATED LIST OF PROPERTY REQUESTS, so an unsafe key column name
+        // arrives at the carrier as SEVERAL requests and the number this step reads would be the answer
+        // to a request the caller composed. Guarding after the describe would already be too late,
+        // which is why the guard sits above it - and why this test asserts on the recorded requests
+        // rather than only on the result.
+        UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
+            FixtureTable,
+            ["age"],
+            ["id .Update"],
+            identityColumn: string.Empty,
+            updateWhere: null,
+            updateKeyInPlace: null);
+
+        FakeUpdateTarget target = FixtureTarget();
+
+        ModificationScriptResult result =
+            UpdateWhereBuilder.BuildModificationString(descriptor, target);
+
+        Assert.False(result.IsSucceeded);
+        Assert.Empty(target.ColumnIdRequests);
+        Assert.Equal(
+            UpdateWhereBuilder.InvalidColumnNameMessage + "id .Update",
+            result.ErrorText);
+    }
+
+    [Fact]
+    public void AKeyColumnFailureIsReportedBeforeATableNameFailure()
+    {
+        // PRECEDENCE, AND WHY IT IS DELIBERATE. The table check sits at step 7 rather than before step 1
+        // so that a descriptor which is bad in two ways still reports the KEY COLUMN - the oracle's own
+        // diagnostic at :L119 - rather than being pre-empted by a diagnostic the oracle does not have.
+        UpdatableTableDescriptor descriptor = UpdatableTableDescriptor.Create(
+            "COMPANY'",
+            ["age"],
+            ["id\nname"],
+            identityColumn: string.Empty,
+            updateWhere: null,
+            updateKeyInPlace: null);
+
+        ModificationScriptResult result =
+            UpdateWhereBuilder.BuildModificationString(descriptor, FixtureTarget());
+
+        Assert.False(result.IsSucceeded);
+        Assert.StartsWith(
+            UpdateWhereBuilder.InvalidColumnNameMessage,
+            result.ErrorText,
+            StringComparison.Ordinal);
+        Assert.NotEqual(UpdateWhereBuilder.UnsafeUpdateTableMessage, result.ErrorText);
+    }
+
+    [Fact]
+    public void TheGrammarChangesNothingForTheFixtureItself()
+    {
+        // THE REGRESSION STATEMENT. Refusing is not rewriting: for every input the legacy could actually
+        // have been given, the generated script is byte-identical to what it was before the guard
+        // existed. The fixture descriptor is that input, and the byte-exact parity region above pins its
+        // full text - this asserts only that the guard admits it, so a future tightening of the grammar
+        // fails here loudly rather than silently changing the fixture's behaviour.
+        UpdatableTableDescriptor descriptor = FixtureDescriptor();
+
+        Assert.True(descriptor.IsAcceptable);
+        Assert.True(descriptor.IsScriptSafe);
+
+        ModificationScriptResult result =
+            UpdateWhereBuilder.BuildModificationString(descriptor, FixtureTarget());
+
+        Assert.True(result.IsSucceeded);
+        Assert.EndsWith(
+            "DataWindow.Table.UpdateTable = 'COMPANY'",
+            result.Script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IsScriptSafeTestsAllFourPositionsAndNotJustTheFirstItFinds()
+    {
+        // A SHORT-CIRCUITING CONJUNCTION IS ONLY CORRECT IF EVERY CLAUSE IS REACHED WHEN THE EARLIER
+        // ONES PASS. This walks the four positions one at a time with the other three known good, which
+        // is the only shape that catches a missing clause.
+        Assert.False(
+            UpdatableTableDescriptor.Create("bad name", ["age"], ["id"], "", null, null).IsScriptSafe);
+        Assert.False(
+            UpdatableTableDescriptor.Create(FixtureTable, ["age", "bad name"], ["id"], "", null, null)
+                .IsScriptSafe);
+        Assert.False(
+            UpdatableTableDescriptor.Create(FixtureTable, ["age"], ["id", "bad name"], "", null, null)
+                .IsScriptSafe);
+        Assert.False(
+            UpdatableTableDescriptor.Create(FixtureTable, ["age"], ["id"], "bad name", null, null)
+                .IsScriptSafe);
+
+        // And all four good together pass, so the predicate is not simply always false.
+        Assert.True(
+            UpdatableTableDescriptor.Create(FixtureTable, ["age"], ["id"], "id", null, null)
+                .IsScriptSafe);
     }
 
     #endregion

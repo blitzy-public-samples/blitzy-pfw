@@ -26,8 +26,10 @@
 //  intuitive expectations were wrong in three places, each noted at the test that records it.
 // ==================================================================================================
 
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Configuration;
+using PowerFramework.DataServices.Expressions;
 using Xunit;
 
 namespace PowerFramework.DataServices.Tests;
@@ -1125,5 +1127,171 @@ public sealed class DataServicesOptionsTests
         string failure = Assert.Single(Failures(options));
 
         Assert.Contains("DataServices:Security:MutualTls", failure, StringComparison.Ordinal);
+    }
+    // ==============================================================================================
+    //  THE PAGE-RESOLUTION PAIR - NOT A LEGACY DEFAULT, AND THE ONLY COUPLED RULE IN THIS GROUP
+    //  --------------------------------------------------------------------------------------------
+    //  These two settings have no legacy counterpart: a PowerBuilder application owned its own band
+    //  geometry, so `for page` asked the runtime which rows were on the page. Decomposition put that
+    //  geometry in the deferred DesignSystem, so the headless engine has to be TOLD the pagination -
+    //  and until it was, the deployed service answered the malformed sentinel for the only `for page`
+    //  expression in the repository, dw_sqlite.srd:L27's `sum(salary for page)`.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The default pairing resolves <c>for page</c> and validates cleanly.
+    /// </summary>
+    /// <remarks>
+    /// THE DEFAULT IS THE ONE THAT MATTERS, because a default-constructed group is exactly what binding
+    /// an absent <c>DataServices:ColumnExpression</c> section produces - so this is what a deployment
+    /// that says nothing gets. WholeBuffer is an explicit statement that the surface is unpaginated,
+    /// evidenced by dw_sqlite.srd declaring no page-break band, rather than a guess made in the absence
+    /// of evidence.
+    /// </remarks>
+    [Fact]
+    public void ThePageResolutionDefaultStatesAnUnpaginatedSurfaceAndValidates()
+    {
+        ColumnExpressionOptions expression = new DataServicesOptions().ColumnExpression;
+
+        Assert.Equal(ExpressionPageResolution.WholeBuffer, expression.PageResolution);
+        Assert.Equal(0, expression.PageRowsPerPage);
+        Assert.True(Succeeds(ValidOptions()));
+    }
+
+    /// <summary>
+    /// All three declared modes are accepted, each with the row count its mode requires.
+    /// </summary>
+    /// <param name="resolution">The mode.</param>
+    /// <param name="rowsPerPage">The row count to pair with it.</param>
+    [Theory]
+    [InlineData(ExpressionPageResolution.Unresolved, 0)]
+    [InlineData(ExpressionPageResolution.WholeBuffer, 0)]
+    [InlineData(ExpressionPageResolution.FixedRowsPerPage, 1)]
+    [InlineData(ExpressionPageResolution.FixedRowsPerPage, 50)]
+    public void EveryDeclaredPageResolutionIsAcceptedWithItsOwnRowCount(
+        ExpressionPageResolution resolution,
+        int rowsPerPage)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.ColumnExpression.PageResolution = resolution;
+        options.ColumnExpression.PageRowsPerPage = rowsPerPage;
+
+        Assert.True(Succeeds(options));
+    }
+
+    /// <summary>
+    /// An undeclared mode is rejected here rather than being left to the factory.
+    /// </summary>
+    /// <remarks>
+    /// CONFIGURATION BINDING WILL HAPPILY PRODUCE AN UNDECLARED ENUM VALUE from a numeric string, and the
+    /// factory's unrecognised arm throws for it - which is the right backstop and the wrong FIRST
+    /// failure, because an operator would get an exception from a resolver instead of a named
+    /// configuration path. Rejecting it here means a mistyped mode fails startup naming the setting.
+    /// </remarks>
+    [Fact]
+    public void AnUndeclaredPageResolutionIsRejectedNamingTheSetting()
+    {
+        DataServicesOptions options = ValidOptions();
+        options.ColumnExpression.PageResolution = (ExpressionPageResolution)7;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:ColumnExpression:PageResolution",
+            failure,
+            StringComparison.Ordinal);
+
+        // AND THE COUPLING RULE DOES NOT ALSO FIRE, so one fault produces one message. A second message
+        // about a row count measured against a mode that is not a mode would read as two faults.
+        Assert.DoesNotContain("PageRowsPerPage", failure, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A fixed-page mode with no usable row count is rejected.
+    /// </summary>
+    /// <param name="rowsPerPage">The unusable row count.</param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void FixedRowsPerPageRequiresAPositiveRowCount(int rowsPerPage)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.ColumnExpression.PageResolution = ExpressionPageResolution.FixedRowsPerPage;
+        options.ColumnExpression.PageRowsPerPage = rowsPerPage;
+
+        Assert.Contains(
+            Failures(options),
+            failure => failure.Contains(
+                "DataServices:ColumnExpression:PageRowsPerPage",
+                StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The exact strings <c>appsettings.json</c> carries bind to the members they name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AN ENUM SETTING IS A STRING IN A FILE, AND THAT SEAM IS WORTH ONE TEST. Every other test in this
+    /// region assigns the enum member directly, which proves the validator and the factory but says
+    /// nothing about whether the word in the deployed configuration file reaches them - a typo, a renamed
+    /// member or a binder that expected a number would all pass those tests and fail at startup.
+    /// </para>
+    /// <para>
+    /// The three names asserted here are exactly the three the file's own comment offers an operator, and
+    /// the numeric form is asserted alongside them because configuration binding accepts it and an
+    /// operator may well write it.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("WholeBuffer", ExpressionPageResolution.WholeBuffer)]
+    [InlineData("Unresolved", ExpressionPageResolution.Unresolved)]
+    [InlineData("FixedRowsPerPage", ExpressionPageResolution.FixedRowsPerPage)]
+    [InlineData("1", ExpressionPageResolution.WholeBuffer)]
+    public void ThePageResolutionNamesInTheConfigurationFileBindToTheirMembers(
+        string configured,
+        ExpressionPageResolution expected)
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DataServices:ColumnExpression:PageResolution"] = configured,
+                ["DataServices:ColumnExpression:PageRowsPerPage"] = "2",
+            })
+            .Build();
+
+        DataServicesOptions options = new();
+        configuration.GetSection(DataServicesOptions.SectionName).Bind(options);
+
+        Assert.Equal(expected, options.ColumnExpression.PageResolution);
+        Assert.Equal(2, options.ColumnExpression.PageRowsPerPage);
+    }
+
+    /// <summary>
+    /// A stated row count is REFUSED rather than ignored when the mode would not apply it.
+    /// </summary>
+    /// <param name="resolution">A mode that does not read the row count.</param>
+    /// <remarks>
+    /// THE DIRECTION THAT CATCHES A REAL MISTAKE. An operator who wrote a page size and left the mode
+    /// alone has stated a pagination that would not be applied, and passing over it silently is how a
+    /// page total becomes a grand total with nothing in the configuration to show why. Both non-fixed
+    /// modes are covered, because the rule is about the mode not reading the value rather than about
+    /// which mode it is.
+    /// </remarks>
+    [Theory]
+    [InlineData(ExpressionPageResolution.WholeBuffer)]
+    [InlineData(ExpressionPageResolution.Unresolved)]
+    public void AStatedRowCountIsRefusedWhenTheModeWouldNotApplyIt(ExpressionPageResolution resolution)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.ColumnExpression.PageResolution = resolution;
+        options.ColumnExpression.PageRowsPerPage = 50;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:ColumnExpression:PageRowsPerPage",
+            failure,
+            StringComparison.Ordinal);
+        Assert.Contains("FixedRowsPerPage", failure, StringComparison.Ordinal);
     }
 }

@@ -73,9 +73,18 @@
 //  Deriving rather than storing is what keeps the nine-field mirror exact.
 //
 //  ================= LogPass IS WRITE-ONLY. THIS IS THE PRIMARY CONSTRAINT (C-F) ==================
-//  It may be SUPPLIED and CONSUMED BY THE CONNECT PATH. It is observable NOWHERE ELSE: never in
-//  ToString(), never in a print member, never in a log record, never emitted by a serializer, and
-//  it carries no default, no placeholder and no example value anywhere in this file.
+//  It may be SUPPLIED and CONSUMED BY THE CONNECT PATH. It is observable NOWHERE ELSE: THE PROPERTY
+//  HAS NO GETTER, so it is never in ToString(), never in a print member, never in a log record,
+//  never emitted by a serializer, never returned by an accessor, and it carries no default, no
+//  placeholder and no example value anywhere in this file.
+//
+//  THE MISSING GETTER IS THE LOAD-BEARING PART, AND IT WAS ADDED LAST. Everything else in this
+//  section was already true and none of it mattered, because `descriptor.LogPass` was a public read:
+//  nothing had to be defeated, a caller could simply ask and then interpolate the answer wherever it
+//  liked. Suppressing the DEFAULT rendering paths protects against accident; removing the getter
+//  protects against the ordinary case. Two named doors replace it - RevealLogPassForConnect(), which
+//  is internal and says at every call site what it is doing, and HasCredential, which answers the
+//  presence question without disclosing the answer.
 //
 //  WHY THE ENFORCEMENT IS STRUCTURAL RATHER THAN CONVENTIONAL, AND WHY IT DECIDED THE TYPE'S SHAPE.
 //  A C# record's COMPILER-GENERATED ToString() prints EVERY property, and its generated
@@ -94,12 +103,23 @@
 //  L2048-L2085]. A response cannot carry the password because there is nowhere on the wire to put
 //  it. Grpc/TransactionService.cs therefore treats the field as INBOUND-ONLY when it maps C-08.
 //
-//  THE LEGACY GENUINELY ROUND-TRIPS IT, WHICH IS WHY THIS MATTERS RATHER THAN BEING THEORETICAL.
-//  Both outbound accessors move it: `data.LogPass = LogPass` [n_cst_thread_trans.sru:L414], and
-//  the no-argument overload delegates to that one [:L397]. This port keeps the in-process transfer
-//  intact - narrowing it would break the connect path - and closes only the OBSERVATION channels
-//  that .NET adds and PowerBuilder never had. That is a narrowing of a newly created surface, not
-//  a change to an existing wire format, because there was none.
+//  THE LEGACY GENUINELY ROUND-TRIPS IT, WHICH IS WHY THIS MATTERS RATHER THAN BEING THEORETICAL,
+//  AND IT IS THE ONE PLACE THIS PORT DOES NOT REPRODUCE A LEGACY LINE. Both outbound accessors move
+//  it: `data.LogPass = LogPass` [n_cst_thread_trans.sru:L414], and the no-argument overload
+//  delegates to that one [:L397]. THAT LINE IS DELIBERATELY NOT PORTED. Handing a credential back to
+//  whoever asked for a descriptor is precisely the echo AAP 0.4.2.6 forbids, and across a service
+//  boundary the asker may not be the process that supplied it. So the transfer splits in two:
+//    * INBOUND keeps all seven, because that IS the connect path and the credential's whole purpose
+//      is to reach the connection [WithConnectionFieldsFrom].
+//    * OUTBOUND moves SIX and leaves the caller's own seventh untouched - neither disclosing the
+//      connection's password nor destroying the caller's
+//      [WithConnectionFieldsFromExcludingCredential].
+//  The published contract enforces the identical rule independently, its response-side view having
+//  no slot for the field at all [persistence.v1.proto:L1965-L1987], so a port that DID move the
+//  value outbound would be contradicting the contract as well as the plan. This is a narrowing of a
+//  newly created surface rather than a change to an existing wire format, because there was none:
+//  PowerBuilder's move handed a password between two objects inside one process that already held
+//  it, and C-08 turns the same accessor into a network response.
 //
 //  NEVER LOGGED, AND THAT OBLIGATION IS INHERITED. No member of this type is written to a logger
 //  from this file - this file takes no logging dependency at all - and the type must never be
@@ -619,9 +639,95 @@ public readonly partial record struct TransactionData
     [JsonIgnore]
     public string LogPass
     {
-        get => _logPass ?? string.Empty;
+        // NO GETTER. THIS IS THE STRUCTURAL HALF OF "WRITE-ONLY", AND IT IS WHAT WAS MISSING.
+        //
+        // Everything above this property was already true - the renderer omits it, the print member
+        // omits it, the serializer is told to omit it, the wire response has no slot for it - and none
+        // of it mattered, because `descriptor.LogPass` was a public read. A caller did not have to
+        // defeat any of those mechanisms; it could simply ask, and then interpolate the answer into a
+        // string, a log line or a response of its own devising. Suppressing the DEFAULT rendering paths
+        // while leaving the value readable protects against accident and not against the ordinary case.
+        //
+        // AAP 0.4.2.6 is unambiguous: `logpass` is WRITE-ONLY - never echoed in a response, never
+        // logged. An init-only property with no getter is that sentence expressed as a type: the value
+        // can be supplied and it cannot be observed, and there is no discipline to remember.
+        //
+        // THE TWO THINGS THAT STILL NEED IT KEEP WORKING, EACH THROUGH A NAMED DOOR:
+        //   * The connect path reads it through RevealLogPassForConnect(), which is internal and whose
+        //     name states at every call site exactly what is being done and why.
+        //   * A caller that needs to know whether one was supplied - to decide between integrated and
+        //     credentialed authentication, say - asks HasCredential, which answers the QUESTION without
+        //     disclosing the ANSWER.
+        //
+        // EQUALITY AND HASHING ARE UNAFFECTED, which matters because the transaction pool keys
+        // reference-counted entries on whole-descriptor equality [n_cst_thread_trans_pool.sru:L138]. A
+        // record's generated Equals and GetHashCode compare FIELDS, not properties, so _logPass still
+        // participates and two descriptors differing only in their password remain different connection
+        // identities. Removing the getter narrows OBSERVATION, not IDENTITY.
         init => _logPass = string.IsNullOrEmpty(value) ? null : value;
     }
+
+    /// <summary>
+    /// Whether a login password was supplied, WITHOUT disclosing it.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> when <see cref="LogPass"/> was set to a non-empty value.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// THE QUESTION WITHOUT THE ANSWER. Deciding between integrated and credentialed authentication, or
+    /// reporting that a configuration binding produced nothing, needs to know only whether a password is
+    /// present - and that is the only legitimate reason anything ever read the member. Answering the
+    /// question directly is what makes the missing getter costless rather than obstructive.
+    /// </para>
+    /// <para>
+    /// A PRESENCE FLAG IS NOT A DISCLOSURE. It reveals one bit that every failed connection already
+    /// reveals by its own error, it cannot be inverted, and it is deliberately NOT a length: a length is
+    /// a genuine reduction in the work of guessing, and no caller needs one.
+    /// </para>
+    /// <para>
+    /// Safe to render and to serialize, and therefore not excluded from either - the cleared state reads
+    /// <see langword="false"/> because the backing field normalises an empty string to
+    /// <see langword="null"/>.
+    /// </para>
+    /// <para>
+    /// <b>NAMED <c>HasCredential</c> AND NOT <c>HasLogPass</c>, WHICH IS NOT COSMETIC.</b> This member DOES
+    /// serialize, and the type's standing guarantee is that neither the credential's value NOR ITS MEMBER
+    /// NAME appears in rendered or serialized output - a document containing <c>"HasLogPass"</c> would
+    /// break the second half of that guarantee, and a sibling test would fail, correctly. Choosing a name
+    /// that does not contain the member's own name is what lets the flag be freely serializable.
+    /// </para>
+    /// </remarks>
+    public bool HasCredential => _logPass is not null;
+
+    /// <summary>
+    /// Reveals the login password to the connect path. <b>The only read of this value in the system.</b>
+    /// </summary>
+    /// <returns>The password, or <see cref="string.Empty"/> when none was supplied.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>NAMED FOR ITS ONE PURPOSE SO THAT NO CALL SITE IS AMBIGUOUS.</b> A property read reads as
+    /// incidental; <c>RevealLogPassForConnect()</c> reads as a decision, and a reviewer scanning for
+    /// credential handling finds every occurrence by searching for one distinctive word. That is the
+    /// entire reason it is a method with an awkward name rather than a getter with a comment.
+    /// </para>
+    /// <para>
+    /// <b>INTERNAL, so the value cannot leave this assembly.</b> Opening a connection is Persistence's
+    /// own work - it is the only service that holds a storage provider (AAP 0.1.1) - so nothing outside
+    /// this assembly has any business reading it. <c>Grpc/TransactionService.cs</c> maps C-08's field as
+    /// INBOUND-ONLY, and the response-side view has no slot for it at all
+    /// [<c>persistence.v1.proto:L1965-L1987</c>], so there is nowhere outward for a revealed value to go
+    /// even inside this assembly.
+    /// </para>
+    /// <para>
+    /// <b>The returned string must not be logged, rendered, stored or echoed</b> - the obligation the
+    /// getter used to carry silently now travels with an explicit name. It is also what the INBOUND fold
+    /// uses to move the credential onto the connection's own descriptor, which is part of the connect
+    /// path and is the one transfer the legacy genuinely performs
+    /// [<c>n_cst_thread_trans.sru:L347</c>].
+    /// </para>
+    /// </remarks>
+    internal string RevealLogPassForConnect() => _logPass ?? string.Empty;
 
     // ------------------------------------------------------------------------------------------
     //  MEMBER 6 of 9 - transactiondata.srs:L9  `string dbparm`
@@ -830,13 +936,27 @@ public readonly partial record struct TransactionData
     /// tell that two members did not move.
     /// </para>
     /// <para>
-    /// <b>THIS IS THE WHOLE TRANSFER, FOR BOTH DIRECTIONS.</b> The legacy inbound and outbound
-    /// accessors move the SAME seven fields, so one fold serves both and that is a useful property
-    /// rather than a shortcut: it makes it impossible for the two directions to drift apart.
-    /// Inbound, the receiver takes the seven from the supplied descriptor
-    /// [<see cref="SetTransactionData"/>]; outbound, the caller's descriptor takes the seven from
-    /// the connection's own state
+    /// <b>THIS IS THE INBOUND TRANSFER ONLY. THE OUTBOUND DIRECTION MOVES SIX, NOT SEVEN</b>, and it has
+    /// its own fold:
+    /// <see cref="WithConnectionFieldsFromExcludingCredential(in TransactionData)"/>. One fold used to
+    /// serve both, on the reasoning that the legacy's two accessors move the same seven fields so a
+    /// shared fold could not drift - and the legacy DOES move the password outbound
+    /// [<c>n_cst_thread_trans.sru:L414</c>]. The two directions are nonetheless no longer symmetric,
+    /// because AAP 0.4.2.6 makes <see cref="LogPass"/> write-only: never echoed in a response. An
+    /// outbound accessor that hands the password back to its caller IS that echo, whatever the caller
+    /// then does with it.
+    /// </para>
+    /// <para>
+    /// Inbound, the receiver takes all seven from the supplied descriptor
+    /// [<see cref="SetTransactionData"/>], and that is the connect path - the credential's whole purpose
+    /// is to reach the connection. Outbound, the caller's descriptor takes SIX from the connection's own
+    /// state and keeps whatever it already held in the seventh
     /// [<see cref="GetTransactionData(ref TransactionData, ref string, GetTransactionDataHook?)"/>].
+    /// </para>
+    /// <para>
+    /// <b>The asymmetry is deliberately expressed as two named methods rather than as a flag</b>, so no
+    /// call site can pick the wrong direction by passing the wrong boolean, and so a reader of either
+    /// call site can see which one it is without opening this file.
     /// </para>
     /// <para>
     /// <b>WHY AutoCommit AND UserParm ARE OMITTED - measured evidence, not speculation.</b> A SQL
@@ -870,7 +990,10 @@ public readonly partial record struct TransactionData
         ServerName = source.ServerName,
         Database = source.Database,
         LogId = source.LogId,
-        LogPass = source.LogPass,
+
+        // THE CREDENTIAL MOVES INBOUND AND ONLY INBOUND, through the named reveal rather than through a
+        // property read - see RevealLogPassForConnect and the OUTBOUND fold below.
+        LogPass = source.RevealLogPassForConnect(),
         DbParm = source.DbParm,
         Lock = source.Lock,
 
@@ -880,6 +1003,71 @@ public readonly partial record struct TransactionData
         // task layer erases the flag anyway [n_cst_thread_task_sqlbase.sru:L119]. Legacy behaviour,
         // deliberately preserved (C-B). See this method's remarks for the measured reasoning.
     };
+
+    /// <summary>
+    /// Returns a copy of this descriptor with the SIX NON-CREDENTIAL connection fields taken from
+    /// <paramref name="source"/> - everything
+    /// <see cref="WithConnectionFieldsFrom(in TransactionData)"/> moves EXCEPT <see cref="LogPass"/>,
+    /// which is left exactly as this descriptor already held it.
+    /// </summary>
+    /// <param name="source">The descriptor to take the six non-credential connection fields from.</param>
+    /// <returns>
+    /// A new descriptor: <see cref="Dbms"/>, <see cref="ServerName"/>, <see cref="Database"/>,
+    /// <see cref="LogId"/>, <see cref="DbParm"/> and <see cref="Lock"/> from <paramref name="source"/>;
+    /// <see cref="LogPass"/>, <see cref="AutoCommit"/> and <see cref="UserParm"/> from this instance.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE OUTBOUND FOLD, AND ITS OMISSION IS THE POINT OF ITS NAME.</b> The legacy's outbound
+    /// accessor moves the password back to its caller [<c>n_cst_thread_trans.sru:L414</c>]. AAP 0.4.2.6
+    /// forbids that: <see cref="LogPass"/> is write-only, never echoed in a response. Handing a
+    /// credential back to whoever asked for a descriptor is the echo, regardless of what the caller
+    /// intends to do with it - and across a service boundary the caller may not be the process that
+    /// supplied it.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE RECEIVER KEEPS ITS OWN VALUE RATHER THAN BEING CLEARED.</b> Clearing would be a second,
+    /// larger behaviour change: a caller that supplied a password, read the descriptor back and then
+    /// re-supplied it would find its own credential silently erased, and would either fail to reconnect
+    /// or - worse - reconnect with an empty password. Leaving the seventh member untouched means the
+    /// outbound path is a strict NON-EVENT for the credential: it neither discloses nor destroys.
+    /// </para>
+    /// <para>
+    /// <b>THIS IS A NARROWING OF A NEWLY CREATED SURFACE, NOT A CHANGE TO AN EXISTING WIRE FORMAT.</b>
+    /// PowerFramework is an in-process library with no listener (AAP 0.1.1), so the legacy's outbound
+    /// move handed a password from one object to another inside a single process that already held it.
+    /// C-08 turns that same accessor into a network response, at which point the same move becomes
+    /// disclosure - which is exactly the class of case AAP 0.1.5 governs: narrow with a defined behaviour
+    /// rather than widen with a guess. The published contract enforces the same rule independently, its
+    /// response-side view having no slot for the field at all
+    /// [<c>persistence.v1.proto:L1965-L1987</c>], so a port that moved the value here would be
+    /// contradicting the contract as well as the plan.
+    /// </para>
+    /// <para>
+    /// <b>Aliasing is safe</b>, for the same reason as the inbound fold: the <see langword="with"/>
+    /// expression reads every member it needs before anything is assigned.
+    /// </para>
+    /// </remarks>
+    public TransactionData WithConnectionFieldsFromExcludingCredential(in TransactionData source) =>
+        this with
+        {
+            // The oracle's own assignment order [n_cst_thread_trans.sru:L410-L416], LESS the credential.
+            Dbms = source.Dbms,
+            ServerName = source.ServerName,
+            Database = source.Database,
+            LogId = source.LogId,
+
+            // LogPass IS ABSENT ON PURPOSE AND MUST STAY ABSENT. The legacy moves it here
+            // [n_cst_thread_trans.sru:L414]; AAP 0.4.2.6 forbids echoing it. Adding it back would
+            // reintroduce the credential-exposure finding this method exists to close, and would also
+            // contradict the published contract, whose response-side view has no field for it.
+            DbParm = source.DbParm,
+            Lock = source.Lock,
+
+            // AutoCommit AND UserParm are absent for the SEPARATE reason recorded on the inbound fold:
+            // the legacy touches neither in either direction. Two different omissions, two different
+            // reasons, deliberately not conflated.
+        };
 
     // ------------------------------------------------------------------------------------------
     //  THE INBOUND ACCESSOR - of_settransdata [n_cst_thread_trans.sru:L343-L354]
@@ -1101,8 +1289,12 @@ public readonly partial record struct TransactionData
             return RetCode.FAILED;
         }
 
-        // [:L410-L416] the seven-field copy, outbound. The caller's AutoCommit and UserParm survive.
-        data = data.WithConnectionFieldsFrom(this);
+        // [:L410-L416] the outbound copy - SIX FIELDS, NOT THE SEVEN THE ORACLE MOVES. The caller's
+        // AutoCommit and UserParm survive for the legacy's own reason; the caller's LogPass survives
+        // because AAP 0.4.2.6 makes it write-only, so this accessor must not hand it back. The oracle's
+        // `data.LogPass = LogPass` [:L414] is the one line of this accessor that is deliberately NOT
+        // reproduced, and WithConnectionFieldsFromExcludingCredential is where that is recorded in full.
+        data = data.WithConnectionFieldsFromExcludingCredential(this);
 
         // [:L418]
         return RetCode.OK;

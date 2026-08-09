@@ -32,10 +32,10 @@ namespace PowerFramework.Persistence.Tests;
 /// </summary>
 internal sealed class RecordingTransferSink : IChangesetTransferSink
 {
-    private readonly List<(byte[] Payload, long ChunkCount, long ChunkIndex, bool FullState)> _chunks =
-        [];
+    private readonly List<(CarrierState? State, long ChunkCount, long ChunkIndex, bool FullState)>
+        _chunks = [];
 
-    private readonly List<(string ColumnName, byte[] Payload)> _children = [];
+    private readonly List<(string ColumnName, CarrierState? State)> _children = [];
     private readonly List<(long ReturnCode, string ErrorText)> _errors = [];
     private readonly List<string> _createdFrom = [];
 
@@ -48,10 +48,10 @@ internal sealed class RecordingTransferSink : IChangesetTransferSink
     /// <summary>Runs after each chunk handover, so a test can mutate the source between chunks.</summary>
     internal Action? AfterChunk { get; set; }
 
-    internal IReadOnlyList<(byte[] Payload, long ChunkCount, long ChunkIndex, bool FullState)> Chunks =>
-        _chunks;
+    internal IReadOnlyList<(CarrierState? State, long ChunkCount, long ChunkIndex, bool FullState)>
+        Chunks => _chunks;
 
-    internal IReadOnlyList<(string ColumnName, byte[] Payload)> Children => _children;
+    internal IReadOnlyList<(string ColumnName, CarrierState? State)> Children => _children;
 
     internal IReadOnlyList<(long ReturnCode, string ErrorText)> Errors => _errors;
 
@@ -66,9 +66,13 @@ internal sealed class RecordingTransferSink : IChangesetTransferSink
 
     public ValueTask<long> SendChunkAsync(ChangesetChunk chunk, CancellationToken cancellationToken)
     {
-        // The payload is copied on receipt because the sender clears its own reference immediately
-        // afterwards, reproducing `blbData = Blob("")`. A test asserts on this copy.
-        _chunks.Add((chunk.Payload.ToArray(), chunk.ChunkCount, chunk.ChunkIndex, chunk.FullState));
+        // The state is cloned on receipt because the sender is entitled to drop its reference
+        // immediately afterwards, reproducing `blbData = Blob("")`. A test asserts on this clone.
+        _chunks.Add((
+            chunk.State is null ? null : chunk.State.Clone(),
+            chunk.ChunkCount,
+            chunk.ChunkIndex,
+            chunk.FullState));
 
         AfterChunk?.Invoke();
 
@@ -79,7 +83,9 @@ internal sealed class RecordingTransferSink : IChangesetTransferSink
         ChangesetChildPayload payload,
         CancellationToken cancellationToken)
     {
-        _children.Add((payload.ColumnName, payload.Payload.ToArray()));
+        _children.Add((
+            payload.ColumnName,
+            payload.State is null ? null : payload.State.Clone()));
 
         return ValueTask.FromResult(ChildResult);
     }
@@ -105,26 +111,38 @@ internal sealed class ScriptedPayloadCodec : IChangesetPayloadCodec
     /// <summary>Answer for every apply, or <see langword="null"/> to delegate to the real format.</summary>
     internal long? ApplyResult { get; set; }
 
-    /// <summary>Payload handed back when <see cref="EncodeResult"/> dictates the answer.</summary>
-    internal byte[] EncodedPayload { get; set; } = [1, 2, 3, 4];
+    /// <summary>
+    /// State handed back when <see cref="EncodeResult"/> dictates the answer. A conforming state - three
+    /// canonically ordered empty segments - so that a dictated SUCCESS produces something a receiver
+    /// would accept, which is what keeps a dictated-success test about the arm under test rather than
+    /// about segment validation.
+    /// </summary>
+    internal CarrierState EncodedState { get; set; } = new()
+    {
+        Processing = 1L,
+        Segments =
+        {
+            new CarrierBufferSegment { Buffer = DwBuffer.Primary },
+            new CarrierBufferSegment { Buffer = DwBuffer.Delete },
+            new CarrierBufferSegment { Buffer = DwBuffer.Filter },
+        },
+    };
 
-    public long TryEncode(DataWindowBufferStore source, out ReadOnlyMemory<byte> payload)
+    public long TryEncode(DataWindowBufferStore source, out CarrierState? state)
     {
         if (EncodeResult is not long dictated)
         {
-            return _real.TryEncode(source, out payload);
+            return _real.TryEncode(source, out state);
         }
 
-        payload = dictated < DataWindowBufferStore.DataStoreSuccess
-            ? ReadOnlyMemory<byte>.Empty
-            : EncodedPayload;
+        state = dictated < DataWindowBufferStore.DataStoreSuccess ? null : EncodedState;
 
         return dictated;
     }
 
-    public long TryApply(DataWindowBufferStore target, ReadOnlyMemory<byte> payload)
+    public long TryApply(DataWindowBufferStore target, CarrierState? state)
     {
-        return ApplyResult ?? _real.TryApply(target, payload);
+        return ApplyResult ?? _real.TryApply(target, state);
     }
 }
 
@@ -185,13 +203,23 @@ internal static class FixtureCarrier
             long identifier = seed + row;
             long rowNumber = carrier.AppendRow(dwBuffer, ItemStatus.NotModified);
 
-            _ = carrier.SetItemValue(rowNumber, 1, dwBuffer, (int)identifier);
+            // SEEDED AS long RATHER THAN int, DELIBERATELY. The fixture's two integer columns are
+            // `id integer primary key autoincrement` and `age integer not null`
+            // [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469], and the production path reads
+            // them through Microsoft.Data.Sqlite, which yields long for a SQLite INTEGER - it has no int
+            // path at all. Seeding int here would additionally make every round-trip comparison in this
+            // service assert against the DECLARED WIDTH rather than the value: common.v1.AnyValue
+            // publishes ONE signed integer arm, so an int travels as it and returns as long, and the
+            // widening - which is the contract's documented decision, asserted directly by
+            // ChangesetPayloadCodecTests.EveryMappedValueTypeRoundTripsOntoItsDeclaredCarrierType -
+            // would show up here as an unrelated inequality between two boxed ones.
+            _ = carrier.SetItemValue(rowNumber, 1, dwBuffer, identifier);
             _ = carrier.SetItemValue(
                 rowNumber,
                 2,
                 dwBuffer,
                 string.Create(CultureInfo.InvariantCulture, $"name-{identifier}"));
-            _ = carrier.SetItemValue(rowNumber, 3, dwBuffer, (int)(identifier % 90L));
+            _ = carrier.SetItemValue(rowNumber, 3, dwBuffer, identifier % 90L);
             _ = carrier.SetItemValue(
                 rowNumber,
                 4,
@@ -444,14 +472,14 @@ public sealed class ChangesetCodecDecisionTests
         Assert.Equal(0L, carrier.FilteredCount());
 
         // The three original primary rows keep their positions...
-        Assert.Equal(1, carrier.GetItemValue(1L, 1, DwBuffer.Primary));
-        Assert.Equal(2, carrier.GetItemValue(2L, 1, DwBuffer.Primary));
-        Assert.Equal(3, carrier.GetItemValue(3L, 1, DwBuffer.Primary));
+        Assert.Equal(1L, carrier.GetItemValue(1L, 1, DwBuffer.Primary));
+        Assert.Equal(2L, carrier.GetItemValue(2L, 1, DwBuffer.Primary));
+        Assert.Equal(3L, carrier.GetItemValue(3L, 1, DwBuffer.Primary));
 
         // ...and the two folded rows are at the TAIL, in their original order. Had the append landed
         // one position early, these two identifiers would appear at rows 3 and 4 instead.
-        Assert.Equal(1001, carrier.GetItemValue(4L, 1, DwBuffer.Primary));
-        Assert.Equal(1002, carrier.GetItemValue(5L, 1, DwBuffer.Primary));
+        Assert.Equal(1001L, carrier.GetItemValue(4L, 1, DwBuffer.Primary));
+        Assert.Equal(1002L, carrier.GetItemValue(5L, 1, DwBuffer.Primary));
     }
 
     [Fact]
@@ -504,13 +532,13 @@ public sealed class ChangesetCodecDecisionTests
         // R9 item 2. A zero index would make the receive side's `if current = 1` reset test never fire,
         // and the target would accumulate rows across sequences with nothing failing loudly.
         _ = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ChangesetChunk(ReadOnlyMemory<byte>.Empty, 3L, 0L));
+            () => new ChangesetChunk(state: null, 3L, 0L));
         _ = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ChangesetChunk(ReadOnlyMemory<byte>.Empty, 3L, 4L));
+            () => new ChangesetChunk(state: null, 3L, 4L));
         _ = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ChangesetChunk(ReadOnlyMemory<byte>.Empty, 0L, 1L));
+            () => new ChangesetChunk(state: null, 0L, 1L));
 
-        ChangesetChunk only = new(ReadOnlyMemory<byte>.Empty, 1L, 1L);
+        ChangesetChunk only = new(state: null, 1L, 1L);
 
         Assert.True(only.IsFirstChunk);
         Assert.True(only.IsLastChunk);

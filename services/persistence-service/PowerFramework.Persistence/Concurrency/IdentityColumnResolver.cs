@@ -166,19 +166,42 @@
 //  `SetItem` [:L144] or the direct filter-buffer assignment [:L160], so a null propagates all the
 //  way to the row.
 //
-//  A C# `long[]` cannot hold null and neither can protobuf `repeated int64`, so the collected
-//  arrays here are `IReadOnlyList<long?>`: THE INFORMATION IS PRESERVED RATHER THAN GUESSED AT.
-//  Collapsing null to zero would be the exact defect the plan's transformation rules forbid -
-//  widening a contract with a guess - because zero is a legal identity value on a table whose
-//  auto-increment seed is zero, so the two cases would become indistinguishable.
+//  A C# `long[]` cannot hold null, so the collected arrays here are `IReadOnlyList<long?>`: THE
+//  INFORMATION IS PRESERVED RATHER THAN GUESSED AT. Collapsing null to zero would be the exact
+//  defect the plan's transformation rules forbid - widening a contract with a guess - because zero
+//  is a legal identity value on a table whose auto-increment seed is zero, so the two cases would
+//  become indistinguishable.
 //
 //  In practice a null cannot occur on the evidenced fixture: `id` is `key=yes identity=yes`
 //  [dw_sqlite.srd:L8] over an INTEGER PRIMARY KEY, which the database always assigns. The
-//  possibility is nonetheless modelled and made detectable through
-//  <see cref="ResolvedIdentityColumnData.ContainsNullValue"/> so that the wire projection in
-//  `Grpc/UpdateService.cs` can NARROW WITH A DEFINED ERROR rather than silently coerce. This file
-//  deliberately performs no projection of its own: choosing a wire encoding for a null identity
-//  value is the boundary's decision, not the collector's.
+//  possibility is nonetheless modelled, and it is modelled ALL THE WAY TO THE WIRE.
+//
+//  ============================================================================================
+//  DECISION 6a - THE WIRE PROJECTION LIVES HERE, AND WHY THAT REVERSES AN EARLIER POSITION
+//  ============================================================================================
+//  This file previously performed NO projection, on the reasoning that "choosing a wire encoding
+//  for a null identity value is the boundary's decision, not the collector's". That reasoning was
+//  sound only while the published boundary could not SAY null: common.v1.IdentityColumnData carried
+//  `repeated int64`, so a projecting consumer genuinely had a choice to make - coerce the null to
+//  zero, drop the element, or narrow with a defined error - and deferring an irreversible choice to
+//  the layer that owns the boundary was right.
+//
+//  THAT CHOICE NO LONGER EXISTS. The element type is now `repeated common.v1.NullableInt64`, whose
+//  `value` field is proto3 `optional`, so an element that is PRESENT IN THE ARRAY AND CARRIES NO
+//  VALUE is directly expressible and the lossless projection is DETERMINED by the contract rather
+//  than chosen by the consumer. What deferral bought was therefore nothing, and what it cost was
+//  measured: with no projection written anywhere, the only reading of the system was that a `long?`
+//  met a `repeated int64` and the null was coerced or dropped - which is exactly what review found.
+//
+//  So the single mapper sits next to the collector, for the same reason the sibling `CarrierValue`
+//  mapper sits next to the buffers it serves: one home means no consumer can invent a second,
+//  lossier one, and `Grpc/UpdateService.cs` - which does not exist yet - will find the projection
+//  already made rather than a decision waiting to be got wrong. It is a pure, allocation-only
+//  transform with no I/O, so it does not compromise this file's testability-without-a-database.
+//
+//  ResolvedIdentityColumnData.ContainsNullValue survives as a cheap DETECTION for diagnostics and
+//  tests. It is no longer the mechanism that prevents loss - the wire type is - and nothing is
+//  required to consult it before projecting.
 //
 //  ============================================================================================
 //  THE WRITE-BACK CONTRACT - RECORDED HERE, IMPLEMENTED IN Tasks/TaskProxies/ (scope boundary)
@@ -392,8 +415,9 @@ namespace PowerFramework.Persistence.Concurrency;
 /// WHY THE ELEMENT TYPE IS <c>long?</c> AND NOT <c>long</c>: see DECISION 6 in the file header. In
 /// short, <c>GetItemNumber</c> answers null for a null item and PowerScript stores that null into
 /// the array, so collapsing it to zero here would make a null indistinguishable from a legitimate
-/// identity value of zero. <see cref="ContainsNullValue"/> makes the condition detectable so the
-/// wire projection can narrow with a defined error instead of guessing.
+/// identity value of zero. <see cref="ToIdentityColumnData"/> then carries that distinction ONTO THE
+/// WIRE rather than resolving it away - see DECISION 6a - and <see cref="ContainsNullValue"/> remains
+/// as a cheap way to ask whether any null occurred.
 /// </para>
 /// </remarks>
 internal sealed record ResolvedIdentityColumnData(
@@ -415,13 +439,93 @@ internal sealed record ResolvedIdentityColumnData(
     /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8</c>], and the database always assigns it.
     /// </para>
     /// <para>
-    /// This predicate deliberately does NOT decide what to do about it. Choosing an encoding, or
-    /// choosing to fail, is the boundary's decision; the collector's job is to preserve the fact.
+    /// THIS IS DETECTION, NOT PROTECTION, and since DECISION 6a it is no longer on the path that
+    /// prevents loss: <see cref="ToIdentityColumnData"/> carries a null through as an element with no
+    /// value, so nothing has to consult this predicate first. It remains because "did any null occur"
+    /// is a question worth being able to ask cheaply from a diagnostic or a test.
     /// </para>
     /// </remarks>
     internal bool ContainsNullValue =>
         PrimaryValues.Any(static value => value is null)
         || FilterValues.Any(static value => value is null);
+
+    /// <summary>
+    /// Projects this block onto the published <c>common.v1.IdentityColumnData</c> message, preserving
+    /// every null, every position and the separation of the two arrays.
+    /// </summary>
+    /// <returns>The wire message.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE ONE MAPPER, AND THE REASON IT IS HERE RATHER THAN AT THE BOUNDARY, is DECISION 6a in the
+    /// file header. Three properties are contract rather than implementation detail, and each is a way
+    /// this projection could silently lose information:
+    /// </para>
+    /// <list type="number">
+    /// <item><description>
+    /// A NULL TRAVELS AS AN ELEMENT THAT IS PRESENT AND CARRIES NO VALUE - never as zero, and never by
+    /// omitting the element. Zero is a legal identity value on a table seeded at zero (DECISION 6), and
+    /// omitting an element would shorten the array, which the apply half indexes POSITIONALLY against
+    /// the rows it is writing back [<c>n_cst_threading_task_sqlupdate.sru:L143-L145</c>] - so a dropped
+    /// element does not lose one value, it misaligns every value after it.
+    /// </description></item>
+    /// <item><description>
+    /// THE TWO ARRAYS ARE NEVER MERGED. Primary and Filter are collected by two different walks in two
+    /// different directions - the Filter buffer is walked BACKWARD because its row order is inverted
+    /// relative to the source [<c>n_cst_thread_task_sqlupdate.sru:L235,L237</c>] - and the apply half
+    /// consumes them as two separate positional sequences. Concatenating them would produce one array
+    /// that indexes correctly for neither buffer.
+    /// </description></item>
+    /// <item><description>
+    /// NEITHER ARRAY IS REORDERED OR DEDUPLICATED. Position IS the row correspondence, so a sort that
+    /// looked like tidying would rewrite which value belongs to which row. The two loops below preserve
+    /// the collected order by construction.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// AN EMPTY ARRAY PROJECTS AS AN EMPTY ARRAY rather than as absent or as one default element, which
+    /// is the "nothing was collected for this buffer" reading the collector produces for a buffer with
+    /// no newly-modified rows.
+    /// </para>
+    /// </remarks>
+    internal IdentityColumnData ToIdentityColumnData()
+    {
+        IdentityColumnData wire = new() { IdentityColumnId = IdentityColumnId };
+
+        foreach (long? value in PrimaryValues)
+        {
+            wire.PrimaryValues.Add(Wrap(value));
+        }
+
+        foreach (long? value in FilterValues)
+        {
+            wire.FilterValues.Add(Wrap(value));
+        }
+
+        return wire;
+    }
+
+    /// <summary>
+    /// Wraps one collected value for the wire, leaving the wrapper's value UNSET for a null.
+    /// </summary>
+    /// <param name="value">The collected value, or <see langword="null"/>.</param>
+    /// <returns>The wrapper.</returns>
+    /// <remarks>
+    /// A default-constructed wrapper already answers <c>false</c> to its presence property, so the null
+    /// arm assigns nothing at all - deliberately, because <c>Value = 0</c> would SET presence and
+    /// produce the very zero-coercion this wrapper exists to avoid. The two arms are therefore not
+    /// symmetrical, and that asymmetry is the whole mechanism.
+    /// </remarks>
+    private static NullableInt64 Wrap(long? value)
+    {
+        NullableInt64 wrapped = new();
+
+        if (value.HasValue)
+        {
+            wrapped.Value = value.Value;
+        }
+
+        return wrapped;
+    }
 }
 
 #endregion

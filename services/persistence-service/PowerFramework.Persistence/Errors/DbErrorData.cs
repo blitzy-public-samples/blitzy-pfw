@@ -169,6 +169,8 @@
 // ==============================================================================================
 
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.Text.Json.Serialization;
 
 using PowerFramework.Contracts.Common.V1;
 
@@ -263,7 +265,37 @@ namespace PowerFramework.Persistence.Errors;
 /// <c>.editorconfig</c> globs that permit those spellings.
 /// </para>
 /// </remarks>
-public readonly record struct DbErrorData
+// ==============================================================================================
+//  THE CONTAINMENT OF THE RAW PAYLOAD - WHY THIS TYPE IS internal AND PRINTS NOTHING
+//  ----------------------------------------------------------------------------------------------
+//  Errors/SqlRedactor.cs masks SqlSyntax unconditionally and ToDbError is the only sanctioned way
+//  out - but a guarded door is only a guard if it is the ONLY door, and as a public record struct
+//  this type had two more:
+//
+//    1. THE COMPILER-GENERATED ToString(). A record's generated renderer prints every member,
+//       SqlSyntax included, in full. So `logger.LogError("update failed: {Error}", dbErrData)` -
+//       the single most natural line anyone would write here - emitted the complete generated
+//       statement with its interpolated literal values into the log, which is exactly the leak the
+//       redactor exists to prevent. Nobody had to bypass anything; the default did it for them.
+//    2. DIRECT SERIALIZATION. Every member had a public getter, so any serializer handed this type
+//       wrote SqlSyntax out. That is the same leak reached through a different default.
+//
+//  Three mechanisms close them, and they are deliberately redundant because each fails differently:
+//
+//    * internal VISIBILITY means no consumer outside this assembly can hold the raw type at all,
+//      so the only shape that can cross an assembly boundary is the redacted wire DbError. The
+//      csproj's InternalsVisibleTo keeps the parity suite able to construct one, which is what lets
+//      the containment itself be tested rather than merely asserted.
+//    * A HAND-WRITTEN ToString() renders the statement's PRESENCE AND LENGTH and never its text, so
+//      the natural log line above is now safe by default rather than dangerous by default.
+//    * [JsonIgnore] ON SqlSyntax means that even inside this assembly, a serializer cannot emit it.
+//
+//  WHAT IS NOT DONE, AND WHY. The member is not removed, not renamed and not made private: Tasks/
+//  populates it and Errors/SqlRedactor.cs masks it, both in this assembly, and the AAP requires the
+//  field to exist because the legacy structure has it [dberrordata.srs:L6]. Containment is about
+//  where the value can GO, not about whether it is carried.
+// ==============================================================================================
+internal readonly record struct DbErrorData
 {
     // ------------------------------------------------------------------------------------------
     //  THE CANONICALISING BACKING FIELDS, AND WHY THEY ARE NOT AUTO-PROPERTIES
@@ -416,6 +448,7 @@ public readonly record struct DbErrorData
     /// </para>
     /// </value>
     [AllowNull]
+    [JsonIgnore]
     public string SqlSyntax
     {
         get => _sqlSyntax ?? string.Empty;
@@ -659,6 +692,64 @@ public readonly record struct DbErrorData
             Buffer = buffer,
             Row = row,
         };
+    // ------------------------------------------------------------------------------------------
+    //  THE SAFE RENDERER - the generated one printed the statement, this one never does
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Renders the payload for a diagnostic, naming every member in the oracle's declaration order
+    /// and rendering the statement as its PRESENCE AND LENGTH rather than its text.
+    /// </summary>
+    /// <returns>The rendered payload, carrying no statement text.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS IS HAND-WRITTEN, when every other aspect of this record is left to the compiler.</b>
+    /// See THE CONTAINMENT OF THE RAW PAYLOAD above the type: the generated renderer printed
+    /// <see cref="SqlSyntax"/> in full, so the most natural diagnostic anyone would write - passing the
+    /// payload to a structured logger - leaked the complete generated statement with its interpolated
+    /// literal values. No bypass was required; the default did it.
+    /// </para>
+    /// <para>
+    /// <b>THE MEMBER ORDER IS THE ORACLE'S AND IS PRESERVED</b> [<c>dberrordata.srs:L4-L8</c>], because
+    /// it is also the wire mirror's field order and a sibling test pins it. Only the statement's VALUE is
+    /// withheld; that a statement was present, and how long it was, are structure rather than data and
+    /// are precisely what a reader of a failed update needs in order to correlate it with the redacted
+    /// wire payload.
+    /// </para>
+    /// <para>
+    /// <b>THE OTHER FOUR MEMBERS RENDER IN FULL, INCLUDING <see cref="SqlErrText"/> (C-B).</b> That is
+    /// the driver's own message and the one Chinese diagnostic the legacy synthesizes
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L190</c>], and the outward projection copies it through
+    /// untouched - so withholding it here would make the diagnostic strictly less useful than the wire
+    /// payload it is supposed to help interpret, while protecting nothing the wire does not already
+    /// publish.
+    /// </para>
+    /// <para>
+    /// <b>The length is rendered with the invariant culture</b>, for the same reason every other number in
+    /// this project is: a culture-sensitive conversion could substitute digits in a value that is read by
+    /// a human comparing two log lines.
+    /// </para>
+    /// </remarks>
+    public override string ToString()
+    {
+        string syntax = _sqlSyntax is null
+            ? "<none>"
+            : "<withheld, "
+                + _sqlSyntax.Length.ToString(CultureInfo.InvariantCulture)
+                + " chars>";
+
+        return "DbErrorData { SqlDbCode = "
+            + SqlDbCode.ToString(CultureInfo.InvariantCulture)
+            + ", SqlErrText = "
+            + SqlErrText
+            + ", SqlSyntax = "
+            + syntax
+            + ", Buffer = "
+            + Buffer
+            + ", Row = "
+            + Row.ToString(CultureInfo.InvariantCulture)
+            + " }";
+    }
 }
 
 /// <summary>

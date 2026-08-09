@@ -608,9 +608,15 @@ internal sealed record UpdatableTableDescriptor(
     /// </para>
     /// <para>
     /// THE NAME TEST IS AN EXACT EMPTY COMPARISON, NOT A WHITESPACE TEST (C-B). The oracle compares
-    /// against <c>""</c>, so a name of a single space PASSES and goes on to be emitted as
-    /// <c>DataWindow.Table.UpdateTable = ' '</c>. Using a whitespace-aware test here would tighten the
-    /// contract and reject an input the legacy accepts.
+    /// against <c>""</c>, so a name of a single space PASSES THIS PREDICATE. Using a whitespace-aware
+    /// test here would tighten the oracle's own arm, and this predicate is the oracle's own arm.
+    /// </para>
+    /// <para>
+    /// A NAME OF A SINGLE SPACE IS NEVERTHELESS REFUSED END TO END, by
+    /// <see cref="IsScriptSafe"/> rather than by this predicate - so do not read this remark as saying
+    /// that such a name reaches the script. It does not. Keeping the two predicates separate is what
+    /// lets this one stay a faithful transcription while the boundary still refuses a name no table
+    /// has; see <see cref="UpdateWhereBuilder.IsScriptSafeTableName"/> for the reasoning.
     /// </para>
     /// <para>
     /// AN EMPTY IDENTITY COLUMN IS LEGAL AND IS NOT AN ARM OF THIS TEST. The oracle never validates
@@ -632,6 +638,38 @@ internal sealed record UpdatableTableDescriptor(
     /// whitespace-aware.
     /// </remarks>
     internal bool HasIdentityColumn => IdentityColumn.Length != 0;
+
+    /// <summary>
+    /// Reports whether every name in this descriptor can be spliced into the modification script
+    /// without authoring any of it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SEPARATE FROM <see cref="IsAcceptable"/> ON PURPOSE, and the separation is what keeps the port
+    /// legible. <see cref="IsAcceptable"/> IS the oracle's <c>:L84</c> test and nothing else, so a
+    /// reader comparing this file against the oracle finds it unchanged; this predicate is the NEW
+    /// boundary guard the review required, and a reader can see at a glance exactly what was added.
+    /// Folding the two together would have made every arm of the legacy test suspect.
+    /// </para>
+    /// <para>
+    /// THE FOUR POSITIONS AND THE ORDER THEY ARE TESTED IN. Table name first, because it is the one the
+    /// caller most obviously controls and the one whose abuse redirects the whole update; then the
+    /// updatable columns; then the key columns; then the identity column. The order is only observable
+    /// as which position a caller learns about first when several are bad, and testing the table first
+    /// means a redirection attempt is never masked by a column complaint.
+    /// </para>
+    /// <para>
+    /// AN EMPTY IDENTITY COLUMN PASSES, because empty means ABSENT and absence is legal
+    /// [<see cref="HasIdentityColumn"/>, <c>:L127</c>]. Testing it unconditionally would reject every
+    /// table without an auto-increment column - the exact mistake the fourth-arm note on
+    /// <see cref="IsAcceptable"/> warns against.
+    /// </para>
+    /// </remarks>
+    internal bool IsScriptSafe =>
+        UpdateWhereBuilder.IsScriptSafeTableName(Name)
+        && UpdatableColumns.All(UpdateWhereBuilder.IsScriptSafeColumnName)
+        && KeyColumns.All(UpdateWhereBuilder.IsScriptSafeColumnName)
+        && (!HasIdentityColumn || UpdateWhereBuilder.IsScriptSafeColumnName(IdentityColumn));
 
     private static IReadOnlyList<string> CopyNames(IEnumerable<string>? names)
     {
@@ -1020,6 +1058,217 @@ internal static class UpdateWhereBuilder
     private const string Assignment = " = ";
     private const string ValueQuote = "'";
 
+    /// <summary>
+    /// The diagnostic for an update table name that cannot be spliced into the script safely.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IN ENGLISH, DELIBERATELY, AND THAT IS NOT AN OVERSIGHT. Every other diagnostic in this file is
+    /// the oracle's own Chinese text carried verbatim, because the oracle raises it. The oracle raises
+    /// NOTHING here - it splices the table name unconditionally
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L143</c>] - so there is no
+    /// legacy string to carry, and inventing a Chinese one would fabricate a legacy diagnostic that
+    /// never existed. The three COLUMN positions do have a legacy diagnostic to reuse, and they reuse
+    /// it: see <see cref="InvalidColumnNameMessage"/>.
+    /// </para>
+    /// <para>
+    /// It carries no value, only the position: the offending text is the caller's own and echoing it
+    /// into a diagnostic that may be logged would put attacker-chosen script fragments in the log,
+    /// which is the shape of the leak <c>Errors/SqlRedactor.cs</c> exists to prevent.
+    /// </para>
+    /// </remarks>
+    internal const string UnsafeUpdateTableMessage =
+        "The update table name is not a valid identifier and was refused.";
+
+    #endregion
+
+    #region The identifier grammar - the guard the legacy does not have and this boundary must
+
+    // ==============================================================================================
+    //  WHY A GRAMMAR EXISTS HERE AT ALL, WHEN THE REST OF THIS FILE IS FAITHFUL TO A FAULT
+    //  ----------------------------------------------------------------------------------------------
+    //  THE SCRIPT THIS FILE BUILDS IS SYNTAX, NOT DATA. Every name a caller supplies is concatenated
+    //  into a DataWindow modification script whose grammar is `<target>.<attribute> = <value>` with
+    //  lines separated by a line feed (LineSeparator). A name is therefore in the same position a
+    //  string literal occupies in hand-interpolated SQL: a name carrying a line feed ENDS the
+    //  assignment it was in and BEGINS one the caller authored, and a name carrying an apostrophe
+    //  closes the quoted value in steps 5 and 7 and reopens it wherever the caller likes. The two
+    //  concrete consequences the review named:
+    //
+    //    * PROPERTY INJECTION. `ID~nDataWindow.Table.UpdateWhere = '0'` supplied as an updatable
+    //      column name emits two lines, the second of which silently turns the optimistic-concurrency
+    //      check OFF - so an update that was meant to compare six original values compares none, and
+    //      the conflict detection this whole folder exists to preserve stops detecting anything.
+    //    * UPDATE-TABLE REDIRECTION. `COMPANY' ~n DataWindow.Table.UpdateTable = 'SALARIES` supplied
+    //      as the table name retargets the entire update at a table the caller chose.
+    //
+    //  NEITHER IS A LEGACY EXPOSURE. PowerFramework is an in-process library with no listener
+    //  [AAP 0.1.1], so the only caller was the application itself and a table name was a literal in
+    //  the developer's own source. Decomposition creates the first-ever ingress, and
+    //  persistence.v1.TableUpdateContract now carries these six fields across it, so the name arrives
+    //  from a remote caller. This is precisely the case AAP 0.1.5 governs: where a legacy behaviour
+    //  cannot be reproduced across a network boundary, the contract is NARROWED WITH A DEFINED ERROR,
+    //  never widened with a guess.
+    //
+    //  REFUSING IS NOT REWRITING, AND THAT DISTINCTION IS WHAT KEEPS PARITY. Nothing here escapes,
+    //  quotes, doubles or strips a character: a name either passes unchanged into the script exactly
+    //  as the oracle would have spliced it, or the operation is refused. So for every input the legacy
+    //  could actually have been given, the generated script is byte-identical to before.
+    //
+    //  WHERE THE REFUSAL LIVES, AND WHY IN TWO PLACES. The PRIMARY refusal is at the admission
+    //  boundary, UpdatableTableCollection.AddUpdatableTable, which is where the oracle's own
+    //  validation lives [:L84] and which answers the oracle's own code for a bad input. The SECONDARY
+    //  refusal is inside BuildModificationString itself, because a descriptor can also be reached
+    //  through UpdatableTableDescriptor.Create or a `with` expression - both of which the descriptor's
+    //  own remarks already acknowledge as open doors - and a guard that only the front door has is not
+    //  a guard. The builder's refusal is fail-closed: it happens BEFORE the name is concatenated and,
+    //  for a key column, BEFORE the name is even handed to Describe.
+    //
+    //  WHAT IS DELIBERATELY *NOT* DONE: RESOLVING STEPS 2 AND 4 AGAINST CARRIER METADATA. The review's
+    //  suggested resolution also offered "resolve against carrier metadata". Step 3 already does, and
+    //  faithfully so - the oracle resolves each KEY column through Describe(<name> + ".Id") and fails
+    //  the whole build on a non-positive identifier [:L118-L122]. Extending that to the updatable
+    //  columns and the identity column would add a failure the oracle does not have: today a
+    //  well-formed but unknown column name emits its line, Modify rejects it, and the driver's own
+    //  error string is carried through verbatim [:L145-L148] - which IS the legacy behaviour, and is
+    //  already a rejection. Pre-resolving would move that failure earlier and replace the driver's
+    //  diagnostic with ours for no security gain, because the grammar below is what stops a name from
+    //  authoring script and an unknown-but-well-formed name authors nothing. The grammar is the fix;
+    //  metadata resolution would be a behaviour change wearing its clothes.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Reports whether a name may be spliced into the script as a COLUMN target: one identifier
+    /// segment and nothing else.
+    /// </summary>
+    /// <param name="name">The candidate name. <see langword="null"/> and empty are refused.</param>
+    /// <returns><see langword="true"/> when every character is a segment character.</returns>
+    /// <remarks>
+    /// <para>
+    /// ONE SEGMENT, SO A DOT IS REFUSED. The dot is the script's own property separator - the whole
+    /// script is <c>&lt;target&gt;.&lt;attribute&gt;</c> - so a column name containing one would let a
+    /// caller choose the attribute as well as the target: <c>ID.Key</c> passed as an updatable column
+    /// emits <c>ID.Key.Update = yes</c>, and a name ending in a dot re-aims the assignment entirely.
+    /// A DataWindow column name is a plain identifier, so nothing legitimate is lost.
+    /// </para>
+    /// <para>
+    /// THE SET IS DEFINED BY WHAT IT ADMITS, NOT BY A LIST OF WHAT IT REFUSES, which is the only form
+    /// that is safe by construction: refusing an enumerated blocklist leaves every character nobody
+    /// thought of on the accepted side. Admitting only segment characters refuses, in one stroke, every
+    /// control character including the line feed and the carriage return, every space, the apostrophe
+    /// and every other quote, the tilde PowerScript escapes with, the equals sign, the dot, and all
+    /// remaining punctuation.
+    /// </para>
+    /// </remarks>
+    internal static bool IsScriptSafeColumnName(string? name)
+    {
+        if (string.IsNullOrEmpty(name) || !IsSegmentStart(name[0]))
+        {
+            return false;
+        }
+
+        for (int index = 1; index < name.Length; index++)
+        {
+            if (!IsSegmentContinuation(name[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reports whether a name may be spliced into the script as the UPDATE TABLE: one or more
+    /// identifier segments joined by single dots.
+    /// </summary>
+    /// <param name="name">The candidate name. <see langword="null"/> and empty are refused.</param>
+    /// <returns><see langword="true"/> when the name is a dotted run of identifier segments.</returns>
+    /// <remarks>
+    /// <para>
+    /// QUALIFIED FORMS ARE ADMITTED HERE AND NOT FOR A COLUMN, and the asymmetry is the point. A table
+    /// name is a DATABASE object name and is routinely schema-qualified - <c>dbo.COMPANY</c>,
+    /// <c>SCHEMA.TABLE</c> - and it lands inside a QUOTED value [<c>:L143</c>], where the dot is
+    /// ordinary text rather than the script's separator. A column name lands UNQUOTED as the assignment
+    /// target, where the dot is the separator. Admitting dots for both would reopen the property
+    /// injection that <see cref="IsScriptSafeColumnName"/> closes; refusing them for both would reject
+    /// every schema-qualified table the legacy accepts.
+    /// </para>
+    /// <para>
+    /// EMPTY SEGMENTS ARE REFUSED, so a leading dot, a trailing dot and a doubled dot are all refused -
+    /// each of which is a malformed name rather than a qualification, and a trailing dot is the shape
+    /// that would concatenate with whatever followed it.
+    /// </para>
+    /// <para>
+    /// A NAME OF A SINGLE SPACE IS NOW REFUSED, AND THAT IS THE ONE OBSERVABLE NARROWING IN THIS FILE.
+    /// <see cref="UpdatableTableDescriptor.IsAcceptable"/> still admits it - that predicate is the
+    /// oracle's <c>name = ""</c> test and stays exactly that - so the oracle's own reachability is
+    /// unchanged and the narrowing is visible in one place: the boundary refuses what
+    /// <c>DataWindow.Table.UpdateTable = ' '</c> would have named. No table is called a space, and a
+    /// contract that carries the name across a network is the right place to say so.
+    /// </para>
+    /// </remarks>
+    internal static bool IsScriptSafeTableName(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return false;
+        }
+
+        int segmentStart = 0;
+
+        for (int index = 0; index <= name.Length; index++)
+        {
+            // The terminator arm doubles as the end-of-string arm, so the final segment is validated by
+            // the same code as every earlier one rather than by a duplicated tail block.
+            if (index != name.Length && name[index] != '.')
+            {
+                continue;
+            }
+
+            if (!IsScriptSafeColumnName(name[segmentStart..index]))
+            {
+                return false;
+            }
+
+            segmentStart = index + 1;
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether a character may begin an identifier segment: a letter or an underscore.</summary>
+    /// <param name="character">The character to classify.</param>
+    /// <returns><see langword="true"/> when it may begin a segment.</returns>
+    /// <remarks>
+    /// <para>
+    /// UNICODE LETTERS RATHER THAN ASCII ONLY, and that is evidenced rather than generous.
+    /// PowerFramework is a Chinese framework whose own diagnostics are Chinese
+    /// [<see cref="UpdateWhereBuilder.InvalidColumnNameMessage"/>], so a DataWindow column named in
+    /// Chinese is an ordinary input rather than a curiosity, and restricting to ASCII would refuse it
+    /// for no benefit - a Chinese character can no more terminate an assignment than a Latin one can.
+    /// The sibling guard in <c>Sql/ClauseModifier.cs</c> classifies word characters the same way, so the
+    /// two boundaries agree on what an identifier is.
+    /// </para>
+    /// </remarks>
+    private static bool IsSegmentStart(char character) =>
+        char.IsLetter(character) || character == '_';
+
+    /// <summary>
+    /// Whether a character may continue an identifier segment: a segment-start character, a digit,
+    /// <c>$</c> or <c>#</c>.
+    /// </summary>
+    /// <param name="character">The character to classify.</param>
+    /// <returns><see langword="true"/> when it may continue a segment.</returns>
+    /// <remarks>
+    /// <c>$</c> and <c>#</c> are admitted because both are legal in database identifiers the legacy
+    /// could name - Oracle permits both, and SQL Server's temporary-table prefix is <c>#</c> - and
+    /// neither carries any meaning in the modification-script grammar, so neither can end an assignment
+    /// or begin one.
+    /// </remarks>
+    private static bool IsSegmentContinuation(char character) =>
+        IsSegmentStart(character) || char.IsDigit(character) || character is '$' or '#';
+
     #endregion
 
     #region The seven-step recipe
@@ -1069,12 +1318,26 @@ internal static class UpdateWhereBuilder
     /// </description></item>
     /// </list>
     /// <para>
-    /// NO ADD-TIME VALIDATION IS RE-RUN HERE. The oracle validates at add time [<c>:L84</c>] and
-    /// <c>_of_updateprepare</c> trusts what it finds, so a descriptor with no key columns emits no key
-    /// lines and one with an empty name emits <c>UpdateTable = ''</c> rather than failing. Re-checking
-    /// here would move a failure to a place the oracle succeeds;
+    /// THE ORACLE'S OWN ADD-TIME VALIDATION IS NOT RE-RUN HERE. The oracle validates at add time
+    /// [<c>:L84</c>] and <c>_of_updateprepare</c> trusts what it finds, so a descriptor with no key
+    /// columns emits no key lines rather than failing. Re-checking those arms here would move a failure
+    /// to a place the oracle succeeds;
     /// <see cref="UpdatableTableCollection.AddUpdatableTable(string, IEnumerable{string}, IEnumerable{string}, string, long?, bool?)"/>
-    /// is where the validation lives.
+    /// is where that validation lives.
+    /// </para>
+    /// <para>
+    /// THE IDENTIFIER GRAMMAR *IS* RE-RUN HERE, AND THAT IS NOT A CONTRADICTION OF THE PARAGRAPH ABOVE.
+    /// The distinction is what each check is for: the oracle's arms decide whether a descriptor is a
+    /// COMPLETE update contract, and re-deciding that here would second-guess the oracle. The grammar
+    /// decides whether a name can be spliced into this script WITHOUT AUTHORING PART OF IT, and that is
+    /// this function's own concern because this function is the only place the splicing happens. It is
+    /// also the only guard that must hold for a descriptor built through
+    /// <see cref="UpdatableTableDescriptor.Create"/> or a <c>with</c> expression, neither of which passes
+    /// through the admission boundary. Four positions are guarded - the updatable columns at step 2, the
+    /// key columns at step 3 before the describe, the identity column at step 4 when present, and the
+    /// table name at step 7 - so a descriptor with an empty or whitespace name is now REFUSED where it
+    /// would previously have emitted <c>UpdateTable = ''</c>. That is the single observable narrowing in
+    /// this file and it is stated on <see cref="UpdateWhereBuilder.IsScriptSafeTableName"/>.
     /// </para>
     /// <para>
     /// EVERY NUMBER IS FORMATTED WITH <see cref="CultureInfo.InvariantCulture"/>. The script is
@@ -1118,6 +1381,17 @@ internal static class UpdateWhereBuilder
             string columnName = descriptor.UpdatableColumns[
                 OneBasedIndex.ToZeroBased(index, updatableCount, nameof(index))];
 
+            // FAIL CLOSED BEFORE THE CONCATENATION. The oracle has no test here, so this is the new
+            // guard - and it reuses the oracle's OWN failure for an unusable column name (the code of
+            // :L120 and the text of :L119) rather than introducing a second failure shape, because a
+            // name that cannot be spliced is unusable in exactly the sense that message describes.
+            if (!IsScriptSafeColumnName(columnName))
+            {
+                return ModificationScriptResult.Failed(
+                    RetCode.E_INTERNAL_ERROR,
+                    InvalidColumnNameMessage + columnName);
+            }
+
             AppendLine(script, columnName + UpdateAttributeSuffix + Assignment + YesLiteral);
         }
 
@@ -1128,6 +1402,18 @@ internal static class UpdateWhereBuilder
         {
             string columnName = descriptor.KeyColumns[
                 OneBasedIndex.ToZeroBased(index, keyCount, nameof(index))];
+
+            // FAIL CLOSED BEFORE THE DESCRIBE, not merely before the concatenation. Describe takes a
+            // SPACE-SEPARATED LIST of property requests, so an unsafe key column name reaches the
+            // carrier as several requests rather than one and the numeric answer this step reads would
+            // be the answer to a request the caller composed. Guarding after the describe would already
+            // be too late; the resulting identifier is what the workaround at :L156 later walks.
+            if (!IsScriptSafeColumnName(columnName))
+            {
+                return ModificationScriptResult.Failed(
+                    RetCode.E_INTERNAL_ERROR,
+                    InvalidColumnNameMessage + columnName);
+            }
 
             // `nColId = Long(Data.Describe(<name> + ".Id"))` [:L118].
             int columnId = metadata.GetColumnId(columnName + ColumnIdSuffix);
@@ -1157,6 +1443,15 @@ internal static class UpdateWhereBuilder
         // and is not an error. See UpdatableTableDescriptor.HasIdentityColumn.
         if (descriptor.HasIdentityColumn)
         {
+            // FAIL CLOSED, and note this sits INSIDE the presence test rather than beside it: an ABSENT
+            // identity column must stay legal, so an empty name is never handed to the grammar.
+            if (!IsScriptSafeColumnName(descriptor.IdentityColumn))
+            {
+                return ModificationScriptResult.Failed(
+                    RetCode.E_INTERNAL_ERROR,
+                    InvalidColumnNameMessage + descriptor.IdentityColumn);
+            }
+
             AppendLine(
                 script,
                 descriptor.IdentityColumn + IdentityAttributeSuffix + Assignment + YesLiteral);
@@ -1196,6 +1491,20 @@ internal static class UpdateWhereBuilder
         // `sModString += "DataWindow.Table.UpdateTable = '" + Tables[index].Name + "'"` - unconditional
         // and with no `+ "~n"`. This is the last line and the script must not end in a line feed, so
         // this is deliberately an Append and not an AppendLine.
+        //
+        // FAIL CLOSED, AND LAST RATHER THAN FIRST. The check could have run before step 1 and saved the
+        // work, and it deliberately does not: the oracle's only failure in this function is the key
+        // column at step 3, so leaving the table test here means a descriptor with both a bad key column
+        // and a bad table name still reports the KEY COLUMN - the oracle's own diagnostic - rather than
+        // being pre-empted by a diagnostic the oracle does not have. The partially built script is
+        // discarded either way.
+        if (!IsScriptSafeTableName(descriptor.Name))
+        {
+            return ModificationScriptResult.Failed(
+                RetCode.E_INTERNAL_ERROR,
+                UnsafeUpdateTableMessage);
+        }
+
         script.Append(
             UpdateTableProperty + Assignment + ValueQuote + descriptor.Name + ValueQuote);
 
@@ -1434,8 +1743,8 @@ internal sealed class UpdatableTableCollection
     /// carrier's setting alone.</param>
     /// <returns>
     /// <see cref="RetCode.OK"/> on success [<c>:L95</c>], <see cref="RetCode.E_INVALID_ARGUMENT"/> when
-    /// validation fails [<c>:L84</c>], or <see cref="RetCode.E_BUSY"/> when <see cref="IsBusy"/> answers
-    /// <see langword="true"/>.
+    /// the oracle's validation fails [<c>:L84</c>] OR when any name is not a valid identifier, or
+    /// <see cref="RetCode.E_BUSY"/> when <see cref="IsBusy"/> answers <see langword="true"/>.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -1444,6 +1753,15 @@ internal sealed class UpdatableTableCollection
     /// VALIDATION ARMS ARE THE ORACLE'S OWN, joined by OR and evaluated before anything is stored:
     /// empty name, zero-length updatable columns, zero-length key columns. An empty identity column is
     /// NOT an arm - see <see cref="UpdatableTableDescriptor.IsAcceptable"/>.
+    /// </para>
+    /// <para>
+    /// A FOURTH REFUSAL FOLLOWS THE ORACLE'S THREE, AND ANSWERS THE SAME CODE. This is the admission
+    /// boundary for the six fields <c>persistence.v1.TableUpdateContract</c> carries, so it is where a
+    /// name that would author modification script is refused - see
+    /// <see cref="UpdatableTableDescriptor.IsScriptSafe"/> and THE IDENTIFIER GRAMMAR region on
+    /// <see cref="UpdateWhereBuilder"/>. Reusing <see cref="RetCode.E_INVALID_ARGUMENT"/> rather than
+    /// inventing a code is deliberate: a caller already has to handle it from the three arms above, and
+    /// the two refusals mean the same thing to that caller - this descriptor was not admitted.
     /// </para>
     /// <para>
     /// THE DESCRIPTOR LANDS AT <c>UpperBound + 1</c> [<c>:L86</c>], which for an ordered list is a plain
@@ -1476,6 +1794,16 @@ internal sealed class UpdatableTableCollection
         // RetCode.E_INVALID_ARGUMENT` [:L84]. Rejected BEFORE the append, so a rejected descriptor
         // leaves the array untouched.
         if (!descriptor.IsAcceptable)
+        {
+            return RetCode.E_INVALID_ARGUMENT;
+        }
+
+        // THE IDENTIFIER GRAMMAR, which the oracle does not have and this admission boundary must. It
+        // runs AFTER the oracle's own three arms so their reachability is exactly unchanged, BEFORE the
+        // append so a refused descriptor never enters the collection, and it answers THE SAME CODE the
+        // oracle's own arms answer rather than introducing a fourth outcome for the caller to handle.
+        // See THE IDENTIFIER GRAMMAR region on UpdateWhereBuilder for the two exposures this closes.
+        if (!descriptor.IsScriptSafe)
         {
             return RetCode.E_INVALID_ARGUMENT;
         }

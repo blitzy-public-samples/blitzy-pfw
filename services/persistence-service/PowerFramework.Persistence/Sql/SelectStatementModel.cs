@@ -482,6 +482,32 @@ internal sealed class SelectStatementModel
     /// </remarks>
     private readonly List<SelectBlock> _blocks = [];
 
+    /// <summary>
+    /// The statement's trailing terminator - a single <c>;</c> plus any whitespace after it - or the
+    /// empty string when the parsed statement carried none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SEPARATED AT PARSE, AND THE REASON IS THAT A TERMINATOR IS NOT PART OF THE STATEMENT'S BODY.
+    /// A review found what happens when it is treated as body text: every paging rewriter composes
+    /// its result by wrapping this statement's own text - <c>SELECT TOP n * FROM (</c> + body +
+    /// <c>) pfwPagedSQL_Tbl WHERE ...</c> - so a semicolon retained inside the body lands in the
+    /// MIDDLE of the generated statement, and everything the rewriter appends after it is
+    /// unreachable. <c>SELECT a FROM t;</c> became
+    /// <c>SELECT TOP 10 * FROM (SELECT a FROM t;) pfwPagedSQL_Tbl WHERE ...</c>, which no engine
+    /// parses.
+    /// </para>
+    /// <para>
+    /// It is held rather than discarded because <see cref="GetSql"/> must round-trip its input BYTE
+    /// FOR BYTE - the parity model compares recordings, so a dropped terminator is a diff. The two
+    /// obligations are met by keeping the terminator out of the body and re-emitting it at the very
+    /// end: see <see cref="GetSql"/> for the faithful read and
+    /// <see cref="GetSqlWithoutTerminator"/> for the read a rewriter must use when it is embedding
+    /// this statement inside a larger one.
+    /// </para>
+    /// </remarks>
+    private string _terminator = string.Empty;
+
     // ------------------------------------------------------------------------------------------
     //  Scanner tokens
     // ------------------------------------------------------------------------------------------
@@ -538,6 +564,7 @@ internal sealed class SelectStatementModel
     public bool Parse(string sql)
     {
         _blocks.Clear();
+        _terminator = string.Empty;
 
         if (string.IsNullOrWhiteSpace(sql))
         {
@@ -546,11 +573,46 @@ internal sealed class SelectStatementModel
 
         List<ClauseToken> clauseTokens = [];
         List<SetOperatorToken> setOperatorTokens = [];
+        List<int> terminators = [];
 
-        if (!TryScanTokens(sql, clauseTokens, setOperatorTokens))
+        if (!TryScanTokens(sql, clauseTokens, setOperatorTokens, terminators))
         {
             return false;
         }
+
+        // THE TERMINATOR SPLIT, before the block walk so that no block ever sees a semicolon. See
+        // the remarks on _terminator for the rewriter defect that made this necessary, and
+        // TrySplitTerminator for why more than one is refused outright.
+        if (!TrySplitTerminator(sql, terminators, out string body, out string terminator))
+        {
+            return false;
+        }
+
+        // THE FIELD IS NOT ASSIGNED HERE, and that placement is deliberate rather than incidental: the
+        // block walk below has five early-return failure arms, and a terminator stored before them
+        // would survive into a model this method has just reported as EMPTY - so a caller that ignored
+        // the boolean and read GetSql() would get a lone `;`. It is assigned once, immediately before
+        // the success return.
+        //
+        // Every token position was recorded against the ORIGINAL text. Because the split only ever
+        // removes a suffix, positions inside the body are unchanged - but a set operator or clause
+        // introducer cannot legally sit after the terminator, and the walk below would have to cope
+        // with one if it could, so the tokens are re-derived from the body rather than filtered.
+        if (terminator.Length > 0)
+        {
+            clauseTokens.Clear();
+            setOperatorTokens.Clear();
+            terminators.Clear();
+
+            if (string.IsNullOrWhiteSpace(body)
+                || !TryScanTokens(body, clauseTokens, setOperatorTokens, terminators)
+                || terminators.Count > 0)
+            {
+                return false;
+            }
+        }
+
+        sql = body;
 
         if (clauseTokens.Count == 0)
         {
@@ -610,6 +672,7 @@ internal sealed class SelectStatementModel
         }
 
         _blocks.AddRange(blocks);
+        _terminator = terminator;
 
         return true;
     }
@@ -635,6 +698,42 @@ internal sealed class SelectStatementModel
             return string.Empty;
         }
 
+        // The terminator is re-attached HERE, at the very end, and nowhere else. That is what makes
+        // this read byte-for-byte faithful to its input while keeping the semicolon out of the body
+        // every modification and every rewriter works on.
+        return GetSqlWithoutTerminator() + _terminator;
+    }
+
+    /// <summary>
+    /// Renders the statement WITHOUT its trailing terminator, for a caller that is embedding it
+    /// inside a larger statement.
+    /// </summary>
+    /// <returns>
+    /// The statement text with no trailing <c>;</c>, or an empty string when no statement has been
+    /// parsed successfully.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE READ EVERY PAGING REWRITER MUST USE FOR AN INNER SUB-QUERY, and the distinction from
+    /// <see cref="GetSql"/> is not stylistic. Both SQL Server row-number arms wrap this text as
+    /// <c>SELECT TOP n * FROM (</c> + text + <c>) pfwPagedSQL_Tbl WHERE ...</c>, the offset-fetch arm
+    /// appends <c>OFFSET ... ROWS FETCH NEXT ... ROWS ONLY</c> to it, and the Oracle arm nests it
+    /// three deep. In every one of those the text is followed by more statement, so a terminator
+    /// inside it terminates the generated statement early and silently discards the paging.
+    /// </para>
+    /// <para>
+    /// A caller that is returning the FINAL statement uses <see cref="GetSql"/> instead, so the
+    /// terminator the caller supplied is preserved on the outermost statement - which is where it
+    /// belongs and where the caller put it.
+    /// </para>
+    /// </remarks>
+    public string GetSqlWithoutTerminator()
+    {
+        if (_blocks.Count == 0)
+        {
+            return string.Empty;
+        }
+
         StringBuilder builder = new(EstimateLength());
 
         foreach (SelectBlock block in _blocks)
@@ -645,6 +744,17 @@ internal sealed class SelectStatementModel
 
         return builder.ToString();
     }
+
+    /// <summary>
+    /// The trailing terminator the parsed statement carried - a single <c>;</c> plus any whitespace
+    /// that followed it - or the empty string.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so that a rewriter which composes its own outer statement, rather than reading this
+    /// model's, can re-attach the caller's terminator at the outermost end. Preserved verbatim
+    /// including the whitespace, because a recording comparison is byte for byte.
+    /// </remarks>
+    public string StatementTerminator => _terminator;
 
     /// <summary>
     /// The number of <c>SELECT</c> blocks in the parsed statement. Reproduces
@@ -860,7 +970,8 @@ internal sealed class SelectStatementModel
     private static bool TryScanTokens(
         string sql,
         List<ClauseToken> clauses,
-        List<SetOperatorToken> setOperators)
+        List<SetOperatorToken> setOperators,
+        List<int> terminators)
     {
         int depth = 0;
         int index = 0;
@@ -907,6 +1018,19 @@ internal sealed class SelectStatementModel
                     index++;
                     continue;
 
+                // A statement terminator. Recorded rather than acted on, because the scan cannot tell
+                // a legitimate trailing one from a multi-statement separator without seeing what
+                // follows - that decision is TrySplitTerminator's.
+                //
+                // Reaching this case means the semicolon is genuine statement text: the delimited-run
+                // and comment cases above have already consumed every semicolon that is data.
+                // Recorded at EVERY depth, not only depth zero, so that a semicolon inside
+                // parentheses is refused rather than silently accepted as body text.
+                case ';':
+                    terminators.Add(index);
+                    index++;
+                    continue;
+
                 default:
                     break;
             }
@@ -948,6 +1072,81 @@ internal sealed class SelectStatementModel
         }
 
         return depth == 0;
+    }
+
+    /// <summary>
+    /// Separates a single trailing statement terminator from the statement body, refusing anything
+    /// that is not exactly one trailing terminator or none.
+    /// </summary>
+    /// <param name="sql">The statement text as supplied.</param>
+    /// <param name="terminators">
+    /// Every semicolon position the scan found in genuine statement text, in ascending order.
+    /// </param>
+    /// <param name="body">The statement without its terminator, on success.</param>
+    /// <param name="terminator">
+    /// The terminator and the whitespace after it, on success, or the empty string when there was
+    /// none.
+    /// </param>
+    /// <returns><see langword="false"/> when the input is not a single statement.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>MULTI-STATEMENT INPUT IS REFUSED, and that is a narrowing with a defined error rather than a
+    /// widening with a guess (AAP 0.1.5).</b> The legacy parser is a closed binary whose behaviour on
+    /// <c>SELECT a FROM t; DELETE FROM t</c> cannot be observed from this repository, and every
+    /// consumer of a rewritten statement splices the result into a DataWindow's select property
+    /// [<c>n_cst_thread_task_sqlquery.sru:L709</c>] - so guessing that a second statement should be
+    /// carried along would hand a second statement to something that expects one. It is refused, and
+    /// the caller's own fail-fast arm [<c>:L314</c>] reports it.
+    /// </para>
+    /// <para>
+    /// <b>A semicolon with anything but whitespace after it is multi-statement input</b>, whether or
+    /// not the text after it parses as a statement. That is the same test either way, and it is
+    /// applied on the CHARACTERS rather than by attempting a second parse, so a trailing comment - a
+    /// semicolon followed by <c>-- done</c> - is refused too. Refusing it is the conservative
+    /// direction: the alternative is deciding, without an oracle, which trailing text is inert.
+    /// </para>
+    /// <para>
+    /// <b>The whitespace after the terminator travels WITH the terminator, not with the body.</b>
+    /// Both choices round-trip byte for byte, but only this one keeps the body free of a trailing
+    /// blank run that a rewriter would then embed in the middle of its generated statement.
+    /// </para>
+    /// </remarks>
+    private static bool TrySplitTerminator(
+        string sql,
+        List<int> terminators,
+        out string body,
+        out string terminator)
+    {
+        body = sql;
+        terminator = string.Empty;
+
+        if (terminators.Count == 0)
+        {
+            return true;
+        }
+
+        // More than one is unambiguously multi-statement input, whatever sits between them.
+        if (terminators.Count > 1)
+        {
+            return false;
+        }
+
+        int position = terminators[0];
+
+        // Anything but whitespace after it - including a comment - makes it a separator rather than a
+        // terminator.
+        for (int index = position + 1; index < sql.Length; index++)
+        {
+            if (!char.IsWhiteSpace(sql[index]))
+            {
+                return false;
+            }
+        }
+
+        body = sql[..position];
+        terminator = sql[position..];
+
+        return true;
     }
 
     /// <summary>

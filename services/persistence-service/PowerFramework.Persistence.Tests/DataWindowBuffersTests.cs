@@ -446,6 +446,142 @@ public sealed class DataWindowBuffersTests
             });
     }
 
+    // ==========================================================================================
+    //  BLOB VALUES ARE ISOLATED ON EVERY CROSSING, AND THE REASON IS THE CONCURRENCY CHECK
+    //  ----------------------------------------------------------------------------------------
+    //  `byte[]` is the ONE value type in the published domain that is mutable, and the carrier's whole
+    //  purpose is to hold a CURRENT value and its ORIGINAL side by side so that `updatewhere=1`
+    //  [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14] can put the original into the generated where
+    //  clause. Share one array between the two and the two stop being two: mutating the caller's array
+    //  in place moves the original ALONG WITH the current, the comparison compares a value against
+    //  itself, and the optimistic-concurrency check silently passes for every row - which is a lost
+    //  update that no row-count assertion would notice.
+    //
+    //  Three crossings therefore copy: INGRESS (the write), the ORIGINAL SNAPSHOT taken from it, and
+    //  EGRESS (both reads). Every other value in the domain is immutable, so it is handed over as-is.
+    // ==========================================================================================
+
+    /// <summary>
+    /// A caller that mutates the array it wrote cannot reach the value the carrier holds.
+    /// </summary>
+    [Fact]
+    public void MutatingTheArrayThatWasWrittenDoesNotReachTheStoredValue()
+    {
+        DataWindowBufferStore store = new();
+        store.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        byte[] written = [1, 2, 3];
+
+        store.SetItemValue(1L, 3, DwBuffer.Primary, written);
+
+        written[0] = 99;
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, Assert.IsType<byte[]>(store.GetItemValue(1L, 3, DwBuffer.Primary)));
+    }
+
+    /// <summary>
+    /// A caller that mutates the array it READ cannot reach the value the carrier holds either.
+    /// </summary>
+    [Fact]
+    public void MutatingTheArrayThatWasReadDoesNotReachTheStoredValue()
+    {
+        DataWindowBufferStore store = new();
+        store.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        store.SetItemValue(1L, 3, DwBuffer.Primary, new byte[] { 1, 2, 3 });
+
+        byte[] read = Assert.IsType<byte[]>(store.GetItemValue(1L, 3, DwBuffer.Primary));
+
+        read[0] = 99;
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, Assert.IsType<byte[]>(store.GetItemValue(1L, 3, DwBuffer.Primary)));
+
+        // Two reads never hand back the same instance, which is what makes the guarantee hold for a
+        // caller that keeps one of them.
+        Assert.NotSame(read, store.GetItemValue(1L, 3, DwBuffer.Primary));
+    }
+
+    /// <summary>
+    /// THE CASE THE ISOLATION EXISTS FOR: an in-place mutation must not move the ORIGINAL along with the
+    /// current, because the two are what the concurrency check compares.
+    /// </summary>
+    [Fact]
+    public void AnInPlaceMutationCannotMoveTheOriginalAlongWithTheCurrent()
+    {
+        DataWindowBufferStore store = new();
+        store.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        byte[] retrieved = [1, 2, 3];
+
+        store.SetItemValue(1L, 3, DwBuffer.Primary, retrieved);
+        store.ResetUpdate();
+
+        // The edit, performed the way a careless caller would perform it - in place on the array it
+        // still holds a reference to, with no second SetItemValue at all.
+        retrieved[0] = 99;
+
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            Assert.IsType<byte[]>(store.GetItemValue(1L, 3, DwBuffer.Primary)));
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            Assert.IsType<byte[]>(store.GetItemOriginalValue(1L, 3, DwBuffer.Primary)));
+
+        // And the honest edit still separates the two, which is the property the check depends on.
+        store.SetItemValue(1L, 3, DwBuffer.Primary, new byte[] { 4, 5, 6 });
+
+        Assert.Equal(
+            new byte[] { 4, 5, 6 },
+            Assert.IsType<byte[]>(store.GetItemValue(1L, 3, DwBuffer.Primary)));
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            Assert.IsType<byte[]>(store.GetItemOriginalValue(1L, 3, DwBuffer.Primary)));
+        Assert.NotSame(
+            store.GetItemValue(1L, 3, DwBuffer.Primary),
+            store.GetItemOriginalValue(1L, 3, DwBuffer.Primary));
+    }
+
+    /// <summary>
+    /// An EMPTY blob survives as an empty blob rather than as a null or a one-element array, so the
+    /// round trip has no length-dependent hole.
+    /// </summary>
+    /// <remarks>
+    /// INSTANCE IDENTITY IS DELIBERATELY NOT ASSERTED HERE, unlike in the non-empty cases above. A
+    /// zero-length array has no element to mutate, so it carries no aliasing hazard at all, and the
+    /// runtime hands out a single interned instance for every zero-length array of a given element type -
+    /// which means the copy taken on ingress legitimately IS the caller's instance. Asserting otherwise
+    /// would be asserting a runtime implementation detail that buys no safety.
+    /// </remarks>
+    [Fact]
+    public void AnEmptyBlobSurvivesAsAnEmptyBlob()
+    {
+        DataWindowBufferStore store = new();
+        store.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        store.SetItemValue(1L, 3, DwBuffer.Primary, new byte[] { });
+        store.ResetUpdate();
+
+        Assert.Empty(Assert.IsType<byte[]>(store.GetItemValue(1L, 3, DwBuffer.Primary)));
+        Assert.Empty(Assert.IsType<byte[]>(store.GetItemOriginalValue(1L, 3, DwBuffer.Primary)));
+    }
+
+    /// <summary>
+    /// Immutable values are handed over AS THEY ARE, because copying them would buy nothing and the
+    /// isolation is deliberately narrow.
+    /// </summary>
+    [Fact]
+    public void AnImmutableValueIsHandedOverWithoutBeingCopied()
+    {
+        DataWindowBufferStore store = new();
+        store.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        string written = "Contoso";
+
+        store.SetItemValue(1L, 2, DwBuffer.Primary, written);
+
+        Assert.Same(written, store.GetItemValue(1L, 2, DwBuffer.Primary));
+    }
+
     #endregion
 
     #region RowsMove, RowsDiscard and the two resets

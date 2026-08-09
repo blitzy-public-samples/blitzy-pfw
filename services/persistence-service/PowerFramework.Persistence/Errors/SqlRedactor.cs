@@ -382,6 +382,15 @@ public sealed class SqlRedactor : ISqlRedactor
     /// </remarks>
     public const string DefaultPlaceholder = "<redacted>";
 
+    /// <summary>The two hyphens that open a line comment, preserved in the masked output.</summary>
+    private const string LineCommentOpener = "--";
+
+    /// <summary>The marker that opens a block comment, preserved in the masked output.</summary>
+    private const string BlockCommentOpener = "/*";
+
+    /// <summary>The marker that closes a block comment, preserved when the comment was terminated.</summary>
+    private const string BlockCommentTerminator = "*/";
+
     private readonly string _placeholder;
 
     /// <summary>
@@ -450,6 +459,27 @@ public sealed class SqlRedactor : ISqlRedactor
                     + "would mask the digit as a numeric literal, which would break idempotence.",
                     nameof(placeholder));
             }
+
+            // THE PLACEHOLDER IS NOW ALSO WRITTEN INSIDE A COMMENT, so anything that can END a comment
+            // would let the masked body escape back into scanned text. A line break closes a line
+            // comment; every other control character is refused with it, because none of them belongs in
+            // a diagnostic marker and admitting them would mean reasoning about each one separately.
+            if (char.IsControl(placeholder[index]))
+            {
+                throw new ArgumentException(
+                    "The redaction placeholder must not contain a control character: it is written "
+                    + "inside the body of a masked comment, and a line break would terminate a line "
+                    + "comment so that the text after it escaped masking.",
+                    nameof(placeholder));
+            }
+        }
+
+        if (placeholder.Contains("*/", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The redaction placeholder must not contain a block-comment terminator: it is "
+                + "written inside the body of a masked block comment and would close it early.",
+                nameof(placeholder));
         }
 
         _placeholder = placeholder;
@@ -468,9 +498,66 @@ public sealed class SqlRedactor : ISqlRedactor
     /// <inheritdoc />
     /// <remarks>
     /// <para>
-    /// <b>The scan, in full.</b> One left-to-right pass. Outside a literal every character is copied
+    /// <b>The scan, in full.</b> One left-to-right pass. Outside a token every character is copied
     /// through unchanged, which is what preserves identifiers, keywords, operators, parentheses and
-    /// the six paging sentinels. Two things start a mask:
+    /// the six paging sentinels. SIX TOKEN FORMS START A MASK, tested in the order the loop lists them
+    /// because two of them begin with a character another form would otherwise claim:
+    /// </para>
+    /// <para>
+    /// <b>A line comment</b> opens with two hyphens and runs to the next line break. The marker and the
+    /// break are kept; the body is masked. This form is tested FIRST because a hyphen is also the sign
+    /// the numeric rule may absorb, so a scanner that measured numbers first would decline on
+    /// <c>--</c> and then copy the comment body out one character at a time.
+    /// </para>
+    /// <para>
+    /// <b>A block comment</b> opens with <c>/*</c> and closes with <c>*/</c>, and NESTING IS COUNTED
+    /// because T-SQL nests block comments. Counting is also the fail-closed direction for the dialects
+    /// that do not nest: an inner <c>/*</c> there is ordinary body text, and treating it as a nested
+    /// opener masks MORE rather than less.
+    /// </para>
+    /// <para>
+    /// <b>An Oracle alternative-quoted literal</b> - <c>q'&lt;delimiter&gt;...&lt;closer&gt;'</c>, with
+    /// the four bracket delimiters mirrored - is tested BEFORE the plain quote, and that ordering is the
+    /// whole point of handling it at all. Its body may contain a BARE apostrophe, which is the reason
+    /// the form exists, so the plain-quote scanner closes at the first one and hands the remainder of
+    /// the value back as though it were SQL.
+    /// </para>
+    /// <para>
+    /// <b>A plain string literal</b> opens on a single quote, as described below.
+    /// </para>
+    /// <para>
+    /// <b>A radix literal</b> - <c>0x</c> or <c>0X</c> followed by hexadecimal digits, or <c>0b</c> or
+    /// <c>0B</c> followed by binary digits - is tested before plain numerics. THIS WAS A COMPLETE LEAK
+    /// and it is worth stating why it hid so well: <c>0xDEADBEEF</c> begins with a digit, so the numeric
+    /// measure enters it, consumes the <c>0</c>, and then the identifier guard sees <c>x</c> and declines
+    /// the whole run - after which every byte of the blob was copied through verbatim. The <c>0x</c>
+    /// marker is kept and the digits are masked, so a reader still sees that a blob literal stood there.
+    /// </para>
+    /// <para>
+    /// <b>A plain numeric literal</b> - a digit run with an optional sign, decimal point and exponent -
+    /// is masked only when it is not part of an identifier.
+    /// </para>
+    /// <para>
+    /// <b>What "fail closed" means here, stated precisely, because the phrase is easy to over-read.</b>
+    /// It does NOT mean masking every byte the scanner cannot classify: identifiers, keywords and the
+    /// paging sentinels must survive, and a scanner that masked the unrecognised would destroy the whole
+    /// diagnostic value of the field. It means that ONCE THE SCANNER HAS ENTERED A TOKEN FORM, an
+    /// unterminated form consumes to the end of the input and is masked rather than being abandoned and
+    /// re-scanned as SQL. That holds for all four terminated forms: an unclosed string literal, an
+    /// unclosed alternative-quoted literal, an unclosed block comment and a line comment with no
+    /// trailing break each swallow the remainder. The alternative to that is emitting the tail of a
+    /// malformed statement, which is the worse of the two available failures.
+    /// </para>
+    /// <para>
+    /// <b>Quoted forms carrying a letter prefix need no branch of their own, and none is written.</b>
+    /// <c>N'...'</c> for national characters, <c>X'...'</c> and <c>x'...'</c> for SQLite blob literals,
+    /// and <c>B'...'</c> for bit strings all reach this scanner as a letter followed by an ordinary
+    /// quoted literal: the letter copies through as an identifier character and the quote opens the
+    /// literal, giving <c>N'&lt;redacted&gt;'</c> and <c>X'&lt;redacted&gt;'</c> - prefix preserved,
+    /// value masked. Adding branches for them would be dead code implying the scanner is dialect-keyword
+    /// aware, which it is not; tests pin each form so the reliance on that fall-through is explicit
+    /// rather than accidental. <c>q'</c> is the ONE prefixed form that does need a branch, because it
+    /// changes the TERMINATOR rather than merely preceding the opener.
     /// </para>
     /// <para>
     /// A single quote opens a string literal. Its content is consumed to the closing quote, with
@@ -538,9 +625,44 @@ public sealed class SqlRedactor : ISqlRedactor
         {
             char current = statement[position];
 
+            // COMMENTS ARE TESTED FIRST, AND THE ORDER IS LOAD-BEARING. A line comment opens with two
+            // hyphens, and a hyphen is also the sign a numeric literal may absorb - so if the numeric
+            // branch ran first it would inspect `--` as a sign position, decline, and let the comment
+            // body through character by character. Testing the two-character openers before any
+            // single-character rule is what keeps that from happening.
+            if (IsTwoCharacterOpener(statement, position, '-', '-'))
+            {
+                position = AppendMaskedLineComment(statement, position, masked);
+                continue;
+            }
+
+            if (IsTwoCharacterOpener(statement, position, '/', '*'))
+            {
+                position = AppendMaskedBlockComment(statement, position, masked);
+                continue;
+            }
+
+            // ORACLE ALTERNATIVE QUOTING, BEFORE THE PLAIN QUOTE. Its body may contain a BARE
+            // apostrophe - the whole reason the form exists - so the plain-quote scanner would close at
+            // the first one and hand the remainder of the value back as though it were SQL.
+            if (IsAlternativeQuoteIntroducer(statement, position))
+            {
+                position = AppendMaskedAlternativeQuotedLiteral(statement, position, masked);
+                continue;
+            }
+
             if (current == '\'')
             {
                 position = AppendMaskedStringLiteral(statement, position, masked);
+                continue;
+            }
+
+            // RADIX LITERALS BEFORE PLAIN NUMERICS. `0xDEADBEEF` begins with a digit, so the numeric
+            // measure enters it, then GUARD 2 sees `x` as an identifier character and declines - after
+            // which every byte of the blob was copied through verbatim. That was the leak review found.
+            if (TryAppendMaskedRadixLiteral(statement, position, masked, out int afterRadix))
+            {
+                position = afterRadix;
                 continue;
             }
 
@@ -595,7 +717,11 @@ public sealed class SqlRedactor : ISqlRedactor
     /// convenience on the concrete type for callers that already hold one.
     /// </para>
     /// </remarks>
-    public DbErrorData Redact(in DbErrorData error) => error with { SqlSyntax = Redact(error.SqlSyntax) };
+    // INTERNAL, FOLLOWING THE PAYLOAD. DbErrorData is internal so that the raw statement cannot leave
+    // this assembly at all - see THE CONTAINMENT OF THE RAW PAYLOAD in Errors/DbErrorData.cs - and this
+    // overload takes and returns it, so it is internal for the same reason. Nothing narrows: the wire
+    // path is ToDbError, which stays reachable, and the ISqlRedactor string member stays public.
+    internal DbErrorData Redact(in DbErrorData error) => error with { SqlSyntax = Redact(error.SqlSyntax) };
 
 
     // ------------------------------------------------------------------------------------------
@@ -604,6 +730,382 @@ public sealed class SqlRedactor : ISqlRedactor
     //  Three of the four are static: they depend on nothing but their arguments. Only the string
     //  literal writer needs the instance, because it writes the configured placeholder.
     // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Whether a two-character token opener stands at <paramref name="position"/>.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="position">The candidate index.</param>
+    /// <param name="first">The first character of the opener.</param>
+    /// <param name="second">The second character of the opener.</param>
+    /// <returns><see langword="true"/> when both characters are present in order.</returns>
+    /// <remarks>
+    /// The range test is part of the predicate rather than the caller's job, so the last character of a
+    /// statement can never be misread as the start of a two-character opener.
+    /// </remarks>
+    private static bool IsTwoCharacterOpener(string statement, int position, char first, char second) =>
+        statement[position] == first
+        && position + 1 < statement.Length
+        && statement[position + 1] == second;
+
+    /// <summary>
+    /// Consumes the line comment opening at <paramref name="position"/>, writes <c>--</c> + placeholder
+    /// + the line break, and returns the index just past what it consumed.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="position">The index of the first hyphen.</param>
+    /// <param name="masked">The output under construction.</param>
+    /// <returns>The index of the first character after the comment, including its line break.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY A COMMENT BODY IS DATA AND NOT DECORATION.</b> The legacy never emits a comment into a
+    /// generated statement, so on the oracle's own path this branch is unreachable - but the statement
+    /// that reaches this seam is not always the oracle's. <c>SetWhereClause</c> takes a raw clause from
+    /// the caller and the parser splices it in, so any comment the caller wrote arrives here inside
+    /// <c>DbError.sqlsyntax</c>; and a comment is exactly where a tool or a human parks the values it is
+    /// about to bind. Masking the body costs nothing diagnostically, because a comment carries no
+    /// structure a reader of a failed statement needs.
+    /// </para>
+    /// <para>
+    /// <b>THE LINE BREAK IS KEPT, AND IT MUST BE.</b> It is what ENDS the comment: swallowing it would
+    /// join the comment to the statement's next line, so a reader could no longer tell where the comment
+    /// stopped, and a second redaction pass would mask that next line as comment body too - which would
+    /// break idempotence in the direction of masking ever more of the statement. Both <c>\r\n</c> and a
+    /// bare <c>\n</c> are handled, and the pair is kept intact.
+    /// </para>
+    /// <para>
+    /// <b>A comment with no trailing break consumes the remainder.</b> That is this method's fail-closed
+    /// arm, and it is also simply correct: a line comment at the end of a statement runs to the end.
+    /// </para>
+    /// </remarks>
+    private int AppendMaskedLineComment(string statement, int position, StringBuilder masked)
+    {
+        masked.Append(LineCommentOpener);
+        masked.Append(_placeholder);
+
+        int cursor = position + LineCommentOpener.Length;
+
+        while (cursor < statement.Length && statement[cursor] is not ('\n' or '\r'))
+        {
+            cursor++;
+        }
+
+        // The break is copied through rather than masked. A CR LF pair is copied as a pair, because
+        // splitting it would leave a lone CR that no longer reads as one line ending.
+        if (cursor < statement.Length)
+        {
+            if (statement[cursor] == '\r'
+                && cursor + 1 < statement.Length
+                && statement[cursor + 1] == '\n')
+            {
+                masked.Append('\r').Append('\n');
+
+                return cursor + 2;
+            }
+
+            masked.Append(statement[cursor]);
+
+            return cursor + 1;
+        }
+
+        return statement.Length;
+    }
+
+    /// <summary>
+    /// Consumes the block comment opening at <paramref name="position"/>, writes
+    /// <c>/*</c> + placeholder + <c>*/</c>, and returns the index just past it.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="position">The index of the slash.</param>
+    /// <param name="masked">The output under construction.</param>
+    /// <returns>
+    /// The index of the first character after the closing marker, or the length of
+    /// <paramref name="statement"/> when the comment is unterminated.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>NESTING IS COUNTED, and that choice is right in both directions.</b> T-SQL genuinely nests
+    /// block comments, so a scanner that closed at the first <c>*/</c> would leave the outer comment's
+    /// tail outside the mask on a nested comment - a real leak in a real dialect. In the dialects that do
+    /// NOT nest, an inner <c>/*</c> is ordinary body text and counting it merely extends the mask to the
+    /// next <c>*/</c> after it, which masks MORE rather than less. There is no input for which counting
+    /// leaks and not counting does not.
+    /// </para>
+    /// <para>
+    /// <b>An unterminated comment consumes the remainder and NO closing marker is written</b>, matching
+    /// the string-literal arm exactly: inventing a terminator the text did not contain would misrepresent
+    /// it, and emitting the tail would leak it.
+    /// </para>
+    /// </remarks>
+    private int AppendMaskedBlockComment(string statement, int position, StringBuilder masked)
+    {
+        masked.Append(BlockCommentOpener);
+        masked.Append(_placeholder);
+
+        int cursor = position + BlockCommentOpener.Length;
+        int depth = 1;
+
+        while (cursor < statement.Length)
+        {
+            if (IsTwoCharacterOpener(statement, cursor, '/', '*'))
+            {
+                depth++;
+                cursor += BlockCommentOpener.Length;
+
+                continue;
+            }
+
+            if (IsTwoCharacterOpener(statement, cursor, '*', '/'))
+            {
+                depth--;
+                cursor += BlockCommentTerminator.Length;
+
+                if (depth == 0)
+                {
+                    masked.Append(BlockCommentTerminator);
+
+                    return cursor;
+                }
+
+                continue;
+            }
+
+            cursor++;
+        }
+
+        // Unterminated at whatever depth: fail closed, no terminator written.
+        return statement.Length;
+    }
+
+    /// <summary>
+    /// Whether an Oracle alternative-quote introducer - <c>q'</c> or <c>Q'</c> followed by a delimiter -
+    /// stands at <paramref name="position"/>.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="position">The candidate index.</param>
+    /// <returns><see langword="true"/> when the three-character introducer is present.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE PRECEDING-CHARACTER GUARD IS WHAT KEEPS THIS FROM FIRING INSIDE A NAME.</b> A column called
+    /// <c>seq</c> followed by a quoted literal would otherwise present as <c>...q'...</c> and be read as
+    /// an introducer, after which the terminator search would run off into the statement. The guard is
+    /// the same identifier test the numeric rule uses, so the two agree on what a name is.
+    /// </para>
+    /// <para>
+    /// <b>A white-space delimiter is refused</b>, because Oracle refuses it: space, tab and newline are
+    /// not legal alternative-quote delimiters, so text shaped like <c>q' </c> is not this form and must
+    /// fall through to the plain-quote scanner rather than being consumed as one.
+    /// </para>
+    /// </remarks>
+    private static bool IsAlternativeQuoteIntroducer(string statement, int position)
+    {
+        if (statement[position] is not ('q' or 'Q'))
+        {
+            return false;
+        }
+
+        if (position > 0 && IsIdentifierPart(statement[position - 1]))
+        {
+            return false;
+        }
+
+        return position + 2 < statement.Length
+            && statement[position + 1] == '\''
+            && !char.IsWhiteSpace(statement[position + 2]);
+    }
+
+    /// <summary>
+    /// Consumes the Oracle alternative-quoted literal opening at <paramref name="position"/>, writes the
+    /// introducer, the placeholder and the closing quote, and returns the index past it.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="position">The index of the <c>q</c>.</param>
+    /// <param name="masked">The output under construction.</param>
+    /// <returns>
+    /// The index of the first character after the closing quote, or the length of
+    /// <paramref name="statement"/> when the literal is unterminated.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE FOUR BRACKET DELIMITERS ARE MIRRORED AND EVERY OTHER DELIMITER IS ITS OWN CLOSER</b>, which
+    /// is Oracle's rule. Getting the mirror wrong is not a cosmetic error: with <c>q'[secret]'</c> and a
+    /// closer of <c>[</c> the search would never terminate and the whole value would be masked - safe but
+    /// wrong - while with <c>q'!secret!'</c> and a mirrored closer nothing would match either.
+    /// </para>
+    /// <para>
+    /// <b>THE DELIMITER IS NOT PRESERVED, and that is the choice idempotence turns on.</b> Preserving it
+    /// emits <c>q'[&lt;redacted&gt;]'</c>, whose third character is then a legal delimiter in its own
+    /// right - so a second pass reads the placeholder's own first character as the delimiter, and the mask
+    /// grows on every pass. Dropping it means BOTH this method and the plain-quote scanner converge on the
+    /// single form <c>q'&lt;placeholder&gt;'</c>, which the already-masked arm below recognises exactly.
+    /// The delimiter is caller-chosen punctuation with no diagnostic value, so nothing is lost: that an
+    /// alternative-quoted literal stood here is still visible from the <c>q'</c> introducer.
+    /// </para>
+    /// <para>
+    /// <b>The already-masked arm is not an optimisation, it is what keeps a second pass safe for ANY
+    /// placeholder.</b> Without it, a placeholder containing no character that could close itself - say
+    /// <c>MASKED</c>, whose first character <c>M</c> would become the delimiter and whose body contains no
+    /// second <c>M</c> followed by a quote - would be read as an UNTERMINATED literal, and the fail-closed
+    /// arm would then swallow the entire remainder of the statement. Recognising the shape this method
+    /// emits removes that whole class of interaction rather than patching one instance of it.
+    /// </para>
+    /// </remarks>
+    private int AppendMaskedAlternativeQuotedLiteral(string statement, int position, StringBuilder masked)
+    {
+        // ALREADY MASKED - the exact shape this method and the plain-quote scanner both emit. Handled
+        // first, and see the remarks for why it is a correctness requirement rather than a shortcut.
+        ReadOnlySpan<char> body = statement.AsSpan(position + 2);
+
+        if (body.StartsWith(_placeholder, StringComparison.Ordinal)
+            && body.Length > _placeholder.Length
+            && body[_placeholder.Length] == '\'')
+        {
+            masked.Append(statement[position]).Append('\'').Append(_placeholder).Append('\'');
+
+            return position + 2 + _placeholder.Length + 1;
+        }
+
+        char closer = ClosingDelimiterFor(statement[position + 2]);
+
+        masked.Append(statement[position]).Append('\'').Append(_placeholder);
+
+        // The body begins after the introducer and its delimiter, and ends at the first closer that is
+        // immediately followed by a quote - the pair is the terminator, not either character alone.
+        for (int cursor = position + 3; cursor + 1 < statement.Length; cursor++)
+        {
+            if (statement[cursor] == closer && statement[cursor + 1] == '\'')
+            {
+                masked.Append('\'');
+
+                return cursor + 2;
+            }
+        }
+
+        // Unterminated: fail closed, and write no terminator that the text did not carry.
+        return statement.Length;
+    }
+
+    /// <summary>
+    /// The character that closes an Oracle alternative-quoted literal opened with
+    /// <paramref name="delimiter"/>.
+    /// </summary>
+    /// <param name="delimiter">The opening delimiter.</param>
+    /// <returns>The mirrored bracket for the four bracket forms, otherwise the delimiter itself.</returns>
+    private static char ClosingDelimiterFor(char delimiter) => delimiter switch
+    {
+        '[' => ']',
+        '(' => ')',
+        '{' => '}',
+        '<' => '>',
+        _ => delimiter,
+    };
+
+    /// <summary>
+    /// Masks a radix literal - <c>0x</c> hexadecimal or <c>0b</c> binary - if one starts at
+    /// <paramref name="position"/>.
+    /// </summary>
+    /// <param name="statement">The statement being scanned.</param>
+    /// <param name="position">The candidate start index.</param>
+    /// <param name="masked">The output under construction.</param>
+    /// <param name="afterLiteral">
+    /// On success, the index of the first character after the literal; otherwise
+    /// <paramref name="position"/>.
+    /// </param>
+    /// <returns><see langword="true"/> when a radix literal was masked.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE LEAK REVIEW FOUND, AND IT HID BECAUSE IT LOOKED LIKE A NUMBER.</b> A SQL Server or
+    /// SQLite blob written as <c>0xDEADBEEF</c> reaches the numeric measure, which consumes the <c>0</c>,
+    /// finds <c>x</c>, and correctly refuses to mask a digit that is part of an identifier - at which
+    /// point the entire blob is copied through byte for byte. Every value the legacy could bind as a
+    /// <c>blob</c> parameter travels in this form.
+    /// </para>
+    /// <para>
+    /// <b>AT LEAST ONE DIGIT IS REQUIRED, and that requirement is what keeps the result idempotent.</b>
+    /// After one pass the text reads <c>0x&lt;redacted&gt;</c>; on a second pass <c>&lt;</c> is not a
+    /// hexadecimal digit, so this method declines, the numeric measure declines on the identifier guard,
+    /// and the three pieces are copied through unchanged.
+    /// </para>
+    /// <para>
+    /// <b>The marker is kept and the digits are masked</b>, for the same reason a string literal keeps its
+    /// quotes: that a blob literal stood at this position is structure worth reading.
+    /// </para>
+    /// <para>
+    /// <b>The preceding-character guard is the numeric rule's GUARD 1</b>, so an identifier such as
+    /// <c>col0x1</c> is not mistaken for a name followed by a literal.
+    /// </para>
+    /// </remarks>
+    private bool TryAppendMaskedRadixLiteral(
+        string statement,
+        int position,
+        StringBuilder masked,
+        out int afterLiteral)
+    {
+        afterLiteral = position;
+
+        if (statement[position] != '0' || position + 2 >= statement.Length)
+        {
+            return false;
+        }
+
+        if (position > 0 && (IsIdentifierPart(statement[position - 1]) || statement[position - 1] == '.'))
+        {
+            return false;
+        }
+
+        char radix = statement[position + 1];
+
+        if (radix is not ('x' or 'X' or 'b' or 'B'))
+        {
+            return false;
+        }
+
+        // THE RADIX CHARACTER IS PASSED, NOT A BOOLEAN, and that is not a style preference. The suite
+        // asserts that NO member of this type takes a bool parameter, because a bool on a redactor is
+        // shaped exactly like the `enabled` switch whose absence is the leak-prevention invariant. Naming
+        // the radix by its own character keeps that invariant literally true, allocates nothing, and
+        // happens to read better than a flag whose meaning has to be remembered.
+        if (!IsRadixDigit(statement[position + 2], radix))
+        {
+            return false;
+        }
+
+        int cursor = position + 2;
+
+        while (cursor < statement.Length && IsRadixDigit(statement[cursor], radix))
+        {
+            cursor++;
+        }
+
+        // A run that continues into an identifier character is a NAME, not a literal - the numeric rule's
+        // GUARD 2, applied here for the same reason: `0b1z` is not a binary literal.
+        if (cursor < statement.Length && IsIdentifierPart(statement[cursor]))
+        {
+            return false;
+        }
+
+        masked.Append('0').Append(radix).Append(_placeholder);
+        afterLiteral = cursor;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is a digit of the requested radix.
+    /// </summary>
+    /// <param name="candidate">The character to classify.</param>
+    /// <param name="radix">
+    /// The radix introducer: <c>x</c> or <c>X</c> for base sixteen, <c>b</c> or <c>B</c> for base two.
+    /// </param>
+    /// <returns><see langword="true"/> when the character is a digit of that radix.</returns>
+    /// <remarks>
+    /// ASCII ONLY, matching <see cref="ConsumeAsciiDigits(string, int)"/>: no dialect reachable here
+    /// accepts a non-ASCII digit in a literal, and admitting one would let a name be read as a blob.
+    /// The radix arrives as its own introducer character rather than as a boolean - see the call site
+    /// for why this type carries no bool parameter anywhere.
+    /// </remarks>
+    private static bool IsRadixDigit(char candidate, char radix) =>
+        radix is 'x' or 'X' ? char.IsAsciiHexDigit(candidate) : candidate is '0' or '1';
 
     /// <summary>
     /// Consumes the string literal opening at <paramref name="openQuoteIndex"/>, writes
@@ -928,7 +1430,7 @@ public sealed class SqlRedactor : ISqlRedactor
 /// the split exists to prevent while satisfying the compiler perfectly.
 /// </para>
 /// </remarks>
-public static class DbErrorDataExtensions
+internal static class DbErrorDataExtensions
 {
     /// <summary>
     /// Projects <paramref name="error"/> onto a wire <see cref="DbError"/>, masking the statement text
@@ -981,7 +1483,7 @@ public static class DbErrorDataExtensions
     /// <see cref="DwBuffer.Filter"/>, whose row order is inverted relative to the source.
     /// </para>
     /// </remarks>
-    public static DbError ToDbError(this in DbErrorData error)
+    internal static DbError ToDbError(this in DbErrorData error)
     {
         return new DbError
         {

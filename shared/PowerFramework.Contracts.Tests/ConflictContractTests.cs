@@ -630,7 +630,38 @@ public sealed class ConflictContractTests(OpenApiContractDocuments documents)
 
         // ALL THREE ARE NUMERIC. The legacy reads the values with GetItemNumber [:L231, :L239] and
         // carries the column as an ordinal, so nothing here is a string.
-        Assert.Equal(FieldType.Int64, field.FieldType);
+        //
+        // THE TWO ARRAYS CARRY THAT NUMBER INSIDE A PRESENCE WRAPPER, AND THE COLUMN ORDINAL DOES NOT.
+        // The distinction is not cosmetic and is asserted rather than assumed. `GetItemNumber` ANSWERS
+        // NULL for a null item and PowerScript stores that null into the array it hands the callback
+        // [n_cst_threading_task_sqlupdate.sru:L144, :L160], so an ELEMENT can be null - and a
+        // `repeated int64` has no per-element presence, leaving only two ways to carry one: coerce it
+        // to 0, which is indistinguishable from a legitimate identity of 0, or drop it, which shortens
+        // the array and silently re-pairs every later value with the wrong row. Both return a
+        // plausible response. common.v1.NullableInt64 is the wrapper that makes "null" sayable.
+        //
+        // The COLUMN ORDINAL cannot be null - the legacy fires this callback only when the ordinal is
+        // positive [n_cst_thread_task_sqlupdate.sru:L226] - so it stays a bare int64 and wrapping it
+        // would add a state the oracle cannot produce.
+        if (field.IsRepeated)
+        {
+            Assert.Equal(FieldType.Message, field.FieldType);
+            Assert.Equal("common.v1.NullableInt64", field.MessageType.FullName);
+
+            FieldDescriptor wrapped = field.MessageType.FindFieldByName("value");
+
+            Assert.Equal(FieldType.Int64, wrapped.FieldType);
+            Assert.True(
+                wrapped.HasPresence,
+                "common.v1.NullableInt64.value must be declared proto3 `optional`: an element with no "
+                    + "value set is exactly how a null identity value is transmitted, and without "
+                    + "presence tracking that element would read as 0.");
+        }
+        else
+        {
+            Assert.Equal(FieldType.Int64, field.FieldType);
+        }
+
         Assert.Equal(expectedIsRepeated, field.IsRepeated);
         Assert.False(string.IsNullOrWhiteSpace(reason));
     }
@@ -815,11 +846,20 @@ public sealed class ConflictContractTests(OpenApiContractDocuments documents)
                 new IdentityColumnData
                 {
                     IdentityColumnId = 1L,
-                    PrimaryValues = { 11L, 12L },
-                    FilterValues = { 99L, 98L },
+                    PrimaryValues = { Identity(11L), Identity(12L) },
+                    FilterValues = { Identity(99L), Identity(98L) },
                 },
-                new IdentityColumnData { IdentityColumnId = 3L, PrimaryValues = { 21L } },
-                new IdentityColumnData { IdentityColumnId = 6L, FilterValues = { 31L, 32L, 33L } },
+                new IdentityColumnData { IdentityColumnId = 3L, PrimaryValues = { Identity(21L) } },
+                new IdentityColumnData
+                {
+                    IdentityColumnId = 6L,
+
+                    // THE MIDDLE ELEMENT IS NULL, and carrying one here is the whole reason the element
+                    // type is a wrapper. It must survive the relay as null - not as 0, and not by
+                    // vanishing and shortening the array - because either would re-pair the values
+                    // after it with the wrong rows while leaving every count intact.
+                    FilterValues = { Identity(31L), NullIdentity, Identity(33L) },
+                },
             },
         };
 
@@ -835,15 +875,39 @@ public sealed class ConflictContractTests(OpenApiContractDocuments documents)
         Assert.Equal([1L, 3L, 6L], relayed.Identity.Select(static block => block.IdentityColumnId));
 
         // EACH BLOCK'S TWO ARRAYS, element for element, still separate and still in collection order.
-        Assert.Equal([11L, 12L], relayed.Identity[0].PrimaryValues);
-        Assert.Equal([99L, 98L], relayed.Identity[0].FilterValues);
+        Assert.Equal([11L, 12L], Values(relayed.Identity[0].PrimaryValues));
+        Assert.Equal([99L, 98L], Values(relayed.Identity[0].FilterValues));
 
-        Assert.Equal([21L], relayed.Identity[1].PrimaryValues);
+        Assert.Equal([21L], Values(relayed.Identity[1].PrimaryValues));
         Assert.Empty(relayed.Identity[1].FilterValues);
 
         Assert.Empty(relayed.Identity[2].PrimaryValues);
-        Assert.Equal([31L, 32L, 33L], relayed.Identity[2].FilterValues);
+
+        // THE NULL SURVIVED AS A NULL, in its own position. Three elements arrive, the outer two carry
+        // their values and the middle one carries no value at all - which is a different reading from
+        // both `[31, 0, 33]` and `[31, 33]`, and the only one that preserves the row pairing.
+        Assert.Equal([31L, null, 33L], Values(relayed.Identity[2].FilterValues));
+        Assert.Equal(3, relayed.Identity[2].FilterValues.Count);
+        Assert.False(relayed.Identity[2].FilterValues[1].HasValue);
     }
+
+    /// <summary>
+    /// An identity value, wrapped for the wire.
+    /// </summary>
+    private static NullableInt64 Identity(long value) => new() { Value = value };
+
+    /// <summary>
+    /// The null identity value: an element that is PRESENT in the array and carries no value.
+    /// </summary>
+    private static NullableInt64 NullIdentity => new();
+
+    /// <summary>
+    /// Unwraps a relayed identity array, projecting an element with no value onto
+    /// <see langword="null"/> so a test can assert the three-way distinction between a value, a null
+    /// and an absent element.
+    /// </summary>
+    private static long?[] Values(IEnumerable<NullableInt64> wrapped) =>
+        [.. wrapped.Select(static element => element.HasValue ? element.Value : (long?)null)];
 
     /// <summary>
     /// An empty block list is the "none collected" reading, and it survives a round trip as empty

@@ -228,6 +228,7 @@
 
 using System.Globalization;
 using System.Text;
+using Google.Protobuf;
 using PowerFramework.Contracts.Common.V1;
 
 // COLLISION RESOLUTION (AAP 0.4.5.1). PowerBuilder resolved one flat global namespace by library
@@ -802,9 +803,13 @@ internal sealed class CarrierRow
     /// </summary>
     /// <param name="columnNumber">The one-based column number. R9: never rebased.</param>
     /// <returns>The current value, or <see langword="null"/> when the column has none.</returns>
+    /// <remarks>
+    /// A <c>blob</c> is answered as a DEFENSIVE COPY - see <see cref="Isolate"/> for why sharing the
+    /// stored array would let a caller change the concurrency comparison from outside the carrier.
+    /// </remarks>
     internal object? GetValue(int columnNumber)
     {
-        return _values.TryGetValue(columnNumber, out object? value) ? value : null;
+        return _values.TryGetValue(columnNumber, out object? value) ? Isolate(value) : null;
     }
 
     /// <summary>
@@ -825,7 +830,7 @@ internal sealed class CarrierRow
     internal object? GetOriginalValue(int columnNumber)
     {
         return _originalValues.TryGetValue(columnNumber, out object? original)
-            ? original
+            ? Isolate(original)
             : GetValue(columnNumber);
     }
 
@@ -846,12 +851,59 @@ internal sealed class CarrierRow
         // Capture the original exactly once per baseline period. A second write must not overwrite
         // the captured original, or the concurrency check would compare against an intermediate
         // value the database never saw.
+        //
+        // THE SNAPSHOT READS THE STORED VALUE DIRECTLY RATHER THAN THROUGH GetValue, because GetValue
+        // already isolates and a second copy would be waste; the isolation the snapshot needs is
+        // supplied by the ingress copy below, which is what put the stored array beyond a caller's
+        // reach in the first place.
         if (!_originalValues.ContainsKey(columnNumber))
         {
-            _originalValues[columnNumber] = GetValue(columnNumber);
+            _originalValues[columnNumber] =
+                _values.TryGetValue(columnNumber, out object? stored) ? stored : null;
         }
 
-        _values[columnNumber] = value;
+        // INGRESS COPY. See Isolate: without it the caller keeps a live handle on the array this row
+        // now treats as a column value.
+        _values[columnNumber] = Isolate(value);
+    }
+
+    /// <summary>
+    /// Answers a value that no other holder can mutate: a <c>blob</c> is copied, every other value is
+    /// returned as it stands.
+    /// </summary>
+    /// <param name="value">The value to isolate. <see langword="null"/> is a value, not an absence.</param>
+    /// <returns>The isolated value.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY A BLOB MUST BE COPIED AT EVERY CROSSING, AND WHAT BREAKS WITHOUT IT.</b> Every other
+    /// value this carrier holds is immutable in .NET - a <see cref="string"/>, a
+    /// <see cref="decimal"/>, a <see cref="DateTime"/>, a boxed number - so storing and answering the
+    /// same instance is safe. <c>byte[]</c> is the one exception: it is a reference to MUTABLE storage.
+    /// Store the caller's array and the caller can still write through it; answer the stored array and
+    /// the reader can write into the row. Either way the ORIGINAL-VALUE SHADOW moves with the current
+    /// value, because <see cref="SetValue"/> snapshots by reference - one array reachable from two
+    /// dictionaries is one array.
+    /// </para>
+    /// <para>
+    /// That is not a theoretical tidiness point, it is the optimistic-concurrency check failing
+    /// silently. The golden-master fixture declares <c>updatewhere=1</c> with
+    /// <c>updatewhereclause=yes</c> on all six columns
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], so the generated WHERE clause is
+    /// built from the ORIGINAL values. If an in-place edit moves the original along with the current,
+    /// the clause compares the new value against itself, MATCHES A ROW THE LEGACY WOULD HAVE
+    /// CONFLICTED ON, and overwrites it. No exception is raised and no row count disagrees.
+    /// </para>
+    /// <para>
+    /// THE COPY IS SHALLOW BY CONSTRUCTION AND THAT IS SUFFICIENT: a <c>byte[]</c>'s elements are
+    /// value types, so copying the array copies everything it holds. It also has no effect on the
+    /// PowerBuilder semantics being reproduced - PowerScript assigns a <c>blob</c> BY VALUE, so a
+    /// carrier that shared storage was the deviation and this restores the oracle's behaviour rather
+    /// than adding a guarantee it lacked.
+    /// </para>
+    /// </remarks>
+    private static object? Isolate(object? value)
+    {
+        return value is byte[] blob ? blob.AsSpan().ToArray() : value;
     }
 
     /// <summary>
@@ -923,6 +975,482 @@ internal sealed class CarrierRow
 }
 
 #endregion
+#region The published value mapping - object? <-> common.v1.AnyValue
+
+/// <summary>
+/// Maps a carrier column value onto the published <see cref="AnyValue"/> carrier and back: the single
+/// place this service decides how a PowerBuilder scalar appears on the wire.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>WHY THIS EXISTS AT ALL, AND WHY THERE IS EXACTLY ONE OF IT.</b> Both cross-thread transfer
+/// paths - the changeset codec and the full-state codec - move column values across the C-05 and C-06
+/// boundaries, and each used to carry its own private byte-level tag table. Two tables meant two
+/// answers to "how does a decimal appear on the wire", and the two could drift without either failing
+/// to compile. One mapper, reached from both, is what makes the answer checkable by reading.
+/// </para>
+/// <para>
+/// <b>THE TARGET DOMAIN IS THE PUBLISHED ONE, NOT THIS SERVICE'S.</b> <c>common.v1.AnyValue</c>
+/// declares eleven arms and applies the contract's own widening rule - its comment states that
+/// <c>int64</c> covers PowerBuilder's <c>long</c> AND its <c>integer</c>, and that a narrower arm
+/// "would only create a second way to say the same thing". So this mapper WIDENS on the way out:
+/// </para>
+/// <list type="table">
+///   <listheader><term>Carrier value</term><description>Wire arm, and what comes back</description></listheader>
+///   <item><term><see langword="null"/></term><description><c>is_null = true</c>; returns <see langword="null"/>. NEVER folded to zero - the framework's tri-state predicates depend on null being a value.</description></item>
+///   <item><term><see cref="bool"/></term><description><c>bool_value</c>; returns <see cref="bool"/>.</description></item>
+///   <item><term><see cref="byte"/>, <see cref="short"/>, <see cref="int"/>, <see cref="long"/></term><description><c>int64_value</c>; returns <see cref="long"/>.</description></item>
+///   <item><term><see cref="uint"/>, <see cref="ulong"/></term><description><c>uint64_value</c>; returns <see cref="ulong"/>.</description></item>
+///   <item><term><see cref="float"/>, <see cref="double"/></term><description><c>double_value</c>; returns <see cref="double"/>.</description></item>
+///   <item><term><see cref="decimal"/></term><description><c>decimal_value</c> as canonical invariant TEXT; returns <see cref="decimal"/> WITH ITS SCALE.</description></item>
+///   <item><term><see cref="DateOnly"/></term><description><c>date_value</c>; returns <see cref="DateOnly"/>.</description></item>
+///   <item><term><see cref="TimeOnly"/></term><description><c>time_value</c>; returns <see cref="TimeOnly"/>.</description></item>
+///   <item><term><see cref="DateTime"/></term><description><c>datetime_value</c>; returns <see cref="DateTime"/>.</description></item>
+///   <item><term><see cref="string"/></term><description><c>string_value</c>; returns <see cref="string"/>.</description></item>
+///   <item><term><see cref="byte"/>[]</term><description><c>blob_value</c>; returns <see cref="byte"/>[].</description></item>
+/// </list>
+/// <para>
+/// <b>THE WIDENING IS OBSERVABLE ON A ROUND TRIP AND IS THEREFORE STATED RATHER THAN LEFT TO BE
+/// DISCOVERED.</b> A carrier holding <c>(short)-9</c> reads back as <c>-9L</c>: the NUMBER survives
+/// exactly and the CLR type does not. That is the published contract's decision, not a loss introduced
+/// here, and AAP 0.4.5.2's type table agrees with it - it maps PowerBuilder's <c>long</c> and
+/// <c>unsignedlong</c> onto <see cref="long"/> and <see cref="ulong"/>, its <c>dec</c>/<c>decimal(n)</c>
+/// onto <see cref="decimal"/>, its date family onto the three date types and its <c>blob</c> onto
+/// <see cref="byte"/>[], and names no PowerBuilder scalar that maps onto a narrower .NET numeric at
+/// all. A consumer that needs the declared column type reads it from the DataWindow definition, which
+/// is where the legacy keeps it too.
+/// </para>
+/// <para>
+/// <b>A VALUE OUTSIDE THE ELEVEN ARMS IS A PAYLOAD FAULT, NOT AN EXCEPTION TO PROPAGATE.</b>
+/// <see cref="TryToWire"/> answers <see langword="false"/> so its caller can return the legacy's own
+/// <c>GetChanges(ref blbData) &lt; 0</c> failure code. <see cref="TimeSpan"/> is the case that reaches
+/// this arm: no PowerBuilder DataWindow column type is an interval, AAP 0.4.5.2 names none, and
+/// <c>AnyValue</c> has no arm for one - so it is a value this boundary cannot express, and saying so
+/// with a code is the narrowing-with-a-defined-error the plan requires instead of inventing an
+/// encoding.
+/// </para>
+/// <para>
+/// <b>DETERMINISM.</b> Every conversion is culture-independent: the decimal arm formats and parses
+/// with <see cref="CultureInfo.InvariantCulture"/>, and the date arms carry integral components rather
+/// than formatted text. Equal input therefore yields byte-identical output, which is the repeatability
+/// the Golden-Master technique requires of master and candidate alike (AAP 0.6.7).
+/// </para>
+/// </remarks>
+internal static class CarrierValue
+{
+    /// <summary>
+    /// Projects a carrier column value onto the wire.
+    /// </summary>
+    /// <param name="value">The value. <see langword="null"/> is a value, not an absence.</param>
+    /// <param name="wire">The projection, or <see langword="null"/> when the value cannot be expressed.</param>
+    /// <returns>
+    /// <see langword="true"/> when the value was projected; <see langword="false"/> when its runtime
+    /// type is outside the eleven published arms.
+    /// </returns>
+    internal static bool TryToWire(object? value, out AnyValue? wire)
+    {
+        switch (value)
+        {
+            case null:
+                // The arm that keeps null distinct from zero. Never set is_null to false to mean "not
+                // null" - the contract says so explicitly, and another arm is how not-null is stated.
+                wire = new AnyValue { IsNull = true };
+                return true;
+
+            case bool flag:
+                wire = new AnyValue { BoolValue = flag };
+                return true;
+
+            // The widening arm. byte, short and int all reach it, because the contract declares no
+            // narrower integral arm; see the table in the type remarks.
+            case byte number:
+                wire = new AnyValue { Int64Value = number };
+                return true;
+
+            case short number:
+                wire = new AnyValue { Int64Value = number };
+                return true;
+
+            case int number:
+                wire = new AnyValue { Int64Value = number };
+                return true;
+
+            case long number:
+                wire = new AnyValue { Int64Value = number };
+                return true;
+
+            case uint number:
+                wire = new AnyValue { Uint64Value = number };
+                return true;
+
+            case ulong number:
+                wire = new AnyValue { Uint64Value = number };
+                return true;
+
+            case float number:
+                wire = new AnyValue { DoubleValue = number };
+                return true;
+
+            case double number:
+                wire = new AnyValue { DoubleValue = number };
+                return true;
+
+            case decimal number:
+                // CANONICAL INVARIANT TEXT, AND NOT A DOUBLE. The contract's DecimalValue exists
+                // precisely so that scale survives: the fixture's `salary decimal(2)` must render 1500
+                // as "1500.00", because normalising it would silently change the scale the legacy
+                // declared. `ToString(InvariantCulture)` on a decimal preserves trailing zeroes.
+                wire = new AnyValue
+                {
+                    DecimalValue = new DecimalValue
+                    {
+                        Value = number.ToString(CultureInfo.InvariantCulture),
+                    },
+                };
+                return true;
+
+            case DateOnly date:
+                // ISO 8601 "yyyy-MM-dd", zero-padded, proleptic Gregorian - the canonical form the
+                // contract fixes for DateValue. Invariant culture so no host calendar can substitute
+                // digits or a different era.
+                wire = new AnyValue
+                {
+                    DateValue = new DateValue
+                    {
+                        Value = date.ToString(DateCanonicalFormat, CultureInfo.InvariantCulture),
+                    },
+                };
+                return true;
+
+            case TimeOnly time:
+                if (!TryRenderTime(time, out string renderedTime))
+                {
+                    // Sub-microsecond precision, which the canonical form cannot carry - see
+                    // TryRenderTime for why that is refused rather than truncated.
+                    wire = null;
+                    return false;
+                }
+
+                wire = new AnyValue { TimeValue = new TimeValue { Value = renderedTime } };
+                return true;
+
+            case DateTime moment:
+                if (!TryRenderTime(
+                        TimeOnly.FromTimeSpan(moment.TimeOfDay),
+                        out string renderedTimeOfDay))
+                {
+                    wire = null;
+                    return false;
+                }
+
+                // "yyyy-MM-ddTHH:mm:ss" plus the fractional part only when non-zero, and UNZONED.
+                //
+                // THE KIND DOES NOT TRAVEL, AND THAT IS THE CONTRACT'S DECISION RATHER THAN AN
+                // OVERSIGHT. DateTimeValue is documented as unzoned "matching the legacy, which has no
+                // time-zone concept at all: adding an offset here would invent information the oracle
+                // does not have". So a Utc or a Local moment is carried as its wall-clock components and
+                // read back with DateTimeKind.Unspecified. The components a producer wrote are preserved
+                // exactly as the legacy preserved them, and the zone it never had is not fabricated on
+                // the way back.
+                wire = new AnyValue
+                {
+                    DatetimeValue = new DateTimeValue
+                    {
+                        Value = string.Concat(
+                            moment.ToString(DateCanonicalFormat, CultureInfo.InvariantCulture),
+                            DateTimeSeparator,
+                            renderedTimeOfDay),
+                    },
+                };
+                return true;
+
+            case string text:
+                wire = new AnyValue { StringValue = text };
+                return true;
+
+            case byte[] blob:
+                wire = new AnyValue { BlobValue = ByteString.CopyFrom(blob) };
+                return true;
+
+            default:
+                // Outside the published domain - TimeSpan is the reachable case. The caller answers the
+                // legacy failure code; see the type remarks for why this is a narrowing and not a bug.
+                wire = null;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads a wire value back into a carrier column value.
+    /// </summary>
+    /// <param name="wire">The wire value, which may be <see langword="null"/> for an omitted field.</param>
+    /// <param name="value">The carrier value.</param>
+    /// <returns>
+    /// <see langword="true"/> when the value was read; <see langword="false"/> when the message carries
+    /// no arm at all, or an arm whose payload is malformed.
+    /// </returns>
+    /// <remarks>
+    /// A MESSAGE WITH NO ARM SET IS REJECTED RATHER THAN READ AS NULL, and the distinction is the
+    /// contract's: <c>is_null = true</c> is how null is stated, so an empty <c>AnyValue</c> is a
+    /// producer that said nothing. Reading it as null would accept a truncated payload as a legitimate
+    /// one. An ABSENT field - a <see langword="null"/> argument here - is rejected for the same reason.
+    /// </remarks>
+    internal static bool TryFromWire(AnyValue? wire, out object? value)
+    {
+        value = null;
+
+        if (wire is null)
+        {
+            return false;
+        }
+
+        switch (wire.KindCase)
+        {
+            case AnyValue.KindOneofCase.IsNull:
+                // The producer said null. The flag's own value is not re-tested: the contract states
+                // that setting the arm IS the statement, and that false must never be sent.
+                value = null;
+                return true;
+
+            case AnyValue.KindOneofCase.BoolValue:
+                value = wire.BoolValue;
+                return true;
+
+            case AnyValue.KindOneofCase.Int64Value:
+                value = wire.Int64Value;
+                return true;
+
+            case AnyValue.KindOneofCase.Uint64Value:
+                value = wire.Uint64Value;
+                return true;
+
+            case AnyValue.KindOneofCase.DoubleValue:
+                value = wire.DoubleValue;
+                return true;
+
+            case AnyValue.KindOneofCase.DecimalValue:
+                if (!decimal.TryParse(
+                        wire.DecimalValue.Value,
+                        NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                        CultureInfo.InvariantCulture,
+                        out decimal parsed))
+                {
+                    // Text outside the canonical grammar the contract fixes - an exponent, a group
+                    // separator, whitespace, currency, a hexadecimal form. Answered as a fault rather
+                    // than coerced. A leading sign IS admitted, because the invariant rendering above
+                    // emits one for every negative value and the read must accept what the write emits.
+                    return false;
+                }
+
+                value = parsed;
+                return true;
+
+            case AnyValue.KindOneofCase.DateValue:
+                return TryReadDate(wire.DateValue, out value);
+
+            case AnyValue.KindOneofCase.TimeValue:
+                return TryReadTime(wire.TimeValue, out value);
+
+            case AnyValue.KindOneofCase.DatetimeValue:
+                return TryReadDateTime(wire.DatetimeValue, out value);
+
+            case AnyValue.KindOneofCase.StringValue:
+                value = wire.StringValue;
+                return true;
+
+            case AnyValue.KindOneofCase.BlobValue:
+                value = wire.BlobValue.ToByteArray();
+                return true;
+
+            default:
+                // KindOneofCase.None - no arm was set. See the remarks.
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// The canonical date form the contract fixes for <c>DateValue</c> and for the date half of
+    /// <c>DateTimeValue</c>.
+    /// </summary>
+    private const string DateCanonicalFormat = "yyyy-MM-dd";
+
+    /// <summary>
+    /// The canonical whole-second time form: a 24-hour clock, zero-padded. The colons are escaped
+    /// because a bare <c>:</c> in a custom format string is the CULTURE'S time separator, which on some
+    /// hosts is not a colon at all - and the canonical form is not negotiable per host.
+    /// </summary>
+    private const string TimeCanonicalFormat = @"HH\:mm\:ss";
+
+    /// <summary>
+    /// The canonical fractional part, SIX digits, emitted only when it is non-zero.
+    /// </summary>
+    private const string FractionCanonicalFormat = "ffffff";
+
+    /// <summary>
+    /// The literal separating the date and time halves of a canonical moment.
+    /// </summary>
+    private const string DateTimeSeparator = "T";
+
+    /// <summary>
+    /// .NET ticks in one microsecond, which is the finest unit the canonical fractional part carries.
+    /// </summary>
+    private const long TicksPerMicrosecond = 10L;
+
+    /// <summary>
+    /// Renders a time of day in the contract's canonical form.
+    /// </summary>
+    /// <param name="time">The time of day.</param>
+    /// <param name="rendered">The canonical text.</param>
+    /// <returns>
+    /// <see langword="false"/> when the value carries sub-microsecond precision, which the canonical
+    /// form cannot express.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE FRACTIONAL PART IS PRESENT ONLY WHEN NON-ZERO, because the contract says so: a whole-second
+    /// time renders as <c>HH:mm:ss</c> and appending <c>.000000</c> would produce a second spelling of
+    /// one value, which a golden-master comparison would read as a difference.
+    /// </para>
+    /// <para>
+    /// SUB-MICROSECOND PRECISION IS REFUSED RATHER THAN TRUNCATED. <see cref="TimeOnly"/> resolves to
+    /// 100-nanosecond ticks and the canonical form carries six fractional digits, so one tick in ten is
+    /// unrepresentable. Truncating it would answer a DIFFERENT time and no assertion on either side
+    /// would notice; refusing it answers the legacy's own <c>GetChanges &lt; 0</c> code and leaves the
+    /// caller in no doubt. No evidenced column produces such a value - the fixture's only temporal
+    /// column is a <c>date</c> [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L13</c>] - so this is the
+    /// boundary being honest about its resolution rather than a case the corpus exercises.
+    /// </para>
+    /// </remarks>
+    private static bool TryRenderTime(TimeOnly time, out string rendered)
+    {
+        rendered = string.Empty;
+
+        if (time.Ticks % TicksPerMicrosecond != 0L)
+        {
+            return false;
+        }
+
+        string whole = time.ToString(TimeCanonicalFormat, CultureInfo.InvariantCulture);
+        long subSecondTicks = time.Ticks % TimeSpan.TicksPerSecond;
+
+        rendered = subSecondTicks == 0L
+            ? whole
+            : string.Concat(
+                whole,
+                ".",
+                time.ToString(FractionCanonicalFormat, CultureInfo.InvariantCulture));
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads a canonical date, rejecting any other spelling.
+    /// </summary>
+    /// <remarks>
+    /// EXACT PARSING, and the exactness is the point: a lenient parse would accept <c>2020/6/15</c> and
+    /// every other culture-shaped spelling, so a producer that ignored the canonical form would be
+    /// silently tolerated and its output would differ byte for byte from a conforming producer's.
+    /// <see cref="DateTimeStyles.None"/> allows no surrounding whitespace either.
+    /// </remarks>
+    private static bool TryReadDate(DateValue wire, out object? value)
+    {
+        value = null;
+
+        if (!DateOnly.TryParseExact(
+                wire.Value,
+                DateCanonicalFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out DateOnly date))
+        {
+            return false;
+        }
+
+        value = date;
+        return true;
+    }
+
+    /// <summary>
+    /// Reads a canonical time of day, in either the whole-second or the fractional spelling.
+    /// </summary>
+    private static bool TryReadTime(TimeValue wire, out object? value)
+    {
+        value = null;
+
+        if (!TryParseCanonicalTime(wire.Value, out TimeOnly time))
+        {
+            return false;
+        }
+
+        value = time;
+        return true;
+    }
+
+    /// <summary>
+    /// Reads a canonical moment, splitting it at the separator and reading each half exactly.
+    /// </summary>
+    /// <remarks>
+    /// The result carries <see cref="DateTimeKind.Unspecified"/> ALWAYS, because the wire form is
+    /// unzoned by contract. See the <see cref="DateTime"/> arm of <see cref="TryToWire"/> for why the
+    /// zone is not fabricated here.
+    /// </remarks>
+    private static bool TryReadDateTime(DateTimeValue wire, out object? value)
+    {
+        value = null;
+
+        int separator = wire.Value.IndexOf(DateTimeSeparator, StringComparison.Ordinal);
+
+        if (separator < 0)
+        {
+            return false;
+        }
+
+        if (!DateOnly.TryParseExact(
+                wire.Value[..separator],
+                DateCanonicalFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out DateOnly date))
+        {
+            return false;
+        }
+
+        if (!TryParseCanonicalTime(wire.Value[(separator + 1)..], out TimeOnly time))
+        {
+            return false;
+        }
+
+        value = new DateTime(date, time, DateTimeKind.Unspecified);
+        return true;
+    }
+
+    /// <summary>
+    /// Parses the canonical time-of-day text, accepting exactly the two spellings the contract allows.
+    /// </summary>
+    /// <remarks>
+    /// The fractional spelling is tried FIRST so that a value carrying one is not read as the
+    /// whole-second form with trailing text; both parses are exact, so neither can absorb the other's.
+    /// </remarks>
+    private static bool TryParseCanonicalTime(string text, out TimeOnly time)
+    {
+        return TimeOnly.TryParseExact(
+                text,
+                TimeCanonicalFormat + "." + FractionCanonicalFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out time)
+            || TimeOnly.TryParseExact(
+                text,
+                TimeCanonicalFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out time);
+    }
+}
+
+#endregion
+
+
 
 #region The `datastore` ancestor - the three-buffer model the carriers inherit
 

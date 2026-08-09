@@ -299,6 +299,154 @@ public sealed class SqlRedactorTests
             $"SELECT COUNT({Mask}) AS CNT FROM (SELECT {Mask} AS _ FROM COMPANY) pfwPagedSQL_Tbl"
         ),
 
+        // ---- radix literals: the blob form that used to escape entirely ----
+        (
+            "a SQL Server / SQLite hexadecimal blob is masked, the 0x marker surviving - THE LEAK "
+                + "review found: the numeric measure consumed the 0, saw x as an identifier "
+                + "character, declined the run, and every byte of the blob was copied through",
+            "UPDATE COMPANY SET ADDRESS = 0xDEADBEEF WHERE ID = 1",
+            $"UPDATE COMPANY SET ADDRESS = 0x{Mask} WHERE ID = {Mask}"
+        ),
+        (
+            "the upper-case radix introducer is masked identically and its own case is preserved",
+            "UPDATE COMPANY SET ADDRESS = 0XdeadBEEF WHERE ID = 1",
+            $"UPDATE COMPANY SET ADDRESS = 0X{Mask} WHERE ID = {Mask}"
+        ),
+        (
+            "a MySQL-style binary literal is masked",
+            "SELECT * FROM COMPANY WHERE AGE = 0b0101",
+            $"SELECT * FROM COMPANY WHERE AGE = 0b{Mask}"
+        ),
+        (
+            "a binary run that continues into a non-binary digit is a NAME, not a literal, so it is "
+                + "left alone - the same guard the numeric rule applies",
+            "SELECT * FROM COMPANY WHERE AGE = 0b1z",
+            "SELECT * FROM COMPANY WHERE AGE = 0b1z"
+        ),
+        (
+            "a 0x with no hexadecimal digit after it is not a literal and is copied through",
+            "SELECT * FROM COMPANY WHERE AGE = 0x",
+            "SELECT * FROM COMPANY WHERE AGE = 0x"
+        ),
+        (
+            "an identifier that merely CONTAINS 0x is untouched, because the preceding character is an "
+                + "identifier character",
+            "SELECT col0xFF FROM COMPANY",
+            "SELECT col0xFF FROM COMPANY"
+        ),
+        (
+            "the SQLite quoted blob form needs no branch: the X prefix copies through as an "
+                + "identifier character and the quoted body is masked",
+            "UPDATE COMPANY SET ADDRESS = X'414243' WHERE ID IS NOT NULL",
+            $"UPDATE COMPANY SET ADDRESS = X'{Mask}' WHERE ID IS NOT NULL"
+        ),
+        (
+            "the lower-case quoted blob form behaves identically",
+            "UPDATE COMPANY SET ADDRESS = x'414243' WHERE ID IS NOT NULL",
+            $"UPDATE COMPANY SET ADDRESS = x'{Mask}' WHERE ID IS NOT NULL"
+        ),
+        (
+            "a bit-string literal behaves identically, for the same reason",
+            "UPDATE COMPANY SET AGE = B'0101' WHERE ID IS NOT NULL",
+            $"UPDATE COMPANY SET AGE = B'{Mask}' WHERE ID IS NOT NULL"
+        ),
+
+        // ---- comment bodies: a caller's clause can carry one, and callers park values in them ----
+        (
+            "a line comment body is masked while the marker and the line break survive - THE LEAK: "
+                + "the numeric rule inspected the first hyphen as a sign, declined, and the body was "
+                + "copied out one character at a time",
+            "SELECT * FROM COMPANY -- bind NAME = Alice\nWHERE ID IS NOT NULL",
+            $"SELECT * FROM COMPANY --{Mask}\nWHERE ID IS NOT NULL"
+        ),
+        (
+            "a CR LF pair is kept intact rather than split",
+            "SELECT * FROM COMPANY -- secret\r\nWHERE ID IS NOT NULL",
+            $"SELECT * FROM COMPANY --{Mask}\r\nWHERE ID IS NOT NULL"
+        ),
+        (
+            "a line comment with no trailing break consumes the remainder, which is both fail-closed "
+                + "and simply correct",
+            "SELECT * FROM COMPANY -- password hunter2",
+            $"SELECT * FROM COMPANY --{Mask}"
+        ),
+        (
+            "a block comment body is masked and both markers survive",
+            "SELECT /* NAME = Alice */ * FROM COMPANY",
+            $"SELECT /*{Mask}*/ * FROM COMPANY"
+        ),
+        (
+            "a nested block comment is counted, so the OUTER comment's tail is inside the mask - "
+                + "T-SQL nests, and closing at the first terminator would leak that tail",
+            "SELECT /* outer /* inner */ still secret */ * FROM COMPANY",
+            $"SELECT /*{Mask}*/ * FROM COMPANY"
+        ),
+        (
+            "an unterminated block comment consumes the remainder with no invented terminator",
+            "SELECT * FROM COMPANY /* NAME = Alice",
+            $"SELECT * FROM COMPANY /*{Mask}"
+        ),
+        (
+            "a literal containing comment markers is still just a literal - the string branch owns it",
+            "SELECT * FROM COMPANY WHERE NAME = '-- not a comment /*'",
+            $"SELECT * FROM COMPANY WHERE NAME = '{Mask}'"
+        ),
+        (
+            "a subtraction operator is not a comment opener: one hyphen is copied through and the "
+                + "operand is masked",
+            "SELECT * FROM COMPANY WHERE SALARY-1 > 0",
+            $"SELECT * FROM COMPANY WHERE SALARY-{Mask} > {Mask}"
+        ),
+
+        // ---- Oracle alternative quoting: the form whose body may hold a BARE apostrophe ----
+        (
+            "an alternative-quoted literal is masked as ONE literal even though its body contains a "
+                + "bare apostrophe - the plain-quote scanner closed at that apostrophe and handed the "
+                + "rest of the value back as SQL",
+            "SELECT * FROM COMPANY WHERE NAME = q'[O'Brien lives at 12 Mill Lane]'",
+            $"SELECT * FROM COMPANY WHERE NAME = q'{Mask}'"
+        ),
+        (
+            "each of the four bracket delimiters is mirrored correctly - a WRONG mirror would find no "
+                + "terminator, and the fail-closed arm would then swallow everything after it, so four "
+                + "separate masks with the commas intact is exactly what proves the mirroring",
+            "SELECT q'(a'b)', q'{c'd}', q'<e'f>', q'[g'h]' FROM COMPANY",
+            $"SELECT q'{Mask}', q'{Mask}', q'{Mask}', q'{Mask}' FROM COMPANY"
+        ),
+        (
+            "a non-bracket delimiter closes with itself",
+            "SELECT * FROM COMPANY WHERE NAME = q'!O'Brien!'",
+            $"SELECT * FROM COMPANY WHERE NAME = q'{Mask}'"
+        ),
+        (
+            "the upper-case introducer behaves identically and its case is preserved",
+            "SELECT * FROM COMPANY WHERE NAME = Q'[O'Brien]'",
+            $"SELECT * FROM COMPANY WHERE NAME = Q'{Mask}'"
+        ),
+        (
+            "an unterminated alternative-quoted literal fails closed to the end of the input",
+            "SELECT * FROM COMPANY WHERE NAME = q'[O'Brien",
+            $"SELECT * FROM COMPANY WHERE NAME = q'{Mask}"
+        ),
+        (
+            "the masked form is recognised on a second pass rather than being re-tokenised, which is "
+                + "what makes this branch idempotent for ANY placeholder",
+            $"SELECT * FROM COMPANY WHERE NAME = q'{Mask}'",
+            $"SELECT * FROM COMPANY WHERE NAME = q'{Mask}'"
+        ),
+        (
+            "an identifier ENDING in q is not an introducer: the guard on the preceding character is "
+                + "what stops the terminator search running off into the statement",
+            "SELECT * FROM COMPANY WHERE seq'Alice' IS NOT NULL",
+            $"SELECT * FROM COMPANY WHERE seq'{Mask}' IS NOT NULL"
+        ),
+        (
+            "a white-space delimiter is not legal in Oracle, so this is an ordinary quoted literal "
+                + "preceded by a letter",
+            "SELECT * FROM COMPANY WHERE NAME = q' Alice '",
+            $"SELECT * FROM COMPANY WHERE NAME = q'{Mask}'"
+        ),
+
         // ---- already-masked text, the idempotence surface ----
         (
             "text that has already crossed this seam is returned unchanged",
@@ -621,12 +769,69 @@ public sealed class SqlRedactorTests
     [InlineData("<red'acted>")]
     [InlineData("<redacted1>")]
     [InlineData("0")]
+    // A LINE BREAK WOULD CLOSE A MASKED LINE COMMENT, so the text after it would escape masking on the
+    // next pass. Every control character is refused with it rather than reasoned about one at a time.
+    [InlineData("<red\nacted>")]
+    [InlineData("<red\racted>")]
+    [InlineData("<red\tacted>")]
+    // A BLOCK-COMMENT TERMINATOR WOULD CLOSE A MASKED BLOCK COMMENT EARLY, putting the remainder of the
+    // masked body back into scanned text.
+    [InlineData("<red*/acted>")]
+    [InlineData("*/")]
     public void Constructor_RejectsAnInvalidPlaceholder(string placeholder)
     {
         ArgumentException failure =
             Assert.Throws<ArgumentException>(() => new SqlRedactor(placeholder: placeholder));
 
         Assert.Equal("placeholder", failure.ParamName);
+    }
+
+    /// <summary>
+    /// Every token form is idempotent under a CUSTOM placeholder too, not only under the default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DEFAULT PLACEHOLDER HIDES ONE WHOLE CLASS OF INTERACTION, which is why this test exists as
+    /// well as the table-driven theory. <c>&lt;redacted&gt;</c> happens to contain a <c>&gt;</c>, so on a
+    /// second pass over an alternative-quoted mask the terminator search finds something. A placeholder
+    /// such as <c>MASKED</c> contains no second <c>M</c> followed by a quote, so without the
+    /// already-masked arm the second pass would read the mask as an UNTERMINATED literal and the
+    /// fail-closed arm would swallow the entire remainder of the statement - losing text rather than
+    /// merely growing the mask.
+    /// </para>
+    /// <para>
+    /// One statement carrying all six token forms at once, redacted twice, so a regression in any of them
+    /// shows up here whatever the placeholder is.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("MASKED")]
+    [InlineData("?")]
+    [InlineData("<redacted>")]
+    [InlineData("[X]")]
+    public void EveryTokenFormIsIdempotentUnderACustomPlaceholder(string placeholder)
+    {
+        SqlRedactor redactor = new(placeholder);
+
+        const string statement =
+            "SELECT * FROM COMPANY /* note */ WHERE NAME = q'[O'Brien]' AND ADDRESS = X'4142' "
+                + "AND AGE = 0xFF AND SALARY > 12345 -- trailing\nAND ID IS NOT NULL";
+
+        string once = redactor.Redact(statement);
+        string twice = redactor.Redact(once);
+
+        Assert.Equal(once, twice);
+
+        // AND THE VALUES REALLY WENT: no fragment of any of the five literals survives either pass.
+        foreach (string secret in new[] { "O'Brien", "4142", "0xFF", "12345", "note", "trailing" })
+        {
+            Assert.DoesNotContain(secret, once, StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, twice, StringComparison.Ordinal);
+        }
+
+        // AND NOTHING WAS SWALLOWED: the structure after the last masked token is still there, which is
+        // what a fail-closed arm firing on an already-masked token would have destroyed.
+        Assert.EndsWith("AND ID IS NOT NULL", twice, StringComparison.Ordinal);
     }
 
     /// <summary>A null placeholder is rejected on the same terms as an empty one.</summary>

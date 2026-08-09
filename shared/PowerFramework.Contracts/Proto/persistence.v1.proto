@@ -487,8 +487,148 @@ message SqlClauseSpec {
   // GENERATED STATEMENT unchanged, with the site annotated as a known legacy defect. WHAT IT MUST
   // NOT DO: silently alter the generated statement, because that would change observable behaviour
   // and byte-exact statement parity is the acceptance criterion (C-B).
+  //
+  // ---------------- AND THE BOUNDARY REJECTS STRUCTURAL SQL BEFORE IT IS STORED ----------------
+  // A BIND PARAMETER CANNOT PROTECT SQL STRUCTURE. Parameterisation substitutes VALUES; a clause is
+  // spliced in as SYNTAX, so the previous paragraph - true as far as it goes - is not a compensator
+  // for this field, and nothing downstream is: the clause reaches the parser's ModifyWhere and
+  // ModifyOrder entry points and then the DataWindow's select property with no grammar between it and
+  // execution. So the SERVER REFUSES, at this boundary, before the clause is stored.
+  //
+  // WHAT IS REFUSED, with common.v1.RetCode.Value.E_INVALID_ARGUMENT and gRPC
+  // StatusCode.InvalidArgument - the same code the legacy's own setter guard already answers for a
+  // non-positive index or an empty clause [n_cst_thread_task_sqlquery.sru:L271, :L288]:
+  //   - a statement terminator (`;`), which is the multi-statement vector;
+  //   - a comment introducer (`--`, `/*`, `*/`), which can truncate the rest of the statement;
+  //   - a nested statement or subquery introducer (`SELECT`, `FROM` at clause level), and any set
+  //     operator (`UNION`, `INTERSECT`, `EXCEPT`, `MINUS`);
+  //   - any DML verb (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `UPSERT`, `INTO`);
+  //   - any DDL verb (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `RENAME`, `REINDEX`, `VACUUM`,
+  //     `ANALYZE`);
+  //   - any permission verb (`GRANT`, `REVOKE`, `DENY`);
+  //   - any procedure or batch-execution verb (`EXEC`/`EXECUTE`, `CALL`, `DECLARE`, `WAITFOR`,
+  //     `SHUTDOWN`, `RECONFIGURE`, `BACKUP`, `RESTORE`, `OPENROWSET`, `OPENQUERY`, `OPENDATASOURCE`),
+  //     and any identifier beginning `xp_` or `sp_`, which name whole procedure FAMILIES rather than
+  //     single words and so cannot be enumerated;
+  //   - any SQLite statement verb reachable through a spliced clause (`ATTACH`, `DETACH`, `PRAGMA`);
+  //   - any transaction-control verb (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`), because a caller
+  //     that can commit or abandon the task's own transaction can break the update contract's
+  //     optimistic-concurrency guarantee without ever touching a row;
+  //   - an unbalanced quote, bracket or parenthesis, which desynchronises every later scan;
+  //   - a control character, including a newline AND a tab, the newline because it is how a line
+  //     comment truncates a statement and how a property assignment is smuggled into a modification
+  //     script elsewhere in this service.
+  //
+  // EACH REFUSED WORD IS TESTED AS A BARE WORD, delimited on both sides by a non-word character and
+  // outside every string literal and quoted identifier. That is not a detail a server may skip: a
+  // substring search refuses `communion`, `updated_at` and `preselected`, all of which are ordinary
+  // column names, and it refuses `note = 'a;b'`, which is an ordinary predicate over an ordinary
+  // literal. The comparison is ORDINAL and case-insensitive, never culture-sensitive - under `tr-TR` a
+  // culture-aware ignore-case comparison finds `insert` and `INSERT` unequal, and a guard whose
+  // behaviour depends on the server's locale is not a guard.
+  //
+  // WHAT IS STILL ACCEPTED, so the refusal is a narrowing and not a rewrite: every ordinary predicate
+  // and ordering expression - comparisons, `AND`/`OR`/`NOT`, `IN (...)` over literals, `BETWEEN`,
+  // `LIKE`, `IS NULL`, qualified column names, quoted and bracketed identifiers INCLUDING ones that
+  // spell a refused word, string literals containing any character at all, the doubled-quote escape,
+  // positional `?` parameters, arithmetic and concatenation operators, `ASC`/`DESC`, function calls
+  // over columns - and, faithfully, SPACE-ONLY TEXT, because the legacy's guard compares against `""`
+  // and nothing more (C-B). For a clause a caller cannot express within that grammar the answer is to
+  // send it as structure, not to widen the guard.
+  //
+  // THE REFUSAL IS A NARROWING WITH A DEFINED ERROR RATHER THAN A WIDENING WITH A GUESS, which is the
+  // rule AAP 0.1.5 fixes for exactly this situation - a legacy behaviour that cannot be reproduced
+  // safely across a boundary that did not previously exist. The legacy had no listener, so no caller
+  // could reach this setter at all; there is therefore no existing wire behaviour being changed.
   // ==========================================================================================
   string clause = 3;
+}
+
+
+// ==============================================================================================
+//  SECTION 2b - CarrierState : THE DataWindow CARRIER, TYPED RATHER THAN OPAQUE
+//  --------------------------------------------------------------------------------------------
+//  WHAT THIS REPLACED AND WHY, stated first because the previous shape looked defensible.
+//  C-05's query chunks and C-06's update input used to carry the carrier as a `bytes` field whose
+//  format was declared "opaque - the codecs' concern on both sides". That is unimplementable across
+//  this boundary: DataServices references ONLY the published contracts project (C-A), so an opaque
+//  format owned privately by Persistence leaves the consumer two options, both forbidden - duplicate
+//  the private encoder from its source, or take a project reference on Persistence internals. A
+//  boundary a consumer cannot implement from the generated stubs alone is not a boundary.
+//
+//  So the carrier crosses as TYPED MESSAGES, and everything the codecs used to hide inside the blob
+//  is now a named field: the buffer a row belongs to, its ONE-BASED row ordinal, its own item status,
+//  each column's value, each column's own item status, and THE ORIGINAL-VALUE SHADOW that
+//  updatewhere=1 compares against. AAP 0.3.4 asks for exactly this - an anti-corruption layer that
+//  "translates between the legacy Primary!/Delete!/Filter! buffers plus the DataModified!/
+//  NewModified! status machine AND THE WIRE MESSAGES" - and AAP 0.6.3.2 states the obligation in one
+//  line: "the payload must transmit, per row, both the current and the original value of every marked
+//  column".
+//
+//  THIS FILE STILL CARRIES NO BEHAVIOUR (C-A). Typing the payload moves the SHAPE into the contract,
+//  not the codec: which rows are eligible, how a changeset merges into a target and how a full-state
+//  image replaces one remain each service's own concern, expressed in its own adapter. The contract
+//  says what a row IS; it does not say how either side produces or applies one.
+//
+//  THE ROW TYPE IS common.v1.DataWindowRow, DELIBERATELY THE SAME ONE C-03 USES. Two definitions of
+//  "a row on the wire" is exactly the drift the shared vocabulary exists to prevent, and it is the
+//  kind that is invisible: both copies would carry a buffer tag, a row ordinal, a status and two value
+//  lists, and only the field numbers would differ. One definition also means a relay - Persistence to
+//  DataServices to Gateway - moves rows without re-encoding them.
+// ==============================================================================================
+
+// One buffer's rows, tagged with which buffer they are.
+//
+// THE TAG IS ON THE SEGMENT AND ALSO ON EVERY ROW, AND NEITHER IS REDUNDANT. The segment tag is what
+// makes the three-segment structure below checkable without walking rows, and it is what an empty
+// segment - a buffer with no eligible rows, which is the ordinary case for Delete! on a retrieve - has
+// instead of rows. The per-row tag is what survives a relay that regroups rows, and common.v1's
+// DwBuffer note records why silence on a row means Primary rather than "unknown".
+//
+// A RECEIVER MUST REJECT A SEGMENT WHOSE ROWS DISAGREE WITH ITS OWN TAG. A Filter! row inside the
+// Primary segment is not a tolerable inconsistency: the Filter buffer's row order is INVERTED relative
+// to the source [n_cst_thread_task_sqlupdate.sru:L235-L238], so a mis-filed row is read in the wrong
+// direction and pairs with the wrong data. Nothing about the resulting rowset looks wrong.
+message CarrierBufferSegment {
+  // Which buffer these rows belong to.
+  common.v1.DwBuffer buffer = 1;
+
+  // The rows, in the order the producer read them. EMPTY IS ORDINARY, not an omission - see above.
+  repeated common.v1.DataWindowRow rows = 2;
+}
+
+// The carrier's transferable state: its processing kind plus one segment per buffer.
+//
+// ============ EXACTLY THREE SEGMENTS, ONE PER BUFFER, IN CANONICAL ORDER ======================
+// A conforming CarrierState carries EXACTLY ONE segment for DW_BUFFER_PRIMARY, EXACTLY ONE for
+// DW_BUFFER_DELETE and EXACTLY ONE for DW_BUFFER_FILTER, in that order, and nothing else. A receiver
+// MUST reject a state with a duplicated buffer, a missing buffer, an out-of-order sequence, an
+// undeclared buffer value or rows whose own tag disagrees with their segment - BEFORE it mutates the
+// target carrier.
+//
+// WHY THE RULE IS STATED HERE RATHER THAN LEFT TO EACH RECEIVER. protobuf cannot express "exactly
+// three, keyed, ordered" in the schema: `repeated` admits any count in any order, and a `map` keyed on
+// the buffer would lose ordering and add a synthesised entry type. So the invariant is a contract
+// obligation with a defined failure, and both are written down. Checking only that three segments
+// exist is NOT the rule: three segments all tagged Primary satisfies a count and loads Delete! and
+// Filter! rows into the primary buffer, which is data corruption that returns a plausible row count.
+// ==========================================================================================
+message CarrierState {
+  // `Long(Describe("DataWindow.Processing"))`, carried so that a receiver can RECONCILE it rather than
+  // assume it. It is the legacy's own codec selector: `choose case Long(Data.Describe(
+  // "DataWindow.Processing")) / case 4,5` sends a CROSSTAB or COMPOSITE carrier whole as a single
+  // full-state image [n_cst_thread_task_sqlquery.sru:L93-L101] and every other kind sends changesets.
+  //
+  // A RECEIVER MUST REJECT A DISAGREEMENT, not silently adopt the sender's value. The two sides'
+  // carriers were built from their own definitions; if they disagree about processing kind then they
+  // disagree about which serialization is even applicable, and applying rows anyway would merge a
+  // crosstab image into a tabular carrier. The raw legacy number is carried rather than an enum
+  // because the legacy tests it as a number and the value domain is the DataWindow engine's, not this
+  // contract's.
+  int64 processing = 1;
+
+  // The three buffer segments, in canonical order. See the block above for the exact obligation.
+  repeated CarrierBufferSegment segments = 2;
 }
 
 
@@ -914,9 +1054,27 @@ message QueryRowCount {
 // An implementation that tidies either away will produce short results that no row-count assertion
 // catches, because the count it would compare against is computed from the same wrong data.
 message QueryDataChunk {
-  // The serialized carrier state. OPAQUE (C-A): its internal format is the changeset and full-state
-  // codecs' concern on both sides, and no field here describes it. Legacy `ref blob blbdata`.
-  bytes data = 1;
+  // The carrier state this chunk carries, TYPED. Legacy `ref blob blbdata`.
+  //
+  // THIS FIELD USED TO BE `bytes` AND THE CHANGE IS THE POINT (C-A). An opaque byte format owned
+  // privately by Persistence cannot be consumed by DataServices, which references only the published
+  // contracts project, so the blob made this boundary unimplementable without either duplicating a
+  // private encoder or reaching into another service's internals. Section 2b records the full
+  // reasoning and the three-segment obligation a receiver must enforce before applying anything.
+  //
+  // The chunk arithmetic, the full_state selector and the three preserved defects below are unchanged
+  // by the typing: they are properties of the CHUNKING, not of the encoding.
+  //
+  // AN ABSENT state IS THE LEGACY'S ZERO-LENGTH BLOB, AND THE MAPPING IS EXACT RATHER THAN A
+  // CONVENTION INVENTED HERE. This is a MESSAGE field, so protobuf tracks its presence natively, and
+  // the receive side's `if Len(blbData) > 0 then ... else rtCode = 1 : Reset()`
+  // [n_cst_threading_task_sqlquery.sru:L188-L210] reads absence as false and CLEARS THE TARGET. The
+  // legacy's empty-result arm produces exactly this, passing (Blob(""), 1, 1, false) at [:L230].
+  //
+  // ABSENCE IS NOT THE SAME AS A STATE CARRYING THREE EMPTY SEGMENTS. The first says "no payload, clear
+  // what you have"; the second says "here is a carrier that legitimately holds no rows". A producer
+  // that sent three empty segments where the legacy sent a zero-length blob would suppress the clear.
+  CarrierState state = 1;
 
   // Legacy `count` - the TOTAL number of chunks. Argument 2 of the legacy call [:L183, :L219].
   int64 chunk_count = 2;
@@ -945,8 +1103,8 @@ message QueryChildDataChunk {
   // Legacy `string name`.
   string name = 1;
 
-  // The serialized child carrier. Opaque, as above. Legacy `ref blob blbdata`.
-  bytes data = 2;
+  // The child carrier's state, typed exactly as the main result's is. Legacy `ref blob blbdata`.
+  CarrierState state = 2;
 }
 
 // The paging totals, delivered last.
@@ -1252,21 +1410,23 @@ message PrepareUpdateResponse {
 message UpdateRequest {
   TaskHandle task = 1;
 
-  // THE UPDATE PAYLOAD CROSSES AS OPAQUE BYTES PLUS A ROW COUNT, NOT AS A ROW ARRAY (C-A).
+  // THE UPDATE PAYLOAD CROSSES AS TYPED CARRIER STATE PLUS A ROW COUNT (C-A).
   // The legacy setter is `of_setupdatedata(ref blob blbdata, readonly long rows)` [:L44, :L74-L77] -
-  // a blob and a count, nothing else. This is the CHANGESET serialization of the caller's carrier.
+  // a blob and a count, nothing else. This is the CHANGESET serialization of the caller's carrier,
+  // and it carries, per row, the current values, the ORIGINAL-VALUE SHADOW that updatewhere=1 needs,
+  // the row's item status and each column's item status.
   //
-  // ITS INTERNAL FORMAT IS THE CODECS' CONCERN ON BOTH SIDES AND IS DELIBERATELY NOT DESCRIBED HERE.
-  // That is what keeps this file free of behaviour: the changeset already carries, per row, the
-  // current values, the ORIGINAL-VALUE SHADOW that updatewhere=1 needs, the row's item status and
-  // each column's item status. Enumerating those as fields would move the codec into the contract and
-  // would create a second, drifting definition of a format that already exists on both sides.
+  // IT USED TO BE `bytes` DESCRIBED AS "the codecs' concern on both sides", AND THAT WAS THE DEFECT.
+  // Every one of those four things is load-bearing on THIS path in particular - the where clause the
+  // update generates is built from the original-value shadow - and a consumer that cannot decode the
+  // payload cannot produce one either. Section 2b records the reasoning and the three-segment
+  // obligation a receiver enforces before applying anything.
   //
   // A CHANGESET, NOT A FULL STATE, and the legacy says why: it deliberately CLEARS THE SORT
   // CONDITION before applying - `data.SetSort("")` [:L334] - so that rows are submitted in the order
   // they were copied rather than in sorted order. A full state would additionally require sort and
   // filter synchronization between the two sides.
-  bytes update_data = 2;
+  CarrierState update_data = 2;
 
   // Legacy `rows`, the caller's own count of rows in the changeset [:L74-L75]. Readable back through
   // of_getupdaterows [:L45, :L79].

@@ -29,6 +29,7 @@
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Google.Protobuf;
 using PowerFramework.Persistence.Concurrency;
 
 namespace PowerFramework.Persistence.Tests;
@@ -1073,9 +1074,10 @@ public sealed class IdentityColumnResolverTests
 
     /// <summary>
     /// C-B - a null numeric value is PRESERVED, not coerced to zero, so that a null cannot be
-    /// confused with a legitimate identity value of zero. The condition is reported by
-    /// <see cref="ResolvedIdentityColumnData.ContainsNullValue"/> rather than resolved here, because
-    /// choosing a wire encoding is the boundary's decision.
+    /// confused with a legitimate identity value of zero. It is preserved all the way onto the wire by
+    /// <see cref="ResolvedIdentityColumnData.ToIdentityColumnData"/>, and
+    /// <see cref="ResolvedIdentityColumnData.ContainsNullValue"/> reports the condition for a caller
+    /// that wants to know without projecting.
     /// </summary>
     [Fact]
     public void NullNumericValuesArePreservedAndReported()
@@ -1471,6 +1473,176 @@ public sealed class IdentityColumnResolverTests
 
         return new IdentityTableSurfaces(source, source);
     }
+
+    #endregion
+
+    #region The wire projection - presence, position and the two-array separation
+
+    /// <summary>
+    /// A null identity value travels as an element that is PRESENT and carries NO VALUE - never as
+    /// zero, and never by dropping the element.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE THREE-WAY DISTINCTION IS THE WHOLE POINT, and only one of the three is obvious. A value of
+    /// zero and a null are DIFFERENT because zero is a legal identity on a table seeded at zero, so
+    /// coercing null to zero makes the two indistinguishable. A null and an ABSENT ELEMENT are also
+    /// different, and that difference is the more dangerous one: the apply half indexes the array
+    /// POSITIONALLY against the rows it writes back
+    /// [<c>n_cst_threading_task_sqlupdate.sru:L143-L145</c>], so dropping one element does not lose one
+    /// value - it misaligns every value after it.
+    /// </para>
+    /// <para>
+    /// This test asserts all three in one array so no pair can be conflated.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ANullIdentityValueTravelsAsAPresentElementCarryingNoValue()
+    {
+        ResolvedIdentityColumnData resolved = new(4L, [0L, null, 7L], []);
+
+        IdentityColumnData wire = resolved.ToIdentityColumnData();
+
+        Assert.Equal(4L, wire.IdentityColumnId);
+
+        // POSITION IS PRESERVED: three values in, three elements out, in the same order.
+        Assert.Equal(3, wire.PrimaryValues.Count);
+
+        Assert.True(wire.PrimaryValues[0].HasValue);
+        Assert.Equal(0L, wire.PrimaryValues[0].Value);
+
+        // The null element is PRESENT and carries nothing. Reading `.Value` here would answer the
+        // protobuf default of 0, which is precisely why `HasValue` is the question that must be asked.
+        Assert.False(wire.PrimaryValues[1].HasValue);
+
+        Assert.True(wire.PrimaryValues[2].HasValue);
+        Assert.Equal(7L, wire.PrimaryValues[2].Value);
+    }
+
+    /// <summary>
+    /// The two arrays are never merged, never swapped and never reordered.
+    /// </summary>
+    /// <remarks>
+    /// PRIMARY AND FILTER ARE COLLECTED BY TWO WALKS IN TWO DIRECTIONS - the Filter buffer is walked
+    /// BACKWARD because its row order is inverted relative to the source
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L235,L237</c>] - and the apply half consumes them as two
+    /// separate positional sequences. Concatenating them would produce one array that indexes correctly
+    /// for neither buffer, and swapping them would write each buffer's identities into the other.
+    /// Deliberately different lengths, so a merge would be visible as a count rather than only as an
+    /// ordering.
+    /// </remarks>
+    [Fact]
+    public void ThePrimaryAndFilterArraysStaySeparateAndKeepTheirOwnOrder()
+    {
+        ResolvedIdentityColumnData resolved = new(1L, [10L, 20L, 30L], [900L, 901L]);
+
+        IdentityColumnData wire = resolved.ToIdentityColumnData();
+
+        Assert.Equal<long?>([10L, 20L, 30L], Unwrap(wire.PrimaryValues));
+        Assert.Equal<long?>([900L, 901L], Unwrap(wire.FilterValues));
+
+        // Neither array acquired the other's content, which a merge would have produced as a count of 5.
+        Assert.Equal(3, wire.PrimaryValues.Count);
+        Assert.Equal(2, wire.FilterValues.Count);
+    }
+
+    /// <summary>
+    /// An empty array projects as an empty array - not as absent, and not as one default element.
+    /// </summary>
+    /// <remarks>
+    /// "Nothing was collected for this buffer" is the ordinary outcome for a buffer with no
+    /// newly-modified rows, and it must stay distinguishable from "one row whose identity was null".
+    /// </remarks>
+    [Fact]
+    public void AnEmptyArrayProjectsAsEmptyRatherThanAsOneNullElement()
+    {
+        IdentityColumnData wire = new ResolvedIdentityColumnData(1L, [], []).ToIdentityColumnData();
+
+        Assert.Empty(wire.PrimaryValues);
+        Assert.Empty(wire.FilterValues);
+
+        // And the contrasting case, so the two readings are pinned against each other rather than
+        // separately: one null element is a COUNT OF ONE with no value.
+        IdentityColumnData oneNull =
+            new ResolvedIdentityColumnData(1L, [null], []).ToIdentityColumnData();
+
+        Assert.Single(oneNull.PrimaryValues);
+        Assert.False(oneNull.PrimaryValues[0].HasValue);
+    }
+
+    /// <summary>
+    /// The projection survives a protobuf round trip, which is the only test that proves the wire
+    /// ENCODING carries presence rather than merely the in-memory message.
+    /// </summary>
+    /// <remarks>
+    /// A message can answer <c>HasValue</c> correctly in memory and still lose the distinction on the
+    /// wire if the field is not declared <c>optional</c> - proto3 omits a default-valued implicit field
+    /// entirely, so an unset element and an element carrying 0 would serialize identically and the
+    /// decoder could not tell them apart. Serializing and re-parsing is what closes that gap.
+    /// </remarks>
+    [Fact]
+    public void PresenceSurvivesSerializationAndNotJustTheInMemoryMessage()
+    {
+        ResolvedIdentityColumnData resolved = new(2L, [null, 0L, null, 5L], [null]);
+
+        IdentityColumnData parsed =
+            IdentityColumnData.Parser.ParseFrom(resolved.ToIdentityColumnData().ToByteArray());
+
+        Assert.Equal(2L, parsed.IdentityColumnId);
+        Assert.Equal<long?>([null, 0L, null, 5L], Unwrap(parsed.PrimaryValues));
+        Assert.Equal<long?>([null], Unwrap(parsed.FilterValues));
+    }
+
+    /// <summary>
+    /// Every value the collector can produce round-trips, including the extremes.
+    /// </summary>
+    /// <param name="value">The identity value, or <see langword="null"/>.</param>
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(1L)]
+    [InlineData(-1L)]
+    [InlineData(long.MinValue)]
+    [InlineData(long.MaxValue)]
+    [InlineData(null)]
+    public void EveryRepresentableIdentityValueRoundTrips(long? value)
+    {
+        IdentityColumnData parsed = IdentityColumnData.Parser.ParseFrom(
+            new ResolvedIdentityColumnData(1L, [value], []).ToIdentityColumnData().ToByteArray());
+
+        Assert.Equal<long?>([value], Unwrap(parsed.PrimaryValues));
+    }
+
+    /// <summary>
+    /// The projection is the one that the resolver's own output feeds, end to end.
+    /// </summary>
+    /// <remarks>
+    /// EVERY OTHER TEST IN THIS REGION CONSTRUCTS THE PAYLOAD BY HAND, which proves the mapper but not
+    /// that it fits what the collector actually produces. This one drives the real collection path -
+    /// including the Filter buffer's backward walk - and projects its output, so the two halves are
+    /// pinned together.
+    /// </remarks>
+    [Fact]
+    public void TheCollectorsOwnOutputProjectsWithItsOrderIntact()
+    {
+        IdentityTableSurfaces surfaces = TableCollecting(4, [801L], [902L, 901L]);
+
+        ResolvedIdentityColumnData payload =
+            Assert.Single(IdentityColumnResolver.ResolveTables([surfaces]).Identity);
+
+        IdentityColumnData wire = payload.ToIdentityColumnData();
+
+        Assert.Equal(4L, wire.IdentityColumnId);
+        Assert.Equal<long?>([801L], Unwrap(wire.PrimaryValues));
+        Assert.Equal<long?>([902L, 901L], Unwrap(wire.FilterValues));
+    }
+
+    /// <summary>
+    /// Unwraps a projected array so a test can assert the value-versus-null distinction directly.
+    /// </summary>
+    /// <param name="wrapped">The projected elements.</param>
+    /// <returns>One nullable value per element, in order.</returns>
+    private static long?[] Unwrap(IEnumerable<NullableInt64> wrapped) =>
+        [.. wrapped.Select(static element => element.HasValue ? element.Value : (long?)null)];
 
     #endregion
 }

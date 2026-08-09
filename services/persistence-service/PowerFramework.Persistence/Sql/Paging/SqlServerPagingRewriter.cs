@@ -1087,8 +1087,13 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
         //
         // ARITHMETIC: the offset is ps * (pi - 1), which is 0 on the first page because the page
         // index is ONE-BASED [:L37]. FETCH NEXT takes the page size unmodified.
-        string pagedSubQuery = statement.GetSql()
-            + OffsetIntroducer + Render(request.PageSize * (request.PageIndex - 1))
+        // UNTERMINATED, because this text is an INNER SUB-QUERY: the offset-fetch clause is appended
+        // to it immediately below and the whole thing is then folded into an INNER JOIN. A trailing
+        // `;` retained here would terminate the generated statement before the OFFSET, silently
+        // discarding the paging - a review found exactly that. The caller's terminator is re-attached
+        // by the outer read at [:L364], which uses GetSql().
+        string pagedSubQuery = statement.GetSqlWithoutTerminator()
+            + OffsetIntroducer + Render(checked(request.PageSize * (request.PageIndex - 1)))
             + FetchNextIntroducer + Render(request.PageSize)
             + FetchTerminator;
 
@@ -1182,7 +1187,8 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
         // the page - because the BETWEEN filter at [:L356] is what selects the page out of it.
         statement.ModifyColumn(
             Enums.SQL_MS_REPLACE,
-            TopIntroducer + Render(request.PageSize * request.PageIndex) + TopColumnListSeparator
+            TopIntroducer + Render(checked(request.PageSize * request.PageIndex))
+                + TopColumnListSeparator
                 + fragments.Columns
                 + RowNumberColumnIntroducer + orderBy + RowNumberColumnTerminator);
 
@@ -1195,12 +1201,15 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
         //
         // The GetSql() read here is the sequencing point described in the remarks: it must follow
         // both the strip and the column replacement above.
+        // UNTERMINATED for the same reason as arm 1: this is the derived table inside
+        // `SELECT TOP n * FROM ( ... ) pfwPagedSQL_Tbl WHERE ...`, so a terminator inside it would
+        // truncate the statement before its own WHERE clause.
         string pagedSlice = SelectTopIntroducer + Render(request.PageSize) + SelectAllFromIntroducer
-            + statement.GetSql()
+            + statement.GetSqlWithoutTerminator()
             + BetweenIntroducer
-            + Render((request.PageSize * (request.PageIndex - 1)) + 1)
+            + Render(checked((request.PageSize * (request.PageIndex - 1)) + 1))
             + BetweenBoundSeparator
-            + Render(request.PageSize * request.PageIndex);
+            + Render(checked(request.PageSize * request.PageIndex));
 
         // [:L358] sqlParser.ModifyColumn(Enums.SQL_MS_REPLACE, sOrigColumns)
         statement.ModifyColumn(Enums.SQL_MS_REPLACE, originalColumns);
@@ -1264,11 +1273,16 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
         statement.ModifyOrder(
             Enums.SQL_MS_REPLACE,
             orderBy
-                + OffsetIntroducer + Render(request.PageSize * (request.PageIndex - 1))
+                + OffsetIntroducer + Render(checked(request.PageSize * (request.PageIndex - 1)))
                 + FetchNextIntroducer + Render(request.PageSize)
                 + FetchTerminator);
 
         // [:L373] sql = sqlParser.GetSQL()
+        //
+        // TERMINATED, deliberately, and this arm is the contrast that makes the distinction legible:
+        // it returns the MODEL's own text as the final statement, so the caller's terminator belongs
+        // on the end of it. The two arms above embed the model inside a larger statement and must
+        // therefore read it unterminated.
         return statement.GetSql();
     }
 
@@ -1347,20 +1361,26 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
         // in this arm for a hoisted local to belong to.
         statement.ModifyColumn(
             Enums.SQL_MS_REPLACE,
-            TopIntroducer + Render(request.PageSize * request.PageIndex) + TopColumnListSeparator
+            TopIntroducer + Render(checked(request.PageSize * request.PageIndex))
+                + TopColumnListSeparator
                 + statement.GetColumn()
                 + RowNumberColumnIntroducer + orderBy + RowNumberColumnTerminator);
 
-        // [:L382] identical in shape to [:L356].
+        // [:L382] identical in shape to [:L356]. UNTERMINATED derived table, terminated result -
+        // see the note at [:L356].
         string pagedSlice = SelectTopIntroducer + Render(request.PageSize) + SelectAllFromIntroducer
-            + statement.GetSql()
+            + statement.GetSqlWithoutTerminator()
             + BetweenIntroducer
-            + Render((request.PageSize * (request.PageIndex - 1)) + 1)
+            + Render(checked((request.PageSize * (request.PageIndex - 1)) + 1))
             + BetweenBoundSeparator
-            + Render(request.PageSize * request.PageIndex);
+            + Render(checked(request.PageSize * request.PageIndex));
 
         // [:L383] sql += " ORDER BY pfwPagedSQL_RN"  --  THIS ARM ONLY, one leading space.
-        return pagedSlice + TrailingOrderBy;
+        //
+        // THIS ARM COMPOSES ITS OWN OUTER STATEMENT rather than re-reading the model, so it is the arm
+        // that must re-attach the caller's terminator itself - after the trailing ORDER BY, which is
+        // the outermost end of the statement it built. Empty for a statement that carried none.
+        return pagedSlice + TrailingOrderBy + statement.StatementTerminator;
     }
 
     // ==========================================================================================
@@ -1382,13 +1402,24 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
     /// this file emits goes through here so that no call site can forget.
     /// </para>
     /// <para>
-    /// <b>Width, stated because the two sides differ.</b> The legacy fields are PowerScript
+    /// <b>Width, and why the products above are CHECKED.</b> The legacy fields are PowerScript
     /// <c>long</c>, which is 32-bit signed <c>[:L36-L37]</c>; the request surfaces them as
-    /// <see langword="long"/>, which is 64-bit. The widening cannot lose a legacy value, and the
-    /// products computed by the arms are left unchecked exactly as the legacy leaves them - a page
-    /// size and index whose product overflows is nonsense input, and adding a guard the oracle does
-    /// not have would introduce a failure mode the legacy could not exhibit (C-B). The dispatcher
-    /// already rejects a non-positive page size or index before any arm runs <c>[:L307]</c>.
+    /// <see langword="long"/>, which is 64-bit. This file previously left every product unchecked on
+    /// the reasoning that the oracle leaves them unchecked too, and a review found that reasoning
+    /// wrong. An unchecked product does not preserve legacy behaviour, it invents behaviour: it wraps
+    /// to a NEGATIVE number, and <c>TOP -N</c>, <c>OFFSET -N</c> and <c>BETWEEN</c> over negative
+    /// bounds are statements that silently match nothing rather than faults that report. Nor is the
+    /// wrap point the legacy's, since the widths differ - so there is no legacy behaviour here to be
+    /// faithful to.
+    /// </para>
+    /// <para>
+    /// The guard that a caller actually meets is upstream:
+    /// <c>PagingRewriteRequest.HasRepresentablePagingProducts</c> is tested by the dispatcher before
+    /// any statement is parsed, and answers the same invalid-paging outcome as the oracle's own bounds
+    /// test at <c>[:L307-L310]</c>. The <see langword="checked"/> operators at the render sites are the
+    /// backstop for a caller that reaches an arm directly - which is to say a test - so that it gets an
+    /// exception rather than a plausible-looking statement built on a negative bound. The dispatcher
+    /// also still rejects a non-positive page size or index, exactly as the oracle does.
     /// </para>
     /// </remarks>
     private static string Render(long value) => value.ToString(CultureInfo.InvariantCulture);

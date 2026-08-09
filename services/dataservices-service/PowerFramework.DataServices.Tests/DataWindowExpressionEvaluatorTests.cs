@@ -27,6 +27,7 @@
 // -----------------------------------------------------------------------------------------------------
 using System.Globalization;
 
+using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
 using PowerFramework.DataServices.Expressions;
 using PowerFramework.DataServices.Validators;
@@ -2270,5 +2271,200 @@ public class ExpressionValueCoercionTests
         Assert.False(ExpressionValue.FromLong(1L).IsTemporal);
         Assert.True(ExpressionValue.True.TryGetBoolean(out bool t) && t);
         Assert.True(ExpressionValue.False.TryGetBoolean(out bool f) && !f);
+    }
+}
+
+// ==================================================================================================
+//  THE DEPLOYED PAGE-RESOLUTION PATH
+//  ------------------------------------------------------------------------------------------------
+//  Every other test in this file that exercises `for page` INJECTS a resolver first, and each of them
+//  is right to: the class default refuses `for page`, deliberately, so a test that wants a number has
+//  to state a pagination. What none of them proved is that a RUNNING SERVICE ever states one - and it
+//  did not. The evaluator's class default is UnresolvedPageResolver, so dw_sqlite.srd:L27's
+//  `sum(salary for page)`, the only `for page` expression in the repository, answered the malformed
+//  sentinel in the deployed path unless some wiring site remembered an assignment.
+//
+//  THE TESTS BELOW CONTAIN NO ASSIGNMENT TO PageResolver. That absence is the assertion: they walk the
+//  same three steps Program.cs walks - read the bound ColumnExpressionOptions, hand its two values to
+//  ExpressionPageResolverFactory, pass the result to the three-argument constructor - and then ask the
+//  fixture's own footer compute for a number. If any link in that chain is missing, they fail.
+// ==================================================================================================
+
+public class DeployedPageResolutionTests
+{
+    /// <summary>
+    /// The default configuration resolves <c>for page</c>: a deployment that states nothing still gets a
+    /// number, not the sentinel.
+    /// </summary>
+    /// <remarks>
+    /// THE FINDING, INVERTED INTO AN ASSERTION. A default-constructed ColumnExpressionOptions is exactly
+    /// what binding an absent DataServices:ColumnExpression section produces, and appsettings.json states
+    /// the same two values explicitly - so this covers both the stated and the unstated deployment.
+    /// </remarks>
+    [Fact]
+    public void TheDefaultConfigurationResolvesForPageWithoutAnyInjection()
+    {
+        ColumnExpressionOptions configured = new();
+
+        Assert.Equal(ExpressionPageResolution.WholeBuffer, configured.PageResolution);
+        Assert.Equal(0, configured.PageRowsPerPage);
+
+        DataWindowExpressionEvaluator evaluator = BuildAsProgramWould(configured, out _);
+
+        // The fixture's OWN footer compute [dw_sqlite.srd:L27], evaluated at row 1 with no property
+        // assignment anywhere above. 1000.50 + 2000.25 + 3000.00, with row 4's null salary contributing
+        // nothing - the whole four-row buffer, because this deployment states that it is one page.
+        Assert.Equal("6000.75", evaluator.Evaluate("sum(salary for page)", 1L));
+
+        // And the resolver really is the one the configuration named, rather than something that happens
+        // to answer.
+        Assert.IsType<WholeBufferPageResolver>(evaluator.PageResolver);
+    }
+
+    /// <summary>
+    /// A paginated deployment gets its own pages, again with no injection.
+    /// </summary>
+    /// <remarks>
+    /// The two-row pages are the same partition the injected FixedRowsPerPageResolver test uses, so this
+    /// proves the configured path reaches the identical behaviour by a different route: rows 1-2 total
+    /// 3000.75 and rows 3-4 total 3000.00, the latter because row 4's salary is null.
+    /// </remarks>
+    [Fact]
+    public void APaginatedConfigurationResolvesItsOwnPagesWithoutAnyInjection()
+    {
+        ColumnExpressionOptions configured = new()
+        {
+            PageResolution = ExpressionPageResolution.FixedRowsPerPage,
+            PageRowsPerPage = 2,
+        };
+
+        DataWindowExpressionEvaluator evaluator = BuildAsProgramWould(configured, out _);
+
+        Assert.Equal("3000.75", evaluator.Evaluate("sum(salary for page)", 1L));
+        Assert.Equal("3000.75", evaluator.Evaluate("sum(salary for page)", 2L));
+        Assert.Equal("3000.00", evaluator.Evaluate("sum(salary for page)", 3L));
+        Assert.Equal("3000.00", evaluator.Evaluate("sum(salary for page)", 4L));
+
+        FixedRowsPerPageResolver resolver =
+            Assert.IsType<FixedRowsPerPageResolver>(evaluator.PageResolver);
+        Assert.Equal(2L, resolver.RowsPerPage);
+    }
+
+    /// <summary>
+    /// A deployment that states <c>Unresolved</c> still gets the refusal, because the narrowing remains
+    /// available rather than being removed.
+    /// </summary>
+    /// <remarks>
+    /// WIRING THE CAPABILITY MUST NOT DELETE THE DEFINED ERROR. AAP 0.1.5's narrowing is the right answer
+    /// for a deployment that genuinely does not know its pagination, so it stays selectable - and a
+    /// deployment that selects it has SAID so, which is the whole difference from silently getting it.
+    /// </remarks>
+    [Fact]
+    public void AnUnresolvedConfigurationStillRefusesForPage()
+    {
+        ColumnExpressionOptions configured = new()
+        {
+            PageResolution = ExpressionPageResolution.Unresolved,
+        };
+
+        DataWindowExpressionEvaluator evaluator = BuildAsProgramWould(configured, out _);
+
+        Assert.IsType<UnresolvedPageResolver>(evaluator.PageResolver);
+        Assert.Equal(
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            evaluator.Evaluate("sum(salary for page)", 1L));
+    }
+
+    /// <summary>
+    /// The factory maps each declared mode to exactly one resolver, and refuses anything else.
+    /// </summary>
+    /// <remarks>
+    /// THE UNRECOGNISED ARM THROWS RATHER THAN FALLING BACK, and that is why the factory exists at all: a
+    /// <c>default:</c> arm returning the refusing resolver would turn a mistyped setting - or a fourth
+    /// enum member somebody forgot to handle - back into the silent sentinel this change removes. The
+    /// options validator rejects an undeclared value first, so in a configured service this is
+    /// unreachable; it is the backstop for a caller that bypassed validation.
+    /// </remarks>
+    [Fact]
+    public void TheFactoryMapsEveryDeclaredModeAndRefusesAnythingElse()
+    {
+        Assert.IsType<UnresolvedPageResolver>(
+            ExpressionPageResolverFactory.Create(ExpressionPageResolution.Unresolved, 0));
+        Assert.IsType<WholeBufferPageResolver>(
+            ExpressionPageResolverFactory.Create(ExpressionPageResolution.WholeBuffer, 0));
+        Assert.IsType<FixedRowsPerPageResolver>(
+            ExpressionPageResolverFactory.Create(ExpressionPageResolution.FixedRowsPerPage, 25));
+
+        // Every declared member is handled, so the switch cannot be partially implemented.
+        foreach (ExpressionPageResolution declared in Enum.GetValues<ExpressionPageResolution>())
+        {
+            Assert.NotNull(ExpressionPageResolverFactory.Create(declared, 1));
+        }
+
+        ArgumentOutOfRangeException undeclared = Assert.Throws<ArgumentOutOfRangeException>(
+            () => ExpressionPageResolverFactory.Create((ExpressionPageResolution)7, 0));
+        Assert.Equal("resolution", undeclared.ParamName);
+
+        // And a fixed page with no row count is refused against the SETTING's name, which is what an
+        // operator reading the failure needs rather than a resolver constructor's parameter name.
+        ArgumentOutOfRangeException missingCount = Assert.Throws<ArgumentOutOfRangeException>(
+            () => ExpressionPageResolverFactory.Create(ExpressionPageResolution.FixedRowsPerPage, 0));
+        Assert.Equal("rowsPerPage", missingCount.ParamName);
+        Assert.Contains(
+            "DataServices:ColumnExpression:PageRowsPerPage",
+            missingCount.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three-argument constructor installs the resolver, and refuses a null one.
+    /// </summary>
+    /// <remarks>
+    /// A CONSTRUCTOR RATHER THAN AN ASSIGNMENT, because an assignment is what a wiring site can forget.
+    /// The two shorter constructors are asserted here too, unchanged, so that widening the wiring did not
+    /// quietly change the class default that every other `for page` test in this file depends on.
+    /// </remarks>
+    [Fact]
+    public void TheThreeArgumentConstructorInstallsTheResolverAndTheShorterOnesKeepTheRefusingDefault()
+    {
+        FakeDataWindowHost host = EvaluatorFixture.BuildSqliteFixture();
+
+        Assert.IsType<WholeBufferPageResolver>(
+            new DataWindowExpressionEvaluator(
+                host,
+                PinyinFirstLetterMatcher.Blocked,
+                WholeBufferPageResolver.Instance).PageResolver);
+
+        Assert.IsType<UnresolvedPageResolver>(new DataWindowExpressionEvaluator(host).PageResolver);
+        Assert.IsType<UnresolvedPageResolver>(
+            new DataWindowExpressionEvaluator(host, PinyinFirstLetterMatcher.Blocked).PageResolver);
+
+        Assert.Throws<ArgumentNullException>(
+            () => new DataWindowExpressionEvaluator(host, PinyinFirstLetterMatcher.Blocked, null!));
+    }
+
+    /// <summary>
+    /// Builds an evaluator through exactly the three steps <c>Program.cs</c> performs.
+    /// </summary>
+    /// <param name="configured">The bound column-expression options.</param>
+    /// <param name="host">Receives the fixture host.</param>
+    /// <returns>The evaluator.</returns>
+    /// <remarks>
+    /// DELIBERATELY MIRRORS THE COMPOSITION ROOT LINE FOR LINE, and contains no assignment to
+    /// <c>PageResolver</c>. If the registration in <c>Program.cs</c> and this helper ever diverge, the
+    /// helper is the one that is wrong - it exists to make the deployed path testable without a host, not
+    /// to be a second way of doing it.
+    /// </remarks>
+    private static DataWindowExpressionEvaluator BuildAsProgramWould(
+        ColumnExpressionOptions configured,
+        out FakeDataWindowHost host)
+    {
+        host = EvaluatorFixture.BuildSqliteFixture();
+
+        IExpressionPageResolver resolver = ExpressionPageResolverFactory.Create(
+            configured.PageResolution,
+            configured.PageRowsPerPage);
+
+        return new DataWindowExpressionEvaluator(host, PinyinFirstLetterMatcher.Blocked, resolver);
     }
 }

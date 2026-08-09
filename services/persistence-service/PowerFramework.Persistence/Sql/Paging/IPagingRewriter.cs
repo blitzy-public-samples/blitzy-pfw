@@ -341,6 +341,72 @@ internal readonly record struct PagingRewriteRequest
     public bool HasValidPagingBounds => PageSize > 0 && PageIndex > 0;
 
     /// <summary>
+    /// Whether every product the paging arms compute from <see cref="PageSize"/> and
+    /// <see cref="PageIndex"/> is representable, so that no arm can render a wrapped bound.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> when the bounds are valid and <c>PageSize * PageIndex</c> does not
+    /// overflow.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// A GUARD THE ORACLE DOES NOT HAVE, ADDED BECAUSE ITS ABSENCE INVENTS BEHAVIOUR RATHER THAN
+    /// PRESERVING IT. Every arm multiplies these two values - <c>TOP ps * pi</c>,
+    /// <c>OFFSET ps * (pi - 1)</c>, <c>BETWEEN ps * (pi - 1) + 1 AND ps * pi</c>
+    /// [<c>n_cst_thread_task_sqlquery.sru:L346, :L356, :L372, :L382, :L395</c>] - and an unchecked
+    /// product WRAPS TO A NEGATIVE NUMBER. The resulting statement is not a fault: <c>TOP -1</c>,
+    /// <c>OFFSET -1</c> and a <c>BETWEEN</c> over negative bounds are syntactically fine and silently
+    /// match no row, so the caller receives an empty page and no indication that anything went wrong.
+    /// That is the one outcome worse than either a correct page or a reported error.
+    /// </para>
+    /// <para>
+    /// AND THERE IS NO LEGACY BEHAVIOUR TO BE FAITHFUL TO, because the widths differ. PowerScript
+    /// <c>long</c> is 32-bit signed [<c>:L36-L37</c>] while these fields are 64-bit, so the wrap point
+    /// here is not the wrap point there; a request that overflowed in the legacy does not overflow
+    /// here, and one that overflows here could never have been expressed there. Refusing it is a
+    /// narrowing with a defined error rather than a widening with a guess (AAP 0.1.5), and the error is
+    /// the SAME one the oracle's own bounds test answers, so no new outcome is introduced on the wire.
+    /// </para>
+    /// <para>
+    /// <b>Only the largest product is tested, and that is sufficient rather than approximate.</b>
+    /// Because both values are positive, <c>ps * pi</c> is the greatest of the three products - it
+    /// dominates <c>ps * (pi - 1)</c>, and <c>ps * (pi - 1) + 1</c> is at most <c>ps * pi</c> whenever
+    /// <c>ps</c> is at least one, which the bounds test already guarantees. So a request whose largest
+    /// product fits has every product fit.
+    /// </para>
+    /// <para>
+    /// <b>Division rather than a trial multiplication</b>, because a trial multiplication is the very
+    /// thing being guarded against: it would have to overflow in order to be detected.
+    /// </para>
+    /// </remarks>
+    public bool HasRepresentablePagingProducts =>
+        HasValidPagingBounds && PageSize <= long.MaxValue / PageIndex;
+
+    /// <summary>
+    /// Returns a copy of this request carrying a different unique-index column list, leaving every other
+    /// field alone.
+    /// </summary>
+    /// <param name="pagedUniqueIndexColumns">The replacement list, copied defensively as at construction.</param>
+    /// <returns>The copy.</returns>
+    /// <remarks>
+    /// <para>
+    /// EXISTS FOR EXACTLY ONE CALLER, and that narrowness is the point:
+    /// <see cref="PagingRewriteDispatcher.Rewrite"/> hands the arm the identifiers
+    /// <see cref="PagedUniqueIndexColumnValidator.TryValidate"/> RESOLVED, which differ from the
+    /// caller's own only where the caller named an output alias rather than a source column.
+    /// </para>
+    /// <para>
+    /// A hand-written copy rather than a <c>with</c> expression, because the list is held in a private
+    /// array field behind a read-only property rather than as a positional record member - so <c>with</c>
+    /// cannot reach it, and a public setter would let any caller mutate a request that is otherwise
+    /// immutable by construction.
+    /// </para>
+    /// </remarks>
+    public PagingRewriteRequest WithPagedUniqueIndexColumns(
+        IReadOnlyList<string>? pagedUniqueIndexColumns) =>
+        new(OriginalSql, PageSize, PageIndex, PageNative, pagedUniqueIndexColumns);
+
+    /// <summary>
     /// Whether the unique-index column list selects the inner-join paging strategy.
     /// </summary>
     /// <value><see langword="true"/> when <see cref="PagedUniqueIndexColumns"/> is not empty.</value>
@@ -845,36 +911,68 @@ internal static class PagedUniqueIndexColumnValidator
     /// Why it failed - <see cref="MalformedReason"/> or <see cref="UnknownColumnReason"/> - or
     /// <see langword="null"/> when all passed.
     /// </param>
+    /// <param name="resolved">
+    /// On success, the identifiers a rewriter must splice, in the caller's own order and one per
+    /// input. On failure, <see langword="null"/>.
+    /// </param>
     /// <returns><see langword="true"/> when every identifier is acceptable.</returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="pagedUniqueIndexColumns"/> or <paramref name="statement"/> is
     /// <see langword="null"/>.
     /// </exception>
     /// <remarks>
+    /// <para>
     /// FIRST FAILURE WINS AND THE REST ARE NOT EXAMINED, which matches how the dispatcher's other guards
     /// behave: one fault, one code, one diagnostic. Reporting every failure would mean assembling a
     /// message out of caller-supplied text, which is exactly what the rejection deliberately does not do.
+    /// </para>
+    /// <para>
+    /// <b>IT ALSO RESOLVES, AND THAT IS WHY IT HAS AN OUT-PARAMETER FOR THE RESULT.</b> A review found
+    /// that admitting an identifier was not enough: the roster this validator built added EVERY
+    /// whitespace-delimited token of a select-list term, so <c>c.id AS ident</c> contributed
+    /// <c>c.id</c>, <c>id</c> AND <c>ident</c> as though all three named a source column. They do not.
+    /// <c>ident</c> is the statement's OUTPUT alias, and the arm that consumes these identifiers
+    /// replaces the sub-query's select list with them
+    /// [<c>n_cst_thread_task_sqlquery.sru:L331, :L345</c>] - so a caller naming the alias produced
+    /// <c>SELECT ident FROM ...</c> over a table that has no such column, and a join predicate on it.
+    /// Invalid SQL, admitted by the guard whose job was to prevent exactly that.
+    /// </para>
+    /// <para>
+    /// <b>SO AN ALIAS IS TRANSLATED BACK TO ITS SOURCE, AND EVERY OTHER SPELLING IS RETURNED
+    /// VERBATIM.</b> A candidate that names a source column - by its full spelling or by its trailing
+    /// segment - resolves to ITSELF, character for character, so byte-exact statement parity is
+    /// untouched for every request that was already correct. Only a candidate that matches nothing but
+    /// an output alias is rewritten, and its previous behaviour was a statement no engine would
+    /// execute, so there is no correct output being changed.
+    /// </para>
     /// </remarks>
     public static bool TryValidate(
         IReadOnlyList<string> pagedUniqueIndexColumns,
         SelectStatementModel statement,
         out string? rejected,
-        out string? reason)
+        out string? reason,
+        out IReadOnlyList<string>? resolved)
     {
         ArgumentNullException.ThrowIfNull(pagedUniqueIndexColumns);
         ArgumentNullException.ThrowIfNull(statement);
 
         rejected = null;
         reason = null;
+        resolved = null;
 
         if (pagedUniqueIndexColumns.Count == 0)
         {
+            resolved = [];
+
             return true;
         }
 
-        // Built once for the whole list rather than per identifier. A null set means at least one select
-        // block cannot enumerate its columns, so membership is unenforceable - see the type remarks.
-        HashSet<string>? roster = BuildRoster(statement);
+        // Built once for the whole list rather than per identifier. A null map means at least one select
+        // block cannot enumerate its columns, so neither membership nor resolution is possible - see the
+        // type remarks.
+        Dictionary<string, string>? resolutions = BuildResolutionMap(statement);
+
+        string[] spliceable = new string[pagedUniqueIndexColumns.Count];
 
         for (int index = 0; index < pagedUniqueIndexColumns.Count; index++)
         {
@@ -890,14 +988,28 @@ internal static class PagedUniqueIndexColumnValidator
                 return false;
             }
 
-            if (roster is not null && !AppearsIn(roster, candidate!))
+            if (resolutions is null)
+            {
+                // UNENFORCEABLE, so the candidate passes through UNCHANGED. There is nothing to resolve
+                // against, and inventing a resolution would be worse than leaving the lexical check as
+                // the enforced bound - which is the position this validator already took for membership.
+                spliceable[index] = candidate!;
+
+                continue;
+            }
+
+            if (!TryResolve(resolutions, candidate!, out string? spliced) || spliced is null)
             {
                 rejected = candidate!;
                 reason = UnknownColumnReason;
 
                 return false;
             }
+
+            spliceable[index] = spliced;
         }
+
+        resolved = spliceable;
 
         return true;
     }
@@ -914,29 +1026,38 @@ internal static class PagedUniqueIndexColumnValidator
     public const string UnknownColumnReason = "identifier names no column of the statement";
 
     /// <summary>
-    /// Collects the column names every select block enumerates.
+    /// Builds the map from every spelling a caller may legitimately write to the identifier a rewriter
+    /// must actually splice.
     /// </summary>
     /// <param name="statement">The parsed statement.</param>
     /// <returns>
-    /// The set of names, or <see langword="null"/> when ANY block's select list cannot be enumerated -
-    /// because it contains <c>*</c>, a <c>t.*</c> term, or a term that is an expression rather than a
-    /// name.
+    /// The map, or <see langword="null"/> when ANY block's select list cannot be enumerated - because it
+    /// contains <c>*</c>, a <c>t.*</c> term, or a term whose source is an expression rather than a name.
     /// </returns>
     /// <remarks>
     /// <para>
     /// NULL MEANS "UNENFORCEABLE", NOT "EMPTY", and the distinction is the whole reason this returns a
-    /// nullable set rather than an empty one. An empty set would reject everything; null skips the
-    /// membership check and leaves the lexical check as the enforced bound.
+    /// nullable map rather than an empty one. An empty map would reject everything; null skips both the
+    /// membership check and the resolution, leaving the lexical check as the enforced bound and the
+    /// caller's own spelling as the spliced text.
     /// </para>
     /// <para>
-    /// ONE BLOCK'S OPACITY MAKES THE WHOLE ROSTER UNENFORCEABLE. A compound statement's blocks may
+    /// ONE BLOCK'S OPACITY MAKES THE WHOLE MAP UNENFORCEABLE. A compound statement's blocks may
     /// enumerate different lists, and the arm rewrites the statement as a whole, so a name that belongs to
     /// only one block is still a legitimate reference. Refusing to enforce membership when any block is
     /// opaque is the conservative direction: the lexical control is untouched either way, and the
     /// alternative would reject legitimate requests.
     /// </para>
+    /// <para>
+    /// <b>SOURCE SPELLINGS ARE INSERTED FIRST AND ALIASES SECOND, AND THE ORDER DECIDES COLLISIONS.</b>
+    /// A source spelling maps to ITSELF, so splicing it changes nothing; an alias maps to its term's
+    /// source. When one name is both - an alias on one term and a real column on another, as in
+    /// <c>SELECT a AS b, b FROM t</c> - the SOURCE meaning wins, because that is the meaning the
+    /// statement's own inner sub-query will have for it and it is also the behaviour that existed before
+    /// resolution was introduced.
+    /// </para>
     /// </remarks>
-    private static HashSet<string>? BuildRoster(SelectStatementModel statement)
+    private static Dictionary<string, string>? BuildResolutionMap(SelectStatementModel statement)
     {
         int blocks = statement.GetSelectCount();
 
@@ -945,7 +1066,8 @@ internal static class PagedUniqueIndexColumnValidator
             return null;
         }
 
-        HashSet<string> roster = new(StringComparer.OrdinalIgnoreCase);
+        List<string> sources = [];
+        List<(string Alias, string Source)> aliases = [];
 
         for (int selectIndex = 1; selectIndex <= blocks; selectIndex++)
         {
@@ -954,28 +1076,62 @@ internal static class PagedUniqueIndexColumnValidator
                 return null;
             }
 
-            if (!AddTerms(statement.GetColumn(selectIndex), roster))
+            if (!AddTerms(statement.GetColumn(selectIndex), sources, aliases))
             {
                 return null;
             }
         }
 
-        return roster.Count == 0 ? null : roster;
+        if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        Dictionary<string, string> resolutions = new(StringComparer.OrdinalIgnoreCase);
+
+        // PASS ONE - every source spelling and its trailing segment, each mapping to ITSELF.
+        foreach (string source in sources)
+        {
+            resolutions[source] = source;
+
+            int separator = source.IndexOf('.', StringComparison.Ordinal);
+
+            if (separator >= 0)
+            {
+                string trailing = source[(separator + 1)..];
+
+                // The trailing segment maps to ITSELF rather than to the qualified spelling, because a
+                // caller who wrote the unqualified name previously had it spliced unqualified and that
+                // statement was valid. Resolving it to the qualified form would change correct output.
+                resolutions[trailing] = trailing;
+            }
+        }
+
+        // PASS TWO - aliases, only where they do not collide with a source spelling.
+        foreach ((string alias, string source) in aliases)
+        {
+            _ = resolutions.TryAdd(alias, source);
+        }
+
+        return resolutions;
     }
 
     /// <summary>
-    /// Splits one select list on its TOP-LEVEL commas and adds each term's name spellings to
-    /// <paramref name="roster"/>.
+    /// Splits one select list on its TOP-LEVEL commas and records each term's source and alias.
     /// </summary>
     /// <param name="selectList">The select-list text, exactly as parsed.</param>
-    /// <param name="roster">The set to add to.</param>
+    /// <param name="sources">Collects each term's SOURCE identifier.</param>
+    /// <param name="aliases">Collects each aliased term's alias paired with its source.</param>
     /// <returns><see langword="false"/> when the list cannot be enumerated.</returns>
     /// <remarks>
     /// PARENTHESIS DEPTH IS TRACKED so that a comma inside a function call does not split a term - though
     /// a term containing a parenthesis is opaque anyway, so the depth counter exists to keep the SPLIT
     /// honest rather than to salvage the term.
     /// </remarks>
-    private static bool AddTerms(string selectList, HashSet<string> roster)
+    private static bool AddTerms(
+        string selectList,
+        List<string> sources,
+        List<(string Alias, string Source)> aliases)
     {
         int depth = 0;
         int start = 0;
@@ -995,7 +1151,7 @@ internal static class PagedUniqueIndexColumnValidator
                     break;
 
                 case ',' when depth == 0:
-                    if (!AddTerm(selectList[start..index], roster))
+                    if (!AddTerm(selectList[start..index], sources, aliases))
                     {
                         return false;
                     }
@@ -1008,29 +1164,50 @@ internal static class PagedUniqueIndexColumnValidator
             }
         }
 
-        return AddTerm(selectList[start..], roster);
+        return AddTerm(selectList[start..], sources, aliases);
     }
 
     /// <summary>
-    /// Adds one select-list term's name spellings to <paramref name="roster"/>.
+    /// Records one select-list term's source identifier and, if it has one, its output alias.
     /// </summary>
     /// <param name="term">One term of a select list, un-trimmed.</param>
-    /// <param name="roster">The set to add to.</param>
+    /// <param name="sources">Collects the term's SOURCE identifier.</param>
+    /// <param name="aliases">Collects the term's alias paired with its source, when it has one.</param>
     /// <returns><see langword="false"/> when the term is not a plain name and therefore opaque.</returns>
     /// <remarks>
     /// <para>
-    /// BOTH SPELLINGS OF AN ALIASED TERM ARE ADDED. <c>c.id AS ident</c> contributes <c>id</c> and
-    /// <c>ident</c>, because a caller naming a unique-index column may reasonably write either. Membership
-    /// is defence in depth behind the lexical control, so admitting both spellings is the right trade: a
-    /// false rejection breaks a legitimate request, while a false acceptance still cannot alter the
-    /// statement's syntax.
+    /// <b>THE SOURCE AND THE ALIAS ARE DISTINGUISHED HERE, AND THAT DISTINCTION IS THE WHOLE FIX.</b>
+    /// This method used to add EVERY whitespace-delimited token of the term to one flat set, so
+    /// <c>c.id AS ident</c> contributed <c>c.id</c>, <c>id</c> and <c>ident</c> as though all three
+    /// named a source column. A review found the consequence: the arm replaces the sub-query's select
+    /// list with the caller's identifiers <c>[:L331, :L345]</c>, so a caller who named the ALIAS got
+    /// <c>SELECT ident FROM &lt;table&gt;</c> - a projection of a column the table does not have - plus
+    /// a join predicate on the same non-existent name.
     /// </para>
     /// <para>
-    /// THE TRAILING DOT-SEGMENT IS WHAT IS STORED, matching how the arm itself treats a qualified name -
-    /// it strips the qualifier when building the join predicate <c>[:L333]</c>.
+    /// <b>The three term shapes, and how each is read.</b> One token is a bare source. Two tokens are a
+    /// source and an implicit alias. Three tokens are a source, the keyword <c>AS</c> and an explicit
+    /// alias. Anything else - four or more tokens, or a leading <c>AS</c> - is not a shape either dialect
+    /// produces for a plain column term, so it is treated as opaque rather than guessed at.
+    /// </para>
+    /// <para>
+    /// <b>The SOURCE must be a plain identifier; the ALIAS is recorded only if it is one too.</b> An
+    /// expression source - a function call, an operator, a quoted or bracketed name - makes the whole map
+    /// unenforceable, exactly as before, because there is then no identifier for a caller's name to
+    /// resolve to. An alias that is not lexically an identifier is simply not recorded: it cannot be
+    /// spliced, so admitting it would only re-create the defect.
+    /// </para>
+    /// <para>
+    /// <b>The T-SQL <c>alias = expr</c> form is opaque</b>, and deliberately so: the term contains
+    /// <c>=</c>, which no lexically valid identifier does, so it falls into the opaque arm and leaves the
+    /// lexical check as the enforced bound. Resolving it would mean parsing an assignment form that
+    /// neither the fixture nor the oracle exercises.
     /// </para>
     /// </remarks>
-    private static bool AddTerm(string term, HashSet<string> roster)
+    private static bool AddTerm(
+        string term,
+        List<string> sources,
+        List<(string Alias, string Source)> aliases)
     {
         string trimmed = term.Trim();
 
@@ -1040,66 +1217,114 @@ internal static class PagedUniqueIndexColumnValidator
             return true;
         }
 
-        // `*` and `t.*` both mean "every column", which is exactly the roster this cannot enumerate.
+        // `*` and `t.*` both mean "every column", which is exactly the list this cannot enumerate.
         if (trimmed == "*" || trimmed.EndsWith(".*", StringComparison.Ordinal))
         {
             return false;
         }
 
-        bool addedAny = false;
-
-        foreach (string token in trimmed.Split(
+        string[] tokens = trimmed.Split(
             (char[]?)null,
-            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        // The source is always the FIRST token. A term that begins with AS is malformed rather than
+        // aliased, and is refused with every other unrecognised shape below.
+        if (tokens.Length == 0 || !IsLexicallyValid(tokens[0]))
         {
-            if (string.Equals(token, "AS", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            // An expression term - a function call, an operator, a quoted alias, a bracketed name. It
-            // cannot be enumerated, and one such term makes the whole roster unenforceable.
-            if (!IsLexicallyValid(token))
-            {
-                return false;
-            }
-
-            roster.Add(token);
-
-            int separator = token.IndexOf('.', StringComparison.Ordinal);
-
-            if (separator >= 0)
-            {
-                roster.Add(token[(separator + 1)..]);
-            }
-
-            addedAny = true;
+            return false;
         }
 
-        return addedAny;
+        string source = tokens[0];
+        string? alias = null;
+
+        switch (tokens.Length)
+        {
+            case 1:
+                // A bare source column, with no alias.
+                break;
+
+            case 2:
+                // An implicit alias: `c.id ident`.
+                alias = tokens[1];
+                break;
+
+            case 3 when string.Equals(tokens[1], "AS", StringComparison.OrdinalIgnoreCase):
+                // An explicit alias: `c.id AS ident`.
+                alias = tokens[2];
+                break;
+
+            default:
+                // Not a plain column term in any shape either dialect produces.
+                return false;
+        }
+
+        sources.Add(source);
+
+        if (alias is not null && IsLexicallyValid(alias))
+        {
+            aliases.Add((alias, source));
+        }
+
+        return true;
     }
 
     /// <summary>
-    /// Whether an identifier names something in the roster, by full spelling or by trailing segment.
+    /// Resolves a caller's identifier to the identifier a rewriter must splice.
     /// </summary>
-    /// <param name="roster">The enumerated names.</param>
+    /// <param name="resolutions">The map built from the statement's select lists.</param>
     /// <param name="identifier">The identifier, already known to be lexically valid.</param>
-    /// <returns><see langword="true"/> when either spelling is present.</returns>
+    /// <param name="spliced">
+    /// The identifier to splice: the caller's own spelling when it names a source column, or the term's
+    /// source when it names only an output alias.
+    /// </param>
+    /// <returns><see langword="true"/> when the identifier names something in the statement.</returns>
     /// <remarks>
+    /// <para>
     /// ORDINAL-IGNORE-CASE, because an unquoted identifier is case-insensitive in both dialects, and
     /// ORDINAL rather than culture-aware because the comparison feeds a decision about text a byte-exact
     /// assertion is run against.
+    /// </para>
+    /// <para>
+    /// <b>THE QUALIFIED FALLBACK ANSWERS THE CALLER'S OWN SPELLING, NOT THE MAPPED ONE.</b> A caller who
+    /// writes <c>t.id</c> against a statement that selects a bare <c>id</c> previously had <c>t.id</c>
+    /// spliced, and that statement was valid - the qualifier names a table the sub-query's FROM clause
+    /// still carries. Returning the map's value here would replace it with the unqualified <c>id</c> and
+    /// change correct output, so the fallback deliberately confirms membership by trailing segment while
+    /// splicing the full spelling the caller supplied.
+    /// </para>
     /// </remarks>
-    private static bool AppearsIn(HashSet<string> roster, string identifier)
+    private static bool TryResolve(
+        Dictionary<string, string> resolutions,
+        string identifier,
+        out string? spliced)
     {
-        if (roster.Contains(identifier))
+        if (resolutions.TryGetValue(identifier, out string? mapped))
         {
+            // A SOURCE SPELLING SPLICES THE CALLER'S OWN TEXT, NOT THE SELECT LIST'S CASING. The map is
+            // ordinal-ignore-case, so a caller who wrote `id` against a statement selecting `ID` finds
+            // the entry and would otherwise be handed `ID` - changing the generated statement for a
+            // request that was already correct, and breaking byte-exact parity on a casing difference
+            // alone. A source key maps to ITSELF, so equality-ignoring-case is exactly the test for
+            // "this was a source spelling rather than an alias".
+            spliced = string.Equals(mapped, identifier, StringComparison.OrdinalIgnoreCase)
+                ? identifier
+                : mapped;
+
             return true;
         }
 
         int separator = identifier.IndexOf('.', StringComparison.Ordinal);
 
-        return separator >= 0 && roster.Contains(identifier[(separator + 1)..]);
+        if (separator >= 0 && resolutions.ContainsKey(identifier[(separator + 1)..]))
+        {
+            spliced = identifier;
+
+            return true;
+        }
+
+        spliced = null;
+
+        return false;
     }
 
     /// <summary>Whether a character may begin a segment: an ASCII letter or an underscore.</summary>
@@ -1384,6 +1609,17 @@ internal static class PagingRewriteDispatcher
             return PagingRewriteResult.InvalidPagingSetting();
         }
 
+        // STEP 1b - THE OVERFLOW GUARD, which the oracle does not have. It answers the SAME outcome as
+        // step 1 rather than a new one, because it is the same class of fault - a paging setting the
+        // arms cannot compute with - and because introducing a fourth outcome would put a code on the
+        // wire that no legacy caller has an arm for. Placed here, before the parse, so that NO SQL IS
+        // EVER RENDERED from a bound that would wrap: see HasRepresentablePagingProducts for why a
+        // wrapped bound is worse than an error.
+        if (!request.HasRepresentablePagingProducts)
+        {
+            return PagingRewriteResult.InvalidPagingSetting();
+        }
+
         // STEP 2 - `sqlParser = Create n_sql` [:L312]. Created here rather than injected because the
         // oracle creates it inside the function, and because a per-call instance is what keeps this
         // method a pure function: the model is mutable and both arms mutate it.
@@ -1418,15 +1654,27 @@ internal static class PagingRewriteDispatcher
         // STEP 5 - THE TRUST BOUNDARY THE ORACLE DOES NOT HAVE. It sits HERE, after the three oracle
         // guards and after arm selection, and it is conditional on the selected arm actually splicing
         // these identifiers - see PagedUniqueIndexColumnValidator and the ordering note in the remarks.
-        if (rewriter.ConsumesPagedUniqueIndexColumns
-            && request.HasPagedUniqueIndexColumns
-            && !PagedUniqueIndexColumnValidator.TryValidate(
-                request.PagedUniqueIndexColumns,
-                statement,
-                out string? _,
-                out string? _))
+        //
+        // IT NOW ALSO RESOLVES, and the arm is handed the RESOLVED identifiers rather than the caller's
+        // raw ones. A caller who named an output ALIAS - `SELECT c.id AS ident ...` plus a unique-index
+        // column of `ident` - previously reached the arm unchanged and produced `SELECT ident FROM
+        // <table>`, a projection of a column no table has. Every other spelling resolves to itself
+        // character for character, so nothing that was already correct changes. See TryValidate.
+        if (rewriter.ConsumesPagedUniqueIndexColumns && request.HasPagedUniqueIndexColumns)
         {
-            return PagingRewriteResult.InvalidPagedUniqueIndexColumn();
+            if (!PagedUniqueIndexColumnValidator.TryValidate(
+                    request.PagedUniqueIndexColumns,
+                    statement,
+                    out string? _,
+                    out string? _,
+                    out IReadOnlyList<string>? resolved)
+                || resolved is null)
+            {
+                return PagingRewriteResult.InvalidPagedUniqueIndexColumn();
+            }
+
+            // The arm body: [:L321-L385] for the first dialect, [:L386-L395] for the second.
+            return rewriter.Rewrite(request.WithPagedUniqueIndexColumns(resolved), statement);
         }
 
         // The arm body: [:L321-L385] for the first dialect, [:L386-L395] for the second.

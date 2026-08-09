@@ -105,14 +105,31 @@
 //  DisableBind=1 MEANS THE POWERBUILDER RUNTIME DOES NOT USE BIND VARIABLES - values are
 //  interpolated into the statement text as literals.
 //
-//  THE MANDATED RESOLUTION, AND WHAT IT FORBIDS HERE. The implementation uses parameterized
-//  commands internally while keeping the OBSERVABLE GENERATED STATEMENT unchanged, and the site is
-//  recorded as a known legacy defect. Parameterization happens where commands are actually
-//  executed, which is not this file. So this file deliberately adds NO escaping, NO quoting, NO
-//  sanitisation, NO allow-listing and NO clause parsing that the legacy lacks: every one of those
-//  would alter the observable generated SQL, and byte-exact statement parity is the acceptance
-//  criterion. Narrowing the input here would also be a behavioural change in its own right, since
-//  it would reject clauses the legacy accepts.
+//  THE MANDATED RESOLUTION. The implementation uses parameterized commands internally while keeping
+//  the OBSERVABLE GENERATED STATEMENT unchanged, and the site is recorded as a known legacy defect.
+//  Parameterization happens where commands are actually executed, which is not this file. So this
+//  file adds NO escaping, NO quoting, NO sanitisation and NO REWRITING of any kind: every one of
+//  those would alter the observable generated SQL, and byte-exact statement parity is the acceptance
+//  criterion. Nothing below changes a single character of an accepted clause.
+//
+//  A BIND PARAMETER CANNOT PROTECT SQL STRUCTURE, WHICH IS WHY THE PARAGRAPH ABOVE IS NOT THE WHOLE
+//  ANSWER. This file previously concluded from it that no validation belonged here at all. That
+//  conclusion was wrong, and a review found it: parameterisation substitutes VALUES, whereas a
+//  clause is spliced in as SYNTAX. The clause reaches n_sql's ModifyWhere / ModifyOrder entry points
+//  and then the DataWindow's select property with NO grammar standing between it and execution, so
+//  there is nothing downstream for this file to defer to. And the exposure is NEW rather than
+//  inherited: the legacy is a library with no listener, so no caller could reach this setter from
+//  outside the process at all, whereas C-05's SqlClauseSpec.clause now carries it over a network.
+//
+//  SO THE BOUNDARY REFUSES STRUCTURAL SQL, AND REFUSING IS NOT REWRITING. ValidateClauseBody below
+//  either stores the caller's clause verbatim or stores nothing and answers
+//  RetCode.E_INVALID_ARGUMENT - the SAME code the legacy's own guard already answers for a
+//  non-positive index or an empty clause [:L271, :L288]. That is the posture AAP 0.1.5 fixes for
+//  exactly this situation: a legacy behaviour that cannot be reproduced safely across a boundary
+//  that did not previously exist is NARROWED WITH A DEFINED ERROR, never widened with a guess. The
+//  refused grammar and the still-accepted grammar are both enumerated on
+//  persistence.v1.SqlClauseSpec.clause, and this file is the implementation of that published text -
+//  the two are meant to be read together and must not drift.
 //
 //  AND THE CLAUSE TEXT IS NEVER LOGGED FROM HERE, at any level. There is no logger field, no
 //  logger parameter and no logging call anywhere below. Statement text is redacted by
@@ -704,6 +721,15 @@ internal sealed class ClauseModifier
             return RetCode.E_INVALID_ARGUMENT;
         }
 
+        // THE STRUCTURAL GUARD, which the legacy does not have and which this boundary must. It runs
+        // AFTER the legacy guard so that the legacy's own two rejections keep their exact reachability,
+        // and BEFORE any mutation so that a refused clause leaves the collection untouched - the same
+        // ordering, and the same return code, as the guard above.
+        if (!ValidateClauseBody(clause))
+        {
+            return RetCode.E_INVALID_ARGUMENT;
+        }
+
         // Locate the existing entry for this select index, if there is one. `position` is a
         // ZERO-BASED LIST ORDINAL and `selectIndex` is a ONE-BASED KEY; they are never converted
         // into one another. The sentinel is -1 because 0 is a real position - see NotFound.
@@ -736,6 +762,457 @@ internal sealed class ClauseModifier
         }
 
         return RetCode.OK;
+    }
+
+    // ==========================================================================================
+    //  THE STRUCTURAL CLAUSE GUARD
+    //  ------------------------------------------------------------------------------------------
+    //  A SCANNER RATHER THAN A REGULAR EXPRESSION OR A SUBSTRING SEARCH, and the reason is that the
+    //  three things worth refusing all hide inside the two things that must still be accepted. A
+    //  bare `Contains(";")` refuses `WHERE note = 'a;b'`, which is an ordinary predicate over an
+    //  ordinary literal; a bare `Contains("union")` refuses a column named `communion`. So the text
+    //  is walked ONCE, left to right, tracking exactly three pieces of state - whether the cursor is
+    //  inside a string literal, inside a quoted identifier, and how deep the parentheses are - and
+    //  each rule is applied only where it means what it says.
+    //
+    //  WHAT IS REFUSED, matching persistence.v1.SqlClauseSpec.clause clause for clause:
+    //    1. a control character, INCLUDING a newline or a tab. A newline is how `--` truncates the
+    //       rest of a statement and how a property assignment is smuggled into a modification script
+    //       elsewhere in this service, and no legitimate WHERE or ORDER BY body needs one.
+    //    2. a statement terminator `;` outside a literal - the multi-statement vector.
+    //    3. a comment introducer `--`, `/*` or `*/` outside a literal - each can comment out the
+    //       remainder of the generated statement, which changes what executes without changing what
+    //       is visible at the top of it.
+    //    4. an unterminated string literal or quoted identifier, and an unbalanced parenthesis or
+    //       bracket. Each desynchronises every later scan, so refusing them is what makes rules 2, 3
+    //       and 5 sound rather than best-effort.
+    //    5. any refused BARE WORD - a nested-statement or set-operator introducer, or any DDL, DML or
+    //       permission verb. Bare means: not inside a string literal and not inside a quoted
+    //       identifier, and delimited on both sides by a non-word character, so `communion` and
+    //       `updated_at` are untouched while `UNION` and `UPDATE` are not.
+    //
+    //  WHAT IS STILL ACCEPTED, because the refusal is a narrowing and not a rewrite: every ordinary
+    //  predicate and ordering expression - comparisons, AND/OR/NOT, IN over a literal list, BETWEEN,
+    //  LIKE, IS NULL, qualified and quoted column names, string and numeric literals, ASC/DESC,
+    //  function calls over columns, positional `?` parameters - and, faithfully, SPACE-ONLY TEXT,
+    //  because the legacy guard compares against `""` and nothing more (C-B).
+    //
+    //  THE SCANNER IS ORDINAL AND CULTURE-INDEPENDENT throughout. A culture-sensitive comparison
+    //  would make the refused-word set depend on the server's locale, and the Turkish dotless-i pair
+    //  alone is enough to make `INSERT` and `insert` compare unequal under some cultures - a
+    //  locale-dependent security guard is not a security guard.
+    // ==========================================================================================
+
+    /// <summary>
+    /// The bare words a clause body may not contain: nested-statement and set-operator introducers,
+    /// and every DDL, DML and permission verb.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>SELECT</c> and <c>FROM</c> are in the set, which is what refuses a subquery.</b> A
+    /// correlated subquery is the single most expressive vector available through this field - it can
+    /// read any table the connection can reach - and neither word has any legitimate place in a clause
+    /// BODY, because the body is spliced in after the keyword the parser already owns.
+    /// </para>
+    /// <para>
+    /// <b>Ordinal-ignore-case, and the comparer is stated rather than defaulted.</b>
+    /// <see cref="StringComparer.OrdinalIgnoreCase"/> is locale-invariant; the default comparer for a
+    /// <see cref="HashSet{T}"/> of strings is ordinal but case-SENSITIVE, which would let <c>DrOp</c>
+    /// through, and a culture-aware comparer would make the guard's behaviour depend on the server's
+    /// locale.
+    /// </para>
+    /// <para>
+    /// <b>The two procedure prefixes are handled separately</b>, in
+    /// <see cref="IsRefusedWord(ReadOnlySpan{char})"/>, because <c>xp_</c> and <c>sp_</c> name whole
+    /// families - <c>xp_cmdshell</c>, <c>sp_executesql</c> and every sibling - rather than single
+    /// words, so no finite set can enumerate them.
+    /// </para>
+    /// </remarks>
+    private static readonly HashSet<string> RefusedClauseWords =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            // Nested statements and subqueries.
+            "SELECT",
+            "FROM",
+
+            // Set operators, including Oracle's spelling of EXCEPT.
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "MINUS",
+
+            // DML.
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "MERGE",
+            "UPSERT",
+            "INTO",
+
+            // DDL.
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "TRUNCATE",
+            "RENAME",
+            "REINDEX",
+            "VACUUM",
+            "ANALYZE",
+
+            // Permissions.
+            "GRANT",
+            "REVOKE",
+            "DENY",
+
+            // Procedure and batch execution.
+            "EXEC",
+            "EXECUTE",
+            "CALL",
+            "DECLARE",
+            "WAITFOR",
+            "SHUTDOWN",
+            "RECONFIGURE",
+            "BACKUP",
+            "RESTORE",
+            "OPENROWSET",
+            "OPENQUERY",
+            "OPENDATASOURCE",
+
+            // SQLite statement verbs reachable through a spliced clause.
+            "ATTACH",
+            "DETACH",
+            "PRAGMA",
+
+            // Transaction control, which would let a caller commit or abandon the task's own work.
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT",
+        };
+
+    /// <summary>
+    /// The two stored-procedure name prefixes that name whole families rather than single words.
+    /// </summary>
+    private static readonly string[] RefusedWordPrefixes = ["xp_", "sp_"];
+
+    /// <summary>
+    /// The SQL string-literal delimiter, named so the scanner below carries no escaped quote literal.
+    /// </summary>
+    private const char SingleQuote = '\u0027';
+
+    /// <summary>
+    /// Decides whether a clause body may be stored, without altering a single character of it.
+    /// </summary>
+    /// <param name="clause">
+    /// The clause body, already known to be non-empty by the legacy guard that runs first.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the body is an ordinary predicate or ordering expression;
+    /// <see langword="false"/> when it carries statement structure, in which case the caller answers
+    /// <c>RetCode.E_INVALID_ARGUMENT</c> and stores nothing.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>It answers a decision and never throws.</b> Every caller is a setter that reports a return
+    /// code, and the whole point of the guard is to convert a hostile input into that code rather than
+    /// into an exception a gRPC handler would surface as a 500.
+    /// </para>
+    /// <para>
+    /// <b>The single left-to-right pass is what makes the rules sound.</b> See the region banner for
+    /// why each rule is applied only in the state where it means what it says, and why the balance
+    /// checks are a precondition of the rest rather than a nicety.
+    /// </para>
+    /// </remarks>
+    private static bool ValidateClauseBody(string clause)
+    {
+        int parenthesisDepth = 0;
+        int wordStart = NotFound;
+
+        for (int index = 0; index < clause.Length; index++)
+        {
+            char current = clause[index];
+
+            // RULE 1, applied before anything else so that no later rule has to reason about a
+            // control character. SPACE is the one whitespace this grammar admits; a tab, a newline
+            // and a carriage return are refused along with every other control character, and so are
+            // the C1 range and the delete character.
+            if (char.IsControl(current))
+            {
+                return false;
+            }
+
+            // A word ends at the first non-word character, and it is tested THERE rather than at the
+            // next word's start, so that a refused word at the very end of the clause is still tested
+            // - see the flush after the loop for the other half of that.
+            if (IsWordCharacter(current))
+            {
+                if (wordStart == NotFound)
+                {
+                    wordStart = index;
+                }
+
+                continue;
+            }
+
+            if (wordStart != NotFound)
+            {
+                if (IsRefusedWord(clause.AsSpan(wordStart, index - wordStart)))
+                {
+                    return false;
+                }
+
+                wordStart = NotFound;
+            }
+
+            switch (current)
+            {
+                case SingleQuote:
+                    // A string literal. Its CONTENT is exempt from every other rule, which is the
+                    // whole reason the scan tracks state rather than searching for substrings: a
+                    // semicolon, a comment introducer or the word UNION inside a literal is data.
+                    if (!TrySkipQuoted(clause, ref index, SingleQuote))
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case '"':
+                    // A quoted identifier, doubled-quote escaped, exempt for the same reason.
+                    if (!TrySkipQuoted(clause, ref index, '"'))
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case '`':
+                    // MySQL-style quoting. Admitted as a delimiter so that its content is exempt and
+                    // its termination is checked, rather than left to be scanned as bare text.
+                    if (!TrySkipQuoted(clause, ref index, '`'))
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case '[':
+                    // A BRACKETED IDENTIFIER IS A QUOTING CONTEXT, NOT A NESTING DEPTH, and the
+                    // distinction is what lets `[union] = 1` through. T-SQL delimits an identifier
+                    // with brackets and escapes a literal close bracket by DOUBLING it; brackets do
+                    // not nest in an identifier at all, so counting depth would both mis-handle
+                    // `[a]]b]` and leave the identifier's content exposed to the refused-word rule.
+                    if (!TrySkipBracketed(clause, ref index))
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case ']':
+                    // A close with no open. A legitimate one is always consumed by the skip above, so
+                    // reaching here means the text is desynchronised.
+                    return false;
+
+                case '(':
+                    parenthesisDepth++;
+                    break;
+
+                case ')':
+                    parenthesisDepth--;
+
+                    if (parenthesisDepth < 0)
+                    {
+                        // A close ahead of its open. Refused on sight rather than at the end,
+                        // because from here on the depth no longer describes the text.
+                        return false;
+                    }
+
+                    break;
+
+                case ';':
+                    // RULE 2.
+                    return false;
+
+                case '-':
+                    // RULE 3. A single minus is subtraction and is fine; two adjacent ones start a
+                    // line comment.
+                    if (index + 1 < clause.Length && clause[index + 1] == '-')
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case '/':
+                    // RULE 3. A single solidus is division.
+                    if (index + 1 < clause.Length && clause[index + 1] == '*')
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case '*':
+                    // RULE 3, the closing half. A lone `*/` cannot open a comment, but it CAN close
+                    // one the caller opened in an earlier clause on the same statement, so it is
+                    // refused symmetrically rather than only when it follows a `/*` this scan saw.
+                    if (index + 1 < clause.Length && clause[index + 1] == '/')
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                default:
+                    // Every other printable character is an operator, a separator or punctuation, all
+                    // of which ordinary predicates need. Enumerating an allow-list of them would
+                    // refuse dialect operators the legacy accepts without refusing any vector that
+                    // rules 1 to 5 do not already cover.
+                    break;
+            }
+        }
+
+        // The trailing word, for a clause that ends on one - `ORDER BY name` and `x = 1 OR DROP`
+        // both end without a delimiter, and only one of them may be stored.
+        if (wordStart != NotFound && IsRefusedWord(clause.AsSpan(wordStart)))
+        {
+            return false;
+        }
+
+        // RULE 4's balance half, tested at the end because that is the only place it is knowable.
+        // Brackets need no counterpart here: every legitimate bracketed identifier is consumed whole
+        // by TrySkipBracketed, and a stray close is refused on sight.
+        return parenthesisDepth == 0;
+    }
+
+    /// <summary>
+    /// Whether a character belongs to a bare word for the purposes of the refused-word test.
+    /// </summary>
+    /// <param name="candidate">The character to classify.</param>
+    /// <remarks>
+    /// The underscore and the digits are INCLUDED, and that inclusion is what protects ordinary
+    /// column names: without it, <c>updated_at</c> would be scanned as the two words <c>updated</c>
+    /// and <c>at</c>, and <c>sp_</c> would never be seen as a prefix of anything. Letters are
+    /// classified by <see cref="char.IsLetter(char)"/> rather than by an ASCII range so that a
+    /// non-Latin identifier is scanned as one word instead of as a run of delimiters.
+    /// </remarks>
+    private static bool IsWordCharacter(char candidate) =>
+        char.IsLetterOrDigit(candidate) || candidate == '_';
+
+    /// <summary>
+    /// Whether a bare word is refused, by exact membership or by procedure-family prefix.
+    /// </summary>
+    /// <param name="word">The word, delimited on both sides by non-word characters.</param>
+    private static bool IsRefusedWord(ReadOnlySpan<char> word)
+    {
+        foreach (string prefix in RefusedWordPrefixes)
+        {
+            if (word.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return RefusedClauseWords.Contains(word.ToString());
+    }
+
+    /// <summary>
+    /// Advances <paramref name="index"/> past a delimited run, honouring the doubled-delimiter escape.
+    /// </summary>
+    /// <param name="clause">The clause being scanned.</param>
+    /// <param name="index">
+    /// On entry, the position of the OPENING delimiter. On a successful return, the position of the
+    /// closing one, so that the caller's own increment resumes after it.
+    /// </param>
+    /// <param name="delimiter">The delimiter character.</param>
+    /// <returns><see langword="false"/> when the run is never closed.</returns>
+    /// <remarks>
+    /// <b>The doubled-delimiter escape is honoured, which is not optional.</b> <c>'it''s'</c> is one
+    /// literal containing an apostrophe, and a scanner that stopped at the second quote would resume
+    /// scanning <c>s'</c> as bare text - and then report an unterminated literal for a perfectly
+    /// ordinary predicate. A control character inside the run is still refused by the caller's rule 1
+    /// on the next iteration only if the run ends, so it is tested HERE as well: a literal is exempt
+    /// from the SQL rules, not from the character-set rule.
+    /// </remarks>
+    private static bool TrySkipQuoted(string clause, ref int index, char delimiter)
+    {
+        for (int cursor = index + 1; cursor < clause.Length; cursor++)
+        {
+            char current = clause[cursor];
+
+            if (char.IsControl(current))
+            {
+                return false;
+            }
+
+            if (current != delimiter)
+            {
+                continue;
+            }
+
+            if (cursor + 1 < clause.Length && clause[cursor + 1] == delimiter)
+            {
+                // A doubled delimiter is an escaped one: consume both and keep going.
+                cursor++;
+
+                continue;
+            }
+
+            index = cursor;
+
+            return true;
+        }
+
+        // Fell off the end still inside the run.
+        return false;
+    }
+
+    /// <summary>
+    /// Advances <paramref name="index"/> past a bracket-delimited identifier, honouring the
+    /// doubled-close escape.
+    /// </summary>
+    /// <param name="clause">The clause being scanned.</param>
+    /// <param name="index">
+    /// On entry, the position of the opening <c>[</c>. On a successful return, the position of the
+    /// closing <c>]</c>, so that the caller's own increment resumes after it.
+    /// </param>
+    /// <returns><see langword="false"/> when the identifier is never closed.</returns>
+    /// <remarks>
+    /// SEPARATE FROM <see cref="TrySkipQuoted(string, ref int, char)"/> because the opener and the
+    /// closer are DIFFERENT characters, which is the one delimiter form in SQL where that is true. The
+    /// escape rule is the same in spirit and different in shape: <c>[a]]b]</c> is the single identifier
+    /// <c>a]b</c>, so a doubled CLOSE is consumed rather than treated as the end.
+    /// </remarks>
+    private static bool TrySkipBracketed(string clause, ref int index)
+    {
+        for (int cursor = index + 1; cursor < clause.Length; cursor++)
+        {
+            char current = clause[cursor];
+
+            if (char.IsControl(current))
+            {
+                return false;
+            }
+
+            if (current != ']')
+            {
+                continue;
+            }
+
+            if (cursor + 1 < clause.Length && clause[cursor + 1] == ']')
+            {
+                cursor++;
+
+                continue;
+            }
+
+            index = cursor;
+
+            return true;
+        }
+
+        return false;
     }
 
     // ==========================================================================================
