@@ -2291,10 +2291,20 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// The answer to <c>Describe("DataWindow.Table.Sort")</c>, from the fixture's <c>sort=</c> attribute.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The primary fixture declares <c>sort="age A salary A "</c> [<c>dw_sqlite.srd:L14</c>] - note the
     /// TRAILING SPACE, which is part of the literal and is carried verbatim rather than trimmed.
+    /// </para>
+    /// <para>
+    /// NAMED FOR THE DESCRIBE PROPERTY IT BACKS, not <c>Sort</c>, because <c>Sort()</c> is now a member of
+    /// the host contract itself [<c>n_cst_dwsvc_columnsort.sru:L415</c>] and a property may not share a
+    /// name with an inherited method. The two are genuinely different things and the rename makes that
+    /// legible: this is the sort expression the DataWindow REPORTS, whereas
+    /// <see cref="SetSort(string)"/> sets one and <see cref="Sort"/> applies it. It is deliberately NOT
+    /// updated by <see cref="SetSort(string)"/> - see that member's remarks.
+    /// </para>
     /// </remarks>
-    public string Sort { get; set; } = string.Empty;
+    public string TableSort { get; set; } = string.Empty;
 
     /// <summary>
     /// The value <see cref="GetFocusedObject"/> reports.
@@ -2348,6 +2358,48 @@ public class FakeDataWindowHost : DataWindowServiceHost
 
     /// <summary>The code <see cref="SetRedraw(bool)"/> returns. Defaults to <c>1</c>.</summary>
     public int SetRedrawResult { get; set; } = 1;
+
+    /// <summary>The code <see cref="SetSort(string)"/> returns. Defaults to <c>1</c>.</summary>
+    public int SetSortResult { get; set; } = 1;
+
+    /// <summary>The code <see cref="Sort"/> returns. Defaults to <c>1</c>.</summary>
+    public int SortResult { get; set; } = 1;
+
+    /// <summary>The code <see cref="GroupCalc"/> returns. Defaults to <c>1</c>.</summary>
+    public int GroupCalcResult { get; set; } = 1;
+
+    /// <summary>
+    /// The expression the last <see cref="SetSort(string)"/> was handed, or <see langword="null"/> when it
+    /// has never been called.
+    /// </summary>
+    /// <remarks>
+    /// <see langword="null"/> AND THE EMPTY STRING ARE DIFFERENT ANSWERS HERE, deliberately. The empty
+    /// string is a legal sort expression meaning "no sort", and the sort service passes it whenever the
+    /// user cleared every column and there was no original sort to restore
+    /// [<c>n_cst_dwsvc_columnsort.sru:L201-L207</c>]. A test asserting the clear-the-sort path must be
+    /// able to tell that from the call never having happened.
+    /// </remarks>
+    public string? AppliedSort { get; private set; }
+
+    /// <summary>How many times <see cref="Sort"/> has been called.</summary>
+    public int SortCallCount { get; private set; }
+
+    /// <summary>How many times <see cref="GroupCalc"/> has been called.</summary>
+    public int GroupCalcCallCount { get; private set; }
+
+    /// <summary>
+    /// Row number to stable row identifier, backing <see cref="GetRowIDFromRow(long)"/>. An unmapped row
+    /// answers <c>0</c>.
+    /// </summary>
+    public Dictionary<long, long> RowIdsByRow { get; } = [];
+
+    /// <summary>
+    /// Stable row identifier to row number, backing <see cref="GetRowFromRowID(long)"/>. Kept SEPARATE
+    /// from <see cref="RowIdsByRow"/> rather than inverted from it, because a re-sort is exactly the event
+    /// that makes the two disagree - and reproducing that disagreement is the only way the row-identity
+    /// round trip at <c>n_cst_dwsvc_columnsort.sru:L408</c> and <c>:L422</c> becomes observable.
+    /// </summary>
+    public Dictionary<long, long> RowsByRowId { get; } = [];
 
     /// <summary>The code <see cref="SetFocus"/> returns. Defaults to <c>1</c>.</summary>
     public int SetFocusResult { get; set; } = 1;
@@ -3179,7 +3231,7 @@ public class FakeDataWindowHost : DataWindowServiceHost
 
         if (string.Equals(property, "DataWindow.Table.Sort", StringComparison.OrdinalIgnoreCase))
         {
-            return Sort;
+            return TableSort;
         }
 
         // A per-object property expression: everything up to the FIRST dot names the object, and the
@@ -3261,6 +3313,124 @@ public class FakeDataWindowHost : DataWindowServiceHost
         CallLog.Record("SetRedraw", enable);
         RedrawEnabled = enable;
         return SetRedrawResult;
+    }
+
+    // ==============================================================================================
+    //  SORT AND ROW IDENTITY                    n_cst_dwsvc_columnsort.sru:L408, L414, L415, L418, L422
+    //  --------------------------------------------------------------------------------------------
+    //  The five members the sort service's apply path consumes. The row-identifier ROUND TRIP is
+    //  modelled rather than faked away: RowIdsByRow and RowsByRowId are two independently settable
+    //  maps, so a test can make an identifier resolve to a DIFFERENT row after the sort - which is the
+    //  only configuration in which the restore at :L421-L423 is distinguishable from doing nothing.
+    //  Every call is recorded, because the ORDER of SetSort, Sort and GroupCalc relative to the
+    //  SetRedraw bracket and the event-gate save and restore is itself the ported behaviour.
+    // ==============================================================================================
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Answers from <see cref="RowIdsByRow"/> when the row has a mapping and <c>0</c> otherwise, so an
+    /// unmapped row reproduces PowerBuilder's non-positive answer for an out-of-range row and the
+    /// <c>&gt; 0</c> guard at <c>n_cst_dwsvc_columnsort.sru:L421</c> is exercised in both directions.
+    /// </remarks>
+    public override long GetRowIDFromRow(long row)
+    {
+        RecordRead("GetRowIDFromRow", row);
+        return RowIdsByRow.TryGetValue(row, out long rowId) ? rowId : 0L;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Answers from <see cref="RowsByRowId"/> when the identifier has a mapping and <c>0</c> otherwise -
+    /// the "the row went away" case, which the oracle passes straight into <c>SetRow</c> without
+    /// checking [<c>:L422</c>].
+    /// </remarks>
+    public override long GetRowFromRowID(long rowId)
+    {
+        RecordRead("GetRowFromRowID", rowId);
+        return RowsByRowId.TryGetValue(rowId, out long row) ? row : 0L;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Remembers the expression in <see cref="AppliedSort"/> WITHOUT reordering anything, which is
+    /// exactly the split between <c>SetSort</c> [<c>:L414</c>] and <c>Sort</c> [<c>:L415</c>]. It does
+    /// NOT update the <c>"DataWindow.Table.Sort"</c> Describe answer: a test controls that separately so
+    /// the equal-sort early-out at <c>:L404</c> can be driven independently of what was last set.
+    /// </remarks>
+    public override int SetSort(string sort)
+    {
+        CallLog.Record("SetSort", sort);
+        AppliedSort = sort;
+        return SetSortResult;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// A headless no-op that records the call. Reordering a fabricated row set would prove nothing about
+    /// the ported logic, whose observable output is the SEQUENCE of host calls and the sort expression
+    /// handed to <see cref="SetSort"/>.
+    /// </remarks>
+    public override int Sort()
+    {
+        CallLog.Record("Sort");
+        SortCallCount++;
+        return SortResult;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Records the call and counts it, so a test can assert that group aggregates are recomputed ONLY
+    /// when <see cref="Describe"/> reports a group band [<c>:L417</c>].
+    /// </remarks>
+    public override int GroupCalc()
+    {
+        CallLog.Record("GroupCalc");
+        GroupCalcCallCount++;
+        return GroupCalcResult;
+    }
+
+    // ==============================================================================================
+    //  THE EVENT GATE                                              se_cst_dw.sru:L109-L111, L469-L525
+    //  --------------------------------------------------------------------------------------------
+    //  The mask VALUE lives on this host because the oracle declares it as a private instance field of
+    //  se_cst_dw [:L88-L89]. The three operations delegate to EventGate so the bit arithmetic - and
+    //  the zero-argument rejection - exists in exactly one place and is not re-specified by a test
+    //  double. DisabledEvent is settable so a test can start the host with an event ALREADY suppressed,
+    //  which is the branch in which the sort path must NOT re-enable it [:L424].
+    // ==============================================================================================
+
+    /// <summary>
+    /// The suppressed-event mask - the port of <c>long _nDisabledEvent</c>
+    /// (<c>se_cst_dw.sru:L88-L89</c>). Settable so a test can arrange either polarity of the
+    /// save-and-restore at <c>n_cst_dwsvc_columnsort.sru:L409-L412</c> and <c>:L424-L426</c>.
+    /// </summary>
+    public uint DisabledEvent { get; set; }
+
+    /// <inheritdoc/>
+    public override bool IsEventDisabled(uint evt)
+    {
+        RecordRead("IsEventDisabled", evt);
+        return EventGate.IsEventDisabled(DisabledEvent, evt);
+    }
+
+    /// <inheritdoc/>
+    public override long DisableEvent(uint evt)
+    {
+        CallLog.Record("DisableEvent", evt);
+        uint mask = DisabledEvent;
+        long result = EventGate.DisableEvent(ref mask, evt);
+        DisabledEvent = mask;
+        return result;
+    }
+
+    /// <inheritdoc/>
+    public override int EnableEvent(uint evt)
+    {
+        CallLog.Record("EnableEvent", evt);
+        uint mask = DisabledEvent;
+        int result = EventGate.EnableEvent(ref mask, evt);
+        DisabledEvent = mask;
+        return result;
     }
 
     /// <inheritdoc/>
@@ -3633,6 +3803,39 @@ public class FakeDataWindowHost : DataWindowServiceHost
 
         return result;
     }
+
+    // ==============================================================================================
+    //  TWO PUBLIC BRIDGES ONTO THE PROTECTED *Core OPERATIONS
+    //  --------------------------------------------------------------------------------------------
+    //  Domain/DataWindowServiceHost.cs's DECISION 5 makes Filter and DeleteRow virtual over PROTECTED
+    //  abstract *Core operations, so that Domain/DataWindowEventChain.cs's overrides can reach the
+    //  base through `base.Filter()` and `base.DeleteRow(nRow)` exactly as the oracle reaches it
+    //  through `super::` [se_cst_dw.sru:L406, :L431].
+    //
+    //  A double for the CHAIN cannot inherit this fake, because the chain is itself a
+    //  DataWindowServiceHost and C# has no multiple inheritance - it must COMPOSE one and forward. Every
+    //  other member of the contract is public and forwards directly; these two are protected and cannot.
+    //  Re-implementing them in the forwarding double would fork the buffer bookkeeping above and let the
+    //  two copies drift, which is the one outcome a shared fake exists to prevent. Two additive public
+    //  forwarders are therefore the narrow fix: they add no behaviour, change nothing for any existing
+    //  test, and keep exactly one implementation of each operation.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Invokes <see cref="FilterCore"/> on behalf of a composing double.
+    /// </summary>
+    /// <returns><see cref="FilterResult"/>, having recorded the call.</returns>
+    public int InvokeFilterCore() => FilterCore();
+
+    /// <summary>
+    /// Invokes <see cref="DeleteRowCore(long)"/> on behalf of a composing double.
+    /// </summary>
+    /// <param name="row">The one-based row to delete.</param>
+    /// <returns>
+    /// <c>-1</c> for a row that does not exist, otherwise <see cref="DeleteRowResult"/>, having
+    /// recorded the call and moved the row when <see cref="DeleteRowCoreRemovesRow"/> allows it.
+    /// </returns>
+    public int InvokeDeleteRowCore(long row) => DeleteRowCore(row);
 
     // ==============================================================================================
     //  THE ELEVEN SEMANTIC EVENTS - recorded, then dispatched to the handler or to the contract default
@@ -4110,7 +4313,7 @@ public static class FakeDataWindowFixtures
             UpdateTable = "COMPANY",
             UpdateWhere = "1",
             UpdateKeyInPlace = "no",
-            Sort = "age A salary A ",
+            TableSort = "age A salary A ",
         };
 
         // dw_sqlite.srd:L15-L20 - the six header text objects, declared BEFORE the columns exactly as the
@@ -4202,7 +4405,7 @@ public static class FakeDataWindowFixtures
         FakeDataWindowHost host = new(eventful)
         {
             // dw_test_dwsvc.srd:L14 - the definition declares a sort and no update table at all.
-            Sort = "n1 A n2 A n3 A ",
+            TableSort = "n1 A n2 A n3 A ",
         };
 
         AddNumericServiceColumns(host, "[general]", "[general]", "[general]");
@@ -4261,7 +4464,7 @@ public static class FakeDataWindowFixtures
     {
         FakeDataWindowHost host = new(eventful)
         {
-            Sort = "n1 A n2 A n3 A ",
+            TableSort = "n1 A n2 A n3 A ",
         };
 
         // dw_test_dwsvc_contextmenu.srd - n1 and n2 are decimal(2) formatted as numbers; n3 is a `number`
@@ -4337,7 +4540,7 @@ public static class FakeDataWindowFixtures
     {
         FakeDataWindowHost host = new(eventful)
         {
-            Sort = "n1 A n2 A n3 A ",
+            TableSort = "n1 A n2 A n3 A ",
         };
 
         // dw_test_dwsvc_columnexp.srd - n1, n2 and n3 are decimal(2) with updatewhereclause=no, which is

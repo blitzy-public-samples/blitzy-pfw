@@ -935,6 +935,208 @@ public abstract class DataWindowServiceHost
     public abstract int SetRedraw(bool enable);
 
     // ==========================================================================================
+    //  SORT AND ROW IDENTITY - THE DATA MODEL'S ORDERING, NOT AN INDICATOR
+    //  ----------------------------------------------------------------------------------------
+    //  ADDED AS A MEASURED EXTENSION OF THE CONSUMED SURFACE, ON THE SAME CRITERION AS THE ROW
+    //  SELECTION REGION BELOW. The census in the file header was taken over se_cst_dw.sru and
+    //  n_cst_dwsvc.sru only, and neither sorts. A fourth in-scope source does:
+    //  ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru's apply path calls
+    //  `#DataWindow.GetRowIDFromRow` at :L408, `#DataWindow.SetSort` at :L414,
+    //  `#DataWindow.Sort` at :L415, `#DataWindow.GroupCalc` at :L418 and
+    //  `#DataWindow.GetRowFromRowID` at :L422. AAP 0.4.2.5's criterion is consumption, and these
+    //  five are consumed - each exactly once, on one code path, in that order.
+    //
+    //  WHY THEY BELONG HERE AND NOT BEHIND THE DEFERRED /v1/design/** ROUTE. AAP 0.2.1.3
+    //  Correction 4 splits n_cst_dwsvc_columnsort.sru into a headless half that ships and a
+    //  rendering half that is deferred, and the split line is drawn at the DPI conversions in
+    //  `_of_setarrow` [:L355-L364]. These five fall on the SHIPPING side without ambiguity:
+    //  ordering is a property of the row set, and the row identifier round trip exists precisely so
+    //  that the CURRENT ROW survives a reorder [:L408 captured, :L421-L423 restored]. Not one
+    //  carries geometry, colour, font, DPI or a window handle, so constraint C-D is not engaged.
+    //
+    //  `Modify` IS DELIBERATELY ABSENT, AND ITS ABSENCE IS THE SPLIT WORKING AS INTENDED.
+    //  n_cst_dwsvc_columnsort.sru calls it three times and ALL THREE are on the deferred side: the
+    //  two `Modify("Destroy " + ...)` calls at :L351-L352 and the `Modify(sSyntax)` at :L393 that
+    //  emits a `create text(...)` band object. The headless half emits no DataWindow syntax at all,
+    //  so the consumption criterion is not met and adding the member would create an unused
+    //  extension point - the same reasoning that keeps the column-NUMBER helper overloads out of
+    //  DataWindowServiceBase below.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Captures the STABLE identifier of a row - the port of <c>GetRowIDFromRow(row)</c> as used at
+    /// <c>n_cst_dwsvc_columnsort.sru:L408</c>.
+    /// </summary>
+    /// <param name="row">The one-based row number to identify.</param>
+    /// <returns>
+    /// The row identifier, or a value that is not positive when <paramref name="row"/> does not
+    /// identify a row.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE FIRST HALF OF A ROUND TRIP, AND THE ROUND TRIP IS THE WHOLE POINT. A row NUMBER
+    /// is positional and a re-sort invalidates it; a row IDENTIFIER survives reordering. The sort
+    /// path captures the identifier BEFORE reordering [<c>:L408</c>] and converts it back to a
+    /// number afterwards [<c>:L422</c>], which is what makes the caret stay on the same DATA row
+    /// rather than the same POSITION.
+    /// </para>
+    /// <para>
+    /// THE GUARD AT THE CALL SITE IS <c>&gt; 0</c> AND NOT <c>&lt;&gt; 0</c> [<c>:L421</c>], so a
+    /// negative answer must be reported rather than normalised to zero. PowerBuilder answers a
+    /// non-positive value for an out-of-range row, and the call site relies on exactly that.
+    /// </para>
+    /// </remarks>
+    public abstract long GetRowIDFromRow(long row);
+
+    /// <summary>
+    /// Resolves a stable row identifier back to a row NUMBER - the port of
+    /// <c>GetRowFromRowID(rowId)</c> as used at <c>n_cst_dwsvc_columnsort.sru:L422</c>.
+    /// </summary>
+    /// <param name="rowId">The identifier previously obtained from <see cref="GetRowIDFromRow"/>.</param>
+    /// <returns>
+    /// The one-based row number the identifier now occupies, or a value that is not positive when
+    /// the identifier no longer corresponds to a row.
+    /// </returns>
+    /// <remarks>
+    /// The second half of the round trip described on <see cref="GetRowIDFromRow"/>. The call site
+    /// passes the result STRAIGHT into <see cref="SetRow"/> without checking it [<c>:L422</c>], so
+    /// this must not raise for an identifier that has gone away - it answers a non-positive number
+    /// and <see cref="SetRow"/> deals with it, exactly as in the oracle.
+    /// </remarks>
+    public abstract long GetRowFromRowID(long rowId);
+
+    /// <summary>
+    /// Sets the sort expression WITHOUT applying it - the port of <c>SetSort(sort)</c> as used at
+    /// <c>n_cst_dwsvc_columnsort.sru:L414</c>.
+    /// </summary>
+    /// <param name="sort">
+    /// The sort expression, in the DataWindow's own comma-separated
+    /// <c>clause&#160;A</c>/<c>clause&#160;D</c> grammar. THE EMPTY STRING IS A LEGAL AND MEANINGFUL
+    /// VALUE: it clears the sort, and the sort service passes it whenever the user has cleared every
+    /// column AND there was no original sort to fall back to [<c>:L201-L207</c>].
+    /// </param>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    /// <remarks>
+    /// SETTING AND APPLYING ARE TWO CALLS, NOT ONE, AND THEY MUST STAY TWO. <c>:L414</c> is
+    /// <c>SetSort(sort)</c> and <c>:L415</c> is <c>Sort()</c>. Collapsing them into a single
+    /// "sort by this expression" member would remove the state in between, which is observable: a
+    /// caller can set the expression and let a later <see cref="Sort"/> - or a retrieve - apply it.
+    /// The oracle discards both return codes; they are surfaced here so a test can assert the calls
+    /// happened rather than inferring them from row order.
+    /// </remarks>
+    public abstract int SetSort(string sort);
+
+    /// <summary>
+    /// Applies the current sort expression, reordering the rows - the port of <c>Sort()</c> as used
+    /// at <c>n_cst_dwsvc_columnsort.sru:L415</c>.
+    /// </summary>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    /// <remarks>
+    /// Takes no argument, exactly as the oracle's call does: the expression comes from the preceding
+    /// <see cref="SetSort"/>. See that member for why the pair is not collapsed.
+    /// </remarks>
+    public abstract int Sort();
+
+    /// <summary>
+    /// Recomputes group breaks and group aggregates - the port of <c>GroupCalc()</c> as used at
+    /// <c>n_cst_dwsvc_columnsort.sru:L418</c>.
+    /// </summary>
+    /// <returns>The legacy integer code, where <c>1</c> indicates success.</returns>
+    /// <remarks>
+    /// <para>
+    /// CALLED ONLY WHEN THE DATAWINDOW HAS GROUPS [<c>:L417</c>], and reaching it at all is an
+    /// interesting corner: the button-up entry point refuses to sort a grouped DataWindow outright
+    /// [<c>:L63</c>], so this is reached only when the sort was applied through
+    /// <c>of_reset</c>/<c>of_update</c> rather than through a header click. Both routes are real, so
+    /// the guard and this call are both preserved.
+    /// </para>
+    /// <para>
+    /// GROUP AGGREGATES ARE DATA, NOT PRESENTATION. A group break decides which rows a group
+    /// aggregate covers, and reordering the rows moves the breaks - so omitting this would leave
+    /// every group total stale after a sort, which is a data defect rather than a rendering one.
+    /// </para>
+    /// </remarks>
+    public abstract int GroupCalc();
+
+    // ==========================================================================================
+    //  THE EVENT GATE - THE HOST'S SUPPRESSED-EVENT MASK       se_cst_dw.sru:L109-L111, L469-L525
+    //  ----------------------------------------------------------------------------------------
+    //  THE MASK BELONGS TO THE HOST, NOT TO A SERVICE, WHICH IS WHY THESE THREE ARE HERE. The
+    //  legacy declares `long _nDisabledEvent` as a PRIVATE INSTANCE FIELD OF se_cst_dw [:L88-L89]
+    //  and publishes exactly three members over it [:L109-L111]. Every attached service reaches it
+    //  through the host - n_cst_dwsvc_columnsort.sru:L409-L411 and :L424-L426 do precisely that -
+    //  so a service that kept its own copy would gate only its own events and would silently stop
+    //  suppressing the host's. Reproducing the mask inside a service is therefore not a style
+    //  choice, it is a behaviour change.
+    //
+    //  THE OPERATIONS ARE NOT REDEFINED HERE. Domain/EventGate.cs already ports the three bodies
+    //  verbatim - BitTest, BitOR with a zero-argument rejection, and BitClear with the same
+    //  rejection - and an implementation of this contract is expected to delegate to it so the bit
+    //  arithmetic exists in exactly one place. These three members are the ACCESS PATH the oracle
+    //  publishes; EventGate is the ALGEBRA. Domain/ValidationSession.cs holds the mask VALUE for a
+    //  server-held session and exposes the identical trio over it, which is the shape a real host
+    //  composes from.
+    //
+    //  THE RETURN-TYPE ASYMMETRY IS A SIGNATURE CONTRACT, NOT AN OVERSIGHT.
+    //  `of_disableevent` returns `long` [:L110] and `of_enableevent` returns `integer` [:L111], for
+    //  the same argument list and the same two possible values. It is reproduced exactly - here, in
+    //  EventGate and in ValidationSession - so a caller that stores either result keeps the width
+    //  the oracle gave it. Harmonising the pair would be a silent widening or narrowing at every
+    //  call site.
+    // ==========================================================================================
+
+    /// <summary>
+    /// Whether a raw DataWindow event is currently suppressed - the port of
+    /// <c>of_iseventdisabled(evt)</c> (<c>se_cst_dw.sru:L109</c>, body <c>:L471</c>).
+    /// </summary>
+    /// <param name="evt">
+    /// One of <c>EventGate.EID_ROWFOCUSCHANGE</c>, <c>EventGate.EID_ITEMFOCUSCHANGE</c> or
+    /// <c>EventGate.EID_ITEMCHANGE</c>, or a bitwise combination of them.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the event is suppressed.
+    /// </returns>
+    /// <remarks>
+    /// A COMBINATION ANSWERS TRUE WHEN ANY BIT MATCHES, because the body is a bit TEST rather than
+    /// an equality. That is the oracle's semantics and the ported <c>EventGate.IsEventDisabled</c>
+    /// reproduces it; the distinction matters for a caller passing two bits at once, which reads as
+    /// "is either suppressed" and never as "are both suppressed".
+    /// </remarks>
+    public abstract bool IsEventDisabled(uint evt);
+
+    /// <summary>
+    /// Suppresses a raw DataWindow event - the port of <c>of_disableevent(evt)</c>
+    /// (<c>se_cst_dw.sru:L110</c>, body <c>:L491-L493</c>).
+    /// </summary>
+    /// <param name="evt">The event bit, or a bitwise combination of bits, to suppress.</param>
+    /// <returns>
+    /// <c>RetCode.OK</c>, or <c>RetCode.E_INVALID_ARGUMENT</c> when <paramref name="evt"/> is
+    /// <c>0</c> - a zero mask names no event and is rejected rather than treated as a no-op.
+    /// </returns>
+    /// <remarks>
+    /// RETURNS <see langword="long"/> WHILE <see cref="EnableEvent"/> RETURNS <see langword="int"/>.
+    /// See the region banner above: the asymmetry is the oracle's and is deliberately preserved.
+    /// </remarks>
+    public abstract long DisableEvent(uint evt);
+
+    /// <summary>
+    /// Stops suppressing a raw DataWindow event - the port of <c>of_enableevent(evt)</c>
+    /// (<c>se_cst_dw.sru:L111</c>, body <c>:L515-L517</c>).
+    /// </summary>
+    /// <param name="evt">The event bit, or a bitwise combination of bits, to stop suppressing.</param>
+    /// <returns>
+    /// <c>RetCode.OK</c>, or <c>RetCode.E_INVALID_ARGUMENT</c> when <paramref name="evt"/> is
+    /// <c>0</c>.
+    /// </returns>
+    /// <remarks>
+    /// RETURNS <see langword="int"/> WHILE <see cref="DisableEvent"/> RETURNS <see langword="long"/>,
+    /// which means the two success values are <c>RetCode.OK</c> widened differently. Both are the
+    /// same numeric <c>0</c>; only the declared width differs, and it differs because the oracle
+    /// declares it so.
+    /// </remarks>
+    public abstract int EnableEvent(uint evt);
+
+    // ==========================================================================================
     //  ROW SELECTION - ROW STATE, NOT RENDERING
     //  ----------------------------------------------------------------------------------------
     //  ADDED AS A MEASURED EXTENSION OF THE CONSUMED SURFACE, NOT AS A GUESS. The census in the
@@ -2332,6 +2534,133 @@ public abstract class DataWindowServiceBase
             "no",
             StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The DataWindow's presentation style - the port of <c>_of_getstyle()</c>
+    /// (<c>n_cst_dwsvc.sru:L46</c>, body <c>:L143-L158</c>).
+    /// </summary>
+    /// <returns>
+    /// One of the <c>STYLE_*</c> constants declared on this class.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE PROPERTY READ IS <c>"DataWindow.Processing"</c> AND NOT <c>"DataWindow.Style"</c>. That is
+    /// worth stating because the method NAME says style while the property says processing, and a
+    /// reader "correcting" the property name would get the invalid-expression sentinel back and every
+    /// style would collapse to <c>STYLE_DEFAULT</c>. The mapping is the oracle's, digit for digit:
+    /// <c>"1"</c> grid, <c>"2"</c> label, <c>"3"</c> graph, <c>"4"</c> crosstab, <c>"5"</c> composite,
+    /// <c>"7"</c> rich text.
+    /// </para>
+    /// <para>
+    /// *** THERE IS NO ARM FOR <c>"6"</c>, AND THERE MUST NOT BE ONE. *** The gap documented on the
+    /// <c>STYLE_*</c> constant block reappears here as a missing <c>case</c>, so a processing value of
+    /// <c>6</c> falls to the default arm and answers <c>STYLE_DEFAULT</c> - the SAME answer an
+    /// unreadable property gives. Adding a sixth arm, or reaching for an enum parse, would invent a
+    /// distinction the oracle does not draw (constraint C-B).
+    /// </para>
+    /// <para>
+    /// THE DEFAULT ARM IS FOUR STYLES PLUS EVERY UNRECOGNISED ANSWER AT ONE VALUE, which is why it is
+    /// reached by the <c>"?"</c> and <c>"!"</c> Describe sentinels too. Callers therefore test for the
+    /// style they want rather than for "not default": <c>n_cst_dwsvc_columnsort.sru:L61</c> is
+    /// <c>if _of_GetStyle() &lt;&gt; STYLE_GRID then return 0</c>, so an unreadable property correctly
+    /// disables column sorting rather than enabling it.
+    /// </para>
+    /// </remarks>
+    protected long GetPresentationStyle()
+    {
+        // n_cst_dwsvc.sru:L143 - ordinal comparison throughout, because these are machine-generated
+        // single-digit tokens rather than user text.
+        string processing = RequireHost().Describe("DataWindow.Processing");
+
+        // :L144-L157 - the choose case, arm for arm and in the oracle's own order. Written as a
+        // switch on the raw string rather than on a parsed number so that a non-numeric answer
+        // reaches the default arm by the same route the oracle takes.
+        return processing switch
+        {
+            "1" => STYLE_GRID,       // :L145-L146
+            "2" => STYLE_LABEL,      // :L147-L148
+            "3" => STYLE_GRAPH,      // :L149-L150
+            "4" => STYLE_CROSSTAB,   // :L151-L152
+            "5" => STYLE_COMPOSITE,  // :L153-L154
+                                     // NO ARM FOR "6" - see the remarks. It falls through below.
+            "7" => STYLE_RICHTEXT,   // :L155-L156
+            _ => STYLE_DEFAULT,      // :L157-L158 - and every unrecognised answer, including "?"/"!".
+        };
+    }
+
+    /// <summary>
+    /// Whether the DataWindow defines any grouping - the port of <c>_of_hasgroup()</c>
+    /// (<c>n_cst_dwsvc.sru:L82</c>, body <c>:L850-L852</c>).
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when a group header OR a group trailer band exists.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// EXISTENCE IS PROVED BY THE ABSENCE OF THE INVALID-EXPRESSION SENTINEL, NOT BY A HEIGHT. Both
+    /// tests are <c>Describe(...) &lt;&gt; "!"</c> against the height of GROUP 1's header and trailer
+    /// bands - a DataWindow with no groups has no such bands, so the property is unrecognised and
+    /// answers <c>"!"</c>. A zero height is therefore a REAL group with a collapsed band and reads as
+    /// true, which is correct and is what a numeric test would get wrong.
+    /// </para>
+    /// <para>
+    /// ONLY GROUP 1 IS PROBED, AND ONLY TWO BANDS. Group 2 and beyond cannot exist without group 1,
+    /// so one probe of each kind settles it; adding further probes would cost Describe calls and
+    /// change nothing. The two tests are ORDERED AND SHORT-CIRCUITING [<c>:L850</c> then
+    /// <c>:L851</c>], so a DataWindow with a group header never has its trailer probed - reproduced
+    /// with two sequential returns rather than an <c>||</c> so the call order is visible at the point
+    /// it happens.
+    /// </para>
+    /// <para>
+    /// CONSUMED BY THE SORT SERVICE ON TWO OPPOSITE POLARITIES: <c>:L63</c> REFUSES to sort a grouped
+    /// DataWindow from a header click, while <c>:L417</c> recomputes the group aggregates AFTER a sort
+    /// applied by another route. Both are live, so neither test may be simplified away.
+    /// </para>
+    /// </remarks>
+    protected bool HasGroup()
+    {
+        DataWindowServiceHost host = RequireHost();
+
+        // n_cst_dwsvc.sru:L850 - the group HEADER band. "!" means the property is unrecognised,
+        // which means there is no such band, which means there is no group.
+        if (!string.Equals(
+                host.Describe("DataWindow.Header.1.Height"),
+                InvalidExpressionSentinel,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // :L851 - the group TRAILER band. Reached only when the header probe said no.
+        if (!string.Equals(
+                host.Describe("DataWindow.Trailer.1.Height"),
+                InvalidExpressionSentinel,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // :L852
+        return false;
+    }
+
+    /// <summary>
+    /// The answer a DataWindow gives when a Describe property is not recognised at all.
+    /// </summary>
+    /// <remarks>
+    /// Named because <see cref="HasGroup"/> uses its ABSENCE as proof that a band exists, which is
+    /// the opposite of the usual "treat the sentinel as a failure" reading and is easy to misread as
+    /// a bug. It is deliberately not shared with the <c>"?"</c> undetermined sentinel: the two mean
+    /// different things and <c>n_cst_dwsvc_columnsort.sru:L403</c> is one of the few places that
+    /// normalises both together.
+    /// </remarks>
+    private const string InvalidExpressionSentinel = "!";
 
     /// <summary>
     /// Reads one of a column's properties, resolving a property EXPRESSION when the DataWindow

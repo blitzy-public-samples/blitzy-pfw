@@ -314,9 +314,12 @@ builder.Services.AddScoped<DataServicesClient>();
 // 7. THE PUBLISHED SURFACE AND THE FAULT PATH
 //
 // Health-check registration ships inside the Microsoft.AspNetCore.App shared framework, so /health
-// needs no package reference. Problem details are registered so that the framework's own challenge
-// and the fault path below both answer application/problem+json, which is the error shape
-// shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml publishes.
+// needs no package reference. It is registered for HealthCheckService, which Endpoints/HealthEndpoints
+// .cs resolves OPTIONALLY for Gateway's own component contribution to the C-10 aggregate; the route
+// itself is that file's, not this one's. Problem details are registered so that the framework's own
+// challenge and the fault path below both answer application/problem+json, which is the error shape
+// shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml publishes - and it is also the shape the
+// readiness endpoint's own not-ready response uses.
 //
 // SystemErrorHandler is registered through an explicit factory rather than by type, so that its
 // optional problem-details collaborator is supplied deliberately and the process-termination seam
@@ -343,22 +346,31 @@ app.UseExceptionHandler();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// The anonymous readiness probe. ANONYMOUS DELIBERATELY AND ON ALL FOUR SERVICES: the thing that
-// probes it - a container orchestrator, a load balancer, an operator - holds no token, and it probes
-// precisely during the window in which the service is still starting. Requiring a token would make
-// readiness depend on Security's issuance already being live, a circular dependency that cannot
-// resolve during a cold start. It is also the endpoint the orchestration manifest's health condition
-// gates Gateway's readiness on.
-app.MapHealthChecks("/health").AllowAnonymous();
-
 // The published contract document, anonymous because a description of the surface is not part of the
 // surface it describes and every operation in it still states its own security requirement.
 app.MapOpenApi().AllowAnonymous();
 
 // One call per endpoint file. The route patterns, the metadata and the authorization requirements all
 // live in those files, next to the contract they implement.
+//
+// /health is NO EXCEPTION and is mapped by Endpoints/HealthEndpoints.cs like every other route, NOT by
+// MapHealthChecks here. Two reasons, and either alone would decide it. First, C-10 requires Gateway's
+// readiness to be an AGGREGATE that names Persistence, DataServices and Security with their individual
+// states [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml AggregateHealthReport], and the
+// framework's own health-check endpoint answers a bare status word that carries none of it. Second, two
+// registrations of the same path and method are an ambiguous match, so mapping both would fault the one
+// endpoint the orchestration readiness gate probes. AddHealthChecks above stays: HealthEndpoints
+// consumes HealthCheckService for Gateway's OWN component contribution to the aggregate.
+app.MapHealthEndpoints();
 app.MapPingEndpoints();
 app.MapCapabilityEndpoints();
+
+// The /v1/datawindow projection of C-03 and C-04. Declared BEFORE the four reserved families so that a
+// reader meets the surface that exists before the surface that deliberately does not; routing itself is
+// order-independent here, because the reserved templates are catch-alls under four other prefixes and no
+// template in either file can match a request the other's could.
+app.MapDataServicesProxyEndpoints();
+
 app.MapDeferredCapabilityEndpoints();
 
 app.Run();

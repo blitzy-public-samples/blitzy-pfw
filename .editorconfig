@@ -390,21 +390,22 @@ trim_trailing_whitespace = true
 # ==============================================================================================
 # THE ROSTER - THIS LIST IS THE SINGLE SOURCE OF TRUTH FOR "WHICH FILES ARE IN BAND 3"
 # ==============================================================================================
-# 11 SECTIONS: 10 EFFECTIVE (the file exists) + 1 PENDING (the file is specified but unauthored).
+# 12 SECTIONS: 11 EFFECTIVE (the file exists) + 1 PENDING (the file is specified but unauthored).
 #
 #      1  shared/PowerFramework.Shared.Kernel/RetCode.cs                                  effective
 #      2  shared/PowerFramework.Shared.Kernel/Enums.cs                                    effective
 #      3  shared/PowerFramework.Shared.Localization/Categories.cs                         effective
-#      4  .../PowerFramework.DataServices/Domain/EventGate.cs                             effective
-#      5  .../PowerFramework.DataServices/Domain/ItemChangeProtocol.cs                    effective
-#      6  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           PENDING
-#      7  .../PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs    effective
-#      8  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
-#      9  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
-#     10  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
-#     11  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
+#      4  .../PowerFramework.DataServices/Domain/DataWindowEventChain.cs                  effective
+#      5  .../PowerFramework.DataServices/Domain/EventGate.cs                             effective
+#      6  .../PowerFramework.DataServices/Domain/ItemChangeProtocol.cs                    effective
+#      7  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           PENDING
+#      8  .../PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs    effective
+#      9  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
+#     10  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
+#     11  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
+#     12  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
 #
-# ENTRY 6 IS THE PENDING ONE AND IT STAYS. ColumnExpressionEngine.cs is enumerated in the
+# ENTRY 7 IS THE PENDING ONE AND IT STAYS. ColumnExpressionEngine.cs is enumerated in the
 # target-structure specification and is not yet authored, so its section is inert - it suppresses
 # nothing today and becomes effective the moment the file lands. That is exactly the case the
 # maintenance rule above sanctions, and the rule is quoted rather than re-derived on purpose:
@@ -470,6 +471,24 @@ dotnet_diagnostic.IDE1006.severity = none
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 
+# Preserved verbatim: the twelve broker topic constants of the DataWindow event chain -
+# EVT_ROWFOCUSCHANGING, EVT_ROWFOCUSCHANGED, EVT_ITEMFOCUSCHANGED, EVT_ITEMCHANGED,
+# EVT_EDITCHANGED, EVT_CLICKED, EVT_DOUBLECLICKED, EVT_LBUTTONUP, EVT_RBUTTONDOWN, EVT_RBUTTONUP,
+# EVT_GETFOCUS and EVT_LOSEFOCUS.
+# Source: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L47-L76.
+# Both the identifiers AND the values are load-bearing here, which is stronger than for the other
+# sections in this band. Two of the twelve carry an ORDERING PREFIX INSIDE THE VALUE -
+# EVT_ITEMCHANGED is "0-itemchanged" [:L54] and EVT_EDITCHANGED is "1-editchanged" [:L57] - and the
+# broker's dispatch order derives from the ascending ordinal sort of the subscription name, so the
+# digits are functional rather than decorative. The identifiers additionally appear as the
+# BrokerTopic.WellKnownName enumerators on contract C-03
+# [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto].
+# These spellings travel in serialized payloads, log records and characterization recordings, so a
+# rename would silently invalidate every stored comparison.
+[services/dataservices-service/PowerFramework.DataServices/Domain/DataWindowEventChain.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
 # Preserved verbatim: the composable event-gate bitmask - EID_ROWFOCUSCHANGE=1,
 # EID_ITEMFOCUSCHANGE=2 and EID_ITEMCHANGE=4, including the coupling recorded at the declaration
 # that disabling item-change also suppresses column-expression evaluation.
@@ -527,6 +546,30 @@ dotnet_diagnostic.IDE1006.severity = none
 # section is the DECLARING file's entry: the sibling files in this folder CONSUME the discriminator,
 # and CA1707 reports declarations only, so none of them needs one.
 [services/dataservices-service/PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
+# Preserved verbatim: the column-sort service's four constants - the public indicator-object suffix
+# ARROWSUFFIX="_arw", and the three private sort directions SORT_NONE=0, SORT_ASC=1 and SORT_DESC=2.
+# ARROWSUFFIX is the one that needs the suppression: it is PUBLIC in the oracle and stays public here,
+# while the three SORT_* values are private in both and CA1707 reports externally-visible declarations
+# only. THE ACCESSIBILITY SPLIT IS THE ORACLE'S AND IS NOT LEVELLED - this suppression must not be read
+# as licence to promote the three private constants to match the public one, nor to demote ARROWSUFFIX
+# to avoid needing this section. The dormant code at :L96-L97 shows external callers were meant to
+# recognise an indicator object by the suffix, which is why it is published.
+# Source: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L26 (public, under the
+# `public:` block opened at :L24) and :L37-L39 (private, under the `private:` block opened at :L28).
+# A search of enums.sru for ARROWSUFFIX or for any SORT_* name returns nothing, so all four are
+# declared on this file rather than arriving with Shared.Kernel's constant catalogue - the same finding
+# the RS_* section below records for the row-select service.
+# These spellings travel in serialized payloads, log records and characterization recordings, so a
+# rename would silently invalidate every stored comparison - here the recordings include the composed
+# indicator object names, which embed ARROWSUFFIX verbatim as `colName + ARROWSUFFIX` and
+# `colName + "_idx_" + ARROWSUFFIX`. The remaining literals in the same file (the two glyphs, the three
+# colour values, the six-space badge padding and the two direction suffixes) are named in PascalCase
+# because the oracle spells them as ordinary locals or inline literals rather than as screaming-snake
+# constants, so none of them needs anything here.
+[services/dataservices-service/PowerFramework.DataServices/Services/ColumnSortModel.cs]
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 

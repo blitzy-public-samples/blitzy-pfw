@@ -876,6 +876,16 @@ material, so an HMAC key there would publish the signing secret itself and make 
 co-signers. `.env.example` §1 carries the full note, including the PEM alternative and why the
 single-line form is what an environment file can hold.
 
+**The material is asymmetric, and the wrong shape fails closed rather than quietly.** Security's
+algorithm is `RS256` over a closed `RS256`/`RS384`/`RS512` allow-list, and it imports the configured
+value as an RSA private key — PEM first, then a base64 of the DER encoding. Symmetric random bytes
+cannot be imported that way, so a key produced by `openssl rand` makes the host **refuse to start**,
+with a message that names the variable and never echoes the value. Do not answer that failure by
+switching the algorithm to an HMAC family: the JWK set Security publishes is anonymous verification
+material, so an HMAC key there would publish the signing secret itself and make all three verifiers
+co-signers. `.env.example` §1 carries the full note, including the PEM alternative and why the
+single-line form is what an environment file can hold.
+
 > ### ⚠️ Why the filled-in environment file is written outside the working tree
 >
 > **The root ignore rules do not exclude an environment file, and this refactor does not change them**

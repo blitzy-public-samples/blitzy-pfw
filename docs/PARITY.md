@@ -1231,6 +1231,13 @@ an overload that supplies no initialization vector. `docs/CONTRACTS.md` records 
 N1 to N3 with their reason codes. Every cell the oracle's own demo exercises remains fully supported, so
 the parity corpus loses nothing it could have measured.
 
+Three cells of that surface are **BLOCKED rather than characterized**, because the parameter each needs
+exists only inside `pfw.dll` and no test this repository can run could tell a right choice from a wrong
+one: keyed and signed use of the CRC32 identifier, any use of the CFB mode, and the chaining mode through
+an overload that supplies no initialization vector. `docs/CONTRACTS.md` records all three as narrowings
+N1 to N3 with their reason codes. Every cell the oracle's own demo exercises remains fully supported, so
+the parity corpus loses nothing it could have measured.
+
 The algorithm identifier sets are preserved exactly as well — the hash types from MD5 through CRC32, the
 ciphers from DES through AES-256, and the ECB, CBC and CFB modes — with their identifier **values** and
 their identifier **spellings** both frozen, for the reasons in §1.7.
