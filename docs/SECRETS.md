@@ -48,11 +48,11 @@ because they are where the corresponding work belongs, not because a reader can 
 
 | Artifact | What it will carry | State |
 | --- | --- | --- |
-| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
-| `orchestration/docker-compose.yml`, `orchestration/.env.example`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up. `orchestration/.env.example` is present; the manifest and its readme are not | **Planned — not yet present** |
 
 Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
+[`PARITY.md`](PARITY.md), `orchestration/.env.example` and
 the read-only legacy tree — **is present in the tree today**.
 
 **No control described in this document depends on those absent artifacts to be true.** The secret
@@ -479,7 +479,7 @@ has. There is no other statement of intended behaviour to consult, no usable leg
 and a changelog that stopped years before the commit history did. Every behavioural assertion in the
 generated .NET code is adjudicated against a legacy locator, and the test and demonstration libraries
 are specifically the **characterization-fixture corpus** — the recorded-oracle inputs that parity
-testing compares against (`docs/PARITY.md`, planned). Editing an object in that corpus changes the
+testing compares against ([`docs/PARITY.md`](PARITY.md)). Editing an object in that corpus changes the
 oracle, which means a subsequent parity failure can no longer be attributed: it might be a port defect,
 or it might be the edit. That is an expensive and self-inflicted loss of diagnostic power.
 
@@ -850,7 +850,7 @@ three points:
 1. **The observable generated statement is preserved byte for byte wherever behaviour depends on it.**
    Parity for the paging rewriters and clause construction is byte-exact generated SQL, sentinel
    identifiers and count aliases included ([`CONTRACTS.md`](CONTRACTS.md) §8.4,
-   `docs/PARITY.md` (planned)). Redaction applies to the **error and log projection** of a statement, not
+   [`docs/PARITY.md`](PARITY.md)). Redaction applies to the **error and log projection** of a statement, not
    to the statement the engine executes or to any statement a parity test compares.
 2. **The boundary being narrowed is new.** As in §5.1, there is no prior wire format whose contract
    could be broken. The field's in-process behaviour is untouched.
@@ -939,7 +939,7 @@ Two related points belong with this section:
   estate. Characterization compares a recorded legacy run against a target run, so a value that differs
   on every execution must be masked on **both** sides. The provider behind them is therefore injected so
   a test can substitute a deterministic double while production uses the platform generator. The full
-  seam register is in `docs/PARITY.md` (planned); the contract-side note is
+  seam register is in [`docs/PARITY.md`](PARITY.md); the contract-side note is
   [`CONTRACTS.md`](CONTRACTS.md) §5.4.
 - **Weak defaults and the key-reference rule are independent.** Preserving ECB does not mean preserving
   the legacy's habit of passing key bytes as arguments. The *algorithm* behaviour is preserved (§7); the
@@ -1017,10 +1017,10 @@ It deliberately does not duplicate its siblings:
 | --- | --- |
 | Service boundaries, the port and transport map, storage, the capability gate, the sole-issuer topology in architectural terms, and the SQL-injection exposure explained mechanically | [`ARCHITECTURE.md`](ARCHITECTURE.md) §8.5, §9, §10.2 |
 | The token service and its sole-issuer property (C-01), the cryptographic service with its key-reference rule and the eight annotated defaults (C-02), the redaction rule at the contract level (C-05, C-08), and the reserved deferred routes | [`CONTRACTS.md`](CONTRACTS.md) §5.2, §5.3, §8.3, §8.6, §11.2, §11.4 |
-| The characterization model, the fixture corpus drawn from the test and demonstration libraries, the determinism seams, and the byte-exact parity criteria referenced in §6.3 | `docs/PARITY.md` (planned) |
+| The characterization model, the fixture corpus drawn from the test and demonstration libraries, the determinism seams, and the byte-exact parity criteria referenced in §6.3 | [`docs/PARITY.md`](PARITY.md) |
 | Why the secret-bearing libraries are deferred or permanently out of scope, and the same corrected MQTT attribution from the deferral side | [`DEFERRED.md`](DEFERRED.md) §3, §4.5, §5.2 |
 | The full-estate library-to-destination assignment, and the same corrected attribution from the mapping side | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) §9, §12.2 |
-| The variable roster an operator must populate, with empty values by design | `orchestration/.env.example` (planned) |
+| The variable roster an operator must populate, with empty values by design | `orchestration/.env.example` |
 | Build and test commands, and per-service build independence | [`BUILD.md`](BUILD.md) |
 
 ---

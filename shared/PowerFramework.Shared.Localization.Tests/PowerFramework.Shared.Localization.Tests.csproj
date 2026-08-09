@@ -58,23 +58,55 @@
       PowerFramework.Shared.Localization.Tests from this file's name, which is exactly the intended
       value, and every test source file in this folder declares that namespace.
 
-      The nine files, and the surface each one owns. Enumerated rather than counted, because a bare
+      The twelve files, and the surface each one owns. Enumerated rather than counted, because a bare
       count is unverifiable by inspection and drifts the moment a file is added - which is exactly how
       this comment came to overstate the project's contents once already.
 
         CategoriesTests.cs              CAT_MSGBOX and CAT_DWSVC as offsets from I18N_CAT_CUSTOM
         I18nTests.cs                    the facade: silent passthrough, install and replace, dispatch
+        I18nFacadeTests.cs              the facade again from the other direction: the passthrough with no
+                                        provider installed, the installer's replace-not-chain semantics,
+                                        and the discarded provider return value
         II18nProviderTests.cs           the one-member contract, exercised through every implementation
         EnglishProviderTests.cs         the source filter, the category map, hit/miss, both preserved
                                         mistranslations
+        MistranslationParityTests.cs    the two mistranslations as ONE table-driven parity matrix, the
+                                        English-word collision the first of them causes, and the
+                                        dormant correct table asserted absent at BOTH the behavioural
+                                        and the data layer - the data layer being the only assertion in
+                                        the project that catches a coordinated edit of code and data
         SimplifiedChineseProviderTests.cs  the deliberate no-op, and why 1-and-unchanged is not a decline
+        TraditionalChineseProviderTests.cs  the cht language token, the same category map and both of its
+                                        quirks, identity translations that are hits rather than misses,
+                                        and the proof that the English mistranslations are data-scoped
         I18nResourceReaderTests.cs      the XDocument/XPath substitution and its structural guards
         I18nResourceFidelityTests.cs    pfw.i18n.xml asserted at the byte, against the read-only oracle
         I18nXPathInjectionTests.cs      the unescaped key: malformed, always-true and union outcomes
         FakeI18nProviders.cs            the test doubles the facade suites drive; declares no test
 
-      Eight of the nine carry tests; FakeI18nProviders.cs is a fixture source and is consumed by
-      I18nTests.cs, II18nProviderTests.cs and SimplifiedChineseProviderTests.cs.
+      Eleven of the twelve carry tests; FakeI18nProviders.cs is a fixture source and is consumed by
+      I18nTests.cs and II18nProviderTests.cs. SimplifiedChineseProviderTests.cs deliberately consumes
+      no double: its subject has exactly two branches and that suite drives both of them directly, so
+      a stand in that declines BY CONSTRUCTION would carry no information about the provider under
+      test, and the facade behaviour a double would be needed for is owned by I18nTests.cs.
+
+      EnglishProviderTests.cs and MistranslationParityTests.cs overlap on the two mistranslations, and
+      that overlap is deliberate rather than an oversight. The first covers them as two assertions among
+      the provider's whole surface; the second is the dedicated parity matrix AAP §0.8.2 and §0.6.7 ask
+      for, and it alone carries the collision, the negative dormant-wording assertions and the
+      document-level scan. Neither subsumes the other, and duplicated cover on the one behaviour this
+      project exists to freeze is the cheapest insurance in the repository.
+
+      I18nTests.cs and I18nFacadeTests.cs likewise both drive the facade, and that is deliberate for the
+      same reason: the first covers the three overloads as one surface, while the second isolates the
+      three properties that are easiest to lose silently - the SILENT passthrough when no provider is
+      installed, install-replaces rather than install-chains, and the provider's handled/not-handled
+      return value being DISCARDED by every overload. Neither subsumes the other.
+
+      One test file per shippable type is the rule this project follows, and it is what the per-project
+      line coverage gate measures: with all three shipped locale providers now present in the library,
+      all three carry a suite. TraditionalChineseProviderTests.cs was added with the provider it covers,
+      because without it the library's measured line coverage falls below that gate.
     -->
 
   </PropertyGroup>

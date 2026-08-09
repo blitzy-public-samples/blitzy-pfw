@@ -677,7 +677,7 @@ the behavioural oracle.
 | `pfw` (`ws_objects/pfw.pbl.src/`) | 3 | `ws_objects/pfw.pbl.src/pfw.sra` is REFERENCE for Gateway's composition root; `project.srj` and `p_pfw.srj` are the two contradictory build definitions, REFERENCE only (Section 10.3) |
 | `pfwx` (`ws_objects/pfwx.pbl.src/`) | 1 | `ws_objects/pfwx.pbl.src/pfwx.sra`, REFERENCE. Note it contains **no initialize call in its open event** — the event is `Open(wx_test_httpclient)` and nothing else [`:L48-L50`] — yet its close event **does** call `pfwxFinalize()` [`:L52`]. That is asymmetric with the framework application, and it is worth recording because the pairing is mandated by the legacy documentation at [`docs/README.md:L15`] |
 | `pfw.pack` | 2 | The PowerBuilder packager tooling: `ws_objects/pfw.pack.pbl.src/pfw.sra` and `w_packager.srw` |
-| `pfw.tests` | 68 | REFERENCE and characterization-fixture source only. Never ported as-is, never edited. 47 `w_test_*.srw` windows and 11 `*.srd` DataWindow definitions, which together are the fixture corpus (`docs/PARITY.md`, planned). Also the location of most of the in-source secret sites — see Section 12.2 and `docs/SECRETS.md` |
+| `pfw.tests` | 68 | REFERENCE and characterization-fixture source only. Never ported as-is, never edited. 47 `w_test_*.srw` windows and 11 `*.srd` DataWindow definitions, which together are the fixture corpus ([`docs/PARITY.md`](PARITY.md)). Also the location of most of the in-source secret sites — see Section 12.2 and `docs/SECRETS.md` |
 | `pfw.demos` | 42 | REFERENCE and characterization-fixture source only: 9 demonstration windows, 1 further `*.srd`, and the supporting tab pages |
 | `pfwx.tests` | 2 | `pfwx` test windows: `wx_test_httpclient.srw`, `wx_test_mqttclient.srw` |
 
@@ -691,8 +691,8 @@ Two of these entries deserve emphasis because downstream work depends on them:
   DataWindow corpus *is* the test corpus: characterization fixtures need no invention. Exactly one
   DataWindow definition in the entire repository carries table-level update settings —
   [`ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14`] — which makes that single 37-line file the
-  golden-master fixture for the retrieval/validation/update capability. `docs/PARITY.md` — planned, and
-  not yet present in the tree — will carry the detail.
+  golden-master fixture for the retrieval/validation/update capability.
+  [`docs/PARITY.md`](PARITY.md) carries the detail.
 - **`pfw` and `pfwx` are reference for a composition root, not sources to port.** The framework
   application object records the lifecycle contract Gateway reproduces: it initializes with the
   composite capability flag [`ws_objects/pfw.pbl.src/pfw.sra:L91`], sets a locale
@@ -939,7 +939,7 @@ duplicate its siblings:
 | The cross-service contract inventory and the reserved Gateway extension points | `docs/CONTRACTS.md` |
 | The deferred destinations in detail, the reserved routes, and the same ledger-derived reconciliation figures as Section 11 | `docs/DEFERRED.md` |
 | Secret locators, severities and required actions | `docs/SECRETS.md` |
-| The characterization model, the fixture corpus drawn from `pfw.tests` and `pfw.demos`, and the determinism seams | `docs/PARITY.md` (planned) |
+| The characterization model, the fixture corpus drawn from `pfw.tests` and `pfw.demos`, and the determinism seams | [`docs/PARITY.md`](PARITY.md) |
 | Build and test commands, the solution layout, and per-service build independence | `docs/BUILD.md` |
 
 ### 12.4 A note on preserved constant spellings

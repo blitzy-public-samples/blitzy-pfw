@@ -50,7 +50,7 @@ itself:
 | For | See |
 | --- | --- |
 | Service topology, transport rationale, the port map, the orchestration decision and its rejected alternative | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
-| The characterization model, the fixture corpus, coverage mechanics in context and the determinism seams | `docs/PARITY.md` (planned) |
+| The characterization model, the fixture corpus, coverage mechanics in context and the determinism seams | [`docs/PARITY.md`](PARITY.md) |
 | The legacy build-definition anomalies in full, and the full-estate object mapping | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | Secret locators, severities, required actions and the token-topology register | [`SECRETS.md`](SECRETS.md) |
 | Compose bring-up detail and the readiness gates step by step | `orchestration/README.md` |
@@ -64,15 +64,14 @@ because they are where the corresponding work belongs, not because a reader can 
 
 | Artifact | What it will carry | State |
 | --- | --- | --- |
-| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
-| `orchestration/docker-compose.yml`, `orchestration/.env.example`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up. `orchestration/.env.example` is already present; the manifest and its readme are not | **Planned — not yet present** |
 | `.github/workflows/ci.yml` | The build/test/coverage pipeline and the per-service coverage gate | **Planned — not yet present** |
 | The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
-| `tests/e2e/specs/` | The Playwright cross-service workflow specs | **Planned — not yet present** |
 
 Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
-the read-only legacy tree — **is present in the tree today**.
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
+[`PARITY.md`](PARITY.md), `orchestration/.env.example`, the Playwright specs under `tests/e2e/specs/`
+and the read-only legacy tree — **is present in the tree today**.
 
 **This matters most in this document**, because the commands in later sections divide into three kinds,
 and conflating them is how a build reference becomes misleading:
@@ -172,7 +171,7 @@ The legacy PowerBuilder tree is read-only and is the behavioural oracle (C-C). N
 or CI step defined in this document reads it as an input, writes to it, or requires it to be present:
 
 - `ws_objects/**`, the `*.pbl`/`*.pbt`/`*.pbw`/`*.pbr`/`*.pbd` artifacts, `oldversion/125/**` and
-  `pack/**` are inputs to **parity work only**, never to the build. See `docs/PARITY.md` (planned).
+  `pack/**` are inputs to **parity work only**, never to the build. See [`docs/PARITY.md`](PARITY.md).
 - The two PowerBuilder project objects are cited in §12 as **REFERENCE for build *intent* only**. They
   are not translated, and §12 shows why neither could be.
 - The five pre-existing Chinese documents in this folder — `docs/README.md`, `docs/Blink交互.md`,
@@ -331,7 +330,7 @@ assumed.
    naming analyzer would turn each of them into a **build error**, so `CA1707` and `IDE1006` are set to
    `none` in `.editorconfig` — **scoped by file glob to the ten files that genuinely carry those
    identifiers**, deliberately not applied globally. Adding a new file with such identifiers requires
-   adding its own scoped section; it will otherwise fail the build. See `docs/PARITY.md` (planned) for why
+   adding its own scoped section; it will otherwise fail the build. See [`docs/PARITY.md`](PARITY.md) for why
    the spellings are preserved.
 
 ### 3.2 Repository-root `Directory.Packages.props` — central package management is mandatory
@@ -568,7 +567,7 @@ services/<service-name>/<project>.Tests/TestResults/<run-guid>/coverage.cobertur
 
 `coverage.cobertura.xml` is the exact artifact the 80%-per-service gate of §10 reads. Its emission by
 `coverlet.collector` was confirmed empirically (§1.2). For what the coverage number is expected to cover
-and which values are masked for determinism, see `docs/PARITY.md` (planned).
+and which values are masked for determinism, see [`docs/PARITY.md`](PARITY.md).
 
 ---
 
@@ -863,7 +862,7 @@ project and no container definition in this phase, so there is nothing for CI to
 [`DEFERRED.md`](DEFERRED.md).
 
 For coverage mechanics in context — what the number is expected to cover, and which non-deterministic
-values are masked so that a coverage run is repeatable — see `docs/PARITY.md` (planned).
+values are masked so that a coverage run is repeatable — see [`docs/PARITY.md`](PARITY.md).
 
 ---
 
@@ -1020,7 +1019,7 @@ requires (C-B).
 | The Aspire hosting package | The rejected orchestration alternative. Reasoning in [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | A managed SQL parser | SQL-Server-dialect-only, so it cannot serve the Oracle rewriter, and the acceptance criterion is byte-exact clause output. Implemented in-repo instead |
 | **Any third-party cryptography package** | `System.Security.Cryptography` in the BCL covers every operation the legacy surface performs |
-| **Any pinyin package** | The legacy lookup table exists only inside a closed binary, so bit-exact parity requires characterizing from the oracle rather than trusting a third-party table. See `docs/PARITY.md` (planned) |
+| **Any pinyin package** | The legacy lookup table exists only inside a closed binary, so bit-exact parity requires characterizing from the oracle rather than trusting a third-party table. See [`docs/PARITY.md`](PARITY.md) |
 
 ### 11.5 One inclusion that needs justifying — and it is a correctness argument
 
@@ -1187,5 +1186,4 @@ therefore reports a failure that must not be acted on, which is worse than no ch
 legacy files is not even UTF-8 — `docs/Blink交互.md` is GBK-encoded — so tooling that assumes UTF-8
 across `docs/` will fault on it.
 
-`docs/PARITY.md` is planned and not yet present; when it is authored it should carry the same directive
-and join the command above.
+[`docs/PARITY.md`](PARITY.md) carries the same directive and joins the command above.

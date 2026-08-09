@@ -67,6 +67,7 @@ public class II18nProviderTests
 
         rows.Add(nameof(SimplifiedChineseProvider), new SimplifiedChineseProvider());
         rows.Add(nameof(EnglishProvider), new EnglishProvider());
+        rows.Add(nameof(TraditionalChineseProvider), new TraditionalChineseProvider());
         rows.Add(nameof(HandledProvider), new HandledProvider());
         rows.Add(nameof(NotHandledProvider), new NotHandledProvider());
         rows.Add(nameof(RecordingProvider), new RecordingProvider());
@@ -164,25 +165,10 @@ public class II18nProviderTests
     [Fact]
     public void AllThreeLocaleProvidersShipIncludingTheNoOpOne()
     {
-        II18nProvider[] locales = [new EnglishProvider(), new SimplifiedChineseProvider(), new TraditionalChineseProviderProbe()];
+        II18nProvider[] locales =
+            [new EnglishProvider(), new SimplifiedChineseProvider(), new TraditionalChineseProvider()];
 
         Assert.Equal(3, locales.Select(provider => provider.GetType()).Distinct().Count());
-    }
-
-    /// <summary>
-    /// A stand-in for the Traditional Chinese provider, which is a later checkpoint's file.
-    /// </summary>
-    /// <remarks>
-    /// The migration plan names <c>TraditionalChineseProvider.cs</c> alongside the English and
-    /// Simplified Chinese ones, and it is not present in this checkpoint's file set. Rather than assert
-    /// its absence - which would break the moment it arrives - or claim three shipped providers when
-    /// two exist, this probe stands in its place so the three-provider SHAPE is asserted while the
-    /// count of real files stays honest. When the real provider lands, this type should be deleted and
-    /// the row above should name it directly.
-    /// </remarks>
-    private sealed class TraditionalChineseProviderProbe : II18nProvider
-    {
-        public long OnTranslate(long source, long category, ref string? text) => 0L;
     }
 
     // ==============================================================================================

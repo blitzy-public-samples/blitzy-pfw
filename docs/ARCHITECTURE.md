@@ -39,7 +39,7 @@ itself:
 | The full-estate mapping — all 39 libraries and all 544 objects assigned to a destination | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | The cross-service contract inventory and the four reserved Gateway extension points | [`CONTRACTS.md`](CONTRACTS.md) |
 | Build and test commands, the solution layout, and per-service build independence | [`BUILD.md`](BUILD.md) |
-| The characterization model, the fixture corpus and the determinism seams | `docs/PARITY.md` (planned) |
+| The characterization model, the fixture corpus and the determinism seams | [`docs/PARITY.md`](PARITY.md) |
 | Secret locators, severities, required actions and the token-topology register | [`SECRETS.md`](SECRETS.md) |
 | The four deferred destinations in detail and their assigned objects | [`DEFERRED.md`](DEFERRED.md) |
 
@@ -50,13 +50,13 @@ because they are where the corresponding work belongs, not because a reader can 
 
 | Artifact | What it will carry | State |
 | --- | --- | --- |
-| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
-| `orchestration/docker-compose.yml`, `orchestration/.env.example`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up. `orchestration/.env.example` is already present; the manifest and its readme are not | **Planned — not yet present** |
 | `characterization/` | The paired legacy and target recordings | **Planned — not yet present** |
 | The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
 
 Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
+[`PARITY.md`](PARITY.md), `orchestration/.env.example` and
 the read-only legacy tree — **is present in the tree today**.
 
 **The topology described below is therefore a design, not a running system.** Every service boundary,
@@ -1074,8 +1074,8 @@ service becomes `persistence-service` in the reviewed roster (§3.1), the volume
 **`persistence-db`**.
 
 The environment's paired-capture persistence rule survives the rename intact: it is restated verbatim
-against the new name in both `docs/PARITY.md` and `characterization/README.md` (both planned, neither yet
-present). The rule itself
+against the new name in [`docs/PARITY.md`](PARITY.md), and it is restated again in
+`characterization/README.md` once that directory is created (it is not yet present). The rule itself
 is not restated here — it belongs with the characterization model, and duplicating it is exactly how a
 rule drifts.
 

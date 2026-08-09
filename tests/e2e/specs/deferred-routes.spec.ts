@@ -28,12 +28,20 @@
  *
  * ORDERING OF THE GUARD MATTERS
  * -----------------------------
- * The contract declares `401` alongside `501` on each family, and `401` is
- * listed first for a reason: authentication is evaluated BEFORE the
- * not-implemented answer. An unauthenticated caller must not be able to
- * enumerate which capabilities are reserved, because that is free
- * reconnaissance about the system's eventual shape. Both statuses are asserted,
- * and the unauthenticated case is asserted to be the 401 rather than the 501.
+ * Each family REQUIRES a token — none of the eight reserved operations
+ * overrides the document-level bearer requirement — so authentication is
+ * evaluated BEFORE the not-implemented answer. An unauthenticated caller must
+ * not be able to enumerate which capabilities are reserved, because that is
+ * free reconnaissance about the system's eventual shape.
+ *
+ * The `401` is nonetheless NOT a declared response of these routes, and the
+ * distinction is deliberate rather than an omission: the contract declares the
+ * response set of each reserved operation as EXACTLY `{501}`, because a second
+ * declared status would suggest the route evaluates something before answering
+ * — which is the "stub them out" reading the requirements forbid. The `401`
+ * comes from the authentication middleware, a cross-cutting concern declared
+ * once at the security scheme. So both statuses are observable at run time and
+ * are asserted here, while only one of them belongs to the route.
  *
  * See `../fixtures/live-stack.ts` for what has and has not been observed
  * running in this checkpoint.
@@ -74,12 +82,27 @@ const RESERVED_FAMILIES: readonly ReservedFamily[] = [
  */
 const RESERVED_MARKER = 'reserved for Phase 2';
 
-/** The shape of `ReservedRouteBody` this spec reads. */
+/**
+ * `E_NO_IMPLEMENTATION`, which the legacy framework declares as -2001
+ * (`ws_objects/pfw.shared.pbl.src/retcode.sru:L78`) and which the contract
+ * fixes as a constant on the 501 body.
+ */
+const RESERVED_RET_CODE = -2001;
+
+/**
+ * The shape of `ReservedRouteBody` this spec reads.
+ *
+ * `deferredService` rather than `service`: the contract uses that member name
+ * because `service` already means the RESPONDING service on the ping body and
+ * an UPSTREAM service on the health body, and a third meaning on the same word
+ * would make this body ambiguous in exactly the place a client branches on it.
+ */
 interface ReservedRouteBody {
   readonly status?: unknown;
-  readonly service?: unknown;
+  readonly deferredService?: unknown;
   readonly marker?: unknown;
   readonly route?: unknown;
+  readonly retCode?: unknown;
 }
 
 test.describe('reserved extension points (no running stack required)', () => {
@@ -183,9 +206,15 @@ test.describe('reserved extension points over HTTP (live stack)', () => {
       const body = (await response.json()) as ReservedRouteBody;
 
       expect(body.status).toBe(501);
-      expect(body.service).toBe(family.service);
+      expect(body.deferredService).toBe(family.service);
       expect(body.marker).toBe(RESERVED_MARKER);
       expect(typeof body.route).toBe('string');
+
+      // The legacy framework's own not-implemented code, so a client branching
+      // on retCode handles a reserved route with the code it already knows.
+      // E_NO_IMPLEMENTATION is -2001 in retcode.sru, in common.v1.RetCode and
+      // in the shared kernel alike.
+      expect(body.retCode).toBe(RESERVED_RET_CODE);
     });
   }
 
@@ -213,8 +242,9 @@ test.describe('reserved extension points over HTTP (live stack)', () => {
         `${family.prefix} varied its status across sub-paths: ${observed.join(', ')}`,
       ).toBe(1);
 
-      // Whichever single status it is, it must be one of the two the contract
-      // declares — never a success and never a fault.
+      // Whichever single status it is, it must be one of the two a caller can
+      // observe — the middleware's 401 or the route's own 501 — and never a
+      // success and never a fault.
       const [only] = [...distinct];
       expect([401, 501]).toContain(only);
     });

@@ -45,7 +45,7 @@ itself:
 | The full-estate mapping — all 39 libraries and all 544 objects assigned to a destination | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | The four deferred destinations in detail and the objects assigned to each | [`DEFERRED.md`](DEFERRED.md) |
 | Secret locators, severities, required actions, and the token-topology register | [`SECRETS.md`](SECRETS.md) |
-| The characterization model, the fixture corpus, and the determinism seams | `docs/PARITY.md` (planned) |
+| The characterization model, the fixture corpus, and the determinism seams | [`docs/PARITY.md`](PARITY.md) |
 | Build and test commands, the solution layout, per-service build independence | [`BUILD.md`](BUILD.md) |
 
 **How the method surfaces in this document are produced, and why that matters.** Every method-surface
@@ -71,17 +71,11 @@ The Security listener publishes **22 operations in total**: C-02's 17, C-01's 3,
 
 ## Current state of the artifacts this document references
 
-One artifact referenced below is **planned and not yet present in this repository**. It is named
-because it is where the corresponding work belongs, not because a reader can open it today:
-
-| Artifact | What it carries | State |
-| --- | --- | --- |
-| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
-
-Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/` including both `gateway.v1.yaml`
-and `security.v1.yaml`, the per-service settings and
-the read-only legacy tree — **is present in the tree today**.
+**Every artifact this document references is present in the tree today** — the solution and project
+files, the shared libraries, the protocol and OpenAPI definitions under
+`shared/PowerFramework.Contracts/` including both `gateway.v1.yaml` and `security.v1.yaml`, the
+per-service settings, [`PARITY.md`](PARITY.md) and the read-only legacy tree. Nothing named below has
+to be imagined.
 
 ---
 
@@ -583,7 +577,7 @@ The contract therefore treats these three as **seamed**: the provider behind the
 test substitutes a deterministic double while production uses the platform generator. The seam is a
 property of the implementation, but it is recorded in the contract description because a consumer
 writing a parity test needs to know which fields to mask. The full seam register is in
-`docs/PARITY.md` (planned).
+[`docs/PARITY.md`](PARITY.md).
 
 **The requested length is capped, and the cap is a boundary requirement rather than a hardening
 preference.** The legacy takes an unsigned 32-bit length, so its domain reaches 4 294 967 295. In
@@ -860,7 +854,7 @@ re-sorted them would reconstruct an order the server never sent and produce a re
 could not.
 
 Conformance tests are written per workflow against this table; the workflow corpus and the recording
-model are the subject of `docs/PARITY.md` (planned, not yet present in the tree).
+model are the subject of [`PARITY.md`](PARITY.md).
 
 ### 6.7 The three-encoding topic string, and why naive serialization fails
 
@@ -2129,7 +2123,7 @@ the idle start time above [`:L97`], the last-successful-connection stamp
 [`n_cst_thread_trans.sru:L107`, `:L212`], and the **liveness cache** that reports a connection as
 connected **without probing it** when the last success was recent [`:L196-L198`]. The last of these
 is observable through the *absence* of a probe, so a test that does not control the clock cannot
-reproduce it. The seam register is in `docs/PARITY.md` (planned).
+reproduce it. The seam register is in [`docs/PARITY.md`](PARITY.md).
 
 ### 11.4 The two connection-parameter flags
 
@@ -2183,12 +2177,22 @@ statuses back. The status mapping is the substantive part:
 | `Unauthenticated` | `401` | |
 | `PermissionDenied` | `403` | |
 | `Unimplemented` | `501` | Including the four reserved routes of [§13](#13-the-four-reserved-gateway-extension-points) |
-| `Internal` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-one-field-that-must-be-redacted) |
+| `Unavailable` | `503` | |
+| `DeadlineExceeded` | `504` | |
+| `Internal` / `Unknown` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-one-field-that-must-be-redacted) |
 
-**Every unary method of C-03 and C-04 is projected, and the five streaming methods are not.** That
-is thirty-seven projected operations: fourteen of C-03's sixteen and twenty-three of C-04's
-twenty-six, alongside `/health`, `/v1/ping` and `/v1/capabilities` and the four reserved routes of
-[§13](#13-the-four-reserved-gateway-extension-points) — forty-four operations in the document.
+Each operation declares the responses it can **actually** produce rather than the whole table, because a
+status every generated client must branch on but no operation can return hides the real surface. In
+practice Gateway's own resilience policy converts an exhausted retry or an unreachable upstream into
+`502` — the one case the table cannot describe, because it is the case where **no gRPC response arrived
+at all** — and `503` additionally appears on `/health` on C-10's own account rather than from this
+mapping.
+
+**Every unary and every server-streaming method of C-03 and C-04 is projected, and the three
+bidirectional ones are not.** That is thirty-nine projected operations: fifteen of C-03's sixteen and
+twenty-four of C-04's twenty-six, alongside `/health`, `/v1/ping` and `/v1/capabilities` and the four
+reserved routes of [§13](#13-the-four-reserved-gateway-extension-points) — **forty-six routes carrying
+fifty operations**, the four extra operations being the second declared method on each reserved route.
 
 Completeness in that direction is not optional. Gateway is the sole ingress, so an operation the gRPC
 contract publishes and the projection omits is unreachable from outside the cluster, and a consumer
@@ -2196,14 +2200,30 @@ would read that as a defect in its own client rather than as a boundary of the c
 read-and-apply operations of the four headless models ([§6.9](#69-the-four-headless-models-and-their-reachable-operations))
 are therefore projected like the rest of C-03**, and `GetExpressionState` like the rest of C-04.
 
-The five excluded streams are `Retrieve` and `EventChain` on C-03, and `EventStream`,
-`InvokeMethodChannel` and `TraceChannel` on C-04. A bidirectional stream carrying an ordered event
-chain with a per-message veto has no faithful REST representation, and a partial projection would be
-worse than none: a consumer would receive some of the chain and have no way to know what it had
-missed. A server stream is no more projectable, because the property that matters is the same — the
-server decides when the next message arrives. Consumers needing any of the five use the gRPC contract.
-This is a documented gap with an enumerable boundary, and the schema names all five individually so
-the boundary is checkable rather than asserted.
+The three excluded streams are `EventChain` on C-03, and `InvokeMethodChannel` and `TraceChannel` on
+C-04 — all three **bidirectional**. `EventChain` carries the item-change and validation chain, which is
+strictly synchronous with no reordering permitted: the validation-error handler *reads and clears* the
+result the preceding item-change event stashed, so its behaviour is a function of the prior event's
+return value ([§6.5](#65-the-item-change-alphabet-is-its-own-enumeration)). JSON over independent REST
+requests would lose both that ordering and the tri-valued typed veto
+([§6.8](#68-the-veto-is-tri-valued-never-boolean)), and a partial projection of an ordered chain would
+be worse than none: a consumer would receive some of it with no way to know what it had missed.
+`InvokeMethodChannel` and `TraceChannel` are additionally **inverted**
+([§7.6](#76-two-inverted-streams-structurally-required)), so there is no request/response direction to
+project at all. Consumers needing any of the three use the gRPC contract. This is a documented gap with
+an enumerable boundary, and the schema names all three individually so the boundary is checkable rather
+than asserted.
+
+**The two server streams — `Retrieve` on C-03 and `EventStream` on C-04 — *are* projected**, because
+the property that decides projectability is a single request and a determinate response sequence, not
+whether the RPC streams. A server stream's ordering is the trivial one: the server produces a sequence
+and the client consumes it in order. Each therefore projects to one operation whose response is that
+same sequence as an ordered collection, **with the chunking contract intact** — the chunk index, the
+final-chunk flag and the cumulative row count all travel exactly as the stream carries them, and each
+operation marks itself with `x-grpc-streaming: server` so a consumer knows the body is the whole
+sequence rather than one message. Omitting them would have left the retrieval third of the triple
+unreachable from outside the cluster, which for the sole ingress is a functional hole rather than a
+documented gap.
 
 ### 12.2 C-10 — Health and readiness
 
@@ -2254,9 +2274,31 @@ The body is structured rather than a text message so that a client can branch on
 | Body field | Content |
 | --- | --- |
 | `status` | `501` |
-| `service` | `DesignSystem` \| `Documents` \| `Integration` \| `ScriptBridge` |
+| `deferredService` | `DesignSystem` \| `Documents` \| `Integration` \| `ScriptBridge` |
 | `marker` | `reserved for Phase 2` |
 | `route` | The matched route pattern |
+| `retCode` | `E_NO_IMPLEMENTATION` = **-2001**, the legacy framework's own not-implemented code |
+
+The member is `deferredService` rather than `service` because `service` already means the *responding*
+service on the ping body and an *upstream* service on the health body, and a third meaning on the same
+word would make this body ambiguous in the one place a client branches on it. It also matches the
+`x-deferred-service` extension each reserved operation carries. `retCode` reuses the legacy vocabulary
+rather than inventing a parallel one, so a client that already branches on `retCode` handles a reserved
+route with the code it knows.
+
+**Each of the four declares `get` and `post`, and each operation declares exactly one response —
+`501`.** Declaring two methods makes "nothing here is implemented" cover more than one verb, and
+*every other* method on the route answers the same way, so no verb appears implemented. **Neither
+declares a request body**: a request schema would model a deferred capability, and modelling one is
+precisely what the prohibition forbids. The four declarations are structurally identical, differing only
+in the path segment and the service they name — an asymmetry between them would itself be the evidence
+that capability modelling had crept in.
+
+Each is nonetheless **authenticated**: none overrides the document-level bearer requirement, so an
+unauthenticated caller cannot enumerate the deferred roster. The `401` that caller receives comes from
+the authentication middleware and is deliberately **not** a declared response of the route, because the
+route's own response set is exactly `{501}` — it answers unconditionally, and a second declared status
+would suggest it evaluates something first.
 
 ### 13.1 The compliance note, stated so it is auditable rather than argued
 
@@ -2433,7 +2475,7 @@ remark on the cost of an operation, that remark is the legacy's own, is not repe
 claim, and is not used to justify anything.
 
 The only quantitative non-functional requirement in the whole brief is the coverage gate, which is
-the subject of [`BUILD.md`](BUILD.md) and of `docs/PARITY.md` (planned, not yet present).
+the subject of [`BUILD.md`](BUILD.md) and of [`PARITY.md`](PARITY.md).
 
 What *is* claimed is architectural rather than quantitative: each service is independently
 deployable and independently scalable, which is a property of the acyclic topology of
@@ -2624,20 +2666,20 @@ Stated plainly, because a reference document that overclaims is worse than one w
 - **It does not claim that any of these ten contracts has been *implemented*** — and that is a narrower
   statement than an earlier draft of this list made, so it is worth separating the three states these
   contracts are actually in:
-  - **Specified and expressed as a schema (C-01 through C-08).** Four definition files exist —
-    `Proto/common.v1.proto`, `Proto/dataservices.v1.proto`, `Proto/persistence.v1.proto` and
-    `OpenApi/security.v1.yaml` — carrying six gRPC services between them. So this document no longer
-    "precedes the schema": for eight of the ten contracts the schema is present and is the artifact
-    this document's inventories are checked against.
-  - **Specified but not yet expressed as a schema (C-09, and the ingress half of C-10).**
-    `OpenApi/gateway.v1.yaml` is planned and absent ([§2.3](#23-where-the-definitions-live)).
+  - **Specified and expressed as a schema — all ten.** Five definition files exist —
+    `Proto/common.v1.proto`, `Proto/dataservices.v1.proto`, `Proto/persistence.v1.proto`,
+    `OpenApi/security.v1.yaml` and `OpenApi/gateway.v1.yaml` — carrying six gRPC services and two REST
+    surfaces between them. So this document no longer "precedes the schema" anywhere: for every one of
+    the ten contracts the schema is present and is the artifact this document's inventories are checked
+    against ([§2.3](#23-where-the-definitions-live)). Where the two disagree, **the schema is
+    authoritative for the wire** and this document is corrected to match it.
   - **Not implemented, all ten.** A schema is a contract definition, not a running service. No service
     implementation behind any of these contracts is asserted to exist or to work, and the four service
     application projects are explicitly outside this document's evidence base.
 - **It does not claim byte-exact parity has been achieved anywhere.** It states where byte-exactness is
   the *criterion* — the paging output of [§8.4](#84-paging-parity-is-byte-exact-generated-sql) and the
   count wrapper of [§8.5](#85-the-count-wrapper-and-its-short-circuit) — and leaves the demonstration to
-  `docs/PARITY.md` (planned).
+  [`docs/PARITY.md`](PARITY.md).
 - **It does not claim the deferred services are partly built.** They are not built at all
   ([§13.1](#131-the-compliance-note-stated-so-it-is-auditable-rather-than-argued)).
 - **It does not claim more than one storage engine is provisioned.** Exactly one is

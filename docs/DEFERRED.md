@@ -36,16 +36,16 @@ destination would be built.
 
 ## Current state of the artifacts this document references
 
-Some artifacts referenced below are **planned and not yet present in this repository**. They are named
-because they are where the corresponding work belongs, not because a reader can open them today:
+One artifact referenced below is **planned and not yet present in this repository**. It is named
+because it is where the corresponding work belongs, not because a reader can open it today:
 
 | Artifact | What it will carry | State |
 | --- | --- | --- |
-| `docs/PARITY.md` | The characterization model, fixture corpus and determinism seams | **Planned — not yet present** |
 | The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
 
 Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings and
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
+[`PARITY.md`](PARITY.md) and
 the read-only legacy tree — **is present in the tree today**.
 
 ---
@@ -404,6 +404,13 @@ with a **machine-readable body** naming the deferred service it will eventually 
 the marker `reserved for Phase 2`. The body is structured rather than a text message so a client can
 branch on it; [`CONTRACTS.md`](CONTRACTS.md) §13 defines the field set.
 
+Each of the four declares `get` and `post`, each operation declares **exactly one response — `501`**,
+and **neither declares a request body**: a request schema would model a deferred capability, and
+modelling one is precisely what the prohibition forbids. Every *other* HTTP method on the route answers
+the same `501`, so no verb appears implemented. The four declarations are structurally identical,
+differing only in the path segment and the service they name — an asymmetry between them would itself be
+the evidence that capability modelling had crept in.
+
 | Route | Deferred service | Capabilities it will eventually reach |
 | --- | --- | --- |
 | `/v1/design/**` | **DesignSystem** | Theming, geometry structures, colour functions, the DPI conversion family, canvas, painter, font, image, image list, popup menu, tooltip, tray icon, timer, `win32` interop, the logo control, and the **presentational halves** of ColumnSort, ContextMenu and DropDownSearch |
@@ -743,7 +750,7 @@ behavioural oracle — not the flag decoding. **If the oracle cannot be exercise
 reported as BLOCKED rather than approximated.** An approximation would return subtly different result
 sets — a regression that a characterization comparison would flag but that a unit test would not, and
 one that would look like correct behaviour to a reader. The parity documentation
-(`docs/PARITY.md`, planned — not yet present in the tree) will carry the oracle, the fixture corpus
+([`docs/PARITY.md`](PARITY.md)) carries the oracle, the fixture corpus
 and this risk.
 
 ---
@@ -812,7 +819,7 @@ siblings:
 | Service topology, transport choice per service, the port map and the reserved 5103 slot, the capability bit table, and the architectural statement that the four routes are metadata | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | The cross-service contract inventory, the four reserved Gateway extension points, and the machine-readable body the reserved routes return | [`CONTRACTS.md`](CONTRACTS.md) |
 | Secret locators, severities and required actions — the single register, and the reason none is restated here | [`SECRETS.md`](SECRETS.md) |
-| The characterization model, the fixture corpus, the determinism seams, and the pinyin parity risk | `docs/PARITY.md` (planned) |
+| The characterization model, the fixture corpus, the determinism seams, and the pinyin parity risk | [`docs/PARITY.md`](PARITY.md) |
 | Build and test commands, the solution layout, per-service build independence, and the coverage gate | [`BUILD.md`](BUILD.md) |
 | The legacy JavaScript-to-PowerScript bridges for the ScriptBridge capability area — read-only reference, never edited | [`Blink交互.md`](Blink交互.md), [`Sciter交互.md`](Sciter交互.md) |
 

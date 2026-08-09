@@ -22,20 +22,41 @@
 #  HTTP. Each operation therefore declares the method it projects in `x-grpc-method`, and the request
 #  and response payload shapes in `x-proto-request` and `x-proto-response`.
 #
-#  PAYLOAD SHAPES ARE DELEGATED TO THE PROTOCOL DEFINITIONS - A DELIBERATE DECISION UNDER C-K
+#  PAYLOAD SHAPES: THE BOUNDARY-CRITICAL ONES ARE MIRRORED FIELD FOR FIELD, THE BULK IS DELEGATED
 #  ------------------------------------------------------------------------------------------------
-#  The bodies of the /v1/datawindow operations are the canonical protobuf JSON mapping of the messages
-#  named in the `x-proto-*` extensions. Those messages are defined in Proto/dataservices.v1.proto and
-#  Proto/common.v1.proto IN THIS SAME PROJECT, and they are the single authority for the shapes.
+#  A DELIBERATE TWO-TIER DECISION UNDER C-K, because the two tiers answer different questions.
 #
-#  Transcribing them into JSON Schema here was considered and REJECTED. It would create a second
-#  source of truth for well over a hundred messages, in a different language, with no mechanism
-#  keeping the two in step - and the first divergence would be silent, because nothing compiles this
-#  file against those definitions. The `x-proto-*` extensions are the alternative: they are mechanical,
-#  one-to-one, and CHECKABLE, and the sibling test project asserts that every one of them resolves to
-#  a real generated type. A schema copy would have been longer, less precise, and unverifiable.
+#  TIER 1 - MIRRORED FIELD FOR FIELD, in components/schemas below. Every shape a consumer has to
+#  understand in order to ACT on a response is transcribed here, member by member and value by value,
+#  from Proto/common.v1.proto and Proto/dataservices.v1.proto:
 #
-#  What this document does specify exhaustively, because it is the ingress contract and nothing else
+#      RetCode (the closed value set on ProblemDetails.retCode)   DwBuffer      ItemStatus
+#      AnyValue and its four string-carrier value types           ColumnValue   DataWindowRow
+#      DbError (statement text REDACTED)                          ConflictRow   ConflictDetail
+#      RetrieveChunk (the chunking contract)                      EventGate and its EID_* bit set
+#      ExpansionMode (the five per-reference modes)               VarData       ExpressionBinding
+#
+#  These are mirrored rather than delegated because each one carries a DECISION. A 409 whose conflict
+#  detail a caller cannot read is a 409 the caller cannot retry against; an error whose statement field
+#  a consumer believes is unredacted invites a diagnostic flow built on data that will never arrive;
+#  and an expansion mode a consumer cannot see turns a static binding into an indistinguishable
+#  literal. Cross-checking them against the .proto is therefore a review obligation on every change to
+#  either side, and the sibling test project asserts the numeric agreement it can reach from code.
+#
+#  TIER 2 - DELEGATED, for the per-operation request and response ENVELOPES. Those bodies are the
+#  canonical protobuf JSON mapping of the messages named in the `x-proto-*` extensions, defined in the
+#  same two files in this same project.
+#
+#  Transcribing all of them was considered and REJECTED. It would create a second source of truth for
+#  well over a hundred envelope messages, in a different language, with no mechanism keeping the two in
+#  step - and the first divergence would be silent, because nothing compiles this file against those
+#  definitions. The `x-proto-*` extensions are the alternative: they are mechanical, one-to-one, and
+#  CHECKABLE, and the sibling test project asserts that every one of them resolves to a real generated
+#  type AND that it is the projected RPC's own input or output type. An envelope carries no decision of
+#  its own - it names the operation's arguments - so delegating it costs a consumer nothing that the
+#  generated client does not already give them.
+#
+#  What this document specifies exhaustively, because it is the ingress contract and nothing else
 #  publishes it: every route, its authentication posture, its HTTP status surface, the gRPC-to-HTTP
 #  status mapping, and the four reserved extension points. Those are C-09 and C-10.
 #
@@ -90,53 +111,173 @@ info:
       first ingress, so the requirement reads as: every newly created surface is authenticated from
       the outset. That is why `/v1/ping` exists, and why it is here rather than only being asserted.
 
-    ## Authentication
+    ## Why REST at the edge, and why that is a per-service decision rather than a house style
 
-    A bearer token is required by default. Exactly three operations override that, and each declares
+    The transport for each service in this system was decided from **the shape of its current
+    interface**, not chosen once and applied uniformly. For Gateway the shape is the one described just
+    above: the coarse `open` / `close` / `systemerror` application lifecycle plus a navigation surface,
+    which is **request/response** and nothing more - no ordered chain, no veto, nothing to stream.
+
+    Being the **sole ingress** then decides it outright, because an ingress needs three properties:
+
+    1. **Reach.** A browser or a third-party client must be able to call it directly, with no
+       intermediary of ours in the path.
+    2. **Alignment with HTTP itself** - standard caching semantics, standard proxying, standard status
+       codes an operator's tooling already understands.
+    3. **Mature description tooling**, so a consumer generates a client from this document rather than
+       hand-writing one.
+
+    **gRPC at the edge would forfeit exactly those three.** gRPC-Web requires a translating proxy in
+    front of it and supports **server** streaming only, so the reach an ingress exists to provide would
+    depend on an extra hop, and the richer streaming the internal contracts rely on would not survive
+    the translation anyway.
+
+    The internal east-west edges are gRPC precisely because the reasoning inverts there: both ends are
+    owned, the contracts are strongly typed and stable, and C-03's interface really is an ordered
+    22-event chain with a tri-valued veto. `docs/ARCHITECTURE.md` records the decision and its evidence
+    for all four services; this paragraph states Gateway's half so a reader of *this* document has it
+    without following a link.
+
+    ## Every path is versioned `v1`, and that is a constraint rather than a habit
+
+    Explicitly versioned contracts are the **only permitted cross-service coupling** in this system
+    (constraint C-A). No service reaches into another's internals, and no behaviour is shared across a
+    service boundary; the published contract is the whole of the coupling. Versioning every path is
+    what lets this boundary change without a lock-step deployment of Gateway and its consumers.
+
+    `/health` is the one unversioned path, deliberately. It is the readiness probe an orchestrator
+    calls, its spelling is fixed by that convention, and versioning it would break the health gate for
+    no benefit - a probe has nothing to negotiate.
+
+    ## Authentication, and the token role Gateway does *not* have
+
+    A bearer token is required by default. Exactly one operation overrides that, and it declares
     itself anonymous explicitly:
 
     * `GET /health` - a readiness probe holds no token and probes precisely while the service is
       starting.
-    * The two reserved-route families are *not* among the exceptions: they require a token like every
+    * The four reserved-route families are *not* among the exceptions: they require a token like every
       other `/v1` route, so an unauthenticated caller cannot enumerate the deferred roster.
 
-    Gateway **validates** tokens; it does not issue them. Security is the sole minter in the system
-    and publishes its verification material at its own `/.well-known/jwks.json`, which Gateway's
-    stock `Microsoft.AspNetCore.Authentication.JwtBearer` handler consumes. Gateway holds no signing
-    key. See `docs/SECRETS.md` for the token topology.
+    **Gateway holds verification material only. It is not an issuer.** Security is the sole minter in
+    the system, and Gateway validates inbound tokens with the stock
+    `Microsoft.AspNetCore.Authentication.JwtBearer` handler pointed at Security's own
+    `/.well-known/jwks.json` and `/.well-known/openid-configuration`. **Gateway holds no signing key**,
+    mints nothing, and has no independent signing authority; that is a structural property of the
+    sole-issuer topology rather than a configuration choice. See `docs/SECRETS.md` for the topology.
+
+    ## Port map
+
+    From `docs/ARCHITECTURE.md` 4.1, which is the authority. It is restated here because a reader of
+    this document needs to know which listener each hop lands on, and because the reserved slot is a
+    decision rather than an omission:
+
+    | Service | Port | Role in relation to this document |
+    | --- | --- | --- |
+    | Persistence | **5101** | Not reachable through this document. Gateway never calls it |
+    | DataServices | **5102** | The gRPC upstream every `/v1/datawindow` operation projects onto |
+    | *(reserved)* | **5103** | **Deliberately unallocated** - see below |
+    | Security | **5104** | The token issuer and the JWKS publisher Gateway verifies against |
+    | **Gateway** | **5105** | **This document's listener** and the composition-root access URL |
+
+    **5103 is reserved rather than reassigned, and that is a decision.** The attached environment had
+    assigned it to a design service, and DesignSystem is precisely one of the four deferred services, so
+    the slot is left commented out in the orchestration manifest instead of being filled by one of the
+    four services that do exist. A gap in a port band with a comment explaining it is the obvious
+    Phase-2 slot; a band silently renumbered to be contiguous would have erased the information.
+
+    Port 5105 is retained for Gateway specifically so the documented composition-root access URL still
+    resolves. `servers` below therefore declares **one** entry and it is Gateway's own - another
+    service's port listed there would invite a consumer to send a Gateway request to the wrong listener.
 
     ## Status mapping, which is the substantive part of the projection
 
-    The `/v1/datawindow` routes translate gRPC statuses from C-03 and C-04 into HTTP. The mapping is
-    published in full at `docs/CONTRACTS.md` 12.1 and reproduced by the response sets below. The one
-    that matters most: **gRPC `Aborted` becomes HTTP `409`**, carrying the optimistic-concurrency
-    conflict detail unchanged. There is no silent overwrite anywhere in the system.
+    The `/v1/datawindow` routes translate gRPC statuses from C-03 and C-04 into HTTP. The full
+    translation this document applies, so the projection is auditable without reading another file:
 
-    That mapping covers the statuses C-03 and C-04 **return**. It does not cover the case where the
-    call never reached them, so this document adds exactly one status beyond it — **`502`**, when an
-    upstream is unreachable or the call failed in transit after the retry policy was exhausted. That
-    is a failure mode decomposition itself creates: an in-process call cannot fail in transit and a
-    network call can. It is added rather than omitted because leaving it undocumented would make the
-    first transient fault an unhandled status in every generated client.
+    | gRPC status from C-03 / C-04 | HTTP | Note |
+    | --- | --- | --- |
+    | `OK` | `200` | |
+    | **`Aborted`** | **`409`** | **Mandatory and canonical.** An optimistic-concurrency mismatch, carrying `ConflictDetail` with the current row state unchanged |
+    | `InvalidArgument` | `400` | Carries the originating `retCode` so the specific legacy validation is identifiable, not merely the HTTP class |
+    | `Unauthenticated` | `401` | |
+    | `PermissionDenied` | `403` | A valid-but-insufficient credential, deliberately distinct from a missing one |
+    | `NotFound` | `404` | |
+    | `Unimplemented` | `501` | Including the four reserved routes below |
+    | `Unavailable` | `503` | |
+    | `DeadlineExceeded` | `504` | |
+    | `Internal` / `Unknown` | `500` | With the statement field **redacted** - see `DbError` |
 
-    ## What is deliberately NOT projected
+    The one that matters most: **gRPC `Aborted` becomes HTTP `409`**, carrying the conflict detail
+    unchanged so a caller can implement an explicit **retry-or-surface** policy. **There is no silent
+    overwrite anywhere in the system.**
 
-    The two streaming methods of C-03 (`Retrieve`, `EventChain`) and the three streaming methods of
-    C-04 (`EventStream`, `InvokeMethodChannel`, `TraceChannel`) have **no REST projection**. A
-    bidirectional stream carrying an ordered event chain with a per-message veto has no faithful REST
-    representation, and a partial projection would be worse than none - a consumer would receive part
-    of the chain with no way to know what it had missed. A server stream is no more projectable than a
-    bidirectional one, because the property that matters is the same: the server decides when the next
-    message arrives. Consumers needing those five use the gRPC contract directly. This is a documented
-    gap with an enumerable boundary, not an oversight, and the five are named individually below so the
-    boundary is checkable.
+    Two notes on what each operation actually declares, because the table above is the *translation*
+    and not a template to paste onto every route. **Each operation declares the responses it can
+    actually produce** and no others - a status every generated client must branch on but no operation
+    can return is noise that hides the real surface. And the last two rows are consequently rare in the
+    response sets below: Gateway's own resilience policy converts an exhausted retry or an unreachable
+    upstream into **`502`**, which is the status the table cannot describe because it is the case where
+    **no gRPC response arrived at all**. That failure mode is one decomposition itself creates - an
+    in-process call cannot fail in transit and a network call can - so it is declared rather than
+    omitted, because leaving it undocumented would make the first transient fault an unhandled status
+    in every generated client. `503` appears on `/health` on its own account, from C-10 rather than
+    from this mapping.
 
-    **Every other method of C-03 and C-04 IS projected, including the eight read-and-apply operations
-    of the four headless models.** A partial projection would be the worst outcome available: Gateway
-    is the sole ingress, so an operation the gRPC contract publishes but this document omits is
-    unreachable from outside the cluster, and a consumer would read that as a bug in its own client
-    rather than as a boundary of the contract. The sibling test project asserts the correspondence in
-    both directions.
+    ## What is deliberately NOT projected: the three bidirectional streams
+
+    Three methods have **no REST projection**, and they are named individually so the boundary is
+    checkable rather than asserted: **`EventChain`** on C-03, and **`InvokeMethodChannel`** and
+    **`TraceChannel`** on C-04. All three are bidirectional.
+
+    The reason is ordering, and it is structural rather than a matter of effort. The item-change and
+    validation chain `EventChain` carries is **strictly synchronous with no reordering permitted**: the
+    validation-error handler **reads and clears** the item-change result that the preceding event
+    stashed, so its behaviour is a function of the prior event's return value, and the item-change
+    handler fires a nested event from inside itself. JSON over independent REST requests would lose
+    both that ordering and the **tri-valued typed veto** - prevent-once, prevent-deep, continue - which
+    collapses to a boolean the moment it is flattened. Flattening these into polling endpoints would
+    invite exactly the reordering the contract forbids, and a partial projection would be worse than
+    none: a consumer would receive part of an ordered chain with no way to know what it had missed.
+
+    `InvokeMethodChannel` and `TraceChannel` are additionally **inverted**: the legacy expects the
+    *application* to implement the macro switch, so across a boundary DataServices calls back **into**
+    its client. An inverted stream has no request/response direction to project at all.
+
+    Consumers needing any of the three use DataServices' gRPC surface directly. This is a documented
+    gap, deliberately preferred over a partial implementation.
+
+    **Every other method of C-03 and C-04 IS projected**, including both server streams and the eight
+    read-and-apply operations of the four headless models. A server stream *is* projectable, because
+    its ordering is the trivial one - the server produces a sequence and the client consumes it - so
+    `Retrieve` and `EventStream` are published as operations that return the same chunk shape as a
+    collection, **with the chunking contract unchanged**: the chunk index, the final-chunk flag and the
+    cumulative row count all travel exactly as the stream carries them.
+
+    A partial projection would otherwise be the worst outcome available: Gateway is the sole ingress,
+    so an operation the gRPC contract publishes but this document omits is unreachable from outside the
+    cluster, and a consumer would read that as a bug in its own client rather than as a boundary of the
+    contract. The sibling test project asserts the correspondence in both directions.
+
+    ## The four reserved extension points are routing METADATA, not stubs
+
+    `/v1/design/**`, `/v1/documents/**`, `/v1/integration/**` and `/v1/scripting/**` are declared here
+    and each returns **`501 Not Implemented`** with a machine-readable body naming the deferred service
+    it will eventually reach and the marker `reserved for Phase 2`. They exist so that the **shape of
+    the eventual system is legible from Gateway's contract**, which is what the brief asks for.
+
+    For DesignSystem, Documents, Integration and ScriptBridge there is **no service directory and no
+    project file, no container definition, no test project, no partial implementation and no
+    exception-throwing placeholder class.** Phase 1 implements exactly four of an eight-service roster
+    and the other four are mapped in discovery and deliberately unbuilt.
+
+    The distinction is worth stating plainly because it is the one an auditor should be able to check
+    without ambiguity: **the prohibition is on *implementing* the deferred services - not partially,
+    not even to stub them out - and a declaration in a route table implements nothing.** A reserved
+    route has no handler beyond the constant response, calls nothing, and can reach nothing, because
+    there is nothing behind it to reach. Every one of the four declares the same two methods, the same
+    single `501` response and the same body schema, and none declares a request body - a request schema
+    would model a deferred capability, which is the one thing a routing declaration must not do.
 
     ## Related documents
 
@@ -162,9 +303,16 @@ tags:
   - name: Health
     x-contract-id: C-10
     description: >-
-      Contract C-10. Aggregated readiness and the standing proof that this boundary is authenticated.
-      Gateway reports healthy only after Persistence, DataServices and Security all report healthy;
-      `/health` is anonymous on all four services and `/v1/ping` requires a token on all four.
+      Contract C-10, readiness half. Gateway reports healthy only after Persistence, DataServices and
+      Security all report healthy, and the aggregate names each upstream with its own state rather
+      than returning one opaque verdict. `/health` is anonymous on all four services.
+  - name: Diagnostics
+    x-contract-id: C-10
+    description: >-
+      Contract C-10, authentication-proof half. `/v1/ping` requires a token on all four services and
+      returns 401 without one. It is a separate grouping from readiness deliberately: the two halves of
+      C-10 have opposite authentication postures, and a reader scanning the groupings should see that
+      rather than have to infer it from one mixed group.
   - name: Capabilities
     x-contract-id: C-09
     description: >-
@@ -235,8 +383,13 @@ paths:
         still completing startup validation is not the same as one whose dependency has failed.
         `Degraded` is reported with 200 so a probe that tears down on any non-2xx does not kill a
         service that is merely still starting; `Unhealthy` is reported with 503.
-      security:
-        - {}
+      # OVERRIDES the document-level bearer requirement with an EMPTY REQUIREMENT LIST, and this is the
+      # ONLY operation in the document that overrides it. `[]` is not interchangeable with `[{}]`: `[]`
+      # says "no requirement applies", whereas `[{}]` says "one requirement applies and it is satisfied
+      # by nothing". Both permit anonymous access, but only `[]` says so in the shape every generator
+      # and policy checker reads, and it is the form the sibling OpenApi/security.v1.yaml uses for the
+      # same purpose - one convention across both documents in this folder rather than two.
+      security: []
       responses:
         '200':
           description: >-
@@ -261,7 +414,7 @@ paths:
     get:
       operationId: ping
       x-contract-id: C-10
-      tags: [Health]
+      tags: [Diagnostics]
       summary: The standing proof that this boundary is authenticated. Token required.
       description: |-
         Returns a trivial success **only** when a valid token is presented, and `401` without one.
@@ -320,11 +473,20 @@ paths:
         | `INIT_FLAG_ENABLE_DPIAWARE` | 1024 | DesignSystem - deferred |
         | `INIT_FLAG_ENABLE_WEBVIEW` | 2048 | ScriptBridge - deferred |
 
-        ## `INIT_FLAG_ENABLE_ALL` deliberately omits `BLINKFAST`
+        ## `INIT_FLAG_ENABLE_ALL` = 3847, and it deliberately omits `BLINKFAST`
+
+        `enums.sru:L49` declares the aggregate as a **seven-term sum** - UI + SCITER + BLINK + ORCA +
+        SQLITE + DPIAWARE + WEBVIEW - which computes to **3847**. `INIT_FLAG_ENABLE_BLINKFAST` (8) is
+        **not** one of the terms, so `3847` is **not** the bitwise union of the eight declared bits;
+        the union would be 3855.
 
         It is not an oversight and must not be "corrected": `blink.dll` and `blinkfast.dll` are
-        alternative builds of one engine, so enabling both is meaningless. The omission is reproduced
-        verbatim under C-B, and the reported `all` mask reflects it.
+        alternative builds of **one** engine, so enabling both is meaningless. The omission is
+        reproduced verbatim under C-B, and the reported `allMask` reflects it.
+
+        This is the value the composition root actually initializes with: `pfw.sra:L91` calls
+        `pfwInitialize(Enums.INIT_FLAG_ENABLE_ALL)`, so the runtime-effective capability set genuinely
+        is the `BLINKFAST`-omitting sum rather than an all-bits mask.
 
         ## The identifiers are preserved verbatim
 
@@ -345,11 +507,91 @@ paths:
   # ================================================================================================
   #  C-09 - THE /v1/datawindow PROJECTION OF C-03 (dataservices.v1.DataWindowService)
   #
-  #  Fourteen of C-03's sixteen methods are projected: the six lifecycle, update and gate operations
-  #  first, then the eight read-and-apply operations of the four headless models. `Retrieve` (server
-  #  streaming) and `EventChain` (bidirectional) are NOT - see the introduction. Every operation below
-  #  names the gRPC method it projects and the protobuf messages that define its payload.
+  #  Fifteen of C-03's sixteen methods are projected: the retrieval operation, the six lifecycle,
+  #  update and gate operations, and the eight read-and-apply operations of the four headless models.
+  #  `EventChain` is the one exclusion, because it is BIDIRECTIONAL and carries a strictly ordered
+  #  chain with a tri-valued veto - see the introduction. Every operation below names the gRPC method
+  #  it projects and the protobuf messages that define its payload.
   # ================================================================================================
+
+  /v1/datawindow/retrieve:
+    post:
+      operationId: retrieve
+      x-contract-id: C-03
+      x-grpc-method: dataservices.v1.DataWindowService/Retrieve
+      x-proto-request: dataservices.v1.RetrieveRequest
+      x-proto-response: dataservices.v1.RetrieveChunk
+      x-grpc-streaming: server
+      tags: [DataWindow]
+      summary: Retrieve rows as an ordered sequence of buffer-shaped chunks. Token required.
+      description: |-
+        The **retrieval** third of the legacy retrieval/validation/update triple, projected from C-03's
+        `Retrieve`.
+
+        ## A server stream IS projectable, and this is the form it takes
+
+        `Retrieve` is **server**-streaming, not bidirectional, and the distinction is the whole reason
+        this operation exists while `EventChain` does not. A server stream's ordering is the trivial
+        one - the server produces a sequence and the client consumes it in order - so it has a faithful
+        request/response projection: one request, and a response carrying the same chunks the stream
+        would have delivered, **in the same order**. There is no per-message veto to lose and no
+        client-to-server message to invert.
+
+        ## The chunking contract is carried unchanged, not flattened away
+
+        This is the part a naive projection gets wrong. The response is **not** a flat rowset: it is the
+        sequence of `RetrieveChunk` values exactly as the stream carries them, each retaining its
+        `chunkIndex`, its `final` flag, its own `rowCount` and the running `cumulativeRowCount`. A
+        consumer can therefore reconstruct precisely what the gRPC consumer sees, and the last chunk is
+        identifiable as the last rather than inferred from the collection ending.
+
+        Chunk size is the caller's, subject to the legacy guard the gRPC contract publishes; this
+        projection changes neither the default nor the guard.
+
+        ## Buffers, and why a row carries two sets of values
+
+        Each row names the buffer it came from - `Primary!`, `Delete!` or `Filter!` - and carries both
+        its **current** and its **original** column values. That is not redundancy: the one updatable
+        DataWindow in the legacy estate declares `updatewhere=1` with all six columns marked, so the
+        optimistic-concurrency check the update half performs compares **original** values. A retrieval
+        that discarded them would leave a caller unable to construct an update at all.
+
+        **`Filter!` row order is inverted relative to the source.** That is the legacy's own behaviour,
+        preserved and stated here rather than corrected, because a consumer re-sorting it would produce
+        wrong data that a row-count assertion would not catch.
+
+        ## What this operation is not
+
+        It reaches DataServices and nothing further. Gateway does not call Persistence, so no SQL, no
+        statement text, no connection detail and no provider name appears in a request or a response
+        here - and the error shape's statement field is redacted for the same reason.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          description: >-
+            The retrieval succeeded. The body is the ordered sequence of chunks the gRPC server stream
+            would have delivered, with the chunking contract intact.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrieveResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
 
   /v1/datawindow/sessions:
     post:
@@ -505,7 +747,14 @@ paths:
         - $ref: '#/components/parameters/SessionIdQuery'
       responses:
         '200':
-          $ref: '#/components/responses/ProjectedSuccess'
+          description: >-
+            The current event gate. The bitmask and its decomposed bits are mirrored field for field from
+            the protobuf message, so the legacy `EID_*` identifiers are part of the published body
+            rather than only of its prose.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetEventGateResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -537,7 +786,14 @@ paths:
               $ref: '#/components/schemas/ProtoPayload'
       responses:
         '200':
-          $ref: '#/components/responses/ProjectedSuccess'
+          description: >-
+            The events were disabled. The body returns the resulting gate, so a caller never infers the new
+            mask from the one it sent - which matters because disabling `EID_ITEMCHANGE` also
+            suppresses column-expression evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisableEventResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -571,7 +827,13 @@ paths:
               $ref: '#/components/schemas/ProtoPayload'
       responses:
         '200':
-          $ref: '#/components/responses/ProjectedSuccess'
+          description: >-
+            The events were re-enabled. The body returns the resulting gate for the same reason the disable
+            projection does.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnableEventResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -918,11 +1180,13 @@ paths:
   #  C-09 - THE /v1/datawindow/expression PROJECTION OF C-04
   #  (dataservices.v1.ColumnExpressionService)
   #
-  #  Twenty-three of C-04's twenty-six methods are projected. Three are NOT: `EventStream` is the
-  #  engine's own SERVER stream of the three events it declares on itself, and `InvokeMethodChannel`
-  #  and `TraceChannel` are the two INVERTED bidirectional streams - the legacy expects the APPLICATION
-  #  to implement the macro switch, so across a boundary DataServices must call back into its client,
-  #  which REST cannot express.
+  #  Twenty-four of C-04's twenty-six methods are projected, including `EventStream` - the engine's own
+  #  SERVER stream of the three events it declares on itself, which projects as an ordered collection
+  #  for the same reason `Retrieve` does.
+  #
+  #  Two are NOT: `InvokeMethodChannel` and `TraceChannel`, the two INVERTED bidirectional streams. The
+  #  legacy expects the APPLICATION to implement the macro switch, so across a boundary DataServices
+  #  must call back INTO its client - an inversion REST has no direction to express.
   # ================================================================================================
 
   /v1/datawindow/expression/sessions:
@@ -1820,6 +2084,69 @@ paths:
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
 
+  /v1/datawindow/expression/event-stream:
+    post:
+      operationId: getExpressionEventStream
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/EventStream
+      x-proto-request: dataservices.v1.EventStreamRequest
+      x-proto-response: dataservices.v1.EventStreamResponse
+      x-grpc-streaming: server
+      tags: [ColumnExpression]
+      summary: Read the engine's own event sequence as an ordered collection. Token required.
+      description: |-
+        The three events the expression engine declares **on itself**, projected from C-04's
+        `EventStream`: the item-changed notification, the deferred item-changed notification, and the
+        variable-changed notification that carries the recalculation-forcing flag.
+
+        ## Projected because it is a SERVER stream, unlike the two that are not
+
+        `EventStream` is server-streaming. The server produces a sequence and the client consumes it in
+        order, so it has a faithful request/response projection: the ordered collection below, with each
+        element retaining its own monotonic `sequence` value so a consumer can detect a gap rather than
+        merely hope there was none.
+
+        This is exactly the property `InvokeMethodChannel` and `TraceChannel` lack. Both are
+        **inverted** - the legacy expects the *application* to implement the macro switch, so across a
+        boundary DataServices calls back **into** its client - and an inverted stream has no
+        request/response direction to project at all. Neither has a REST path here, and the introduction
+        names them individually so the gap is checkable.
+
+        ## The sequence value is for DETECTION, never for reordering
+
+        These events are notifications rather than a vetoable chain, so a consumer may process them as
+        they arrive. It may **not** reorder them: an out-of-order arrival is a hard error in this
+        contract, not a reorder opportunity. The distinction matters because the item-change and
+        validation chain on C-03 - which is *not* projected - depends on strict ordering for
+        correctness, and a consumer that learned to reorder here would carry the habit there.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          description: >-
+            The ordered event collection the gRPC server stream would have delivered, each element
+            carrying its own monotonic sequence value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpressionEventStreamResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
   # ================================================================================================
   #  THE FOUR RESERVED EXTENSION POINTS  (docs/CONTRACTS.md 13)
   #
@@ -1831,13 +2158,31 @@ paths:
   #
   #  The catch-all path parameter is what makes each a route FAMILY rather than a single route, so a
   #  Phase-2 consumer's eventual URL shape is already legible from this contract.
+  #
+  #  STRUCTURAL SYMMETRY IS PART OF THE COMPLIANCE POSITION, NOT A TIDINESS PREFERENCE.
+  #  The four declarations below are IDENTICAL in shape: the same templated catch-all path, the same
+  #  single path parameter, the same two methods, NO request body on either, and one response - `501` -
+  #  referencing one shared body schema. They differ ONLY in the path segment and in the deferred
+  #  service they name. If one of the four ever acquired more shape than the others - a request schema,
+  #  a second status, an extra field - that asymmetry would BE the evidence that capability modelling
+  #  had crept in, which is precisely what C-D forbids. Diffing them against each other is therefore a
+  #  meaningful audit, and it is meant to be performed.
+  #
+  #  WHY THE RESPONSE SET IS EXACTLY {501} AND CARRIES NO 401.
+  #  The document-level bearer requirement still applies to all eight operations - none of them
+  #  overrides it, so the deferred roster is NOT anonymously enumerable. What an unauthenticated request
+  #  meets is the authentication middleware, which is a cross-cutting concern declared once at the
+  #  security scheme; it is not a response this ROUTE produces. The route itself has exactly one
+  #  outcome, unconditionally, for every method and every path remainder, and declaring that single
+  #  outcome is the sharpest available statement that nothing is implemented behind it. A second status
+  #  in the set would suggest the route evaluates something before answering.
   # ================================================================================================
 
   /v1/design/{path}:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedDesignSystem
+      operationId: reservedDesignSystemGet
       x-contract-id: C-09
       x-deferred-service: DesignSystem
       x-reserved-marker: reserved for Phase 2
@@ -1846,23 +2191,90 @@ paths:
       description: |-
         **Reserved for Phase 2. Not implemented.**
 
-        This route family will eventually reach the **DesignSystem** service: theming, geometry
-        structures, colour functions, the DPI conversion family, canvas, painter, font, image, image
-        list, popup menu, tooltip, tray icon, timer, `win32` interop, the logo control, and the
-        **presentational halves** of ColumnSort, ContextMenu and DropDownSearch.
+        ## What this route family will eventually reach
 
-        Three DataWindow services in scope are irreducibly part presentational and each is split: the
-        **headless half ships** on C-03 - the data model, the filter and sort expression construction,
-        the row-selection state machine, and the menu *item* model including labels, identifiers,
-        enabled and split flags and computed logical text widths - while the **rendering half is
-        deferred** and reached, eventually, through here. That is a documented capability gap with an
-        enumerable boundary, not a silent omission.
+        The deferred **DesignSystem** service: theming, geometry structures, colour functions, the DPI
+        conversion family, canvas, painter, font, image, image list, popup menu, tooltip, tray icon,
+        timer, `win32` interop, the logo control, and the **presentational halves** of ColumnSort,
+        ContextMenu and DropDownSearch.
 
-        Nothing exists behind this route. It has no handler beyond the constant response below, it
-        calls nothing, and it can reach nothing.
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for DesignSystem. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
       responses:
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+    post:
+      operationId: reservedDesignSystemPost
+      x-contract-id: C-09
+      x-deferred-service: DesignSystem
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred DesignSystem service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        ## What this route family will eventually reach
+
+        The deferred **DesignSystem** service: theming, geometry structures, colour functions, the DPI
+        conversion family, canvas, painter, font, image, image list, popup menu, tooltip, tray icon,
+        timer, `win32` interop, the logo control, and the **presentational halves** of ColumnSort,
+        ContextMenu and DropDownSearch.
+
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for DesignSystem. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
+      responses:
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -1870,7 +2282,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedDocuments
+      operationId: reservedDocumentsGet
       x-contract-id: C-09
       x-deferred-service: Documents
       x-reserved-marker: reserved for Phase 2
@@ -1879,18 +2291,86 @@ paths:
       description: |-
         **Reserved for Phase 2. Not implemented.**
 
-        This route family will eventually reach the **Documents** service: JSON and its helpers, the
-        XML object family, ZIP, barcode and QR generation, file scanning, logging, and the
-        date/number conversion set.
+        ## What this route family will eventually reach
 
-        Note one thing this route is **not** needed for: the shared Localization library reads
-        `pfw.i18n.xml` with `System.Xml.Linq` rather than with the deferred XML object family, so
-        localization acquires **no** Documents coupling and does not wait on this service.
+        The deferred **Documents** service: JSON and its four helpers, the XML object family, ZIP,
+        barcode and QR generation, file scanning, logging, and the date/number conversion set.
 
-        Nothing exists behind this route.
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for Documents. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
       responses:
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+    post:
+      operationId: reservedDocumentsPost
+      x-contract-id: C-09
+      x-deferred-service: Documents
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred Documents service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        ## What this route family will eventually reach
+
+        The deferred **Documents** service: JSON and its four helpers, the XML object family, ZIP,
+        barcode and QR generation, file scanning, logging, and the date/number conversion set.
+
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for Documents. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
+      responses:
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -1898,7 +2378,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedIntegration
+      operationId: reservedIntegrationGet
       x-contract-id: C-09
       x-deferred-service: Integration
       x-reserved-marker: reserved for Phase 2
@@ -1907,20 +2387,86 @@ paths:
       description: |-
         **Reserved for Phase 2. Not implemented.**
 
-        This route family will eventually reach the **Integration** service: the HTTP client and its
-        extensions, FTP, WebSocket, MQTT, and the `pfwx.*` transports.
+        ## What this route family will eventually reach
 
-        Nothing exists behind this route. Note also that **no signing, verification or mutual-TLS
-        configuration is provisioned for this or any other deferred service** - the token topology in
-        `docs/SECRETS.md` scaffolds material only for the four services that exist.
+        The deferred **Integration** service: the HTTP client and its extensions, FTP, WebSocket, MQTT,
+        and the `pfwx.*` transports.
 
-        Five of the eight hardcoded-secret sites found by the repository sweep live in the legacy
-        MQTT test object, which maps to this service. They are recorded in `docs/SECRETS.md` with
-        their locators and required actions, and **no value from any of them appears anywhere in the
-        .NET tree**.
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for Integration. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
       responses:
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+    post:
+      operationId: reservedIntegrationPost
+      x-contract-id: C-09
+      x-deferred-service: Integration
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred Integration service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        ## What this route family will eventually reach
+
+        The deferred **Integration** service: the HTTP client and its extensions, FTP, WebSocket, MQTT,
+        and the `pfwx.*` transports.
+
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for Integration. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
+      responses:
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -1928,7 +2474,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ReservedPath'
     get:
-      operationId: reservedScriptBridge
+      operationId: reservedScriptBridgeGet
       x-contract-id: C-09
       x-deferred-service: ScriptBridge
       x-reserved-marker: reserved for Phase 2
@@ -1937,20 +2483,88 @@ paths:
       description: |-
         **Reserved for Phase 2. Not implemented.**
 
-        This route family will eventually reach the **ScriptBridge** service: Sciter and its
-        extensions, MiniBlink, WebView embedding, the PowerScript compiler and evaluator, dynamic
-        object and script invocation, and global-variable access.
+        ## What this route family will eventually reach
 
-        Note one thing this route is **not** needed for: the legacy's dynamic-invocation object is a
-        *variadic-call escape hatch* - PowerScript cannot forward an arbitrary-length argument list,
-        so the SQL task layer unrolls its calls positionally and falls back to dynamic invocation only
-        past the unrolled maximum. C# has native variadic support, so the workaround has no analogue
-        to port and Persistence acquires **no** ScriptBridge coupling.
+        The deferred **ScriptBridge** service: Sciter and its extensions, MiniBlink, WebView embedding,
+        the PowerScript compiler and evaluator, dynamic object and script invocation, and
+        global-variable access.
 
-        Nothing exists behind this route.
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for ScriptBridge. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
       responses:
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '501':
+          $ref: '#/components/responses/ReservedForPhaseTwo'
+    post:
+      operationId: reservedScriptBridgePost
+      x-contract-id: C-09
+      x-deferred-service: ScriptBridge
+      x-reserved-marker: reserved for Phase 2
+      tags: [Reserved]
+      summary: Reserved for the deferred ScriptBridge service. Always 501.
+      description: |-
+        **Reserved for Phase 2. Not implemented.**
+
+        ## What this route family will eventually reach
+
+        The deferred **ScriptBridge** service: Sciter and its extensions, MiniBlink, WebView embedding,
+        the PowerScript compiler and evaluator, dynamic object and script invocation, and
+        global-variable access.
+
+        Naming the capability area is permitted metadata - it is what makes the shape of the eventual
+        system legible from this contract, which is the only reason the route is declared. Implementing
+        any part of it is not, and nothing here does.
+
+        ## Nothing exists behind this route
+
+        There is no service directory and no project file, no container definition, no test project, no
+        partial implementation and no exception-throwing placeholder class for ScriptBridge. This route has
+        no handler beyond the constant response below, it calls nothing, and it can reach nothing. It
+        names no gRPC method, no request message and no response message, because there is none to name.
+
+        ## Every method answers the same way, and none accepts a body
+
+        `GET` and `POST` are declared so that the family is explicit in the contract rather than
+        inferred, and **every other HTTP method on this route returns the same `501`** - so no method
+        appears implemented. **Neither declares a request body**, deliberately: a request schema would
+        model a deferred capability, and modelling one is exactly what C-D forbids. A routing declaration
+        is not a stub.
+
+        ## The response is machine-readable, and it is the only one
+
+        The body names the deferred service, carries the marker `reserved for Phase 2` as a constant, and
+        sets `retCode` to the legacy framework's own `E_NO_IMPLEMENTATION` (-2001), so a client branches
+        on structured members rather than parsing prose. The response set is exactly `501`: the route
+        answers unconditionally, for every method and every path remainder. A token is nonetheless
+        required - this operation does not override the document-level requirement - because the body
+        names a Phase-2 plan and an anonymous reserved route would publish it to any unauthenticated
+        caller.
+      responses:
         '501':
           $ref: '#/components/responses/ReservedForPhaseTwo'
 
@@ -1964,19 +2578,50 @@ components:
       description: |-
         A JSON Web Token **issued by the Security service**, presented in the `Authorization` header.
 
-        **Gateway validates; it does not issue.** Security is the sole minter in the system, and
-        exactly one signing key exists anywhere in it - `SECURITY_JWT_SIGNING_KEY`, held by Security
-        and injected through the options pattern from the orchestration secret layer. Gateway holds
-        **verification material only**.
+        ## Gateway validates. It does not issue, and it holds no signing key
 
-        Verification uses the **stock `Microsoft.AspNetCore.Authentication.JwtBearer` handler**,
-        pointed at Security's `GET /.well-known/openid-configuration`. The handler performs signature
-        checking, key fetching and rollover, issuer and audience validation and clock-skew tolerance
-        by itself. That is the point rather than an implementation note: it keeps the
-        security-critical path inside framework code rather than hand-written code.
+        Security is the **sole minter** in the system. Gateway holds **verification material only** -
+        no signing key, no minting capability and no independent signing authority - and so do
+        DataServices and Persistence. That is a structural property of the sole-issuer topology rather
+        than a configuration choice: the security properties depend on there being exactly one issuer.
 
-        No key material appears in this repository, in any application settings file, or in any
-        container image.
+        **This document names no key, no key material and no key-holding setting**, deliberately and
+        not merely as an omission. Gateway has nothing of the kind to configure, so naming one here
+        would describe a capability this service does not have and must never acquire. Where the
+        system's single signing secret is configured, and by which service, is
+        `docs/SECRETS.md` §4's subject - one place, on the service that holds it.
+
+        ## Where the verification material comes from
+
+        Both publications are on **Security's own listener, port 5104**, and both are anonymous,
+        because verification material is **public by design** - that is precisely what distinguishes it
+        from a signing key:
+
+        * `GET /.well-known/jwks.json` - the current key set, public parameters only. This is the
+          material a signature is checked against.
+        * `GET /.well-known/openid-configuration` - the discovery document, which points at the key set
+          above so a consumer never has to fetch a key itself.
+
+        Gateway does **not** republish either document. A consumer of *this* API presents a token and
+        never needs the key set; a service verifying one fetches it from Security directly.
+
+        ## Verification is framework code, not hand-written code
+
+        Gateway validates with the **stock `Microsoft.AspNetCore.Authentication.JwtBearer` handler**,
+        pointed at the discovery document above. The handler performs signature checking, key fetching
+        and rollover, issuer and audience validation and clock-skew tolerance by itself.
+
+        That is the point rather than an implementation note: it keeps the security-critical path
+        inside framework code, on three services rather than one. It is also the specific reason
+        Security's contract is REST - gRPC would have forced a bespoke key-set retrieval implementation
+        into each of those three services, which is a net *increase* in hand-written security code.
+
+        ## Scope
+
+        Every operation in this document requires this scheme except `GET /health`, which declares
+        itself anonymous. **No signing, verification or mutual-TLS material is scaffolded for any
+        deferred service**, and no per-deferred-service key name appears anywhere in this document -
+        those services do not exist in this phase, so material for them would secure nothing.
 
   parameters:
     SessionId:
@@ -2174,8 +2819,19 @@ components:
         one keeps the error path out of hand-written code, for the same reason token validation is
         left to the stock bearer handler.
 
-        `retCode` carries the legacy PowerFramework return code. RFC 9457 explicitly permits extension
-        members, which is why this schema sets `additionalProperties: true` rather than `false`.
+        ## Three extension members, and why RFC 9457 permits them
+
+        `retCode` carries the legacy PowerFramework return code, `upstream` names which upstream a
+        forwarded failure came from, and `dbError` carries the database-layer detail **when, and only
+        when, the failure originated in the data path**. RFC 9457 explicitly permits extension members,
+        which is why this schema - alone in this document apart from its own conflict specialization and
+        the delegated `ProtoPayload` - sets `additionalProperties: true` rather than `false`. A consumer
+        must ignore any member it does not recognise.
+
+        **`dbError.sqlsyntax` is redacted**, and that is a contract commitment rather than an
+        implementation detail: the legacy field carries the complete generated statement with
+        interpolated literal values and the legacy logger performs no redaction at all. The `DbError`
+        schema states the rule in full at the point of use.
       additionalProperties: true
       properties:
         type:
@@ -2206,7 +2862,7 @@ components:
           format: int64
           description: |-
             The legacy PowerFramework return code for this failure, transcribed from
-            `ws_objects/pfw.shared.pbl.src/retcode.sru`. `Proto/common.v1.proto` is the numeric
+            `ws_objects/pfw.shared.pbl.src/retcode.sru:L39-L79`. `Proto/common.v1.proto` is the numeric
             authority; `PowerFramework.Shared.Kernel.RetCode` is the same set in C#, and the sibling
             test project asserts the two agree numerically.
 
@@ -2214,6 +2870,102 @@ components:
             `IsSucceeded` tests `>= 0`, so `PREVENT` (1) reads as a SUCCESS; `IsFailed` tests `< 0`
             **with an explicit exclusion of `CANCELLED` (-2)**, so cancelled is **neither** succeeded
             nor failed. A consumer must not infer failure from a non-zero value.
+
+            ## Why the enumeration carries 38 members while the oracle declares 41 constants
+
+            The oracle declares **41** constants over **38 distinct values**, because three are aliases:
+            `OK`, `SUCCESS` and `ALLOW` are three spellings of **0** [`:L39-L41`], and `CANCELED` and
+            `CANCELLED` are two spellings of **-2** [`:L44-L45`]. A JSON Schema `enum` lists *values*,
+            not spellings, so it necessarily carries 38. All five spellings remain valid names for their
+            values, and `x-enum-varnames` gives one canonical name per value. **41 minus 3 aliases
+            equals 38 is an audit**: if the member count is ever anything else, a value has been added,
+            removed or duplicated.
+
+            The set is **closed** because the oracle's catalogue is closed: `UNKNOWN` (-4000) exists
+            precisely for the unclassifiable case, so no failure this ingress can produce needs a value
+            outside it.
+          enum:
+            - 0        # OK / SUCCESS / ALLOW  [retcode.sru:L39-L41] - three spellings of one value
+            - 1        # PREVENT               [:L42] - SATISFIES the success predicate
+            - -1       # FAILED                [:L43]
+            - -2       # CANCELED / CANCELLED  [:L44-L45] - neither succeeded nor failed
+            # The contiguous, gap-free error block -3 .. -33 [:L46-L76]. The density is the oracle's.
+            - -3       # E_INVALID_ARGUMENT    [:L46]
+            - -4       # E_INVALID_IMAGE       [:L47]
+            - -5       # E_INVALID_OBJECT      [:L48]
+            - -6       # E_INVALID_TYPE        [:L49]
+            - -7       # E_INVALID_TRANSACTION [:L50]
+            - -8       # E_INVALID_SQL         [:L51]
+            - -9       # E_INVALID_DATA        [:L52]
+            - -10      # E_INVALID_DATAOBJECT  [:L53]
+            - -11      # E_INVALID_HANDLE      [:L54]
+            - -12      # E_OUT_OF_BOUND        [:L55]
+            - -13      # E_OUT_OF_RANGE        [:L56]
+            - -14      # E_OUT_OF_MEMORY       [:L57]
+            - -15      # E_FILE_NOT_FOUND      [:L58]
+            - -16      # E_OBJECT_NOT_FOUND    [:L59]
+            - -17      # E_DATA_NOT_FOUND      [:L60]
+            - -18      # E_FUNCTION_NOT_FOUND  [:L61]
+            - -19      # E_EVENT_NOT_FOUND     [:L62]
+            - -20      # E_MEMBER_NOT_FOUND    [:L63]
+            - -21      # E_VAR_NOT_FOUND       [:L64]
+            - -22      # E_NOT_EXISTS          [:L65]
+            - -23      # E_BUSY                [:L66]
+            - -24      # E_TIME_OUT            [:L67]
+            - -25      # E_ACCESS_DENIED       [:L68]
+            - -26      # E_WIN32_ERROR         [:L69]
+            - -27      # E_INTERNAL_ERROR      [:L70]
+            - -28      # E_DB_ERROR            [:L71]
+            - -29      # E_HTTP_ERROR          [:L72]
+            - -30      # E_WINHTTP_ERROR       [:L73]
+            - -31      # E_IO_ERROR            [:L74]
+            - -32      # E_SQL_BIND_ARG_FAILED [:L75]
+            - -33      # E_RETRY               [:L76]
+            # The three sentinels, deliberately distant from the contiguous block.
+            - -2000    # E_NO_SUPPORT          [:L77]
+            - -2001    # E_NO_IMPLEMENTATION   [:L78] - the four reserved routes' own code
+            - -4000    # UNKNOWN               [:L79]
+          x-enum-varnames:
+            - OK
+            - PREVENT
+            - FAILED
+            - CANCELLED
+            - E_INVALID_ARGUMENT
+            - E_INVALID_IMAGE
+            - E_INVALID_OBJECT
+            - E_INVALID_TYPE
+            - E_INVALID_TRANSACTION
+            - E_INVALID_SQL
+            - E_INVALID_DATA
+            - E_INVALID_DATAOBJECT
+            - E_INVALID_HANDLE
+            - E_OUT_OF_BOUND
+            - E_OUT_OF_RANGE
+            - E_OUT_OF_MEMORY
+            - E_FILE_NOT_FOUND
+            - E_OBJECT_NOT_FOUND
+            - E_DATA_NOT_FOUND
+            - E_FUNCTION_NOT_FOUND
+            - E_EVENT_NOT_FOUND
+            - E_MEMBER_NOT_FOUND
+            - E_VAR_NOT_FOUND
+            - E_NOT_EXISTS
+            - E_BUSY
+            - E_TIME_OUT
+            - E_ACCESS_DENIED
+            - E_WIN32_ERROR
+            - E_INTERNAL_ERROR
+            - E_DB_ERROR
+            - E_HTTP_ERROR
+            - E_WINHTTP_ERROR
+            - E_IO_ERROR
+            - E_SQL_BIND_ARG_FAILED
+            - E_RETRY
+            - E_NO_SUPPORT
+            - E_NO_IMPLEMENTATION
+            - UNKNOWN
+        dbError:
+          $ref: '#/components/schemas/DbError'
         upstream:
           type: string
           enum: [persistence, dataservices, security]
@@ -2231,12 +2983,19 @@ components:
         The detail is forwarded **unchanged** from C-06 rather than reshaped, because a caller
         deciding between retrying and surfacing needs the current row state exactly as the database
         reported it.
+
+        **The `conflict` member is the field-for-field mirror of `common.v1.ConflictDetail`, not a
+        delegated placeholder.** That is the one payload in this document a consumer must be able to
+        read in order to *act* - a caller that cannot see which column moved cannot construct a retry,
+        and would re-send the same stale original values and receive the same `409` for ever. So it is
+        transcribed here rather than deferred to the protocol definition.
       allOf:
         - $ref: '#/components/schemas/ProblemDetails'
         - type: object
+          required: [conflict]
           properties:
             conflict:
-              $ref: '#/components/schemas/ProtoPayload'
+              $ref: '#/components/schemas/ConflictDetail'
 
     ProtoPayload:
       type: object
@@ -2260,6 +3019,1240 @@ components:
         `additionalProperties: true` because the authority is elsewhere; a consumer validates against
         the generated message type, not against this placeholder.
       additionalProperties: true
+
+    # ==============================================================================================
+    #  TIER 1 - THE MIRRORED PROTOBUF SHAPES
+    #  --------------------------------------------------------------------------------------------
+    #  Every schema in this section is transcribed FIELD FOR FIELD AND VALUE FOR VALUE from
+    #  Proto/common.v1.proto or Proto/dataservices.v1.proto in this same project. They are mirrored
+    #  rather than delegated because each one carries a DECISION a consumer has to act on: a conflict
+    #  it must retry or surface, an error field it must not expect to be unredacted, a chunk boundary
+    #  it must not flatten, an expansion mode it must not confuse with a literal.
+    #
+    #  THE .proto REMAINS THE AUTHORITY. Where a member here and its protobuf counterpart ever
+    #  disagree, the .proto is right and this document has drifted. The agreement has no compile-time
+    #  edge and cannot be given one - nothing compiles a YAML file against a .proto - so it is a review
+    #  obligation on every change to either side, and the sibling test project asserts the parts it can
+    #  reach from generated code.
+    #
+    #  MEMBER NAMES ARE THE CANONICAL PROTOBUF JSON MAPPING, i.e. lowerCamelCase of the proto field
+    #  name. `column_name` is `columnName`, `item_status` is `itemStatus`, `datetime_value` is
+    #  `datetimeValue`. That is what the mapping emits, so it is what a consumer sees.
+    #
+    #  ENUM MEMBERS ARE THE PROTO ENUMERATOR NAMES, not their numbers, because that is what the
+    #  canonical mapping emits. Identifier spellings are preserved verbatim for the same reason the
+    #  SCREAMING_SNAKE constants are: they appear in serialized payloads, log records and
+    #  characterization recordings, where a rename does not restyle a symbol - it silently invalidates
+    #  every stored comparison that mentions it.
+    #
+    #  EACH ENUMERATOR'S NUMBER TRAVELS WITH IT, in `x-enum-values`, positionally aligned with `enum`
+    #  and `x-enum-varnames`. The numbers matter even though the wire carries names: they are what the
+    #  .proto declares, what a numeric bridge to a legacy ordinal casts to, and what a characterization
+    #  recording holds - so value-for-value agreement has to be checkable from this document alone
+    #  rather than only from a markdown table a machine cannot read. `x-enum-varnames` is the
+    #  established generator convention; `x-enum-values` is this document's own extension, declared here
+    #  once so it is not mistaken for one. Every set also states its numbers in prose, for a reader.
+    #
+    #  ONE SCHEMA HERE IS PUBLISHED WITHOUT BEING `$ref`-ED, AND THAT IS DELIBERATE RATHER THAN DEAD
+    #  WEIGHT. `ExpressionBinding` is the shape carried by the `bindings` member of C-04's
+    #  `GetExpressionStateResponse`, which is a Tier-2 delegated envelope - so no `$ref` in this document
+    #  reaches it, and a style linter will report it as unused. It is published anyway because it is the
+    #  ONE contract detail the requirements single out as not surviving naive serialization: the static
+    #  versus dynamic expansion distinction. A consumer that could not see the three-part payload and the
+    #  per-reference mode would send an already-expanded string and destroy the distinction silently,
+    #  which is exactly the failure the schema exists to prevent. The alternative - mirroring the whole
+    #  `GetExpressionStateResponse` cascade, seven structures deep - would have pulled most of the
+    #  expression engine's internal model into an ingress contract to satisfy a linter rule. Publishing
+    #  the one decision-carrying shape and saying why is the better trade, and saying why is the part
+    #  that makes it reviewable rather than an oversight. It is also mechanically verifiable: the name
+    #  matches a real protobuf message, and the field-for-field cross-check covers it like every other.
+    #
+    #  64-BIT INTEGERS ARE `[integer, string]`, AND THAT IS FIDELITY RATHER THAN LOOSENESS. The
+    #  canonical protobuf JSON mapping EMITS int64, uint64 and fixed64 as JSON strings, to survive
+    #  consumers whose number type is a double, and ACCEPTS either form on input. A schema declaring
+    #  `integer` alone would reject the encoding the upstream actually produces. Expressed as a JSON
+    #  Schema type array, which OpenAPI 3.1 supports natively - there is no `nullable` keyword and no
+    #  3.0-only construct anywhere in this document. 32-bit fields are plain integers, because the
+    #  mapping emits them as JSON numbers.
+    # ==============================================================================================
+
+    DwBuffer:
+      title: DwBuffer
+      description: |-
+        The PowerBuilder `dwbuffer` domain, mirrored from `common.v1.DwBuffer`.
+
+        | Member | Number | Legacy buffer |
+        | --- | --- | --- |
+        | `DW_BUFFER_PRIMARY` | 0 | `Primary!` - the live rows |
+        | `DW_BUFFER_DELETE` | 1 | `Delete!` - rows deleted but not yet flushed |
+        | `DW_BUFFER_FILTER` | 2 | `Filter!` - filtered-out rows |
+
+        **`Primary!` occupies zero on its own account.** PowerBuilder initialises an unassigned
+        `dwbuffer` to `Primary!`, so in the legacy "no buffer was supplied" and "the default buffer" are
+        one state rather than two - which is why the framework can synthesize an error with `Primary!`
+        and row 0 to mean "not attributable to any buffer or row". There is no synthetic unspecified
+        member, and inserting one would shift all three real members up by one and silently invalidate
+        every stored characterization comparison that mentions a buffer ordinal.
+
+        **`Filter!` row order is INVERTED relative to the source.** That is the legacy's own behaviour
+        and it is preserved: a consumer that re-sorted it would produce wrong data that a row-count
+        assertion would not catch.
+      type: string
+      enum: [DW_BUFFER_PRIMARY, DW_BUFFER_DELETE, DW_BUFFER_FILTER]
+      x-enum-varnames: [DW_BUFFER_PRIMARY, DW_BUFFER_DELETE, DW_BUFFER_FILTER]
+      x-enum-values: [0, 1, 2]
+
+    ItemStatus:
+      title: ItemStatus
+      description: |-
+        The PowerBuilder `dwItemStatus` domain in full, mirrored from `common.v1.ItemStatus`.
+
+        | Member | Number | Legacy status |
+        | --- | --- | --- |
+        | `ITEM_STATUS_NOT_MODIFIED` | 0 | `NotModified!` - existing row, unchanged |
+        | `ITEM_STATUS_DATA_MODIFIED` | 1 | `DataModified!` - existing row, edited |
+        | `ITEM_STATUS_NEW` | 2 | `New!` - inserted, not yet edited |
+        | `ITEM_STATUS_NEW_MODIFIED` | 3 | `NewModified!` - inserted and edited |
+
+        **All four are carried, including `New!`, which no in-scope legacy source names literally.** It
+        is a legal runtime status - the DataWindow engine assigns it to a row inserted but not yet
+        edited - so omitting it would make real rows unrepresentable on the wire and force a service to
+        invent a substitute or drop the row. Carrying it is faithfulness to the legacy type, not an
+        added capability: nothing accompanies it but the ability to say it.
+      type: string
+      enum:
+        - ITEM_STATUS_NOT_MODIFIED
+        - ITEM_STATUS_DATA_MODIFIED
+        - ITEM_STATUS_NEW
+        - ITEM_STATUS_NEW_MODIFIED
+      x-enum-varnames:
+        - ITEM_STATUS_NOT_MODIFIED
+        - ITEM_STATUS_DATA_MODIFIED
+        - ITEM_STATUS_NEW
+        - ITEM_STATUS_NEW_MODIFIED
+      x-enum-values: [0, 1, 2, 3]
+
+    DecimalValue:
+      type: object
+      title: DecimalValue
+      description: >-
+        A legacy `dec` / `decimal(n)`, mirrored from `common.v1.DecimalValue`. **A decimal string, never
+        a JSON number**: the legacy type is exact and a double is not, so routing a salary or a price
+        through a binary floating-point type would change the value the database compared against. The
+        one updatable DataWindow in the legacy estate declares a two-place decimal salary column, which
+        is exactly the case this exists for.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The decimal in its exact textual form.
+
+    DateValue:
+      type: object
+      title: DateValue
+      description: >-
+        A legacy `date`, mirrored from `common.v1.DateValue`. A date-only value with no time component
+        and no zone, carried as text so no zone is implied where the legacy implies none.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The date in its textual form.
+
+    TimeValue:
+      type: object
+      title: TimeValue
+      description: >-
+        A legacy `time`, mirrored from `common.v1.TimeValue`. A time-of-day with no date and no zone.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The time in its textual form.
+
+    DateTimeValue:
+      type: object
+      title: DateTimeValue
+      description: >-
+        A legacy `datetime`, mirrored from `common.v1.DateTimeValue`. Carried as text rather than as an
+        instant because the legacy type carries no zone: converting it to one would invent information
+        the source does not have, and converting it back would not necessarily return the same value.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The timestamp in its textual form.
+
+    AnyValue:
+      type: object
+      title: AnyValue
+      description: |-
+        A single legacy column or variable value, mirrored from `common.v1.AnyValue`.
+
+        **Exactly one member is present**, which is how the canonical protobuf JSON mapping encodes a
+        `oneof` - hence `minProperties: 1` and `maxProperties: 1`. A payload carrying two members, or
+        none, is not a valid `AnyValue`.
+
+        The eleven arms are the legacy scalar domain, and three of the distinctions are load-bearing:
+
+        * `isNull` is an **arm of its own**, not the absence of a value. The legacy has null for value
+          types and the tri-state return algebra depends on it; collapsing null to zero would turn
+          "no value" into "the value zero".
+        * `decimalValue` is **not** `doubleValue`. A legacy `dec` is exact; a double is not.
+        * `int64Value` carries the legacy `long` **and** `integer`, deliberately widened, because a
+          narrower wire type would truncate silently rather than fail.
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        isNull:
+          type: boolean
+          description: >-
+            Present and true when the value is null. An arm rather than an absence, so a consumer can
+            tell "null" from "not supplied".
+        boolValue:
+          type: boolean
+          description: A legacy `boolean`.
+        int64Value:
+          type: [integer, string]
+          format: int64
+          description: A legacy `long` or `integer`, widened. Emitted as a string by the canonical mapping.
+        uint64Value:
+          type: [integer, string]
+          format: int64
+          description: A legacy `unsignedlong`. Emitted as a string by the canonical mapping.
+        doubleValue:
+          type: number
+          format: double
+          description: A legacy `double` or `real` - genuinely floating point at source.
+        decimalValue:
+          $ref: '#/components/schemas/DecimalValue'
+        dateValue:
+          $ref: '#/components/schemas/DateValue'
+        timeValue:
+          $ref: '#/components/schemas/TimeValue'
+        datetimeValue:
+          $ref: '#/components/schemas/DateTimeValue'
+        stringValue:
+          type: string
+          description: A legacy `string`.
+        blobValue:
+          type: string
+          format: byte
+          description: >-
+            A legacy `blob`, base64-encoded as the canonical protobuf JSON mapping requires for a
+            `bytes` field.
+
+    ColumnValue:
+      type: object
+      title: ColumnValue
+      description: |-
+        One column's value, mirrored from `common.v1.ColumnValue`.
+
+        **The row-status convention is the surprising part, and it is preserved.** The legacy reads a
+        ROW's status by asking for column index **0**, which is not a real column - it means "the row
+        itself". The same object also reads a genuine per-column status with a real index, so both
+        readings coexist and the distinction is carried entirely by whether the identifier is zero. A
+        consumer must therefore read `columnId: 0` paired with an `itemStatus` as the row's own status,
+        not as column zero's.
+      additionalProperties: false
+      required: [columnName, columnId, value]
+      properties:
+        columnName:
+          type: string
+          description: The column's name as the DataWindow declares it.
+        columnId:
+          type: [integer, string]
+          format: int64
+          description: >-
+            The column's one-based identifier, or **0** to denote the row itself - see the row-status
+            convention above.
+        value:
+          $ref: '#/components/schemas/AnyValue'
+        itemStatus:
+          $ref: '#/components/schemas/ItemStatus'
+
+    DbError:
+      type: object
+      title: DbError
+      description: |-
+        A database-layer failure, mirrored from `common.v1.DbError`, which mirrors the legacy
+        `dberrordata` structure field for field.
+
+        ## `sqlsyntax` IS REDACTED, AND THAT IS A CONTRACT COMMITMENT (C-G)
+
+        The legacy field carries the **complete generated statement including interpolated literal
+        values**, and the legacy logger performs **no** redaction at all. The literals are real user
+        data rather than placeholders, because a `DisableBind=1` connection means the runtime does not
+        use bind variables: it interpolates. Forwarding that field verbatim through an ingress would
+        publish row data to whoever reads an error response.
+
+        This member therefore carries **placeholders only**, and an empty value is valid and common. The
+        commitment is published here rather than left to the implementation so that a consumer does not
+        build a diagnostic flow on data that will never arrive.
+
+        ## `sqldbcode` is NOT a `retCode`
+
+        It is the driver's own numeric code, and three different code spaces reach it depending on
+        provider. It is a plain integer here for exactly that reason, and a consumer must not interpret
+        it with the `retCode` vocabulary.
+      additionalProperties: false
+      required: [sqldbcode, sqlerrtext, sqlsyntax, buffer, row]
+      properties:
+        sqldbcode:
+          type: [integer, string]
+          format: int64
+          description: >-
+            The driver's own numeric code, in the provider's code space rather than the framework's. Not
+            a `retCode`.
+        sqlerrtext:
+          type: string
+          description: >-
+            The driver's message text, verbatim. **May be non-English** - the framework synthesizes
+            Chinese diagnostics for some conditions it detects itself. Opaque display text: a consumer
+            must classify with `sqldbcode` rather than by parsing this.
+        sqlsyntax:
+          type: string
+          description: >-
+            The statement text, **redacted**. Placeholders only, never interpolated literals; empty is
+            valid and common. See the redaction rule above - this is the one member of this shape whose
+            legacy content could not be forwarded as it stands.
+        buffer:
+          $ref: '#/components/schemas/DwBuffer'
+        row:
+          type: [integer, string]
+          format: int64
+          description: >-
+            The offending row number, **one-based** like every legacy row ordinal. **0** means "no
+            particular row", which is what the framework reports for a connection- or statement-level
+            failure not attributable to one row.
+
+    ConflictRow:
+      type: object
+      title: ConflictRow
+      description: |-
+        One row that lost an optimistic-concurrency check, mirrored from `common.v1.ConflictRow`.
+
+        **Both value sets travel, and that is a requirement rather than a preference.** The one
+        updatable DataWindow in the legacy estate declares `updatewhere=1` and marks **all six** of its
+        columns `updatewhereclause=yes`. `updatewhere=1` is the "key and updateable columns" concurrency
+        mode, so the generated `WHERE` clause carries the key column **plus the original value of every
+        updateable column**. A payload carrying only current values could not express what the failed
+        statement actually compared, and the caller could not tell which column moved underneath it.
+      additionalProperties: false
+      required: [buffer, row, itemStatus, currentValues, originalValues]
+      properties:
+        buffer:
+          $ref: '#/components/schemas/DwBuffer'
+        row:
+          type: [integer, string]
+          format: int64
+          description: The one-based row ordinal within the buffer.
+        itemStatus:
+          $ref: '#/components/schemas/ItemStatus'
+        currentValues:
+          type: array
+          description: The row's values as they stand now, per column.
+          items:
+            $ref: '#/components/schemas/ColumnValue'
+        originalValues:
+          type: array
+          description: >-
+            The values the failed statement's `WHERE` clause compared against, per column. This is the
+            set that lets a caller identify which column moved.
+          items:
+            $ref: '#/components/schemas/ColumnValue'
+
+    ConflictDetail:
+      type: object
+      title: ConflictDetail
+      description: |-
+        The optimistic-concurrency mismatch payload, mirrored from `common.v1.ConflictDetail`.
+
+        It originates on C-06's `Update` as the detail of a gRPC **`Aborted`** status, is relayed by
+        C-03's `Update`, and **this projection surfaces the same payload unchanged as HTTP `409`.** It
+        is forwarded rather than reshaped because a caller deciding between retrying and surfacing needs
+        the current row state exactly as the database reported it.
+
+        **`Aborted`, not `FailedPrecondition`, and the distinction is deliberate:** the operation MAY
+        succeed if the caller re-reads and retries at a higher level, which is what `Aborted` means and
+        what `FailedPrecondition` does not. `Aborted` is also the canonical gRPC mapping to HTTP 409.
+
+        **There is no silent overwrite anywhere in the system.** This shape exists so a mismatch is
+        always reported rather than resolved by guessing. The caller implements an explicit
+        **retry-or-surface** policy; there is no last-writer-wins path and no member here that would
+        enable one.
+      additionalProperties: false
+      required: [rows, updateTable, rowsExpected, rowsMatched]
+      properties:
+        rows:
+          type: array
+          description: >-
+            The conflicting rows, each with both value sets. More than one row can conflict in a single
+            update, so this is a collection rather than a single row.
+          items:
+            $ref: '#/components/schemas/ConflictRow'
+        updateTable:
+          type: string
+          description: >-
+            The table the update targeted. Present because multi-table update from one DataWindow is a
+            real legacy capability, so "which table" is a genuine question.
+        rowsExpected:
+          type: [integer, string]
+          format: int64
+          description: How many rows the statement expected to affect.
+        rowsMatched:
+          type: [integer, string]
+          format: int64
+          description: >-
+            How many it actually matched. The gap between this and `rowsExpected` is the mismatch, and
+            reporting both lets a caller see the size of it rather than only its existence.
+
+    DataWindowRow:
+      type: object
+      title: DataWindowRow
+      description: |-
+        One retrieved row, mirrored from `dataservices.v1.DataWindowRow`.
+
+        It carries **both** its current and its original column values for the reason `ConflictRow`
+        states: the update half's concurrency check compares originals, so a retrieval that discarded
+        them would leave a caller unable to construct an update at all.
+      additionalProperties: false
+      required: [buffer, row, itemStatus, columns, originalValues]
+      properties:
+        buffer:
+          $ref: '#/components/schemas/DwBuffer'
+        row:
+          type: [integer, string]
+          format: int64
+          description: The one-based row ordinal within its buffer.
+        itemStatus:
+          $ref: '#/components/schemas/ItemStatus'
+        columns:
+          type: array
+          description: The row's current values, per column.
+          items:
+            $ref: '#/components/schemas/ColumnValue'
+        originalValues:
+          type: array
+          description: >-
+            The row's original values, per column - what a subsequent update's `WHERE` clause will
+            compare against.
+          items:
+            $ref: '#/components/schemas/ColumnValue'
+
+    RetrieveChunk:
+      type: object
+      title: RetrieveChunk
+      description: |-
+        One chunk of a retrieval, mirrored from `dataservices.v1.RetrieveChunk`.
+
+        **This is the chunking contract, and this projection does not change it.** Each chunk retains
+        its own index, its own row count, the running cumulative count and the final-chunk flag, exactly
+        as the gRPC server stream carries them. A consumer of the REST projection can therefore
+        reconstruct precisely what a gRPC consumer sees, and can identify the last chunk **as** the last
+        rather than inferring it from the collection ending.
+      additionalProperties: false
+      required: [rows, rowCount, chunkIndex, final, cumulativeRowCount]
+      properties:
+        rows:
+          type: array
+          description: The rows in this chunk.
+          items:
+            $ref: '#/components/schemas/DataWindowRow'
+        rowCount:
+          type: [integer, string]
+          format: int64
+          description: How many rows this chunk carries.
+        chunkIndex:
+          type: [integer, string]
+          format: int64
+          description: >-
+            This chunk's position in the sequence. Retained so a consumer can detect a gap rather than
+            assume there was none.
+        final:
+          type: boolean
+          description: >-
+            True on the last chunk. Explicit rather than inferred: a collection ending and a retrieval
+            completing are different facts, and only the flag distinguishes a complete retrieval from a
+            truncated one.
+        cumulativeRowCount:
+          type: [integer, string]
+          format: int64
+          description: The running total across this chunk and every chunk before it.
+        buffer:
+          $ref: '#/components/schemas/DwBuffer'
+        error:
+          $ref: '#/components/schemas/DbError'
+
+    RetrieveResult:
+      title: RetrieveResult
+      description: |-
+        The projection of C-03's `Retrieve` server stream: **the ordered sequence of chunks the stream
+        would have delivered**, in the order it would have delivered them.
+
+        A collection rather than an invented envelope, deliberately - the protobuf definition has no
+        envelope message for a stream, so wrapping one here would add a member the gRPC contract does
+        not have and the two halves of the boundary would stop corresponding. Element order is the
+        stream's order and is significant; the last element carries `final: true`.
+
+        An empty collection is valid and means the retrieval produced no chunk at all.
+      type: array
+      items:
+        $ref: '#/components/schemas/RetrieveChunk'
+
+    EventGate:
+      type: object
+      title: EventGate
+      description: |-
+        The DataWindow event gate, mirrored from `dataservices.v1.EventGate`.
+
+        The mask is composed from the legacy bit identifiers, whose spellings and values are preserved
+        verbatim:
+
+        | Bit | Value | Legacy event |
+        | --- | --- | --- |
+        | `EID_ROWFOCUSCHANGE` | **1** | row-focus change |
+        | `EID_ITEMFOCUSCHANGE` | **2** | item-focus change |
+        | `EID_ITEMCHANGE` | **4** | item change |
+
+        ## The one non-obvious coupling, preserved rather than fixed (C-B)
+
+        **Disabling `EID_ITEMCHANGE` also suppresses column-expression evaluation.** That is not a
+        separate switch a caller can hold differently: the legacy couples the two, and the coupling is
+        reproduced. A caller disabling item-change to stop validation firing will also stop expressions
+        recalculating, and it needs to know that before it does so rather than after.
+
+        It is legacy behaviour to preserve, not a bug to fix. Splitting the two would be a behaviour
+        improvement, which the mandate forbids exactly as firmly as it forbids a regression.
+      additionalProperties: false
+      required: [mask]
+      properties:
+        mask:
+          type: [integer, string]
+          format: int64
+          description: >-
+            The composed mask of currently DISABLED events. Zero means every event is enabled. The mask
+            is a sum of the three bit values above.
+
+    DataWindowEventBit:
+      title: DataWindowEventBit
+      description: >-
+        One event-gate bit, mirrored from `dataservices.v1.EventGate.Bit`. The spellings are the legacy
+        `EID_*` identifiers, preserved verbatim because they appear in serialized payloads, log records
+        and characterization recordings. `EID_UNSPECIFIED` is the protobuf zero enumerator and carries no
+        event; the three real bits are 1, 2 and 4, and their composition rule and the item-change
+        coupling are stated on `EventGate`.
+      type: string
+      enum: [EID_UNSPECIFIED, EID_ROWFOCUSCHANGE, EID_ITEMFOCUSCHANGE, EID_ITEMCHANGE]
+      x-enum-varnames: [EID_UNSPECIFIED, EID_ROWFOCUSCHANGE, EID_ITEMFOCUSCHANGE, EID_ITEMCHANGE]
+      x-enum-values: [0, 1, 2, 4]
+
+    RetCodeValue:
+      title: RetCodeValue
+      description: |-
+        The legacy return code **as a mirrored protobuf enum**, from `common.v1.RetCode.Value`.
+
+        ## This is the same algebra as `ProblemDetails.retCode`, in the other of its two encodings
+
+        `ProblemDetails.retCode` is an integer, because it is Gateway's own RFC 9457 extension member on
+        a body Gateway itself serializes. This schema is the **canonical protobuf JSON** encoding of the
+        same value set, used where a mirrored upstream message carries the code - the mapping emits an
+        enum's NAME, not its number. The two are the same 38 values either way, and a consumer must not
+        treat them as two vocabularies.
+
+        ## All 41 enumerator names are accepted; a writer emits the first of each alias group
+
+        The oracle declares **41** constants over **38** distinct values, and the protobuf definition
+        preserves every spelling with `allow_alias`. The canonical mapping therefore *accepts* any of the
+        41 names on input while *emitting* the first-declared name for each value - `OK` for 0 and
+        `CANCELED` for -2. Both alias groups are listed so a consumer that reads either spelling
+        validates, and `x-enum-values` records the number each name carries so the value-for-value
+        agreement stays checkable.
+
+        ## Two properties to expect rather than repair (C-B)
+
+        `PREVENT` is 1 and satisfies the legacy success predicate, so **a prevention reads as a
+        success**; `CANCELED` is -2 and is excluded from failure by an explicit guard while also failing
+        the success test, so **cancelled is neither succeeded nor failed**. Branch on the specific value,
+        never on a two-way success test.
+      type: string
+      enum:
+        - OK
+        - SUCCESS
+        - ALLOW
+        - PREVENT
+        - FAILED
+        - CANCELED
+        - CANCELLED
+        - E_INVALID_ARGUMENT
+        - E_INVALID_IMAGE
+        - E_INVALID_OBJECT
+        - E_INVALID_TYPE
+        - E_INVALID_TRANSACTION
+        - E_INVALID_SQL
+        - E_INVALID_DATA
+        - E_INVALID_DATAOBJECT
+        - E_INVALID_HANDLE
+        - E_OUT_OF_BOUND
+        - E_OUT_OF_RANGE
+        - E_OUT_OF_MEMORY
+        - E_FILE_NOT_FOUND
+        - E_OBJECT_NOT_FOUND
+        - E_DATA_NOT_FOUND
+        - E_FUNCTION_NOT_FOUND
+        - E_EVENT_NOT_FOUND
+        - E_MEMBER_NOT_FOUND
+        - E_VAR_NOT_FOUND
+        - E_NOT_EXISTS
+        - E_BUSY
+        - E_TIME_OUT
+        - E_ACCESS_DENIED
+        - E_WIN32_ERROR
+        - E_INTERNAL_ERROR
+        - E_DB_ERROR
+        - E_HTTP_ERROR
+        - E_WINHTTP_ERROR
+        - E_IO_ERROR
+        - E_SQL_BIND_ARG_FAILED
+        - E_RETRY
+        - E_NO_SUPPORT
+        - E_NO_IMPLEMENTATION
+        - UNKNOWN
+      x-enum-varnames:
+        - OK
+        - SUCCESS
+        - ALLOW
+        - PREVENT
+        - FAILED
+        - CANCELED
+        - CANCELLED
+        - E_INVALID_ARGUMENT
+        - E_INVALID_IMAGE
+        - E_INVALID_OBJECT
+        - E_INVALID_TYPE
+        - E_INVALID_TRANSACTION
+        - E_INVALID_SQL
+        - E_INVALID_DATA
+        - E_INVALID_DATAOBJECT
+        - E_INVALID_HANDLE
+        - E_OUT_OF_BOUND
+        - E_OUT_OF_RANGE
+        - E_OUT_OF_MEMORY
+        - E_FILE_NOT_FOUND
+        - E_OBJECT_NOT_FOUND
+        - E_DATA_NOT_FOUND
+        - E_FUNCTION_NOT_FOUND
+        - E_EVENT_NOT_FOUND
+        - E_MEMBER_NOT_FOUND
+        - E_VAR_NOT_FOUND
+        - E_NOT_EXISTS
+        - E_BUSY
+        - E_TIME_OUT
+        - E_ACCESS_DENIED
+        - E_WIN32_ERROR
+        - E_INTERNAL_ERROR
+        - E_DB_ERROR
+        - E_HTTP_ERROR
+        - E_WINHTTP_ERROR
+        - E_IO_ERROR
+        - E_SQL_BIND_ARG_FAILED
+        - E_RETRY
+        - E_NO_SUPPORT
+        - E_NO_IMPLEMENTATION
+        - UNKNOWN
+      x-enum-values:
+        - 0
+        - 0
+        - 0
+        - 1
+        - -1
+        - -2
+        - -2
+        - -3
+        - -4
+        - -5
+        - -6
+        - -7
+        - -8
+        - -9
+        - -10
+        - -11
+        - -12
+        - -13
+        - -14
+        - -15
+        - -16
+        - -17
+        - -18
+        - -19
+        - -20
+        - -21
+        - -22
+        - -23
+        - -24
+        - -25
+        - -26
+        - -27
+        - -28
+        - -29
+        - -30
+        - -31
+        - -32
+        - -33
+        - -2000
+        - -2001
+        - -4000
+
+    GetEventGateResponse:
+      type: object
+      title: GetEventGateResponse
+      description: >-
+        The event-gate read, mirrored from `dataservices.v1.GetEventGateResponse`. Mirrored rather than
+        delegated because the bitmask is a decision a caller acts on: it has to know that disabling
+        item-change also suppresses column-expression evaluation before it relies on the gate, and the
+        `EventGate` schema states that coupling at the point of use.
+      additionalProperties: false
+      required: [gate, disabledBits, retCode]
+      properties:
+        gate:
+          $ref: '#/components/schemas/EventGate'
+        disabledBits:
+          type: array
+          uniqueItems: true
+          description: >-
+            The disabled bits decomposed, so a caller need not decompose the mask itself. Equivalent to
+            `gate.mask` and carried alongside it because the legacy identifiers are what appear in log
+            records and characterization recordings, while the mask is what the framework tests.
+          items:
+            $ref: '#/components/schemas/DataWindowEventBit'
+        retCode:
+          $ref: '#/components/schemas/RetCodeValue'
+
+    DisableEventResponse:
+      type: object
+      title: DisableEventResponse
+      description: >-
+        The result of disabling one or more gated events, mirrored from
+        `dataservices.v1.DisableEventResponse`. The resulting gate is returned so a caller never has to
+        infer the new mask from the one it sent - and because disabling `EID_ITEMCHANGE` also suppresses
+        column-expression evaluation, the returned gate is the authoritative statement of what is now
+        off.
+      additionalProperties: false
+      required: [retCode, gate]
+      properties:
+        retCode:
+          $ref: '#/components/schemas/RetCodeValue'
+        gate:
+          $ref: '#/components/schemas/EventGate'
+
+    EnableEventResponse:
+      type: object
+      title: EnableEventResponse
+      description: >-
+        The result of re-enabling one or more gated events, mirrored from
+        `dataservices.v1.EnableEventResponse`. Structurally identical to `DisableEventResponse` because
+        the protobuf messages are - two distinct messages of the same shape - and both names are mirrored
+        rather than folded into one so the 1:1 correspondence with the protocol definition stays
+        auditable.
+      additionalProperties: false
+      required: [retCode, gate]
+      properties:
+        retCode:
+          $ref: '#/components/schemas/RetCodeValue'
+        gate:
+          $ref: '#/components/schemas/EventGate'
+
+    DwObjectRef:
+      type: object
+      title: DwObjectRef
+      description: >-
+        A reference to the DataWindow object an event concerns, mirrored from
+        `dataservices.v1.DwObjectRef`. The column-type prefix is the legacy's own coercion selector: the
+        item-change protocol dispatches on the **first five characters** of the column type, and the
+        enumerated prefixes are exactly the set it recognises.
+      additionalProperties: false
+      required: [name, id]
+      properties:
+        name:
+          type: string
+          description: The object's name.
+        id:
+          type: [integer, string]
+          format: int64
+          description: The object's identifier.
+        colType:
+          type: string
+          description: The column's declared type, verbatim.
+        colTypePrefix:
+          title: ColTypePrefix
+          description: >-
+            The five-character type prefix the legacy coercion switch dispatches on. Numbers in order:
+            0 unspecified, 1 `char`, 2 `char(`, 3 `decim`, 4 `real`, 5 `numbe`, 6 `long`, 7 `ulong`,
+            8 `datet`, 9 `date`, 10 `time`.
+          type: string
+          enum:
+            - COL_TYPE_PREFIX_UNSPECIFIED
+            - COL_TYPE_PREFIX_CHAR
+            - COL_TYPE_PREFIX_CHAR_PAREN
+            - COL_TYPE_PREFIX_DECIM
+            - COL_TYPE_PREFIX_REAL
+            - COL_TYPE_PREFIX_NUMBE
+            - COL_TYPE_PREFIX_LONG
+            - COL_TYPE_PREFIX_ULONG
+            - COL_TYPE_PREFIX_DATET
+            - COL_TYPE_PREFIX_DATE
+            - COL_TYPE_PREFIX_TIME
+          x-enum-varnames:
+            - COL_TYPE_PREFIX_UNSPECIFIED
+            - COL_TYPE_PREFIX_CHAR
+            - COL_TYPE_PREFIX_CHAR_PAREN
+            - COL_TYPE_PREFIX_DECIM
+            - COL_TYPE_PREFIX_REAL
+            - COL_TYPE_PREFIX_NUMBE
+            - COL_TYPE_PREFIX_LONG
+            - COL_TYPE_PREFIX_ULONG
+            - COL_TYPE_PREFIX_DATET
+            - COL_TYPE_PREFIX_DATE
+            - COL_TYPE_PREFIX_TIME
+          x-enum-values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    ColumnExpEvent:
+      type: object
+      title: ColumnExpEvent
+      description: |-
+        One event the expression engine declares on itself, mirrored from
+        `dataservices.v1.ColumnExpEvent`.
+
+        **Exactly one member is present**, which is how the canonical protobuf JSON mapping encodes a
+        `oneof`. The three arms are the engine's whole self-declared event surface: an item changed, a
+        deferred item-changed notification, and a variable changed.
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        itemChanged:
+          type: object
+          title: ColumnExpEventItemChanged
+          description: An item changed, identified by row and DataWindow object.
+          additionalProperties: false
+          required: [row]
+          properties:
+            row:
+              type: [integer, string]
+              format: int64
+              description: The one-based row ordinal.
+            dwo:
+              $ref: '#/components/schemas/DwObjectRef'
+        doItemChanged:
+          type: object
+          title: ColumnExpEventDoItemChanged
+          description: >-
+            The deferred item-changed notification, which additionally records whether the change
+            originated from user input rather than programmatically.
+          additionalProperties: false
+          required: [row, colName, colId, fromInput]
+          properties:
+            row:
+              type: [integer, string]
+              format: int64
+              description: The one-based row ordinal.
+            colName:
+              type: string
+              description: The column's name.
+            colId:
+              type: [integer, string]
+              format: int64
+              description: The column's identifier.
+            fromInput:
+              type: boolean
+              description: >-
+                True when the change came from user input. Preserved because the legacy branches on it,
+                so a consumer replaying events needs the same distinction.
+        varChanged:
+          type: object
+          title: ColumnExpEventVarChanged
+          description: A variable changed, identified by its index in the global variable table.
+          additionalProperties: false
+          required: [index, forceCalc]
+          properties:
+            index:
+              type: integer
+              format: int32
+              description: The variable's index. A 32-bit field, emitted as a JSON number.
+            forceCalc:
+              type: boolean
+              description: >-
+                True when the change forces recalculation regardless of the cache state. The engine's
+                calculation cache is tri-state, so "unknown" and "no" are different answers and this flag
+                overrides both.
+
+    EventStreamResponse:
+      type: object
+      title: EventStreamResponse
+      description: >-
+        One element of the projected expression event sequence, mirrored from
+        `dataservices.v1.EventStreamResponse`. The sequence value is monotonic and is carried **for
+        detection**: a consumer uses it to notice a gap, never to reorder. These events are
+        notifications rather than a vetoable chain, which is why they project at all - the ordered
+        item-change and validation chain on C-03 does not.
+      additionalProperties: false
+      required: [event, sequence]
+      properties:
+        event:
+          $ref: '#/components/schemas/ColumnExpEvent'
+        sequence:
+          type: [integer, string]
+          format: int64
+          description: The event's monotonic sequence number, for gap detection only.
+
+    ExpressionEventStreamResult:
+      title: ExpressionEventStreamResult
+      description: >-
+        The projection of C-04's `EventStream` server stream: the ordered sequence of events the stream
+        would have delivered. A collection rather than an invented envelope, for the same reason
+        `RetrieveResult` is one. Element order is the stream's order and is significant.
+      type: array
+      items:
+        $ref: '#/components/schemas/EventStreamResponse'
+
+    # ----------------------------------------------------------------------------------------------
+    #  THE `$` VERSUS `$$` FAMILY
+    #  --------------------------------------------------------------------------------------------
+    #  These six schemas exist because the static-versus-dynamic expansion distinction DOES NOT
+    #  SURVIVE NAIVE SERIALIZATION, and a projection that sent an already-expanded string would destroy
+    #  it silently.
+    #
+    #  Static expansion (`$name`) substitutes the variable's value AT THE MOMENT THE EXPRESSION IS SET.
+    #  The variable name is then GONE from the stored text, so a later assignment cannot reach it and
+    #  the result is fixed permanently. Dynamic expansion (`$$name`) retains the variable AS A
+    #  REFERENCE, resolved at calculation time, so a later assignment propagates. The legacy
+    #  specification's worked example fixes a static result at 5 for ever while the identical sequence
+    #  under dynamic expansion yields 6.
+    #
+    #  Three things must therefore travel together, and ExpressionBinding carries all three: the
+    #  UNEXPANDED source text, the BIND-TIME snapshot, and the LIVE environment. Transmitting an
+    #  expanded string would make a static binding indistinguishable from a literal and would strip a
+    #  dynamic binding of the environment it needs to resolve against.
+    #
+    #  AND THE MODE IS TAGGED PER REFERENCE, NEVER PER EXPRESSION. The legacy specification documents an
+    #  example mixing dynamic and static expansion INSIDE ONE EXPRESSION, so the mode is a property of
+    #  each reference. `VarData.expansionMode` is that tag, mirrored from the proto exactly.
+    # ----------------------------------------------------------------------------------------------
+
+    ExpansionMode:
+      title: ExpansionMode
+      description: |-
+        Which expansion applies to **one reference**, mirrored from `dataservices.v1.ExpansionMode`.
+
+        | Member | Number | Meaning |
+        | --- | --- | --- |
+        | `EXPANSION_MODE_UNSPECIFIED` | 0 | The protobuf zero enumerator; no mode determined |
+        | `EXPANSION_MODE_STATIC` | 1 | `$name` - substituted at bind time; later mutation cannot reach it |
+        | `EXPANSION_MODE_DYNAMIC` | 2 | `$$name` - retained as a reference; later mutation propagates |
+        | `EXPANSION_MODE_DYNAMIC_INDIRECT` | 3 | The variable NAME is itself computed at run time, and may be a DataWindow expression |
+        | `EXPANSION_MODE_MACRO_DIRECT` | 4 | A macro invocation with a fixed function name |
+        | `EXPANSION_MODE_MACRO_DYNAMIC` | 5 | A macro invocation whose FUNCTION name is itself a variable |
+
+        Five real modes, and the mode belongs to the reference rather than to the expression that
+        contains it.
+      type: string
+      enum:
+        - EXPANSION_MODE_UNSPECIFIED
+        - EXPANSION_MODE_STATIC
+        - EXPANSION_MODE_DYNAMIC
+        - EXPANSION_MODE_DYNAMIC_INDIRECT
+        - EXPANSION_MODE_MACRO_DIRECT
+        - EXPANSION_MODE_MACRO_DYNAMIC
+      x-enum-varnames:
+        - EXPANSION_MODE_UNSPECIFIED
+        - EXPANSION_MODE_STATIC
+        - EXPANSION_MODE_DYNAMIC
+        - EXPANSION_MODE_DYNAMIC_INDIRECT
+        - EXPANSION_MODE_MACRO_DIRECT
+        - EXPANSION_MODE_MACRO_DYNAMIC
+      x-enum-values: [0, 1, 2, 3, 4, 5]
+
+    VarValue:
+      type: object
+      title: VarValue
+      description: >-
+        One expression-variable value, mirrored from `dataservices.v1.VarValue`. **Exactly one member is
+        present** - the canonical `oneof` encoding. The seven arms are the seven distinct scalar types
+        the legacy variable environment is typed across, carried as a discriminated union rather than a
+        stringly-typed map because the coercion behaviour depends on the type: collapsing them to strings
+        would lose exactly the information the engine branches on.
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        timeValue:
+          $ref: '#/components/schemas/TimeValue'
+        stringValue:
+          type: string
+          description: A legacy `string` variable.
+        longValue:
+          type: [integer, string]
+          format: int64
+          description: A legacy `long` variable. Emitted as a string by the canonical mapping.
+        doubleValue:
+          type: number
+          format: double
+          description: A legacy `double` variable.
+        datetimeValue:
+          $ref: '#/components/schemas/DateTimeValue'
+        dateValue:
+          $ref: '#/components/schemas/DateValue'
+        boolValue:
+          type: boolean
+          description: A legacy `boolean` variable.
+
+    VarData:
+      type: object
+      title: VarData
+      description: >-
+        **One variable reference inside an expression**, mirrored from `dataservices.v1.VarData`. This is
+        where the per-reference expansion tag lives, and it is the member that makes the `$` / `$$`
+        distinction survive the boundary.
+      additionalProperties: false
+      required: [name, fullName, index, isCtx, isMacro, expansionMode]
+      properties:
+        name:
+          type: string
+          description: The variable's name as written in the expression.
+        fullName:
+          type: string
+          description: >-
+            The reference as it appeared in the source text, sigils included - which is what makes a
+            `$name` reference distinguishable from a `$$name` one after the fact.
+        index:
+          type: integer
+          format: int32
+          description: >-
+            The reference's index into the global variable table. A dynamic reference resolves through
+            this at calculation time; a static one has already been substituted and does not.
+        isCtx:
+          type: boolean
+          description: True when the reference resolves from the calculation context rather than the table.
+        isMacro:
+          type: boolean
+          description: True when the reference is a macro invocation rather than a plain variable.
+        expansionMode:
+          $ref: '#/components/schemas/ExpansionMode'
+
+    FuncData:
+      type: object
+      title: FuncData
+      description: >-
+        One function reference inside an expression, mirrored from `dataservices.v1.FuncData`. An **empty
+        `name`** is the legacy's own sentinel for a bare variable rather than a call, so an empty value
+        here is meaningful and must not be treated as missing.
+      additionalProperties: false
+      required: [name, fullName, args, builtin]
+      properties:
+        name:
+          type: string
+          description: The function's name. Empty is the sentinel for a bare variable.
+        fullName:
+          type: string
+          description: The reference as it appeared in the source text.
+        args:
+          type: array
+          description: The argument expressions, in positional order.
+          items:
+            type: string
+        builtin:
+          type: boolean
+          description: >-
+            True for a function the engine implements itself, false for one the application must supply
+            through the macro channel.
+
+    ForeignVarRef:
+      type: object
+      title: ForeignVarRef
+      description: |-
+        A reference to a variable owned by **another** DataWindow's expression service, mirrored from
+        `dataservices.v1.ForeignVarRef`.
+
+        ## This is the one deliberately narrowed contract in the refactor, and it is published rather than hidden
+
+        The legacy member behind this is a **live object pointer** to another DataWindow's expression
+        service, and a pointer does not serialize. Cross-DataWindow references are therefore supported
+        **only** when both DataWindows are co-resident in the same expression session inside one
+        DataServices instance, addressed by the session-scoped handle below. A reference spanning
+        sessions or service instances is **BLOCKED with a defined error** rather than approximated,
+        because approximating a pointer dereference across a network would produce results that are wrong
+        in a way no test would obviously catch.
+
+        Narrow with a defined error; never widen with a guess.
+      additionalProperties: false
+      required: [index, foreignDatawindowHandle, resolvable]
+      properties:
+        index:
+          type: integer
+          format: int32
+          description: The reference's index in the owning table.
+        foreignDatawindowHandle:
+          type: string
+          description: >-
+            The **session-scoped** handle of the DataWindow that owns the variable. Session-scoped rather
+            than global precisely because the legacy pointer's reach could not be reproduced.
+        resolvable:
+          type: boolean
+          description: >-
+            False when the reference cannot currently be resolved - the co-resident session has ended, or
+            the reference spans instances. A reference can be accepted and later become unresolvable,
+            which is why this is reported per reference rather than only refused at registration.
+
+    LocalVarData:
+      type: object
+      title: LocalVarData
+      description: >-
+        A variable whose value is **itself an expression**, mirrored from
+        `dataservices.v1.LocalVarData`. Recursive by nature: the expression may carry its own variable
+        and function references, each with its own expansion mode, so the structure nests exactly as the
+        legacy one does.
+      additionalProperties: false
+      required: [exp, vars, fns, hasMacro]
+      properties:
+        exp:
+          type: string
+          description: The variable's own expression text, unexpanded.
+        vars:
+          type: array
+          description: The variable references inside that expression, each with its own expansion mode.
+          items:
+            $ref: '#/components/schemas/VarData'
+        fns:
+          type: array
+          description: The function references inside that expression.
+          items:
+            $ref: '#/components/schemas/FuncData'
+        hasMacro:
+          type: boolean
+          description: True when the expression contains a macro invocation.
+        value:
+          $ref: '#/components/schemas/VarValue'
+
+    GlobalVarData:
+      type: object
+      title: GlobalVarData
+      description: |-
+        One entry in the engine's global variable table, mirrored from `dataservices.v1.GlobalVarData`.
+
+        `varType` decides which of the two value arms applies: a **local** variable resolves from this
+        service's own table, and a **foreign** one resolves through another DataWindow's expression
+        service subject to the narrowing `ForeignVarRef` documents.
+
+        | `varType` | Number | Resolution |
+        | --- | --- | --- |
+        | `VAR_LOCAL` | 0 | From this service's own table |
+        | `VAR_FOREIGN` | 1 | Through another DataWindow's expression service |
+
+        **A foreign variable requires dynamic expansion**, which the legacy specification states
+        directly: a statically expanded reference has already been substituted at bind time, so there is
+        nothing left for a foreign lookup to resolve.
+      additionalProperties: false
+      required: [name, varType]
+      properties:
+        name:
+          type: string
+          description: The variable's name.
+        varType:
+          title: GlobalVarType
+          description: >-
+            Which arm resolves this variable. Numbers in order: 0 local, 1 foreign.
+          type: string
+          enum: [VAR_LOCAL, VAR_FOREIGN]
+          x-enum-varnames: [VAR_LOCAL, VAR_FOREIGN]
+          x-enum-values: [0, 1]
+        local:
+          $ref: '#/components/schemas/LocalVarData'
+        foreign:
+          $ref: '#/components/schemas/ForeignVarRef'
+        links:
+          type: array
+          description: >-
+            The onward foreign references this entry links to. Each is subject to the same co-residency
+            narrowing, and each reports its own resolvability.
+          items:
+            $ref: '#/components/schemas/ForeignVarRef'
+
+    ExpressionBinding:
+      type: object
+      title: ExpressionBinding
+      description: |-
+        **The three-part payload that makes the `$` versus `$$` distinction survive a network boundary**,
+        mirrored from `dataservices.v1.ExpressionBinding`.
+
+        All three parts travel together, and none is optional in practice:
+
+        1. **`unexpandedExp`** - the source text as written, before any substitution. Sending an expanded
+           string instead would make a static binding indistinguishable from a literal.
+        2. **`bindTimeSnapshot`** - the variable values as they stood when the expression was set. This
+           is what a static (`$name`) reference resolved against, and it is why a static result never
+           changes afterwards.
+        3. **`liveEnvironment`** - the variable values as they stand now. This is what a dynamic
+           (`$$name`) reference resolves against at calculation time, and it is why a dynamic result
+           tracks later mutation.
+
+        The reference arrays then say, **per reference**, which of the two applied - or which of the
+        three further modes did. Without the arrays a consumer holding both maps still could not tell
+        which map any particular reference should be read from.
+
+        ## Where this shape travels, and why it is published without a `$ref`
+
+        It is the shape of the `bindings` member of C-04's `GetExpressionStateResponse`, returned by
+        `POST /v1/datawindow/expression/engine-state` when the request asks for bindings. That response
+        is a delegated envelope - its members are named in the operation's `x-proto-response` extension -
+        so nothing in this document `$ref`s this schema, and a style linter will report it as unused.
+
+        It is published anyway because this is the **one** contract detail the requirements single out as
+        not surviving naive serialization. A consumer that could not see the three parts and the
+        per-reference mode would reasonably send an already-expanded string, and the distinction would be
+        destroyed silently rather than rejected. The Tier-1 section header records the trade in full.
+      additionalProperties: false
+      required: [unexpandedExp]
+      properties:
+        unexpandedExp:
+          type: string
+          description: The expression's source text, unexpanded. Part 1 of the three.
+        bindTimeSnapshot:
+          type: object
+          description: >-
+            The bind-time variable values, keyed by variable name. Part 2 of the three - what a static
+            reference resolved against. A protobuf `map<string, VarValue>`.
+          additionalProperties:
+            $ref: '#/components/schemas/VarValue'
+        liveEnvironment:
+          type: object
+          description: >-
+            The current variable values, keyed by variable name. Part 3 of the three - what a dynamic
+            reference resolves against now. A protobuf `map<string, VarValue>`.
+          additionalProperties:
+            $ref: '#/components/schemas/VarValue'
+        vars:
+          type: array
+          description: >-
+            The variable references, each carrying its own `expansionMode`. **Per reference, never per
+            expression** - the legacy specification documents an example mixing static and dynamic
+            expansion inside one expression.
+          items:
+            $ref: '#/components/schemas/VarData'
+        fns:
+          type: array
+          description: The function references.
+          items:
+            $ref: '#/components/schemas/FuncData'
+        globalVars:
+          type: array
+          description: The global variable table entries the references resolve through.
+          items:
+            $ref: '#/components/schemas/GlobalVarData'
 
     AggregateHealthReport:
       type: object
@@ -2421,15 +4414,22 @@ components:
         allMask:
           type: integer
           format: int64
-          minimum: 0
-          maximum: 4294967295
+          const: 3847
           description: |-
-            The value of `INIT_FLAG_ENABLE_ALL`.
+            The value of `INIT_FLAG_ENABLE_ALL`, which is **3847** and is fixed by the legacy
+            declaration rather than by this deployment - hence `const` rather than a range.
+
+            `ws_objects/pfw.shared.pbl.src/enums.sru:L49` declares it as a **seven-term sum**:
+            `INIT_FLAG_ENABLE_UI` (1) + `INIT_FLAG_ENABLE_SCITER` (2) + `INIT_FLAG_ENABLE_BLINK` (4)
+            + `INIT_FLAG_ENABLE_ORCA` (256) + `INIT_FLAG_ENABLE_SQLITE` (512)
+            + `INIT_FLAG_ENABLE_DPIAWARE` (1024) + `INIT_FLAG_ENABLE_WEBVIEW` (2048) = **3847**.
 
             **It deliberately omits `INIT_FLAG_ENABLE_BLINKFAST` (8).** That is not an oversight and
             must not be "corrected": `blink.dll` and `blinkfast.dll` are alternative builds of one
             engine, so enabling both is meaningless. The omission is reproduced verbatim under C-B, so
-            `allMask` is **not** the bitwise union of every declared bit.
+            `allMask` is **not** the bitwise union of every declared bit - that union would be 3855, and
+            a consumer computing it that way would disagree with the framework by exactly the
+            `BLINKFAST` bit.
         unrecognizedBits:
           type: integer
           format: int64
@@ -2467,15 +4467,46 @@ components:
             - INIT_FLAG_ENABLE_SQLITE
             - INIT_FLAG_ENABLE_DPIAWARE
             - INIT_FLAG_ENABLE_WEBVIEW
+          x-enum-varnames:
+            - INIT_FLAG_ENABLE_UI
+            - INIT_FLAG_ENABLE_SCITER
+            - INIT_FLAG_ENABLE_BLINK
+            - INIT_FLAG_ENABLE_BLINKFAST
+            - INIT_FLAG_ENABLE_ORCA
+            - INIT_FLAG_ENABLE_SQLITE
+            - INIT_FLAG_ENABLE_DPIAWARE
+            - INIT_FLAG_ENABLE_WEBVIEW
           description: >-
-            The legacy identifier, spelled exactly as `enums.sru:L41-L49` declares it. Preserved
-            verbatim because it appears in stored characterization comparisons.
+            The legacy identifier, spelled exactly as `enums.sru:L41-L48` declares it. Preserved
+            verbatim because it appears in stored characterization comparisons. The `x-enum-varnames`
+            list is identical to the `enum` list here - deliberately, because the wire value *is* the
+            legacy symbol, so a generator has nothing to translate and the pairing is what makes the
+            member order line up with the numeric set on `value` below.
         value:
           type: integer
           format: int64
+          # THE SAME CLOSED SET AS `name`, IN THE SAME ORDER, EXPRESSED NUMERICALLY. The pairing of an
+          # exact numeric `enum` with `x-enum-varnames` carrying the SCREAMING_SNAKE identifiers is the
+          # convention the sibling OpenApi/security.v1.yaml uses for every legacy constant set, and it
+          # is used here for the same reason: the numbers are what appear in a serialized payload, a log
+          # record and a characterization recording, and the identifiers are what a reader recognises.
+          # Neither alone is sufficient, and `name[i]` corresponds to `value[i]` by construction.
+          enum: [1, 2, 4, 8, 256, 512, 1024, 2048]
+          x-enum-varnames:
+            - INIT_FLAG_ENABLE_UI
+            - INIT_FLAG_ENABLE_SCITER
+            - INIT_FLAG_ENABLE_BLINK
+            - INIT_FLAG_ENABLE_BLINKFAST
+            - INIT_FLAG_ENABLE_ORCA
+            - INIT_FLAG_ENABLE_SQLITE
+            - INIT_FLAG_ENABLE_DPIAWARE
+            - INIT_FLAG_ENABLE_WEBVIEW
           description: >-
-            The bit's numeric value. The eight are sparse - 1, 2, 4, 8, 256, 512, 1024, 2048 - rather
-            than the first eight powers of two, and the gap is the legacy's.
+            The bit's numeric value, exactly as `enums.sru:L41-L48` declares it. The eight are sparse -
+            1, 2, 4, 8, 256, 512, 1024, 2048 - rather than the first eight powers of two, and the gap
+            between 8 and 256 is the legacy's own: bits 16, 32, 64 and 128 are simply not declared. The
+            set is closed because the legacy declaration is closed; a ninth capability would be a change
+            to this published contract.
         enabled:
           type: boolean
           description: Whether this bit is set in `effectiveMask`.
@@ -2500,20 +4531,32 @@ components:
         prose - which is the whole point of declaring the routes: the shape of the eventual system is
         legible from this contract, while nothing is implemented behind it.
       additionalProperties: false
-      required: [status, service, marker, route]
+      required: [status, deferredService, marker, route, retCode]
       properties:
         status:
           type: integer
           const: 501
           description: Always 501. Repeated in the body so a logged body is self-describing.
-        service:
+        deferredService:
           type: string
           enum: [DesignSystem, Documents, Integration, ScriptBridge]
           x-enum-varnames: [DesignSystem, Documents, Integration, ScriptBridge]
-          description: >-
+          description: |-
             The deferred service this route will eventually reach. The four are the Phase-2 half of the
             eight-service target roster; `docs/DEFERRED.md` is the authoritative roster and records
             which legacy objects each is assigned.
+
+            **The name is the whole of what this member carries, and that is the point.** Naming the
+            destination is required by the contract - it is what makes the eventual system legible - and
+            nothing beyond the name is permitted, because anything further would begin to describe a
+            capability that must not be modelled.
+
+            The member is spelled `deferredService` rather than `service` deliberately: `service` is
+            already used in this document for the **responding** service (`PingResponse`) and for an
+            **upstream** service (`UpstreamHealth`), and a third meaning on the same word would make a
+            body ambiguous in exactly the place a client branches on it. It also matches the
+            `x-deferred-service` extension each reserved operation carries, so the wire member and the
+            routing metadata read the same.
         marker:
           type: string
           const: reserved for Phase 2
@@ -2523,3 +4566,20 @@ components:
         route:
           type: string
           description: The matched route pattern, echoed so a client can log what it asked for.
+        retCode:
+          type: integer
+          format: int64
+          const: -2001
+          description: |-
+            `E_NO_IMPLEMENTATION`, which the legacy framework declares as **-2001**
+            [`ws_objects/pfw.shared.pbl.src/retcode.sru:L78`].
+
+            **The legacy's own not-implemented code, rather than a parallel vocabulary invented for
+            this document.** It is the same value `common.v1.RetCode.Value.E_NO_IMPLEMENTATION` carries
+            on the gRPC half of the boundary and the same value
+            `PowerFramework.Shared.Kernel.RetCode.E_NO_IMPLEMENTATION` carries in process, so a client
+            that branches on `retCode` handles a reserved route with the code it already knows. Its
+            neighbour `E_NO_SUPPORT` (-2000) is a different statement - "this framework does not support
+            that" rather than "this is not implemented here" - and is deliberately not used.
+
+            A constant rather than an open integer, because a reserved route has exactly one outcome.

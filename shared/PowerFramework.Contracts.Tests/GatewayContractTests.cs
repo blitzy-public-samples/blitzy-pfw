@@ -129,13 +129,18 @@ public sealed class GatewayContractTests
     {
         OpenApiDocument document = Document;
 
-        // An anonymous operation overrides the document-level requirement with an EMPTY requirement
-        // object - `security: [- {}]`. An operation that simply inherits has no `security` member at
-        // all, which the reader models as null rather than as an empty list.
+        // An anonymous operation overrides the document-level requirement with an EMPTY REQUIREMENT
+        // LIST - `security: []`. An operation that simply inherits has no `security` member at all,
+        // which the reader models as NULL rather than as an empty list, so the two states are
+        // distinguishable and `Count: 0` means "declared itself anonymous" and nothing else.
+        //
+        // `[]` AND `[{}]` ARE BOTH ANONYMOUS BUT ARE NOT INTERCHANGEABLE, and the document uses `[]`:
+        // `[]` says "no requirement applies", whereas `[{}]` says "one requirement applies and it is
+        // satisfied by nothing". Both permit anonymous access, but only `[]` says so in the shape every
+        // generator and policy checker reads - and it is the form the sibling security.v1.yaml uses for
+        // the same purpose, so the two documents in this folder state anonymity one way rather than two.
         (string Route, HttpMethod Method, OpenApiOperation Operation)[] anonymous = Operations(document)
-            .Where(static entry =>
-                entry.Operation.Security is { Count: 1 }
-                && entry.Operation.Security[0].Count == 0)
+            .Where(static entry => entry.Operation.Security is { Count: 0 })
             .ToArray();
 
         // EXACTLY ONE. The count matters as much as the identity: this is the assertion that stops a
@@ -158,7 +163,7 @@ public sealed class GatewayContractTests
         // dependency cannot resolve and the service never reports ready. Anonymity here is a
         // correctness requirement, not a convenience.
         Assert.NotNull(health.Security);
-        Assert.Empty(Assert.Single(health.Security));
+        Assert.Empty(health.Security);
 
         Assert.True(health.Responses!.ContainsKey("200"));
         Assert.True(health.Responses.ContainsKey("503"));
@@ -344,10 +349,27 @@ public sealed class GatewayContractTests
     {
         OpenApiDocument document = Document;
 
+        int checkedOperations = 0;
+
         foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
         {
-            bool anonymous = operation.Security is { Count: 1 } && operation.Security[0].Count == 0;
-            if (anonymous)
+            if (operation.Security is { Count: 0 })
+            {
+                continue;
+            }
+
+            // THE FOUR RESERVED ROUTES ARE THE ONE EXEMPTION, AND IT IS A C-D OBLIGATION RATHER THAN AN
+            // OVERSIGHT.
+            //
+            // They are still authenticated - none of them overrides the document-level requirement, and
+            // AReservedRouteRequiresATokenSoTheDeferredRosterIsNotAnonymouslyEnumerable asserts exactly
+            // that - but their DECLARED response set is exactly {501}, because C-D permits a reserved
+            // route to declare its 501 and its machine-readable body and nothing else. A second status
+            // in the set would suggest the route evaluates something before answering, which is the
+            // "stub them out" reading the requirements forbid. What an unauthenticated caller meets is
+            // the authentication middleware, which is a cross-cutting concern declared once at the
+            // security scheme; it is not a response the ROUTE produces.
+            if (Extension(operation, "x-deferred-service") is not null)
             {
                 continue;
             }
@@ -356,13 +378,17 @@ public sealed class GatewayContractTests
             //
             // A generated client typically throws on any status absent from the contract, so an
             // operation that can return 401 but does not say so produces an unhandled exception rather
-            // than a re-authentication attempt. Every authenticated route can return 401, so every one
-            // declares it - including the four reserved routes, which are authenticated precisely so an
-            // unauthenticated caller cannot enumerate the deferred roster.
+            // than a re-authentication attempt. Every authenticated operation that does real work can
+            // return 401, so every one declares it.
             Assert.True(
                 operation.Responses!.ContainsKey("401"),
                 $"{method} {route} requires a token but does not declare a 401.");
+
+            checkedOperations++;
         }
+
+        // 50 operations, less the one anonymous /health and the eight reserved-route operations.
+        Assert.Equal(41, checkedOperations);
     }
 
     // ==============================================================================================
@@ -409,7 +435,10 @@ public sealed class GatewayContractTests
         OpenApiDocument document = Document;
         IOpenApiSchema report = document.Components!.Schemas!["CapabilityReport"];
 
-        foreach (string maskProperty in (string[])["effectiveMask", "allMask", "unrecognizedBits"])
+        // `allMask` IS DELIBERATELY NOT IN THIS LOOP - see the separate assertion below. It is a legacy
+        // CONSTANT rather than a deployment-dependent value, so the document states it as a `const` and
+        // a range would be strictly weaker.
+        foreach (string maskProperty in (string[])["effectiveMask", "unrecognizedBits"])
         {
             IOpenApiSchema mask = report.Properties![maskProperty];
 
@@ -431,6 +460,55 @@ public sealed class GatewayContractTests
             Assert.Equal("0", mask.Minimum);
             Assert.Equal("4294967295", mask.Maximum);
         }
+    }
+
+    [Fact]
+    public void TheAllMaskIsTheLegacySevenTermSumThatOmitsBlinkfast()
+    {
+        OpenApiDocument document = Document;
+        IOpenApiSchema allMask =
+            document.Components!.Schemas!["CapabilityReport"].Properties!["allMask"];
+
+        // 3847, AND THE VALUE IS THE ASSERTION.
+        //
+        // ws_objects/pfw.shared.pbl.src/enums.sru:L49 declares INIT_FLAG_ENABLE_ALL as a SEVEN-TERM sum:
+        // UI(1) + SCITER(2) + BLINK(4) + ORCA(256) + SQLITE(512) + DPIAWARE(1024) + WEBVIEW(2048) = 3847.
+        // INIT_FLAG_ENABLE_BLINKFAST(8) is NOT one of the terms, so 3847 is NOT the bitwise union of the
+        // eight declared bits - the union is 3855.
+        //
+        // THE OMISSION IS PRESERVED, NOT CORRECTED (C-B). blink.dll and blinkfast.dll are alternative
+        // builds of ONE engine, so enabling both is meaningless. A future reader "tidying" this to 3855
+        // would be making the framework's own initialization flag disagree with the framework, and this
+        // assertion is what stops that being a silent change. pfw.sra:L91 initializes with exactly this
+        // constant, so it is the runtime-effective capability set rather than a documented ideal.
+        // NOTE ON THE COMPARISON TYPE: Microsoft.OpenApi 2.x models a JSON Schema `const` as a STRING,
+        // for the same reason it models a numeric bound as one - a JSON Schema value has no precision
+        // limit and parsing it into a CLR numeric type would silently round a value the document is
+        // entitled to state exactly. So the constant is compared as the text the document carries.
+        Assert.Equal("3847", allMask.Const);
+
+        int union = 1 + 2 + 4 + 8 + 256 + 512 + 1024 + 2048;
+        Assert.Equal(3855, union);
+        Assert.Equal(8, union - 3847);
+
+        // AND BLINKFAST IS STILL PRESENT AS A BIT IN ITS OWN RIGHT. It is excluded from the AGGREGATE,
+        // not from the capability set - a consumer can still enable it explicitly, exactly as the legacy
+        // permits.
+        // NOTE ON THE CONVERSION: the OpenAPI YAML reader materializes a JSON Schema number as a
+        // `decimal`, so the members are read as decimals and narrowed here rather than requested as
+        // `long` directly - which throws.
+        IOpenApiSchema value = document.Components.Schemas["Capability"].Properties!["value"];
+        long[] values = value.Enum!.Select(static node => (long)node!.GetValue<decimal>()).ToArray();
+        Assert.Equal([1L, 2L, 4L, 8L, 256L, 512L, 1024L, 2048L], values);
+        Assert.Contains(8L, values);
+
+        // THE NUMERIC SET AND THE IDENTIFIER SET LINE UP POSITIONALLY, which is what makes the pairing
+        // convention meaningful rather than decorative.
+        string[] names = value.Extensions!["x-enum-varnames"] is JsonNodeExtension varnames
+            ? varnames.Node!.AsArray().Select(static node => node!.GetValue<string>()).ToArray()
+            : [];
+        Assert.Equal(values.Length, names.Length);
+        Assert.Equal("INIT_FLAG_ENABLE_BLINKFAST", names[Array.IndexOf(values, 8L)]);
     }
 
     [Fact]
@@ -711,8 +789,8 @@ public sealed class GatewayContractTests
             }
         }
 
-        // 37 projected operations, each naming a request and a response.
-        Assert.Equal(74, checkedNames);
+        // 39 projected operations, each naming a request and a response.
+        Assert.Equal(78, checkedNames);
     }
 
     [Fact]
@@ -757,20 +835,37 @@ public sealed class GatewayContractTests
             Assert.Equal(rpc!.InputType.FullName, Extension(operation, "x-proto-request"));
             Assert.Equal(rpc.OutputType.FullName, Extension(operation, "x-proto-response"));
 
-            // AND IT MUST NOT BE A STREAM - see the dedicated test below for why.
+            // AND IT MUST NOT BE A CLIENT-TO-SERVER STREAM - see the dedicated test below for why.
+            //
+            // A SERVER stream IS projectable and two of them are projected. Its ordering is the trivial
+            // one - the server produces a sequence, the client consumes it in order - so it has a
+            // faithful request/response form: one request, and a response carrying the same chunks in
+            // the same order. A CLIENT-streaming or BIDIRECTIONAL RPC has no such form: there is no
+            // single request to send, and in the inverted case the callee calls back into the caller.
             Assert.False(
-                rpc.IsClientStreaming || rpc.IsServerStreaming,
-                $"{route} projects streaming RPC '{grpcMethod}'. Streams have no faithful REST "
-                    + "projection and must not be projected.");
+                rpc.IsClientStreaming,
+                $"{route} projects client-streaming RPC '{grpcMethod}'. A client-to-server stream has no "
+                    + "faithful REST projection and must not be projected.");
+
+            // A PROJECTED SERVER STREAM MUST SAY SO, so a consumer knows the body is the whole sequence
+            // rather than one message, and so the collection's element order is known to be significant.
+            if (rpc.IsServerStreaming)
+            {
+                Assert.Equal("server", Extension(operation, "x-grpc-streaming"));
+            }
+            else
+            {
+                Assert.Null(Extension(operation, "x-grpc-streaming"));
+            }
 
             checkedOperations++;
         }
 
-        Assert.Equal(37, checkedOperations);
+        Assert.Equal(39, checkedOperations);
     }
 
     [Fact]
-    public void EveryUnaryRpcOfCThreeAndCFourIsProjectedAndNoStreamIs()
+    public void EveryUnaryAndServerStreamingRpcOfCThreeAndCFourIsProjectedAndNoBidirectionalOneIs()
     {
         OpenApiDocument document = Document;
 
@@ -787,14 +882,22 @@ public sealed class GatewayContractTests
             .SelectMany(static service => service.Methods)
             .ToList();
 
-        string[] unary = allRpcs
-            .Where(static rpc => !rpc.IsClientStreaming && !rpc.IsServerStreaming)
+        // PROJECTABLE = UNARY OR SERVER-STREAMING. The property that decides it is whether the RPC has
+        // a single request and a determinate response sequence, not whether it streams at all.
+        string[] projectable = allRpcs
+            .Where(static rpc => !rpc.IsClientStreaming)
             .Select(static rpc => rpc.Name)
             .OrderBy(static name => name, StringComparer.Ordinal)
             .ToArray();
 
-        string[] streaming = allRpcs
-            .Where(static rpc => rpc.IsClientStreaming || rpc.IsServerStreaming)
+        string[] serverStreaming = allRpcs
+            .Where(static rpc => rpc.IsServerStreaming && !rpc.IsClientStreaming)
+            .Select(static rpc => rpc.Name)
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        string[] bidirectional = allRpcs
+            .Where(static rpc => rpc.IsClientStreaming)
             .Select(static rpc => rpc.Name)
             .OrderBy(static name => name, StringComparer.Ordinal)
             .ToArray();
@@ -803,26 +906,42 @@ public sealed class GatewayContractTests
         //
         // A PARTIAL projection would be the worst outcome: a consumer would find most of the surface
         // over REST and have no way to know which parts were missing, so it would look like a bug in
-        // their client rather than a boundary of the contract. Every unary RPC is projected.
-        Assert.Equal(unary, projectedRpcs);
+        // their client rather than a boundary of the contract. Gateway is the SOLE ingress, so an
+        // operation the gRPC contract publishes and this document omits is unreachable from outside the
+        // cluster. Every unary AND every server-streaming RPC is projected.
+        Assert.Equal(projectable, projectedRpcs);
 
-        // AND THE FIVE STREAMS ARE EXCLUDED, DELIBERATELY.
+        // THE TWO SERVER STREAMS ARE PROJECTED, AS ORDERED COLLECTIONS.
         //
-        // `Retrieve` is server-streaming; `EventChain` is bidirectional and carries an ordered event
-        // chain with a per-message veto; `InvokeMethodChannel` and `TraceChannel` are the two INVERTED
-        // streams, where the legacy expects the APPLICATION to implement the macro switch so across a
-        // boundary DataServices must call back INTO its client; and `EventStream` is C-04's own server
-        // stream of the three events the engine declares on itself. REST cannot express any of those,
-        // and a partial projection of an ordered chain would deliver part of it with no way for the
-        // consumer to detect what it had missed.
+        // `Retrieve` carries the buffer chunks of the retrieval third of the triple, and `EventStream`
+        // carries the three events the expression engine declares on itself. Each projects to one
+        // operation whose response is the same sequence the stream would have delivered, in the same
+        // order and with the chunking contract intact - the chunk index, the final-chunk flag and the
+        // cumulative row count all travel.
+        Assert.Equal(["EventStream", "Retrieve"], serverStreaming);
+        foreach (string name in serverStreaming)
+        {
+            Assert.Contains(name, projectedRpcs);
+        }
+
+        // AND THE THREE BIDIRECTIONAL STREAMS ARE EXCLUDED, DELIBERATELY.
+        //
+        // `EventChain` carries the item-change and validation chain, which is STRICTLY SYNCHRONOUS with
+        // no reordering permitted: the validation-error handler READS AND CLEARS the result the
+        // preceding item-change event stashed, so its behaviour is a function of the prior event's
+        // return value. JSON over independent REST requests would lose both that ordering and the
+        // TRI-VALUED typed veto - prevent-once, prevent-deep, continue - which collapses to a boolean
+        // the moment it is flattened. `InvokeMethodChannel` and `TraceChannel` are additionally
+        // INVERTED: the legacy expects the APPLICATION to implement the macro switch, so across a
+        // boundary DataServices calls back INTO its client, and an inverted stream has no
+        // request/response direction to project at all.
         //
         // THE SET IS ASSERTED RATHER THAN THE COUNT, so a stream added to either service fails here
         // with its own name in the message instead of an off-by-one - and it must fail, because a new
-        // stream is a new documented gap in the ingress and the document names its gaps individually.
-        Assert.Equal(
-            ["EventChain", "EventStream", "InvokeMethodChannel", "Retrieve", "TraceChannel"],
-            streaming);
-        Assert.Empty(projectedRpcs.Intersect(streaming, StringComparer.Ordinal));
+        // bidirectional stream is a new documented gap in the ingress and the document names its gaps
+        // individually.
+        Assert.Equal(["EventChain", "InvokeMethodChannel", "TraceChannel"], bidirectional);
+        Assert.Empty(projectedRpcs.Intersect(bidirectional, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -881,8 +1000,19 @@ public sealed class GatewayContractTests
             .Select(entry => (entry.Route, Service: Extension(entry.Operation, "x-deferred-service")))
             .Where(static entry => entry.Service is not null)
             .Select(static entry => (entry.Route, Service: entry.Service!))
+            .Distinct()
             .OrderBy(static entry => entry.Route, StringComparer.Ordinal)
             .ToArray();
+
+        // EIGHT OPERATIONS ACROSS FOUR ROUTES - `get` and `post` on each, and both name the same
+        // deferred service, which is why the pairs are de-duplicated above before the set is compared.
+        // Declaring both methods is what makes "nothing here is implemented" cover more than one verb:
+        // each answers the same 501, neither accepts a request body, and every OTHER method on the route
+        // answers the same way too.
+        Assert.Equal(
+            8,
+            Operations(document)
+                .Count(entry => Extension(entry.Operation, "x-deferred-service") is not null));
 
         // FOUR, AND EXACTLY FOUR.
         //
@@ -944,12 +1074,34 @@ public sealed class GatewayContractTests
         Assert.Equal("501", body.Properties["status"].Const);
         Assert.Equal("reserved for Phase 2", body.Properties["marker"].Const);
 
+        // THE MEMBER IS `deferredService`, NOT `service`.
+        //
+        // `service` already means the RESPONDING service on PingResponse and an UPSTREAM service on
+        // UpstreamHealth, so a third meaning on the same word would make a body ambiguous in exactly the
+        // place a client branches on it. The name also matches the `x-deferred-service` extension each
+        // reserved operation carries, so the wire member and the routing metadata read the same.
         Assert.Equal(
             ["DesignSystem", "Documents", "Integration", "ScriptBridge"],
-            body.Properties["service"].Enum!.Select(static node => node!.GetValue<string>()).ToArray());
+            body.Properties["deferredService"].Enum!
+                .Select(static node => node!.GetValue<string>())
+                .ToArray());
+
+        // THE RETURN CODE IS THE LEGACY'S OWN, NOT A PARALLEL VOCABULARY.
+        //
+        // E_NO_IMPLEMENTATION is -2001 [ws_objects/pfw.shared.pbl.src/retcode.sru:L78], which is the same
+        // value common.v1.RetCode.Value.E_NO_IMPLEMENTATION carries on the gRPC half of the boundary and
+        // PowerFramework.Shared.Kernel.RetCode.E_NO_IMPLEMENTATION carries in process. A client that
+        // already branches on retCode therefore handles a reserved route with the code it knows. Its
+        // neighbour E_NO_SUPPORT (-2000) is a DIFFERENT statement and is deliberately not used.
+        Assert.Equal("-2001", body.Properties["retCode"].Const);
+
+        // AND THE GRPC HALF OF THE BOUNDARY CARRIES THE SAME NUMBER. Asserted against the generated
+        // descriptor rather than against a literal, so a change on either side of the boundary fails here
+        // instead of leaving the two halves quietly disagreeing.
+        Assert.Equal(-2001, (long)RetCode.Types.Value.ENoImplementation);
 
         Assert.NotNull(body.Required);
-        foreach (string required in (string[])["status", "service", "marker", "route"])
+        foreach (string required in (string[])["status", "deferredService", "marker", "route", "retCode"])
         {
             Assert.Contains(required, body.Required);
         }
@@ -1013,8 +1165,21 @@ public sealed class GatewayContractTests
             // exposes no capability. But the BODY names the deferred service and the roadmap marker, so
             // an anonymous reserved route publishes the system's Phase-2 plan to any unauthenticated
             // caller. Requiring a token costs nothing and keeps the roster inside the boundary.
+            //
+            // A NULL `security` MEMBER IS HOW THAT IS EXPRESSED: the operation inherits the
+            // document-level bearer requirement rather than overriding it. An empty list would have made
+            // it anonymous, which is why the distinction between null and empty is load-bearing here.
             Assert.Null(operation.Security);
-            Assert.True(operation.Responses!.ContainsKey("401"));
+
+            // AND THE DECLARED RESPONSE SET IS EXACTLY {501} - THE C-D AUDIT, MADE EXECUTABLE.
+            //
+            // C-D permits a reserved route to declare its four paths, its 501 responses and the
+            // machine-readable body, and nothing else. A second declared status - even a 401 - would say
+            // the route evaluates something before answering, which is the "stub them out" reading the
+            // requirements forbid. The 401 an unauthenticated caller actually receives comes from the
+            // authentication middleware, a cross-cutting concern declared once at the security scheme;
+            // it is not a response this route produces, and the two are deliberately not conflated.
+            Assert.Equal(["501"], operation.Responses!.Keys.ToArray());
         }
     }
 
@@ -1073,29 +1238,37 @@ public sealed class GatewayContractTests
     // ==============================================================================================
 
     [Fact]
-    public void TheDocumentDeclaresFortyFourOperationsAcrossFortyFourRoutes()
+    public void TheDocumentDeclaresFiftyOperationsAcrossFortySixRoutes()
     {
         OpenApiDocument document = Document;
 
-        // 3 (health, ping, capabilities) + 37 (projected) + 4 (reserved) = 44.
+        // ROUTES: 3 (health, ping, capabilities) + 39 (projected) + 4 (reserved) = 46.
+        // OPERATIONS: the same 42, plus a second method on each reserved route = 50.
         //
-        // The 37 is every unary RPC of C-03 and C-04: six lifecycle/update/gate operations plus the
-        // eight read-and-apply operations of the four headless models for C-03, and twenty-three for
-        // C-04. The five streams are excluded and are named individually in
-        // EveryUnaryRpcOfCThreeAndCFourIsProjectedAndNoStreamIs.
+        // The 39 is every unary AND every server-streaming RPC of C-03 and C-04: fifteen of C-03's
+        // sixteen - retrieval, the five lifecycle/update/gate operations and the eight read-and-apply
+        // operations of the four headless models - and twenty-four of C-04's twenty-six. The three
+        // BIDIRECTIONAL streams are excluded and are named individually in
+        // EveryUnaryAndServerStreamingRpcOfCThreeAndCFourIsProjectedAndNoBidirectionalOneIs.
         //
-        // The count is asserted so a route added without a test, or removed without the documentation
+        // THE TWO NUMBERS DIFFER BY FOUR, AND THAT IS THE RESERVED ROUTES' SECOND METHOD. Every other
+        // route carries exactly one operation; each reserved route carries `get` and `post`, both
+        // answering the same 501 and neither accepting a body.
+        //
+        // The counts are asserted so a route added without a test, or removed without the documentation
         // being updated, fails here. It is the cheapest possible guard against the document and the
         // specification drifting apart, which is the failure that produced finding I-2 in the first
         // place - a contract documented as published while absent.
-        Assert.Equal(44, document.Paths.Count);
-        Assert.Equal(44, Operations(document).Count());
+        Assert.Equal(46, document.Paths.Count);
+        Assert.Equal(50, Operations(document).Count());
     }
 
     [Fact]
     public void EverySchemaExceptProblemDetailsIsClosedToUnknownMembers()
     {
         OpenApiDocument document = Document;
+
+        int checkedSchemas = 0;
 
         foreach ((string name, IOpenApiSchema schema) in document.Components!.Schemas!)
         {
@@ -1104,6 +1277,22 @@ public sealed class GatewayContractTests
             // `ProtoPayload` MUST be open - its authority is the .proto, so this placeholder cannot
             // enumerate its members without becoming the second source of truth it exists to avoid.
             if (name is "ProblemDetails" or "ConflictProblemDetails" or "ProtoPayload")
+            {
+                continue;
+            }
+
+            // A NON-OBJECT SCHEMA IS SKIPPED BECAUSE THE KEYWORD HAS NO MEANING ON ONE, NOT BECAUSE IT IS
+            // EXEMPT FROM THE CONVENTION.
+            //
+            // `additionalProperties` constrains members of an OBJECT. A string enum - DwBuffer,
+            // ItemStatus, ExpansionMode, DataWindowEventBit - and an array - RetrieveResult,
+            // ExpressionEventStreamResult - have no members to constrain, so writing
+            // `additionalProperties: false` on one would be inert noise that invites a reader to ask what
+            // it is doing there. The convention is unchanged and every OBJECT schema below is still
+            // required to close itself; the reader's default for an unstated keyword is "allowed", which
+            // is why the check has to distinguish the two cases rather than treat the default as a
+            // violation.
+            if (schema.Type is not null && !schema.Type.Value.HasFlag(JsonSchemaType.Object))
             {
                 continue;
             }
@@ -1117,7 +1306,13 @@ public sealed class GatewayContractTests
                 schema.AdditionalPropertiesAllowed,
                 $"Schema '{name}' permits unknown members. Only ProblemDetails (RFC 9457 extension "
                     + "members) and ProtoPayload (authority delegated to the .proto) may.");
+
+            checkedSchemas++;
         }
+
+        // AND THE CHECK ACTUALLY REACHED SOMETHING. Without this, a change that made every schema
+        // non-object - or misspelled the exemption list - would pass an empty loop silently.
+        Assert.Equal(32, checkedSchemas);
     }
 
     [Fact]

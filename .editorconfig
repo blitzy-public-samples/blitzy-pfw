@@ -478,6 +478,22 @@ dotnet_diagnostic.IDE1006.severity = none
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 
+# Preserved verbatim: the two macro variable-type discriminators VAR_LOCAL=0 and VAR_FOREIGN=1,
+# declared on the type that ports the global variable table so the constant stays adjacent to the
+# array it discriminates, exactly as the oracle declares them beside GLOBALVARDATA GlobalVars[].
+# VAR_FOREIGN is the value the legacy compares before dereferencing another DataWindow's expression
+# service, and a foreign variable cannot be expanded statically.
+# Source: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L117-L118, declared
+# beside the array at :L103, compared at :L1425 and :L2199.
+# These spellings travel in serialized payloads, log records and characterization recordings, so a
+# rename would silently invalidate every stored comparison - here the payload is contract C-04's
+# GlobalVarData.var_type, whose wire enum carries these same two names as its original names. This
+# section is the DECLARING file's entry: the sibling files in this folder CONSUME the discriminator,
+# and CA1707 reports declarations only, so none of them needs one.
+[services/dataservices-service/PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
 # Preserved verbatim: the SQL clause-modification styles SQL_MS_REPLACE=1, SQL_MS_APPEND=2 and
 # SQL_MS_PREPEND=3, together with the validation that a zero index or an empty clause yields
 # E_INVALID_ARGUMENT. The style value is carried on the query contract.
