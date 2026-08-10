@@ -39,7 +39,10 @@
 //       PastingTheUninitialisedDatetimeReportsATypeMismatch
 //
 //  THE TWENTY-ONE LINES THIS SUITE CANNOT REACH, AND WHY EACH ONE STAYS. Coverage of the file under
-//  test is 98.1% of lines, and the remainder is not untested behaviour - it is code that is
+//  test is 1,165 of its 1,186 coverable lines - 98.2%, measured from the Cobertura report the
+//  documented `dotnet test --collect:"XPlat Code Coverage"` command emits, against which the
+//  PowerFramework.DataServices assembly as a whole scores 86.0% and clears constraint C-H's 80%
+//  per-service gate. The remaining twenty-one lines are not untested behaviour - they are code that is
 //  UNREACHABLE BY CONSTRUCTION and retained because the oracle writes it. Enumerated so that nobody
 //  has to rediscover the reason, and so that a later edit which makes one of them reachable is
 //  recognised as a real change:
@@ -64,12 +67,47 @@
 //  write nothing, and that the ten dialogs arrive as structured errors carrying their keys - so a
 //  later "helpful" measurement, clipboard write or message rewording fails a test instead of passing
 //  silently.
+//
+//  FOUR STRUCTURAL REGIONS SIT AFTER THE BEHAVIOURAL ONES, each asserting a property that no single
+//  behavioural test can reach. They are the ones to read first when changing the boundary rather than
+//  the behaviour:
+//
+//    * THE C-D BOUNDARY, ASSERTED STRUCTURALLY. Reflects the whole model - private members included -
+//      and proves that none of the eleven deferred locators reaches it: no DPI or unit conversion, no
+//      font or popup-menu OBJECT, no canvas, no window rectangle. Then proves the published surface is
+//      built out of a CLOSED type set, which is the form of the assertion that cannot be evaded by
+//      naming a member carefully, and which is also what discharges "no dialog, message-box or UI type
+//      in an error payload". Note carefully why the ban names OPERATIONS and not the word "font":
+//      TextMeasurementCandidate CARRIES FontFace, FontHeight and Bold as data, and that is the split
+//      working correctly - measuring with them is what is deferred.
+//    * THE COMPUTED LOGICAL WIDTHS, DRIVEN FROM THE FIXTURE CORPUS. The Len/LenA pair and the
+//      Fill("A",n) + Fill("国",m) proxy, over the corpus's own column shapes - char(100) from
+//      dw_test_dwsvc_contextmenu.srd:L11 in both its ASCII and its Han display sets, and char(200)
+//      from dw_sqlite.srd:L11, the only char(200) in the estate. Includes the case where the two
+//      maxima come from DIFFERENT rows, which is why the oracle wraps the subtraction in Abs, plus a
+//      theory proving no measure moves under any of the four DataWindow unit systems.
+//    * THE TEN DIALOGS: COMPLETENESS, BOTH SPRINTF GRAMMARS, AND THE LOCALIZATION CONTRAST. Locates
+//      the four sites the AAP does not name, asserts the ten as an exact set, exercises Sprintf in
+//      BOTH its index-omitted and its explicit-index grammar with emitted text for each, and - with a
+//      live TRANSLATING provider installed - proves these ten really do route through I18n, which the
+//      rest of the suite cannot show because the silent-passthrough fallback makes an absent lookup
+//      indistinguishable from a performed one.
+//    * THE ORDERED MAP SEAM AND THE INIT-BEFORE-SELECTION DATA DEPENDENCY. That the column-value map
+//      is genuinely Shared.Containers.OrderedMap with insertion order and one-based positional access,
+//      and that an identifier is meaningful to ApplySelection only because initialization put it in
+//      the model first - the data dependency behind pattern (b), whose ORDERING is
+//      EventOrderingPatternTests.cs's subject rather than this file's.
+//
+//  NO SCREAMING_SNAKE CONSTANT IS DECLARED HERE. The nine legacy command identifiers are referenced as
+//  ContextMenuModel.MID_*, matching RowSelectServiceTests, EventGateTests and DropDownSearchModelTests,
+//  and matching .editorconfig, which licenses those spellings for the named implementation files only.
 // ==============================================================================================
 
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 
 using Microsoft.Extensions.Options;
 
@@ -77,6 +115,7 @@ using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
 using PowerFramework.DataServices.Expressions;
 using PowerFramework.DataServices.Services;
+using PowerFramework.Shared.Containers;
 using PowerFramework.Shared.Eventful;
 using PowerFramework.Shared.Kernel;
 using PowerFramework.Shared.Localization;
@@ -94,18 +133,18 @@ public sealed class ContextMenuModelTests
     private const string HeaderObject = Column + "_t";
     private const string CheckColumn = "flag";
 
-    // The nine command identifiers, restated from n_cst_dwsvc_contextmenu.sru:L37-L45 so that a change
-    // on either side is caught rather than silently diverging. TheNineCommandIdentifiers below pins
-    // them against the service's own constants.
-    private const uint MID_RESERVED = 10000u;
-    private const uint MID_COLAUTOWIDTH = 10000u;
-    private const uint MID_COLAUTOWIDTH_ALL = 10001u;
-    private const uint MID_COLCHECK = 10002u;
-    private const uint MID_COLUNCHECK = 10003u;
-    private const uint MID_COLREVERTCHECK = 10004u;
-    private const uint MID_COLCOPY = 10005u;
-    private const uint MID_COLPASTE = 10006u;
-    private const uint MID_ITEMCOPY = 10007u;
+    // THE NINE COMMAND IDENTIFIERS ARE REFERENCED, NEVER RE-DECLARED. Every use below reads
+    // ContextMenuModel.MID_* directly, so this suite has no private copy of a legacy identifier that
+    // could silently drift from the oracle's own [n_cst_dwsvc_contextmenu.sru:L37-L45]. The literal
+    // VALUES are still pinned - by TheNineCommandIdentifiers and TheTwoTenThousandIdentifiersAreBoth
+    // Declared, which compare the service's constants against bare literals - so a renumbering is
+    // caught in exactly one place instead of being masked by a matching local edit.
+    //
+    // This also keeps the file inside the naming boundary the repository draws deliberately:
+    // .editorconfig suppresses CA1707 and IDE1006 only for the named IMPLEMENTATION files that carry
+    // the preserved SCREAMING_SNAKE spellings - Services/ContextMenuModel.cs among them - and for no
+    // test file, matching RowSelectServiceTests, EventGateTests and DropDownSearchModelTests, none of
+    // which declares one either.
 
     /// <summary>The separator marker, which IS the item's text [<c>:L511</c>].</summary>
     private const string Separator = "-";
@@ -247,20 +286,186 @@ public sealed class ContextMenuModelTests
     // ==============================================================================================
 
     /// <summary>
-    /// The nine command identifiers carry the oracle's values [<c>:L37-L45</c>].
+    /// The nine command identifiers, one theory row per oracle line: the legacy SPELLING survives
+    /// verbatim, the value is the oracle's, and the width is <c>uint</c> [<c>:L37-L45</c>].
     /// </summary>
-    [Fact]
-    public void TheNineCommandIdentifiers()
+    /// <param name="locator">The oracle line the row is taken from.</param>
+    /// <param name="name">The legacy identifier, looked up BY NAME rather than referenced.</param>
+    /// <param name="expected">The oracle's value, as a bare literal.</param>
+    /// <remarks>
+    /// <para>
+    /// THE CONSTANT IS RESOLVED BY NAME, WHICH IS THE POINT. A test that wrote
+    /// <c>Assert.Equal(10002u, ContextMenuModel.MID_COLCHECK)</c> would pin the VALUE and say nothing
+    /// about the SPELLING - yet AAP 0.4.5.3 preserves these identifiers precisely because they appear in
+    /// serialized payloads, log records and characterization recordings, so a rename is as breaking as a
+    /// renumbering. Reflecting the field out by its legacy name fails if either changes, and it fails
+    /// with the oracle line in the message.
+    /// </para>
+    /// <para>
+    /// <c>IsLiteral</c> IS ASSERTED because a <c>static readonly</c> field would compile every call site
+    /// against a memory read rather than an inlined constant, and would silently permit a value that
+    /// differs between the assembly this suite ran against and the one a consumer links.
+    /// </para>
+    /// <para>
+    /// THE WIDTH IS <c>uint</c>, NOT <c>ulong</c>. PowerScript's <c>unsignedlong</c> is 32 bits, so
+    /// <c>constant ulong</c> maps to <c>uint</c> under AAP 0.4.5.2's fixed-width convention - the name is
+    /// the false friend here, and a port that read "ulong" literally would double every id's wire width.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(CommandIdentifierRows))]
+    public void TheNineCommandIdentifiers(string locator, string name, uint expected)
     {
-        Assert.Equal(MID_RESERVED, ContextMenuModel.MID_RESERVED);
-        Assert.Equal(MID_COLAUTOWIDTH, ContextMenuModel.MID_COLAUTOWIDTH);
-        Assert.Equal(MID_COLAUTOWIDTH_ALL, ContextMenuModel.MID_COLAUTOWIDTH_ALL);
-        Assert.Equal(MID_COLCHECK, ContextMenuModel.MID_COLCHECK);
-        Assert.Equal(MID_COLUNCHECK, ContextMenuModel.MID_COLUNCHECK);
-        Assert.Equal(MID_COLREVERTCHECK, ContextMenuModel.MID_COLREVERTCHECK);
-        Assert.Equal(MID_COLCOPY, ContextMenuModel.MID_COLCOPY);
-        Assert.Equal(MID_COLPASTE, ContextMenuModel.MID_COLPASTE);
-        Assert.Equal(MID_ITEMCOPY, ContextMenuModel.MID_ITEMCOPY);
+        FieldInfo? field = typeof(ContextMenuModel).GetField(
+            name,
+            BindingFlags.Public | BindingFlags.Static);
+
+        Assert.NotNull(field);
+        Assert.True(
+            field.IsLiteral,
+            locator + ": " + name + " must be a compile-time constant, as the oracle declares it.");
+        Assert.Equal(typeof(uint), field.FieldType);
+        Assert.Equal(expected, Assert.IsType<uint>(field.GetRawConstantValue()));
+    }
+
+    /// <summary>
+    /// One row per command identifier, each carrying its oracle line [<c>:L37-L45</c>].
+    /// </summary>
+    /// <returns>Locator, legacy identifier, oracle value.</returns>
+    public static TheoryData<string, string, uint> CommandIdentifierRows() => new()
+    {
+        { "n_cst_dwsvc_contextmenu.sru:L37", "MID_RESERVED", 10000u },
+        { "n_cst_dwsvc_contextmenu.sru:L38", "MID_COLAUTOWIDTH", 10000u },
+        { "n_cst_dwsvc_contextmenu.sru:L39", "MID_COLAUTOWIDTH_ALL", 10001u },
+        { "n_cst_dwsvc_contextmenu.sru:L40", "MID_COLCHECK", 10002u },
+        { "n_cst_dwsvc_contextmenu.sru:L41", "MID_COLUNCHECK", 10003u },
+        { "n_cst_dwsvc_contextmenu.sru:L42", "MID_COLREVERTCHECK", 10004u },
+        { "n_cst_dwsvc_contextmenu.sru:L43", "MID_COLCOPY", 10005u },
+        { "n_cst_dwsvc_contextmenu.sru:L44", "MID_COLPASTE", 10006u },
+        { "n_cst_dwsvc_contextmenu.sru:L45", "MID_ITEMCOPY", 10007u },
+    };
+
+    /// <summary>
+    /// The identifier an item CARRIES is the same <c>uint</c> the nine constants are
+    /// [<c>:L17</c> versus <c>:L37-L45</c>].
+    /// </summary>
+    /// <remarks>
+    /// TWO DECLARATIONS, ONE WIDTH. The oracle spells the structure field <c>unsignedlong id</c> and the
+    /// nine constants <c>constant ulong</c>, so a port could plausibly widen one and not the other and
+    /// still compile - every assignment would simply convert. This pins them equal, which is what makes
+    /// <see cref="ContextMenuModel.MID_ITEMCOPY"/> assignable to <see cref="MenuItemData.Id"/> without a
+    /// narrowing conversion that could ever be lossy.
+    /// </remarks>
+    [Fact]
+    public void AnItemIdentifierIsTheSameWidthAsTheCommandIdentifiers()
+    {
+        PropertyInfo? id = typeof(MenuItemData).GetProperty(
+            nameof(MenuItemData.Id),
+            BindingFlags.Public | BindingFlags.Instance);
+
+        Assert.NotNull(id);
+        Assert.Equal(typeof(uint), id.PropertyType);
+        Assert.Equal(
+            typeof(uint),
+            Assert.IsType<FieldInfo>(
+                typeof(ContextMenuModel).GetField(
+                    nameof(ContextMenuModel.MID_ITEMCOPY),
+                    BindingFlags.Public | BindingFlags.Static),
+                exactMatch: false).FieldType);
+    }
+
+    /// <summary>
+    /// <c>ARROW_BTN_WIDTH</c> is 18 and is still FLOATING POINT, as the oracle's <c>real</c> declares
+    /// [<c>:L63</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE NARROWING IS THE HAZARD, NOT THE VALUE. 18 is expressible as an <c>int</c>, so a port that
+    /// typed this constant integrally would compile, would pass any equality test written against
+    /// <c>18</c>, and would then TRUNCATE - because the allowance is added to a running
+    /// <c>fMaxTextWidth</c> that the oracle also declares <c>real</c> [<c>:L1088</c>, <c>:L1263</c>] and
+    /// that accumulates fractional text measurements. This asserts the declared type, which is the only
+    /// thing an equality test cannot reach.
+    /// </para>
+    /// <para>
+    /// IT IS PRIVATE, AND IS READ BY REFLECTION FOR THAT REASON. The oracle declares it under
+    /// <c>private:</c> [<c>:L56</c>], the port keeps it private, and promoting it to satisfy a test would
+    /// widen the published surface - so the test reaches in rather than the surface reaching out. Its
+    /// OBSERVABLE projection is asserted alongside, through
+    /// <see cref="ColumnWidthComputation.ArrowButtonWidth"/>, which is what a consumer actually sees.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheArrowButtonWidthIsEighteenAndIsNotNarrowedToAnInteger()
+    {
+        FieldInfo? field = typeof(ContextMenuModel).GetField(
+            "ARROW_BTN_WIDTH",
+            BindingFlags.NonPublic | BindingFlags.Static);
+
+        Assert.NotNull(field);
+        Assert.True(field.IsLiteral, ":L63 declares it `constant`, so the port must too.");
+        Assert.Equal(typeof(double), field.FieldType);
+        Assert.Equal(18d, Assert.IsType<double>(field.GetRawConstantValue()));
+
+        // NOT ONE OF THE INTEGRAL TYPES a "tidy up" would reach for. Enumerated rather than implied,
+        // because `Assert.Equal(typeof(double), ...)` above already fails on a narrowing - this states
+        // WHY it must, so the intent survives a future edit.
+        Assert.DoesNotContain(
+            field.FieldType,
+            new[] { typeof(int), typeof(long), typeof(short), typeof(uint), typeof(ulong) });
+
+        // The observable projection carries the same type, so the allowance cannot be truncated on its
+        // way out to a caller either.
+        PropertyInfo? projected = typeof(ColumnWidthComputation).GetProperty(
+            nameof(ColumnWidthComputation.ArrowButtonWidth),
+            BindingFlags.Public | BindingFlags.Instance);
+
+        Assert.NotNull(projected);
+        Assert.Equal(typeof(double), projected.PropertyType);
+    }
+
+    /// <summary>
+    /// <c>PRP_POPUPMENUCREATOR</c> is the literal <c>{DWSVC_POPUPMENU_CREATOR}</c>, byte for byte and
+    /// brace for brace [<c>:L65</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IT IS A DataWindow PROPERTY NAME, NOT A MESSAGE. The oracle writes it into the DataWindow's own
+    /// property bag to mark a popup menu the service CREATED, compares it on the way back in
+    /// [<c>:L649</c>] and assigns it on the way out [<c>:L679</c>] - which is what makes
+    /// <see cref="MenuItemData.MenuOwner"/> decidable across a transfer. Both braces are part of the key:
+    /// the tag is deliberately spelled so it cannot collide with a DataWindow property, and dropping
+    /// either brace would silently stop matching a value written by an earlier build.
+    /// </para>
+    /// <para>
+    /// ASSERTED CHARACTER BY CHARACTER as well as whole, because a single-brace or curly-quote typo in a
+    /// 24-character token is exactly the kind of edit an equality-only assertion reports unhelpfully.
+    /// The comparison is ordinal throughout.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ThePopupMenuCreatorTagIsByteExact()
+    {
+        FieldInfo? field = typeof(ContextMenuModel).GetField(
+            "PRP_POPUPMENUCREATOR",
+            BindingFlags.NonPublic | BindingFlags.Static);
+
+        Assert.NotNull(field);
+        Assert.True(field.IsLiteral, ":L65 declares it `constant string`.");
+        Assert.Equal(typeof(string), field.FieldType);
+
+        string tag = Assert.IsType<string>(field.GetRawConstantValue());
+
+        Assert.Equal("{DWSVC_POPUPMENU_CREATOR}", tag, StringComparer.Ordinal);
+
+        // BOTH BRACES, EXPLICITLY - and exactly one of each, so a doubled brace is caught too.
+        Assert.StartsWith("{", tag, StringComparison.Ordinal);
+        Assert.EndsWith("}", tag, StringComparison.Ordinal);
+        Assert.Equal(1, tag.Count(character => character == '{'));
+        Assert.Equal(1, tag.Count(character => character == '}'));
+
+        // The token between them, uppercase and underscore-separated exactly as the oracle spells it.
+        Assert.Equal("DWSVC_POPUPMENU_CREATOR", tag[1..^1], StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -832,10 +1037,10 @@ public sealed class ContextMenuModelTests
         foreach (uint id in AllGatedIds)
         {
             bool suppressed =
-                (!colCheck && (id == MID_COLCHECK || id == MID_COLUNCHECK))
-                || (!colCopy && id == MID_COLCOPY)
-                || (!colPaste && id == MID_COLPASTE)
-                || (!itemCopy && id == MID_ITEMCOPY);
+                (!colCheck && (id == ContextMenuModel.MID_COLCHECK || id == ContextMenuModel.MID_COLUNCHECK))
+                || (!colCopy && id == ContextMenuModel.MID_COLCOPY)
+                || (!colPaste && id == ContextMenuModel.MID_COLPASTE)
+                || (!itemCopy && id == ContextMenuModel.MID_ITEMCOPY);
 
             if (!suppressed)
             {
@@ -851,14 +1056,14 @@ public sealed class ContextMenuModelTests
     /// </summary>
     private static IEnumerable<uint> AllGatedIds =>
     [
-        MID_COLAUTOWIDTH,
-        MID_COLAUTOWIDTH_ALL,
-        MID_COLCHECK,
-        MID_COLUNCHECK,
-        MID_COLREVERTCHECK,
-        MID_COLCOPY,
-        MID_COLPASTE,
-        MID_ITEMCOPY,
+        ContextMenuModel.MID_COLAUTOWIDTH,
+        ContextMenuModel.MID_COLAUTOWIDTH_ALL,
+        ContextMenuModel.MID_COLCHECK,
+        ContextMenuModel.MID_COLUNCHECK,
+        ContextMenuModel.MID_COLREVERTCHECK,
+        ContextMenuModel.MID_COLCOPY,
+        ContextMenuModel.MID_COLPASTE,
+        ContextMenuModel.MID_ITEMCOPY,
     ];
 
     /// <summary>All thirty-two combinations of the five toggles.</summary>
@@ -893,13 +1098,13 @@ public sealed class ContextMenuModelTests
     {
         (_, ContextMenuModel service) = NewService();
 
-        _ = service.AddMenu("check", string.Empty, MID_COLCHECK);
-        _ = service.AddMenu("uncheck", string.Empty, MID_COLUNCHECK);
-        _ = service.AddMenu("revert", string.Empty, MID_COLREVERTCHECK);
+        _ = service.AddMenu("check", string.Empty, ContextMenuModel.MID_COLCHECK);
+        _ = service.AddMenu("uncheck", string.Empty, ContextMenuModel.MID_COLUNCHECK);
+        _ = service.AddMenu("revert", string.Empty, ContextMenuModel.MID_COLREVERTCHECK);
 
         service.ColCheck = false;
 
-        Assert.Equal([MID_COLREVERTCHECK], IdsOf(service.EmitVisibleItems(service.GetCount())));
+        Assert.Equal([ContextMenuModel.MID_COLREVERTCHECK], IdsOf(service.EmitVisibleItems(service.GetCount())));
     }
 
     /// <summary>
@@ -914,15 +1119,15 @@ public sealed class ContextMenuModelTests
     {
         (_, ContextMenuModel service) = NewService();
 
-        _ = service.AddMenu("auto", string.Empty, MID_COLAUTOWIDTH);
-        _ = service.AddMenu("all", string.Empty, MID_COLAUTOWIDTH_ALL);
+        _ = service.AddMenu("auto", string.Empty, ContextMenuModel.MID_COLAUTOWIDTH);
+        _ = service.AddMenu("all", string.Empty, ContextMenuModel.MID_COLAUTOWIDTH_ALL);
 
         List<uint> withToggleSet = IdsOf(service.EmitVisibleItems(service.GetCount()));
 
         service.ColAutoWidth = false;
         List<uint> withToggleCleared = IdsOf(service.EmitVisibleItems(service.GetCount()));
 
-        Assert.Equal([MID_COLAUTOWIDTH, MID_COLAUTOWIDTH_ALL], withToggleSet);
+        Assert.Equal([ContextMenuModel.MID_COLAUTOWIDTH, ContextMenuModel.MID_COLAUTOWIDTH_ALL], withToggleSet);
         Assert.Equal(withToggleSet, withToggleCleared);
     }
 
@@ -1002,14 +1207,20 @@ public sealed class ContextMenuModelTests
     public void ASubmenuParentIsEmittedWithItsChildren()
     {
         (_, ContextMenuModel service) = NewService();
-        _ = service.AddSubmenuParent("parent", "img", "tip", split: true, id: MID_COLAUTOWIDTH);
-        _ = service.AddSubmenuItem(MID_COLAUTOWIDTH, "child", string.Empty, "ctip", MID_COLAUTOWIDTH_ALL);
+        _ = service.AddSubmenuParent(
+            "parent", "img", "tip", split: true, id: ContextMenuModel.MID_COLAUTOWIDTH);
+        _ = service.AddSubmenuItem(
+            ContextMenuModel.MID_COLAUTOWIDTH,
+            "child",
+            string.Empty,
+            "ctip",
+            ContextMenuModel.MID_COLAUTOWIDTH_ALL);
 
         MenuItemData parent = Assert.Single(service.EmitVisibleItems(service.GetCount()));
 
         Assert.True(parent.HasSubmenu);
         Assert.True(parent.Split);
-        Assert.Equal(MID_COLAUTOWIDTH_ALL, Assert.Single(parent.Submenu).Id);
+        Assert.Equal(ContextMenuModel.MID_COLAUTOWIDTH_ALL, Assert.Single(parent.Submenu).Id);
     }
 
     // ==============================================================================================
@@ -1035,7 +1246,7 @@ public sealed class ContextMenuModelTests
         Assert.Equal(0L, service.OnPrepare(3L, Dwo(Column, objectType), Pointer()));
 
         MenuItemData item = Assert.Single(service.StoreItems);
-        Assert.Equal(MID_ITEMCOPY, item.Id);
+        Assert.Equal(ContextMenuModel.MID_ITEMCOPY, item.Id);
         Assert.Equal("复制单元格", item.Text);
         Assert.Equal("Copy!", item.Image);
         Assert.Equal("复制单元格值", item.TipText);
@@ -1058,7 +1269,7 @@ public sealed class ContextMenuModelTests
         Assert.Equal(0L, service.OnPrepare(0L, Dwo("total", "compute"), Pointer("summary\t1")));
 
         MenuItemData item = Assert.Single(service.StoreItems);
-        Assert.Equal(MID_ITEMCOPY, item.Id);
+        Assert.Equal(ContextMenuModel.MID_ITEMCOPY, item.Id);
         Assert.Equal("复制", item.Text);
         Assert.Equal("复制值", item.TipText);
     }
@@ -1077,7 +1288,7 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo("total", "compute"), Pointer(band, pointerY: 5000L));
 
-        Assert.DoesNotContain(MID_ITEMCOPY, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_ITEMCOPY, IdsOf(service.StoreItems));
     }
 
     /// <summary>
@@ -1090,7 +1301,7 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(3L, Dwo(Column, "column"), Pointer());
 
-        Assert.DoesNotContain(MID_ITEMCOPY, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_ITEMCOPY, IdsOf(service.StoreItems));
     }
 
     /// <summary>
@@ -1105,7 +1316,7 @@ public sealed class ContextMenuModelTests
         // auto-width item for an object whose name does not end in the header suffix.
         _ = service.OnPrepare(0L, Dwo("anything", "text"), Pointer("header\t1"));
 
-        Assert.Equal([MID_COLAUTOWIDTH_ALL], IdsOf(service.EmitVisibleItems(service.GetCount())));
+        Assert.Equal([ContextMenuModel.MID_COLAUTOWIDTH_ALL], IdsOf(service.EmitVisibleItems(service.GetCount())));
     }
 
     /// <summary>
@@ -1123,7 +1334,7 @@ public sealed class ContextMenuModelTests
         // The header height is 100; a pointer at 50 is inside it.
         _ = service.OnPrepare(0L, Dwo("anything", "text"), Pointer(band, pointerY: 50L));
 
-        Assert.Equal([MID_COLAUTOWIDTH_ALL], IdsOf(service.EmitVisibleItems(service.GetCount())));
+        Assert.Equal([ContextMenuModel.MID_COLAUTOWIDTH_ALL], IdsOf(service.EmitVisibleItems(service.GetCount())));
     }
 
     /// <summary>
@@ -1158,14 +1369,14 @@ public sealed class ContextMenuModelTests
         Assert.Equal(Column, service.ClickedColumn);
 
         MenuItemData parent = service.EmitVisibleItems(service.GetCount())[0];
-        Assert.Equal(MID_COLAUTOWIDTH, parent.Id);
+        Assert.Equal(ContextMenuModel.MID_COLAUTOWIDTH, parent.Id);
         Assert.Equal("自动列宽", parent.Text);
         Assert.Equal("SizeHorizontal!", parent.Image);
         Assert.Equal("自动调整列宽度", parent.TipText);
         Assert.True(parent.Split);
 
         MenuItemData child = Assert.Single(parent.Submenu);
-        Assert.Equal(MID_COLAUTOWIDTH_ALL, child.Id);
+        Assert.Equal(ContextMenuModel.MID_COLAUTOWIDTH_ALL, child.Id);
         Assert.Equal("所有列", child.Text);
         Assert.Equal(string.Empty, child.Image);
         Assert.Equal("自动调整所有列宽度", child.TipText);
@@ -1186,7 +1397,7 @@ public sealed class ContextMenuModelTests
         _ = service.OnPrepare(0L, Dwo("plain_header", "text"), Pointer("header\t1"));
 
         MenuItemData item = Assert.Single(service.EmitVisibleItems(service.GetCount()));
-        Assert.Equal(MID_COLAUTOWIDTH_ALL, item.Id);
+        Assert.Equal(ContextMenuModel.MID_COLAUTOWIDTH_ALL, item.Id);
         Assert.Equal("自动列宽", item.Text);
         Assert.Equal("SizeHorizontal!", item.Image);
         Assert.Equal("自动调整所有列宽度", item.TipText);
@@ -1210,7 +1421,7 @@ public sealed class ContextMenuModelTests
         _ = service.OnPrepare(0L, Dwo("caption_t", "text"), Pointer("header\t1"));
 
         Assert.Equal(string.Empty, service.ClickedColumn);
-        Assert.Equal([MID_COLAUTOWIDTH_ALL], IdsOf(service.EmitVisibleItems(service.GetCount())));
+        Assert.Equal([ContextMenuModel.MID_COLAUTOWIDTH_ALL], IdsOf(service.EmitVisibleItems(service.GetCount())));
     }
 
     /// <summary>
@@ -1224,8 +1435,8 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
 
-        Assert.DoesNotContain(MID_COLAUTOWIDTH, IdsOf(service.StoreItems));
-        Assert.DoesNotContain(MID_COLAUTOWIDTH_ALL, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLAUTOWIDTH, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLAUTOWIDTH_ALL, IdsOf(service.StoreItems));
     }
 
     /// <summary>
@@ -1241,8 +1452,8 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
 
-        Assert.DoesNotContain(MID_COLAUTOWIDTH, IdsOf(service.StoreItems));
-        Assert.DoesNotContain(MID_COLAUTOWIDTH_ALL, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLAUTOWIDTH, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLAUTOWIDTH_ALL, IdsOf(service.StoreItems));
     }
 
     /// <summary>
@@ -1259,17 +1470,17 @@ public sealed class ContextMenuModelTests
             .Where(item => item.Id != 0u)
             .ToDictionary(item => item.Id);
 
-        Assert.Equal("勾选列", byId[MID_COLCHECK].Text);
-        Assert.Equal("勾选整列", byId[MID_COLCHECK].TipText);
-        Assert.Equal(string.Empty, byId[MID_COLCHECK].Image);
+        Assert.Equal("勾选列", byId[ContextMenuModel.MID_COLCHECK].Text);
+        Assert.Equal("勾选整列", byId[ContextMenuModel.MID_COLCHECK].TipText);
+        Assert.Equal(string.Empty, byId[ContextMenuModel.MID_COLCHECK].Image);
 
-        Assert.Equal("清除勾选列", byId[MID_COLUNCHECK].Text);
-        Assert.Equal("清除勾选整列", byId[MID_COLUNCHECK].TipText);
-        Assert.Equal(string.Empty, byId[MID_COLUNCHECK].Image);
+        Assert.Equal("清除勾选列", byId[ContextMenuModel.MID_COLUNCHECK].Text);
+        Assert.Equal("清除勾选整列", byId[ContextMenuModel.MID_COLUNCHECK].TipText);
+        Assert.Equal(string.Empty, byId[ContextMenuModel.MID_COLUNCHECK].Image);
 
-        Assert.Equal("反向勾选列", byId[MID_COLREVERTCHECK].Text);
-        Assert.Equal("反向勾选整列", byId[MID_COLREVERTCHECK].TipText);
-        Assert.Equal(string.Empty, byId[MID_COLREVERTCHECK].Image);
+        Assert.Equal("反向勾选列", byId[ContextMenuModel.MID_COLREVERTCHECK].Text);
+        Assert.Equal("反向勾选整列", byId[ContextMenuModel.MID_COLREVERTCHECK].TipText);
+        Assert.Equal(string.Empty, byId[ContextMenuModel.MID_COLREVERTCHECK].Image);
 
         _ = Assert.IsType<FakeDataWindowHost>(host);
     }
@@ -1308,9 +1519,9 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(CheckColumn + "_t", "text"), Pointer("header\t1"));
 
-        Assert.DoesNotContain(MID_COLCHECK, IdsOf(service.StoreItems));
-        Assert.DoesNotContain(MID_COLUNCHECK, IdsOf(service.StoreItems));
-        Assert.DoesNotContain(MID_COLREVERTCHECK, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLCHECK, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLUNCHECK, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLREVERTCHECK, IdsOf(service.StoreItems));
     }
 
     /// <summary>
@@ -1355,7 +1566,7 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
 
-        MenuItemData item = service.StoreItems.Single(entry => entry.Id == MID_COLCOPY);
+        MenuItemData item = service.StoreItems.Single(entry => entry.Id == ContextMenuModel.MID_COLCOPY);
         Assert.Equal("复制列", item.Text);
         Assert.Equal("Copy!", item.Image);
         Assert.Equal("复制整列的数据", item.TipText);
@@ -1376,12 +1587,12 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1", clipboard: clipboard));
 
-        Assert.Equal(expected, IdsOf(service.StoreItems).Contains(MID_COLPASTE));
+        Assert.Equal(expected, IdsOf(service.StoreItems).Contains(ContextMenuModel.MID_COLPASTE));
         Assert.Equal(clipboard, service.CapturedClipboardText);
 
         if (expected)
         {
-            MenuItemData item = service.StoreItems.Single(entry => entry.Id == MID_COLPASTE);
+            MenuItemData item = service.StoreItems.Single(entry => entry.Id == ContextMenuModel.MID_COLPASTE);
             Assert.Equal("粘贴列", item.Text);
             Assert.Equal("Paste!", item.Image);
             Assert.Equal("拷贝粘帖板数据覆盖到整列", item.TipText);
@@ -1399,7 +1610,7 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1", clipboard: "42"));
 
-        Assert.DoesNotContain(MID_COLPASTE, IdsOf(service.StoreItems));
+        Assert.DoesNotContain(ContextMenuModel.MID_COLPASTE, IdsOf(service.StoreItems));
     }
 
     /// <summary>
@@ -1407,12 +1618,15 @@ public sealed class ContextMenuModelTests
     /// </summary>
     /// <param name="addRow">Whether the buffer has a row, which is the third guard.</param>
     /// <param name="colCheck">The check toggle, which is the first guard.</param>
+    /// <param name="i18n">The localization facade, defaulting to one with no provider installed.</param>
     /// <returns>The host and the attached service.</returns>
     private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeCheckBoxColumn(
         bool addRow = true,
-        bool colCheck = true)
+        bool colCheck = true,
+        I18n? i18n = null)
     {
-        (FakeDataWindowHost host, ContextMenuModel service) = NewService(OptionsWith(colCheck: colCheck));
+        (FakeDataWindowHost host, ContextMenuModel service) =
+            NewService(OptionsWith(colCheck: colCheck), i18n);
 
         FakeDataWindowObjectDefinition checkColumn = host.AddColumn(CheckColumn, "char(1)");
         checkColumn.TabSequence = "60";
@@ -1620,7 +1834,7 @@ public sealed class ContextMenuModelTests
         host.ContextMenuHandler = (_, _, _) => 1L;
         _ = service.BuildMenu(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
 
-        Assert.Equal(RetCode.OK, service.ApplySelection(0L, Dwo(HeaderObject, "text"), MID_COLCOPY));
+        Assert.Equal(RetCode.OK, service.ApplySelection(0L, Dwo(HeaderObject, "text"), ContextMenuModel.MID_COLCOPY));
 
         Assert.Empty(service.StoreItems);
         Assert.Null(service.PendingCopiedText);
@@ -1643,7 +1857,7 @@ public sealed class ContextMenuModelTests
         _ = service.BuildMenu(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
         host.CallLog.Clear();
 
-        _ = service.ApplySelection(0L, Dwo(HeaderObject, "text"), MID_COLCOPY);
+        _ = service.ApplySelection(0L, Dwo(HeaderObject, "text"), ContextMenuModel.MID_COLCOPY);
 
         List<string> members = [.. host.CallLog.Members];
         int contextMenu = members.IndexOf("Event OnContextMenu");
@@ -1727,40 +1941,56 @@ public sealed class ContextMenuModelTests
         // :L206  MID_COLAUTOWIDTH reaches the single-column arity, which REFUSES a check-box column
         // [:L1272-L1275] - see ACheckBoxColumnIsOfferedAnAutoWidthItThenRefuses for why that is the
         // oracle's behaviour and not a broken arrangement.
-        Assert.Equal(RetCode.FAILED, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLAUTOWIDTH));
+        Assert.Equal(
+            RetCode.FAILED,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLAUTOWIDTH));
         ColumnAutoWidthPlan single = Assert.IsType<ColumnAutoWidthPlan>(service.PendingWidthPlan);
         Assert.Empty(single.Columns);
 
         // :L208  MID_COLAUTOWIDTH_ALL plans every eligible column - and the check-box column is NOT
         // eligible for the all-columns arity [:L1107-L1110], which is why it is absent from the plan.
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLAUTOWIDTH_ALL));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLAUTOWIDTH_ALL));
         ColumnAutoWidthPlan all = Assert.IsType<ColumnAutoWidthPlan>(service.PendingWidthPlan);
         Assert.DoesNotContain(CheckColumn, all.Columns.Select(column => column.ColName));
 
         // :L210  MID_COLCHECK writes the ON value.
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLCHECK));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLCHECK));
         Assert.Equal("Y", host.GetItemString(1L, CheckColumn));
 
         // :L212  MID_COLUNCHECK writes the OFF value.
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLUNCHECK));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLUNCHECK));
         Assert.Equal("N", host.GetItemString(1L, CheckColumn));
 
         // :L214  MID_COLREVERTCHECK flips it back.
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLREVERTCHECK));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLREVERTCHECK));
         Assert.Equal("Y", host.GetItemString(1L, CheckColumn));
 
         // :L218  MID_COLCOPY produces text and writes no clipboard (DECISION 3).
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLCOPY));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLCOPY));
         Assert.Equal("Y" + RowSeparator, service.PendingCopiedText);
 
         // :L216  MID_COLPASTE applies the captured clipboard text.
         _ = host.SetItem(1L, CheckColumn, "N");
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_COLPASTE));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_COLPASTE));
         Assert.Equal("Y", host.GetItemString(1L, CheckColumn));
 
         // :L220  MID_ITEMCOPY produces one cell's text, taking the column from the OBJECT rather than
         // from the clicked column.
-        Assert.Equal(RetCode.OK, service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)MID_ITEMCOPY));
+        Assert.Equal(
+            RetCode.OK,
+            service.OnDefProc(1L, Dwo(CheckColumn, "column"), (long)ContextMenuModel.MID_ITEMCOPY));
         Assert.Equal("Y", service.PendingCopiedText);
     }
 
@@ -1782,7 +2012,7 @@ public sealed class ContextMenuModelTests
 
         _ = service.OnPrepare(0L, Dwo(CheckColumn + "_t", "text"), Pointer("header\t1"));
 
-        Assert.Contains(MID_COLAUTOWIDTH, IdsOf(service.StoreItems));
+        Assert.Contains(ContextMenuModel.MID_COLAUTOWIDTH, IdsOf(service.StoreItems));
 
         ColumnAutoWidthPlan plan = service.ColumnAutoWidth(CheckColumn);
 
@@ -1807,7 +2037,7 @@ public sealed class ContextMenuModelTests
         // Preparation is what sets the clicked column the single-column arm needs.
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
 
-        Assert.Equal(RetCode.OK, service.OnDefProc(0L, Dwo(Column, "column"), (long)MID_RESERVED));
+        Assert.Equal(RetCode.OK, service.OnDefProc(0L, Dwo(Column, "column"), (long)ContextMenuModel.MID_RESERVED));
 
         ColumnAutoWidthPlan plan = Assert.IsType<ColumnAutoWidthPlan>(service.PendingWidthPlan);
         Assert.Equal(Column, Assert.Single(plan.Columns).ColName);
@@ -1841,11 +2071,11 @@ public sealed class ContextMenuModelTests
         (_, ContextMenuModel service) = NewService();
         _ = service.OnPrepare(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
 
-        _ = service.OnDefProc(0L, Dwo(Column, "column"), (long)MID_COLAUTOWIDTH);
+        _ = service.OnDefProc(0L, Dwo(Column, "column"), (long)ContextMenuModel.MID_COLAUTOWIDTH);
         ColumnAutoWidthPlan single = Assert.IsType<ColumnAutoWidthPlan>(service.PendingWidthPlan);
         Assert.Equal(Column, Assert.Single(single.Columns).ColName);
 
-        _ = service.OnDefProc(0L, Dwo(Column, "column"), (long)MID_COLAUTOWIDTH_ALL);
+        _ = service.OnDefProc(0L, Dwo(Column, "column"), (long)ContextMenuModel.MID_COLAUTOWIDTH_ALL);
         ColumnAutoWidthPlan all = Assert.IsType<ColumnAutoWidthPlan>(service.PendingWidthPlan);
         Assert.Equal(Column, Assert.Single(all.Columns).ColName);
     }
@@ -2852,10 +3082,13 @@ public sealed class ContextMenuModelTests
     /// A host carrying one editable, visible column of the requested type with a single row.
     /// </summary>
     /// <param name="colType">The column's raw <c>ColType</c>.</param>
+    /// <param name="i18n">The localization facade, defaulting to one with no provider installed.</param>
     /// <returns>The host and the attached service.</returns>
-    private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeTypedColumn(string colType)
+    private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeTypedColumn(
+        string colType,
+        I18n? i18n = null)
     {
-        (FakeDataWindowHost host, ContextMenuModel service) = NewService();
+        (FakeDataWindowHost host, ContextMenuModel service) = NewService(i18n: i18n);
 
         FakeDataWindowObjectDefinition typed = host.AddColumn("typed", colType);
         typed.TabSequence = "70";
@@ -2876,10 +3109,12 @@ public sealed class ContextMenuModelTests
     /// A host carrying one radio-button column with a code table, which makes it BOTH translating and
     /// enumerated [<c>:L979-L983</c>].
     /// </summary>
+    /// <param name="i18n">The localization facade, defaulting to one with no provider installed.</param>
     /// <returns>The host and the attached service.</returns>
-    private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeEnumeratedColumn()
+    private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeEnumeratedColumn(
+        I18n? i18n = null)
     {
-        (FakeDataWindowHost host, ContextMenuModel service) = NewService();
+        (FakeDataWindowHost host, ContextMenuModel service) = NewService(i18n: i18n);
 
         FakeDataWindowObjectDefinition grade = host.AddColumn("grade", "char(1)");
         grade.TabSequence = "80";
@@ -2901,13 +3136,21 @@ public sealed class ContextMenuModelTests
     /// A host carrying one detail column plus one sibling COLUMN object over it, which is what drives the
     /// synthesized proxy [<c>:L1297-L1301</c>].
     /// </summary>
+    /// <param name="siblingColType">
+    /// The sibling column's declared type, defaulting to the <c>char(10)</c> every pre-existing caller
+    /// uses. The FIXTURE-DRIVEN width theory passes the real fixture types through it -
+    /// <c>char(100)</c> from <c>dw_test_dwsvc_contextmenu.srd:L11</c> and <c>char(200)</c> from
+    /// <c>dw_sqlite.srd:L11</c> - so the proxy is measured over the corpus's own column shapes rather
+    /// than over one invented width.
+    /// </param>
     /// <returns>The host and the attached service.</returns>
-    private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeSiblingColumn()
+    private static (FakeDataWindowHost Host, ContextMenuModel Service) ArrangeSiblingColumn(
+        string siblingColType = "char(10)")
     {
         (FakeDataWindowHost host, ContextMenuModel service) = NewService();
 
         _ = host.AddColumn("host_col", "char(10)");
-        _ = host.AddColumn("typed", "char(10)");
+        _ = host.AddColumn("typed", siblingColType);
 
         host.SetDescribe("host_col.Band", "detail");
         host.SetDescribe("host_col.Type", "column");
@@ -3899,9 +4142,9 @@ public sealed class ContextMenuModelTests
     public void TheSixArgumentInsertAddsAnEnabledItemWithATooltip()
     {
         (_, ContextMenuModel service) = NewService();
-        _ = service.AddMenu("first", "", MID_ITEMCOPY);
+        _ = service.AddMenu("first", "", ContextMenuModel.MID_ITEMCOPY);
 
-        int index = service.InsertMenu(1u, true, "inserted", "Copy!", "a tip", MID_COLCOPY);
+        int index = service.InsertMenu(1u, true, "inserted", "Copy!", "a tip", ContextMenuModel.MID_COLCOPY);
 
         Assert.Equal(1, index);
         Assert.Equal("inserted", service.GetText(1u, true));
@@ -3919,8 +4162,17 @@ public sealed class ContextMenuModelTests
     {
         (_, ContextMenuModel service) = NewService();
 
-        Assert.Equal(0, service.AddSubmenuParent(string.Empty, "", "", true, MID_COLAUTOWIDTH));
-        Assert.Equal(0, service.AddSubmenuItem(MID_COLAUTOWIDTH, string.Empty, "", "", MID_COLAUTOWIDTH_ALL));
+        Assert.Equal(
+            0,
+            service.AddSubmenuParent(string.Empty, "", "", true, ContextMenuModel.MID_COLAUTOWIDTH));
+        Assert.Equal(
+            0,
+            service.AddSubmenuItem(
+                ContextMenuModel.MID_COLAUTOWIDTH,
+                string.Empty,
+                "",
+                "",
+                ContextMenuModel.MID_COLAUTOWIDTH_ALL));
         Assert.Equal(0, service.GetCount());
     }
 
@@ -4191,4 +4443,1241 @@ public sealed class ContextMenuModelTests
         return (host, service);
     }
 
+    // ==============================================================================================
+    //  THE C-D BOUNDARY, ASSERTED STRUCTURALLY                       AAP 0.2.1.3 CORRECTION 4 / C-D
+    //  --------------------------------------------------------------------------------------------
+    //  Correction 4 splits n_cst_dwsvc_contextmenu.sru in two. THE HEADLESS HALF SHIPS: the complete
+    //  menu item model - labels, ids, enabled and split flags - and the COMPUTED LOGICAL text widths.
+    //  THE RENDERING HALF DOES NOT, and it is identified in the oracle by these eleven locators:
+    //
+    //      :L18                    n_cst_popupmenu submenu       the structure's own field type
+    //      :L96-L106               n_cst_popupmenu insert API     the eight insert-submenu overloads
+    //      :L187                   Win32.GetWindowRect            window geometry for the popup origin
+    //      :L1092, :L1098          font = Create n_cst_font       font object, all-columns arity
+    //      :L1266, :L1277          font = Create n_cst_font       font object, single-column arity
+    //      :L1241, :L1243          Win32.PX2MMX(D2PX(...))        DPI and unit conversion, all columns
+    //      :L1409, :L1411          Win32.PX2MMX(D2PX(...))        DPI and unit conversion, one column
+    //
+    //  Every one of those belongs to DesignSystem, which AAP 0.2.2.2 forbids implementing "even
+    //  partially, even to 'stub them out'", and which is reachable only as the RESERVED Gateway route
+    //  `/v1/design/**` (AAP 0.4.4) - a routing declaration, not a stub.
+    //
+    //  WHY THE BANNED SET NAMES OPERATIONS AND NOT THE WORD "FONT". TextMeasurementCandidate carries
+    //  FontFace, FontHeight and Bold, and that is the split working correctly rather than a leak: those
+    //  three are raw `Describe` answers - DATA about which font a renderer should use - exactly as
+    //  ColumnWidth and ColumnXPosition are data about geometry. What is deferred is MEASURING with
+    //  them, which needs a device context this service does not have and must never acquire. So the
+    //  sweep bans the conversion and rendering VERBS (PX2MM, D2PX, GetWindowRect, Canvas, Render) and
+    //  the legacy TYPE names (n_cst_font, n_cst_popupmenu), and asserts the descriptors are present as
+    //  data. Banning "Font" outright would fail on a correct implementation and would then be "fixed"
+    //  by deleting the descriptors - which is the actual regression.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Every type this model publishes, so the two sweeps below cover the whole reachable surface.
+    /// </summary>
+    private static IReadOnlyList<Type> PublishedTypes =>
+    [
+        typeof(ContextMenuModel),
+        typeof(MenuItemData),
+        typeof(ContextMenuLayout),
+        typeof(ContextMenuPointerContext),
+        typeof(ContextMenuError),
+        typeof(ClipboardTextResult),
+        typeof(TextMeasurementCandidate),
+        typeof(ColumnWidthComputation),
+        typeof(ColumnAutoWidthPlan),
+        typeof(ContextMenuOutcome),
+        typeof(ContextMenuErrorKind),
+        typeof(ContextMenuMessageIcon),
+        typeof(TextMeasurementMode),
+    ];
+
+    /// <summary>
+    /// Unwraps a by-ref or generic type to the types it is actually built out of.
+    /// </summary>
+    /// <param name="type">The reflected type.</param>
+    /// <returns><paramref name="type"/> and, recursively, its element and argument types.</returns>
+    private static IEnumerable<Type> Flatten(Type type)
+    {
+        yield return type;
+
+        if (type.HasElementType)
+        {
+            Type? element = type.GetElementType();
+            if (element is not null)
+            {
+                foreach (Type inner in Flatten(element))
+                {
+                    yield return inner;
+                }
+            }
+        }
+
+        foreach (Type argument in type.GetGenericArguments())
+        {
+            foreach (Type inner in Flatten(argument))
+            {
+                yield return inner;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The whole reflected surface - every member name and every type name it touches, public and
+    /// private alike.
+    /// </summary>
+    /// <returns>Member names, then the full names of every type carried.</returns>
+    private static List<string> ReflectedVocabulary()
+    {
+        const BindingFlags Everything =
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static
+            | BindingFlags.DeclaredOnly;
+
+        List<string> vocabulary = [];
+
+        foreach (Type type in PublishedTypes)
+        {
+            vocabulary.Add(type.Name);
+
+            foreach (MemberInfo member in type.GetMembers(Everything))
+            {
+                vocabulary.Add(member.Name);
+            }
+
+            IEnumerable<Type> carried =
+            [
+                .. type.GetFields(Everything).Select(field => field.FieldType),
+                .. type.GetProperties(Everything).Select(property => property.PropertyType),
+                .. type.GetMethods(Everything).Select(method => method.ReturnType),
+                .. type.GetMethods(Everything)
+                    .SelectMany(method => method.GetParameters())
+                    .Select(parameter => parameter.ParameterType),
+                .. type.GetConstructors(Everything)
+                    .SelectMany(constructor => constructor.GetParameters())
+                    .Select(parameter => parameter.ParameterType),
+            ];
+
+            foreach (Type candidate in carried.SelectMany(Flatten))
+            {
+                vocabulary.Add(candidate.FullName ?? candidate.Name);
+            }
+        }
+
+        return vocabulary;
+    }
+
+    /// <summary>
+    /// The eleven deferred locators reach NOTHING in this model - no member name and no carried type
+    /// names a DPI conversion, a font object, a canvas, a popup menu or a window rectangle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SWEEP INCLUDES PRIVATE MEMBERS DELIBERATELY. A deferred capability smuggled in as a private
+    /// helper is still implemented, and constraint C-D is about what the code DOES, not about what it
+    /// publishes. The positive control below proves the vocabulary was genuinely read, so an empty
+    /// reflection result cannot pass this test silently.
+    /// </para>
+    /// <para>
+    /// <c>Popup</c> is banned over the PUBLISHED surface only, because the oracle's own property tag
+    /// <c>PRP_POPUPMENUCREATOR</c> [<c>:L65</c>] is a private constant this port keeps - it is a STRING
+    /// KEY that decides <see cref="MenuItemData.MenuOwner"/>, not a menu. The legacy TYPE name
+    /// <c>n_cst_popupmenu</c> is banned everywhere, private members included, and that is the ban that
+    /// actually forbids the deferred submenu API of <c>:L96-L106</c>.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoDeferredGeometryFontOrMenuRenderingReachesThisModel()
+    {
+        string[] bannedEverywhere =
+        [
+            // Window geometry - :L187.
+            "GetWindowRect", "WindowRect", "Win32",
+
+            // DPI and unit conversion - :L1241, :L1243, :L1409, :L1411.
+            "PX2MM", "D2PX", "D2PY", "D2UX", "P2DX", "P2DY", "U2PY", "Dpi", "Pixel", "Millimet",
+
+            // Font and menu OBJECTS - :L1092, :L1098, :L1266, :L1277, :L18, :L96-L106.
+            "n_cst_font", "n_cst_popupmenu",
+
+            // Rendering.
+            "Canvas", "Render", "Repaint", "Painter",
+        ];
+
+        List<string> vocabulary = ReflectedVocabulary();
+
+        // POSITIVE CONTROL: the vocabulary really was read, and it contains the members the headless
+        // half is REQUIRED to have. Without this, a reflection change that returned nothing would turn
+        // every assertion below into a vacuous truth.
+        Assert.Contains(nameof(ContextMenuModel.ColumnAutoWidth), vocabulary);
+        Assert.Contains(nameof(MenuItemData.Split), vocabulary);
+        Assert.Contains("PRP_POPUPMENUCREATOR", vocabulary);
+
+        Assert.All(
+            vocabulary,
+            word => Assert.All(
+                bannedEverywhere,
+                banned => Assert.False(
+                    word.Contains(banned, StringComparison.OrdinalIgnoreCase),
+                    "'" + word + "' names the deferred half through '" + banned + "'. DPI conversion, "
+                    + "font measurement and menu rendering belong to DesignSystem behind /v1/design/** "
+                    + "(AAP 0.2.1.3 Correction 4, 0.2.2.2, 0.4.4).")));
+
+        // AND NO POPUP MENU ON THE PUBLISHED SURFACE, where a consumer could bind to one.
+        const BindingFlags Published =
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
+        IEnumerable<string> publishedNames = PublishedTypes
+            .SelectMany(type => type.GetMembers(Published))
+            .Select(member => member.Name);
+
+        Assert.All(
+            publishedNames,
+            name => Assert.DoesNotContain("Popup", name, StringComparison.OrdinalIgnoreCase));
+
+        // POSITIVELY: the font DESCRIPTORS are present, because carrying them IS the headless half. If
+        // a later edit "cleans up" the deferred half by deleting these, the renderer loses the data it
+        // needs and this fails - which is the opposite failure from the one above, and both matter.
+        Assert.Contains(nameof(TextMeasurementCandidate.FontFace), vocabulary);
+        Assert.Contains(nameof(TextMeasurementCandidate.FontHeight), vocabulary);
+        Assert.Contains(nameof(TextMeasurementCandidate.Bold), vocabulary);
+    }
+
+    /// <summary>
+    /// Every type carried on the PUBLISHED surface, normalized past <c>in</c>/<c>ref</c> and
+    /// <c>Nullable&lt;&gt;</c> wrappers.
+    /// </summary>
+    /// <param name="everything">
+    /// Whether to include private members as well as published ones.
+    /// </param>
+    /// <returns>The carried types.</returns>
+    private static List<Type> CarriedTypes(bool everything)
+    {
+        BindingFlags flags =
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly
+            | (everything ? BindingFlags.NonPublic : BindingFlags.Default);
+
+        List<Type> carried = [];
+
+        foreach (Type type in PublishedTypes)
+        {
+            carried.AddRange(type.GetFields(flags).Select(field => field.FieldType));
+            carried.AddRange(type.GetProperties(flags).Select(property => property.PropertyType));
+            carried.AddRange(type.GetMethods(flags).Select(method => method.ReturnType));
+            carried.AddRange(
+                type.GetMethods(flags)
+                    .SelectMany(method => method.GetParameters())
+                    .Select(parameter => parameter.ParameterType));
+            carried.AddRange(
+                type.GetConstructors(flags)
+                    .SelectMany(constructor => constructor.GetParameters())
+                    .Select(parameter => parameter.ParameterType));
+        }
+
+        return
+        [
+            .. carried
+                .SelectMany(Flatten)
+                .Select(type => type.IsByRef ? type.GetElementType() ?? type : type)
+                .Select(type => Nullable.GetUnderlyingType(type) ?? type),
+        ];
+    }
+
+    /// <summary>
+    /// The PUBLISHED surface is built out of a CLOSED set of types: BCL scalars, its own records and
+    /// enums, its three injected collaborators and the host handle. No UI type is reachable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE STRONGEST FORM OF C-D AVAILABLE TO A TEST, AND THE FORM THAT DISCHARGES "NO DIALOG,
+    /// MESSAGE-BOX OR UI TYPE IN AN ERROR PAYLOAD". A name ban can be evaded by naming a member
+    /// carefully; a closed type set cannot, because a dialog, a font, a canvas or a popup menu would
+    /// have to appear as a TYPE on the surface to be usable at all. The set is enumerated rather than
+    /// pattern-matched, so widening it is a visible edit to this list rather than an accident.
+    /// </para>
+    /// <para>
+    /// SCOPED TO THE PUBLISHED SURFACE ON PURPOSE. The private surface legitimately uses a much wider
+    /// slice of the BCL - <see cref="DateTime"/>, <see cref="DateOnly"/>, <see cref="TimeOnly"/> and
+    /// <see cref="decimal"/> for the six typed paste arms [<c>:L1013-L1049</c>], tuples and
+    /// <see cref="List{T}"/> for the width walk - and enumerating that would assert nothing about the
+    /// boundary. <see cref="NoTypeOnTheWholeSurfaceComesFromAUiAssembly"/> covers the private half at
+    /// assembly granularity, which is the level at which a UI dependency actually shows up.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ThePublishedSurfaceIsBuiltOutOfAClosedTypeSet()
+    {
+        HashSet<Type> allowed =
+        [
+            // The BCL scalars the item model, the error, the layout and the width plan are made of.
+            typeof(void), typeof(bool), typeof(int), typeof(long), typeof(uint), typeof(double),
+            typeof(string), typeof(object),
+
+            // Its own published records and enums.
+            .. PublishedTypes,
+
+            // The three constructor collaborators plus the two host handles the events take.
+            typeof(I18n),
+            typeof(DataWindowExpressionEvaluator),
+            typeof(IOptions<DataServicesOptions>),
+            typeof(DataServicesOptions),
+            typeof(DataWindowServiceHost),
+            typeof(IDataWindowObject),
+
+            // The one collection shape the surface publishes.
+            typeof(IReadOnlyList<MenuItemData>),
+            typeof(IReadOnlyList<TextMeasurementCandidate>),
+            typeof(IReadOnlyList<ColumnWidthComputation>),
+        ];
+
+        List<Type> carried = CarriedTypes(everything: false);
+
+        // POSITIVE CONTROL: the surface really was reflected, and it carries the error type whose payload
+        // this assertion is about.
+        Assert.NotEmpty(carried);
+        Assert.Contains(typeof(ContextMenuError), carried);
+
+        Assert.All(
+            carried,
+            type => Assert.True(
+                allowed.Contains(type),
+                "'" + (type.FullName ?? type.Name) + "' is published on the context-menu surface and is "
+                + "not in the closed set. A UI, dialog, message-box, font or menu-rendering type here "
+                + "would breach constraint C-D."));
+    }
+
+    /// <summary>
+    /// Nothing anywhere on the surface - published or private - comes from a user-interface assembly,
+    /// and the service assembly references none.
+    /// </summary>
+    /// <remarks>
+    /// ASSEMBLY GRANULARITY IS WHERE A UI DEPENDENCY ACTUALLY APPEARS. A font, a canvas, a window or a
+    /// dialog cannot be conjured from the BCL slice this service links on Linux; it has to arrive as a
+    /// package or project reference. So this asserts both halves: every carried type belongs to the
+    /// framework, to this repository's own assemblies or to the options abstraction, AND the service
+    /// assembly's own reference list names no drawing, forms, windows or deferred-service assembly.
+    /// </remarks>
+    [Fact]
+    public void NoTypeOnTheWholeSurfaceComesFromAUiAssembly()
+    {
+        List<Type> carried = CarriedTypes(everything: true);
+
+        Assert.NotEmpty(carried);
+
+        Assert.All(
+            carried,
+            type =>
+            {
+                string assembly = type.Assembly.GetName().Name ?? string.Empty;
+
+                Assert.True(
+                    assembly.StartsWith("System.", StringComparison.Ordinal)
+                    || assembly.StartsWith("PowerFramework.", StringComparison.Ordinal)
+                    || assembly.StartsWith("Microsoft.Extensions.Options", StringComparison.Ordinal)
+                    || string.Equals(assembly, "netstandard", StringComparison.Ordinal),
+                    "'" + (type.FullName ?? type.Name) + "' comes from '" + assembly + "', which is "
+                    + "outside the framework, this repository and the options abstraction.");
+            });
+
+        // AND THE REFERENCE LIST ITSELF, so a UI type is not merely unused but unavailable.
+        string[] referenced =
+        [
+            .. typeof(ContextMenuModel).Assembly
+                .GetReferencedAssemblies()
+                .Select(reference => reference.Name ?? string.Empty),
+        ];
+
+        // POSITIVE CONTROL: the list was genuinely read and names a shared library this service does use.
+        Assert.Contains("PowerFramework.Shared.Localization", referenced);
+
+        string[] bannedAssemblies =
+        [
+            "System.Drawing", "System.Windows", "WindowsBase", "PresentationCore",
+            "PresentationFramework", "System.Windows.Forms", "Avalonia", "SkiaSharp",
+            "DesignSystem", "Documents", "Integration", "ScriptBridge",
+        ];
+
+        Assert.All(
+            referenced,
+            name => Assert.All(
+                bannedAssemblies,
+                banned => Assert.False(
+                    name.Contains(banned, StringComparison.OrdinalIgnoreCase),
+                    "PowerFramework.DataServices references '" + name + "'. Rendering belongs to the "
+                    + "deferred DesignSystem service, which receives no code in this phase "
+                    + "(AAP 0.2.2.2).")));
+    }
+
+    /// <summary>
+    /// <c>MENUITEMDATA</c>'s eight legacy fields, one theory row each, mapped onto the port's members
+    /// with the legacy declaration's own line [<c>:L12-L21</c>].
+    /// </summary>
+    /// <param name="locator">The oracle line the field is declared on.</param>
+    /// <param name="legacyField">The legacy field name and type, as the structure spells it.</param>
+    /// <param name="portMember">The port's member.</param>
+    /// <param name="portType">The port's type for it.</param>
+    /// <remarks>
+    /// SEVEN MAP ONE TO ONE; THE EIGHTH SPLITS, AND THAT IS THE C-D SPLIT ITSELF. The legacy
+    /// <c>n_cst_popupmenu submenu</c> [<c>:L18</c>] is an OBJECT POINTER to a live popup menu, and a
+    /// pointer neither serializes nor exists without the deferred rendering half. The port carries what
+    /// the oracle actually READS off it - whether a child is attached [<c>:L179</c>], the identifier the
+    /// child is addressed by [<c>:L273</c>], and the child's items [<c>:L274</c>] - as
+    /// <see cref="MenuItemData.HasSubmenu"/>, <see cref="MenuItemData.SubmenuHandle"/> and
+    /// <see cref="MenuItemData.Submenu"/>. <see cref="TheSubmenuFieldIsDataAndNotAPopupMenu"/> asserts
+    /// the negative side of that split.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(MenuItemFieldRows))]
+    public void MenuItemDataCarriesTheLegacyEightFields(
+        string locator,
+        string legacyField,
+        string portMember,
+        Type portType)
+    {
+        PropertyInfo? property = typeof(MenuItemData).GetProperty(
+            portMember,
+            BindingFlags.Public | BindingFlags.Instance);
+
+        Assert.NotNull(property);
+        Assert.Equal(portType, property.PropertyType);
+        Assert.True(
+            property.CanRead,
+            locator + ": " + legacyField + " must be readable through " + portMember + ".");
+    }
+
+    /// <summary>
+    /// One row per legacy structure field [<c>:L12-L21</c>].
+    /// </summary>
+    /// <returns>Locator, legacy declaration, port member, port type.</returns>
+    public static TheoryData<string, string, string, Type> MenuItemFieldRows() => new()
+    {
+        { "n_cst_dwsvc_contextmenu.sru:L13", "boolean enabled", nameof(MenuItemData.Enabled), typeof(bool) },
+        { "n_cst_dwsvc_contextmenu.sru:L14", "string text", nameof(MenuItemData.Text), typeof(string) },
+        { "n_cst_dwsvc_contextmenu.sru:L15", "string image", nameof(MenuItemData.Image), typeof(string) },
+        { "n_cst_dwsvc_contextmenu.sru:L16", "string tiptext", nameof(MenuItemData.TipText), typeof(string) },
+        { "n_cst_dwsvc_contextmenu.sru:L17", "unsignedlong id", nameof(MenuItemData.Id), typeof(uint) },
+        {
+            "n_cst_dwsvc_contextmenu.sru:L18",
+            "n_cst_popupmenu submenu",
+            nameof(MenuItemData.Submenu),
+            typeof(IReadOnlyList<MenuItemData>)
+        },
+        {
+            "n_cst_dwsvc_contextmenu.sru:L18",
+            "n_cst_popupmenu submenu",
+            nameof(MenuItemData.SubmenuHandle),
+            typeof(uint)
+        },
+        {
+            "n_cst_dwsvc_contextmenu.sru:L18",
+            "n_cst_popupmenu submenu",
+            nameof(MenuItemData.HasSubmenu),
+            typeof(bool)
+        },
+        { "n_cst_dwsvc_contextmenu.sru:L19", "boolean split", nameof(MenuItemData.Split), typeof(bool) },
+        {
+            "n_cst_dwsvc_contextmenu.sru:L20",
+            "boolean menuowner",
+            nameof(MenuItemData.MenuOwner),
+            typeof(bool)
+        },
+    };
+
+    /// <summary>
+    /// The submenu is a CHILD-ITEM COLLECTION plus a handle, never an <c>n_cst_popupmenu</c>-typed
+    /// object [<c>:L18</c>, <c>:L96-L106</c>].
+    /// </summary>
+    /// <remarks>
+    /// THE COLLECTION IS RECURSIVE AND HELD BY VALUE, so a child that itself has children is
+    /// expressible - which the oracle supports and the default set uses to exactly one level
+    /// [<c>:L272-L274</c>]. It is EMPTY, not null, when there is no child, so a consumer may enumerate
+    /// unconditionally, and the emptiness is distinguishable from absence through
+    /// <see cref="MenuItemData.HasSubmenu"/> - which matters because <c>:L272</c> attaches a valid but
+    /// still-empty child menu before <c>:L274</c> puts anything in it.
+    /// </remarks>
+    [Fact]
+    public void TheSubmenuFieldIsDataAndNotAPopupMenu()
+    {
+        PropertyInfo submenu = Assert.IsType<PropertyInfo>(
+            typeof(MenuItemData).GetProperty(
+                nameof(MenuItemData.Submenu),
+                BindingFlags.Public | BindingFlags.Instance),
+            exactMatch: false);
+
+        Assert.Equal(typeof(IReadOnlyList<MenuItemData>), submenu.PropertyType);
+
+        // RECURSIVE BY TYPE: the element type is MenuItemData itself.
+        Assert.Equal(typeof(MenuItemData), Assert.Single(submenu.PropertyType.GetGenericArguments()));
+
+        // EMPTY, NOT NULL, on a default item - and the flag says "no child" independently.
+        MenuItemData bare = new() { Text = "x", Id = ContextMenuModel.MID_ITEMCOPY };
+
+        Assert.NotNull(bare.Submenu);
+        Assert.Empty(bare.Submenu);
+        Assert.False(bare.HasSubmenu);
+        Assert.Equal(0u, bare.SubmenuHandle);
+
+        // AND THE FLAG IS INDEPENDENT OF THE COUNT, which is the state :L272 passes through.
+        MenuItemData attachedButEmpty = bare with
+        {
+            HasSubmenu = true,
+            SubmenuHandle = ContextMenuModel.MID_COLAUTOWIDTH,
+        };
+
+        Assert.True(attachedButEmpty.HasSubmenu);
+        Assert.Empty(attachedButEmpty.Submenu);
+    }
+
+
+    // ==============================================================================================
+    //  THE COMPUTED LOGICAL WIDTHS, DRIVEN FROM THE FIXTURE CORPUS       :L1132-L1135 / :L1298-L1301
+    //  --------------------------------------------------------------------------------------------
+    //  This is the headless half's SIGNATURE OUTPUT, and the oracle computes it in four statements:
+    //
+    //      nAsc2Cnt = Long(_of_Evaluate("Max(Len(LookUpDisplay(" + obj + ")))"))          the CHARACTER measure
+    //      nChsCnt  = Abs(Long(_of_Evaluate("Max(LenA(LookUpDisplay(" + obj + ")))")) - nAsc2Cnt)   the DBCS BYTE excess
+    //      nAsc2Cnt -= nChsCnt
+    //      sText    = Fill("A",nAsc2Cnt) + Fill("国",nChsCnt)
+    //
+    //  THE PROXY IS THE SHAPE OF NO REAL VALUE, AND THAT IS DELIBERATE. Both aggregates are maxima
+    //  taken INDEPENDENTLY over the buffer, so the widest-by-characters row and the widest-by-bytes row
+    //  can be different rows - which is exactly why the oracle wraps the subtraction in Abs. The result
+    //  is a synthetic worst case: the narrowest string that is simultaneously at least as long as the
+    //  longest value and at least as many bytes as the byte-widest value.
+    //
+    //  THE ROWS BELOW ARE THE CORPUS'S OWN COLUMNS, not invented widths. char(100) with the fixture's
+    //  own code-table displays comes from dw_test_dwsvc_contextmenu.srd:L11 - `type=char(100) ...
+    //  name=s1 ... values="新建 NEW/确认 CFD/审核 ADT/"` - which supplies BOTH an ASCII display set and a
+    //  Han display set. char(200) occurs exactly once in the whole DataWindow corpus, at
+    //  dw_sqlite.srd:L11 (`type=char(200) ... name=address`), the AAP 0.6.3.1 golden-master fixture, and
+    //  an address column is precisely where a mixed-script worst case arises in practice.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The two measures and the synthesized proxy, one theory row per fixture column shape.
+    /// </summary>
+    /// <param name="locator">The fixture the column shape is taken from.</param>
+    /// <param name="colType">The column's declared type, verbatim from that fixture.</param>
+    /// <param name="values">The seeded display values, semicolon-separated.</param>
+    /// <param name="expectedAscii">The derived ASCII count - <c>Max(Len) - excess</c>.</param>
+    /// <param name="expectedWide">The derived wide count - <c>Abs(Max(LenA) - Max(Len))</c>.</param>
+    /// <param name="expectedProxy">The proxy string, byte for byte.</param>
+    /// <remarks>
+    /// <para>
+    /// BOTH MEASURES ARE ASSERTED AND BOTH ARE EXPOSED, because a consumer that could see only the
+    /// character count could not size a DBCS column and one that could see only the byte count could not
+    /// size an ASCII one. They are separate members on
+    /// <see cref="TextMeasurementCandidate"/> for that reason.
+    /// </para>
+    /// <para>
+    /// THE HAN CHARACTER IS ASSERTED AS ITSELF, not as a code point or a length. The oracle fills with
+    /// <c>国</c> specifically [<c>:L1135</c>, <c>:L1301</c>], and any other wide character - even another
+    /// two-byte one - would measure differently under a real font, so the substitution is part of the
+    /// contract rather than an implementation detail.
+    /// </para>
+    /// <para>
+    /// THE AGGREGATES ARE COMPUTED BY THE REAL EVALUATOR over really seeded rows. Nothing here stubs
+    /// <c>Max</c>, <c>Len</c>, <c>LenA</c> or <c>LookUpDisplay</c>, so the test exercises the same path
+    /// production takes and would fail if any of the four drifted.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(FixtureColumnWidthRows))]
+    public void TheLogicalWidthsAreDerivedFromTheFixtureColumns(
+        string locator,
+        string colType,
+        string values,
+        int expectedAscii,
+        int expectedWide,
+        string expectedProxy)
+    {
+        (FakeDataWindowHost host, ContextMenuModel service) = ArrangeSiblingColumn(colType);
+
+        foreach (string value in values.Split(';'))
+        {
+            _ = host.AddRow(0m, "hc", value);
+        }
+
+        ColumnWidthComputation computation =
+            Assert.Single(service.ColumnAutoWidth("host_col").Columns);
+
+        TextMeasurementCandidate candidate = Assert.Single(computation.HeadingCandidates);
+
+        Assert.True(
+            candidate.IsSynthesizedProxy,
+            locator + ": a " + colType + " column must measure through the synthesized proxy.");
+        Assert.Equal(expectedAscii, candidate.AsciiCount);
+        Assert.Equal(expectedWide, candidate.WideCount);
+        Assert.Equal(expectedProxy, candidate.Text, StringComparer.Ordinal);
+
+        // THE PROXY IS EXACTLY Fill("A",n) + Fill("国",m) - reconstructed here from the two measures the
+        // candidate itself reports, so the assertion cannot pass by coincidence on a hand-written string.
+        Assert.Equal(
+            new string('A', candidate.AsciiCount) + new string('国', candidate.WideCount),
+            candidate.Text,
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// One row per fixture column shape, each carrying the fixture it came from.
+    /// </summary>
+    /// <returns>Locator, column type, seeded values, ASCII count, wide count, proxy.</returns>
+    public static TheoryData<string, string, string, int, int, string> FixtureColumnWidthRows() => new()
+    {
+        // dw_test_dwsvc_contextmenu.srd:L11 - s1's ASCII display set. Three rows of three ASCII
+        // characters: Max(Len) = 3, Max(LenA) = 3, so the excess is 0 and the proxy is pure ASCII.
+        { "dw_test_dwsvc_contextmenu.srd:L11", "char(100)", "NEW;CFD;ADT", 3, 0, "AAA" },
+
+        // dw_test_dwsvc_contextmenu.srd:L11 - s1's HAN display set, the same column's other half. Three
+        // rows of two Han characters: Max(Len) = 2, Max(LenA) = 4, so the excess is 2, the ASCII count
+        // falls to 0, and the proxy is entirely wide. THE WIDE MEASURE IS LARGER THAN THE CHARACTER
+        // MEASURE HERE AND SMALLER IN THE ROW ABOVE, which is the split this theory exists to show.
+        { "dw_test_dwsvc_contextmenu.srd:L11", "char(100)", "新建;确认;审核", 0, 2, "国国" },
+
+        // dw_sqlite.srd:L11 - the only char(200) in the corpus, holding a plain ASCII address.
+        // Max(Len) = Max(LenA) = 13, so the proxy is thirteen ASCII characters.
+        { "dw_sqlite.srd:L11", "char(200)", "1 Main Street", 13, 0, "AAAAAAAAAAAAA" },
+
+        // dw_sqlite.srd:L11 - the same char(200) column with a MIXED-SCRIPT buffer, and the case that
+        // proves the two maxima are taken independently. Row 1 is `深圳A` (3 characters, 5 bytes) and
+        // row 2 is `ABCD` (4 characters, 4 bytes), so Max(Len) = 4 comes from row 2 while
+        // Max(LenA) = 5 comes from row 1. The excess is 1, the ASCII count is 3, and the proxy `AAA国`
+        // is the shape of NEITHER row - it is 4 characters like the longer and 5 bytes like the wider.
+        { "dw_sqlite.srd:L11", "char(200)", "深圳A;ABCD", 3, 1, "AAA国" },
+    };
+
+    /// <summary>
+    /// The widths are LOGICAL and stay logical: changing the DataWindow's unit system does not change
+    /// one measure, because the conversion is the deferred half [<c>:L1239-L1247</c>,
+    /// <c>:L1407-L1415</c>].
+    /// </summary>
+    /// <param name="units">
+    /// The <c>DataWindow.Units</c> answer - <c>"1"</c> pixels, <c>"2"</c> thousandths of an inch,
+    /// <c>"3"</c> thousandths of a centimetre, anything else PowerBuilder units.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE POSITIVE FORM OF THE C-D SPLIT, and it is the assertion that a later "helpful" unit
+    /// conversion here would fail. The oracle's four-armed <c>choose case</c> on
+    /// <c>DataWindow.Units</c> ends in <c>Win32.PX2MMX(D2PX(fMaxTextWidth + 4))</c> - a DPI-dependent,
+    /// device-context-dependent conversion belonging to DesignSystem behind <c>/v1/design/**</c>. The
+    /// port therefore PUBLISHES the unit token and the raw ingredients and converts nothing: the
+    /// character count, the byte count, the proxy string, the arrow allowance and the padding are
+    /// identical under all four unit systems, and only <see cref="ColumnAutoWidthPlan.Units"/> changes.
+    /// </para>
+    /// <para>
+    /// THE PADDING IS PART OF THE EVIDENCE. <c>+ 4</c> appears INSIDE every arm of the oracle's
+    /// conversion, so a port that converted would fold it in and it would no longer be separately
+    /// visible. It is published as <see cref="ColumnWidthComputation.Padding"/> at its raw value
+    /// instead, which is what lets the deferred half apply the oracle's arithmetic exactly.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("1")]
+    [InlineData("2")]
+    [InlineData("3")]
+    [InlineData("0")]
+    public void TheWidthsAreLogicalUnderEveryUnitSystem(string units)
+    {
+        (FakeDataWindowHost host, ContextMenuModel service) = ArrangeSiblingColumn("char(100)");
+        host.SetDescribe("DataWindow.Units", units);
+        _ = host.AddRow(0m, "hc", "深圳A");
+        _ = host.AddRow(0m, "hc", "ABCD");
+
+        ColumnAutoWidthPlan plan = service.ColumnAutoWidth("host_col");
+        ColumnWidthComputation computation = Assert.Single(plan.Columns);
+        TextMeasurementCandidate candidate = Assert.Single(computation.HeadingCandidates);
+
+        // The unit token travels as the RAW Describe answer, so the deferred half can pick its arm.
+        Assert.Equal(units, plan.Units, StringComparer.Ordinal);
+
+        // AND NOTHING ELSE MOVED. Identical values to the mixed-script theory row above, unit system
+        // notwithstanding.
+        Assert.Equal(3, candidate.AsciiCount);
+        Assert.Equal(1, candidate.WideCount);
+        Assert.Equal("AAA国", candidate.Text, StringComparer.Ordinal);
+        Assert.Equal(ContextMenuModel.WidthPadding, computation.Padding);
+        Assert.Equal(0d, computation.ArrowButtonWidth);
+
+        // NO CONVERTED WIDTH IS PUBLISHED AT ALL - the plan carries ingredients, never a result. Were a
+        // converted total present it would have to appear as a member, and this is where it would show.
+        Assert.DoesNotContain(
+            "Converted",
+            string.Join(
+                ',',
+                typeof(ColumnWidthComputation)
+                    .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                    .Select(property => property.Name)),
+            StringComparison.Ordinal);
+    }
+
+
+    // ==============================================================================================
+    //  THE TEN DIALOGS: COMPLETENESS, BOTH SPRINTF GRAMMARS, AND THE LOCALIZATION CONTRAST
+    //  --------------------------------------------------------------------------------------------
+    //  AAP 0.2.1.3 Correction 5 converts every live MessageBoxEx into a structured error, "only the
+    //  delivery channel changes". A sweep of the oracle finds EXACTLY TEN, and the AAP names six of
+    //  them - the remaining four are located here so nobody has to sweep again:
+    //
+    //      :L795   修改数据被拒绝    CheckColumn's item-change refusal          named in the AAP
+    //      :L863   修改数据被拒绝    RevertCheckColumn's refusal                named in the AAP
+    //      :L916   修改数据被拒绝    UncheckColumn's refusal                    named in the AAP
+    //      :L1009  无效的值          the paste's enumerated-value rejection     named in the AAP
+    //      :L1018  数据类型不匹配    the paste's long arm                       named in the AAP
+    //      :L1027  数据类型不匹配    the paste's decimal arm                    named in the AAP
+    //      :L1033  数据类型不匹配    the paste's datetime arm                   NOT named - located here
+    //      :L1039  数据类型不匹配    the paste's date arm                       NOT named - located here
+    //      :L1045  数据类型不匹配    the paste's time arm                       NOT named - located here
+    //      :L1052  修改数据被拒绝    the paste's item-change refusal            NOT named - located here
+    //
+    //  ALL TEN ROUTE THROUGH I18N(ne_cst_i18n.CAT_DWSVC, ...), and that is the property that separates
+    //  them from the twenty-eight hardcoded Chinese messages in n_cst_dwsvc_columnexp.sru, which do NOT.
+    //  The suite proves the positive case here with a live translating provider;
+    //  StructuredErrorParityTests.cs owns the cross-service comparison.
+    //
+    //  ALL TEN ALSO COMPOSE THEIR FIRST LINE WITH Sprintf, and this service uses BOTH of that
+    //  function's grammars - the index-omitted `{}` for the row number and the explicit `{1}` for the
+    //  three width-plan Find predicates. Both are asserted, with emitted text, below.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Drives every one of the ten sites and returns the locator each reported, in the order they were
+    /// provoked.
+    /// </summary>
+    /// <returns>The ten locators.</returns>
+    /// <remarks>
+    /// EACH SITE IS PROVOKED THROUGH ITS OWN PUBLIC ENTRY POINT, never by constructing an error - so a
+    /// site that became unreachable would show up as a missing locator rather than as a still-passing
+    /// unit test over a record constructor.
+    /// </remarks>
+    private static List<string> ProvokeEveryConvertedDialog()
+    {
+        List<string> locators = [];
+
+        // THE FOUR CHANGE-REFUSED SITES. All four need a host that VETOES the item change, and a row
+        // that genuinely needs writing - a row already holding the target value is skipped and no error
+        // is raised [:L786-L793].
+        (FakeDataWindowHost host, ContextMenuModel service) = ArrangeCheckBoxColumn();
+        host.DoItemChangeHandler = (_, _, _) => 1L;
+
+        Assert.Equal(RetCode.FAILED, service.CheckColumn(CheckColumn));
+        locators.Add(Assert.IsType<ContextMenuError>(service.PendingError).SourceLocator);
+
+        Assert.Equal(RetCode.FAILED, service.RevertCheckColumn(CheckColumn));
+        locators.Add(Assert.IsType<ContextMenuError>(service.PendingError).SourceLocator);
+
+        _ = host.SetItem(1L, CheckColumn, "Y");
+        Assert.Equal(RetCode.FAILED, service.UncheckColumn(CheckColumn));
+        locators.Add(Assert.IsType<ContextMenuError>(service.PendingError).SourceLocator);
+
+        _ = host.SetItem(1L, CheckColumn, "N");
+        Assert.Equal(RetCode.FAILED, service.Paste2Column(CheckColumn, "Y"));
+        locators.Add(Assert.IsType<ContextMenuError>(service.PendingError).SourceLocator);
+
+        // THE INVALID-VALUE SITE - a pasted text that is not a key of an ENUMERATED column.
+        (_, ContextMenuModel enumerated) = ArrangeEnumeratedColumn();
+
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, enumerated.Paste2Column("grade", "Z"));
+        locators.Add(Assert.IsType<ContextMenuError>(enumerated.PendingError).SourceLocator);
+
+        // THE FIVE TYPE-MISMATCH SITES, one per typed paste arm.
+        foreach (string colType in new[] { "long", "decimal(2)", "datetime", "date", "time" })
+        {
+            (_, ContextMenuModel typed) = ArrangeTypedColumn(colType);
+
+            Assert.Equal(RetCode.E_INVALID_ARGUMENT, typed.Paste2Column("typed", "abc"));
+            locators.Add(Assert.IsType<ContextMenuError>(typed.PendingError).SourceLocator);
+        }
+
+        return locators;
+    }
+
+    /// <summary>
+    /// EXACTLY TEN sites, and they are exactly the oracle's ten - no site elided, no site invented.
+    /// </summary>
+    /// <remarks>
+    /// THE SET IS ASSERTED IN BOTH DIRECTIONS. A subset check would pass if a site were dropped and an
+    /// "all present" check would pass if a locator were duplicated, so the assertion is on the exact
+    /// distinct set AND on the count of provocations. Every locator is a fully qualified
+    /// <c>file:line</c> pair rather than a bare line number, because the four attached services all
+    /// have their own <c>:L795</c>.
+    /// </remarks>
+    [Fact]
+    public void TheTenConvertedDialogsAreExactlyTheOraclesTen()
+    {
+        string[] expected =
+        [
+            "n_cst_dwsvc_contextmenu.sru:L795",
+            "n_cst_dwsvc_contextmenu.sru:L863",
+            "n_cst_dwsvc_contextmenu.sru:L916",
+            "n_cst_dwsvc_contextmenu.sru:L1009",
+            "n_cst_dwsvc_contextmenu.sru:L1018",
+            "n_cst_dwsvc_contextmenu.sru:L1027",
+            "n_cst_dwsvc_contextmenu.sru:L1033",
+            "n_cst_dwsvc_contextmenu.sru:L1039",
+            "n_cst_dwsvc_contextmenu.sru:L1045",
+            "n_cst_dwsvc_contextmenu.sru:L1052",
+        ];
+
+        List<string> observed = ProvokeEveryConvertedDialog();
+
+        Assert.Equal(10, observed.Count);
+        Assert.Equal(
+            expected.OrderBy(locator => locator, StringComparer.Ordinal),
+            observed.Distinct(StringComparer.Ordinal).OrderBy(locator => locator, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Every one of the ten carries the four fields Correction 5 requires: the exact text, the
+    /// <c>CAT_DWSVC</c> category read from <see cref="Categories"/>, the <c>Sprintf</c> argument as
+    /// DATA, and the legacy <c>StopSign!</c> severity.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CATEGORY IS COMPARED AGAINST <see cref="Categories.CAT_DWSVC"/> AND NEVER AGAINST A NUMBER.
+    /// Its value is a COMPUTED OFFSET - <c>ne_cst_i18n.sru:L17</c> declares it relative to
+    /// <c>I18N_CAT_CUSTOM</c> - so a literal here would pin the arithmetic's current result rather than
+    /// the identifier, and would silently stop tracking the base if it ever moved.
+    /// </para>
+    /// <para>
+    /// THE ROW TRAVELS AS DATA AS WELL AS PRE-RENDERED. <see cref="ContextMenuError.Row"/> carries the
+    /// <c>Sprintf</c> argument itself and <see cref="ContextMenuError.RowFormatTemplate"/> carries the
+    /// format, so a consumer that wants to re-render in another locale can, which is the whole point of
+    /// converting a dialog into a structured result instead of a formatted string.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryConvertedDialogCarriesTheCategoryTheArgumentAndTheSeverity()
+    {
+        // Re-provoked here rather than shared, because PendingError is per-service state and the
+        // completeness test above deliberately reads only the locator.
+        (FakeDataWindowHost host, ContextMenuModel service) = ArrangeCheckBoxColumn();
+        host.DoItemChangeHandler = (_, _, _) => 1L;
+
+        List<ContextMenuError> errors = [];
+
+        Assert.Equal(RetCode.FAILED, service.CheckColumn(CheckColumn));
+        errors.Add(Assert.IsType<ContextMenuError>(service.PendingError));
+
+        (_, ContextMenuModel enumerated) = ArrangeEnumeratedColumn();
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, enumerated.Paste2Column("grade", "Z"));
+        errors.Add(Assert.IsType<ContextMenuError>(enumerated.PendingError));
+
+        (_, ContextMenuModel typed) = ArrangeTypedColumn("long");
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, typed.Paste2Column("typed", "abc"));
+        errors.Add(Assert.IsType<ContextMenuError>(typed.PendingError));
+
+        Assert.Equal(3, errors.Count);
+
+        Assert.All(
+            errors,
+            error =>
+            {
+                Assert.Equal(Categories.CAT_DWSVC, error.LocalizationCategory);
+                Assert.Equal(ContextMenuMessageIcon.StopSign, error.Icon);
+                Assert.True(error.Localized);
+                Assert.Equal(ContextMenuModel.RowNumberMessageKey, error.RowFormatTemplate, StringComparer.Ordinal);
+                Assert.Equal(1L, error.Row);
+                Assert.NotEqual(ContextMenuErrorKind.None, error.Kind);
+                Assert.StartsWith("n_cst_dwsvc_contextmenu.sru:L", error.SourceLocator, StringComparison.Ordinal);
+
+                // THE FIRST LINE IS THE Sprintf RESULT, recomputed here from the template and the
+                // argument the error itself carries - so the composition is asserted, not just the text.
+                Assert.StartsWith(
+                    Formatting.Sprintf(error.RowFormatTemplate, error.Row),
+                    error.Text,
+                    StringComparison.Ordinal);
+            });
+
+        // The three DISTINCT detail keys, so this is not three readings of one path.
+        Assert.Equal(
+            new[]
+            {
+                ContextMenuModel.ChangeRejectedMessageKey,
+                ContextMenuModel.InvalidValueMessageKey,
+                ContextMenuModel.TypeMismatchMessageKey,
+            },
+            errors.Select(error => error.DetailMessageKey));
+    }
+
+    /// <summary>
+    /// Both <c>Sprintf</c> grammars, with the emitted text asserted for one of each: the index-omitted
+    /// <c>{}</c> that composes the row fragment [<c>:L795</c>] and the explicit <c>{1}</c> that builds
+    /// the width plan's Find predicate [<c>:L1186</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ONE FUNCTION, TWO GRAMMARS, AND THE SERVICE USES BOTH. <c>Formatting.Sprintf</c> takes the next
+    /// argument from a sequential cursor for a brace pair with no index and the n-th argument for
+    /// <c>{n}</c>, one-based. The oracle mixes them across the file - <c>{}</c> at the ten dialog sites
+    /// and <c>{1}</c> at <c>:L1183</c>, <c>:L1186</c>, <c>:L1188</c>, <c>:L1349</c>, <c>:L1352</c> and
+    /// <c>:L1354</c> - so a port that implemented only one grammar would pass a test over the other and
+    /// still be wrong. Both are exercised here against the SERVICE'S OWN emitted text rather than
+    /// against <c>Sprintf</c> in isolation.
+    /// </para>
+    /// <para>
+    /// THE INDEXED FORM SUBSTITUTES THE SAME ARGUMENT FOUR TIMES in this predicate, which is exactly
+    /// what an explicit index is for and what a sequential cursor could not express with one argument.
+    /// That asymmetry is why the oracle reaches for the two forms in different places.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void BothSprintfGrammarsAreExercisedAndTheirEmittedTextIsExact()
+    {
+        // ---- GRAMMAR 1: THE INDEX-OMITTED `{}` -------------------------------------------------
+        // The template is the service's own key, and the emitted text is asserted whole.
+        Assert.Equal("第{}行", ContextMenuModel.RowNumberMessageKey, StringComparer.Ordinal);
+        Assert.Equal(
+            "第1行",
+            Formatting.Sprintf(ContextMenuModel.RowNumberMessageKey, 1L),
+            StringComparer.Ordinal);
+
+        (FakeDataWindowHost host, ContextMenuModel service) = ArrangeCheckBoxColumn();
+        host.DoItemChangeHandler = (_, _, _) => 1L;
+
+        Assert.Equal(RetCode.FAILED, service.CheckColumn(CheckColumn));
+
+        ContextMenuError error = Assert.IsType<ContextMenuError>(service.PendingError);
+
+        // The service's whole first line IS the sequential-grammar result.
+        Assert.Equal(
+            Formatting.Sprintf(ContextMenuModel.RowNumberMessageKey, 1L)
+                + ContextMenuModel.LineSeparator
+                + ContextMenuModel.ChangeRejectedMessageKey
+                + ContextMenuModel.DetailSuffix,
+            error.Text,
+            StringComparer.Ordinal);
+        Assert.Equal("第1行\n修改数据被拒绝!", error.Text, StringComparer.Ordinal);
+
+        // ---- GRAMMAR 2: THE EXPLICIT `{1}`, SUBSTITUTED FOUR TIMES -----------------------------
+        const string IndexedTemplate = "if(IsNull({1}),'',{1}) <> if(IsNull({1}[1]),'',{1}[1])";
+
+        string expectedPredicate = Formatting.Sprintf(IndexedTemplate, "typed");
+
+        Assert.Equal(
+            "if(IsNull(typed),'',typed) <> if(IsNull(typed[1]),'',typed[1])",
+            expectedPredicate,
+            StringComparer.Ordinal);
+
+        (FakeDataWindowHost widthHost, ContextMenuModel widthService) = ArrangeTypedColumn("char(10)");
+        List<string> predicates = [];
+        widthHost.FindHandler = (expression, _, _) =>
+        {
+            predicates.Add(expression);
+            return 0L;
+        };
+
+        _ = widthService.ColumnAutoWidth("typed");
+
+        // The service emits exactly what the indexed grammar produces.
+        Assert.Equal(expectedPredicate, Assert.Single(predicates), StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The ten messages DO route through <see cref="I18n"/> - proved with a live translating provider
+    /// whose translations then appear in the emitted text.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE CONTRAST, AND IT IS THE POINT OF THE TEST. AAP 0.2.1.3 Correction 5 records that the
+    /// twenty-eight column-expression messages are hardcoded Chinese that do NOT reach <c>I18N</c>,
+    /// while these ten do - and that the inconsistency is legacy behaviour to reproduce rather than
+    /// harmonise. Asserting only the untranslated text, as the rest of this suite does, cannot tell the
+    /// two apart: with no provider installed the silent-passthrough fallback returns the source string
+    /// unchanged, so a service that never called <c>I18N</c> at all would produce identical output.
+    /// Installing a provider that CHANGES the text is what makes the call observable.
+    /// </para>
+    /// <para>
+    /// THE DOUBLE RECORDS EVERY REQUEST BEFORE DECIDING WHETHER TO HANDLE IT, so the request log
+    /// distinguishes "never asked" from "asked and declined" - and the requests are asserted as well as
+    /// the output, because a lookup whose result was discarded would still be a lookup.
+    /// </para>
+    /// <para>
+    /// TRANSLATE FIRST, THEN FORMAT. The row template is translated and the RESULT is handed to
+    /// <c>Sprintf</c> [<c>:L795</c>], never the other way round - so a translation may legitimately move
+    /// the brace pair, and this test proves it by teaching a template whose <c>{}</c> sits at the END
+    /// rather than in the middle.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheTenMessagesRouteThroughLocalization()
+    {
+        ScriptedI18nProvider provider = new();
+        _ = provider.Teach(ContextMenuModel.RowNumberMessageKey, "row {}");
+        _ = provider.Teach(ContextMenuModel.ChangeRejectedMessageKey, "change rejected");
+        _ = provider.Teach(ContextMenuModel.InvalidValueMessageKey, "invalid value");
+        _ = provider.Teach(ContextMenuModel.TypeMismatchMessageKey, "type mismatch");
+
+        I18n facade = ScriptedLocalization.With(provider);
+
+        // ---- THE CHANGE-REFUSED SHAPE -----------------------------------------------------------
+        (FakeDataWindowHost host, ContextMenuModel service) = ArrangeCheckBoxColumn(i18n: facade);
+        host.DoItemChangeHandler = (_, _, _) => 1L;
+
+        Assert.Equal(RetCode.FAILED, service.CheckColumn(CheckColumn));
+
+        ContextMenuError refused = Assert.IsType<ContextMenuError>(service.PendingError);
+
+        // THE TRANSLATED TEXT APPEARS, and the brace pair was expanded AFTER translation - "row 1", not
+        // "row {}" and not "第1行".
+        Assert.Equal("row 1\nchange rejected!", refused.Text, StringComparer.Ordinal);
+
+        // THE KEYS ARE STILL THE SOURCE STRINGS, untranslated, so a consumer can re-render.
+        Assert.Equal(ContextMenuModel.RowNumberMessageKey, refused.RowFormatTemplate, StringComparer.Ordinal);
+        Assert.Equal(
+            ContextMenuModel.ChangeRejectedMessageKey,
+            refused.DetailMessageKey,
+            StringComparer.Ordinal);
+
+        // ---- THE INVALID-VALUE SHAPE ------------------------------------------------------------
+        (_, ContextMenuModel enumerated) = ArrangeEnumeratedColumn(facade);
+
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, enumerated.Paste2Column("grade", "Z"));
+        Assert.Equal(
+            "row 1\ninvalid value!\nZ",
+            Assert.IsType<ContextMenuError>(enumerated.PendingError).Text,
+            StringComparer.Ordinal);
+
+        // ---- THE TYPE-MISMATCH SHAPE ------------------------------------------------------------
+        (_, ContextMenuModel typed) = ArrangeTypedColumn("long", facade);
+
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, typed.Paste2Column("typed", "abc"));
+        Assert.Equal(
+            "row 1\ntype mismatch!\nabc",
+            Assert.IsType<ContextMenuError>(typed.PendingError).Text,
+            StringComparer.Ordinal);
+
+        // ---- AND THE PROVIDER WAS GENUINELY CONSULTED, WITH THE RIGHT CATEGORY -------------------
+        Assert.NotEmpty(provider.Requests);
+        Assert.All(provider.Requests, request => Assert.Equal(Categories.CAT_DWSVC, request.Category));
+
+        Assert.Contains(ContextMenuModel.RowNumberMessageKey, provider.RequestedKeys);
+        Assert.Contains(ContextMenuModel.ChangeRejectedMessageKey, provider.RequestedKeys);
+        Assert.Contains(ContextMenuModel.InvalidValueMessageKey, provider.RequestedKeys);
+        Assert.Contains(ContextMenuModel.TypeMismatchMessageKey, provider.RequestedKeys);
+    }
+
+
+    // ==============================================================================================
+    //  THE ORDERED MAP SEAM                                     AAP 0.2.1.3 CORRECTION 2 / :L986-L988
+    //  --------------------------------------------------------------------------------------------
+    //  Correction 2 splits pfw.utility.container: n_map is in scope as a SHARED container because BOTH
+    //  in-scope services reach it, and this service is one of the two - `n_cst_dwsvc_contextmenu.sru`
+    //  :L948 calls `_of_GetColumnValueMap`, whose base implementation is `n_cst_dwsvc.sru:L561-L664`
+    //  and whose ported form is Domain/DataWindowServiceHost.cs's GetColumnValueMap. The paste path
+    //  consults it at :L986-L988 and :L1006-L1007.
+    //
+    //  WHY THE TYPE MATTERS AND A Dictionary WOULD NOT DO. n_map's contract is ORDERED: `get(int)` and
+    //  `getkey(int)` address entries POSITIONALLY, one-based, in insertion order. A .NET Dictionary
+    //  enumerates in an unspecified order and has no positional accessor at all, so substituting one
+    //  here would silently drop a capability the rest of the layer relies on - which is exactly the kind
+    //  of narrowing constraint C-B forbids.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The column-value map really is <see cref="OrderedMap"/>, and the seam that produces it is the
+    /// base helper this service calls [<c>:L948</c>].
+    /// </summary>
+    /// <remarks>
+    /// ASSERTED AT THE SEAM, NOT AT THE CALL SITE. <c>GetColumnValueMap</c> is <c>protected</c> on
+    /// <c>DataWindowServiceBase</c> - which is where the oracle puts it too, since
+    /// <c>_of_GetColumnValueMap</c> is a private function on <c>n_cst_dwsvc</c>, the base every DataWindow
+    /// service derives from - so the test reflects the declared return type rather than asking the port to
+    /// publish it. Its BEHAVIOUR through the paste path is asserted separately by
+    /// <see cref="AKnownDisplayValueIsTranslatedToItsDataValue"/>.
+    /// </remarks>
+    [Fact]
+    public void TheColumnValueMapIsAnOrderedMap()
+    {
+        MethodInfo seam = Assert.IsType<MethodInfo>(
+            typeof(DataWindowServiceBase).GetMethod(
+                "GetColumnValueMap",
+                BindingFlags.NonPublic | BindingFlags.Instance),
+            exactMatch: false);
+
+        Assert.Equal(typeof(OrderedMap), seam.ReturnType);
+
+        // ONE PARAMETER, THE COLUMN NAME, passed `in` exactly as the oracle declares `readonly string`.
+        ParameterInfo parameter = Assert.Single(seam.GetParameters());
+
+        Assert.Equal(typeof(string), parameter.ParameterType.GetElementType() ?? parameter.ParameterType);
+        Assert.True(parameter.ParameterType.IsByRef, "the oracle declares it `readonly string`.");
+    }
+
+    /// <summary>
+    /// The map the seam actually builds for an enumerated column preserves the code table's INSERTION
+    /// ORDER, and its positional accessors are ONE-BASED [<c>n_cst_dwsvc.sru:L561-L664</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE MAP IS OBTAINED FROM THE LIVE SEAM, not constructed by the test, so the order asserted is the
+    /// order the service will see, and it is invoked on the SERVICE instance, which is what proves the
+    /// inherited member is reachable from this service rather than merely declared somewhere. The code
+    /// table is seeded 优 then 良 by
+    /// <see cref="ArrangeEnumeratedColumn"/>, mirroring the fixture's own
+    /// <c>values="新建 NEW/确认 CFD/审核 ADT/"</c> ordering at
+    /// <c>dw_test_dwsvc_contextmenu.srd:L11</c> - a code table is an ORDERED list in the DataWindow
+    /// syntax, and the display order is the order the entries are written.
+    /// </para>
+    /// <para>
+    /// ONE-BASED WITH AN INCLUSIVE UPPER BOUND OF <c>Count()</c>, which is AAP 0.4.5.4's named hazard.
+    /// Both ends are asserted - index 0 and index <c>Count() + 1</c> answer the out-of-range default
+    /// rather than throwing, matching PowerScript, where an out-of-range read is not an exception.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheColumnValueMapPreservesInsertionOrderAndIsOneBased()
+    {
+        (_, ContextMenuModel service) = ArrangeEnumeratedColumn();
+
+        MethodInfo seam = Assert.IsType<MethodInfo>(
+            typeof(DataWindowServiceBase).GetMethod(
+                "GetColumnValueMap",
+                BindingFlags.NonPublic | BindingFlags.Instance),
+            exactMatch: false);
+
+        OrderedMap map = Assert.IsType<OrderedMap>(seam.Invoke(service, ["grade"]));
+
+        Assert.Equal(2UL, map.Count());
+
+        // BY KEY - the display-to-data translation the paste path uses.
+        Assert.Equal("A", map.Get("优"));
+        Assert.Equal("B", map.Get("良"));
+
+        // POSITIONALLY, ONE-BASED, IN INSERTION ORDER.
+        Assert.Equal("优", map.GetKey(1), StringComparer.Ordinal);
+        Assert.Equal("良", map.GetKey(2), StringComparer.Ordinal);
+        Assert.Equal("A", map.Get(1));
+        Assert.Equal("B", map.Get(2));
+
+        // BOTH ENDS OF THE RANGE, and neither throws - index 0 does not exist and Count()+1 is past the
+        // last entry.
+        Assert.Null(map.Get(0));
+        Assert.Equal(string.Empty, map.GetKey(0));
+        Assert.Null(map.Get(3));
+        Assert.Equal(string.Empty, map.GetKey(3));
+    }
+
+    // ==============================================================================================
+    //  THE INIT-BEFORE-SELECTION DATA DEPENDENCY                       :L147 versus :L194 / PATTERN (b)
+    //  --------------------------------------------------------------------------------------------
+    //  AAP 0.6.1.4 assigns the context-menu pair pattern (b), strictly synchronous with no reordering,
+    //  and gives the reason in one line: "Initialization must complete before the menu identifier passed
+    //  to the second event can be meaningful". The oracle makes that a straight-line dependency inside
+    //  one event - `#DataWindow.Event OnInitContextMenu(row,dwo)` at :L147 populates the store, the
+    //  popup runs at :L189, and `#DataWindow.Event OnContextMenu(row,dwo,rtCode)` at :L194 receives the
+    //  identifier the popup answered.
+    //
+    //  ACROSS A BOUNDARY THAT ONE EVENT BECOMES TWO CALLS, because a headless service cannot show a menu
+    //  and block: BuildMenu returns the model and ApplySelection receives the choice. The ORDERING of
+    //  the two is EventOrderingPatternTests.cs's subject. What is asserted HERE is the DATA DEPENDENCY
+    //  that makes the ordering necessary - that a mid is only meaningful because initialization put it
+    //  in the model first.
+    // ==============================================================================================
+
+    /// <summary>
+    /// An identifier is meaningful to <see cref="ContextMenuModel.ApplySelection"/> only because
+    /// initialization put it in the model first [<c>:L147</c> before <c>:L194</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SAME CALL, THE SAME IDENTIFIER, TWO DIFFERENT OUTCOMES - and the only difference is whether
+    /// initialization ran. That is what "the mid is not meaningful until oninitcontextmenu completes"
+    /// means operationally, and it is why the pair cannot be reordered or run concurrently.
+    /// </para>
+    /// <para>
+    /// THE HOST'S INIT HANDLER IS WHERE AN APPLICATION ADDS ITS OWN ITEMS, so the identifier used here is
+    /// an APPLICATION identifier below <c>MID_RESERVED</c> rather than one of the nine - which is the
+    /// case that matters, since a framework identifier would dispatch on its own arm regardless of what
+    /// the model holds.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnIdentifierIsOnlyMeaningfulAfterInitializationHasRun()
+    {
+        const uint ApplicationId = 42u;
+
+        (FakeDataWindowHost host, ContextMenuModel service) = NewService();
+        _ = host.AddRow(1.00m);
+
+        // The application adds its item during initialization, exactly as :L147 invites it to.
+        host.InitContextMenuHandler = (_, _) =>
+        {
+            _ = service.AddMenu("application item", string.Empty, ApplicationId);
+            return 0L;
+        };
+
+        List<long> claimed = [];
+        host.ContextMenuHandler = (_, _, mid) =>
+        {
+            claimed.Add(mid);
+            return 1L;
+        };
+
+        // ---- WITHOUT INITIALIZATION: the store is empty, so the identifier names nothing ----------
+        Assert.Equal(0, service.GetCount());
+        Assert.Null(service.LastLayout);
+
+        // ---- WITH INITIALIZATION: the identifier is in the built model ---------------------------
+        ContextMenuLayout layout = service.BuildMenu(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
+
+        Assert.Equal(ContextMenuOutcome.Menu, layout.Outcome);
+        Assert.Contains(ApplicationId, IdsOf(layout.Items));
+        Assert.True(layout.AwaitingSelection);
+
+        // ...and only now does applying it reach the host's semantic event with that identifier.
+        Assert.Equal(RetCode.OK, service.ApplySelection(0L, Dwo(HeaderObject, "text"), ApplicationId));
+        Assert.Equal([(long)ApplicationId], claimed);
+    }
+
+    /// <summary>
+    /// A selection for an identifier that was never in the built model is a DEFINED outcome - the
+    /// no-matching-arm exit of <c>event ondefproc</c>, not an exception and not a guess
+    /// [<c>:L196</c>, <c>:L204-L222</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DEFINED AS "NOTHING HAPPENED, SUCCESSFULLY". The oracle's dispatch is a <c>choose case</c> over
+    /// the nine identifiers with no <c>case else</c>, so an unrecognised value falls out of the bottom
+    /// and the event returns having done nothing. Reproduced verbatim: <c>RetCode.OK</c>, no host call,
+    /// and none of the three pending results set - and specifically NOT an error, because the oracle has
+    /// no error to raise here and inventing one would break an application that adds its own identifiers
+    /// and handles them in <c>OnContextMenu</c> without the framework knowing.
+    /// </para>
+    /// <para>
+    /// THE CLEANUP STILL RUNS, which is the observable half that would break if the unknown identifier
+    /// were allowed to short-circuit: the oracle's <c>finally</c> at <c>:L197-L201</c> clears the clicked
+    /// column, the captured clipboard text and the whole item store on EVERY exit. So after an unknown
+    /// selection the model is empty and a second <c>ApplySelection</c> has nothing to find - asserted
+    /// below, because a port that skipped the cleanup would leave the store alive across right-clicks and
+    /// accumulate duplicate items.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ASelectionForAnIdentifierNeverInTheModelIsDefinedAndStillCleansUp()
+    {
+        const long NeverAdded = 999L;
+
+        (FakeDataWindowHost host, ContextMenuModel service) = NewService();
+        _ = host.AddRow(1.00m);
+
+        ContextMenuLayout layout = service.BuildMenu(0L, Dwo(HeaderObject, "text"), Pointer("header\t1"));
+
+        Assert.Equal(ContextMenuOutcome.Menu, layout.Outcome);
+        Assert.DoesNotContain((uint)NeverAdded, IdsOf(layout.Items));
+
+        host.CallLog.Clear();
+
+        Assert.Equal(RetCode.OK, service.ApplySelection(0L, Dwo(HeaderObject, "text"), NeverAdded));
+
+        // NOTHING WAS ATTEMPTED beyond the host's own veto event, and no result was produced.
+        Assert.Equal(["Event OnContextMenu"], host.CallLog.Members);
+        Assert.Null(service.PendingError);
+        Assert.Null(service.PendingCopiedText);
+        Assert.Null(service.PendingWidthPlan);
+
+        // AND THE CLEANUP RAN, so the store is empty and the layout is released.
+        Assert.Equal(0, service.GetCount());
+        Assert.Null(service.LastLayout);
+    }
 }

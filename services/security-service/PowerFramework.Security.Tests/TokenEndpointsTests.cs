@@ -99,6 +99,16 @@ internal static class IssuanceFixture
     /// <summary>A second configured audience, for the rows that vary the audience.</summary>
     internal const string SecondAudience = "powerframework-dataservices";
 
+    /// <summary>
+    /// This service's OWN identity, as its settings file declares it in both the issuance roster and the
+    /// inbound-validation section.
+    /// </summary>
+    /// <remarks>
+    /// It is the single audience the composition root's inbound bearer handler accepts, so it is the
+    /// audience a token minted for reading this service's own non-exempt routes must carry.
+    /// </remarks>
+    internal const string SelfAudience = "powerframework-security";
+
     /// <summary>An audience no deployment in this repository configures.</summary>
     /// <remarks>
     /// Deliberately shaped like a service identity so that the refusal is proved to come from the
@@ -444,6 +454,47 @@ internal sealed class IssuanceHostFactory : WebApplicationFactory<Program>
                 services.AddSingleton<TimeProvider>(new FrozenTimeProvider(frozen));
             }
         });
+    }
+
+    /// <summary>
+    /// Creates a client carrying a bearer token this host itself minted.
+    /// </summary>
+    /// <returns>A client whose every request presents a valid token for this service.</returns>
+    /// <remarks>
+    /// <para>
+    /// NEEDED BECAUSE THE COMPOSITION ROOT'S DEFAULT-DENY FALLBACK POLICY GOVERNS EVERY ROUTE THAT DID
+    /// NOT EXPLICITLY OPT OUT, and this service has exactly THREE anonymous routes - <c>/health</c> and
+    /// the two <c>/.well-known/</c> publications. The generated contract document is not among them, so
+    /// a row that reads it authenticates like any other caller.
+    /// </para>
+    /// <para>
+    /// THE TOKEN IS MINTED THROUGH THE HOST'S OWN ISSUER rather than hand-assembled, so the issuer, the
+    /// audience, the key identifier and the algorithm are by construction the ones the composition root
+    /// configured its inbound handler to require. The audience is this service's own identity, because
+    /// that is the single audience the inbound handler accepts: a token addressed to another service in
+    /// the roster is deliberately not replayable here.
+    /// </para>
+    /// </remarks>
+    public HttpClient CreateAuthenticatedClient()
+    {
+        TokenIssuanceResult issued = Services
+            .GetRequiredService<TokenIssuer>()
+            .Issue(new TokenIssuanceRequest(
+                subject: IssuanceFixture.SelfAudience,
+                audience: IssuanceFixture.SelfAudience,
+                scopes: [IssuanceFixture.ReadScope]));
+
+        Assert.Equal(TokenIssuanceOutcome.Issued, issued.Outcome);
+        Assert.NotNull(issued.Token);
+
+        HttpClient client = CreateClient();
+
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer",
+                issued.Token.AccessToken);
+
+        return client;
     }
 }
 
@@ -1475,9 +1526,16 @@ public sealed class TokenRegistrationTests
 
         Assert.DoesNotContain("access_token", refused, StringComparison.Ordinal);
 
-        using HttpResponseMessage document = await client.GetAsync(
+        // A BEARER-AUTHENTICATED CLIENT FOR THE DOCUMENT, because the generated document is not one of
+        // this service's three anonymous routes: the default-deny fallback policy governs it, and a
+        // transport credential authenticates the ISSUANCE operation rather than the whole surface.
+        using HttpClient reader = factory.CreateAuthenticatedClient();
+
+        using HttpResponseMessage document = await reader.GetAsync(
             new Uri(IssuanceFixture.DocumentPath, UriKind.Relative),
             TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, document.StatusCode);
 
         string payload = await document.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
 
@@ -2241,10 +2299,16 @@ public sealed class TokenGeneratedDocumentTests
 
     /// <summary>Fetches the generated document from a booted host.</summary>
     /// <returns>The document.</returns>
+    /// <remarks>
+    /// AUTHENTICATED, BECAUSE THE DOCUMENT IS NOT ONE OF THIS SERVICE'S THREE ANONYMOUS ROUTES. The
+    /// composition root installs a default-deny fallback policy and exempts only <c>/health</c> and the
+    /// two <c>/.well-known/</c> publications, so a description of the surface is fetched with a token
+    /// like any other non-exempt route.
+    /// </remarks>
     private static async Task<JsonDocument> ReadAsync()
     {
         await using IssuanceHostFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        using HttpClient client = factory.CreateAuthenticatedClient();
 
         using HttpResponseMessage response = await client.GetAsync(
             new Uri(IssuanceFixture.DocumentPath, UriKind.Relative),
@@ -2283,7 +2347,10 @@ public sealed class TokenSecrecyTests
         Assert.DoesNotContain("eyJ", ContractDocument.Text, StringComparison.Ordinal);
 
         await using IssuanceHostFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+
+        // Authenticated: the generated document is governed by the default-deny fallback policy, so an
+        // anonymous read would return a refusal rather than the document this row inspects.
+        using HttpClient client = factory.CreateAuthenticatedClient();
 
         using HttpResponseMessage response = await client.GetAsync(
             new Uri(IssuanceFixture.DocumentPath, UriKind.Relative),

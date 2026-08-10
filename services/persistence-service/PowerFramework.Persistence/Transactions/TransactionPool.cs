@@ -986,6 +986,35 @@ internal interface IPooledTransaction : IDisposable
     bool IsConnected();
 
     /// <summary>
+    /// Whether the connection is believed live, ALSO REPORTING whether the answer came from an actual
+    /// probe or from the liveness cache. [<c>:L193-L218</c>]
+    /// </summary>
+    /// <param name="probed">
+    /// <see langword="true"/> when the connection was actually interrogated - by the test hook, or by
+    /// the dialect probe when that hook yields nothing [<c>:L200-L210</c>]. <see langword="false"/> when
+    /// the answer came from the cache short-circuit [<c>:L198</c>] or from one of the two
+    /// no-probe-needed refusals [<c>:L196</c>, <c>:L197</c>].
+    /// </param>
+    /// <returns><see langword="true"/> when the connection is believed live.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS OVERLOAD REPORTS A DISTINCTION THE ORACLE ALREADY MAKES BUT NEVER RETURNS, AND IT ADDS NO
+    /// BEHAVIOUR.</b> The cache short-circuit at [<c>:L198</c>] answers <see langword="true"/> WITHOUT
+    /// TOUCHING THE CONNECTION, and nothing about the boolean result distinguishes that from a real
+    /// probe - the difference is observable only through the ABSENCE of the probe. A characterization
+    /// comparison has to be able to see it, which is why the published contract carries
+    /// <c>persistence.v1.IsConnectedResponse.probed</c> and why the flag has to be reported rather than
+    /// deduced: deducing it from a statement-status delta would have false negatives, because the test
+    /// hook can answer without changing any state.
+    /// </para>
+    /// <para>
+    /// The parameterless overload above remains the primary member and delegates here, so no existing
+    /// caller changes and there is exactly one implementation of the sequence.
+    /// </para>
+    /// </remarks>
+    bool IsConnected(out bool probed);
+
+    /// <summary>
     /// Whether the transaction has been condemned. [<c>:L530-L534</c>]
     /// </summary>
     /// <returns><see langword="true"/> when the transaction is broken.</returns>
@@ -1142,8 +1171,18 @@ internal sealed class PooledTransaction : IPooledTransaction
     /// <c>RetCode.OK</c> or <c>DBT_ORACLE</c>, whose spellings travel in recordings and are consumed
     /// from their own files.
     /// </para>
+    /// <para>
+    /// <b><see langword="internal"/> rather than <see langword="private"/>, so the ONE value is stated
+    /// once.</b> The published contract lets a caller ASK for a liveness window
+    /// (<c>persistence.v1.PoolKeepAliveSettings.liveness_cache_window_ms</c>), and this build honours
+    /// only the legacy one - so <c>Grpc/TransactionService.cs</c> has to compare a requested window
+    /// against it in order to refuse a request it could not satisfy. Reading it from here is what keeps
+    /// that comparison from becoming a second copy of the number that could drift from this one. It is
+    /// still on no public surface: this assembly exposes its internals to
+    /// <c>PowerFramework.Persistence.Tests</c> and to nothing else.
+    /// </para>
     /// </remarks>
-    private const long LivenessCacheWindowMilliseconds = 10_000;
+    internal const long LivenessCacheWindowMilliseconds = 10_000;
 
     /// <summary>
     /// The Oracle marker the dialect resolver and the liveness probe both search for.
@@ -1654,9 +1693,27 @@ internal sealed class PooledTransaction : IPooledTransaction
     /// warm the cache is - which is what lets a health check condemn a connection promptly.
     /// </para>
     /// </remarks>
-    public bool IsConnected()
+    public bool IsConnected() => IsConnected(out _);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// The single implementation of the sequence; the parameterless overload delegates here and
+    /// discards the flag. <b>The flag is set from the CONTROL FLOW that already exists rather than from
+    /// any new decision</b>, so this overload adds no behaviour - it only reports which of the arms
+    /// below was taken.
+    /// </para>
+    /// <para>
+    /// The two early refusals report <see langword="false"/> for the flag as well as for the verdict,
+    /// which is correct rather than merely convenient: neither of them touches the connection either.
+    /// </para>
+    /// </remarks>
+    public bool IsConnected(out bool probed)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // No arm below this point has interrogated the connection yet.
+        probed = false;
 
         // [:L196] The zero sentinel means "never connected OK".
         if (_lastConnectionOkTicks == 0 || _broken)
@@ -1672,11 +1729,16 @@ internal sealed class PooledTransaction : IPooledTransaction
             return false;
         }
 
-        // [:L198] CLOCK 2. Strictly less than, so a delta of exactly the window re-probes.
+        // [:L198] CLOCK 2. Strictly less than, so a delta of exactly the window re-probes. THE ANSWER
+        // COMES FROM THE CACHE AND NOT FROM THE CONNECTION, which is what `probed` reports: this arm is
+        // observable only by the absence of the probe below it.
         if (ReadTicks() - _lastConnectionOkTicks < LivenessCacheWindowMilliseconds)
         {
             return true;
         }
+
+        // Past the short-circuit, one of the two probe paths below always runs.
+        probed = true;
 
         // [:L200]
         long? hookResult = _hooks.OnTest();

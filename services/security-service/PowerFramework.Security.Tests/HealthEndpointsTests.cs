@@ -50,7 +50,9 @@
 // =================================================================================================
 
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -66,6 +68,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
 using PowerFramework.Security.Endpoints;
+using PowerFramework.Security.Tokens;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.Security.Tests;
@@ -238,7 +241,19 @@ public sealed class HealthEndpointsTests
     public async Task ThePublishedDocumentDeclaresTheOperationTheAuthoredContractFixes()
     {
         await using SecurityHostFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+
+        // THE DOCUMENT IS NOT ONE OF THE SERVICE'S THREE ANONYMOUS ROUTES. The refutation comes first
+        // so that the assertions below cannot pass for the wrong reason: an anonymous caller is refused
+        // by the default-deny fallback policy, exactly as on every other non-exempt route.
+        using HttpClient anonymous = factory.CreateClient();
+
+        using HttpResponseMessage refused = await anonymous.GetAsync(
+            OpenApiDocumentRoute,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+
+        using HttpClient client = factory.CreateAuthenticatedClient();
 
         using HttpResponseMessage document = await client.GetAsync(
             OpenApiDocumentRoute,
@@ -1195,6 +1210,26 @@ public sealed class HealthEndpointsTests
 /// </remarks>
 internal sealed class SecurityHostFactory : WebApplicationFactory<Program>
 {
+    /// <summary>
+    /// The signing material this host runs on. A DISTINCT PAIR PER HOST, generated in the constructor.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SUPPLYING IT IS MANDATORY, NOT CONVENIENCE. <c>Program.cs</c> validates the configuration
+    /// contract on start and REFUSES THE HOST when the signing material is absent, which is the legacy
+    /// fail-fast posture [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>, ending in <c>HALT CLOSE</c> at
+    /// <c>:L143</c>]. A factory that supplied none would therefore not boot at all, and every row below
+    /// would fail on startup rather than on the property it exists to assert.
+    /// </para>
+    /// <para>
+    /// It is applied through the OPTIONS PIPELINE rather than through the process environment, because
+    /// that is the same ingress a deployment uses and it keeps the value out of an environment a sibling
+    /// row could observe. The composition root's own resolution step reads the flat configuration key
+    /// only when that key is PRESENT, so it never displaces what is supplied here.
+    /// </para>
+    /// </remarks>
+    private readonly string _signingKey;
+
     private readonly Action<IServiceCollection>? _configure;
 
     /// <summary>Creates the factory over the unmodified composition root.</summary>
@@ -1205,18 +1240,81 @@ internal sealed class SecurityHostFactory : WebApplicationFactory<Program>
 
     /// <summary>Creates the factory and applies a registration override.</summary>
     /// <param name="configure">The override to apply after the composition root has registered.</param>
-    public SecurityHostFactory(Action<IServiceCollection>? configure) => _configure = configure;
+    public SecurityHostFactory(Action<IServiceCollection>? configure)
+    {
+        _configure = configure;
+
+        using RSA key = RSA.Create(2048);
+
+        _signingKey = key.ExportPkcs8PrivateKeyPem();
+    }
 
     /// <inheritdoc/>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
+        string signingKey = _signingKey;
+
+        builder.ConfigureServices(services =>
+            services.Configure<SecurityOptions>(options => options.SigningKey = signingKey));
+
+        // Applied AFTER the signing material so that a row poisoning a registration still observes a
+        // bootable host, and after the composition root so that a row can poison what it installed.
         if (_configure is not null)
         {
             builder.ConfigureServices(_configure);
         }
     }
+
+    /// <summary>
+    /// Creates a client carrying a bearer token this host itself minted.
+    /// </summary>
+    /// <returns>A client whose every request presents a valid token for this service.</returns>
+    /// <remarks>
+    /// <para>
+    /// NEEDED BECAUSE THE DEFAULT-DENY FALLBACK POLICY GOVERNS EVERY ROUTE THAT DID NOT EXPLICITLY OPT
+    /// OUT, and this service has exactly THREE anonymous routes - <c>/health</c> and the two
+    /// <c>/.well-known/</c> publications. The generated contract document is not among them, so a row
+    /// that reads it authenticates like any other caller.
+    /// </para>
+    /// <para>
+    /// THE TOKEN IS MINTED THROUGH THE HOST'S OWN ISSUER rather than hand-assembled, so the issuer, the
+    /// audience, the key identifier and the algorithm are by construction the ones the composition root
+    /// configured its inbound handler to require. A hand-built token would be asserting the test's
+    /// beliefs about that configuration instead of the configuration itself.
+    /// </para>
+    /// <para>
+    /// The audience is this service's own identity, because that is the single audience the inbound
+    /// handler accepts - a token addressed to another service in the roster is deliberately NOT
+    /// replayable here.
+    /// </para>
+    /// </remarks>
+    public HttpClient CreateAuthenticatedClient()
+    {
+        TokenIssuanceResult issued = Services
+            .GetRequiredService<TokenIssuer>()
+            .Issue(new TokenIssuanceRequest(
+                subject: SelfAudience,
+                audience: SelfAudience,
+                scopes: [DocumentScope]));
+
+        Assert.Equal(TokenIssuanceOutcome.Issued, issued.Outcome);
+        Assert.NotNull(issued.Token);
+
+        HttpClient client = CreateClient();
+
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", issued.Token.AccessToken);
+
+        return client;
+    }
+
+    /// <summary>This service's own identity, as its settings file declares it in both rosters.</summary>
+    private const string SelfAudience = "powerframework-security";
+
+    /// <summary>One scope, so that a request asks for something rather than for nothing.</summary>
+    private const string DocumentScope = "contract.read";
 }
 
 /// <summary>

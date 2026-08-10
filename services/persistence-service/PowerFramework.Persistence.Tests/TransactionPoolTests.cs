@@ -2564,6 +2564,14 @@ public sealed class TransactionPoolTests
 
         public bool IsConnected() => true;
 
+        // The probe-reporting overload. Recorded so a caller can assert on it; this double answers
+        // from nothing at all, so it reports that it did not probe.
+        public bool IsConnected(out bool probed)
+        {
+            probed = false;
+            return true;
+        }
+
         public bool IsBroken()
         {
             IsBrokenCalls++;
@@ -2898,6 +2906,12 @@ public sealed class TransactionPoolTests
         public long Exec(string? sqlCommand) => RetCode.OK;
 
         public bool IsConnected() => false;
+
+        public bool IsConnected(out bool probed)
+        {
+            probed = false;
+            return false;
+        }
 
         public bool IsBroken() => false;
 

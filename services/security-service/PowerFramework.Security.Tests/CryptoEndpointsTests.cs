@@ -1245,10 +1245,16 @@ public sealed class CryptoEndpointsServiceTests
 
     /// <summary>Fetches and parses the generated contract document.</summary>
     /// <returns>The parsed document.</returns>
+    /// <remarks>
+    /// AUTHENTICATED, BECAUSE THE DOCUMENT IS NOT ONE OF THIS SERVICE'S THREE ANONYMOUS ROUTES. The
+    /// composition root installs a default-deny fallback policy and exempts only <c>/health</c> and the
+    /// two <c>/.well-known/</c> publications, so a description of the surface is fetched with a token
+    /// like any other non-exempt route.
+    /// </remarks>
     private static async Task<JsonDocument> ReadGeneratedDocumentAsync()
     {
         using SecurityHostFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        using HttpClient client = factory.CreateAuthenticatedClient();
 
         using HttpResponseMessage response = await client.GetAsync(
             DocumentRoute,

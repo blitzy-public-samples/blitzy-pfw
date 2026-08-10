@@ -2025,6 +2025,14 @@ public sealed class SqlTaskBaseTests
 
         public bool IsConnected() => Connected;
 
+        // The probe-reporting overload. This double never consults a connection, so it never
+        // probes - the flag is false on every path, matching the cache/refusal arms of the oracle.
+        public bool IsConnected(out bool probed)
+        {
+            probed = false;
+            return Connected;
+        }
+
         public bool IsBroken() => Broken;
 
         public long SetBroken()
