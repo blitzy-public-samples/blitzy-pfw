@@ -146,6 +146,32 @@ builder.Services.AddSingleton<CryptoReferenceResolver>();
 builder.Services.AddSingleton<SigningKeyProvider>();
 
 // --------------------------------------------------------------------------------------------------
+// 1d. THE SOLE MINTER - ONE INSTANCE, AND THE ONLY COMPONENT IN THE SYSTEM THAT CREATES A TOKEN
+//
+// Security mints; Gateway, DataServices and Persistence hold verification material only and are not
+// independent signing authorities. Registering this type here, once, is what makes that topology a
+// property of the composition root rather than of a convention: there is exactly one issuer instance
+// in the process and exactly one route that can reach it.
+//
+// A SINGLETON, AND ITS CONSTRUCTOR IS THE STARTUP GATE. It resolves the issuer identity, the audience
+// roster, the lifetime and the signing credential EAGERLY and refuses to construct when any of them
+// cannot support issuance - a blank issuer, an empty or blank-entried roster, a lifetime that does not
+// carry a whole second, a symmetric key, an algorithm this issuer does not produce, or a key identifier
+// that disagrees with the one the key set publishes. That is the fail-fast posture the legacy framework
+// application object sets by ending a structural fault in process termination rather than in a warning
+// [ws_objects/pfw.pbl.src/pfw.sra:L111-L144, ending in HALT CLOSE at :L143]: a misconfigured issuer must
+// not reach the point of answering a readiness probe, because a service that reports healthy and then
+// refuses every request looks correct from the outside for exactly as long as it takes to page someone.
+//
+// IT TAKES ITS CLOCK AND ITS CREDENTIAL FROM THE TWO REGISTRATIONS ABOVE, and neither is duplicated for
+// it. The clock is the determinism seam a characterization run substitutes, so the issuance instant, the
+// not-before instant and the expiry are all derived from one substitutable reading; the credential comes
+// from the signing-key layer, which is the only place private key material lives. NO KEY MATERIAL AND NO
+// CONFIGURATION VALUE APPEARS HERE (constraint C-F).
+// --------------------------------------------------------------------------------------------------
+builder.Services.AddSingleton<TokenIssuer>();
+
+// --------------------------------------------------------------------------------------------------
 // 2. INBOUND TOKEN VALIDATION - THE STOCK HANDLER, AND THE ONE ASYMMETRY THAT IS DELIBERATE
 //
 // Security is subject to the same rule as every other service on its own surface: /v1/ping requires a
@@ -238,6 +264,17 @@ app.MapPingEndpoints();
 // configured addresses sit inside the well-known namespace and differ from one another, and fails the
 // host when either condition does not hold.
 app.MapJwksEndpoints();
+
+// Contract C-01's issuance half, and the only route in the system that reaches a signing key. It is
+// authenticated by a CLIENT CERTIFICATE rather than by a token, applied explicitly inside that file as a
+// route-level authorization policy, because a caller cannot present a bearer token in order to obtain its
+// first bearer token - which is why the published document applies its mutual-TLS scheme to that one
+// operation as an override of the document-level bearer requirement. The requirement is enforced per
+// operation rather than at the listener so that the anonymous routes above and the bearer-authenticated
+// ones below stay reachable on this service's single listener; the registration also validates the
+// configured issuance address and fails the host when it is blank, unrooted, or inside the anonymous
+// metadata namespace.
+app.MapTokenEndpoints();
 
 // Contract C-02, the cryptographic surface. Every one of its 17 operations requires a token and answers
 // 401 without one, applied once on the route group inside the file rather than relied upon from the

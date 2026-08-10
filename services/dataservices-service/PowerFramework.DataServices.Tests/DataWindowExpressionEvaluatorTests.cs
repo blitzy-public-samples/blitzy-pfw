@@ -2468,3 +2468,1304 @@ public class DeployedPageResolutionTests
         return new DataWindowExpressionEvaluator(host, PinyinFirstLetterMatcher.Blocked, resolver);
     }
 }
+
+
+// ======================================================================================================
+//  THE EXPRESSION-ENCODED PROPERTY PROTOCOL
+//  -----------------------------------------------------------------------------------------------------
+//  n_cst_dwsvc.sru:L186-L196 (_of_GetDWOProp) is the ONLY place in the oracle that decides whether a
+//  property holds a literal or an expression, and the decision is made on a single TAB character:
+//
+//      sExp = #DataWindow.Describe(colName + "." + prop)      // :L188
+//      nPos = Pos(sExp,"~t")                                  // :L189
+//      if nPos = 0 then
+//          return sExp                                        // :L191  the value IS the answer
+//      else
+//          sExp = "~"" + Mid(sExp,nPos + 1)                   // :L194  prefix ONE double quote
+//          return #DataWindow.Describe("Evaluate(" + sExp + "," + String(row) + ")")   // :L195
+//      end if
+//
+//  Two properties of that code are load bearing and are asserted below rather than assumed.
+//
+//  FIRST, THE NO-TAB ARM MUST NOT EVALUATE. A property whose literal value happens to BE a valid
+//  expression - and `RowCount()` is - has to come back as that text, not as its value. Asserting this
+//  with an inert literal would pass whether or not the arm evaluates, which is why the case below uses a
+//  value that would visibly change if it were evaluated.
+//
+//  SECOND, THE PREFIXED QUOTE IS NOT A TYPO. The stored conditional form is `literal~texpression"` - it
+//  carries a TRAILING quote and no leading one - so :L194 supplies the missing opening quote and the
+//  result is a BALANCED `Evaluate("...",0)`. That is also why the sibling helper _of_GetPropExp does the
+//  opposite arithmetic and DROPS the trailing character (its own comment reads 取表达式（排除尾部'"'）).
+//  Both halves are exercised here, because a port that "cleaned up" either one would corrupt the other.
+// ======================================================================================================
+
+public class ExpressionEncodedPropertyTests
+{
+    /// <summary>
+    /// Reaches the two protected halves of the <c>~t</c> protocol, which are protected because the
+    /// oracle's own members are <c>protected</c> on <c>se_cst_datawindow</c>'s descendant.
+    /// </summary>
+    /// <remarks>
+    /// A HAND-WRITTEN DOUBLE RATHER THAN REFLECTION, AND IT DERIVES FROM THE SERVICE BASE RATHER THAN
+    /// FROM THE HOST. <c>_of_GetDWOProp</c> is a member of <c>n_cst_dwsvc</c>, the SERVICE that attaches
+    /// to a DataWindow, not of the DataWindow itself, so the port puts it on
+    /// <see cref="DataWindowServiceBase"/> and reaching it means being a service. Deriving here also
+    /// exercises the same <c>OnInit</c> attachment the oracle performs on each attached service at
+    /// <c>ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L576-L580</c>; reflection would reach
+    /// the same members while skipping the attachment, and the attachment is the part that can fail.
+    /// </remarks>
+    private sealed class PropertyReadingService : DataWindowServiceBase
+    {
+        /// <summary>Reaches <c>_of_GetDWOProp(dwoName, prop)</c>.</summary>
+        /// <param name="dwoName">The object name.</param>
+        /// <param name="prop">The property name.</param>
+        /// <returns>The literal value, the evaluated value, or the empty string for a sentinel.</returns>
+        public string ReadProperty(string dwoName, string prop) =>
+            GetDataWindowObjectProperty(dwoName, prop);
+
+        /// <summary>Reaches <c>_of_GetDWOText(dwoName)</c>.</summary>
+        /// <param name="dwoName">The object name.</param>
+        /// <returns>The object's text.</returns>
+        public string ReadText(string dwoName) => GetDataWindowObjectText(dwoName);
+
+        /// <summary>Reaches <c>_of_GetPropExp(prop)</c>.</summary>
+        /// <param name="prop">A raw property value, possibly in the conditional form.</param>
+        /// <returns>The expression half, with its trailing quote removed.</returns>
+        public static string ExpressionHalf(string prop) => GetPropertyExpression(prop);
+    }
+
+    /// <summary>
+    /// Builds the fixture with the DataWindow answering its own <c>Evaluate</c> properties, which is
+    /// what the PowerBuilder runtime does and what <see cref="FakeDataWindowHost.DescribeOverride"/>
+    /// exists for.
+    /// </summary>
+    /// <param name="host">Receives the host.</param>
+    /// <param name="evaluator">Receives the evaluator wired into that host's property reads.</param>
+    /// <returns>The service, already attached to <paramref name="host"/>.</returns>
+    private static PropertyReadingService BuildAttachedService(
+        out FakeDataWindowHost host,
+        out DataWindowExpressionEvaluator evaluator)
+    {
+        host = EvaluatorFixture.BuildSqliteFixture();
+
+        // The fixture's own compute is `sum(salary for page)` [dw_sqlite.srd:L27], so a pagination has
+        // to be stated before any property read can reach it (DECISION D7a).
+        DataWindowExpressionEvaluator built = new(host)
+        {
+            PageResolver = WholeBufferPageResolver.Instance,
+        };
+
+        // Only an Evaluate property is answered here; everything else falls through to the taught table
+        // by answering null, so a plain property read still behaves exactly as it does elsewhere.
+        host.DescribeOverride = property =>
+            DataWindowExpressionEvaluator.TryUnwrapEvaluateProperty(property, out _, out _)
+                ? built.Describe(property)
+                : null;
+
+        evaluator = built;
+
+        PropertyReadingService service = new();
+        service.OnInit(host);
+
+        return service;
+    }
+
+    [Fact]
+    public void ATabEncodedPropertyIsEvaluatedAndAPlainOneIsReturnedAsIs()
+    {
+        PropertyReadingService service = BuildAttachedService(out FakeDataWindowHost host, out _);
+
+        // THE CONDITIONAL FORM, stored exactly as the DataWindow stores it: the unconditional value,
+        // a TAB, the expression, and the trailing quote the oracle relies on [:L194].
+        host.SetDescribe("name_t.text", "Name\tif(RowCount() > 2,'many','few')\"");
+
+        // The fixture holds four rows, so the expression answers 'many'. Reading "Name" here instead
+        // would mean the tab arm never fired.
+        Assert.Equal("many", service.ReadProperty("name_t", "text"));
+
+        // THE NO-TAB ARM. The value is itself a valid expression, chosen precisely so that evaluating
+        // it would be observable - it would answer "4" - so this assertion can only pass if :L191
+        // returns the text untouched.
+        host.SetDescribe("id_t.text", "RowCount()");
+
+        Assert.Equal("RowCount()", service.ReadProperty("id_t", "text"));
+        Assert.NotEqual("4", service.ReadProperty("id_t", "text"));
+    }
+
+    [Fact]
+    public void TheEvaluatedHalfSeesTheRowlessContextTheOracleGivesIt()
+    {
+        PropertyReadingService service = BuildAttachedService(out FakeDataWindowHost host, out _);
+
+        // :L195 passes String(row) and :L344 / :L782 pass a literal 0. _of_GetDWOProp is the latter
+        // shape, so a property expression is evaluated OUTSIDE any row and a COLUMN REFERENCE in it has
+        // no value to read.
+        //
+        // THE PROBE IS A COLUMN AND DELIBERATELY NOT GetRow(). GetRow() answers the DataWindow's CURRENT
+        // row and ignores the evaluation row entirely - `{ "GetRow()", 4L, "1" }` in the roster above is
+        // that exact behaviour - so it cannot distinguish a rowless evaluation from any other. A column
+        // reference can, because row 0 has no row to read it from.
+        const string probe = "if(IsNull(name),'no row',name)";
+
+        host.SetDescribe("name_t.text", "Value\t" + probe + "\"");
+
+        Assert.Equal("no row", service.ReadProperty("name_t", "text"));
+
+        // And the same expression at a real row does see one, which is what proves the answer above is
+        // the row-zero context rather than a fault. Row 2's name is "国A" [the fixture].
+        Assert.Equal("国A", host.Describe("Evaluate(\"" + probe + "\",2)"));
+    }
+
+    [Fact]
+    public void EitherSentinelNormalisesToTheEmptyStringOnThePropertyReadPath()
+    {
+        PropertyReadingService service = BuildAttachedService(out FakeDataWindowHost host, out _);
+
+        // _of_GetDWOProp: `if sExp = "!" or sExp = "?" then return ""`. Note this DIFFERS from
+        // GetColumnProperty, which passes both sentinels through - the divergence is the oracle's and
+        // both sides of it are preserved.
+        Assert.Equal(string.Empty, service.ReadProperty("no_such_object", "text"));
+
+        host.SetDescribe("id_t.text", DataWindowExpressionEvaluator.UndeterminedValueSentinel);
+        Assert.Equal(string.Empty, service.ReadProperty("id_t", "text"));
+
+        host.SetDescribe("id_t.text", DataWindowExpressionEvaluator.InvalidExpressionSentinel);
+        Assert.Equal(string.Empty, service.ReadProperty("id_t", "text"));
+    }
+
+    [Fact]
+    public void TheTextPropertyDelegationInheritsBothArms()
+    {
+        PropertyReadingService service = BuildAttachedService(out FakeDataWindowHost host, out _);
+
+        // _of_GetDWOText is one line in the oracle - `return _of_GetDWOProp(dwoName,"text")` - so it
+        // must inherit the tab arm, the plain arm and the sentinel normalisation rather than repeat
+        // any of them.
+        host.SetDescribe("name_t.text", "Name\tString(RowCount())\"");
+        Assert.Equal("4", service.ReadText("name_t"));
+
+        host.SetDescribe("id_t.text", "Identifier");
+        Assert.Equal("Identifier", service.ReadText("id_t"));
+
+        Assert.Equal(string.Empty, service.ReadText("no_such_object"));
+    }
+
+    [Fact]
+    public void TheExpressionHalfDropsTheTrailingQuoteThatTheOtherHalfSupplies()
+    {
+        // _of_GetPropExp: `return Mid(prop,nPos + 1,Len(prop) - nPos - 1)`. The length is ONE SHORT of
+        // the remainder, which is the whole of the "excluding the trailing quote" comment.
+        Assert.Equal(
+            "if(RowCount() > 2,'many','few')",
+            PropertyReadingService.ExpressionHalf("Name\tif(RowCount() > 2,'many','few')\""));
+
+        // No tab, so not conditional, so returned unchanged - INCLUDING a format mask, which is the
+        // shape n_cst_dwsvc_contextmenu.sru:L1167-L1171 reads.
+        Assert.Equal("[general]", PropertyReadingService.ExpressionHalf("[general]"));
+
+        // A value that ends AT the tab has nothing after it to take, and PowerScript's Mid answers the
+        // empty string for a non-positive length rather than faulting.
+        Assert.Equal(string.Empty, PropertyReadingService.ExpressionHalf("Name\t"));
+    }
+
+    [Fact]
+    public void APlainPropertyValueIsCarriedAsAStringValueAndNeverEvaluated()
+    {
+        DataWindowExpressionEvaluator evaluator =
+            EvaluatorFixture.BuildEvaluator(out FakeDataWindowHost host);
+
+        // A property whose VALUE is an expression is still just a property: TryDescribe hands back the
+        // host's answer, unevaluated, because only an `Evaluate(...)` PROPERTY is an evaluation
+        // request. dw_sqlite.srd:L27's compute expression is the realistic case.
+        host.SetDescribe("compute_1.Expression", "sum(salary for page)");
+
+        Assert.False(DataWindowExpressionEvaluator.TryUnwrapEvaluateProperty(
+            "compute_1.Expression", out _, out _));
+
+        DataWindowExpressionResult result = evaluator.TryDescribe("compute_1.Expression");
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("sum(salary for page)", result.Text);
+        Assert.Equal(ExpressionValueKind.String, result.Value.Kind);
+        Assert.Equal(DataWindowExpressionEvaluator.NoRowContext, result.Row);
+        Assert.Null(result.Error);
+    }
+}
+
+
+// ======================================================================================================
+//  THE SENTINEL-TO-STRUCTURED-ERROR LINKAGE
+//  -----------------------------------------------------------------------------------------------------
+//  n_cst_dwsvc_columnexp.sru:L761-L763 is the engine's entire reaction to an evaluator failure:
+//
+//  if sVal = "?" or sVal = "!" then
+//    MessageBox("错误","[" + String(ColExpDatas[index].name) + "]表达式错误:~nExpression:" + sExp,StopSign!)
+//    return false
+//  end if
+//
+//  So the contract has TWO halves and this suite asserts both and the joint between them. The evaluator
+//  must SURFACE the sentinel as a failure while keeping the sentinel itself as the observable text - if
+//  the text changed, the oracle's own equality test would stop firing. The engine must then convert that
+//  into a structured error carrying the COLUMN NAME and the EXPRESSION TEXT, because those are the only
+//  two values the dialog ever showed and a caller that lost either one could not reproduce the message.
+//
+//  The third sentinel is not in that test at all. `""` is the CALLER'S ABORT, returned by
+//  _of_GetItemExpValue at :L2185-L2186 and by its `case else` arm at :L2358, and it is exactly why
+//  dwvaluetoexp.srf may never answer the empty string: an empty answer there would be read as "abandon
+//  this calculation" rather than as a value. That invariant is asserted here from the evaluator's side.
+// ======================================================================================================
+
+public class SentinelToStructuredErrorTests
+{
+    /// <summary>
+    /// The column whose name the structured error carries, from dw_test_dwsvc_columnexp.srd.
+    /// </summary>
+    private const string ColumnName = "n1";
+
+    /// <summary>The expression text it carries, from w_test_dwsvc_columnexp.srw:L151.</summary>
+    private const string ExpressionText = "$FormatPrice($应收-$未收,$精度)";
+
+    // :L761 tests for both sentinels in one condition, so both must reach the same error site.
+    public static TheoryData<string, ExpressionEvaluationOutcome> Sentinels() => new()
+    {
+        {
+            DataWindowExpressionEvaluator.UndeterminedValueSentinel,
+            ExpressionEvaluationOutcome.Undetermined
+        },
+        {
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            ExpressionEvaluationOutcome.InvalidExpression
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(Sentinels))]
+    public void EitherSentinelIsAFailureThatCarriesTheColumnNameAndTheExpression(
+        string sentinel,
+        ExpressionEvaluationOutcome expected)
+    {
+        DataWindowExpressionEvaluator evaluator =
+            EvaluatorFixture.BuildEvaluator(out FakeDataWindowHost host);
+        host.SetDescribe("salary.Protect", sentinel);
+
+        // HALF ONE - the evaluator. Classified as a failure on the structured channel, while the
+        // observable text stays the one character the oracle compares against at :L761.
+        DataWindowExpressionResult result = evaluator.TryDescribe("salary.Protect");
+
+        Assert.Equal(expected, result.Outcome);
+        Assert.Equal(sentinel, result.Text);
+        Assert.True(result.IsSentinel);
+        Assert.False(result.IsSuccess);
+        Assert.False(result.IsAbort);
+        Assert.NotNull(result.Error);
+
+        // HALF TWO - the engine's conversion of that failure [:L762], reached the same way
+        // Expressions/ColumnExpressionEngine.cs reaches it.
+        ExpressionParseError error = ParseErrorFormatter.CreatePlainError(
+            ExpressionErrorSite.ExpressionError,
+            ColumnName,
+            ExpressionText);
+
+        Assert.Equal(ExpressionErrorSite.ExpressionError, error.Site);
+        Assert.Equal(762, error.LegacyLine);
+        Assert.Equal(ExpressionErrorFamily.PlainMessage, error.Family);
+        Assert.Equal(ExpressionErrorCategory.Expression, error.Category);
+        Assert.Equal(ExpressionErrorSeverity.StopSign, error.Severity);
+        Assert.Equal(ExpressionErrorCatalog.LegacyTitle, error.Title);
+
+        // BOTH VALUES SURVIVE AS ARGUMENTS, not merely interpolated into prose, so a consumer can
+        // render them itself instead of parsing them back out of the message.
+        Assert.Equal(ColumnName, error.FormatArguments[0]);
+        Assert.Equal(ExpressionText, error.FormatArguments[1]);
+
+        // And the rendered message is the oracle's, hardcoded Chinese included - these particular
+        // messages do NOT route through I18N, unlike the dwsvc and contextmenu ones, and that
+        // inconsistency is reproduced rather than harmonised (AAP §0.2.1.3 Correction 5).
+        Assert.Contains("[" + ColumnName + "]", error.Text, StringComparison.Ordinal);
+        Assert.Contains(ExpressionText, error.Text, StringComparison.Ordinal);
+        Assert.Contains("表达式错误", error.Text, StringComparison.Ordinal);
+        Assert.Contains("Expression:", error.Text, StringComparison.Ordinal);
+
+        // The caret members belong to the parse family and this site is not in it, so there is no
+        // caret to report and none is invented.
+        Assert.Null(error.CaretPosition);
+    }
+
+    [Fact]
+    public void TheAbortSentinelIsNeitherFailureNorValueAndTheLiteralConverterNeverProducesIt()
+    {
+        DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+
+        DataWindowExpressionResult abort = evaluator.TryEvaluate(string.Empty, 1L);
+
+        Assert.True(abort.IsAbort);
+        Assert.Equal(DataWindowExpressionEvaluator.AbortSentinel, abort.Text);
+        Assert.False(abort.IsSentinel);
+        Assert.False(abort.IsSuccess);
+
+        // No error object, because an abort is not a failure - :L761 never sees it and no dialog was
+        // ever shown for it.
+        Assert.Null(abort.Error);
+
+        // THE INVARIANT THAT FOLLOWS FROM :L2185-L2186 AND :L2358. Every dwvaluetoexp.srf overload,
+        // null included, must answer something the caller cannot mistake for an abort.
+        foreach (string literal in new[]
+        {
+            ValueToExpression.Convert((decimal?)null),
+            ValueToExpression.Convert((short?)null),
+            ValueToExpression.Convert((long?)null),
+            ValueToExpression.Convert((double?)null),
+            ValueToExpression.Convert((float?)null),
+            ValueToExpression.Convert((string?)null),
+            ValueToExpression.Convert((DateTime?)null),
+            ValueToExpression.Convert((DateOnly?)null),
+            ValueToExpression.Convert((TimeOnly?)null),
+
+            // The genuinely EMPTY string is the case the guard exists to keep distinct: it converts
+            // to the two-character literal '' and never to nothing at all.
+            ValueToExpression.Convert(string.Empty),
+        })
+        {
+            Assert.NotEqual(DataWindowExpressionEvaluator.AbortSentinel, literal);
+        }
+
+        Assert.Equal("''", ValueToExpression.Convert(string.Empty));
+        Assert.Equal(StringValidator.NullLiteralExpression, ValueToExpression.Convert((string?)null));
+    }
+
+    [Fact]
+    public void NoneOfTheThreeSentinelsIsEverThrown()
+    {
+        DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+
+        // The oracle `choose case`s on the returned text; it has no exception handler around
+        // _of_Evaluate anywhere. A port that threw would convert a branch the caller takes into a
+        // fault it does not catch, so every shape that produces a sentinel must RETURN it.
+        foreach (string expression in new[]
+        {
+            // Abort.
+            "", "   ", "''",
+
+            // Invalid.
+            "!", "1 +", "(1 + 2", "'unterminated", "NoSuchFunction(1)", "no_such_column",
+
+            // The sentinel characters themselves as input, which must not be mistaken for output.
+            "?", "'?'", "'!'",
+        })
+        {
+            Assert.Null(Record.Exception(() => { _ = evaluator.Evaluate(expression, 1L); }));
+            Assert.Null(Record.Exception(() => { _ = evaluator.TryEvaluate(expression, 1L); }));
+            Assert.Null(Record.Exception(() => { _ = evaluator.Describe(expression); }));
+            Assert.Null(Record.Exception(() => { _ = evaluator.TryDescribe(expression); }));
+        }
+
+        // A BARE QUOTED SENTINEL IS NOT A VALUE, AND THAT IS DELIBERATE. A payload that is exactly one
+        // complete literal is ambiguous - it could be a quoted payload or a lone string literal - and
+        // NormaliseExpressionPayload resolves it as the DELIMITER, because that is the shape all six
+        // legacy call sites produce. So `'?'` normalises to the bare sentinel character and is malformed,
+        // which is the same resolution that makes `''` the abort at n_cst_dwsvc_columnexp.sru:L745.
+        Assert.Equal(
+            ExpressionEvaluationOutcome.InvalidExpression,
+            evaluator.TryEvaluate("'?'", 1L).Outcome);
+
+        // The oracle reaches a lone literal the way it always does, by PARENTHESISING it before
+        // evaluation - `sVal = "(" + sVal + ")"` at :L2213 and :L2310 - and then it is a value whose text
+        // happens to be a sentinel character. Same text, different outcome: the distinction lives on the
+        // structured channel, never in the text.
+        DataWindowExpressionResult quoted = evaluator.TryEvaluate("('?')", 1L);
+
+        Assert.Equal(ExpressionEvaluationOutcome.Value, quoted.Outcome);
+        Assert.Equal(DataWindowExpressionEvaluator.UndeterminedValueSentinel, quoted.Text);
+        Assert.False(quoted.IsSentinel);
+        Assert.True(quoted.IsSuccess);
+
+        Assert.Equal(ExpressionEvaluationOutcome.Value, evaluator.TryEvaluate("('!')", 1L).Outcome);
+        Assert.Equal(
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            evaluator.Evaluate("('!')", 1L));
+    }
+}
+
+
+
+// ======================================================================================================
+//  THE LEGACY EXPRESSION CORPUS, EVALUATED
+//  -----------------------------------------------------------------------------------------------------
+//  Everything above tests shapes this port CHOSE. This suite tests the shapes the legacy actually WROTE,
+//  taken verbatim from ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw, which is the only place
+//  in the repository where the expression corpus is exercised end to end. Its variable table is:
+//
+//      :L104  of_AddVarExp("损耗","1")            1        the surcharge
+//      :L105  of_AddVarExp("倍率","2")            2        the multiplier
+//      :L106  of_AddVarExp("回程","'3'")          '3'      A STRING, and this is the whole point
+//      :L107  of_AddVarExp("上月读数","4")        4        last month's reading
+//      :L108  of_AddVarExp("本月读数","5")        5        this month's reading
+//      :L109  of_AddVar("精度",0)                 0        the precision, a plain long
+//
+//  and its four macro bodies plus the indirect selector are:
+//
+//      :L111  num1 = $FormatPrice($上月读数,$精度)
+//      :L112  num2 = $FormatPrice($本月读数,$精度)
+//      :L113  exp1 = $FormatPrice($本月读数*$倍率+$损耗,$精度)
+//      :L114  exp2 = $FormatPrice(($本月读数+dec($回程))*$倍率+$损耗,$精度)
+//      :L116  n1   = $$(if($num1-$num2>0 ,'exp1','exp2'))
+//      :L140  数据汇总 = SUM(n1)                            (on the SECOND DataWindow)
+//
+//  This suite evaluates each body in its POST-EXPANSION form, because expansion is
+//  Expressions/ColumnExpressionEngine.cs's job and this file is the substrate underneath it. FormatPrice
+//  is registered exactly as docs/n_cst_dwsvc_columnexp.md:L126 defines the application's own macro body,
+//  `Round(Double(args[1]),Long(args[2]))`, because the oracle expects the APPLICATION to implement the
+//  macro switch and a test that invented a different body would be testing its own arithmetic.
+//
+//  ---------------------------------------------------------------------------------------------------
+//  FINDING F1 - `dec(...)` IS NOT IN THE REGISTRY, AND :L114 IS THE SITE THAT NEEDS IT
+//  ---------------------------------------------------------------------------------------------------
+//  RegisterBuiltInFunctions registers twenty-six names and `dec` is not among them, nor is it reachable
+//  as a cast or an alias. But :L114 writes `dec($回程)` for a concrete reason: 回程 is declared as the
+//  STRING '3' at :L106, so without a numeric coercion the surrounding `$本月读数 + ...` would be adding a
+//  string to a number. `dec` is the coercion, and it is the only variable in that table that needs one.
+//
+//  The consequence is that the legacy `exp2` body cannot be evaluated by this port as written: it answers
+//  the malformed sentinel. That is REPORTED here rather than tested around, and rather than patched from
+//  a test file - the roster is a documented decision surface in the unit under test, and widening it is
+//  that file's change to make, not this one's. The row below pins the observable behaviour so the finding
+//  is a failing capability with a name rather than a silent gap, and the row after it evaluates the same
+//  body with the coercion already applied, which demonstrates that ONLY the coercion is missing and the
+//  rest of the shape - grouping, multiplication, addition and the macro call - is sound.
+// ======================================================================================================
+
+public class LegacyMacroExpressionShapeTests
+{
+    // The variable table of w_test_dwsvc_columnexp.srw:L104-L109, as post-expansion expression text.
+    private const string Surcharge = "1";
+    private const string Multiplier = "2";
+    private const string ReturnTrip = "'3'";
+    private const string LastMonth = "4";
+    private const string ThisMonth = "5";
+    private const string Precision = "0";
+
+    /// <summary>
+    /// Builds the dw_test_dwsvc_columnexp.srd shape: three <c>decimal(2)</c> columns and two
+    /// <c>char(100)</c> columns.
+    /// </summary>
+    /// <returns>The host.</returns>
+    /// <remarks>
+    /// The values are the ones the macro bodies above compute, so <c>SUM(n1)</c> at <c>:L140</c> has
+    /// something to total: <c>exp1</c> answers 11 and <c>exp2</c> answers 17. The column ids in the
+    /// oracle run 1, 2, 3 for the numbers and 4, 5 for the strings even though the source declares
+    /// <c>s2</c> before <c>s1</c> [dw_test_dwsvc_columnexp.srd:L8-L12, :L20-L24]; that ordering is not
+    /// reproduced here because nothing in this suite reads a column positionally.
+    /// </remarks>
+    private static FakeDataWindowHost BuildColumnExpFixture()
+    {
+        FakeDataWindowHost host = new();
+
+        host.AddColumn("n1", FakeColumnType.DecimalOf(2)).Format = "[general]";
+        host.AddColumn("n2", FakeColumnType.DecimalOf(2)).Format = "[general]";
+        host.AddColumn("n3", FakeColumnType.DecimalOf(2)).Format = "[general]";
+        host.AddColumn("s1", FakeColumnType.CharOf(100)).Format = "[general]";
+        host.AddColumn("s2", FakeColumnType.CharOf(100)).Format = "[general]";
+
+        host.AddRow(11m, 4m, 5m, "exp1", "num1");
+        host.AddRow(17m, 6m, 7m, "exp2", "num2");
+
+        host.CurrentRow = 1L;
+        return host;
+    }
+
+    /// <summary>
+    /// Registers the application's own <c>FormatPrice</c> macro, exactly as the legacy documentation
+    /// implements it.
+    /// </summary>
+    /// <param name="evaluator">The evaluator to register into.</param>
+    /// <remarks>
+    /// docs/n_cst_dwsvc_columnexp.md:L124-L127 - the <c>OnColumnExpInvokeMethod</c> body is
+    /// <c>choose case name / case "FormatPrice" / return Round(Double(args[1]),Long(args[2]))</c>. The
+    /// macro switch belongs to the APPLICATION, not to the framework, which is why the roster does not
+    /// carry this name and why the contract inverts the stream for macro invocation (AAP §0.4.3 C-04).
+    /// </remarks>
+    private static void RegisterFormatPrice(DataWindowExpressionEvaluator evaluator)
+    {
+        evaluator.RegisterFunction(
+            "FormatPrice",
+            invocation =>
+            {
+                if (invocation.ArgumentCount != 2)
+                {
+                    return invocation.WrongArity("2");
+                }
+
+                if (!invocation.TryEvaluateArguments(
+                        out ExpressionValue[] values,
+                        out DataWindowExpressionResult failure))
+                {
+                    return failure;
+                }
+
+                // Double(args[1]) then Long(args[2]), in the oracle's own order.
+                if (!values[0].TryGetDecimal(out decimal amount)
+                    || !values[1].TryGetLong(out long digits))
+                {
+                    return invocation.Invalid(
+                        "FormatPrice expects an amount and a digit count, as "
+                        + "docs/n_cst_dwsvc_columnexp.md:L126 defines it.");
+                }
+
+                return invocation.Success(
+                    ExpressionValue.FromDecimal(
+                        decimal.Round(amount, (int)digits, MidpointRounding.AwayFromZero)));
+            });
+    }
+
+    // Every row is a legacy expression body in its post-expansion form, with its own locator.
+    public static TheoryData<string, string, long, string> CorpusBodies() => new()
+    {
+        // :L111  num1 = FormatPrice(4,0) = 4
+        {
+            "w_test_dwsvc_columnexp.srw:L111",
+            "FormatPrice(" + LastMonth + "," + Precision + ")",
+            1L,
+            "4"
+        },
+
+        // :L112  num2 = FormatPrice(5,0) = 5
+        {
+            "w_test_dwsvc_columnexp.srw:L112",
+            "FormatPrice(" + ThisMonth + "," + Precision + ")",
+            1L,
+            "5"
+        },
+
+        // :L113  exp1 = FormatPrice(5*2+1,0) = FormatPrice(11,0) = 11. The MULTIPLICATION and ADDITION
+        // forms, with the precedence that makes it 11 rather than 12.
+        {
+            "w_test_dwsvc_columnexp.srw:L113",
+            "FormatPrice(" + ThisMonth + "*" + Multiplier + "+" + Surcharge + "," + Precision + ")",
+            1L,
+            "11"
+        },
+
+        // :L114  exp2, VERBATIM. FINDING F1: `dec` is unregistered, so the whole body is malformed.
+        {
+            "w_test_dwsvc_columnexp.srw:L114 (FINDING F1)",
+            "FormatPrice((" + ThisMonth + "+dec(" + ReturnTrip + "))*" + Multiplier + "+" + Surcharge
+                + "," + Precision + ")",
+            1L,
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel
+        },
+
+        // :L114 with the coercion already applied - FormatPrice((5+3)*2+1,0) = FormatPrice(17,0) = 17.
+        // This is the row that proves F1 is ONLY the missing coercion: the grouping, the multiplication,
+        // the addition and the macro call all behave.
+        {
+            "w_test_dwsvc_columnexp.srw:L114 (coercion applied)",
+            "FormatPrice((" + ThisMonth + "+3)*" + Multiplier + "+" + Surcharge + "," + Precision + ")",
+            1L,
+            "17"
+        },
+
+        // :L116  the SELECTOR, which is a COMPARISON INSIDE if(...): if(4-5>0,'exp1','exp2'). The
+        // SUBTRACTION form, and the answer is the NAME of another variable because the outer $$( )
+        // makes the whole thing an indirect dynamic reference.
+        {
+            "w_test_dwsvc_columnexp.srw:L116",
+            "if(" + LastMonth + "-" + ThisMonth + ">0,'exp1','exp2')",
+            1L,
+            "exp2"
+        },
+
+        // :L116 with the operands swapped, so the other arm is taken too.
+        {
+            "w_test_dwsvc_columnexp.srw:L116 (other arm)",
+            "if(" + ThisMonth + "-" + LastMonth + ">0,'exp1','exp2')",
+            1L,
+            "exp1"
+        },
+
+        // :L140  数据汇总 = SUM(n1) over the whole buffer: 11 + 17 = 28.
+        { "w_test_dwsvc_columnexp.srw:L140", "SUM(n1)", 0L, "28" },
+
+        // :L151  n2 = FormatPrice($应收-$未收,$精度) with the two operands read from COLUMNS rather than
+        // from variables - n3 - n2 at row 1 is 5 - 4 = 1.
+        { "w_test_dwsvc_columnexp.srw:L151", "FormatPrice(n3-n2," + Precision + ")", 1L, "1" },
+
+        // :L154  n3 = FormatPrice($未收+$实收,$$精度) - the ADDITION form over two columns, 4 + 5 = 9.
+        { "w_test_dwsvc_columnexp.srw:L154", "FormatPrice(n2+n3," + Precision + ")", 1L, "9" },
+
+        // :L157  n1 = FormatPrice(n3-n2,$$('精度')) + $$数据汇总 - the two halves composed, with the
+        // aggregate half already resolved to its value: 1 + 28 = 29.
+        { "w_test_dwsvc_columnexp.srw:L157", "FormatPrice(n3-n2," + Precision + ")+SUM(n1)", 1L, "29" },
+
+        // The MULTIPLICATION form over two columns, which no single legacy line writes on its own but
+        // which :L113 depends on: 4 * 5 = 20.
+        { "w_test_dwsvc_columnexp.srw:L113 (operator only)", "n2*n3", 1L, "20" },
+    };
+
+    [Theory]
+    [MemberData(nameof(CorpusBodies))]
+    public void EveryLegacyCorpusBodyEvaluatesToItsHandComputedValue(
+        string locator,
+        string expression,
+        long row,
+        string expected)
+    {
+        FakeDataWindowHost host = BuildColumnExpFixture();
+        DataWindowExpressionEvaluator evaluator = new(host)
+        {
+            PageResolver = WholeBufferPageResolver.Instance,
+        };
+        RegisterFormatPrice(evaluator);
+
+        // The locator travels with the assertion so a failure names the legacy line it broke.
+        Assert.Equal(expected, evaluator.Evaluate(expression, row));
+        Assert.False(string.IsNullOrEmpty(locator));
+    }
+
+    [Fact]
+    public void FindingF1TheNumericCoercionTheLegacyCorpusUsesIsNotRegistered()
+    {
+        FakeDataWindowHost host = BuildColumnExpFixture();
+        DataWindowExpressionEvaluator evaluator = new(host);
+        RegisterFormatPrice(evaluator);
+
+        // THE FINDING, stated as an executable fact rather than as a comment. `dec` is absent from the
+        // roster in every casing, so w_test_dwsvc_columnexp.srw:L114 cannot be evaluated as written.
+        Assert.False(evaluator.IsFunctionRegistered("dec"));
+        Assert.False(evaluator.IsFunctionRegistered("Dec"));
+        Assert.False(evaluator.IsFunctionRegistered("DEC"));
+        Assert.False(evaluator.IsFunctionRegistered("decimal"));
+
+        // An unregistered name is the MALFORMED sentinel and not an exception, which is the general
+        // contract this particular gap happens to exercise.
+        DataWindowExpressionResult result = evaluator.TryEvaluate("dec(" + ReturnTrip + ")", 1L);
+
+        Assert.Equal(ExpressionEvaluationOutcome.InvalidExpression, result.Outcome);
+        Assert.Equal(DataWindowExpressionEvaluator.InvalidExpressionSentinel, result.Text);
+        Assert.NotNull(result.Error);
+
+        // AND THE COERCION IS GENUINELY NEEDED, WHICH IS WHAT MAKES THIS A FINDING RATHER THAN A PEDANTIC
+        // ROSTER COMPLAINT - and the mechanism is worse than a plain refusal. 回程 is the STRING '3'
+        // [:L106], and `+` with a string on either side is CONCATENATION, not addition. So without the
+        // coercion the sub-expression :L114 writes silently answers the TEXT "53" instead of the number 8.
+        DataWindowExpressionResult concatenated =
+            evaluator.TryEvaluate(ThisMonth + "+" + ReturnTrip, 1L);
+
+        Assert.Equal(ExpressionEvaluationOutcome.Value, concatenated.Outcome);
+        Assert.Equal(ExpressionValueKind.String, concatenated.Value.Kind);
+        Assert.Equal("53", concatenated.Text);
+
+        // The same addition over two NUMBERS is arithmetic and stays integral, which isolates the
+        // degradation to the operand's type rather than to the operator.
+        DataWindowExpressionResult added = evaluator.TryEvaluate(ThisMonth + "+3", 1L);
+
+        Assert.Equal(ExpressionValueKind.Long, added.Value.Kind);
+        Assert.Equal("8", added.Text);
+
+        // WHAT ACTUALLY CATCHES IT IS THE NEXT OPERATOR, NOT THE ADDITION. `*` has no string arm, so the
+        // wrong intermediate is refused one step later - which is why the full :L114 body answers the
+        // malformed sentinel rather than a wrong number. A shorter legacy expression that stopped at the
+        // addition would have propagated "53" as a value.
+        Assert.Equal(
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            evaluator.Evaluate("(" + ThisMonth + "+" + ReturnTrip + ")*" + Multiplier, 1L));
+    }
+
+    [Fact]
+    public void TheMacroIsInvokedThroughTheRegistryAndSeesItsOwnContext()
+    {
+        FakeDataWindowHost host = BuildColumnExpFixture();
+        DataWindowExpressionEvaluator evaluator = new(host);
+
+        string? observedName = null;
+        int observedArity = -1;
+        long observedRow = -1L;
+
+        evaluator.RegisterFunction(
+            "FormatPrice",
+            invocation =>
+            {
+                observedName = invocation.Name;
+                observedArity = invocation.ArgumentCount;
+                observedRow = invocation.Row;
+
+                return invocation.Success(ExpressionValue.FromLong(0L));
+            });
+
+        _ = evaluator.Evaluate("FormatPrice(n2," + Precision + ")", 2L);
+
+        // The name is carried as WRITTEN, which matters because the oracle's macro switch is a
+        // `choose case name` over exactly these strings [docs/n_cst_dwsvc_columnexp.md:L124-L127].
+        Assert.Equal("FormatPrice", observedName);
+        Assert.Equal(2, observedArity);
+
+        // And the invocation carries the EVALUATION row, so a macro reading a column reads the right
+        // one - this is the row the inverted macro stream has to transmit (AAP §0.4.3 C-04).
+        Assert.Equal(2L, observedRow);
+    }
+}
+
+
+// ======================================================================================================
+//  THE CONTEXT-MENU EVALUATE SITES
+//  -----------------------------------------------------------------------------------------------------
+//  Services/ContextMenuModel.cs reaches this evaluator at TEN call sites. They collapse onto NINE
+//  distinct expression shapes, because the first three appear twice - once in the whole-column pass and
+//  once in the single-row pass - and every shape is asserted below with the oracle locator of both its
+//  copies:
+//
+//    #  ContextMenuModel.cs      oracle                     shape
+//    1  :L4959, :L5074           :L534, :L617               Evaluate('<column>',<row>)      raw value
+//    2  :L4974, :L5089           :L541, :L624               Evaluate('<compute>',<row>)     raw value
+//    3  :L4979, :L5094           :L543, :L626               Evaluate('LookUpDisplay(c)',r)  display
+//    4  :L6360                   :L1130, :L1296             Evaluate(<compute>)             row zero
+//    5  :L6466                   :L1132, :L1298             Max(Len(LookUpDisplay(o)))
+//    6  :L6470                   :L1133, :L1299             Max(LenA(LookUpDisplay(o)))
+//    7  :L6582                   :L1194, :L1360             Evaluate(<column>,<row>)        bare
+//    8  :L6595                   :L1197, :L1363             Evaluate(<format>,<row>)        mask
+//    9  :L6669                   :L1183, :L1349             the nested-Describe find expression
+//
+//  Shapes 1 to 3 arrive through EvaluateAtRow, which builds `Evaluate('<expression>',<row>)` and hands it
+//  to Describe [ContextMenuModel.cs:L5737-L5741], so they are exercised HERE as properties rather than as
+//  expressions - the property text is itself observable, since a recording of the ported call sequence
+//  has to match the oracle's. Shape 9 is already covered by NestedDescribeTests above and is not
+//  duplicated; the two are cross-referenced rather than repeated.
+//
+//  WHAT STOPS AT THIS BOUNDARY. Shape 1's `Y`/`N` mapping [:L535-L539] and the `Fill("A",n) + Fill("国",m)`
+//  proxy string that shapes 5 and 6 feed [:L1134] are ContextMenuModelTests.cs's, not this file's. This
+//  suite asserts that the evaluator hands that caller the RAW inputs those steps need, and stops there.
+// ======================================================================================================
+
+public class ContextMenuEvaluateSiteTests
+{
+    /// <summary>
+    /// Builds a fixture with the three object kinds the context menu measures: a checkbox column, a
+    /// compute, and plain columns whose widest display values differ in width class.
+    /// </summary>
+    /// <returns>The host.</returns>
+    /// <remarks>
+    /// The two names are chosen so shapes 5 and 6 DIVERGE: "Alice" is five ASCII characters and
+    /// "深圳市南山区" is six Han characters, so the character maximum is 6 and the byte maximum is 12.
+    /// A fixture whose names were all ASCII would make both shapes answer the same number and the width
+    /// split would be untested.
+    /// </remarks>
+    private static FakeDataWindowHost BuildContextMenuFixture()
+    {
+        FakeDataWindowHost host = new();
+
+        host.AddTextObject("name_t", "header");
+
+        host.AddColumn("name", FakeColumnType.CharOf(100)).Format = "[general]";
+        host.AddColumn("salary", FakeColumnType.DecimalOf(2)).Format = "[general]";
+
+        FakeDataWindowObjectDefinition flag = host.AddColumn("flag", FakeColumnType.CharOf(1));
+        flag.Format = "[general]";
+        flag.EditStyle = "checkbox";
+        flag.CheckBoxOn = "Y";
+        flag.CheckBoxOff = "N";
+
+        // dw_sqlite.srd:L27's footer compute, carrying its UPPER-CASE mask alongside the columns'
+        // LOWER-CASE ones. Neither spelling is normalised.
+        host.AddComputedField("compute_1", "footer", "sum(salary for page)").Format = "[GENERAL]";
+
+        // A per-row compute, which is the kind :L541 and :L1194 read.
+        host.AddComputedField("compute_2", "detail", "name + '/' + flag").Format = "[general]";
+
+        host.AddRow("Alice", 1000.50m, "Y");
+        host.AddRow("深圳市南山区", 2000.25m, "N");
+
+        host.CurrentRow = 1L;
+        return host;
+    }
+
+    private static DataWindowExpressionEvaluator BuildEvaluator(out FakeDataWindowHost host)
+    {
+        host = BuildContextMenuFixture();
+
+        // compute_1 is `sum(salary for page)`, so the pagination is stated rather than left to the
+        // refusing default (DECISION D7a). The whole buffer is one page here.
+        return new DataWindowExpressionEvaluator(host)
+        {
+            PageResolver = WholeBufferPageResolver.Instance,
+        };
+    }
+
+    // Shapes 1 to 3 and their second copies, as the PROPERTY text EvaluateAtRow builds.
+    public static TheoryData<string, string, string> DescribeShapedSites() => new()
+    {
+        // #1 the CHECKBOX arm reads the column's RAW stored value, because the caller compares it
+        // against the on and off values before mapping it [:L535-L539].
+        { "n_cst_dwsvc_contextmenu.sru:L534", "Evaluate('flag',1)", "Y" },
+        { "n_cst_dwsvc_contextmenu.sru:L617", "Evaluate('flag',2)", "N" },
+
+        // #2 the COMPUTE arm evaluates the compute by name.
+        { "n_cst_dwsvc_contextmenu.sru:L541", "Evaluate('compute_2',1)", "Alice/Y" },
+        { "n_cst_dwsvc_contextmenu.sru:L624", "Evaluate('compute_2',2)", "深圳市南山区/N" },
+
+        // #3 every other column goes through LookUpDisplay. Note the oracle spells the row conversion
+        // String() at :L534 and :L541 and string() at :L543; PowerScript is case-insensitive so the two
+        // are one function, and the port formats the row invariantly either way.
+        { "n_cst_dwsvc_contextmenu.sru:L543", "Evaluate('LookUpDisplay(name)',1)", "Alice" },
+        { "n_cst_dwsvc_contextmenu.sru:L626", "Evaluate('LookUpDisplay(name)',2)", "深圳市南山区" },
+    };
+
+    [Theory]
+    [MemberData(nameof(DescribeShapedSites))]
+    public void EveryDescribeShapedSiteResolves(string locator, string property, string expected)
+    {
+        DataWindowExpressionEvaluator evaluator = BuildEvaluator(out _);
+
+        Assert.Equal(expected, evaluator.Describe(property));
+
+        // The property text is an Evaluate property, which is what routes it to the evaluator at all.
+        Assert.True(DataWindowExpressionEvaluator.TryUnwrapEvaluateProperty(property, out _, out _));
+        Assert.False(string.IsNullOrEmpty(locator));
+    }
+
+    // Shapes 4 to 8, as the EXPRESSION text the model hands to Evaluate directly.
+    public static TheoryData<string, string, long, string> ExpressionShapedSites() => new()
+    {
+        // #4 a compute measured at ROW ZERO, because a footer compute has no row of its own.
+        // 1000.50 + 2000.25 over the one page the whole buffer forms.
+        {
+            "n_cst_dwsvc_contextmenu.sru:L1130",
+            "compute_1",
+            DataWindowExpressionEvaluator.NoRowContext,
+            "3000.75"
+        },
+
+        // #5 the CHARACTER maximum: Len("Alice") = 5, Len("深圳市南山区") = 6.
+        {
+            "n_cst_dwsvc_contextmenu.sru:L1132",
+            "Max(Len(LookUpDisplay(name)))",
+            DataWindowExpressionEvaluator.NoRowContext,
+            "6"
+        },
+
+        // #6 the DBCS BYTE maximum: LenA("Alice") = 5, LenA("深圳市南山区") = 12.
+        {
+            "n_cst_dwsvc_contextmenu.sru:L1133",
+            "Max(LenA(LookUpDisplay(name)))",
+            DataWindowExpressionEvaluator.NoRowContext,
+            "12"
+        },
+
+        // #6 the composite the oracle actually writes, wrapper for wrapper:
+        //     nChsCnt = Abs(Long(_of_Evaluate("Max(LenA(...))")) - nAsc2Cnt)
+        {
+            "n_cst_dwsvc_contextmenu.sru:L1133 (composite)",
+            "Abs(Long(Max(LenA(LookUpDisplay(name)))) - Long(Max(Len(LookUpDisplay(name)))))",
+            DataWindowExpressionEvaluator.NoRowContext,
+            "6"
+        },
+
+        // #7 a compute evaluated AT A ROW, the bare two-argument arity.
+        { "n_cst_dwsvc_contextmenu.sru:L1194", "compute_2", 2L, "深圳市南山区/N" },
+        { "n_cst_dwsvc_contextmenu.sru:L1360", "compute_2", 1L, "Alice/Y" },
+
+        // #8 a FORMAT that is itself a per-row expression. The oracle detects it with
+        // `Pos(sFormat,"~t") > 0` at :L1169 and strips the tab form with _of_GetPropExp at :L1171 - both
+        // asserted in ExpressionEncodedPropertyTests - and then evaluates the remainder PER ROW here.
+        {
+            "n_cst_dwsvc_contextmenu.sru:L1197",
+            "if(salary > 1500,'#,##0.00','0.00')",
+            1L,
+            "0.00"
+        },
+        {
+            "n_cst_dwsvc_contextmenu.sru:L1363",
+            "if(salary > 1500,'#,##0.00','0.00')",
+            2L,
+            "#,##0.00"
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(ExpressionShapedSites))]
+    public void EveryExpressionShapedSiteResolves(
+        string locator,
+        string expression,
+        long row,
+        string expected)
+    {
+        DataWindowExpressionEvaluator evaluator = BuildEvaluator(out _);
+
+        Assert.Equal(expected, evaluator.Evaluate(expression, row));
+        Assert.False(string.IsNullOrEmpty(locator));
+    }
+
+    [Fact]
+    public void TheWidthPairFeedsTheOraclesOwnArithmeticWithoutSynthesisingTheProxyString()
+    {
+        DataWindowExpressionEvaluator evaluator = BuildEvaluator(out _);
+
+        // :L1132-L1133 read the two maxima, :L1134 subtracts. Both reads go through Long()/Abs() in the
+        // oracle, so both are taken here in the same wrappers.
+        long characters = long.Parse(
+            evaluator.Evaluate("Long(Max(Len(LookUpDisplay(name))))"),
+            CultureInfo.InvariantCulture);
+        long bytes = long.Parse(
+            evaluator.Evaluate("Long(Max(LenA(LookUpDisplay(name))))"),
+            CultureInfo.InvariantCulture);
+
+        Assert.Equal(6L, characters);
+        Assert.Equal(12L, bytes);
+
+        // :L1133  nChsCnt = Abs(... - nAsc2Cnt)      then      :L1134  nAsc2Cnt -= nChsCnt
+        long wide = Math.Abs(bytes - characters);
+        long ascii = characters - wide;
+
+        Assert.Equal(6L, wide);
+        Assert.Equal(0L, ascii);
+
+        // AND THAT IS WHERE THIS FILE STOPS. :L1134's `Fill("A",nAsc2Cnt) + Fill("国",nChsCnt)` builds a
+        // proxy string whose rendered width stands in for the real one, and asserting that synthesis
+        // belongs to ContextMenuModelTests.cs. The two counts above are the whole of this evaluator's
+        // contribution to it.
+    }
+
+    [Fact]
+    public void ATextObjectIsMeasuredThroughItsPropertyRatherThanThroughAnAggregate()
+    {
+        DataWindowExpressionEvaluator evaluator = BuildEvaluator(out FakeDataWindowHost host);
+
+        // :L1135-L1136 - the `case "text"` arm reads the object's TEXT PROPERTY instead of evaluating an
+        // aggregate over rows, because a heading has exactly one value and no rows to aggregate.
+        host.SetDescribe("name_t.text", "Name");
+
+        Assert.Equal("Name", evaluator.Describe("name_t.text"));
+
+        // AND THE REASON THE ORACLE SPLITS THE ARMS IS WORTH PINNING, because the alternative does not
+        // fail loudly. A text object is not a data column, so reading it at a row answers NULL rather
+        // than refusing; Len of a null is null, and Max over nothing but nulls is null. So the width
+        // expression the `case "column"` arm writes would answer the EMPTY STRING for a heading -
+        // indistinguishable from a zero-width label - instead of reporting a problem.
+        DataWindowExpressionResult aggregated =
+            evaluator.TryEvaluate("Max(Len(LookUpDisplay(name_t)))", 1L);
+
+        Assert.Equal(ExpressionEvaluationOutcome.Value, aggregated.Outcome);
+        Assert.True(aggregated.IsNullValue);
+        Assert.Equal(string.Empty, aggregated.Text);
+
+        // The same reading one step at a time, so the null is located rather than inferred.
+        Assert.True(evaluator.TryEvaluate("name_t", 1L).IsNullValue);
+        Assert.True(evaluator.TryEvaluate("LookUpDisplay(name_t)", 1L).IsNullValue);
+
+        // A genuinely UNKNOWN name is a different answer entirely - that one IS refused - so the null
+        // above is the object resolving and carrying no data, not the name failing to resolve.
+        Assert.Equal(
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            evaluator.Evaluate("Max(Len(LookUpDisplay(no_such_object)))"));
+    }
+
+    [Fact]
+    public void TheFindExpressionSiteIsCoveredByTheNestedDescribeSuite()
+    {
+        DataWindowExpressionEvaluator evaluator = BuildEvaluator(out _);
+
+        // Shape 9 - ContextMenuModel.cs:L6669, the port of :L1183 and :L1349. NestedDescribeTests above
+        // asserts the full construction against the primary fixture; this row exists so the ten-site
+        // inventory in this suite's header is complete rather than nine tenths complete, and it asserts
+        // the one property that matters at this boundary: the INNER Describe("Evaluate('...',<row>)") is
+        // recognised as an evaluation request from inside an outer expression.
+        const string inner = "Describe(\"Evaluate('compute_2',2)\")";
+
+        Assert.Equal("深圳市南山区/N", evaluator.Evaluate(inner, 1L));
+
+        // And composed the way the oracle composes it, comparing a row against its successor.
+        Assert.Equal(
+            "true",
+            evaluator.Evaluate("String(compute_2) <> " + inner, 1L));
+    }
+}
+
+
+
+// ======================================================================================================
+//  CULTURE INDEPENDENCE, PROVED RATHER THAN ASSERTED
+//  -----------------------------------------------------------------------------------------------------
+//  Every expectation in this file is written in the invariant form - "1000.50", "1990-01-02", "2.5" - and
+//  every one of them would still pass on a machine whose culture happens to be invariant-like even if the
+//  evaluator consulted the ambient culture somewhere. That makes the whole suite's numeric and temporal
+//  expectations conditionally correct, which is not correct.
+//
+//  So this suite RE-RUNS the culture-sensitive expectations under cultures whose decimal separator is a
+//  COMMA and whose date order is not ISO, and requires byte-identical output. A single missing
+//  CultureInfo.InvariantCulture anywhere in the render path - ToDisplayText's eight arms, the tokenizer's
+//  numeric literal parse, the aggregate accumulator, ValueToExpression's formatter, or the row conversion
+//  inside an Evaluate property - turns "1000.50" into "1000,50" or "1990-01-02" into "02.01.1990" and
+//  fails here.
+//
+//  WHY THIS MATTERS BEYOND TIDINESS. The rendered text is not a display detail: it is the value the
+//  expansion engine splices back into another expression [n_cst_dwsvc_columnexp.sru:L2390 evaluates
+//  `dwValueToExp(...)` and :L2213 / :L2310 splice the result], it is what a characterization recording
+//  stores, and it is what crosses the C-04 contract. A comma-decimal render would produce an expression
+//  in which the decimal separator is an ARGUMENT SEPARATOR, so the corruption would surface as a parse
+//  failure somewhere else entirely, or worse, as a different number.
+//
+//  ICU stays live for this refactor - Directory.Build.props deliberately does NOT set
+//  InvariantGlobalization, because the port carries an en / zh-Hans / zh-Hant localization surface - so
+//  these cultures are genuinely available and the premise below is guarded rather than assumed.
+// ======================================================================================================
+
+public class InvariantCultureRenderingTests
+{
+    // Three cultures, each a comma-decimal culture with a different group separator and date order:
+    // de-DE groups with ".", fr-FR with a narrow no-break space, pt-BR with "." and a d/M/y order.
+    public static TheoryData<string> CommaDecimalCultures() => new()
+    {
+        "de-DE",
+        "fr-FR",
+        "pt-BR",
+    };
+
+    /// <summary>
+    /// The rows whose rendered text a culture could corrupt, with the invariant expectation each one
+    /// already carries elsewhere in this file.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a superset of the numeric and temporal roster entries rather than a fresh set: the
+    /// point is that THOSE expectations hold under a hostile culture, so restating them is the assertion.
+    /// </remarks>
+    private static (string Expression, long Row, string Expected)[] CultureSensitiveRows =>
+    [
+        // The decimal(2) column of dw_sqlite.srd:L12, read directly and through LookUpDisplay. A
+        // comma-decimal culture would render "1000,50".
+        ("salary", 1L, "1000.50"),
+        ("LookUpDisplay(salary)", 1L, "1000.50"),
+
+        // A bare numeric literal, which is the INBOUND direction - the tokenizer parsing "1000.50" out
+        // of expression text. A culture-sensitive parse would reject it or read 100050.
+        ("1000.50", 0L, "1000.50"),
+
+        // The footer aggregate of dw_sqlite.srd:L27, whose accumulator sums three decimals.
+        ("sum(salary for all)", 0L, "6000.75"),
+
+        // Division and rounding, which MANUFACTURE a fraction rather than echoing a stored literal.
+        ("5 / 2", 0L, "2.5"),
+        ("Round(1.005,2)", 0L, "1.01"),
+
+        // The three numeric conversion functions.
+        ("Double(age)", 1L, "30"),
+        ("Long(salary)", 1L, "1000"),
+        ("Abs(0 - salary)", 1L, "1000.50"),
+
+        // Text projection of a number, which is String() and therefore the likeliest place for an
+        // ambient-culture call to hide.
+        ("String(salary)", 1L, "1000.50"),
+
+        // The three temporal renders. A comma-decimal culture is also a d.M.yyyy or d/M/yyyy culture,
+        // so an ambient format would reorder every one of these.
+        ("birth", 1L, "1990-01-02"),
+        ("Date('1990-01-02')", 0L, "1990-01-02"),
+        ("DateTime('1990-01-02 03:04:05')", 0L, "1990-01-02 03:04:05"),
+        ("Time('03:04:05')", 0L, "03:04:05"),
+
+        // ValueToExpression's output, which is spliced back INTO an expression - the case where a comma
+        // would become an argument separator.
+        ("dwValueToExp(salary)", 1L, "1000.50"),
+        ("dwValueToExp(birth)", 1L, "Date('1990-01-02')"),
+        ("dwValueToExp(name)", 1L, "'Alice'"),
+
+        // A comparison over decimals, so the culture cannot leak in through the comparison path either.
+        ("if(salary > 1000.49,'over','under')", 1L, "over"),
+
+        // And the boolean spelling, which is PowerScript's and not the culture's.
+        ("salary > 1000.49", 1L, "true"),
+    ];
+
+    [Theory]
+    [MemberData(nameof(CommaDecimalCultures))]
+    public void EveryRenderedValueIsByteIdenticalUnderACommaDecimalCulture(string cultureName)
+    {
+        CultureInfo originalCulture = CultureInfo.CurrentCulture;
+        CultureInfo originalUiCulture = CultureInfo.CurrentUICulture;
+
+        try
+        {
+            CultureInfo comma = CultureInfo.GetCultureInfo(cultureName);
+
+            // GUARD THE PREMISE RATHER THAN ASSUMING IT. If ICU were ever trimmed out, every culture
+            // would resolve to an invariant-like fallback and every assertion below would pass for
+            // entirely the wrong reason - a green test proving nothing.
+            Assert.Equal(",", comma.NumberFormat.NumberDecimalSeparator);
+            Assert.NotEqual(
+                CultureInfo.InvariantCulture.DateTimeFormat.ShortDatePattern,
+                comma.DateTimeFormat.ShortDatePattern);
+
+            // The culture is set on THIS THREAD only, so a suite running in parallel is unaffected, and
+            // the finally below returns the thread to where it started.
+            CultureInfo.CurrentCulture = comma;
+            CultureInfo.CurrentUICulture = comma;
+
+            DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+            evaluator.PageResolver = WholeBufferPageResolver.Instance;
+
+            foreach ((string expression, long row, string expected) in CultureSensitiveRows)
+            {
+                Assert.Equal(expected, evaluator.Evaluate(expression, row));
+            }
+
+            // The same for the property-shaped entry point, whose ROW argument is itself formatted -
+            // n_cst_dwsvc.sru:L195 writes String(row) and a culture-sensitive conversion there would
+            // produce a row the unwrapper cannot read back.
+            Assert.Equal("1000.50", evaluator.Describe("Evaluate('salary',1)"));
+            Assert.Equal("6000.75", evaluator.Describe("Evaluate('sum(salary for all)',0)"));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
+        }
+    }
+
+    [Fact]
+    public void TheInvariantRunAndTheCommaDecimalRunProduceTheSameText()
+    {
+        // The strongest form of the assertion, and the one that needs no hand-written expectation at
+        // all: render every row twice, once under each culture, and require the two lists to be equal.
+        // This catches a culture leak even in a row whose expected value this file got wrong.
+        string[] invariantRun = Render(CultureInfo.InvariantCulture);
+        string[] commaRun = Render(CultureInfo.GetCultureInfo("de-DE"));
+
+        Assert.Equal(invariantRun, commaRun);
+
+        // And a third culture, so the agreement is not an accident of one pairing.
+        Assert.Equal(invariantRun, Render(CultureInfo.GetCultureInfo("fr-FR")));
+    }
+
+    /// <summary>
+    /// Renders every culture-sensitive row under one culture.
+    /// </summary>
+    /// <param name="culture">The culture to render under.</param>
+    /// <returns>The rendered text, one entry per row, in declaration order.</returns>
+    private static string[] Render(CultureInfo culture)
+    {
+        CultureInfo originalCulture = CultureInfo.CurrentCulture;
+        CultureInfo originalUiCulture = CultureInfo.CurrentUICulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = culture;
+            CultureInfo.CurrentUICulture = culture;
+
+            DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+            evaluator.PageResolver = WholeBufferPageResolver.Instance;
+
+            (string Expression, long Row, string Expected)[] rows = CultureSensitiveRows;
+            string[] rendered = new string[rows.Length];
+
+            for (int index = 0; index < rows.Length; index++)
+            {
+                rendered[index] = evaluator.Evaluate(rows[index].Expression, rows[index].Row);
+            }
+
+            return rendered;
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
+        }
+    }
+}
+
+
+
+// ======================================================================================================
+//  THE SIX PRODUCER NAMES ARE SINGLE-SOURCED, AND THAT IS ASSERTED RATHER THAN TRUSTED
+//  -----------------------------------------------------------------------------------------------------
+//  RegisterBuiltInFunctions registers the value converter and the five typed-null producers under their
+//  OWNING VALIDATOR'S constant, not under a retyped literal:
+//
+//      RegisterFunction(ValueToExpression.FunctionName, ...)      not  RegisterFunction("dwValueToExp", ...)
+//      RegisterFunction(NumberValidator.FunctionName,   ...)      not  RegisterFunction("dwNvlNumber",  ...)
+//      ... and so on for String, Date, DateTime and Time
+//
+//  That single-sourcing is what closes the loop between the two halves of the round trip: dwvaluetoexp.srf
+//  EMITS the literal text "dwNvlNumber()" for a null [:L19, :L25, :L31, :L37, :L43], "dwNvlString()"
+//  [:L49], "dwNvlDateTime()" [:L55], "dwNvlDate()" [:L61] and "dwNvlTime()" [:L67], the preprocessor
+//  splices that text into an expression, and THIS evaluator then has to evaluate it. If the emitting side
+//  and the registering side ever named the function differently, a null would round-trip into an
+//  unregistered call and answer the malformed sentinel instead of a null.
+//
+//  WHY A SEPARATE ASSERTION IS NEEDED. Two suites above already cover the registry: one looks the names up
+//  through the CONSTANTS and one through the LEGACY LITERALS. Between them a drifted constant is caught,
+//  but only as "name not registered" - the failure would point at the registry rather than at the rename
+//  that caused it. Binding the constant to the legacy spelling here makes the diagnosis immediate, and it
+//  is the assertion that literally states the requirement: the registry's names ARE the validators'
+//  constants, and those constants ARE the oracle's spellings.
+// ======================================================================================================
+
+public class ProducerNameBindingTests
+{
+    // Each row pairs a validator's own constant with the literal dwvaluetoexp.srf emits, and with the
+    // locator of the emitting line. The literals are deliberately written out here - this is the one
+    // place in the file where a retyped literal is the POINT rather than a hazard.
+    public static TheoryData<string, string, string> ProducerNames() => new()
+    {
+        {
+            "n_cst_dwsvc_columnexp.sru:L2390",
+            ValueToExpression.FunctionName,
+            "dwValueToExp"
+        },
+        { "dwvaluetoexp.srf:L19", NumberValidator.FunctionName, "dwNvlNumber" },
+        { "dwvaluetoexp.srf:L49", StringValidator.FunctionName, "dwNvlString" },
+        { "dwvaluetoexp.srf:L61", DateValidator.FunctionName, "dwNvlDate" },
+        { "dwvaluetoexp.srf:L55", DateTimeValidator.FunctionName, "dwNvlDateTime" },
+        { "dwvaluetoexp.srf:L67", TimeValidator.FunctionName, "dwNvlTime" },
+    };
+
+    [Theory]
+    [MemberData(nameof(ProducerNames))]
+    public void EveryProducerConstantCarriesItsOracleSpellingAndIsTheRegisteredName(
+        string locator,
+        string constant,
+        string oracleSpelling)
+    {
+        DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+
+        // The constant IS the oracle's spelling, byte for byte and case for case.
+        Assert.Equal(oracleSpelling, constant);
+
+        // And the registry's entry is that same value, so the emitting side and the evaluating side
+        // cannot drift apart.
+        Assert.True(evaluator.IsFunctionRegistered(constant), locator);
+        Assert.Contains(constant, evaluator.FunctionNames);
+    }
+
+    [Fact]
+    public void TheNullLiteralsTheConverterEmitsAreExactlyTheCallsTheRegistryAnswers()
+    {
+        DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
+
+        // THE ROUND TRIP, CLOSED. Each producer's published null literal is the complete CALL TEXT -
+        // "dwNvlNumber()" and friends - so evaluating it must answer a null rather than a refusal. This
+        // is the exact path a null column value takes: dwValueToExp emits the text, the preprocessor
+        // splices it in, and this evaluator reads it back.
+        foreach (string nullLiteral in new[]
+        {
+            NumberValidator.NullLiteralExpression,
+            StringValidator.NullLiteralExpression,
+            DateValidator.NullLiteralExpression,
+            DateTimeValidator.NullLiteralExpression,
+            TimeValidator.NullLiteralExpression,
+        })
+        {
+            DataWindowExpressionResult result = evaluator.TryEvaluate(nullLiteral, 1L);
+
+            Assert.True(result.IsSuccess, nullLiteral);
+            Assert.True(result.IsNullValue, nullLiteral);
+            Assert.NotEqual(
+                DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+                result.Text);
+        }
+
+        // And the loop actually closes: converting a null salary yields a literal that evaluates back to
+        // a null, rather than to the empty string or to a sentinel.
+        string produced = evaluator.Evaluate("dwValueToExp(salary)", 4L);
+
+        Assert.Equal(NumberValidator.NullLiteralExpression, produced);
+        Assert.True(evaluator.TryEvaluate(produced, 4L).IsNullValue);
+    }
+}
+

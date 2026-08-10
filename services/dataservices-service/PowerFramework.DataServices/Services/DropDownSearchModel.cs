@@ -1867,16 +1867,30 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// </summary>
     /// <param name="show">
     /// <see langword="true"/> to relocate filtered rows into the primary buffer,
-    /// <see langword="false"/> not to.
+    /// <see langword="false"/> not to, or <see langword="null"/> to RESTORE THE AUTO-DETERMINATION
+    /// the property is constructed with. See the remarks - the third state is not a convenience.
     /// </param>
     /// <returns><c>RetCode.OK</c>, always (<c>:L284</c>).</returns>
     /// <remarks>
     /// <para>
-    /// TWO STATEMENTS IN THE ORACLE AND TWO HERE [<c>:L283-L284</c>]: assign, return success. It takes
-    /// a NON-NULLABLE bool because <c>readonly boolean show</c> is what the oracle declares - so this
-    /// setter can only ever move the property OUT of its three-state null and never back into it. That
-    /// is the oracle's own limitation, faithfully reproduced: the null exists only as the constructed
-    /// default [<c>:L503</c>], and there is no <c>SetNull</c> path exposed to a caller.
+    /// TWO STATEMENTS IN THE ORACLE AND TWO HERE [<c>:L283-L284</c>]: assign, return success.
+    /// </para>
+    /// <para>
+    /// <b>THE PARAMETER IS NULLABLE, AND THAT IS FIDELITY RATHER THAN GENEROSITY.</b> The oracle
+    /// declares <c>readonly boolean show</c> [<c>:L266</c>] and PowerScript value types CARRY NULL, so
+    /// <c>boolean b; SetNull(b); of_SetShowFilteredRows(b)</c> is a legal call that assigns null
+    /// straight through <c>#ShowFilteredRows = show</c> [<c>:L283</c>] - which is precisely why the
+    /// resolver opens with <c>if Not IsNull(#ShowFilteredRows)</c> [<c>:L260</c>] rather than trusting
+    /// the field to have been set once at construction [<c>:L503</c>]. A non-nullable <c>bool</c> here
+    /// would make the three-state property one-way: reachable out of auto-determination and never back
+    /// into it. AAP 0.4.5.4 forbids exactly that, requiring PowerBuilder's nullable value types to be
+    /// ported as nullable value types and never collapsed - so all three states are settable, and
+    /// DECISION 7 in the file header is honoured by the setter as well as by the property.
+    /// </para>
+    /// <para>
+    /// NOTHING IS WIDENED BEYOND THE ORACLE. There is no fourth state, no sentinel and no separate
+    /// "reset" member; the null travels through the same single assignment the oracle performs, and a
+    /// caller passing <see langword="true"/> or <see langword="false"/> is unaffected.
     /// </para>
     /// <para>
     /// It takes effect on the NEXT filter application rather than immediately, because
@@ -1884,7 +1898,7 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// setter triggers nothing.
     /// </para>
     /// </remarks>
-    public long SetShowFilteredRows(in bool show)
+    public long SetShowFilteredRows(in bool? show)
     {
         // :L283  #ShowFilteredRows = show
         ShowFilteredRows = show;

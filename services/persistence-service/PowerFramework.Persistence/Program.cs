@@ -59,6 +59,9 @@
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.Options;
+using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Endpoints;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -158,14 +161,49 @@ builder.Services.AddAuthorization(static options =>
 builder.Services.AddSingleton(TimeProvider.System);
 
 // --------------------------------------------------------------------------------------------------
-// 3. THE PUBLISHED REST SURFACE
+// 3. THE SERVICE'S OWN CONFIGURATION, AND THE ONE STORAGE SEAM IT DESCRIBES
 //
-// Health-check registration ships inside the Microsoft.AspNetCore.App shared framework, so /health
-// needs no package reference and none is declared. Problem details are registered so the framework's
-// own challenge and the readiness probe's 503 both answer application/problem+json, which is the error
-// shape the authored contracts publish.
+// Bound from the configuration ROOT rather than from a service-named wrapper, because PersistenceOptions
+// declares its four groups - Sqlite, TransactionPool, Query and Jwt - as TOP-LEVEL sections and
+// deliberately carries no SectionName constant. That is what makes the environment-variable contract
+// read `Sqlite__DataDirectory` rather than `Persistence__Sqlite__DataDirectory`.
+//
+// VALIDATED ON START, WHICH IS WHERE FAIL FAST BELONGS. PersistenceOptionsValidator is registered
+// explicitly rather than relying on ValidateDataAnnotations, because annotation validation does not
+// recurse into nested complex properties - without the validator every annotation on the four groups
+// would be silently ignored and a misconfigured service would start happily. Validating at START rather
+// than on first use is the deliberate half: a structural fault must end the process before it can serve
+// a request, which is the framework application object's own posture
+// [ws_objects/pfw.pbl.src/pfw.sra:L111-L144], and it also keeps a configuration verdict from ever being
+// mistaken for a storage verdict on the readiness route.
+//
+// The connection seam is a singleton for the process lifetime, the way the legacy global auto-instance
+// `global n_sqlite n_sqlite` [ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru:L90] was - but injected
+// rather than global, which is the whole point of the substitution. It is the ONLY place in the system
+// that opens a storage connection or composes a connection string.
 // --------------------------------------------------------------------------------------------------
-builder.Services.AddHealthChecks();
+builder.Services
+    .AddOptions<PersistenceOptions>()
+    .BindConfiguration(string.Empty)
+    .ValidateOnStart();
+
+builder.Services.AddSingleton<IValidateOptions<PersistenceOptions>, PersistenceOptionsValidator>();
+
+builder.Services.AddSingleton<SqliteConnectionFactory>();
+
+// --------------------------------------------------------------------------------------------------
+// 4. THE PUBLISHED REST SURFACE
+//
+// ONE readiness registration call, and it lives in Endpoints/HealthEndpoints.cs beside the route that
+// publishes it: it registers the read-only SQLite reachability check that gives /health its meaning, so
+// this host cannot end up publishing a readiness verdict that never reached the only storage engine in
+// the estate. Health-check registration itself ships inside the Microsoft.AspNetCore.App shared
+// framework, so /health needs no package reference and none is declared.
+//
+// Problem details are registered so the framework's own challenge and the readiness probe's 503 both
+// answer application/problem+json, which is the error shape the authored contracts publish.
+// --------------------------------------------------------------------------------------------------
+builder.Services.AddPersistenceHealthChecks();
 builder.Services.AddProblemDetails();
 
 WebApplication app = builder.Build();

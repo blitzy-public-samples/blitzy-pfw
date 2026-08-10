@@ -1334,6 +1334,17 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     private const string RetCodeMember = "retCode";
 
     /// <summary>
+    /// The problem-details extension member carrying the correlation identifier.
+    /// </summary>
+    /// <remarks>
+    /// Attached by the framework's problem-details writer rather than by this service, and its value is an
+    /// opaque randomly generated trace-context identifier. It is named here so the disclosure scan below can
+    /// exclude it - see <see cref="RemoveCorrelationIdentifiers(JsonElement, string)"/> for why excluding it
+    /// is correctness rather than convenience.
+    /// </remarks>
+    private const string CorrelationIdMember = "traceId";
+
+    /// <summary>
     /// Vocabulary that would indicate signing material on a configuration surface.
     /// </summary>
     /// <remarks>
@@ -4228,16 +4239,28 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
 
         string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
 
+        // THE CORRELATION IDENTIFIER IS EXCLUDED FROM THE SCAN, AND THAT IS CORRECTNESS RATHER THAN
+        // CONVENIENCE. The problem-details writer attaches a `traceId` whose value is an opaque, randomly
+        // generated hexadecimal trace-context identifier - it names an OCCURRENCE, it is not authored by
+        // this service, and it can disclose nothing. But it is roughly fifty hex characters long, and a
+        // string that long contains any particular four-digit decimal substring often enough to matter:
+        // this assertion was observed failing because a generated identifier happened to contain the
+        // sequence `5102`. Scanning it would therefore make the suite intermittently red over a value that
+        // carries no information at all, which is worse than useless because it trains a reader to ignore
+        // a security assertion. Everything the service ACTUALLY authors - the detail sentence, the upstream
+        // entries, the component checks - is still scanned in full, so the property under test is intact.
+        string scanned = RemoveCorrelationIdentifiers(document.RootElement, body);
+
         // The configured probe ports are topology. None of them may appear in an anonymous body.
         foreach (int port in GatewayTestHostFixture.ConfiguredProbePorts)
         {
             Assert.DoesNotContain(
                 port.ToString(CultureInfo.InvariantCulture),
-                body,
+                scanned,
                 StringComparison.Ordinal);
         }
 
-        string normalized = body.ToLowerInvariant();
+        string normalized = scanned.ToLowerInvariant();
 
         foreach (string vocabulary in CredentialVocabulary)
         {
@@ -4247,6 +4270,77 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         // Nor may the body carry a scripted failure's own words: the probe authors its own detail
         // sentences instead of relaying whatever the transport said.
         Assert.DoesNotContain("on purpose", normalized, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Removes every correlation identifier the body carries, leaving everything the service authored.
+    /// </summary>
+    /// <param name="root">The parsed body.</param>
+    /// <param name="body">The raw body.</param>
+    /// <returns>The body with each correlation identifier's value removed.</returns>
+    /// <remarks>
+    /// Searched at every depth rather than at the root only, because the not-ready answer nests the
+    /// readiness report inside a problem document and a future revision may nest it differently. Removing
+    /// the VALUE rather than the member keeps the surrounding text intact, so nothing the service authored
+    /// escapes the scan as a side effect of this exclusion.
+    /// </remarks>
+    private static string RemoveCorrelationIdentifiers(JsonElement root, string body)
+    {
+        string scanned = body;
+
+        foreach (string identifier in ReadCorrelationIdentifiers(root))
+        {
+            scanned = scanned.Replace(identifier, string.Empty, StringComparison.Ordinal);
+        }
+
+        return scanned;
+    }
+
+    /// <summary>
+    /// Collects every correlation-identifier value in a document, at any depth.
+    /// </summary>
+    /// <param name="element">The element to walk.</param>
+    /// <returns>Each non-empty identifier found.</returns>
+    private static IEnumerable<string> ReadCorrelationIdentifiers(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (JsonProperty member in element.EnumerateObject())
+                {
+                    if (string.Equals(member.Name, CorrelationIdMember, StringComparison.Ordinal)
+                        && member.Value.ValueKind == JsonValueKind.String)
+                    {
+                        string? value = member.Value.GetString();
+
+                        if (!string.IsNullOrEmpty(value))
+                        {
+                            yield return value;
+                        }
+                    }
+
+                    foreach (string nested in ReadCorrelationIdentifiers(member.Value))
+                    {
+                        yield return nested;
+                    }
+                }
+
+                break;
+
+            case JsonValueKind.Array:
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    foreach (string nested in ReadCorrelationIdentifiers(item))
+                    {
+                        yield return nested;
+                    }
+                }
+
+                break;
+
+            default:
+                break;
+        }
     }
 }
 

@@ -320,6 +320,15 @@ app.MapOpenApi().AllowAnonymous();
 app.MapHealthEndpoints();
 app.MapPingEndpoints();
 
+// The thin REST projection of contracts C-03 and C-04 under /v1/datawindow/**, consumed by Gateway.
+// gRPC remains the PRIMARY transport for both contracts - the protocol definitions in
+// PowerFramework.Contracts are the authority, and the three bidirectional streams have no REST
+// projection at all - so this call adds a translation layer over the same implementations rather than
+// a second API. Every route it declares requires a token; the file applies that once at the group
+// level so a route cannot be anonymous by omission, and it registers nothing here because it resolves
+// the projected implementations with the same semantics the gRPC hosting layer uses.
+app.MapRestProjectionEndpoints();
+
 app.Run();
 
 /// <summary>

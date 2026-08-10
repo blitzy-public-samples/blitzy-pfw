@@ -1736,8 +1736,28 @@ public static class DataServicesProxyEndpoints
         }
         catch (InvalidProtocolBufferException)
         {
-            // InvalidJsonException derives from this type, so one arm covers both a body that is not JSON
-            // at all and a body that is JSON but does not map onto the message.
+            // A body that IS JSON but does not map onto the message: an unknown member, a wrong shape, a
+            // value the field cannot hold.
+            request = null;
+            failure = BindingRejection(MalformedBodyDetail);
+
+            return false;
+        }
+        catch (InvalidJsonException)
+        {
+            // A body that is not well-formed JSON at all: a truncated document, a bad literal, a stray
+            // character.
+            //
+            // TWO ARMS, AND THE SECOND ONE IS LOAD BEARING RATHER THAN DEFENSIVE. It would be natural to
+            // assume one arm covers both cases, because the parser's two failure types read like a
+            // hierarchy - but Google.Protobuf derives InvalidJsonException from System.IO.IOException and
+            // NOT from InvalidProtocolBufferException, so `catch (InvalidProtocolBufferException)` alone
+            // lets every malformed-JSON body escape this method entirely. Escaping it means the request
+            // reaches the host's exception handler and the CALLER'S mistake is reported as HTTP 500 - this
+            // service announcing its own failure for a body it correctly refused. The contract publishes
+            // 400 for an unbindable body, and 400 is what a client needs in order to know not to retry.
+            // Verified by exercising the parser directly: `{`, and `not json at all`, both raise
+            // InvalidJsonException, while `[]` and an unknown member raise InvalidProtocolBufferException.
             request = null;
             failure = BindingRejection(MalformedBodyDetail);
 
