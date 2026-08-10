@@ -1498,6 +1498,34 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     internal bool HasTransactionReference => Predicates.IsValidObject(_transactionObject);
 
     /// <summary>
+    /// The pooled transaction this task most recently acquired - the direct read of the oracle's
+    /// <c>_transObject</c> field
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L170</c>], or
+    /// <see langword="null"/> when no acquisition has succeeded.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>AN OBSERVATION SEAM, AND IT REPORTS STATE WITHOUT CHANGING ANY.</b> It exists because a task
+    /// body's outcome is only half the story: the oracle's own task body reads the driver's four
+    /// accessors off THE INSTANCE IT JUST ACQUIRED - <c>transObject.SQLDBCode</c>,
+    /// <c>transObject.SQLErrText</c> [<c>:L110-L111</c>] - and a caller that has to project those onto a
+    /// wire response needs the same instance. Nothing else on this type surfaces it:
+    /// <see cref="HasTransactionReference"/> answers only whether one is held, and
+    /// <see cref="GetTransObject(ref IPooledTransaction?)"/> is <see langword="protected"/> and would
+    /// RE-ACQUIRE, which clears the very state the caller is trying to read.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE ACQUIRED INSTANCE AND NOT THE ONE A CALLER ALREADY HOLDS.</b> The pool REPLACES a
+    /// broken entry's transaction and DISPOSES the old one
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L164-L172</c>], so a reference
+    /// captured before a task ran can be both stale and disposed by the time it returns. This property
+    /// always answers whatever the acquisition sequence actually attached, which is the only reading
+    /// that matches the oracle's local.
+    /// </para>
+    /// </remarks>
+    internal IPooledTransaction? AttachedTransaction => _transactionObject;
+
+    /// <summary>
     /// Whether the commit signal has been created yet - the direct read of
     /// <c>_hEvtCommitted &lt;&gt; 0</c>
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L106, :L242, :L720</c>].
