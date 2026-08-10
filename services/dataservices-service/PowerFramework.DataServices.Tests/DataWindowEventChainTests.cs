@@ -22,9 +22,39 @@
 //  below states what the oracle ACTUALLY does, including where that is an oddity a tidy-minded reader
 //  would "fix" - an assertion that encoded the tidied behaviour would be asserting a regression.
 //
-//  SHAPE. Table-driven parity matrices as theories with member data, driven through one composed test
-//  double so every path is reachable with no live DataWindow, no window handle and no message pump
-//  anywhere (constraints C-D and C-H).
+//  SCOPE, AND THE ONE LINE THIS FILE MUST NOT CROSS
+//  ------------------------------------------------------------------------------------------------
+//  This is FAMILY 1 of the four mandated parity-matrix families: EVENT ORDER. It owns what order the
+//  chain does things in, which participants run, and what each event returns.
+//
+//  It does NOT own, and must not acquire, the other half of AAP 0.6.1's subject matter:
+//      * the PER-CAPABILITY-AREA ORDERING-PATTERN ASSIGNMENT of AAP 0.6.1.4 - which areas get
+//        pattern (a) a sequencing token and which get pattern (b) a strictly synchronous chain, i.e.
+//        every assertion about `DataWindowEventOrdering.DisciplineOf`; and
+//      * the OUT-OF-ORDER RULE - that an out-of-order arrival is a hard error under (b) and tolerable
+//        under (a), i.e. every assertion about `DataWindowEventSequencer.Accept` and
+//        `DataWindowEventSequenceException`.
+//  Both live in EventOrderingPatternTests.cs. THE SPLIT IS DELIBERATE AND IS NOT DUPLICATED HERE: two
+//  files asserting one fact is two files to change when the oracle is re-read, and the second one
+//  silently becomes the stale one. Likewise the queued continuation `ondwnkillfocus` hands to the
+//  session is ValidationSessionTests.cs's subject - this file asserts only WHERE in the kill-focus
+//  sequence the queueing happens, never what the continuation then does.
+//
+//  SHAPE. Table-driven parity matrices as theories with member data (AAP 0.6.7), plain xunit
+//  assertions, driven through one composed test double so every path is reachable with no live
+//  DataWindow, no window handle and no message pump anywhere (constraints C-D and C-H).
+//
+//  ORDERED, NEVER SET-WISE. Every ordering assertion compares an ORDERED LIST. A set comparison would
+//  pass on a reordered chain, which is exactly the regression AAP 0.6.1 calls the highest risk.
+//
+//  RULES. review_rules returns exactly "No user rules provided.", so NO USER RULE GOVERNS THIS FILE.
+//  Per AAP 0.7.1 that is a finding and not latitude: the enterprise baseline of AAP 0.7.2 applies in
+//  its place, and the binding constraints are AAP 0.7.3's non-rule set - C-B (every asymmetry below is
+//  legacy behaviour, asserted rather than harmonised), C-C (the oracle is read-only and every claim
+//  carries its locator), C-H (this file is the primary coverage of the chain) and C-K (every assertion
+//  cites the line it came from). Per AAP 0.4.5.3 the SCREAMING_SNAKE topic identifiers are REFERENCED
+//  here and none is DECLARED here, because no test file appears in the repository-root .editorconfig
+//  suppression bands and this project builds under TreatWarningsAsErrors.
 //
 //  WHY THE DOUBLE COMPOSES RATHER THAN INHERITS. Domain/DataWindowServiceHost.cs's DECISION 5 makes
 //  the chain a DataWindowServiceHost in its own right, so a double for the chain cannot also inherit
@@ -33,7 +63,6 @@
 //  bookkeeping and a single call log. The two protected *Core operations are reached through the two
 //  public bridges added to FakeDataWindowHost for exactly this purpose.
 // ==================================================================================================
-using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
 using PowerFramework.Shared.Eventful;
 using PowerFramework.Shared.Kernel;
@@ -43,12 +72,15 @@ using Xunit;
 // ALIASED RATHER THAN IMPORTED WHOLESALE. PowerFramework.Contracts.Common.V1 and
 // PowerFramework.Contracts.DataServices.V1 each publish a type whose name also exists in
 // PowerFramework.DataServices.Domain - the wire half and the in-process half of a matched pair - so an
-// unaliased import is CS0104. Naming the four types this file needs keeps every use unambiguous
+// unaliased import is CS0104. Naming the three types this file needs keeps every use unambiguous
 // without importing either namespace.
+//
+// OrderingDiscipline is DELIBERATELY NOT ALIASED HERE. It is the vocabulary of the ordering-pattern
+// assignment, which EventOrderingPatternTests.cs owns - see THE ONE LINE THIS FILE MUST NOT CROSS
+// above. Its absence from this using block is the machine-checkable half of that boundary.
 using DwBuffer = PowerFramework.Contracts.Common.V1.DwBuffer;
 using EventId = PowerFramework.Contracts.DataServices.V1.EventId;
 using ItemStatus = PowerFramework.Contracts.Common.V1.ItemStatus;
-using OrderingDiscipline = PowerFramework.Contracts.DataServices.V1.OrderingDiscipline;
 
 namespace PowerFramework.DataServices.Tests;
 
@@ -458,12 +490,22 @@ internal sealed class RecordingEventObserver : IDataWindowEventObserver
 /// </remarks>
 internal sealed class FakeEventChain : DataWindowEventChain
 {
+    /// <summary>Builds the double over a session and a service factory.</summary>
+    /// <param name="session">The validation session the chain holds for its whole life.</param>
+    /// <param name="services">The factory the chain creates its five attached services from.</param>
+    /// <param name="observer">The dispatch observer, or <see langword="null"/> for none.</param>
+    /// <remarks>
+    /// THE BASE'S FOURTH PARAMETER - ITS SEQUENCER - IS DELIBERATELY NOT SURFACED. Supplying one is how
+    /// a test would drive the sequencer's ACCEPT rule, and that rule is EventOrderingPatternTests.cs's
+    /// subject (see THE ONE LINE THIS FILE MUST NOT CROSS in the file header). Leaving the base to build
+    /// its own keeps this double unable to reach into the other file's territory even by accident, while
+    /// still issuing the entry tokens whose ORDER this file does read.
+    /// </remarks>
     internal FakeEventChain(
         ValidationSession session,
         FakeAttachedServiceFactory services,
-        IDataWindowEventObserver? observer = null,
-        DataWindowEventSequencer? sequencer = null)
-        : base(session, services, observer, sequencer)
+        IDataWindowEventObserver? observer = null)
+        : base(session, services, observer)
     {
         Services = services;
         Host = new FakeDataWindowHost(Eventful);
@@ -964,6 +1006,27 @@ public sealed class DataWindowEventChainTests
         (EventId.Ondwnsetfocus, nameof(DataWindowEventChain.OnDwnSetFocus))
     ];
 
+    /// <summary>
+    /// The THIRTEEN raw <c>pbm_dwn*</c> events in the oracle's own DECLARATION ORDER, with the locator
+    /// of each declaration.
+    /// </summary>
+    private static readonly string[] RawEventOrderTable =
+    [
+        nameof(DataWindowEventChain.OnDwnRButtonDown),        // :L15  pbm_dwnrbuttondown
+        nameof(DataWindowEventChain.OnDwnRButtonUp),          // :L16  pbm_dwnrbuttonup
+        nameof(DataWindowEventChain.OnDwnRowChange),          // :L17  pbm_dwnrowchange
+        nameof(DataWindowEventChain.OnDwnRowChanging),        // :L18  pbm_dwnrowchanging
+        nameof(DataWindowEventChain.OnDwnLButtonDblClk),      // :L19  pbm_dwnlbuttondblclk
+        nameof(DataWindowEventChain.OnDwnLButtonClk),         // :L20  pbm_dwnlbuttonclk
+        nameof(DataWindowEventChain.OnDwnChanging),           // :L21  pbm_dwnchanging
+        nameof(DataWindowEventChain.OnDwnItemChangeFocus),    // :L22  pbm_dwnitemchangefocus
+        nameof(DataWindowEventChain.OnDwnItemChange),         // :L23  pbm_dwnitemchange
+        nameof(DataWindowEventChain.OnDwnItemValidationError), // :L27 pbm_dwnitemvalidationerror
+        nameof(DataWindowEventChain.OnDwnKillFocus),          // :L29  pbm_dwnkillfocus
+        nameof(DataWindowEventChain.OnDwnLButtonUp),          // :L30  pbm_dwnlbuttonup
+        nameof(DataWindowEventChain.OnDwnSetFocus)            // :L31  pbm_dwnsetfocus
+    ];
+
     /// <summary>The twelve topics, paired with their BYTE-EXACT legacy values [<c>:L47-L76</c>].</summary>
     private static readonly (string Constant, string Value)[] TopicValueTable =
     [
@@ -981,36 +1044,75 @@ public sealed class DataWindowEventChainTests
         (nameof(DataWindowEventChain.EVT_LOSEFOCUS), "losefocus")
     ];
 
-    /// <summary>Every event, paired with the ordering discipline AAP 0.6.1.4 assigns its area.</summary>
-    private static readonly (EventId Id, OrderingDiscipline Discipline)[] EventDisciplineTable =
+    /// <summary>
+    /// The NINE semantic events, each paired with the return type and the exact parameter list its
+    /// legacy declaration prescribes [<c>:L11-L14</c>, <c>:L24-L26</c>, <c>:L28</c>, <c>:L32</c>].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SIGNATURES ARE PART OF THE ORDERING CONTRACT, WHICH IS WHY THEY ARE PINNED HERE RATHER THAN
+    /// LEFT TO THE COMPILER. Two of the nine cannot be expressed asynchronously at all, and each one's
+    /// signature is the evidence:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>
+    ///   <c>onddsgetfilter</c> [<c>:L13</c>] produces its result through a <b><c>ref string</c>
+    ///   out-parameter</b> and returns nothing. A <c>ref</c> result has no asynchronous representation -
+    ///   the caller blocks on the produced filter - so the drop-down search pair is irreducibly
+    ///   request/response.
+    ///   </description></item>
+    ///   <item><description>
+    ///   <c>oncolumnexpinvokemethod</c> [<c>:L14</c>] returns <c>any</c> over a <c>string args[]</c>.
+    ///   AAP 0.4.5.2 maps <c>any</c> to <see cref="object"/>, and the string array is what makes
+    ///   contract C-04's INVERTED macro channel expressible: the legacy expects the APPLICATION to
+    ///   implement the macro switch, so across a boundary DataServices calls back into its client and
+    ///   the calculation cannot proceed until it answers.
+    ///   </description></item>
+    /// </list>
+    /// <para>
+    /// The remaining seven are declarations with no script, so their signature is the whole of their
+    /// contract. A widened parameter or a changed return type would be a new feature (constraint C-B).
+    /// </para>
+    /// </remarks>
+    private static readonly (string Member, Type ReturnType, string Parameters)[]
+        SemanticEventSignatureTable =
     [
-        // (b) SYNCHRONOUS - item-change and validation.
-        (EventId.Ondwnitemchange, OrderingDiscipline.Synchronous),
-        (EventId.Ondoitemchange, OrderingDiscipline.Synchronous),
-        (EventId.Onitemchanged, OrderingDiscipline.Synchronous),
-        (EventId.Ondoitemchanged, OrderingDiscipline.Synchronous),
-        (EventId.Ondwnitemvalidationerror, OrderingDiscipline.Synchronous),
+        // :L11  event type long oninitcontextmenu ( long row, dwobject dwo )
+        (nameof(DataWindowEventChain.OnInitContextMenu), typeof(long), "Int64,IDataWindowObject"),
 
-        // (b) SYNCHRONOUS - context menu, drop-down search, macro invocation.
-        (EventId.Oninitcontextmenu, OrderingDiscipline.Synchronous),
-        (EventId.Oncontextmenu, OrderingDiscipline.Synchronous),
-        (EventId.Onddsgetfilter, OrderingDiscipline.Synchronous),
-        (EventId.Onddsfiltered, OrderingDiscipline.Synchronous),
-        (EventId.Oncolumnexpinvokemethod, OrderingDiscipline.Synchronous),
+        // :L12  event type long oncontextmenu ( long row, dwobject dwo, long mid )
+        (nameof(DataWindowEventChain.OnContextMenu), typeof(long), "Int64,IDataWindowObject,Int64"),
 
-        // (a) SEQUENCED - focus, mouse and row-focus notification, plus the trace.
-        (EventId.Ondwnsetfocus, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnkillfocus, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnrowchange, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnrowchanging, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnlbuttonclk, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnlbuttondblclk, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnlbuttonup, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnrbuttondown, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnrbuttonup, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnitemchangefocus, OrderingDiscipline.Sequenced),
-        (EventId.Ondwnchanging, OrderingDiscipline.Sequenced),
-        (EventId.Oncolumnexptrace, OrderingDiscipline.Sequenced)
+        // :L13  event onddsgetfilter ( long row, dwobject dwo, string data, ref string filter )
+        (nameof(DataWindowEventChain.OnDdsGetFilter),
+            typeof(void),
+            "Int64,IDataWindowObject,String,String&"),
+
+        // :L14  event type any oncolumnexpinvokemethod ( long row, dwobject dwo, string name, string args[] )
+        (nameof(DataWindowEventChain.OnColumnExpInvokeMethod),
+            typeof(object),
+            "Int64,IDataWindowObject,String,String[]"),
+
+        // :L24  event type long ondoitemchange ( long row, dwobject dwo, string data )
+        (nameof(DataWindowEventChain.OnDoItemChange),
+            typeof(long),
+            "Int64,IDataWindowObject,String"),
+
+        // :L25  event onitemchanged ( long row, dwobject dwo )
+        (nameof(DataWindowEventChain.OnItemChanged), typeof(void), "Int64,IDataWindowObject"),
+
+        // :L26  event ondoitemchanged ( long row, dwobject dwo )
+        (nameof(DataWindowEventChain.OnDoItemChanged), typeof(void), "Int64,IDataWindowObject"),
+
+        // :L28  event onddsfiltered ( long row, dwobject dwo, long rowcount, long filteredcount )
+        (nameof(DataWindowEventChain.OnDdsFiltered),
+            typeof(void),
+            "Int64,IDataWindowObject,Int64,Int64"),
+
+        // :L32  event oncolumnexptrace ( long row, dwobject dwo, string stack, string expr, string value )
+        (nameof(DataWindowEventChain.OnColumnExpTrace),
+            typeof(void),
+            "Int64,IDataWindowObject,String,String,String")
     ];
 
     /// <summary>The event-to-member table as theory data.</summary>
@@ -1045,21 +1147,106 @@ public sealed class DataWindowEventChainTests
         }
     }
 
-    /// <summary>The discipline table as theory data.</summary>
-    public static TheoryData<EventId, OrderingDiscipline> EventDisciplines
+    /// <summary>The nine semantic signatures as theory data.</summary>
+    public static TheoryData<string, Type, string> SemanticEventSignatures
     {
         get
         {
-            TheoryData<EventId, OrderingDiscipline> data = new();
+            TheoryData<string, Type, string> data = new();
 
-            foreach ((EventId id, OrderingDiscipline discipline) in EventDisciplineTable)
+            foreach ((string member, Type returnType, string parameters) in SemanticEventSignatureTable)
             {
-                data.Add(id, discipline);
+                data.Add(member, returnType, parameters);
             }
 
             return data;
         }
     }
+
+    /// <summary>
+    /// The THIRTEEN raw <c>pbm_dwn*</c> events as theory data, each paired with its ONE-BASED position
+    /// in the oracle's declaration order [<c>:L15-L23</c>, <c>:L27</c>, <c>:L29-L31</c>].
+    /// </summary>
+    /// <remarks>
+    /// DECLARATION ORDER IS DATA HERE BECAUSE IT IS NOT ALPHABETICAL, NOT GROUPED AND NOT DERIVABLE.
+    /// The oracle interleaves the item-change family through the mouse and focus families - item
+    /// validation error sits at <c>:L27</c>, between <c>ondwnitemchange</c> at <c>:L23</c> and
+    /// <c>ondwnkillfocus</c> at <c>:L29</c>, with two SEMANTIC declarations in between at
+    /// <c>:L24-L26</c> - so the only way to state the order is to state it.
+    /// </remarks>
+    public static TheoryData<int, string> RawEventDeclarationOrder
+    {
+        get
+        {
+            TheoryData<int, string> data = new();
+
+            for (int position = 0; position < RawEventOrderTable.Length; position++)
+            {
+                data.Add(position + 1, RawEventOrderTable[position]);
+            }
+
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// The two row-focus raw events, paired with what a BROKER veto does to each - which is the
+    /// deliberate asymmetry at <c>:L124-L127</c> against <c>:L130-L133</c>.
+    /// </summary>
+    /// <remarks>
+    /// Columns are: whether the event is <c>ondwnrowchanging</c> rather than <c>ondwnrowchange</c>; the
+    /// result the event must return when the broker answers <c>1</c>; and the locator the row is drawn
+    /// from, carried as data so a failure message names the line rather than the theory.
+    /// </remarks>
+    public static TheoryData<bool, long, string> RowFocusBrokerVetoMatrix =>
+        new()
+        {
+            // ondwnrowchange TRIGGERS the broker and DISCARDS its result - the focus has already moved,
+            // so there is nothing left to veto.
+            { false, RetCode.OK, "se_cst_dw.sru:L126" },
+
+            // ondwnrowchanging TESTS the result, because the move can still be stopped.
+            { true, RetCode.PREVENT, "se_cst_dw.sru:L132" }
+        };
+
+    /// <summary>
+    /// The four combinations of (<c>DataWindow.Processing</c> is <c>"1"</c>) by (<c>SetRow</c>
+    /// actually moves the row) that <c>:L152-L159</c> discriminates between.
+    /// </summary>
+    /// <remarks>
+    /// Columns are: the <c>Describe("DataWindow.Processing")</c> answer; whether the host's
+    /// <c>SetRow</c> genuinely moves the cursor; the event's expected return; the expected current row
+    /// afterwards; and whether the outcome should report a row-switch attempt at all - which is
+    /// <see langword="null"/> when the guarded block was never entered, so "not attempted" and
+    /// "attempted and failed" stay distinguishable.
+    /// </remarks>
+    public static TheoryData<string, bool, long, long, bool?> ClickRowSwitchMatrix =>
+        new()
+        {
+            // Processing, SetRow moves, expected result, expected current row, switch attempted.
+            { "1", true, RetCode.OK, 2L, true },
+            { "1", false, RetCode.PREVENT, 1L, false },
+            { "0", true, RetCode.OK, 1L, null },
+            { "0", false, RetCode.OK, 1L, null }
+        };
+
+    /// <summary>
+    /// The four combinations of (the column-expression service is <c>#Enabled</c>) by (the
+    /// <c>0-itemchanged</c> topic has a subscriber) that <c>:L313-L319</c> discriminates between.
+    /// </summary>
+    /// <remarks>
+    /// Steps one and two are independently gated and step three is gated on NOTHING, so the expected
+    /// sequence is a different ORDERED LIST in each of the four rows and the semantic event is the last
+    /// entry in all four.
+    /// </remarks>
+    public static TheoryData<bool, bool> DoItemChangedGateMatrix =>
+        new()
+        {
+            { true, true },
+            { true, false },
+            { false, true },
+            { false, false }
+        };
 
 
     // ==============================================================================================
@@ -1080,23 +1267,38 @@ public sealed class DataWindowEventChainTests
         internal IDataWindowObject Dwo => Host.DwObject(ColumnName);
     }
 
+    /// <summary>
+    /// A session seeded with nothing but a correlation id, a handle and the one legacy field a caller
+    /// may seed - the disabled-event bitmask [<c>:L89-L90</c>].
+    /// </summary>
+    /// <param name="disabledMask">The initial disabled-event bitmask.</param>
+    /// <returns>The session.</returns>
+    /// <remarks>
+    /// THE LIFETIME ARGUMENT IS LEFT AT ITS DEFAULT DELIBERATELY. Passing nothing is behaviourally
+    /// identical to passing a fresh option object - the session itself substitutes one - and it keeps
+    /// this file's import surface to exactly the dependencies it was given, with no reach into the
+    /// configuration namespace for a value that has no bearing on event ordering.
+    /// </remarks>
     private static ValidationSession NewSession(uint disabledMask = 0u) =>
-        new("chain-session", "dw-1", disabledMask, new SessionLifetimeOptions());
+        new("chain-session", "dw-1", disabledMask);
 
     /// <summary>
     /// Builds a chain over a one-column, one-row fixture with the cursor on row 1.
     /// </summary>
     /// <param name="disabledMask">The initial disabled-event bitmask [<c>:L89-L90</c>].</param>
-    /// <param name="sequencer">An explicit sequencer, or <see langword="null"/> for a fresh one.</param>
     /// <returns>The fixture.</returns>
-    private static ChainFixture NewFixture(
-        uint disabledMask = 0u,
-        DataWindowEventSequencer? sequencer = null)
+    /// <remarks>
+    /// NO SEQUENCER IS EVER SUPPLIED FROM HERE. The chain builds its own, and how that sequencer
+    /// ACCEPTS a token is EventOrderingPatternTests.cs's subject - see THE ONE LINE THIS FILE MUST NOT
+    /// CROSS in the file header. What this file reads from a dispatch is the ORDER the outcomes arrived
+    /// in and the entry order their tokens record, both of which the chain produces on its own.
+    /// </remarks>
+    private static ChainFixture NewFixture(uint disabledMask = 0u)
     {
         RecordingEventObserver observer = new();
         FakeAttachedServiceFactory services = new();
         ValidationSession session = NewSession(disabledMask);
-        FakeEventChain chain = new(session, services, observer, sequencer);
+        FakeEventChain chain = new(session, services, observer);
 
         chain.Host.AddColumn(ColumnName, ColumnType);
         chain.Host.AddRow("original");
@@ -1106,7 +1308,10 @@ public sealed class DataWindowEventChainTests
     }
 
     // ==============================================================================================
-    //  PHASE 1 - ALL TWENTY-TWO EVENTS, AND THEIR ONE-FOR-ONE CORRESPONDENCE WITH CONTRACT C-03
+    //  BRIEF PHASE 1 - THE TWENTY-TWO-EVENT SURFACE, ENUMERATED
+    //  --------------------------------------------------------------------------------------------
+    //  Nine SEMANTIC with their legacy signatures, thirteen RAW in declaration order, the total of
+    //  twenty-two, and the one-for-one correspondence with contract C-03's own event set.
     // ==============================================================================================
 
     [Theory]
@@ -1115,6 +1320,90 @@ public sealed class DataWindowEventChainTests
     {
         Assert.NotEqual(EventId.Unspecified, eventId);
         Assert.NotNull(typeof(DataWindowEventChain).GetMethod(member));
+    }
+
+    [Theory]
+    [MemberData(nameof(SemanticEventSignatures))]
+    public void EverySemanticEventCarriesItsLegacySignature(
+        string member,
+        Type returnType,
+        string parameters)
+    {
+        // :L11-L14, :L24-L26, :L28, :L32. The nine semantic declarations, signature by signature.
+        // Parameter types are compared as an ORDERED, comma-joined list, because a semantic event's
+        // parameter ORDER is as much a part of the contract as its parameter set - `oncontextmenu`
+        // [:L12] takes (row, dwo, mid) and nothing else would carry the same meaning.
+        System.Reflection.MethodInfo? found = typeof(DataWindowEventChain).GetMethod(member);
+
+        Assert.NotNull(found);
+        Assert.Equal(returnType, found.ReturnType);
+        Assert.Equal(
+            parameters,
+            string.Join(',', found.GetParameters().Select(parameter => parameter.ParameterType.Name)));
+    }
+
+    [Fact]
+    public void ExactlyNineSemanticEventsArePinnedWithTheirSignatures()
+    {
+        // The count is the assertion: a tenth row here, or a missing one, would mean the 13-versus-9
+        // divergence AAP 0.6.1.1 cites had moved without anybody noticing.
+        Assert.Equal(9, SemanticEventSignatureTable.Length);
+
+        // And the nine are exactly the nine the event-to-member table classifies as non-raw, so the two
+        // tables cannot drift apart.
+        Assert.Equal(
+            [.. EventMemberTable
+                .Select(entry => entry.Member)
+                .Where(name => !name.StartsWith("OnDwn", StringComparison.Ordinal))],
+            SemanticEventSignatureTable.Select(entry => entry.Member));
+    }
+
+    [Theory]
+    [MemberData(nameof(RawEventDeclarationOrder))]
+    public void EveryRawEventExistsAtItsDeclaredPosition(int position, string member)
+    {
+        // :L15-L23, :L27, :L29-L31. ONE-BASED position, matching the oracle's own indexing convention
+        // (AAP 0.4.5.4), so a row reads as "the Nth raw event the oracle declares".
+        System.Reflection.MethodInfo? found = typeof(DataWindowEventChain).GetMethod(member);
+
+        Assert.NotNull(found);
+        Assert.StartsWith("OnDwn", member, StringComparison.Ordinal);
+        Assert.Equal(member, RawEventOrderTable[position - 1]);
+    }
+
+    [Fact]
+    public void TheThirteenRawEventsAreDeclaredInTheOraclesOwnOrder()
+    {
+        // THE WHOLE ORDERED LIST IN ONE ASSERTION, not a set. A set comparison would pass on a
+        // reordered chain [:L15-L31], and the interleaving is the part a reader would "tidy": the
+        // item-change family is split across :L23 and :L27 by two SEMANTIC declarations at :L24-L26.
+        Assert.Equal(
+            [
+                nameof(DataWindowEventChain.OnDwnRButtonDown),
+                nameof(DataWindowEventChain.OnDwnRButtonUp),
+                nameof(DataWindowEventChain.OnDwnRowChange),
+                nameof(DataWindowEventChain.OnDwnRowChanging),
+                nameof(DataWindowEventChain.OnDwnLButtonDblClk),
+                nameof(DataWindowEventChain.OnDwnLButtonClk),
+                nameof(DataWindowEventChain.OnDwnChanging),
+                nameof(DataWindowEventChain.OnDwnItemChangeFocus),
+                nameof(DataWindowEventChain.OnDwnItemChange),
+                nameof(DataWindowEventChain.OnDwnItemValidationError),
+                nameof(DataWindowEventChain.OnDwnKillFocus),
+                nameof(DataWindowEventChain.OnDwnLButtonUp),
+                nameof(DataWindowEventChain.OnDwnSetFocus)
+            ],
+            RawEventOrderTable);
+
+        Assert.Equal(13, RawEventOrderTable.Length);
+
+        // And that order is the order the event-to-member table lists them in, so the contract's own
+        // enumeration and the oracle's declaration order agree.
+        Assert.Equal(
+            RawEventOrderTable,
+            EventMemberTable
+                .Select(entry => entry.Member)
+                .Where(name => name.StartsWith("OnDwn", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -1151,8 +1440,10 @@ public sealed class DataWindowEventChainTests
     [Fact]
     public void OnDdsGetFilterProducesItsResultThroughARefStringAndReturnsNothing()
     {
-        // :L13. The `ref` out-parameter is precisely why drop-down search is pattern (b): a `ref`
-        // result has no asynchronous representation, so the caller blocks on the produced filter.
+        // :L13. The `ref` out-parameter is the reason the drop-down search pair is irreducibly
+        // request/response: a `ref` result has no asynchronous representation at all, so the caller
+        // BLOCKS on the produced filter. (Which ordering PATTERN that fact earns the area is
+        // EventOrderingPatternTests.cs's call; this file asserts the fact itself.)
         System.Reflection.MethodInfo member =
             typeof(DataWindowEventChain).GetMethod(nameof(DataWindowEventChain.OnDdsGetFilter))!;
 
@@ -1217,11 +1508,13 @@ public sealed class DataWindowEventChainTests
 
         Assert.Empty(fixture.Host.CallLog.Records);
         Assert.Empty(fixture.Observer.Outcomes);
-        Assert.Equal(DataWindowEventSequencer.NoToken, fixture.Chain.Sequencer.LastIssued);
     }
 
     // ==============================================================================================
-    //  PHASE 3 - THE TWELVE TOPICS, THE ORDERING PREFIX, AND THE SORT KEY
+    //  BRIEF PHASE 3 - THE TWELVE TOPICS AND THE THREE-ENCODING TOPIC STRING
+    //  --------------------------------------------------------------------------------------------
+    //  The byte-exact values, the two ordering prefixes, the sort key, the decomposed triple's round
+    //  trip, the `.^persistent` lifetime and the tri-valued veto that follows it.
     // ==============================================================================================
 
     [Theory]
@@ -1303,6 +1596,51 @@ public sealed class DataWindowEventChainTests
         Assert.Equal(
             ["0-itemchanged", "1-editchanged"],
             topics.Order(SubscriptionTopic.DispatchOrderComparer).Select(topic => topic.LegacyName));
+
+        // The pairwise comparison agrees too, in BOTH directions, so the ordering is a total order and
+        // not an artefact of the sort's stability.
+        Assert.True(SubscriptionTopic.CompareDispatchOrder(topics[0], topics[1]) < 0);
+        Assert.True(SubscriptionTopic.CompareDispatchOrder(topics[1], topics[0]) > 0);
+    }
+
+    [Fact]
+    public void OverTheWholeTwelveALogicalNameSortDivergesFromTheDispatchOrder()
+    {
+        // THE SAME GUARD, WIDENED FROM THE PAIR TO ALL TWELVE, because a refactor does not change the
+        // sort key of two topics - it changes it for the whole registry. Sorting the full set by
+        // LogicalName produces a DIFFERENT sequence from sorting it by LegacyName, and the difference is
+        // exactly the "0-"/"1-" pair moving [:L54, :L57]: with the prefixes stripped, "editchanged" and
+        // "itemchanged" fall into alphabetical position among the other ten instead of leading them.
+        string[] byLegacyName =
+        [
+            .. DataWindowEventChain.Topics
+                .OrderBy(topic => topic.LegacyName, StringComparer.Ordinal)
+                .Select(topic => topic.LegacyName)
+        ];
+
+        string[] byLogicalName =
+        [
+            .. DataWindowEventChain.Topics
+                .OrderBy(topic => topic.LogicalName, StringComparer.Ordinal)
+                .Select(topic => topic.LegacyName)
+        ];
+
+        Assert.Equal(12, byLegacyName.Length);
+        Assert.NotEqual(byLegacyName, byLogicalName);
+
+        // THE TWO PREFIXED TOPICS LEAD THE DISPATCH ORDER, because ASCII digits sort before letters -
+        // which is the entire reason their authors spelled a digit into the name.
+        Assert.Equal(["0-itemchanged", "1-editchanged"], byLegacyName[..2]);
+
+        // Under a logical-name sort neither leads, so a "simplified" sort key would silently demote both.
+        Assert.DoesNotContain(byLogicalName[0], new[] { "0-itemchanged", "1-editchanged" });
+
+        // And the dispatch comparer reproduces the legacy-name sequence over the whole set.
+        Assert.Equal(
+            byLegacyName,
+            DataWindowEventChain.Topics
+                .Order(SubscriptionTopic.DispatchOrderComparer)
+                .Select(topic => topic.LegacyName));
     }
 
     [Fact]
@@ -1334,7 +1672,104 @@ public sealed class DataWindowEventChainTests
             Assert.Null(topic.NamespaceCriterion);
             Assert.DoesNotContain('^', topic.LegacyName);
             Assert.DoesNotContain('.', topic.LegacyName);
+
+            // The lifetime component of the triple is therefore TRANSIENT on all twelve. Not "absent":
+            // the field is always carried, and its value here is the one an unnamespaced subscription
+            // projects onto.
+            Assert.Equal(SubscriptionLifetime.Transient, topic.Lifetime);
         }
+    }
+
+    [Fact]
+    public void ThePersistentLifetimeIsRepresentableInTheTripleEvenThoughThisChainNeverEmitsIt()
+    {
+        // BOTH HALVES OF THE SAME CONSTRAINT, IN ONE TEST, BECAUSE ONE WITHOUT THE OTHER IS MISLEADING.
+        //
+        // REPRESENTABLE: the triple's third field can carry the threading layer's lifetime, so the
+        // decomposition of AAP 0.6.1.2 is not lossy. `.^persistent` at n_cst_threading.sru:L544 and
+        // :L596 is a FILTER - "every name WHERE namespace is NOT persistent" - and both the namespace it
+        // names and the lifetime it projects onto round-trip.
+        SubscriptionTopic persistent = new()
+        {
+            LegacyName = "rowfocuschanged",
+            NamespaceCriterion = SubscriptionNamespaces.Persistent
+        };
+
+        Assert.Equal(SubscriptionLifetime.Persistent, persistent.Lifetime);
+        Assert.True(persistent.HasNamespace);
+        Assert.Equal("rowfocuschanged." + SubscriptionNamespaces.Persistent, persistent.ToLegacyString());
+
+        // NOT EMITTED HERE: the persistent namespace belongs to PERSISTENCE's threading layer. Not one
+        // of this chain's twelve topics names it, and none of the seven of_on/of_off overloads appends
+        // it [:L448-L467 delegate straight through].
+        Assert.DoesNotContain(
+            SubscriptionNamespaces.Persistent,
+            DataWindowEventChain.Topics.Select(topic => topic.Namespace));
+        Assert.All(
+            DataWindowEventChain.Topics,
+            topic => Assert.Equal(SubscriptionNamespaces.None, topic.Namespace));
+    }
+
+    [Theory]
+    [InlineData(0, "itemchanged", "0-itemchanged")]
+    [InlineData(1, "editchanged", "1-editchanged")]
+    public void TheDecomposedTripleReconstitutesTheFusedLegacyStringAndParsesBackToTheSameFields(
+        int sequence,
+        string logicalName,
+        string fused)
+    {
+        // THE ROUND TRIP AAP 0.6.1.2 REQUIRES, IN BOTH DIRECTIONS.
+        //
+        // The wire contract carries `sequence`, `name` and `lifetime` as THREE SEPARATE FIELDS; the fused
+        // legacy spelling is reconstituted only at the compatibility edge. Transmit the fused string
+        // opaquely and the ordering becomes invisible; parse it at the far end and the contract has an
+        // undocumented grammar. So both directions must be exact.
+        //
+        // FORWARD - from the triple to the fused string. `sequence` and `logicalName` are spelled back
+        // into the name with the `-` of TopicSymbols.Prepend between them, which IS the legacy encoding
+        // at :L54 and :L57, and `lifetime` contributes no suffix because this chain's lifetime is
+        // transient.
+        SubscriptionTopic built = new() { LegacyName = $"{sequence}{TopicSymbols.Prepend}{logicalName}" };
+
+        Assert.Equal(fused, built.ToLegacyString());
+        Assert.Equal(sequence, built.Sequence);
+        Assert.Equal(logicalName, built.LogicalName);
+        Assert.Equal(SubscriptionLifetime.Transient, built.Lifetime);
+
+        // BACKWARD - from the fused string to the same three fields.
+        Assert.Equal(RetCode.OK, SubscriptionTopic.ParseSubscription(fused, out SubscriptionTopic? parsed));
+        Assert.NotNull(parsed);
+        Assert.Equal(sequence, parsed.Sequence);
+        Assert.Equal(logicalName, parsed.LogicalName);
+        Assert.Equal(SubscriptionLifetime.Transient, parsed.Lifetime);
+
+        // AND THE TWO AGREE, field for field and byte for byte - which is what makes the fused form a
+        // projection of the triple rather than a second, parallel source of truth.
+        Assert.Equal(built.Sequence, parsed.Sequence);
+        Assert.Equal(built.LogicalName, parsed.LogicalName);
+        Assert.Equal(built.Lifetime, parsed.Lifetime);
+        Assert.Equal(built.ToLegacyString(), parsed.ToLegacyString());
+
+        // The chain's own constant is that same fused string, so the round trip is over the REAL topic
+        // and not a look-alike built for the test.
+        Assert.Equal(fused, DataWindowEventChain.TopicOf(fused)!.ToLegacyString());
+    }
+
+    [Fact]
+    public void AnUnprefixedTopicCarriesNoSequenceAndKeepsItsWholeNameAsTheLogicalOne()
+    {
+        // THE OTHER TEN, WHICH ARE THE CONTROL CASE FOR THE TRIPLE. A null sequence is not "sequence
+        // zero": zero is a real position that "0-itemchanged" occupies [:L54], so collapsing absent onto
+        // zero would give ten topics a dispatch position they were never given.
+        foreach (SubscriptionTopic topic in DataWindowEventChain.Topics.Where(
+            candidate => candidate.Sequence is null))
+        {
+            Assert.Equal(topic.LegacyName, topic.LogicalName);
+            Assert.Equal(topic.LegacyName, topic.ToLegacyString());
+        }
+
+        Assert.Equal(10, DataWindowEventChain.Topics.Count(topic => topic.Sequence is null));
+        Assert.Equal(2, DataWindowEventChain.Topics.Count(topic => topic.Sequence is not null));
     }
 
     [Fact]
@@ -1345,158 +1780,7 @@ public sealed class DataWindowEventChainTests
     }
 
     // ==============================================================================================
-    //  PHASE 4 - THE PER-AREA ORDERING ASSIGNMENT AND THE SEQUENCER
-    // ==============================================================================================
-
-    [Theory]
-    [MemberData(nameof(EventDisciplines))]
-    public void EveryEventCarriesTheDisciplineItsAreaWasAssigned(
-        EventId eventId,
-        OrderingDiscipline discipline)
-    {
-        Assert.Equal(discipline, DataWindowEventOrdering.DisciplineOf(eventId));
-    }
-
-    [Fact]
-    public void EveryOneOfTheTwentyTwoEventsIsClassified()
-    {
-        // Unspecified is reserved for an UNIDENTIFIED event. A real event answering Unspecified would
-        // be indistinguishable on the wire from a corrupt one, so all twenty-two must be classified.
-        Assert.Equal(22, EventDisciplineTable.Length);
-
-        foreach (EventId eventId in Enum.GetValues<EventId>().Where(id => id != EventId.Unspecified))
-        {
-            Assert.NotEqual(
-                OrderingDiscipline.Unspecified,
-                DataWindowEventOrdering.DisciplineOf(eventId));
-        }
-
-        Assert.Equal(
-            OrderingDiscipline.Unspecified,
-            DataWindowEventOrdering.DisciplineOf(EventId.Unspecified));
-    }
-
-    [Fact]
-    public void KillFocusIsTheOneEventWhoseDisciplineDependsOnItsRole()
-    {
-        // As the tail of the item-change chain it is synchronous, because the deferred accept must not
-        // be queued while an item change is in flight [:L388-L390]; as pure focus notification it is
-        // sequenced. Only the emitter knows which role an occurrence is playing.
-        Assert.Equal(
-            OrderingDiscipline.Sequenced,
-            DataWindowEventOrdering.DisciplineOf(EventId.Ondwnkillfocus));
-        Assert.Equal(
-            OrderingDiscipline.Synchronous,
-            DataWindowEventOrdering.DisciplineOf(EventId.Ondwnkillfocus, withinItemChangeChain: true));
-
-        // The flag is ignored for every other event, so a caller cannot reclassify an area by accident.
-        foreach (EventId eventId in
-            Enum.GetValues<EventId>().Where(id => id != EventId.Ondwnkillfocus))
-        {
-            Assert.Equal(
-                DataWindowEventOrdering.DisciplineOf(eventId),
-                DataWindowEventOrdering.DisciplineOf(eventId, withinItemChangeChain: true));
-        }
-    }
-
-    [Fact]
-    public void TokensAreMonotonicAndEveryDispatchCarriesOne()
-    {
-        ChainFixture fixture = NewFixture();
-
-        _ = fixture.Chain.OnDwnSetFocus();
-        _ = fixture.Chain.OnDwnRButtonUp(1L, 2L, Row, fixture.Dwo);
-        _ = fixture.Chain.OnDwnLButtonUp(1L, 2L, Row, fixture.Dwo);
-
-        long[] sequences = [.. fixture.Observer.Outcomes.Select(outcome => outcome.Sequence)];
-
-        Assert.Equal([1L, 2L, 3L], sequences);
-        Assert.All(sequences, sequence => Assert.True(sequence > DataWindowEventSequencer.NoToken));
-        Assert.Equal(3L, fixture.Chain.Sequencer.LastIssued);
-    }
-
-    [Fact]
-    public void AGatedOutDispatchStillConsumesAToken()
-    {
-        // A gated-out dispatch is still a dispatch that happened, so it is still counted - otherwise a
-        // consumer counting tokens would see a gap it could not explain.
-        ChainFixture fixture = NewFixture(EventGate.EID_ROWFOCUSCHANGE);
-
-        Assert.Equal(RetCode.OK, fixture.Chain.OnDwnRowChange(Row));
-
-        Assert.True(fixture.Observer.Last.Dispatch.GatedOut);
-        Assert.Equal(1L, fixture.Observer.Last.Sequence);
-        Assert.Equal(1L, fixture.Chain.Sequencer.LastIssued);
-    }
-
-    [Fact]
-    public void UnderSynchronousOrderingAnOutOfOrderArrivalIsAHardError()
-    {
-        // PATTERN (b). Reordering is not undesirable, it is SEMANTICALLY IMPOSSIBLE: the
-        // validation-error handler reads and clears the code its predecessor stashed [:L331-L332] and
-        // pre-sets its own result from it [:L338-L340]. A consumer that buffered and re-sorted that
-        // group would read a stash written by the wrong predecessor, SILENTLY, because every
-        // individual message would still be well formed.
-        DataWindowEventSequencer sequencer = new();
-
-        sequencer.Accept(1L, OrderingDiscipline.Synchronous, EventId.Ondwnitemchange);
-
-        DataWindowEventSequenceException error = Assert.Throws<DataWindowEventSequenceException>(
-            () => sequencer.Accept(3L, OrderingDiscipline.Synchronous, EventId.Ondoitemchange));
-
-        Assert.Equal(EventId.Ondoitemchange, error.EventId);
-        Assert.Equal(OrderingDiscipline.Synchronous, error.Discipline);
-        Assert.Equal(2L, error.ExpectedSequence);
-        Assert.Equal(3L, error.ActualSequence);
-
-        // The accepted position did not move, so the group is not silently resynchronised either.
-        Assert.Equal(1L, sequencer.LastAccepted);
-    }
-
-    [Fact]
-    public void UnderSequencedOrderingAnOutOfOrderArrivalIsTolerated()
-    {
-        // PATTERN (a). These events hold no cross-event state, so the token genuinely does carry
-        // reorder authority and a gap is not a fault.
-        DataWindowEventSequencer sequencer = new();
-
-        sequencer.Accept(1L, OrderingDiscipline.Sequenced, EventId.Ondwnsetfocus);
-        sequencer.Accept(5L, OrderingDiscipline.Sequenced, EventId.Ondwnlbuttonup);
-        sequencer.Accept(3L, OrderingDiscipline.Sequenced, EventId.Ondwnrbuttonup);
-
-        Assert.Equal(5L, sequencer.LastAccepted);
-    }
-
-    [Theory]
-    [InlineData(0L)]
-    [InlineData(-1L)]
-    public void AMissingTokenIsAFaultOnEveryDiscipline(long sequence)
-    {
-        DataWindowEventSequencer sequencer = new();
-
-        Assert.Throws<DataWindowEventSequenceException>(
-            () => sequencer.Accept(sequence, OrderingDiscipline.Sequenced, EventId.Ondwnsetfocus));
-        Assert.Throws<DataWindowEventSequenceException>(
-            () => sequencer.Accept(sequence, OrderingDiscipline.Synchronous, EventId.Ondwnitemchange));
-    }
-
-    [Fact]
-    public void TheSequenceExceptionCarriesEnoughToDiagnoseTheFaultWithoutTheStream()
-    {
-        DataWindowEventSequenceException bare = new();
-        Assert.Equal(EventId.Unspecified, bare.EventId);
-        Assert.Equal(OrderingDiscipline.Unspecified, bare.Discipline);
-
-        DataWindowEventSequenceException described = new("out of order");
-        Assert.Equal("out of order", described.Message);
-
-        InvalidOperationException inner = new("inner");
-        DataWindowEventSequenceException wrapped = new("out of order", inner);
-        Assert.Same(inner, wrapped.InnerException);
-    }
-
-    // ==============================================================================================
-    //  PHASE 2 - EVERY RAW EVENT'S DELEGATION SHAPE, ONE AT A TIME
+    //  BRIEF PHASE 2 - EVERY RAW EVENT'S DELEGATION SHAPE, ONE AT A TIME
     //  --------------------------------------------------------------------------------------------
     //  THE PATTERN IS raw -> semantic -> broker, AND IT IS NOT UNIFORM. The variations ARE the
     //  behaviour, so each is asserted separately rather than through one shared helper that would
@@ -1627,12 +1911,59 @@ public sealed class DataWindowEventChainTests
     //  :L124-L133  ondwnrowchange and ondwnrowchanging - THE DELIBERATE ASYMMETRY
     // ---------------------------------------------------------------------------------------------
 
+    [Theory]
+    [MemberData(nameof(RowFocusBrokerVetoMatrix))]
+    public void RowFocusEvents_TheBrokerResultIsHonouredByRowChangingAndDiscardedByRowChange(
+        bool changing,
+        long expected,
+        string locator)
+    {
+        // THE TWO LOCATORS, NAMED, BECAUSE THE ASYMMETRY IS THE WHOLE POINT:
+        //
+        //   :L124-L127  event ondwnrowchange;   if BitTest(_nDisabledEvent,EID_ROWFOCUSCHANGE) then return 0
+        //                                       if Event RowFocusChanged(currentRow) = 1 then return 1
+        //                                       Eventful.of_Trigger(EVT_ROWFOCUSCHANGED,currentRow)   <- BARE
+        //                                       return 0
+        //   :L130-L133  event ondwnrowchanging; if BitTest(_nDisabledEvent,EID_ROWFOCUSCHANGE) then return 0
+        //                                       if Event RowFocusChanging(...) = 1 then return 1
+        //                                       if Eventful.of_Trigger(EVT_ROWFOCUSCHANGING,...) = 1 then return 1
+        //                                       return 0
+        //
+        // :L126 is a BARE STATEMENT and :L132 is an `if`. A port that "normalised" the pair would
+        // silently GAIN a veto on rowchange or LOSE one on rowchanging, and a test that drove only one
+        // of the two would not notice either way - so both are driven from one theory.
+        ChainFixture fixture = NewFixture();
+        RecordingSubscriber subscriber = Subscribe(
+            fixture,
+            changing
+                ? DataWindowEventChain.EVT_ROWFOCUSCHANGING
+                : DataWindowEventChain.EVT_ROWFOCUSCHANGED);
+        subscriber.Answer = RetCode.PREVENT;
+
+        long actual = changing
+            ? fixture.Chain.OnDwnRowChanging(Row, 2L)
+            : fixture.Chain.OnDwnRowChange(Row);
+
+        Assert.Equal(expected, actual);
+
+        // The broker RAN on both, so the divergence really is about the RESULT and not about reaching
+        // the broker edge at all.
+        Assert.Equal(1, subscriber.Count);
+        Assert.True(fixture.Observer.Last.Dispatch.BrokerTriggerRan);
+
+        // And the veto is REPORTED on both, so a consumer can still see that a subscriber objected even
+        // where the objection changed nothing.
+        Assert.Equal(VetoResult.PreventOnce, fixture.Observer.Last.BrokerVeto);
+        Assert.Contains("se_cst_dw.sru:L1", locator, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void RowChange_IgnoresTheBrokerResultWhileRowChanging_HonoursIt()
     {
-        // THE ASYMMETRY IS THE POINT [:L124-L133]. `rowchange` triggers the broker and DOES NOT TEST
-        // the result - the row focus has already moved, so there is nothing left to veto. `rowchanging`
-        // tests it, because the move can still be stopped. A shared helper would erase this.
+        // THE SAME ASYMMETRY, SIDE BY SIDE ON ONE CHAIN [:L124-L133], which the theory above cannot
+        // show: there, each row builds its own fixture, so nothing proves the two events behave
+        // differently under IDENTICAL conditions. Here one chain, one pair of subscribers, both
+        // answering PREVENT.
         ChainFixture fixture = NewFixture();
         RecordingSubscriber changed = Subscribe(fixture, DataWindowEventChain.EVT_ROWFOCUSCHANGED);
         RecordingSubscriber changing = Subscribe(fixture, DataWindowEventChain.EVT_ROWFOCUSCHANGING);
@@ -1786,43 +2117,67 @@ public sealed class DataWindowEventChainTests
         Assert.Null(outcome.RowSwitchAttempted);
     }
 
-    [Fact]
-    public void Click_SwitchesTheRowWithoutFocusWhileProcessing()
+    [Theory]
+    [MemberData(nameof(ClickRowSwitchMatrix))]
+    public void Click_TheRowSwitchWithoutFocusAcrossAllFourCombinations(
+        string processing,
+        bool setRowMoves,
+        long expectedResult,
+        long expectedCurrentRow,
+        bool? expectedSwitchAttempted)
     {
-        // :L152-L159  the "row change without focus" path: while DataWindow.Processing is "1" and the
-        // current row is not the clicked one, SetRow moves it and the result is RE-READ to check.
+        // ALL FOUR COMBINATIONS OF (Processing == "1") BY (SetRow ACTUALLY MOVES), because the block is
+        // two nested conditions over two independent facts and only the full cross-product pins it:
+        //
+        //   :L152  if IsValid(this) and row > 0 then
+        //   :L153      if Describe("DataWindow.Processing") = "1" then     <- STRING compare, not boolean
+        //   :L154          if GetRow() <> row then
+        //   :L155              SetRow(row)
+        //   :L156              if GetRow() <> row then return 1            <- SetRow IS FALLIBLE
+        //
+        // The RE-READ at :L156 is the load-bearing line: trusting SetRow's own return code instead would
+        // let a failed move look successful, and a row-count assertion would never catch it.
         ChainFixture fixture = NewFixture();
         fixture.Host.AddRow("second");
         fixture.Host.CurrentRow = 1L;
+        fixture.Host.Processing = processing;
+        fixture.Host.SetRowMovesCurrentRow = setRowMoves;
         fixture.Host.RecordsReads = true;
 
-        Assert.Equal(RetCode.OK, fixture.Chain.OnDwnLButtonClk(1L, 2L, 2L, fixture.Dwo));
+        Assert.Equal(expectedResult, fixture.Chain.OnDwnLButtonClk(1L, 2L, 2L, fixture.Dwo));
 
-        Assert.Contains("SetRow", fixture.Host.CallLog.Members);
-        Assert.Equal(2L, fixture.Host.CurrentRow);
-        Assert.True(fixture.Observer.Single(EventId.Ondwnlbuttonclk).RowSwitchAttempted);
-    }
+        Assert.Equal(expectedCurrentRow, fixture.Host.CurrentRow);
 
-    [Fact]
-    public void Click_PreventsWhenSetRowDidNotActuallyMoveTheRow()
-    {
-        // :L156-L158  `SetRow` IS FALLIBLE and the re-read is the check: if the row still differs, the
-        // event returns 1. Trusting SetRow's own code instead would let a failed move look successful.
-        ChainFixture fixture = NewFixture();
-        fixture.Host.AddRow("second");
-        fixture.Host.CurrentRow = 1L;
-        fixture.Host.SetRowMovesCurrentRow = false;
+        // null means the guarded block was never entered, so "not attempted" stays distinguishable from
+        // "attempted and failed" - which are the row 3 / row 4 and the row 2 cases respectively.
+        Assert.Equal(
+            expectedSwitchAttempted,
+            fixture.Observer.Single(EventId.Ondwnlbuttonclk).RowSwitchAttempted);
 
-        Assert.Equal(RetCode.PREVENT, fixture.Chain.OnDwnLButtonClk(1L, 2L, 2L, fixture.Dwo));
-        Assert.False(fixture.Observer.Single(EventId.Ondwnlbuttonclk).RowSwitchAttempted);
+        // SetRow is reached only when the processing test passed, so its presence in the call log is the
+        // independent witness that :L153 gated the block rather than :L154.
+        if (expectedSwitchAttempted is null)
+        {
+            Assert.DoesNotContain("SetRow", fixture.Host.CallLog.Members);
+        }
+        else
+        {
+            Assert.Contains("SetRow", fixture.Host.CallLog.Members);
+        }
     }
 
     [Theory]
     [InlineData("0")]
     [InlineData("no")]
-    public void Click_LeavesTheRowAloneWhenTheDataWindowIsNotProcessing(string processing)
+    [InlineData("")]
+    [InlineData("1 ")]
+    [InlineData("01")]
+    public void Click_ComparesTheProcessingAnswerAsAStringAgainstExactlyOne(string processing)
     {
-        // The oracle compares Describe("DataWindow.Processing") AS A STRING against "1" [:L153].
+        // :L153 compares Describe("DataWindow.Processing") AS A STRING against "1". Anything else - a
+        // "0", a "no", an empty answer, a trailing space or a leading zero - fails the test, so the row
+        // is left alone. A port that coerced the answer to a boolean or an integer would treat "01" and
+        // "1 " as true and switch a row the oracle leaves put.
         ChainFixture fixture = NewFixture();
         fixture.Host.AddRow("second");
         fixture.Host.CurrentRow = 1L;
@@ -1958,36 +2313,75 @@ public sealed class DataWindowEventChainTests
         // :L399-L400  the broker FIRST, then `return Event GetFocus()`. The order matters: the semantic
         // event's value is the result, and the broker's is not.
         ChainFixture fixture = NewFixture();
+        List<string> order = [];
         RecordingSubscriber subscriber = Subscribe(fixture, DataWindowEventChain.EVT_GETFOCUS);
         subscriber.Answer = RetCode.PREVENT;
-        fixture.Host.GetFocusHandler = () => 7L;
+        subscriber.InHandler = () => order.Add("broker");
+        fixture.Host.GetFocusHandler = () =>
+        {
+            order.Add("semantic");
+            return 7L;
+        };
 
         Assert.Equal(7L, fixture.Chain.OnDwnSetFocus());
+
+        // THE ORDERED LIST, AND IT IS THE REVERSE OF EVERY OTHER RAW EVENT IN THIS FILE. Nine of the
+        // thirteen ask the semantic event FIRST and let it veto; `ondwnsetfocus` triggers the broker
+        // first and then RETURNS the semantic result [:L399-L400]. Asserting only that both ran would
+        // pass on the far more common shape.
+        Assert.Equal(["broker", "semantic"], order);
 
         Assert.Equal(1, subscriber.Count);
         Assert.Equal(["Event GetFocus"], SemanticEvents(fixture));
 
         DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Ondwnsetfocus);
         Assert.Equal(7L, outcome.ReturnValue);
+
+        // The broker's PREVENT is reported but does NOT become the result - :L399 discards it.
         Assert.Equal(VetoResult.PreventOnce, outcome.BrokerVeto);
     }
 
     [Fact]
     public void KillFocus_QueuesTheDeferredAcceptThenTriggersThenReturnsTheSemanticResult()
     {
-        // :L387-L393. The POSTED AcceptText becomes an explicitly queued continuation, because a
-        // headless container has no Win32 message pump (AAP 0.4.5.4). It is queued only while the
-        // item-change flag is CLEAR, and that guard lives inside the session.
+        // :L387-L393  THREE STEPS IN ONE FIXED ORDER, and this test asserts the ORDER ONLY:
+        //
+        //   :L388-L390  if Not _bDoItemChange then Post _of_PostAcceptText()   <- 1, the queueing
+        //   :L391       Eventful.of_Trigger(EVT_LOSEFOCUS)                     <- 2, result DISCARDED
+        //   :L392       return Event LoseFocus()                               <- 3, THIS is the result
+        //
+        // WHAT THE CONTINUATION THEN DOES [:L553-L557] IS NOT ASSERTED HERE. That body reads the four
+        // cross-event fields, so it belongs to ValidationSessionTests.cs; this file's business is where
+        // in the kill-focus sequence the queueing happens, not what is queued.
         ChainFixture fixture = NewFixture();
+        List<string> order = [];
         RecordingSubscriber subscriber = Subscribe(fixture, DataWindowEventChain.EVT_LOSEFOCUS);
-        fixture.Host.LoseFocusHandler = () => 3L;
+
+        // Observed NON-DESTRUCTIVELY at each later step, so reading the order does not drain the queue.
+        subscriber.InHandler = () => order.Add(
+            fixture.Session.DeferredAcceptPending ? "broker(after queueing)" : "broker(before queueing)");
+        fixture.Host.LoseFocusHandler = () =>
+        {
+            order.Add(fixture.Session.DeferredAcceptPending ? "semantic(after queueing)" : "semantic(before queueing)");
+            return 3L;
+        };
 
         Assert.Equal(3L, fixture.Chain.OnDwnKillFocus());
+
+        // THE ORDERED LIST. The broker saw the accept already queued and the semantic event ran after
+        // the broker - which fixes all three positions relative to one another.
+        Assert.Equal(["broker(after queueing)", "semantic(after queueing)"], order);
 
         Assert.Equal(1, subscriber.Count);
         Assert.Equal(["Event LoseFocus"], SemanticEvents(fixture));
 
-        DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Ondwnkillfocus);
+        // :L391's result is DISCARDED and :L392's is returned, so a vetoing subscriber cannot change the
+        // answer - the asymmetry `ondwnsetfocus` shares [:L399-L400].
+        subscriber.Answer = RetCode.PREVENT;
+        Assert.Equal(3L, fixture.Chain.OnDwnKillFocus());
+
+        DataWindowEventOutcome outcome = fixture.Observer.Outcomes[0];
+        Assert.Equal(EventId.Ondwnkillfocus, outcome.EventId);
         Assert.True(outcome.DeferredAcceptQueued);
         Assert.Equal(3L, outcome.ReturnValue);
 
@@ -2037,7 +2431,6 @@ public sealed class DataWindowEventChainTests
 
         DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Ondwnitemchange);
         Assert.Equal(ItemChangeResult.RestoreAndRejectText, outcome.ItemChangeResult);
-        Assert.Equal(OrderingDiscipline.Synchronous, outcome.Discipline);
         Assert.NotNull(outcome.State);
     }
 
@@ -2099,14 +2492,13 @@ public sealed class DataWindowEventChainTests
 
         DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Ondwnitemvalidationerror);
         Assert.Equal(ItemChangeResult.KeepValueNoFocusMove, outcome.ItemChangeResult);
-        Assert.Equal(OrderingDiscipline.Synchronous, outcome.Discipline);
         Assert.NotNull(outcome.State);
     }
 
     [Fact]
     public void ItemValidationError_ConsumesTheCodeTheItemChangeEventStashed()
     {
-        // THE REASON THE ITEM-CHANGE GROUP IS PATTERN (b). The validation-error handler READS AND CLEARS
+        // THE REASON THE ITEM-CHANGE GROUP CANNOT BE REORDERED AT ALL. The validation-error handler READS AND CLEARS
         // the code its predecessor stashed [:L331-L332] and PRE-SETS its own result from it
         // [:L338-L340], so its behaviour is a FUNCTION of the previous event's return value. Reordering
         // is not undesirable here, it is impossible.
@@ -2127,7 +2519,9 @@ public sealed class DataWindowEventChainTests
     }
 
     // ---------------------------------------------------------------------------------------------
-    //  :L256-L293  ondoitemchange   and   :L295-L320  ondoitemchanged
+    //  BRIEF PHASE 4 - :L256-L293 ondoitemchange AND :L295-L320 ondoitemchanged
+    //  -------------------------------------------------------------------------------------------
+    //  THE STRICT THREE-STEP SEQUENCE AT :L313-L319, ACROSS ALL FOUR GATE COMBINATIONS.
     // ---------------------------------------------------------------------------------------------
 
     [Fact]
@@ -2176,27 +2570,64 @@ public sealed class DataWindowEventChainTests
         Assert.Equal("0-itemchanged", outcome.Topic!.LegacyName);
     }
 
-    [Fact]
-    public void DoItemChanged_SkipsStepsOneAndTwoIndependentlyButNeverStepThree()
+    [Theory]
+    [MemberData(nameof(DoItemChangedGateMatrix))]
+    public void DoItemChanged_AcrossAllFourGateCombinationsKeepsTheOrderAndNeverSkipsStepThree(
+        bool columnExpressionEnabled,
+        bool subscriberPresent)
     {
-        // Step one is gated on the service, step two on a subscriber, and step three on NOTHING - so a
-        // chain with the expression service disabled and no subscriber still raises the semantic event.
+        // THE FULL CROSS-PRODUCT OF THE TWO INDEPENDENT GATES AT :L313-L319. Step one is gated on
+        // `ColumnExp.#Enabled` [:L313], step two on `Eventful.of_IsSubscribed(EVT_ITEMCHANGED)` [:L316]
+        // and step three on NOTHING [:L319] - so there are exactly four reachable sequences, the
+        // semantic event is the last entry in all four, and the two present steps keep their relative
+        // order in the one row where both run.
         ChainFixture fixture = NewFixture();
-        fixture.Services.ColumnExp.Enabled = false;
+        fixture.Services.ColumnExp.Enabled = columnExpressionEnabled;
+
+        if (subscriberPresent)
+        {
+            RecordingSubscriber subscriber = Subscribe(fixture, DataWindowEventChain.EVT_ITEMCHANGED);
+            subscriber.InHandler = () => fixture.Log.Record("Broker:0-itemchanged");
+        }
+
         fixture.Log.Clear();
 
         fixture.Chain.OnDoItemChanged(Row, fixture.Dwo);
 
-        Assert.Equal(["Semantic:OnItemChanged"], fixture.Log.Entries);
+        // BUILT IN THE ORACLE'S OWN ORDER, then compared as an ORDERED LIST. A set comparison would pass
+        // on a chain that ran the broker before the expression service.
+        List<string> expected = [];
 
+        if (columnExpressionEnabled)
+        {
+            expected.Add("OnItemChanged:ColumnExp");
+        }
+
+        if (subscriberPresent)
+        {
+            expected.Add("Broker:0-itemchanged");
+        }
+
+        expected.Add("Semantic:OnItemChanged");
+
+        Assert.Equal(expected, fixture.Log.Entries);
+
+        // The report agrees with the log on which of the three steps ran, and step three ALWAYS did.
         DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Ondoitemchanged);
-        Assert.False(outcome.Dispatch.ColumnExpressionHandlerRan);
-        Assert.False(outcome.Dispatch.BrokerTriggerRan);
+        Assert.Equal(columnExpressionEnabled, outcome.Dispatch.ColumnExpressionHandlerRan);
+        Assert.Equal(subscriberPresent, outcome.Dispatch.BrokerTriggerRan);
         Assert.True(outcome.Dispatch.SemanticHandlerRan);
+        Assert.Equal("Semantic:OnItemChanged", fixture.Log.Entries[^1]);
+
+        // AND THE EXPRESSION SERVICE SAW THE ARGUMENTS, or did not, according to its own gate - so a
+        // disabled service is not merely unreported, it is genuinely not called [:L313-L315].
+        Assert.Equal(
+            columnExpressionEnabled ? 1 : 0,
+            fixture.Services.ColumnExp.ItemChangedCalls.Count);
     }
 
     // ---------------------------------------------------------------------------------------------
-    //  THE TRI-VALUED VETO - CARRIED END TO END, NEVER DOWNGRADED
+    //  BRIEF PHASE 3 (CONTINUED) - THE TRI-VALUED VETO, CARRIED END TO END AND NEVER DOWNGRADED
     // ---------------------------------------------------------------------------------------------
 
     [Fact]
@@ -2229,6 +2660,32 @@ public sealed class DataWindowEventChainTests
         Assert.Equal(expected, DataWindowEventChain.ToVetoResult(value));
 
     [Fact]
+    public void TheOneTheChainBranchesOnIsTheSameOneTheReturnCodeAlgebraCallsPrevented()
+    {
+        // TWO NUMERIC ALPHABETS SHARE THE NUMERAL 1, AND THIS PINS THEM TO THE SAME VALUE. The oracle
+        // spells every prevent test `= 1` [:L115, :L116, :L125, :L131, :L132, :L136, :L139, :L145,
+        // :L148, :L164, :L167, :L177, :L178, :L395], and that 1 is RetCode.PREVENT
+        // [ws_objects/pfw.shared.pbl.src/retcode.sru:L42]. The veto projection reads the SAME numeral as
+        // PreventOnce. If either ever moved independently, a subscriber's veto would stop being a veto.
+        Assert.Equal(1L, RetCode.PREVENT);
+        Assert.Equal((long)VetoResult.PreventOnce, RetCode.PREVENT);
+        Assert.Equal(VetoResult.PreventOnce, DataWindowEventChain.ToVetoResult(RetCode.PREVENT));
+        Assert.True(Predicates.IsPrevented(RetCode.PREVENT));
+
+        // AND THE TRI-STATE HOLE IS PRESERVED RATHER THAN CLOSED: a prevention reads as a SUCCESS in the
+        // return-code algebra [issucceeded.srf:L11-L13 tests `>= 0`], which is a documented legacy defect
+        // (constraint C-B) and is exactly why this file branches on `== RetCode.PREVENT` and never on
+        // `IsFailed`. Asserted here so the two alphabets cannot be quietly conflated.
+        Assert.True(Predicates.IsSucceeded(RetCode.PREVENT));
+        Assert.False(Predicates.IsFailed(RetCode.PREVENT));
+
+        // PreventDeep (2) is NOT prevented in the return-code algebra at all - it is a broker state, not
+        // a return code - which is the clearest statement that the two alphabets are separate.
+        Assert.False(Predicates.IsPrevented((long)VetoResult.PreventDeep));
+        Assert.Equal(VetoResult.PreventDeep, DataWindowEventChain.ToVetoResult(2L));
+    }
+
+    [Fact]
     public void ANullBrokerAnswerIsNeverCollapsedIntoZero()
     {
         // AAP 0.4.5.4: null must never be collapsed to zero, because that would turn "no answer" into
@@ -2245,7 +2702,7 @@ public sealed class DataWindowEventChainTests
     }
 
     // ==============================================================================================
-    //  PHASE 5 - THE Filter AND DeleteRow OVERRIDES.  SUCCESS IS 1, NOT 0.
+    //  BRIEF PHASE 5b - THE Filter AND DeleteRow OVERRIDES.  SUCCESS IS 1, NOT 0.
     // ==============================================================================================
 
     [Fact]
@@ -2258,6 +2715,22 @@ public sealed class DataWindowEventChainTests
         Assert.Equal(1, fixture.Chain.Filter());
         Assert.Equal(1, fixture.Services.RowSelect.FilteredCount);
         Assert.Contains("FilterCore", fixture.Host.CallLog.Members);
+
+        // AND THE NOTIFICATION CARRIES NO COUNTS. :L409 is `RowSelect.Event OnFiltered()` with an EMPTY
+        // argument list - the row and filtered counts belong to a DIFFERENT event, `onddsfiltered(row,
+        // dwo, rowcount, filteredcount)` at :L28, which the drop-down search service raises. Adding
+        // count parameters here because they "obviously belong" would be a new feature (constraint C-B),
+        // so their absence is asserted rather than assumed.
+        Assert.Empty(
+            typeof(IDataWindowRowSelectService)
+                .GetMethod(nameof(IDataWindowRowSelectService.OnFiltered))!
+                .GetParameters());
+        Assert.Equal(
+            4,
+            typeof(DataWindowEventChain)
+                .GetMethod(nameof(DataWindowEventChain.OnDdsFiltered))!
+                .GetParameters()
+                .Length);
     }
 
     [Theory]
@@ -2400,18 +2873,63 @@ public sealed class DataWindowEventChainTests
     }
 
     // ==============================================================================================
-    //  PHASE 6 - THE SEVEN SUBSCRIPTION PASS-THROUGHS
+    //  BRIEF PHASE 5a - THE SEVEN SUBSCRIPTION PASS-THROUGHS
     // ==============================================================================================
 
     [Fact]
     public void ExactlySevenSubscriptionOverloadsExist_OneOnAndSixOff()
     {
-        // :L448-L467 declares exactly seven: of_on/3, and of_off in arities 3, 2, 1, 0, 1 and 2.
+        // :L102-L108 prototypes them and :L448-L467 bodies them: exactly seven - of_on/3, and of_off in
+        // arities 3, 2, 1, 0, 1 and 2. SIX of_off OVERLOADS, NOT FIVE: the two one-argument forms take
+        // DIFFERENT types [:L457 string against :L463 powerobject] and so do the two two-argument forms
+        // [:L454 (string,obj) against :L466 (obj,evt)].
         System.Reflection.MethodInfo[] members = typeof(DataWindowEventChain).GetMethods();
 
         Assert.Single(members, member => member.Name == "On");
         Assert.Equal(6, members.Count(member => member.Name == "Off"));
+
+        // THE PARAMETER SHAPES, PINNED. Counting the overloads is not enough: two forms of the same
+        // arity that differed only in parameter ORDER would still count six while dispatching a caller's
+        // argument to the wrong slot. `&` is the by-ref marker every shape carries, because the oracle
+        // declares all seven with `readonly` parameters [:L102-L108] and AAP 0.4.5.2 maps `readonly` onto
+        // `in` - so the marker's presence is itself part of the ported signature and is asserted below.
+        Assert.Equal(
+            ["String&,Object&,String&", "Object&,String&", "String&,Object&", "Object&", "String&", string.Empty],
+            members
+                .Where(member => member.Name == "Off")
+                .Select(ParameterShape)
+                .OrderByDescending(shape => shape.Length)
+                .ThenBy(shape => shape, StringComparer.Ordinal));
+
+        // :L448  of_on(name, obj, evtname) - one form only, and its three parameters in that order.
+        Assert.Equal("String&,Object&,String&", ParameterShape(members.Single(member => member.Name == "On")));
+
+        // :L451  of_off(name, obj, evtname) - the three-argument form, matching of_on's own order.
+        Assert.Single(
+            members,
+            member => member.Name == "Off" && ParameterShape(member) == "String&,Object&,String&");
+
+        // EVERY PARAMETER OF ALL SEVEN IS `in`, NOT `ref` AND NOT `out`. A `ref` would let a callee
+        // rewrite the caller's topic name, which `readonly` in the oracle forbids.
+        foreach (System.Reflection.MethodInfo member in
+            members.Where(candidate => candidate.Name is "On" or "Off"))
+        {
+            Assert.All(
+                member.GetParameters(),
+                parameter =>
+                {
+                    Assert.True(parameter.ParameterType.IsByRef);
+                    Assert.True(parameter.IsIn);
+                    Assert.False(parameter.IsOut);
+                });
+        }
     }
+
+    /// <summary>The ordered, comma-joined parameter-type names of one member.</summary>
+    /// <param name="member">The member.</param>
+    /// <returns>The shape, empty for a member declaring no parameters.</returns>
+    private static string ParameterShape(System.Reflection.MethodInfo member) =>
+        string.Join(',', member.GetParameters().Select(parameter => parameter.ParameterType.Name));
 
     [Fact]
     public void On_IsAPurePassThroughToTheBroker()
@@ -2618,7 +3136,7 @@ public sealed class DataWindowEventChainTests
     }
 
     // ==============================================================================================
-    //  PHASE 7 - THE TWO DIVERGENT LIFECYCLE ORDERS, AND TEARDOWN
+    //  BRIEF PHASE 5c - THE TWO DIVERGENT LIFECYCLE ORDERS, AND TEARDOWN
     // ==============================================================================================
 
     [Fact]
@@ -2665,17 +3183,53 @@ public sealed class DataWindowEventChainTests
     }
 
     [Fact]
-    public void TheTwoLifecycleOrdersMustDiffer()
+    public void TheTwoLifecycleOrdersDiverge_AndTheDivergenceMustNotBeHarmonised()
     {
-        // THE GUARD AGAINST A TIDYING "CONSISTENCY FIX". The divergence at positions three and four is
-        // intentional-as-observed and must not be harmonised (constraint C-B). This assertion is what
-        // makes harmonising it FAIL THE BUILD rather than pass silently.
+        // BOTH ORDERS, IN ONE TEST, BECAUSE THE FACT UNDER TEST IS THE RELATION BETWEEN THEM.
+        //
+        //   :L570-L574   ContextMenu, RowSelect, ColumnSort,      DropDownSearch, ColumnExp   <- CREATE
+        //   :L576-L580   ContextMenu, RowSelect, DropDownSearch,  ColumnSort,     ColumnExp   <- OnInit
+        //                                        ^^^^^^^^^^^^^^   ^^^^^^^^^^      POSITIONS 3 AND 4 SWAP
+        //
+        // THIS DIVERGENCE IS LEGACY BEHAVIOUR AND MUST NOT BE HARMONISED (constraint C-B). It reads like
+        // a slip and it may well have been one, but the oracle is the specification and AAP 0.8.1 governs
+        // the judgement: a documented oddity beats a silent correction. This test is what makes
+        // "consistency-fixing" the two into one order FAIL THE BUILD rather than pass unnoticed.
         ChainFixture fixture = NewFixture();
+
+        Assert.Equal(
+            [
+                DataWindowAttachedServiceKind.ContextMenu,
+                DataWindowAttachedServiceKind.RowSelect,
+                DataWindowAttachedServiceKind.ColumnSort,
+                DataWindowAttachedServiceKind.DropDownSearch,
+                DataWindowAttachedServiceKind.ColumnExp
+            ],
+            fixture.Log.Sequence("Create"));
+
+        Assert.Equal(
+            [
+                DataWindowAttachedServiceKind.ContextMenu,
+                DataWindowAttachedServiceKind.RowSelect,
+                DataWindowAttachedServiceKind.DropDownSearch,
+                DataWindowAttachedServiceKind.ColumnSort,
+                DataWindowAttachedServiceKind.ColumnExp
+            ],
+            fixture.Log.Sequence("OnInit"));
 
         Assert.NotEqual(fixture.Log.Sequence("Create"), fixture.Log.Sequence("OnInit"));
         Assert.NotEqual(
             DataWindowEventChain.ServiceCreationOrder,
             DataWindowEventChain.ServiceInitializationOrder);
+
+        // POSITIONS 1, 2 AND 5 AGREE; ONLY 3 AND 4 SWAP. Stated positionally so the assertion pins WHERE
+        // the divergence is rather than merely that there is one - a different permutation would be a
+        // different behaviour and would pass a bare NotEqual.
+        Assert.Equal(fixture.Log.Sequence("Create")[0], fixture.Log.Sequence("OnInit")[0]);
+        Assert.Equal(fixture.Log.Sequence("Create")[1], fixture.Log.Sequence("OnInit")[1]);
+        Assert.Equal(fixture.Log.Sequence("Create")[2], fixture.Log.Sequence("OnInit")[3]);
+        Assert.Equal(fixture.Log.Sequence("Create")[3], fixture.Log.Sequence("OnInit")[2]);
+        Assert.Equal(fixture.Log.Sequence("Create")[4], fixture.Log.Sequence("OnInit")[4]);
 
         // And they are permutations of one another, so the divergence is an ORDER difference and not a
         // missing or extra service.
@@ -2805,7 +3359,7 @@ public sealed class DataWindowEventChainTests
     }
 
     // ==============================================================================================
-    //  PHASE 8 - THE NESTED BROKER SUBCLASS AND ITS onprepare
+    //  THE NESTED BROKER SUBCLASS AND ITS onprepare                        se_cst_dw.sru:L591-L607
     // ==============================================================================================
 
     [Fact]
@@ -2908,7 +3462,11 @@ public sealed class DataWindowEventChainTests
 
         Assert.NotNull(target.LastThreeSlots);
         Assert.Equal(7L, target.LastThreeSlots![0]);
-        Assert.False(Ancestry.IsAncestor(target, nameof(DataWindowServiceBase)));
+
+        // THE PREMISE, CHECKED INDEPENDENTLY OF THE PRODUCTION ANCESTRY WALK. Asserting it with the same
+        // helper the chain uses at :L603 would make a broken walk agree with itself and mask exactly the
+        // bug this test exists to catch, so the BCL's own assignability test is used instead.
+        Assert.IsNotAssignableFrom<DataWindowServiceBase>(target);
     }
 
     [Fact]
@@ -2924,7 +3482,9 @@ public sealed class DataWindowEventChainTests
         ChainFixture fixture = NewFixture();
         RecordingServiceSubscriber target = new();
 
-        Assert.True(Ancestry.IsAncestor(target, nameof(DataWindowServiceBase)));
+        // The premise, checked with the BCL rather than with the production walk, for the reason given
+        // on the identity-exclusion theory above.
+        Assert.IsAssignableFrom<DataWindowServiceBase>(target);
         Assert.Equal(
             RetCode.OK,
             fixture.Chain.On(
@@ -3013,12 +3573,29 @@ public sealed class DataWindowEventChainTests
     //  bodies, so an unhandled one reports nothing - there was no dispatch to report. Their ordering is
     //  therefore asserted through the participants that ARE observable: the services, the broker and the
     //  raw events that bracket them.
+    //
+    //  WHERE THE SCENARIOS COME FROM. The sequences below are drawn from the legacy test and demo
+    //  windows, which are REFERENCE ONLY under constraint C-C - read for realism, never ported, never
+    //  edited:
+    //      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L250-L252
+    //          the real subscribe shape - of_On(name, parent, handlerName) with a CASE-SENSITIVE event
+    //          name and a case-INSENSITIVE handler name - which is the shape Subscribe uses here.
+    //      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L240,L247
+    //          a handler's arity need NOT match the trigger's, but the ORDER must, and surplus arguments
+    //          are DISCARDED - which is why RecordingSubscriber declares three different arities.
+    //      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L97
+    //          a real oncontextmenu(row, dwo, mid) handler resolving the menu text FROM mid, which is
+    //          why the context-menu workflow below passes a non-zero identifier to the second event and
+    //          none at all to the first.
+    //      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw
+    //          54 lines and NO event handler at all, so it contributes no sequence - recorded so the
+    //          absence is a checked finding rather than an oversight.
     // ==============================================================================================
 
     [Fact]
-    public void Workflow_ItemChangeAndValidation_RunsStrictlySynchronouslyInOneSession()
+    public void Workflow_ItemChangeAndValidation_NestsTheInnerEventsAndCompletesThemInsideOut()
     {
-        // THE PATTERN (b) WORKFLOW, AND THE HIGHEST-RISK ONE IN THE FILE:
+        // THE HIGHEST-RISK WORKFLOW IN THE FILE:
         //   ondwnitemchange -> ondoitemchange -> ondoitemchanged -> ondwnitemvalidationerror
         //                                                       -> ondwnkillfocus
         //
@@ -3042,66 +3619,48 @@ public sealed class DataWindowEventChainTests
             ],
             fixture.Observer.EventIds);
 
-        // THE ENCLOSING EVENT HOLDS THE LOWER TOKEN. Tokens are issued on ENTRY, reports made on EXIT.
-        DataWindowEventOutcome enclosing = fixture.Observer.Single(EventId.Ondwnitemchange);
-        Assert.Equal(1L, enclosing.Sequence);
+        // THE ENCLOSING EVENT HOLDS THE LOWER TOKEN, WHICH IS HOW THE NESTING IS READ BACK. Tokens are
+        // issued on ENTRY and reports are made on EXIT, so ENTRY order and COMPLETION order genuinely
+        // differ for this group - and that difference is the observable fingerprint of :L207 firing an
+        // event from inside another one. Both orders are asserted, because either alone would be
+        // consistent with a flat chain.
+        Assert.Equal(1L, fixture.Observer.Single(EventId.Ondwnitemchange).Sequence);
         Assert.Equal(2L, fixture.Observer.Single(EventId.Ondoitemchange).Sequence);
         Assert.Equal(3L, fixture.Observer.Single(EventId.Ondoitemchanged).Sequence);
+        Assert.Equal(4L, fixture.Observer.Single(EventId.Ondwnitemvalidationerror).Sequence);
+        Assert.Equal(5L, fixture.Observer.Single(EventId.Ondwnkillfocus).Sequence);
 
-        // EVERY MEMBER OF THIS GROUP IS SYNCHRONOUS, INCLUDING THE KILL-FOCUS TAIL - which is the one
-        // event whose discipline depends on the role it is playing, and here it is playing the tail.
-        Assert.All(
-            fixture.Observer.Outcomes,
-            outcome => Assert.Equal(OrderingDiscipline.Synchronous, outcome.Discipline));
+        // ENTRY ORDER, as an ORDERED LIST, and it is NOT the completion order asserted above.
+        Assert.Equal(
+            [
+                EventId.Ondwnitemchange,
+                EventId.Ondoitemchange,
+                EventId.Ondoitemchanged,
+                EventId.Ondwnitemvalidationerror,
+                EventId.Ondwnkillfocus
+            ],
+            fixture.Observer.Outcomes
+                .OrderBy(outcome => outcome.Sequence)
+                .Select(outcome => outcome.EventId));
 
-        // Replayed in TOKEN order the group validates; the tokens are contiguous from one, which is
-        // exactly what the synchronous discipline demands.
-        DataWindowEventSequencer replay = new();
-
-        foreach (DataWindowEventOutcome outcome in
-            fixture.Observer.Outcomes.OrderBy(outcome => outcome.Sequence))
-        {
-            replay.Accept(outcome.Sequence, outcome.Discipline, outcome.EventId);
-        }
-
-        Assert.Equal(5L, replay.LastAccepted);
+        Assert.NotEqual(
+            [.. fixture.Observer.EventIds],
+            fixture.Observer.Outcomes
+                .OrderBy(outcome => outcome.Sequence)
+                .Select(outcome => outcome.EventId));
     }
 
     [Fact]
-    public void Workflow_ItemChangeAndValidation_ReplayedOutOfOrderFailsRatherThanReordering()
+    public void Workflow_FocusClickAndRowSwitch_EmitsTheFiveRawEventsInOrderAndWithoutNesting()
     {
-        // THE SAME WORKFLOW, REPLAYED WRONG. This is the assertion that gives pattern (b) its teeth: a
-        // consumer that buffered this group and re-sorted it would read a stash written by the wrong
-        // predecessor, and every individual message would still look well formed. So it must FAIL.
-        ChainFixture fixture = NewFixture();
-
-        _ = fixture.Chain.OnDwnItemChange(Row, fixture.Dwo, "original");
-        _ = fixture.Chain.OnDwnItemValidationError(Row, fixture.Dwo, "bad");
-
-        DataWindowEventSequencer replay = new();
-
-        // Completion order is NOT token order for a nested group, so replaying the reports as they
-        // arrived puts token 2 ahead of token 1.
-        DataWindowEventOutcome first = fixture.Observer.Outcomes[0];
-        Assert.Equal(2L, first.Sequence);
-
-        Assert.Throws<DataWindowEventSequenceException>(
-            () => replay.Accept(first.Sequence, first.Discipline, first.EventId));
-    }
-
-    [Fact]
-    public void Workflow_FocusClickAndRowSwitch_IsSequencedThroughoutWithMonotonicTokens()
-    {
-        // THE PATTERN (a) WORKFLOW:
+        // THE FLAT WORKFLOW - five raw events, none of which raises another:
         //   ondwnsetfocus -> ondwnlbuttonclk -> ondwnrowchanging -> ondwnrowchange -> ondwnkillfocus
         //
-        // Four of the five are Sequenced. KILL-FOCUS IS STILL REPORTED SYNCHRONOUS EVEN HERE, where it is
-        // playing the pure-notification role, and that is deliberate rather than an oversight: its body
+        // NOTHING HERE RAISES ANYTHING ELSE, which is what makes this the control case for the nested
+        // item-change group above: entry order and completion order coincide. The kill-focus tail still
         // reads the session's item-change flag and may enqueue a continuation that RE-ENTERS the
-        // item-change protocol, so no occurrence is safely reorderable. Of the two possible misreports
-        // only the Sequenced one could authorise a harmful reorder, so the chain always reports the
-        // stricter role. Asserted HERE, in the workflow where the looser reading would have been
-        // tempting, so the decision cannot be quietly relaxed later.
+        // item-change protocol [:L388-L390], so its position at the end of the sequence is load-bearing
+        // even here - which is why the ordered list below includes it rather than filtering it out.
         ChainFixture fixture = NewFixture();
         fixture.Host.AddRow("second");
         fixture.Host.CurrentRow = 1L;
@@ -3126,38 +3685,26 @@ public sealed class DataWindowEventChainTests
             [1L, 2L, 3L, 4L, 5L],
             fixture.Observer.Outcomes.Select(outcome => outcome.Sequence));
 
-        Assert.All(
-            fixture.Observer.Outcomes.Where(outcome => outcome.EventId != EventId.Ondwnkillfocus),
-            outcome => Assert.Equal(OrderingDiscipline.Sequenced, outcome.Discipline));
-
+        // NO NESTING IN THIS WORKFLOW, so ENTRY order IS COMPLETION order - the exact opposite of the
+        // item-change group above, where the two differ. That contrast is what makes each of the two
+        // workflows evidence about the other: a chain that nested here, or that flattened there, would
+        // fail one of the two.
         Assert.Equal(
-            OrderingDiscipline.Synchronous,
-            fixture.Observer.Single(EventId.Ondwnkillfocus).Discipline);
-
-        // NO NESTING IN THIS WORKFLOW, so completion order IS token order. The four sequenced events
-        // replay in ANY order - which is exactly the authority pattern (a) grants a consumer, and what
-        // distinguishes it from the group above.
-        DataWindowEventSequencer replay = new();
-
-        foreach (DataWindowEventOutcome outcome in fixture.Observer.Outcomes
-            .Where(outcome => outcome.EventId != EventId.Ondwnkillfocus)
-            .Reverse())
-        {
-            replay.Accept(outcome.Sequence, outcome.Discipline, outcome.EventId);
-        }
-
-        Assert.Equal(4L, replay.LastAccepted);
+            [.. fixture.Observer.EventIds],
+            fixture.Observer.Outcomes
+                .OrderBy(outcome => outcome.Sequence)
+                .Select(outcome => outcome.EventId));
     }
 
     [Fact]
-    public void Workflow_ContextMenu_BracketsTheSynchronousSemanticPairBetweenTheRawButtonEvents()
+    public void Workflow_ContextMenu_BracketsTheSemanticPairBetweenTheRawButtonEvents()
     {
         // THE CONTEXT-MENU WORKFLOW:
         //   ondwnrbuttondown -> [ oninitcontextmenu -> oncontextmenu ] -> ondwnrbuttonup
         //
         // The two semantic events are raised BY THE SERVICE on its host [n_cst_dwsvc_contextmenu.sru:L147
         // then :L194], not by the chain, and initialisation must COMPLETE before the menu identifier the
-        // second one carries can mean anything - which is why both are Synchronous.
+        // second one carries can mean anything - which is why the pair cannot be reordered.
         ChainFixture fixture = NewFixture();
         RecordingSubscriber down = Subscribe(fixture, DataWindowEventChain.EVT_RBUTTONDOWN);
         RecordingSubscriber up = Subscribe(fixture, DataWindowEventChain.EVT_RBUTTONUP);
@@ -3177,12 +3724,20 @@ public sealed class DataWindowEventChainTests
             fixture.Observer.EventIds);
         Assert.Equal([1L, 2L], fixture.Observer.Outcomes.Select(outcome => outcome.Sequence));
 
+        // The init event carries NO menu identifier and the context event carries one [:L11 against
+        // :L12], which is the signature-level reason the pair reads init-then-show and never the reverse.
         Assert.Equal(
-            OrderingDiscipline.Synchronous,
-            DataWindowEventOrdering.DisciplineOf(EventId.Oninitcontextmenu));
+            2,
+            typeof(DataWindowEventChain)
+                .GetMethod(nameof(DataWindowEventChain.OnInitContextMenu))!
+                .GetParameters()
+                .Length);
         Assert.Equal(
-            OrderingDiscipline.Synchronous,
-            DataWindowEventOrdering.DisciplineOf(EventId.Oncontextmenu));
+            3,
+            typeof(DataWindowEventChain)
+                .GetMethod(nameof(DataWindowEventChain.OnContextMenu))!
+                .GetParameters()
+                .Length);
     }
 
     [Fact]
@@ -3193,8 +3748,8 @@ public sealed class DataWindowEventChainTests
         //                 -> onddsgetfilter -> onddsfiltered
         //
         // :L164-L171 fixes the order of the three participants inside `ondwnchanging`, and the filter
-        // pair that follows is the pattern (b) half: the first produces its result through a `ref string`
-        // out-parameter, so the caller blocks on it.
+        // pair that follows cannot be reordered either: the first produces its result through a
+        // `ref string` out-parameter [:L13], so the caller blocks on it.
         ChainFixture fixture = NewFixture();
         RecordingSubscriber subscriber = Subscribe(fixture, DataWindowEventChain.EVT_EDITCHANGED);
         subscriber.InHandler = () => fixture.Log.Record("Broker:1-editchanged");
@@ -3215,12 +3770,15 @@ public sealed class DataWindowEventChainTests
         // and both are unhandled outbound questions here.
         Assert.Equal([EventId.Ondwnchanging], fixture.Observer.EventIds);
 
+        // The filter is produced through the `ref string` out-parameter at :L13 and the counts arrive
+        // afterwards at :L28, so the get-filter call must COMPLETE before the filtered notification can
+        // report anything - the ordering follows from the signatures, not from a convention.
+        Assert.Equal(string.Empty, filter);
         Assert.Equal(
-            OrderingDiscipline.Synchronous,
-            DataWindowEventOrdering.DisciplineOf(EventId.Onddsgetfilter));
-        Assert.Equal(
-            OrderingDiscipline.Synchronous,
-            DataWindowEventOrdering.DisciplineOf(EventId.Onddsfiltered));
+            typeof(void),
+            typeof(DataWindowEventChain)
+                .GetMethod(nameof(DataWindowEventChain.OnDdsFiltered))!
+                .ReturnType);
     }
 
     [Fact]
@@ -3399,7 +3957,6 @@ public sealed class DataWindowEventChainTests
 
         DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Onddsgetfilter);
         Assert.Equal("name like 'Sh%'", outcome.ProducedFilter);
-        Assert.Equal(OrderingDiscipline.Synchronous, outcome.Discipline);
         Assert.Equal(1L, outcome.Sequence);
     }
 
@@ -3416,7 +3973,6 @@ public sealed class DataWindowEventChainTests
 
         DataWindowEventOutcome outcome = fixture.Observer.Single(EventId.Oncolumnexpinvokemethod);
         Assert.Equal(42m, outcome.AnyResult);
-        Assert.Equal(OrderingDiscipline.Synchronous, outcome.Discipline);
 
         // A NULL ANSWER IS STILL AN ANSWER when a handler produced it.
         fixture.Chain.MacroResultFactory = () => null;

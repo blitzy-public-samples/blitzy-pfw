@@ -64,8 +64,10 @@
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
 using PowerFramework.Security.Endpoints;
+using PowerFramework.Security.Tokens;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -102,6 +104,46 @@ builder.Services.AddSingleton<RsaProvider>();
 builder.Services.AddSingleton<IEntropySource, CryptographicEntropySource>();
 builder.Services.AddSingleton<RandomProvider>();
 builder.Services.AddSingleton(TimeProvider.System);
+
+// --------------------------------------------------------------------------------------------------
+// 1b. THE REFERENCE RESOLUTION BOUNDARY - THE OTHER HALF OF THE CONTRACT-LEVEL SECRETS RULE
+//
+// The seven providers above were authored to take ALREADY-RESOLVED material and to read no
+// configuration of their own. That is the structural half of the rule that RAW KEY MATERIAL NEVER
+// CROSSES THE WIRE INBOUND. CryptoReferenceResolver is the other half: it is the single place an opaque
+// reference becomes material, it consults the permitted set before it reads anything, and it is the only
+// type in this service that touches the key store.
+//
+// The options binding below is what gives it its policy. Only the key-store section is consumed here,
+// and DELIBERATELY WITHOUT startup validation: the validator covers the issuer's own signing material,
+// which is the token-issuance surface's concern rather than this one's, and enabling it here would
+// couple the cryptographic surface's readiness to a setting it never reads. The store's own closed
+// default does the safety work instead - an unpopulated permitted set authorises nothing, so a service
+// brought up without a reviewed key store refuses every keyed operation rather than reading whatever
+// configuration key a caller names.
+// --------------------------------------------------------------------------------------------------
+builder.Services.Configure<SecurityOptions>(
+    builder.Configuration.GetSection(SecurityOptions.SectionName));
+builder.Services.AddSingleton<CryptoReferenceResolver>();
+
+// --------------------------------------------------------------------------------------------------
+// 1c. THE SIGNING-KEY LAYER - ONE INSTANCE, AND THE ONLY PLACE PRIVATE KEY MATERIAL LIVES
+//
+// A SINGLETON BECAUSE THE KEY IS FIXED FOR THE LIFETIME OF THE PROCESS. This phase adds no rotation, so
+// a per-request instance would re-import the same material on every call and would let two concurrent
+// requests publish key sets built from different imports. It imports the one configured signing secret,
+// owns the resulting key, and is therefore IDisposable - the container disposes it at shutdown.
+//
+// TWO CONSUMERS, WITH DELIBERATELY UNEQUAL ACCESS. Endpoints/JwksEndpoints.cs reads ONLY the public-only
+// projection and never the credential member; Tokens/TokenIssuer.cs is the sole legitimate reader of the
+// credential. Registering the type once here is what keeps that asymmetry a property of the two call
+// sites rather than of two separately-configured instances.
+//
+// NO KEY MATERIAL APPEARS HERE. The secret is bound from configuration into SecurityOptions, which the
+// provider takes through IOptions, so nothing in this file, in appsettings.json or in the container
+// definition carries a literal (constraint C-F).
+// --------------------------------------------------------------------------------------------------
+builder.Services.AddSingleton<SigningKeyProvider>();
 
 // --------------------------------------------------------------------------------------------------
 // 2. INBOUND TOKEN VALIDATION - THE STOCK HANDLER, AND THE ONE ASYMMETRY THAT IS DELIBERATE
@@ -187,6 +229,20 @@ app.MapOpenApi().AllowAnonymous();
 // exercised.
 app.MapHealthEndpoints();
 app.MapPingEndpoints();
+
+// Contract C-01's publication half: the key set and the discovery metadata this service's three
+// consumers point their stock bearer handlers at. BOTH ROUTES ARE ANONYMOUS BY NECESSITY - a handler
+// reads them in order to learn how to authenticate, so it cannot already hold a token - and each says so
+// explicitly inside the file rather than relying on omission, because under the default-deny fallback
+// above omission would close the route instead of opening it. The registration also validates that both
+// configured addresses sit inside the well-known namespace and differ from one another, and fails the
+// host when either condition does not hold.
+app.MapJwksEndpoints();
+
+// Contract C-02, the cryptographic surface. Every one of its 17 operations requires a token and answers
+// 401 without one, applied once on the route group inside the file rather than relied upon from the
+// default-deny fallback above, so a route added later cannot become anonymous by omission.
+app.MapCryptoEndpoints();
 
 app.Run();
 
