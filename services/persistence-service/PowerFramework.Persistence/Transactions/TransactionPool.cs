@@ -382,6 +382,28 @@ internal readonly record struct SqlBoundParameter(string Name, object? Value);
 /// this member unconditionally.
 /// </param>
 /// <param name="Parameters">The bound values, in placeholder order. Empty when nothing was bound.</param>
+/// <param name="CacheStatement">
+/// <para>
+/// Whether the caller asked for this statement to be RETAINED IN PREPARED FORM for re-execution - the
+/// port of the leading-<c>@</c> execution mode the SQLite binding's own <c>Exec</c> carries
+/// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>], whose comment records that the
+/// prefix caches the statement to speed up re-parsing on a later execution.
+/// </para>
+/// <para>
+/// <b>A REQUEST, NOT A GUARANTEE, AND NEVER A PERFORMANCE CLAIM.</b> An engine that keeps no prepared
+/// form simply executes the statement immediately, which is the same OBSERVABLE outcome - the mode
+/// changes how many times the provider parses the text and nothing else. The repository publishes no
+/// latency budget anywhere (AAP §0.8.5), so no member of this type asserts one; what IS asserted is
+/// that the mode is CARRIED rather than dropped, because a caller who sent the documented prefix must
+/// not have their statement rejected.
+/// </para>
+/// <para>
+/// <b>The prefix itself never reaches this member's siblings.</b> It is a mode selector rather than
+/// SQL, so <c>Tasks/SqlCommandTask</c> removes it from the statement before either text is composed -
+/// which is why an error payload, a SQL-preview hook and a log record all see the statement the
+/// provider actually ran.
+/// </para>
+/// </param>
 /// <remarks>
 /// <para>
 /// <b>TWO TEXTS, ONE MEANING, AND THE DISTINCTION IS A SECURITY BOUNDARY.</b> The two differ only in
@@ -399,7 +421,8 @@ internal readonly record struct SqlBoundParameter(string Name, object? Value);
 internal sealed record SqlBoundStatement(
     string ObservableText,
     string ParameterizedText,
-    IReadOnlyList<SqlBoundParameter> Parameters)
+    IReadOnlyList<SqlBoundParameter> Parameters,
+    bool CacheStatement = false)
 {
     /// <summary>
     /// A statement with nothing bound, whose two texts are therefore the same text.
@@ -407,6 +430,11 @@ internal sealed record SqlBoundStatement(
     /// <param name="text">The statement.</param>
     /// <returns>A statement carrying no parameters.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="text"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// Defaults <see cref="CacheStatement"/> to <see langword="false"/>, which is the ordinary mode: a
+    /// caller that wants the retained form selects it with <c>with { CacheStatement = true }</c> rather
+    /// than through a second factory, so the two modes cannot drift apart in their construction.
+    /// </remarks>
     internal static SqlBoundStatement Unbound(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -604,6 +632,21 @@ internal readonly record struct PoolLease(long Id)
 /// <param name="Parameters">
 /// The values to bind, in one-based legacy order. Empty when the statement carries no placeholder.
 /// </param>
+/// <param name="CacheStatement">
+/// <para>
+/// Whether the engine is asked to RETAIN this statement in prepared form so a later execution of the
+/// same text does not re-parse it - the port of the leading-<c>@</c> execution mode
+/// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>]. Carried on the command rather
+/// than on the engine because the mode is a property of the REQUEST, exactly as it is in the legacy
+/// where it is selected by the statement text a caller passes to one call.
+/// </para>
+/// <para>
+/// <b>AN IMPLEMENTATION MAY IGNORE IT AND STILL BE CORRECT.</b> Honouring it changes how often the
+/// provider parses the text and nothing a caller can observe in the RESULT, so an engine with no
+/// prepared-form store executes immediately and reports the same outcome. That is why it defaults to
+/// <see langword="false"/> and why no test double has to grow a cache to stay valid.
+/// </para>
+/// </param>
 /// <remarks>
 /// <b>WHY THE ENGINE SEAM CARRIES THIS RATHER THAN A BARE STRING.</b> A seam that accepts only rendered
 /// text cannot represent a provider parameter at all, so every value would have to be spliced into the
@@ -615,7 +658,8 @@ internal readonly record struct PoolLease(long Id)
 internal readonly record struct SqlCommandText(
     string CanonicalText,
     string RenderedText,
-    IReadOnlyList<object?> Parameters)
+    IReadOnlyList<object?> Parameters,
+    bool CacheStatement = false)
 {
     /// <summary>
     /// Wraps a statement that has nothing to bind, so the legacy single-string call shape keeps working
@@ -636,17 +680,22 @@ internal readonly record struct SqlCommandText(
     /// <param name="canonicalText">The statement the provider executes, with <c>@pN</c> placeholders.</param>
     /// <param name="renderedText">The interpolated text the oracle would have produced.</param>
     /// <param name="parameters">The values to bind, in one-based legacy order.</param>
+    /// <param name="cacheStatement">
+    /// Whether the engine is asked to retain the prepared form. See <see cref="CacheStatement"/>;
+    /// defaulted so every existing call site keeps the ordinary immediate mode.
+    /// </param>
     /// <returns>The command.</returns>
     internal static SqlCommandText FromBoundStatement(
         string canonicalText,
         string renderedText,
-        IReadOnlyList<object?> parameters)
+        IReadOnlyList<object?> parameters,
+        bool cacheStatement = false)
     {
         ArgumentNullException.ThrowIfNull(canonicalText);
         ArgumentNullException.ThrowIfNull(renderedText);
         ArgumentNullException.ThrowIfNull(parameters);
 
-        return new SqlCommandText(canonicalText, renderedText, parameters);
+        return new SqlCommandText(canonicalText, renderedText, parameters, cacheStatement);
     }
 
     /// <summary>
@@ -866,6 +915,18 @@ internal interface ITransactionEngine : IDisposable
     /// <para>
     /// <see cref="SqlCommandText.RenderedText"/> must never reach a diagnostic without passing through
     /// <c>Errors/ISqlRedactor</c>: it is the interpolated form and therefore the literal-dense one.
+    /// </para>
+    /// <para>
+    /// <b><see cref="SqlCommandText.CacheStatement"/> IS A REQUEST AN IMPLEMENTATION MAY DECLINE, AND
+    /// DECLINING IT IS NOT A DEFECT.</b> It is the port of the leading-<c>@</c> execution mode
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>], and honouring it changes how
+    /// often the provider parses the text rather than anything a caller observes in the outcome - so an
+    /// implementation with no prepared-form store executes immediately and reports the same
+    /// <see cref="SqlState"/>. An implementation that DOES honour it owns two obligations: the retained
+    /// form must be bounded, because the legacy's own comment describes the mode as trading space for
+    /// time and an unbounded store trades away all of it; and the retained form must be released when
+    /// the connection it was prepared against closes, because a prepared statement outliving its
+    /// connection is a use-after-free.
     /// </para>
     /// </remarks>
     SqlState Execute(in SqlCommandText command, CancellationToken cancellationToken = default);
@@ -1301,10 +1362,16 @@ internal interface IPooledTransaction : IDisposable
         // POSITIONAL: SqlCommandText.BindTo re-derives @p1..@pN from the ordinal. The binder mints
         // exactly those names in exactly that order [Tasks/SqlTaskBase.cs, BindParams], so the two
         // agree by construction rather than by coincidence.
+        //
+        // THE EXECUTION MODE IS FORWARDED RATHER THAN DEFAULTED. It is the port of the leading-`@`
+        // prefix, and this conversion is the only bridge between the statement type the task composes
+        // and the command type the engine receives - so dropping it here would silently discard a mode
+        // the caller selected and the published contract promises to honour (AAP §0.4.3 C-07).
         SqlCommandText command = SqlCommandText.FromBoundStatement(
             statement.ParameterizedText,
             statement.ObservableText,
-            [.. statement.Parameters.Select(static parameter => parameter.Value)]);
+            [.. statement.Parameters.Select(static parameter => parameter.Value)],
+            statement.CacheStatement);
 
         return Exec(in command, cancellationToken);
     }

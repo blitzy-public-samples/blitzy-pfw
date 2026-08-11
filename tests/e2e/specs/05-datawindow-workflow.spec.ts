@@ -129,10 +129,11 @@
  * Every HTTP assertion below is authored against the published contract — the
  * routes, request messages, response messages and status mapping in
  * `shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml` and the `.proto`
- * definitions it delegates to — rather than against an observed response. At the
- * time of authoring the repository carries no `orchestration/docker-compose.yml`
- * and no service `Dockerfile`, so the stack could not be brought up and these
- * assertions have NOT been observed passing against live services. What was
+ * definitions it delegates to — rather than against an observed response. All four
+ * service `Dockerfile`s exist, but the repository carries no
+ * `orchestration/docker-compose.yml`, so nothing assembles them into a stack: the
+ * stack could not be brought up and these assertions have NOT been observed
+ * passing against live services. What was
  * verified is everything that needs no stack: that the file type-checks under
  * `tsc --noEmit`, that every test is collected by `playwright test --list`, and
  * that the pure-fixture column-contract test below executes and passes with the

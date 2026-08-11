@@ -349,6 +349,111 @@ public sealed class PersistenceTaskCompositionTests : IDisposable
     }
 
     /// <summary>
+    /// The provisioned factory's publication window reports a session it cannot resolve as RETIRING, so a
+    /// task can never be published against a session that has already left the registry.
+    /// </summary>
+    /// <remarks>
+    /// THE DEFAULT ANSWER FOR AN ABSENT SESSION IS THE SAFE ONE, NOT THE PERMISSIVE ONE. A session that is
+    /// no longer in the registry has had - or is having - its pooled transaction handed back, so treating
+    /// "cannot resolve" as "live" would publish a task holding a transaction the pool may already have
+    /// re-issued to a different session.
+    /// </remarks>
+    [Fact]
+    public async Task ThePublicationWindowReportsAnUnknownSessionAsRetiring()
+    {
+        IUpdateTaskFactory updates = _provider.GetRequiredService<IUpdateTaskFactory>();
+
+        using UpdateTaskPublication publication = await updates.EnterPublicationAsync(
+            "no-such-session",
+            TestContext.Current.CancellationToken);
+
+        Assert.True(publication.IsSessionRetiring);
+    }
+
+    /// <summary>
+    /// The publication window reports a live session as not retiring, and reports the same session as
+    /// retiring once it has been marked closing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// BOTH HALVES IN ONE CASE, BECAUSE EITHER ALONE WOULD PASS AGAINST A CONSTANT. A window that always
+    /// answered "live" would satisfy the first assertion and a window that always answered "retiring" would
+    /// satisfy the second, so only the pair pins that the flag is actually read off the session.
+    /// </para>
+    /// <para>
+    /// The window is disposed between the two acquisitions because it HOLDS the session's lifecycle gate,
+    /// which admits one holder at a time - a second acquisition taken while the first was still open would
+    /// wait for ever. That is the property being relied on rather than an inconvenience: it is what makes
+    /// the adapter's test-then-register indivisible.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ThePublicationWindowTracksTheSessionsClosingMark()
+    {
+        using TaskHarness harness = new(this);
+
+        IUpdateTaskFactory updates = _provider.GetRequiredService<IUpdateTaskFactory>();
+
+        using (UpdateTaskPublication live = await updates.EnterPublicationAsync(
+            harness.Session.SessionId,
+            TestContext.Current.CancellationToken))
+        {
+            Assert.False(live.IsSessionRetiring);
+        }
+
+        // The mark is written under the gate, exactly as EndSession writes it.
+        using (harness.Session.Gate.Enter())
+        {
+            harness.Session.MarkClosing();
+        }
+
+        using (UpdateTaskPublication retiring = await updates.EnterPublicationAsync(
+            harness.Session.SessionId,
+            TestContext.Current.CancellationToken))
+        {
+            Assert.True(retiring.IsSessionRetiring);
+        }
+    }
+
+    /// <summary>
+    /// The publication window holds the session's lifecycle gate for as long as it lives, so a second
+    /// acquisition cannot begin until the first is disposed.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS THE WHOLE POINT OF THE TYPE, AND WITHOUT THIS CASE IT COULD BE A PLAIN BOOLEAN. The adapter
+    /// tests the flag and registers the task INSIDE one window; if the window held nothing, an
+    /// <c>EndSession</c> could mark the session closing and walk the task registry between those two steps
+    /// and the task it missed would outlive the transaction it holds. The assertion is deterministic rather
+    /// than timed: the second acquisition is observed still incomplete while the first is open, and observed
+    /// complete after it is disposed.
+    /// </remarks>
+    [Fact]
+    public async Task ThePublicationWindowExcludesASecondAcquisitionUntilItIsDisposed()
+    {
+        using TaskHarness harness = new(this);
+
+        IUpdateTaskFactory updates = _provider.GetRequiredService<IUpdateTaskFactory>();
+
+        UpdateTaskPublication first = await updates.EnterPublicationAsync(
+            harness.Session.SessionId,
+            TestContext.Current.CancellationToken);
+
+        ValueTask<UpdateTaskPublication> second = updates.EnterPublicationAsync(
+            harness.Session.SessionId,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(
+            second.IsCompleted,
+            "A second publication window opened while the first still held the session's gate.");
+
+        first.Dispose();
+
+        using UpdateTaskPublication admitted = await second;
+
+        Assert.False(admitted.IsSessionRetiring);
+    }
+
+    /// <summary>
     /// The worker-side host binds exactly one task and refuses to be rebound.
     /// </summary>
     /// <remarks>

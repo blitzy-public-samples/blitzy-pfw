@@ -239,9 +239,10 @@ four folders is a failure mode, not a cautious choice, and is not the shape here
 
 **Two states, kept apart deliberately.** The four per-service `.slnx` files, project files, settings, test
 projects and `Dockerfile`s are **present in the tree**, all four applications compile in Release with zero
-warnings, all four test suites pass, and all four images build. What is still **planned** is running them:
-`orchestration/docker-compose.yml` does not exist, so no image has been started, no aggregated `/health`
-has had a stack to aggregate, and the documented bring-up and its health gates remain unexercised. This
+warnings, and all four test suites pass. What is still **planned** is running them as a stack:
+`orchestration/docker-compose.yml` does not exist, so only one image — Security's — has been built and
+started here (§10.6), no aggregated `/health` has had a stack to aggregate, and the documented bring-up
+and its health gates remain unexercised. This
 section describes the target structure; [`BUILD.md`](BUILD.md) §5.5 and §13 record exactly what has been
 built and run and what has not.
 
@@ -316,9 +317,9 @@ architectural property of the topology, and the whole point of C-J.
 
 Solid boxes are the four in-scope services; the four dashed boxes reached by dotted edges are reserved
 routes. **Each solid box names a service directory, project, settings, application and test project that
-are all present in the tree and build clean** — what none of them has is a *running process*: three of
-the four container definitions exist, `services/persistence-service/Dockerfile` does not, and no image has
-been built or started (§10.6 and [`BUILD.md`](BUILD.md) §13). The edge labels carry the **actual listener
+are all present in the tree and build clean** — what none of them has is a *running process*: all four
+container definitions exist, but no manifest assembles them, and only Security's image has been built and
+started here (§10.6 and [`BUILD.md`](BUILD.md) §13). The edge labels carry the **actual listener
 ports** of §4.1, gRPC included.
 
 **Three edge styles, and the difference between the first two is the point.** A solid arrow is a
@@ -566,8 +567,8 @@ mounted read-only.
   because it contradicted the one-port-per-service map of §4.1, it put an unauthenticated listener in
   the one service that holds the signing key, and it made the local gate address a port that no
   deployment ever serves. Security now declares exactly ONE Kestrel endpoint,
-  `https://+:5104`, `Http1AndHttp2`, and `security.v1.yaml` publishes exactly one `servers` entry to
-  match. §9.4 records why TLS on 5104 is functional rather than a preference.
+  `https://+:5104`, `Http1` — `Http1` rather than `Http1AndHttp2` because this service publishes no gRPC
+  contract — and `security.v1.yaml` publishes exactly one `servers` entry to match. §9.4 records why TLS on 5104 is functional rather than a preference.
 - **Conflict mapping.** On an optimistic-concurrency mismatch, Persistence and DataServices return
   gRPC `StatusCode.Aborted` — the canonical gRPC-to-HTTP mapping — and Gateway's REST projection
   surfaces it as **HTTP `409`** carrying a structured conflict detail with the current row state.
@@ -1298,7 +1299,7 @@ configuration; parts 3 to 6 name where each remaining piece lands and its state.
 
 | # | Part | Where it is expressed | State |
 | --- | --- | --- | --- |
-| 1 | **The TLS listener.** `Kestrel:Endpoints:Default`, `https://+:5104`, `Http1AndHttp2`, `ClientCertificateMode: AllowCertificate`, `SslProtocols: [Tls12, Tls13]`. It is the service's ONLY endpoint and it carries every route: `POST /v1/tokens`, the C-02 crypto operations, the anonymous key set and discovery documents, and the anonymous `GET /health` | `services/security-service/PowerFramework.Security/appsettings.json` | **Present and statically verified** — `Url`, `Protocols`, `ClientCertificateMode` and `SslProtocols` are all real `KestrelServerOptions` endpoint keys, confirmed by reflecting over the shared framework's `EndpointConfig` on SDK 10.0.302 |
+| 1 | **The TLS listener.** `Kestrel:Endpoints:Default`, `https://+:5104`, `Http1`, `ClientCertificateMode: AllowCertificate`, `SslProtocols: [Tls12, Tls13]`. It is the service's ONLY endpoint and it carries every route: `POST /v1/tokens`, the C-02 crypto operations, the anonymous key set and discovery documents, and the anonymous `GET /health` | `services/security-service/PowerFramework.Security/appsettings.json` | **Present and statically verified** — `Url`, `Protocols`, `ClientCertificateMode` and `SslProtocols` are all real `KestrelServerOptions` endpoint keys, confirmed by reflecting over the shared framework's `EndpointConfig` on SDK 10.0.302 |
 | 2 | **The server certificate.** `Kestrel:Certificates:Default:Path` and `:KeyPath`, supplied per environment by `TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` — **one pair for the whole stack, and therefore a pair that MUST carry subject alternative names for every origin it is presented under**: `persistence-service`, `dataservices-service`, `security-service` and `localhost`, plus the loopback IP entries. Current TLS stacks ignore the common name for host matching and read `subjectAltName` only, so a single-CN certificate matches none of the four and every internal channel fails name validation. Per-service certificates are the equally correct alternative — see the recipe below | `orchestration/.env.example` §5 declares the two variables and the key each maps onto; no settings file declares either, because both carry a path to key material (C-F) | **Present as the declared contract** (paths only — no material, here or anywhere). Absence is fail-fast: Kestrel refuses to start an HTTPS endpoint it cannot find a certificate for, and never downgrades to plaintext |
 | 3 | **Client-certificate trust.** `ClientCertificateMode` `AllowCertificate` makes Kestrel **request** a certificate and hand it to the application without demanding one, so the token operation can require it per operation while `/health`, the key set and the discovery document stay anonymously reachable. *Which* issuers may have signed that certificate is decided by `Security:MutualTls:ClientCaPath`: the anchor is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which builds the caller's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. Unset defers to the platform's verdict; set-but-unreadable refuses to start. `AllowAnyClientCertificate` is never called | `services/security-service/PowerFramework.Security/Program.cs` (`CallerCertificateTrust`), configured from `SECURITY_MTLS_CLIENT_CA_PATH` | **Present.** An OS-trust-store mount is no longer required for this to work, which is what makes it operable without a root-privileged step in the runtime image |
 | 4 | **Subject-to-caller mapping.** The certificate establishes the identity; a `subject` in the request body that disagrees with it is refused `403`, per the table above. The certificate's common name is compared ordinally against the claimed subject, and the refusal names neither the expected identity nor any stored configuration | `Endpoints/TokenEndpoints.cs` | **Present** |
@@ -1417,9 +1418,12 @@ for a lookup that must fail. The 30-day certificate lifetime above is the contro
 it. A deployment whose authority does publish revocation information leaves these paths unset and uses
 platform trust, where the platform's own revocation behaviour applies.
 
-Point `SECURITY_JWT_SIGNING_KEY`, `SECURITY_MTLS_CERT_PATH`, `SECURITY_MTLS_KEY_PATH` and
-`SECURITY_MTLS_CLIENT_CA_PATH` at those files from the environment file; every one of the four carries a
-**path or a PEM value supplied at deployment time**, and none has a value in this repository.
+Point `SECURITY_JWT_SIGNING_KEY`, `TLS_CERTIFICATE_PATH`, `TLS_CERTIFICATE_KEY_PATH` and
+`SECURITY_MTLS_CLIENT_CA_PATH` at those files from the environment file — those four are the names
+`orchestration/.env.example` actually declares — plus the two client pairs, `GATEWAY_MTLS_CERT_PATH` /
+`GATEWAY_MTLS_KEY_PATH` and `DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH`, for a deployment
+choosing the certificate alternative on the issuance edge. Every one carries a **path or a PEM value
+supplied at deployment time**, and none has a value in this repository.
 
 **One naming hazard, stated because the failure it produces looks like something else.** The two
 `SECURITY_MTLS_*` certificate names above are the **server** half — they record where Security's own
@@ -1436,22 +1440,29 @@ refusal that is entirely correct and resembles nothing about its cause. Point th
 `orchestration/.env.example` §1 and §5 declare the variables; the three must agree word for word, and a
 change to one is a change to all three.
 
-> **The trust half of part 3 is not implemented, and until it is, nothing here may be described as
-> working.** `SECURITY_MTLS_CLIENT_CA_PATH` above names `mtls-ca.crt`, but **nothing in this repository
-> installs or reads it**: `services/security-service/Dockerfile` performs no `ca-certificates` install and
-> no `update-ca-certificates`, Security registers no explicit chain-validation callback, and
-> `orchestration/docker-compose.yml` — which would mount the file — does not exist. A presented client
-> certificate therefore has no anchor to chain to, so **mutual-TLS caller authentication on
-> `POST /v1/tokens` is declared and unexercised rather than operable.** Exactly one of two
-> implementations closes it, and whichever is chosen must be recorded here:
+> **The trust half of part 3 IS implemented, by the second of the two options that were open — and the
+> mount is the one piece still outstanding.** `SECURITY_MTLS_CLIENT_CA_PATH` above names `mtls-ca.crt`, and
+> `Security:MutualTls:ClientCaPath` is **read at startup**, before `Build()`, by
+> `CallerCertificateTrust.Load` in `services/security-service/PowerFramework.Security/Program.cs`; the
+> loaded anchor is then installed as Kestrel's `ClientCertificateValidation` callback, which builds a
+> presented caller certificate's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor
+> alone. A configured-but-unreadable anchor is a **refusal to start**, not a handshake failure discovered
+> by the first caller, and `AllowAnyClientCertificate` is called nowhere in the repository. So chain
+> verification is application code against a mounted file rather than an OS trust store — which is why
+> `services/security-service/Dockerfile` deliberately performs no `ca-certificates` install and no
+> `update-ca-certificates`, and why the runtime stage needs no root-privileged step.
 >
-> 1. **Install the anchor in the image.** Copy the CA into the runtime stage of the Security
->    `Dockerfile` and run `update-ca-certificates`, so chain verification happens in the OS trust store
->    where `AllowCertificate` expects it. Keeps the validation path framework code; puts a
->    deployment-specific anchor into an image layer.
-> 2. **Validate explicitly in application code** against the file the variable names. Keeps the anchor
->    out of the image and mountable per environment; moves security-critical chain validation into
->    hand-written code, which is the thing the sole-issuer design otherwise avoids.
+> **What is still outstanding is the mount, not the validation.** `orchestration/docker-compose.yml` —
+> which would mount `mtls-ca.crt` into the container — does not exist, so nothing places the file the
+> variable names. With the path unset the callback defers to the platform's own verdict, which is what
+> Kestrel would have done unaided; with it set and mounted, caller authentication on `POST /v1/tokens`
+> is operable. Until a manifest mounts it, **the certificate alternative on the issuance edge is
+> unexercised end to end**, and the `clientCredential` scheme is the alternative the documented bring-up
+> supplies — so this is a gap in one of two schemes rather than an unauthenticated boundary.
+>
+> The option NOT taken is recorded because it was a real choice: installing the anchor in the image and
+> letting the OS trust store decide would have kept the validation path framework code, at the cost of
+> baking a deployment-specific anchor into an image layer and requiring a root step in the runtime stage.
 >
 > [`SECRETS.md`](SECRETS.md) §4.1.1 and §4.3 carry the same statement from the secrets side.
 
@@ -1564,11 +1575,10 @@ and holds by construction; it is not a measured result, and no throughput figure
 
 ### 10.2 Container build context
 
-Each service's container definition lives at `services/<service-name>/Dockerfile`. **Three of the four
-exist** — `gateway-service`, `dataservices-service` and `security-service`;
-`services/persistence-service/Dockerfile` is still to be written. The Compose manifest, which is also
-still to be written, sets the build **context to the repository root**: `context: ..` with
-`dockerfile: services/<service-name>/Dockerfile`, and the three existing definitions are authored against
+Each service's container definition lives at `services/<service-name>/Dockerfile`. **All four exist** —
+`gateway-service`, `dataservices-service`, `persistence-service` and `security-service`. The Compose
+manifest, which is still to be written, sets the build **context to the repository root**: `context: ..`
+with `dockerfile: services/<service-name>/Dockerfile`, and all four definitions are authored against
 exactly that assumption — every `COPY` path in them is repository-root-relative.
 
 This is not stylistic. Every service project references the shared libraries and the generated contract

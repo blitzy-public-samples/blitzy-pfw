@@ -131,6 +131,7 @@ using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Runtime;
 
 // The generated C-06 service base, reached through an alias for two reasons. First, the mandated class
@@ -711,6 +712,14 @@ internal interface IUpdateTaskSurface : IDisposable
 /// the oracle returns when asked to act on a transaction it cannot use
 /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113</c>].
 /// </para>
+/// <para>
+/// <b>AND BECAUSE THE FACTORY OWNS THE SESSION, IT ALSO OWNS THE PUBLICATION WINDOW.</b> A task must not
+/// become reachable after its session has begun retiring: <c>EndSession</c> marks the session closing
+/// inside the session's lifecycle gate and only then walks the task registries, so a registration performed
+/// outside that gate can land after the walk and leave a task holding a transaction the pool has already
+/// taken back. The adapter therefore asks the factory for a publication window and registers inside it -
+/// see <see cref="IUpdateTaskFactory.EnterPublicationAsync"/>.
+/// </para>
 /// </remarks>
 internal interface IUpdateTaskFactory
 {
@@ -725,6 +734,88 @@ internal interface IUpdateTaskFactory
     /// <c>RetCode.E_INVALID_TRANSACTION</c> for an unknown or ended session.
     /// </returns>
     long TryCreate(string sessionId, out IUpdateTaskSurface? task);
+
+    /// <summary>
+    /// Enters the lifecycle gate of the session a task was created against, so that the caller can publish
+    /// the task atomically with respect to that session's closure.
+    /// </summary>
+    /// <param name="sessionId">The session the task was created against.</param>
+    /// <param name="cancellationToken">The request's token. Awaiting the gate is cancellable.</param>
+    /// <returns>
+    /// A window that must be disposed as soon as the publication step is over, and that reports whether the
+    /// session has already begun retiring.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE DEFAULT IMPLEMENTATION IS THE HONEST ANSWER FOR A FACTORY THAT TRACKS NO SESSIONS</b>, and
+    /// there is a real such implementation: a test double built around a fake surface has no pool, no
+    /// session registry and therefore no lifecycle to be atomic against. It answers an unguarded window
+    /// that reports the session live, which reproduces exactly the behaviour such a double had before this
+    /// member existed. The provisioned factory in <c>Program.cs</c> - the only one with a session registry -
+    /// overrides it and holds the real gate.
+    /// </para>
+    /// <para>
+    /// It is AWAITED rather than blocked on because another operation on the same transaction may hold the
+    /// gate; a streaming retrieval holds it for the whole of its stream, and a blocking acquisition here
+    /// would pin a request thread for that duration.
+    /// </para>
+    /// </remarks>
+    ValueTask<UpdateTaskPublication> EnterPublicationAsync(
+        string sessionId,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(UpdateTaskPublication.Unguarded);
+}
+
+/// <summary>
+/// The window inside which an update task may be published into its registry: it holds the session's
+/// lifecycle gate for as long as it lives, and reports whether that session has already begun retiring.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A WINDOW RATHER THAN A BOOLEAN, BECAUSE THE ANSWER AND THE ACT MUST NOT BE SEPARABLE.</b> Asking
+/// "is this session still live?" and then registering is a check-then-act across a boundary whose callers
+/// are concurrent requests: <c>EndSession</c> can mark the session closing and walk the registry in between,
+/// and the task it missed then outlives the transaction it holds. Holding the gate for both steps is what
+/// makes them one step. The type is a <see langword="readonly"/> <see langword="struct"/> so the ordinary
+/// path allocates nothing.
+/// </para>
+/// <para>
+/// <b>THE UNGUARDED VALUE IS <see langword="default"/>, AND IT REPORTS THE SESSION LIVE.</b> That is not a
+/// silent weakening: a factory with no session registry has nothing to retire a session from, so there is
+/// no closure for the publication to race. The only such factories are test doubles.
+/// </para>
+/// </remarks>
+internal readonly struct UpdateTaskPublication : IDisposable
+{
+    /// <summary>The held gate, or <see langword="default"/> when this window guards nothing.</summary>
+    private readonly TransactionGateScope _gate;
+
+    /// <summary>
+    /// Creates a window over a held gate.
+    /// </summary>
+    /// <param name="gate">The acquired lifecycle gate, released on disposal.</param>
+    /// <param name="isSessionRetiring">Whether the session has already been marked closing.</param>
+    internal UpdateTaskPublication(TransactionGateScope gate, bool isSessionRetiring)
+    {
+        _gate = gate;
+        IsSessionRetiring = isSessionRetiring;
+    }
+
+    /// <summary>A window that holds nothing and reports the session live.</summary>
+    internal static UpdateTaskPublication Unguarded => default;
+
+    /// <summary>
+    /// Whether the session began retiring before this window opened, so nothing may be published.
+    /// </summary>
+    /// <remarks>
+    /// READ INSIDE THE WINDOW AND NOWHERE ELSE. It is a snapshot taken under the gate this window holds, so
+    /// it stays true for as long as the window lives; read after disposal it would be a stale value with no
+    /// mutual exclusion behind it.
+    /// </remarks>
+    internal bool IsSessionRetiring { get; }
+
+    /// <summary>Releases the lifecycle gate. A no-op for the unguarded window.</summary>
+    public void Dispose() => _gate.Dispose();
 }
 
 /// <summary>
@@ -1036,10 +1127,13 @@ internal sealed class UpdateTaskRegistry
     /// <param name="window">How long a task may go untouched before it is considered abandoned.</param>
     /// <returns>How many tasks were reclaimed.</returns>
     /// <remarks>
-    /// THERE IS NO IN-FLIGHT LATCH TO CONSULT HERE, AND NONE IS NEEDED. Every C-06 operation is unary and
-    /// each one refreshes the stamp on the way in, so a task in use is never near the window - which is far
-    /// longer than any update this contract declares can take. The streaming case, where a single operation
-    /// legitimately outlives the window, is C-05's, and its registry does carry a latch.
+    /// AN IDLE TASK IS ALMOST NEVER A RUNNING ONE, AND THE HANDOFF COSTS NOTHING TO BE SURE. Every C-06
+    /// operation is unary and each one refreshes the stamp on the way in, so a task in use is not normally
+    /// near the window - which is far longer than any update this contract declares can take. "Not normally"
+    /// is not "never" though: an update against a contended file-backed store can outrun the window, and a
+    /// direct teardown would then destroy an object with work still pending against it, which is hazard 1
+    /// [<c>docs/PB多线程绕坑提示.md</c>]. The release/disposal handoff makes the reclaim identical to an
+    /// explicit release: whichever of the two paths finishes last performs the teardown, exactly once.
     /// </remarks>
     internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
     {
@@ -1055,7 +1149,17 @@ internal sealed class UpdateTaskRegistry
                 continue;
             }
 
-            removed.Task.Dispose();
+            // THE RELEASE/DISPOSAL HANDOFF, NOT A DIRECT TEARDOWN. Reaching straight for the worker's
+            // Dispose - which is what this loop used to do - tears the task down even while an operation
+            // owns it, and destroying an object with work still pending against it is hazard 1
+            // [docs/PB多线程绕坑提示.md]. RequestRelease records the release and answers whether
+            // disposal is THIS caller's duty: false while an operation is in flight, in which case that
+            // operation's EndOperation disposes on its way out. Exactly one of the two disposes, always.
+            if (removed.RequestRelease())
+            {
+                removed.DisposeTask();
+            }
+
             reclaimed++;
 
             _logger?.LogWarning(
@@ -1114,7 +1218,16 @@ internal sealed class UpdateTaskRegistry
                 continue;
             }
 
-            removed.Task.Dispose();
+            // THE RELEASE/DISPOSAL HANDOFF, NOT A DIRECT TEARDOWN. Reaching straight for the worker's
+            // Dispose - which is what this loop used to do - tears the task down even while an operation
+            // owns it, and destroying an object with work still pending against it is hazard 1
+            // [docs/PB多线程绕坑提示.md]. RequestRelease records the release and answers whether
+            // disposal is THIS caller's duty: false while an operation is in flight, in which case that
+            // operation's EndOperation disposes on its way out. Exactly one of the two disposes, always.
+            if (removed.RequestRelease())
+            {
+                removed.DisposeTask();
+            }
 
             retired++;
         }
@@ -1141,7 +1254,17 @@ internal sealed class UpdateTaskRegistry
                 continue;
             }
 
-            removed.Task.Dispose();
+            // THE RELEASE/DISPOSAL HANDOFF, NOT A DIRECT TEARDOWN. Reaching straight for the worker's
+            // Dispose - which is what this loop used to do - tears the task down even while an operation
+            // owns it, and destroying an object with work still pending against it is hazard 1
+            // [docs/PB多线程绕坑提示.md]. RequestRelease records the release and answers whether
+            // disposal is THIS caller's duty: false while an operation is in flight, in which case that
+            // operation's EndOperation disposes on its way out. Exactly one of the two disposes, always.
+            if (removed.RequestRelease())
+            {
+                removed.DisposeTask();
+            }
+
             drained++;
         }
 
@@ -1217,6 +1340,22 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// </remarks>
     private const string MissingSessionDiagnostic =
         "CreateUpdateTask requires a transaction session handle issued by BeginSession.";
+
+    /// <summary>
+    /// The diagnostic for a create whose session began retiring before the task could be published.
+    /// </summary>
+    /// <remarks>
+    /// A DISTINCT MESSAGE FROM <see cref="MissingSessionDiagnostic"/>, because the caller's position is
+    /// different: it DID supply a handle and that handle WAS live when it sent the request. No task handle
+    /// was issued, so there is nothing for it to release and its only recourse is a new session. The code is
+    /// <c>E_INVALID_TRANSACTION</c> - the one the oracle answers for a transaction it cannot use
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113</c>] - and no handle value is
+    /// quoted (constraint C-F).
+    /// </remarks>
+    private const string SessionClosingOnCreateDiagnostic =
+        "The transaction session named by this request began retiring before the update task could be "
+        + "published against it, so no task was created and no handle was issued. Open a new session and "
+        + "retry.";
 
     /// <summary>
     /// The diagnostic accompanying <c>E_BUSY</c> when another operation already owns the task.
@@ -1351,6 +1490,24 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
 
     private static OperationStatus ProjectStatus(UpdateRunResult result)
     {
+        // ============ THE RUN'S DIAGNOSTIC IS MASKED ONCE, HERE, FOR EVERY ARM BELOW ================
+        // The run's text is whatever the worker raised into the caller-side collector, and ONE of the
+        // arms that raises is the transaction's own message: `Event OnError(rtCode, transObject.SQLErrText)`
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L390, reproduced at
+        // Tasks/SqlUpdateTask.cs]. What SQLite puts in that message routinely includes the caller's own
+        // data - a uniqueness violation names the duplicated column, a constraint or type failure quotes
+        // the offending value - so relaying it verbatim would publish row data through a field documented
+        // as opaque display text. The legacy could publish it safely because it published nothing: it is a
+        // library, and the message never left the process.
+        //
+        // MASKED ONCE RATHER THAN PER ARM, because five of the six arms below pass this same text and a
+        // per-arm mask would be five places for one of them to be forgotten. The mask is LITERAL-SCOPED,
+        // so the framework-authored sentences that also reach here - 无效的SQL!, SQL参数绑定失败!,
+        // 没有设置可更新表!, 无效的更新数据!, 无效的数据源对象! and 无效的列名: plus a column name - quote no
+        // literal and arrive byte for byte (constraints C-F, C-B). The driver PAYLOAD is masked separately
+        // and already, by the one sanctioned projection in Errors/SqlRedactor.cs.
+        string errorText = SqlRedactor.Instance.Redact(result.ErrorText);
+
         // ============ THE UPDATE WAS NEVER ATTEMPTED, WHICH IS AN ORDINARY OUTCOME ==================
         // Every arm of ondotask that returns before _of_Update leaves nothing to classify: the failed
         // transaction acquisition [:L292-L295], the cancellation check before the body [:L301], the
@@ -1360,7 +1517,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         // latched driver error is what carries the acquisition failure's detail [:L293].
         if (result.Outcome is not { } outcome)
         {
-            return UpdateWireCodes.Status(result.Code, result.ErrorText, result.LastDbError);
+            return UpdateWireCodes.Status(result.Code, errorText, result.LastDbError);
         }
 
         // The classification's own payload when it has one; otherwise whatever the run latched. Both are
@@ -1378,7 +1535,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // autocommit whose raise is on the GENERAL channel only [:L390], never on the database one.
             // So this arm passes the run's text and deliberately no detail.
             UpdateOutcomeKind.Succeeded =>
-                UpdateWireCodes.Status(result.Code, result.ErrorText),
+                UpdateWireCodes.Status(result.Code, errorText),
 
             // CANCELLED, from any of three distinct arms: the check before the update [:L182], a CLEAN
             // VETO [:L201], or the check after it [:L212] - plus the epilogue's own rewrite [:L381-L383].
@@ -1393,7 +1550,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // raises BOTH channels there - the database detail and then the general code with the driver's
             // own text - so both travel.
             UpdateOutcomeKind.InvalidTransaction =>
-                UpdateWireCodes.Status(result.Code, result.ErrorText, dbError),
+                UpdateWireCodes.Status(result.Code, errorText, dbError),
 
             // E_DB_ERROR, which the oracle reaches three different ways and lumps together: the sentinel
             // update table [:L188-L193], A VETO COMBINED WITH A TRANSACTION FAILURE [:L196-L199], and any
@@ -1406,7 +1563,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // a clean veto arrives on the cancelled arm above. Two arms, two statuses, exactly as the
             // oracle keeps them.
             UpdateOutcomeKind.DatabaseError =>
-                UpdateWireCodes.Status(result.Code, result.ErrorText, dbError),
+                UpdateWireCodes.Status(result.Code, errorText, dbError),
 
             // UNREACHABLE ON THIS PATH, AND NOT AN OVERSIGHT. Update() raises a conflict as the Aborted
             // status before reaching here, so the only way to arrive is a conflict classification whose
@@ -1416,7 +1573,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // would report a conflict the caller cannot act on, and reporting a success would be the
             // silent overwrite this system does not have.
             UpdateOutcomeKind.Conflict =>
-                UpdateWireCodes.Status(result.Code, result.ErrorText, dbError),
+                UpdateWireCodes.Status(result.Code, errorText, dbError),
 
             _ => throw new InvalidOperationException(
                 "The update classification carried an outcome kind this boundary does not map: "
@@ -1447,8 +1604,11 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// object creation.
     /// </summary>
     /// <param name="request">The session the task will run against.</param>
-    /// <param name="context">The call context. Not consulted: the handler is synchronous and total.</param>
-    /// <returns>A completed task carrying the outcome and, on success, the task handle.</returns>
+    /// <param name="context">
+    /// The call context. Its cancellation token is threaded into the wait for the session's publication
+    /// window, so a caller that goes away while queued behind another operation stops waiting.
+    /// </param>
+    /// <returns>The outcome and, on success, the task handle.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
@@ -1468,23 +1628,36 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// object [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L174</c>] - rather than
     /// dereferenced.
     /// </para>
+    /// <para>
+    /// <b>PUBLICATION IS ATOMIC WITH THE SESSION'S LIVENESS, AND ONLY PUBLICATION IS.</b> Building the task
+    /// touches nothing but the unpublished task, so it runs outside the session's lifecycle gate. The step
+    /// that has to be atomic is the one that makes the task REACHABLE: <c>EndSession</c> marks its session
+    /// closing inside that gate and only then walks this registry, so a registration performed outside the
+    /// gate could land after the walk and leave a task holding a transaction the pool has already taken
+    /// back - and may already have handed to a different session. The window comes from the factory, which
+    /// is this contract's session authority; see <see cref="IUpdateTaskFactory.EnterPublicationAsync"/> and
+    /// <see cref="UpdateTaskPublication"/>. Either the registration precedes the closing mark and the walk
+    /// finds the task, or it reaches the gate after the mark and is refused with
+    /// <c>E_INVALID_TRANSACTION</c>; there is no third interleaving.
+    /// </para>
     /// </remarks>
-    public override Task<CreateUpdateTaskResponse> CreateUpdateTask(
+    public override async Task<CreateUpdateTaskResponse> CreateUpdateTask(
         CreateUpdateTaskRequest request,
         ServerCallContext context)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
 
         string? sessionId = request.Session?.SessionId;
 
         if (string.IsNullOrEmpty(sessionId))
         {
-            return Task.FromResult(new CreateUpdateTaskResponse
+            return new CreateUpdateTaskResponse
             {
                 Status = UpdateWireCodes.Status(
                     RetCode.E_INVALID_TRANSACTION,
                     MissingSessionDiagnostic),
-            });
+            };
         }
 
         long created = _factory.TryCreate(sessionId, out IUpdateTaskSurface? task);
@@ -1506,45 +1679,88 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                 sessionId,
                 created);
 
-            return Task.FromResult(new CreateUpdateTaskResponse
+            return new CreateUpdateTaskResponse
             {
                 Status = UpdateWireCodes.Status(
                     created == RetCode.OK ? RetCode.E_INVALID_OBJECT : created),
-            });
+            };
         }
 
-        UpdateTaskEntry? entry = _tasks.Register(sessionId, task, out string quotaDiagnostic);
+        // ONE DISPOSAL PATH FOR EVERY ARM THAT DOES NOT PUBLISH, and it replaces three separate explicit
+        // drops. Nothing else in the process can reach an unpublished task, so failing to dispose it would
+        // pin its pool reference for the life of the process
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L174]. The gate wait below is
+        // cancellable, so a caller that goes away while queued is now one of those arms - and it is
+        // precisely the arm an explicit per-branch drop would have missed.
+        bool published = false;
 
-        if (entry is null)
+        try
         {
-            // THE TASK JUST BUILT IS DISPOSED, on the same terms as the defensive arm above: nothing else
-            // in the process can reach it, so failing to dispose it would pin its pool reference for the
-            // life of the process - the very leak this ceiling exists to bound.
-            task.Dispose();
+            UpdateTaskEntry? entry;
+            string quotaDiagnostic;
 
-            _logger?.LogWarning(
-                "CreateUpdateTask refused a task on session {SessionId} because a handle ceiling was "
-                + "reached: {Diagnostic}",
-                sessionId,
-                quotaDiagnostic);
-
-            return Task.FromResult(new CreateUpdateTaskResponse
+            // ------------------------------------------------------------------------------------------
+            //  THE PUBLICATION, AND THE ONLY GATED STEP IN THIS HANDLER. See the remarks above and
+            //  IUpdateTaskFactory.EnterPublicationAsync for why the liveness test and the registration have
+            //  to be one step rather than two.
+            // ------------------------------------------------------------------------------------------
+            using (UpdateTaskPublication publication =
+                await _factory.EnterPublicationAsync(sessionId, context.CancellationToken)
+                    .ConfigureAwait(false))
             {
-                // E_BUSY - the oracle's own "not now", so no new value enters a consumer's branch set.
-                Status = UpdateWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
-            });
+                if (publication.IsSessionRetiring)
+                {
+                    _logger?.LogWarning(
+                        "CreateUpdateTask did not publish a task on session {SessionId} because the session "
+                        + "began retiring first.",
+                        sessionId);
+
+                    return new CreateUpdateTaskResponse
+                    {
+                        Status = UpdateWireCodes.Status(
+                            RetCode.E_INVALID_TRANSACTION,
+                            SessionClosingOnCreateDiagnostic),
+                    };
+                }
+
+                entry = _tasks.Register(sessionId, task, out quotaDiagnostic);
+            }
+
+            if (entry is null)
+            {
+                _logger?.LogWarning(
+                    "CreateUpdateTask refused a task on session {SessionId} because a handle ceiling was "
+                    + "reached: {Diagnostic}",
+                    sessionId,
+                    quotaDiagnostic);
+
+                return new CreateUpdateTaskResponse
+                {
+                    // E_BUSY - the oracle's own "not now", so no new value enters a consumer's branch set.
+                    Status = UpdateWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
+                };
+            }
+
+            published = true;
+
+            _logger?.LogDebug(
+                "CreateUpdateTask issued update task {TaskId} on session {SessionId}.",
+                entry.TaskId,
+                entry.SessionId);
+
+            return new CreateUpdateTaskResponse
+            {
+                Status = UpdateWireCodes.Status(RetCode.OK),
+                Task = new TaskHandle { TaskId = entry.TaskId },
+            };
         }
-
-        _logger?.LogDebug(
-            "CreateUpdateTask issued update task {TaskId} on session {SessionId}.",
-            entry.TaskId,
-            entry.SessionId);
-
-        return Task.FromResult(new CreateUpdateTaskResponse
+        finally
         {
-            Status = UpdateWireCodes.Status(RetCode.OK),
-            Task = new TaskHandle { TaskId = entry.TaskId },
-        });
+            if (!published)
+            {
+                task.Dispose();
+            }
+        }
     }
 
     /// <summary>

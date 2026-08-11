@@ -656,15 +656,17 @@ public sealed class SecurityOptions
     public IList<SecurityClientOptions> Clients { get; } = [];
 
     /// <summary>
-    /// The mutual-TLS trust configuration for the one edge that authenticates by client certificate:
+    /// The mutual-TLS trust configuration for the one edge that can authenticate by client certificate:
     /// which authority's client certificates this service accepts on <c>POST /v1/tokens</c>. Bound from
     /// <c>Security:MutualTls</c>. A path - never material.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// WHY IT IS REQUIRED AND WHY ITS ABSENCE WAS A DEFECT. <c>POST /v1/tokens</c> is authenticated by
-    /// the client certificate and by nothing else, because a caller cannot present a bearer token in
-    /// order to obtain its first bearer token. The endpoint reads the presented certificate's common
+    /// WHY IT IS REQUIRED AND WHY ITS ABSENCE WAS A DEFECT. <c>POST /v1/tokens</c> accepts TWO caller
+    /// credentials - a shared secret presented as an HTTP <c>Basic</c> credential, or a client
+    /// certificate - and no bearer token, because a caller cannot present a bearer token in order to
+    /// obtain its first bearer token. This group is the trust half of the certificate alternative. Where
+    /// a caller authenticates that way the endpoint reads the presented certificate's common
     /// name and reconciles it against the claimed subject - but a NAME proves nothing on its own. Unless
     /// the certificate's chain is verified against a known authority, any caller can mint a self-signed
     /// certificate whose common name is <c>powerframework-gateway</c> and be issued a Gateway token. The

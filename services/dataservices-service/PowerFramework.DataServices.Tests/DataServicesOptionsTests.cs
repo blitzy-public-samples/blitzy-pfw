@@ -1618,12 +1618,24 @@ public sealed class DataServicesOptionsTests
     /// The shipped configuration keys bind to the descriptor members they name.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// THE SEAM IS THE KEY SPELLING, NOT THE PROPERTY. Every other test here assigns the members directly,
-    /// which says nothing about whether the words in the deployed file reach them. Two of these matter more
-    /// than the rest: <c>NCharBind</c> has an unusual capitalization that a binder must match, and
-    /// <c>LogPass</c> is the credential an operator overrides from the secret layer as
+    /// which says nothing about whether the words in the deployed file reach them. <c>LogPass</c> matters
+    /// more than the rest: it is the credential an operator overrides from the secret layer as
     /// <c>DataServices__PersistenceSession__LogPass</c> - if that key did not bind, the override would be
     /// accepted silently and the session would open without it.
+    /// </para>
+    /// <para>
+    /// ⚠ TWO KEYS THIS ROW USED TO BIND ARE DELIBERATELY ABSENT NOW. It set
+    /// <c>DisableBind</c> and <c>NCharBind</c> alongside <c>DbParm</c>, which is precisely the shape that
+    /// broke every session: the flags are DERIVED from the connection-parameter string, and
+    /// <c>"DisableBind=1"</c> resolves under the oracle's nested reading to <c>nchar_bind=false</c>, so the
+    /// two settings this row supplied CONTRADICTED the string it supplied them with. There is one input
+    /// now, and a leftover key in a deployed settings file binds to nothing and is silently ignored by the
+    /// configuration binder - which is the harmless outcome, and is why the FIX was to remove the
+    /// properties rather than to validate them. What guards against their return is the reflection row in
+    /// <c>DataWindowServiceContractTests</c> that asserts neither property exists.
+    /// </para>
     /// </remarks>
     [Fact]
     public void ThePersistenceSessionKeysBindToTheDescriptorMembers()
@@ -1640,8 +1652,6 @@ public sealed class DataServicesOptionsTests
                 ["DataServices:PersistenceSession:Lock"] = "RU",
                 ["DataServices:PersistenceSession:AutoCommit"] = "true",
                 ["DataServices:PersistenceSession:UserParm"] = "u",
-                ["DataServices:PersistenceSession:DisableBind"] = "true",
-                ["DataServices:PersistenceSession:NCharBind"] = "true",
             })
             .Build();
 
@@ -1659,19 +1669,20 @@ public sealed class DataServicesOptionsTests
         Assert.Equal("RU", session.Lock);
         Assert.True(session.AutoCommit);
         Assert.Equal("u", session.UserParm);
-        Assert.True(session.DisableBind);
-        Assert.True(session.NCharBind);
     }
 
     /// <summary>
     /// The descriptor's defaults are the safe arm of every choice the legacy leaves open.
     /// </summary>
     /// <remarks>
-    /// ASSERTED AS DEFAULTS BECAUSE A DEPLOYMENT THAT SETS NOTHING GETS THEM. <c>DisableBind</c> false
-    /// keeps the runtime binding parameters rather than interpolating literals - the mechanical root of the
-    /// legacy injection exposure - and <c>AutoCommit</c> false is the preserved legacy posture that keeps a
-    /// partially applied multi-row update recoverable. An empty password is correct for the only evidenced
-    /// engine rather than a placeholder.
+    /// ASSERTED AS DEFAULTS BECAUSE A DEPLOYMENT THAT SETS NOTHING GETS THEM. An EMPTY
+    /// connection-parameter string matches neither of the oracle's two flag patterns
+    /// [<c>n_cst_thread_task_sqlbase.sru:L128-L129</c>], so it keeps the runtime BINDING parameters rather
+    /// than interpolating literals - the mechanical root of the legacy injection exposure - and that safe
+    /// arm is now reached from the one input rather than from a second setting that could contradict it.
+    /// <c>AutoCommit</c> false is the preserved legacy posture that keeps a partially applied multi-row
+    /// update recoverable. An empty password is correct for the only evidenced engine rather than a
+    /// placeholder.
     /// </remarks>
     [Fact]
     public void ThePersistenceSessionDefaultsAreTheSafeArmOfEachChoice()
@@ -1679,8 +1690,7 @@ public sealed class DataServicesOptionsTests
         PersistenceSessionOptions session = new();
 
         Assert.Equal("SQLite", session.Dbms);
-        Assert.False(session.DisableBind);
-        Assert.False(session.NCharBind);
+        Assert.Equal(string.Empty, session.DbParm);
         Assert.False(session.AutoCommit);
         Assert.Equal(string.Empty, session.LogPass);
     }

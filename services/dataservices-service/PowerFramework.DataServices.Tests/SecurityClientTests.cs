@@ -200,12 +200,14 @@ public sealed class SecurityClientTests
         DataServicesOptions options = new();
         options.Security.BaseAddress = configuredAddress;
 
-        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST HAVE AN IDENTITY TO PRESENT. Contract C-01
-        // authenticates the issuance endpoint with mutual TLS and with nothing else, so the client
-        // refuses to ask for a token when this deployment configures no certificate - a certificate-less
-        // request could only be refused, and the refusal would read like a Security fault rather than a
-        // missing setting here. PATHS ONLY: nothing below is opened or loaded, because the client checks
-        // only WHETHER an identity is configured and the composition root is what reads the material.
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST BE ABLE TO PRESENT ONE. Contract C-01 authenticates
+        // the issuance endpoint with a caller credential and no bearer token, accepting EITHER a shared
+        // secret as an HTTP Basic credential or a client certificate, so the client refuses to ask for a
+        // token when a deployment configures NEITHER - a credential-less request could only be refused,
+        // and the refusal would read like a Security fault rather than a missing setting here. THE
+        // CERTIFICATE SCHEME IS CHOSEN HERE because its settings are PATHS: nothing below is opened or
+        // loaded, since the client checks only WHETHER a credential is configured and the composition root
+        // is what reads the material. The secret path is exercised by SecurityCredentialCompositionTests.
         options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
         options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
 
@@ -767,9 +769,9 @@ public sealed class SecurityClientTests
             BaseAddress = new Uri(TestBaseAddress, UriKind.Absolute),
         };
 
-        // The identity is configured for the same reason CreateClient configures it: the client refuses
-        // to ask for a token when this deployment presents no certificate, because the issuance endpoint
-        // is authenticated by mutual TLS and by nothing else. Paths only; nothing is opened.
+        // A credential is configured for the same reason CreateClient configures one: the client refuses
+        // to ask for a token when a deployment can present NEITHER accepted scheme. The certificate scheme
+        // is chosen because its settings are paths rather than a credential value; nothing is opened.
         DataServicesOptions options = new();
         options.Security.BaseAddress = TestBaseAddress;
         options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";

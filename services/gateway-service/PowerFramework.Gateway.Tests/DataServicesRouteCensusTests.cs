@@ -299,6 +299,16 @@ public sealed class DataServicesRouteCensusTests
     /// <summary>The published contract document, which is anonymous.</summary>
     private const string DocumentRoute = "/openapi/v1.json";
 
+    /// <summary>The schema name the 409 response references in the published document.</summary>
+    /// <remarks>
+    /// The generator names a schema after its CLR type, so this is the name of the Gateway-local problem
+    /// type. Written once here rather than at each use so a rename shows up as one failure.
+    /// </remarks>
+    private const string ConflictSchemaName = "ConflictProblemDetails";
+
+    /// <summary>The member of that schema carrying the storage-current row.</summary>
+    private const string ConflictMemberName = "conflict";
+
     /// <summary>The session identifier every session-scoped row supplies.</summary>
     /// <remarks>
     /// An opaque, obviously non-secret token. Gateway holds no state keyed by it - the session lives inside
@@ -596,6 +606,74 @@ public sealed class DataServicesRouteCensusTests
 
         // Guards against a silently empty loop: the count is the census, not a number this test chose.
         Assert.Equal(Census.Length, checkedRoutes);
+    }
+
+    /// <summary>
+    /// The update route's 409 publishes the CONFLICT schema, so a consumer of the document can see the
+    /// current row state the response actually carries.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE 409 IS THE ONE RESPONSE IN THIS CONTRACT THAT CARRIES A PAYLOAD BEYOND ITS STATUS.</b> On an
+    /// optimistic-concurrency mismatch the projection answers a problem document with a <c>conflict</c>
+    /// member holding the storage-current row, which is what makes the published retry-or-surface policy
+    /// actionable: a caller that cannot see what it lost has nothing to decide with. Declaring the response
+    /// as a BARE problem document - which is what a plain problem declaration produces - published a shape
+    /// the route does not answer, and the authored <c>gateway.v1.yaml</c> declares a
+    /// <c>ConflictProblemDetails</c> schema precisely so that shape is visible.
+    /// </para>
+    /// <para>
+    /// Asserted against the GENERATED document rather than the authored one, because the authored contract is
+    /// already checked by the contracts suite and the divergence being guarded here is between the two. Both
+    /// the reference and the referenced schema are checked: a <c>$ref</c> to a schema that declared no
+    /// conflict member would satisfy the first assertion while publishing nothing more than a status.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheUpdateRoutePublishesTheConflictSchemaRatherThanABareProblemDocument()
+    {
+        await using GatewayTestHostFixture host =
+            GatewayTestHostFixture.ForEnvironment(Environments.Production);
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using JsonDocument document = await ReadDocumentAsync(client);
+
+        ProjectedRoute update = Census.Single(row =>
+            string.Equals(row.Rpc, "Update", StringComparison.Ordinal)
+            && row.Surface == ContractService.DataWindow);
+
+        JsonElement operation = FindOperation(document, update);
+
+        Assert.True(
+            operation.GetProperty("responses").TryGetProperty("409", out JsonElement conflict),
+            "The update operation publishes no 409, so the conflict the contract rests on is invisible.");
+
+        Assert.True(
+            conflict.GetProperty("content")
+                .TryGetProperty(MediaTypeNames.Application.ProblemJson, out JsonElement problemJson),
+            $"The update operation's 409 declares no {MediaTypeNames.Application.ProblemJson} content.");
+
+        string? reference = problemJson.GetProperty("schema").GetProperty("$ref").GetString();
+
+        Assert.False(
+            string.IsNullOrEmpty(reference),
+            "The update operation's 409 references no schema, so its payload is undescribed.");
+
+        Assert.EndsWith(ConflictSchemaName, reference!, StringComparison.Ordinal);
+
+        // THE REFERENCED SCHEMA MUST ACTUALLY CARRY THE MEMBER. A reference alone proves only that a name
+        // was published; the conflict member is what a caller reads the storage-current row from.
+        Assert.True(
+            document.RootElement.GetProperty("components")
+                .GetProperty("schemas")
+                .TryGetProperty(ConflictSchemaName, out JsonElement schema),
+            $"The document references {ConflictSchemaName} but declares no such schema.");
+
+        Assert.True(
+            schema.GetProperty("properties").TryGetProperty(ConflictMemberName, out _),
+            $"{ConflictSchemaName} declares no {ConflictMemberName} member, so the 409 publishes nothing "
+                + "beyond its status.");
     }
 
     /// <summary>Finds one census row's operation object in the published document.</summary>

@@ -32,6 +32,7 @@
 
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using Grpc.Core;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -916,6 +917,323 @@ public sealed class PersistenceRuntimeTests : IDisposable
     }
 
     /// <summary>
+    /// 🔴 THE WHOLE STALE-WRITE WORKFLOW, OVER A REAL DATABASE: a competing writer moves a row, the
+    /// caller's update matches nothing, and the REAL classifier turns that into the <c>Aborted</c>
+    /// projection carrying the row state STORAGE holds - with the caller's edit never applied.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS EXERCISE EXISTS AND WHAT A SPLIT-HALF SUITE MISSED.</b> Every part of this chain had
+    /// its own test - the carrier measured a shortfall, the classifier narrowed a supplied measurement,
+    /// the service relayed a supplied conflict - and the workflow was still broken end to end, because
+    /// nothing drove the REAL carrier into the REAL classifier over a REAL competing write. Two defects
+    /// lived in the gaps between those halves: the measurement was read before the update had run, so it
+    /// was always the previous attempt's, and the classifier consulted it only after the success arm had
+    /// already returned. A stale write therefore reported success and the caller was told its edit
+    /// applied. This exercise fails if either returns.
+    /// </para>
+    /// <para>
+    /// EVERY COLLABORATOR HERE IS THE SHIPPED ONE: the connection factory, the engine, the pooled
+    /// transaction, the update carrier and its statement generator, the update preparer that installs the
+    /// evidenced contract, the conflict detector, and the rich-error projection the C-06 throw site
+    /// consumes whole. The only substitution is the temporary database file.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AStaleRowWorkflowAnswersAbortedWithStorageStateAndNeverOverwrites()
+    {
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+
+        UpdateHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        harness.PrepareCompany();
+
+        long id = long.Parse(
+            ScalarText(engine, "SELECT ID FROM COMPANY WHERE NAME = 'Paul'"),
+            CultureInfo.InvariantCulture);
+
+        // The caller's carrier: retrieved, baselined, then edited - which is the state a real retrieval
+        // followed by a user edit produces.
+        long row = harness.Carrier.Store.Carrier.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+        SetRow(harness.Carrier.Store.Carrier, row, "Paul", 32L, "California", 20000d, "1999-05-08");
+        _ = harness.Carrier.Store.Carrier.SetItemValue(
+            row,
+            DwSqliteFixture.IdColumnNumber,
+            DwBuffer.Primary,
+            id);
+        harness.Carrier.Store.Carrier.RowAt(row, DwBuffer.Primary).Baseline();
+
+        // ANOTHER WRITER GETS THERE FIRST, through the provider and outside this carrier entirely.
+        Assert.Equal(
+            0,
+            engine.Execute(
+                "UPDATE COMPANY SET AGE = 99 WHERE ID = " + id,
+                TestContext.Current.CancellationToken).SqlCode);
+
+        EditColumn(harness.Carrier.Store.Carrier, row, DwSqliteFixture.AgeColumnNumber, 34L);
+
+        // THE REAL CLASSIFIER, DRIVING THE REAL CARRIER. Nothing supplies it a measurement: it takes one
+        // from the target after the update has run, which is the ordering the contract requires.
+        ConflictDetector detector = new(SqlRedactor.Instance);
+
+        UpdateOutcome outcome = detector.Classify(new UpdateAttempt
+        {
+            Transaction = new WorkflowTransaction(),
+            Target = harness.Carrier.Target,
+            Identity = harness.Carrier.Identity,
+            Errors = new WorkflowErrorSink(),
+            Cancellation = TestContext.Current.CancellationToken,
+        });
+
+        // A CLAIMED SUCCESS OVER A ZERO-ROW MATCH IS A CONFLICT. The DataWindow update answered 1 - no
+        // provider raised anything - and the verdict comes from the measurement instead.
+        Assert.Equal(UpdateOutcomeKind.Conflict, outcome.Kind);
+        Assert.Equal(RetCode.E_DB_ERROR, outcome.Code);
+        Assert.True(outcome.RequiresRollback);
+
+        // NOTHING IS PUBLISHED FROM A CONFLICT: no identity block and no counts report reach a caller
+        // that changed no row.
+        Assert.Null(outcome.Identity);
+
+        ConflictDetail detail = Assert.IsType<ConflictDetail>(outcome.Conflict);
+        Assert.Equal(DwSqliteFixture.UpdateTableName, detail.UpdateTable);
+        Assert.Equal(1L, detail.RowsExpected);
+        Assert.Equal(0L, detail.RowsMatched);
+
+        ConflictRow reported = Assert.Single(detail.Rows);
+
+        // 🔴 THE CURRENT VALUES ARE THE DATABASE'S, NOT THE CALLER'S. The winning writer left 99 in the
+        // age column; the caller submitted 34 and believed 32. A payload echoing 34 here would send the
+        // caller round a retry loop resubmitting the value that just lost.
+        ColumnValue currentAge = ColumnOf(reported.CurrentValues, DwSqliteFixture.AgeColumnNumber);
+        ColumnValue originalAge = ColumnOf(reported.OriginalValues, DwSqliteFixture.AgeColumnNumber);
+
+        Assert.Equal(99L, currentAge.Value.Int64Value);
+        Assert.Equal(32L, originalAge.Value.Int64Value);
+
+        // THE UNION OF KEY AND MARKED COLUMNS TRAVELS, not the modified column alone: a caller rebasing a
+        // retry needs every column whose original value formed the predicate that failed. The evidenced
+        // fixture marks all six [dw_sqlite.srd:L8-L14].
+        Assert.Equal(DwSqliteFixture.Columns.Count, reported.CurrentValues.Count);
+        Assert.Equal(reported.CurrentValues.Count, reported.OriginalValues.Count);
+        Assert.NotNull(ColumnOf(reported.CurrentValues, DwSqliteFixture.IdColumnNumber));
+
+        // THE WIRE PROJECTION THE C-06 THROW SITE CONSUMES WHOLE - built here from the real outcome, so
+        // the status and the trailer a caller receives are the ones this workflow actually produces.
+        Assert.True(ConflictDetector.TryProjectAborted(outcome, out RichErrorProjection projection));
+        Assert.Equal(StatusCode.Aborted, projection.Status.StatusCode);
+
+        byte[]? raw = projection.Trailers.GetValueBytes(ConflictDetector.RichErrorTrailerKey);
+        Assert.NotNull(raw);
+
+        RichErrorTrailer trailer = RichErrorTrailer.Parser.ParseFrom(raw);
+        Assert.Equal(RichErrorTrailer.DetailOneofCase.Conflict, trailer.DetailCase);
+        Assert.Equal(RetCode.E_DB_ERROR, trailer.RetCode);
+        Assert.Equal(
+            99L,
+            ColumnOf(
+                Assert.Single(trailer.Conflict.Rows).CurrentValues,
+                DwSqliteFixture.AgeColumnNumber).Value.Int64Value);
+
+        // 🔴 AND NO SILENT OVERWRITE. The winning writer's value stands, the caller's 34 was never
+        // written, and the caller learns it must re-read and rebase or surface the conflict - which is a
+        // decision it makes, not one this service makes for it. Nothing here retried: the update ran
+        // exactly once.
+        Assert.Equal("99", ScalarText(engine, "SELECT AGE FROM COMPANY WHERE ID = " + id));
+    }
+
+    /// <summary>
+    /// 🔴 An INSERT reads the generated identity back onto the carrier, so the identity round trip reports
+    /// the value the DATABASE assigned rather than the placeholder the caller sent.
+    /// </summary>
+    /// <remarks>
+    /// WITHOUT THE READ-BACK THE ROUND TRIP IS A LOOP THAT REPORTS ITS OWN INPUT. The insert deliberately
+    /// omits the identity column so the store assigns it [<c>n_cst_thread_task_sqlupdate.sru:L215-L245</c>
+    /// is the collection half], and the resolver reads the value straight off this same carrier at
+    /// [<c>:L231</c>] - so a carrier still holding the caller's placeholder makes the whole identity block
+    /// a fiction. This exercise pins the value against the one the database actually generated.
+    /// </remarks>
+    [Fact]
+    public void AnInsertWritesTheGeneratedIdentityBackOntoTheCarrier()
+    {
+        UpdateHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        harness.PrepareCompany();
+
+        long row = harness.Carrier.Store.Carrier.AppendRow(DwBuffer.Primary, ItemStatus.NewModified);
+        SetRow(harness.Carrier.Store.Carrier, row, "Grace", 41L, "Kent", 33000d, "1984-03-01");
+
+        // THE PLACEHOLDER A CALLER SENDS FOR A ROW IT HAS NOT SEEN A KEY FOR. If this survives the update,
+        // the identity block is reporting the caller's own guess.
+        const long Placeholder = -7L;
+        _ = harness.Carrier.Store.Carrier.SetItemValue(
+            row,
+            DwSqliteFixture.IdColumnNumber,
+            DwBuffer.Primary,
+            Placeholder);
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            harness.Carrier.Target.Update(
+                acceptText: true,
+                resetFlag: false,
+                TestContext.Current.CancellationToken));
+
+        long generated = long.Parse(
+            ScalarText(engine, "SELECT ID FROM COMPANY WHERE NAME = 'Grace'"),
+            CultureInfo.InvariantCulture);
+
+        Assert.NotEqual(Placeholder, generated);
+
+        // The carrier now answers the DATABASE's value, which is what the resolver collects.
+        Assert.Equal(
+            generated,
+            harness.Carrier.Identity.Values.GetItemNumber(row, DwSqliteFixture.IdColumnNumber));
+
+        // AND THROUGH THE SHIPPED RESOLVER, over the same surfaces the classifier hands it: the row is
+        // NewModified! so the forward primary walk collects it [:L228-L233].
+        IdentityResolutionOutcome resolved = IdentityColumnResolver.Resolve(
+            harness.Carrier.Identity.Metadata,
+            harness.Carrier.Identity.Values);
+
+        ResolvedIdentityColumnData block = Assert.Single(resolved.Identity);
+        Assert.Equal(DwSqliteFixture.ExpectedDiscoveredIdentityColumnNumber, block.IdentityColumnId);
+        Assert.Equal(generated, Assert.Single(block.PrimaryValues));
+        Assert.Equal(1L, resolved.Counts.Inserted);
+    }
+
+    /// <summary>
+    /// 🔴 A KEY CHANGE UNDER <c>updatekeyinplace=no</c> IS A DELETE PLUS AN INSERT, never an in-place
+    /// update - and the pair is atomic: a delete that matches nothing runs no insert.
+    /// </summary>
+    /// <remarks>
+    /// THE EVIDENCED FIXTURE SETS THE MODE, so this is the ordinary path rather than a rare branch:
+    /// <c>update="COMPANY" updatewhere=1 updatekeyinplace=no</c> [dw_sqlite.srd:L14]. The observable
+    /// difference is the statement pair on the preview channel and the row's new key in storage; an
+    /// in-place UPDATE would leave the old key row rewritten instead of removed and re-created.
+    /// </remarks>
+    [Fact]
+    public void AKeyChangeUnderKeyInPlaceNoBecomesADeleteAndAnInsert()
+    {
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+
+        UpdateHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        harness.PrepareCompany();
+
+        long id = long.Parse(
+            ScalarText(engine, "SELECT ID FROM COMPANY WHERE NAME = 'Paul'"),
+            CultureInfo.InvariantCulture);
+
+        long row = harness.Carrier.Store.Carrier.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+        SetRow(harness.Carrier.Store.Carrier, row, "Paul", 32L, "California", 20000d, "1999-05-08");
+        _ = harness.Carrier.Store.Carrier.SetItemValue(
+            row,
+            DwSqliteFixture.IdColumnNumber,
+            DwBuffer.Primary,
+            id);
+        harness.Carrier.Store.Carrier.RowAt(row, DwBuffer.Primary).Baseline();
+
+        // THE KEY ITSELF MOVES, which is the condition the mode is about.
+        EditColumn(harness.Carrier.Store.Carrier, row, DwSqliteFixture.IdColumnNumber, id + 100L);
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            harness.Carrier.Target.Update(
+                acceptText: true,
+                resetFlag: false,
+                TestContext.Current.CancellationToken));
+
+        // THE OLD ROW IS GONE AND A NEW ONE EXISTS - the delete-plus-insert outcome. An in-place update
+        // would have left exactly one row carrying the new key and no delete at all, which the counts
+        // below distinguish.
+        Assert.Equal("0", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE ID = " + id));
+        Assert.Equal("1", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE NAME = 'Paul'"));
+
+        // THE KEY THE CALLER ASKED FOR IS THE KEY IN STORAGE. The insert half writes the changed key even
+        // though the column carries the identity flag: a key change is an explicit assignment, so letting
+        // the store pick instead would re-create the row under a value nobody requested.
+        Assert.Equal("1", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE ID = " + (id + 100L)));
+
+        // COUNTED AS A DELETE AND AN INSERT, NOT AS AN UPDATE, because two statements were generated.
+        Assert.Equal(1L, harness.Carrier.Identity.Values.GetDeletedCount());
+        Assert.Equal(1L, harness.Carrier.Identity.Values.GetInsertedCount());
+        Assert.Equal(0L, harness.Carrier.Identity.Values.GetUpdatedCount());
+
+        // BOTH STATEMENTS MATCHED, so there is no shortfall and nothing for a caller to retry.
+        ConcurrencyEvidence evidence = Assert.IsType<ConcurrencyEvidence>(
+            harness.Carrier.CaptureConcurrencyEvidence());
+
+        Assert.Equal(2L, evidence.RowsExpected);
+        Assert.Equal(2L, evidence.RowsMatched);
+        Assert.False(ConflictDetector.IsConcurrencyMismatch(evidence));
+    }
+
+    /// <summary>
+    /// 🔴 A KEY CHANGE WHOSE DELETE MATCHES NOTHING RUNS NO INSERT, so a stale key change cannot duplicate
+    /// the row it failed to remove - and it is reported as the conflict it is.
+    /// </summary>
+    [Fact]
+    public void AStaleKeyChangeRunsNoInsertAndIsReportedAsAConflict()
+    {
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+
+        UpdateHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        harness.PrepareCompany();
+
+        long id = long.Parse(
+            ScalarText(engine, "SELECT ID FROM COMPANY WHERE NAME = 'Paul'"),
+            CultureInfo.InvariantCulture);
+
+        long row = harness.Carrier.Store.Carrier.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+        SetRow(harness.Carrier.Store.Carrier, row, "Paul", 32L, "California", 20000d, "1999-05-08");
+        _ = harness.Carrier.Store.Carrier.SetItemValue(
+            row,
+            DwSqliteFixture.IdColumnNumber,
+            DwBuffer.Primary,
+            id);
+        harness.Carrier.Store.Carrier.RowAt(row, DwBuffer.Primary).Baseline();
+
+        // Another writer moves a NON-key column, so the delete's updatewhere predicate no longer matches.
+        Assert.Equal(
+            0,
+            engine.Execute(
+                "UPDATE COMPANY SET AGE = 99 WHERE ID = " + id,
+                TestContext.Current.CancellationToken).SqlCode);
+
+        EditColumn(harness.Carrier.Store.Carrier, row, DwSqliteFixture.IdColumnNumber, id + 100L);
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            harness.Carrier.Target.Update(
+                acceptText: true,
+                resetFlag: false,
+                TestContext.Current.CancellationToken));
+
+        // NO INSERT RAN, so the table still holds exactly the winning writer's row.
+        Assert.Equal("1", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY"));
+        Assert.Equal("0", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE ID = " + (id + 100L)));
+        Assert.Equal("99", ScalarText(engine, "SELECT AGE FROM COMPANY WHERE ID = " + id));
+
+        // AND THE SHORTFALL IS THE MISMATCH. One statement was owed and none matched.
+        ConcurrencyEvidence evidence = Assert.IsType<ConcurrencyEvidence>(
+            harness.Carrier.CaptureConcurrencyEvidence());
+
+        Assert.Equal(1L, evidence.RowsExpected);
+        Assert.Equal(0L, evidence.RowsMatched);
+        Assert.True(ConflictDetector.IsConcurrencyMismatch(evidence));
+    }
+
+    /// <summary>
     /// An unattached carrier and one whose definition names no updatable table both refuse.
     /// </summary>
     /// <remarks>
@@ -1207,6 +1525,62 @@ public sealed class PersistenceRuntimeTests : IDisposable
             ItemStatusMachine.RowStatusColumn,
             buffer,
             ItemStatus.DataModified);
+    }
+
+    /// <summary>Finds one projected column value by its one-based column number.</summary>
+    /// <param name="values">The projected values.</param>
+    /// <param name="columnNumber">The one-based column number. R9: never rebased.</param>
+    /// <returns>The value.</returns>
+    /// <remarks>
+    /// LOOKED UP BY ORDINAL RATHER THAN BY POSITION, so an assertion cannot silently start reading a
+    /// different column if the payload's column set changes.
+    /// </remarks>
+    private static ColumnValue ColumnOf(IEnumerable<ColumnValue> values, int columnNumber) =>
+        values.Single(value => value.ColumnId == columnNumber);
+
+    /// <summary>
+    /// The transaction surface one classified attempt reads, over a real connected engine.
+    /// </summary>
+    /// <remarks>
+    /// THE DEFAULT STATE IS THE ONE A STALE WRITE PRODUCES: the provider raised nothing, so the code is
+    /// zero and the defensive override at [<c>n_cst_thread_task_sqlupdate.sru:L208-L210</c>] - which fires
+    /// only on EXACTLY -1 - does not apply. That is what makes the exercise meaningful: the update's own
+    /// claimed success stands, and the verdict has to come from the measurement instead. The hooks answer
+    /// the non-preventing value, because a veto is a different exercise.
+    /// </remarks>
+    private sealed class WorkflowTransaction : IUpdateTransaction
+    {
+        /// <summary>The driver code the classification reads. Zero is "the provider raised nothing".</summary>
+        internal long Code { get; set; }
+
+        public long SqlCode => Code;
+
+        public long SqlDbCode => Code;
+
+        public string SqlErrText => string.Empty;
+
+        public bool IsFailed() => Code < 0L;
+
+        public long OnBeforeUpdate() => RetCode.OK;
+
+        public void OnAfterUpdate(long updateResult) => AfterUpdateResults.Add(updateResult);
+
+        /// <summary>Every value the after-update hook observed, in order.</summary>
+        internal List<long> AfterUpdateResults { get; } = [];
+    }
+
+    /// <summary>Collects whatever the classification raises on the two error channels.</summary>
+    private sealed class WorkflowErrorSink : IUpdateErrorSink
+    {
+        /// <summary>The database-error payloads raised, in order.</summary>
+        internal List<DbErrorData> DbErrors { get; } = [];
+
+        /// <summary>The general-channel raises, in order.</summary>
+        internal List<(long Code, string ErrorText)> Raises { get; } = [];
+
+        public void OnDbError(in DbErrorData error) => DbErrors.Add(error);
+
+        public void OnError(long code, string errorText) => Raises.Add((code, errorText));
     }
 
     /// <summary>Parses grid syntax, failing the case rather than the assertion when it will not.</summary>

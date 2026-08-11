@@ -128,6 +128,76 @@ namespace PowerFramework.Persistence.Data
     }
 
     /// <summary>
+    /// The optional engine capability that reports the state of the prepared-statement store the
+    /// leading-<c>@</c> execution mode populates.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS EXISTS SO THE MODE IS VERIFIABLE, NOT SO IT IS TUNABLE.</b> The legacy selects statement
+    /// caching by writing <c>@</c> in front of the statement
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>], and the effect it describes -
+    /// avoiding a re-parse - is invisible in the result of any one call. A contract that promises the
+    /// mode and cannot demonstrate it is indistinguishable from one that silently drops it, which is the
+    /// exact defect this capability closes. Every member here is a COUNT of something that happened, so
+    /// a test asserts the mode structurally instead of asserting a duration.
+    /// </para>
+    /// <para>
+    /// <b>NOT ON <c>ITransactionEngine</c>, FOR THE SAME REASON <see cref="ISqliteCommandSource"/> IS
+    /// NOT.</b> A prepared statement is a provider concept; putting its accounting on the pooling
+    /// abstraction would put SQLite into <c>Transactions/</c>. It is reached through
+    /// <see cref="IPooledTransaction.TryGetEngineCapability{TCapability}"/>, so an engine that keeps no
+    /// prepared form is not broken - it simply does not publish this, and a consumer that asks gets a
+    /// defined negative rather than a fabricated zero.
+    /// </para>
+    /// <para>
+    /// <b>NO MEMBER HERE IS A PERFORMANCE STATEMENT (AAP §0.8.5).</b> The repository publishes no
+    /// latency budget, no throughput target and no availability commitment, so these counts describe
+    /// only how many times a statement was retained, matched or newly prepared. Reading a rate or a
+    /// saving out of them would be inventing a requirement the plan forbids asserting.
+    /// </para>
+    /// </remarks>
+    internal interface IPreparedStatementStore
+    {
+        /// <summary>The number of statements currently retained in prepared form.</summary>
+        /// <remarks>
+        /// Never exceeds <see cref="PreparedStatementCapacity"/>, and drops to zero when the connection
+        /// closes, because a prepared statement is prepared against a connection and cannot outlive it.
+        /// </remarks>
+        int PreparedStatementCount { get; }
+
+        /// <summary>
+        /// The number of executions that MATCHED an already-retained statement, so the provider was not
+        /// asked to parse the text again.
+        /// </summary>
+        /// <remarks>
+        /// This is the counter that makes the mode observable: the legacy demonstration executes one
+        /// prefixed statement ten times in a loop [<c>w_test_sqlite.srw:L396-L406</c>], which is nine
+        /// matches after the first retention.
+        /// </remarks>
+        long PreparedStatementHits { get; }
+
+        /// <summary>
+        /// The number of executions that asked for the retained form and did not find one, so a new
+        /// statement was prepared.
+        /// </summary>
+        /// <remarks>
+        /// Counts only executions that REQUESTED the mode. An ordinary immediate execution is neither a
+        /// hit nor a miss, because it never consulted the store - folding it in would make the two
+        /// counters describe the connection's whole traffic rather than the mode.
+        /// </remarks>
+        long PreparedStatementMisses { get; }
+
+        /// <summary>The most statements this store will retain at once.</summary>
+        /// <remarks>
+        /// <b>A BOUND IS NOT OPTIONAL HERE.</b> The legacy comment calls the mode 空间换时间 - trading
+        /// space for time - and a store with no bound trades away unbounded space on a connection that
+        /// may live for the whole session. Past the bound the least-recently-matched entry is released,
+        /// so the mode keeps working on the statements a caller actually re-executes.
+        /// </remarks>
+        int PreparedStatementCapacity { get; }
+    }
+
+    /// <summary>
     /// The provisioned <see cref="ITransactionEngine"/>: one SQLite connection, composed through
     /// <see cref="SqliteConnectionFactory"/>, plus the four verbs that move it.
     /// </summary>
@@ -147,7 +217,7 @@ namespace PowerFramework.Persistence.Data
     /// convention. Adding a lock here would hide a caller that had violated the checkout discipline.
     /// </para>
     /// </remarks>
-    internal sealed class SqliteTransactionEngine : ITransactionEngine, ISqliteCommandSource
+    internal sealed class SqliteTransactionEngine : ITransactionEngine, ISqliteCommandSource, IPreparedStatementStore
     {
         /// <summary>
         /// The handle a connected engine reports.
@@ -215,6 +285,22 @@ namespace PowerFramework.Persistence.Data
             "No explicit transaction is open on this connection, so there is nothing to commit or roll "
             + "back. A connection opened with auto-commit on applies each statement as it executes.";
 
+        /// <summary>The most statements the prepared-statement store retains at once.</summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A CONSTANT RATHER THAN A SETTING, DELIBERATELY.</b> The legacy exposes no knob for the
+        /// mode at all - the only control it has is whether the statement carries the prefix - so adding
+        /// a configurable bound would be adding a capability the oracle does not have (constraint C-B).
+        /// The value only has to be large enough that a caller re-executing a handful of statements in a
+        /// session keeps hitting, and small enough that the store cannot become the reason a long-lived
+        /// connection grows without limit.
+        /// </para>
+        /// <para>
+        /// It is internal rather than private so the suite can assert the eviction arm at the bound
+        /// instead of hard-coding a number that would silently stop testing eviction if the bound moved.
+        /// </para>
+        /// </remarks>
+        internal const int PreparedStatementCapacityLimit = 64;
 
         /// <summary>Composes the connection string from the ported URI grammar.</summary>
         private readonly SqliteConnectionFactory _connections;
@@ -244,6 +330,44 @@ namespace PowerFramework.Persistence.Data
         /// is never read, never copied and never reachable from this object.
         /// </remarks>
         private bool _credentialSupplied;
+
+        /// <summary>
+        /// The statements retained in prepared form, keyed by the CANONICAL text that was prepared.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>KEYED ON THE CANONICAL TEXT AND NEVER ON THE RENDERED TEXT.</b> The canonical form is the
+        /// one with <c>@pN</c> placeholders, so ten executions of one statement with ten different
+        /// parameter sets are ten matches on one entry - which is exactly the legacy demonstration's
+        /// shape [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406</c>]. Keying on the
+        /// rendered text would produce a miss every time a value changed, so the mode would retain
+        /// everything and match nothing.
+        /// </para>
+        /// <para>
+        /// <b>C-F:</b> the key is the PLACEHOLDER form, which carries no caller value by construction.
+        /// The rendered, literal-bearing form is never stored here, never logged from here, and is not
+        /// reachable from this object once the execution that carried it has returned.
+        /// </para>
+        /// <para>
+        /// Created lazily so an engine that is never asked for the mode allocates nothing, and cleared
+        /// with the connection because a prepared statement cannot outlive what it was prepared against.
+        /// </para>
+        /// </remarks>
+        private Dictionary<string, RetainedStatement>? _preparedStatements;
+
+        /// <summary>The monotonic stamp the eviction arm orders entries by.</summary>
+        /// <remarks>
+        /// A COUNTER RATHER THAN A CLOCK, so eviction order is deterministic and a test does not have to
+        /// arrange for time to pass. It is stamped on retention and re-stamped on every match, which is
+        /// what makes the victim the least recently MATCHED entry rather than the oldest one.
+        /// </remarks>
+        private long _preparedStatementStamp;
+
+        /// <summary>Executions that requested the mode and matched a retained statement.</summary>
+        private long _preparedStatementHits;
+
+        /// <summary>Executions that requested the mode and had to prepare a new statement.</summary>
+        private long _preparedStatementMisses;
 
         /// <summary>Initializes the engine.</summary>
         /// <param name="connections">The factory the connection string is composed by.</param>
@@ -455,6 +579,10 @@ namespace PowerFramework.Persistence.Data
 
             RollbackAndRelease();
 
+            // BEFORE the connection goes, not after: a retained command holds prepared statements over
+            // this connection, and disposing the connection first would leave them dangling.
+            ReleaseRetainedStatements();
+
             _connection?.Dispose();
             _connection = null;
 
@@ -596,9 +724,20 @@ namespace PowerFramework.Persistence.Data
         /// count carries.
         /// </para>
         /// <para>
-        /// THE STATEMENT IS NEITHER STORED NOR LOGGED. It may carry interpolated literal values whenever
-        /// the connection disabled bind variables, and this engine has no reason to retain it
-        /// (constraint C-F).
+        /// THE RENDERED STATEMENT IS NEITHER STORED NOR LOGGED. It may carry interpolated literal values
+        /// whenever the connection disabled bind variables, and this engine has no reason to retain it
+        /// (constraint C-F). The CANONICAL text is retained when - and only when - the caller selected
+        /// the prepared-form mode, and it is the placeholder form, so it carries no caller value.
+        /// </para>
+        /// <para>
+        /// <b>THE PREPARED-FORM MODE IS HONOURED HERE, AND THIS IS THE ONLY PLACE IT IS.</b>
+        /// <see cref="SqlCommandText.CacheStatement"/> is the port of the leading-<c>@</c> execution mode
+        /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>]. When it is set the command
+        /// object is kept alive across executions rather than disposed, so its prepared statements are
+        /// reused and the provider is not asked to parse the text again; the values are re-bound each
+        /// time, which is what makes one retained entry serve the legacy demonstration's ten iterations.
+        /// The OUTCOME is identical either way - the mode changes the parse count and nothing a caller
+        /// observes in the result - which is exactly why the ordinary path is left untouched below.
         /// </para>
         /// </remarks>
         public SqlState Execute(in SqlCommandText command, CancellationToken cancellationToken = default)
@@ -621,9 +760,26 @@ namespace PowerFramework.Persistence.Data
                 return SqlState.Failed(RetCode.E_INVALID_TRANSACTION, NotConnectedText);
             }
 
+            return command.CacheStatement
+                ? ExecuteRetained(in command)
+                : ExecuteImmediate(in command);
+        }
+
+        /// <summary>
+        /// Executes a statement and disposes the command afterwards - the ordinary mode.
+        /// </summary>
+        /// <param name="command">The command. Its canonical text is neither empty nor null.</param>
+        /// <returns>The five state values the statement left behind.</returns>
+        /// <remarks>
+        /// Unchanged from the single path this class had before the prepared-form mode existed, and
+        /// extracted rather than rewritten precisely so that a reader can see the mode added an arm and
+        /// altered nothing on this one.
+        /// </remarks>
+        private SqlState ExecuteImmediate(in SqlCommandText command)
+        {
             try
             {
-                using SqliteCommand statement = _connection.CreateCommand();
+                using SqliteCommand statement = _connection!.CreateCommand();
                 statement.CommandText = command.CanonicalText;
                 statement.Transaction = _transaction;
 
@@ -635,6 +791,187 @@ namespace PowerFramework.Persistence.Data
             {
                 return Failed(failure, "statement execution");
             }
+        }
+
+        /// <summary>
+        /// Executes a statement through the retained prepared form, retaining it if it is new.
+        /// </summary>
+        /// <param name="command">The command. Its canonical text is neither empty nor null.</param>
+        /// <returns>The five state values the statement left behind.</returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THE AMBIENT TRANSACTION IS RE-ASSIGNED ON EVERY EXECUTION, AND THAT IS NOT DEFENSIVE
+        /// CODING.</b> A retained command outlives commits and rollbacks, and each of those DISPOSES the
+        /// explicit transaction and opens a fresh one - so the reference the command was created with
+        /// goes stale. <see cref="SqliteCommand"/> refuses to execute when its transaction is not the
+        /// connection's current one, so a command retained across a commit would start failing with a
+        /// transaction-mismatch fault that has nothing to do with the caller's statement.
+        /// </para>
+        /// <para>
+        /// <b>THE VALUES ARE CLEARED AND RE-BOUND RATHER THAN OVERWRITTEN IN PLACE.</b> Re-binding is
+        /// what lets one retained entry serve every iteration of the legacy's loop, and clearing first
+        /// means the entry cannot accumulate a parameter from a previous execution - which would bind a
+        /// stale value into a statement whose placeholder count happened to be smaller.
+        /// </para>
+        /// <para>
+        /// <b>A FAILURE RELEASES THE ENTRY INSTEAD OF RETAINING IT.</b> A statement the provider refused
+        /// has no useful prepared form, and retaining one would mean a malformed statement occupied a
+        /// slot in a bounded store for the life of the connection. A statement that already matched an
+        /// entry keeps it: the failure there is about the values, not the text.
+        /// </para>
+        /// </remarks>
+        private SqlState ExecuteRetained(in SqlCommandText command)
+        {
+            Dictionary<string, RetainedStatement> retained =
+                _preparedStatements ??= new Dictionary<string, RetainedStatement>(StringComparer.Ordinal);
+
+            bool matched = retained.TryGetValue(command.CanonicalText, out RetainedStatement? entry);
+
+            if (matched)
+            {
+                _preparedStatementHits++;
+            }
+            else
+            {
+                _preparedStatementMisses++;
+
+                // Released BEFORE the new entry is built, so the store is never momentarily over its
+                // bound and the victim is chosen without the newcomer competing to be it.
+                EvictLeastRecentlyMatchedStatement(retained);
+
+                SqliteCommand created = _connection!.CreateCommand();
+                created.CommandText = command.CanonicalText;
+
+                entry = new RetainedStatement(created);
+            }
+
+            SqliteCommand statement = entry!.Command;
+
+            try
+            {
+                statement.Transaction = _transaction;
+
+                statement.Parameters.Clear();
+                command.BindTo(statement);
+
+                SqlState state = SqlState.Succeeded(statement.ExecuteNonQuery());
+
+                entry.Stamp = ++_preparedStatementStamp;
+                retained[command.CanonicalText] = entry;
+
+                return state;
+            }
+            catch (SqliteException failure)
+            {
+                if (!matched)
+                {
+                    // Never entered the store, so there is nothing to remove - only the command this
+                    // method created and the caller will never see.
+                    statement.Dispose();
+                }
+
+                return Failed(failure, "statement execution");
+            }
+        }
+
+        /// <summary>
+        /// Releases the least recently matched retained statement when the store is at its bound.
+        /// </summary>
+        /// <param name="retained">The store.</param>
+        /// <remarks>
+        /// <para>
+        /// O(n) over a population bounded by <see cref="PreparedStatementCapacityLimit"/>, which is the
+        /// right trade at this size: a linked list threaded through the dictionary would make eviction
+        /// constant-time and make every other member of this class harder to read, for a saving on a
+        /// scan of a few dozen entries that happens only when the store is full and the statement is new.
+        /// </para>
+        /// <para>
+        /// <b>LEAST RECENTLY MATCHED, NOT OLDEST.</b> The stamp is refreshed on every match, so a
+        /// statement a caller keeps re-executing is never the victim however long ago it was first
+        /// retained - which is the population the mode exists to serve.
+        /// </para>
+        /// </remarks>
+        private static void EvictLeastRecentlyMatchedStatement(Dictionary<string, RetainedStatement> retained)
+        {
+            if (retained.Count < PreparedStatementCapacityLimit)
+            {
+                return;
+            }
+
+            string? victim = null;
+            long oldest = long.MaxValue;
+
+            foreach (KeyValuePair<string, RetainedStatement> candidate in retained)
+            {
+                if (candidate.Value.Stamp < oldest)
+                {
+                    oldest = candidate.Value.Stamp;
+                    victim = candidate.Key;
+                }
+            }
+
+            if (victim is null)
+            {
+                return;
+            }
+
+            retained[victim].Command.Dispose();
+            _ = retained.Remove(victim);
+        }
+
+        /// <summary>
+        /// Releases every retained statement and forgets the store.
+        /// </summary>
+        /// <remarks>
+        /// <b>CALLED FROM BOTH CONNECTION-CLOSING PATHS, AND IT HAS TO BE.</b> A prepared statement is
+        /// prepared against a connection; disposing the connection while a command still holds prepared
+        /// statements over it is a use-after-free at the provider layer. The counters are deliberately
+        /// NOT reset - they describe what this engine did over its whole life, and zeroing them on a
+        /// reconnect would hide the mode's history from the only observer of it.
+        /// </remarks>
+        private void ReleaseRetainedStatements()
+        {
+            if (_preparedStatements is null)
+            {
+                return;
+            }
+
+            foreach (RetainedStatement entry in _preparedStatements.Values)
+            {
+                entry.Command.Dispose();
+            }
+
+            _preparedStatements = null;
+        }
+
+        /// <inheritdoc/>
+        public int PreparedStatementCount => _preparedStatements?.Count ?? 0;
+
+        /// <inheritdoc/>
+        public long PreparedStatementHits => _preparedStatementHits;
+
+        /// <inheritdoc/>
+        public long PreparedStatementMisses => _preparedStatementMisses;
+
+        /// <inheritdoc/>
+        public int PreparedStatementCapacity => PreparedStatementCapacityLimit;
+
+        /// <summary>
+        /// One statement held in prepared form, with the stamp the eviction arm orders by.
+        /// </summary>
+        /// <param name="command">The command whose prepared statements are being retained.</param>
+        /// <remarks>
+        /// A CLASS RATHER THAN A RECORD STRUCT, because <see cref="Stamp"/> is mutated in place on every
+        /// match and a struct in a dictionary would have to be read out, copied, and written back - three
+        /// steps where one of them can be forgotten.
+        /// </remarks>
+        private sealed class RetainedStatement(SqliteCommand command)
+        {
+            /// <summary>The retained command. Disposed by the store, never by a caller.</summary>
+            internal SqliteCommand Command { get; } = command;
+
+            /// <summary>When this entry was last matched or first retained.</summary>
+            internal long Stamp { get; set; }
         }
 
         /// <summary>
@@ -710,6 +1047,9 @@ namespace PowerFramework.Persistence.Data
             }
 
             RollbackAndRelease();
+
+            // BEFORE the connection goes, for the reason stated on Disconnect.
+            ReleaseRetainedStatements();
 
             _connection?.Dispose();
             _connection = null;

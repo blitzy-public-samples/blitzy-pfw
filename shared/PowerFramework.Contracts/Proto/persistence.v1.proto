@@ -697,17 +697,62 @@ message QuerySpec {
   // of_setsqlsyntax [:L68]. A complete DataWindow syntax string, used to Create the carrier at run
   // time [:L619]. A Create failure is common.v1.RetCode.Value.E_INVALID_SQL [:L619-L621]. Clears
   // data_object - see above.
+  //
+  // THE RETRIEVAL IT DECLARES IS SUBJECT TO THE READ-ONLY STATEMENT GRAMMAR STATED ON `sql` BELOW.
+  // A syntax carries its own statement in a `retrieve="..."` clause, and that clause is what the
+  // server registers and ultimately executes - so this field reaches the database exactly as `sql`
+  // does and is gated on exactly the same terms. A syntax whose retrieve clause carries an
+  // inadmissible statement is refused with common.v1.RetCode.Value.E_INVALID_SQL and NOTHING is
+  // stored, so the task keeps whichever source it already had. A syntax that declares no retrieve
+  // clause at all is accepted here and refused later by Create, unchanged.
   optional string sql_syntax = 3;
 
   // of_setsql [:L67]. The statement to retrieve.
   //
-  // NOTE THE ASYMMETRY WITH C-07, WHICH IS REAL AND IS PRESERVED (C-B): this setter has NO guard at
-  // all - it is a plain assignment [:L468] - whereas C-07's of_setsql rejects an empty statement
-  // immediately. The emptiness check on this path happens LATER, inside the task body, where an
-  // empty statement yields E_INVALID_SQL with the message "SQL为空!" [:L616-L617]. Same condition,
-  // different code path, different moment; the contract must not move the check forward to match
-  // C-07, because a caller would then see a rejection at configuration time that the legacy defers
-  // to run time.
+  // NOTE THE ASYMMETRY WITH C-07, WHICH IS REAL AND IS PRESERVED (C-B): the legacy setter has NO
+  // guard at all - it is a plain assignment [:L468] - whereas C-07's of_setsql rejects an empty
+  // statement immediately. The EMPTINESS check on this path still happens LATER, inside the task
+  // body, where an empty statement yields E_INVALID_SQL with the message "SQL为空!" [:L616-L617].
+  // Same condition, different code path, different moment; the contract must not move THAT check
+  // forward to match C-07, because a caller would then see a rejection at configuration time that
+  // the legacy defers to run time.
+  //
+  // ============================================================================================
+  //  THE READ-ONLY STATEMENT GRAMMAR THIS CONTRACT ENFORCES (C-G)
+  // ============================================================================================
+  // C-05 is published under the `persistence.read` scope, and this field is caller-authored SQL that
+  // reaches the database. The legacy needed no gate on it because PowerFramework is a LIBRARY: it
+  // opens no socket and has no caller whose rights are narrower than the process's. This contract
+  // does, so the scope is ENFORCED here rather than assumed. A statement is ACCEPTED only when all of
+  // the following hold; otherwise it is refused with common.v1.RetCode.Value.E_INVALID_SQL, nothing
+  // is stored, and the diagnostic names the rule WITHOUT quoting the rejected text.
+  //
+  //   1. It is ONE statement. A semicolon is admitted only as a trailing terminator with nothing but
+  //      whitespace after it. Any other semicolon is a second statement, and the provider executes
+  //      every statement in a batch it is handed.
+  //   2. Its first bare word is SELECT, WITH or VALUES.
+  //   3. Outside string literals, quoted identifiers and bracketed identifiers, it contains none of
+  //      the state-changing or control verbs: INSERT, UPDATE, DELETE, UPSERT, MERGE, INTO, CREATE,
+  //      ALTER, DROP, TRUNCATE, RENAME, REINDEX, VACUUM, ANALYZE, ATTACH, DETACH, PRAGMA, BEGIN,
+  //      COMMIT, ROLLBACK, SAVEPOINT, GRANT, REVOKE, DENY, EXEC, EXECUTE, CALL, DECLARE, WAITFOR,
+  //      SHUTDOWN, RECONFIGURE, BACKUP, RESTORE, OPENROWSET, OPENQUERY, OPENDATASOURCE,
+  //      LOAD_EXTENSION, or any name beginning `xp_` or `sp_`. REPLACE is admitted ONLY as a function
+  //      call - immediately followed by `(` - and refused as the SQLite DML verb.
+  //      Note that rule 2 alone is insufficient, which is why rule 3 spans the whole statement:
+  //      `WITH x AS (...) INSERT INTO ...` is valid SQL whose first word is admissible.
+  //   4. It carries no SQL comment: neither `--` nor `/* */`.
+  //   5. Its parentheses balance, and every string literal, quoted identifier and bracketed
+  //      identifier is terminated.
+  //   6. It contains no control character other than tab, carriage return and line feed.
+  //
+  // WHAT IS NOT REFUSED, so a caller can predict the boundary exactly: an EMPTY statement (rule
+  // above), a MALFORMED statement, an unknown table or column, and a statement whose literals or
+  // identifiers happen to contain any refused word as DATA - `WHERE note = 'delete me'` and
+  // `WHERE [delete] = 1` are both accepted.
+  //
+  // SEND STATE-CHANGING STATEMENTS TO C-07 INSTEAD. CommandService is published under
+  // `persistence.write` and DML is its entire purpose; this is a scope boundary rather than a
+  // capability the system lacks.
   optional string sql = 4;
 
   // of_sethookclass [:L60]. The class name of a per-retrieve hook object the task instantiates and
@@ -1785,8 +1830,11 @@ message SetCommandSqlRequest {
   // an observable difference in what a caller sees, and the second guard is the only one a caller who
   // never called this setter can reach.
   //
-  // See ExecRequest.sql for the leading-`@` prefix and the batch note; the statement text itself is
-  // identical on both paths.
+  // THE LEADING-`@` EXECUTION MODE AND THE BATCH NOTE APPLY IDENTICALLY ON THIS PATH, because the
+  // statement text is the same text - see ExecRequest.sql for the five-point grammar. This setter stores
+  // it VERBATIM, selector included, so a task whose statement was installed here and then executed
+  // several times stays in the same mode on every execution; the mode is derived from the stored text at
+  // execution rather than latched at installation, which is what stops the two disagreeing.
   string sql = 2;
 }
 
@@ -1808,6 +1856,29 @@ message ExecRequest {
   // would create two sources of truth for one decision and a way for them to disagree. The legacy
   // demonstrates the form directly at ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw, where an insert
   // is written "@INSERT INTO ..." with the accompanying comment recording what the prefix does.
+  //
+  // THE GRAMMAR, EXACTLY, SO A PRODUCER CAN PREDICT WHAT THE PROVIDER RECEIVES:
+  //   1. THE SELECTOR IS POSITION ONE, WITH NO WHITESPACE TOLERANCE. The oracle's sibling test is
+  //      `Left(sql,1) = "@"` [n_cst_thread_trans.sru:L309], so " @INSERT ..." does NOT select the mode
+  //      and is forwarded whole, leading space and all.
+  //   2. EXACTLY ONE CHARACTER IS REMOVED, which is the oracle's `Mid(sql,2)`. So "@@INSERT ..." yields
+  //      "@INSERT ..." - a doubled selector is NOT an escape sequence, and the survivor reaches the
+  //      provider and fails there.
+  //   3. THE REMAINDER IS WHAT EVERY OBSERVER SEES. The before-command and after-command hooks, the
+  //      DbError statement field, a SQL preview and any log record all carry the statement the provider
+  //      ran - never the selector, because a diagnostic naming a statement no execution issued is worse
+  //      than one naming none.
+  //   4. A LONE "@" IS ANSWERED BY THE TRANSACTION, NOT BY A STATEMENT-SHAPED CODE. It is not the empty
+  //      string, so it passes both emptiness guards [:L45, :L65] exactly as the oracle's would; the
+  //      empty remainder is then refused with E_INVALID_ARGUMENT
+  //      [n_cst_thread_trans.sru:L219] - the same route a null statement takes.
+  //   5. THE MODE COMPOSES WITH EVERYTHING ELSE ON THIS REQUEST. It is compatible with positional
+  //      binding, with a multi-statement batch, and with all three autocommit values, because all of
+  //      them are carried independently of the statement's first character.
+  //
+  // NO PERFORMANCE PROMISE IS MADE OR IMPLIED (AAP 0.8.5): the mode changes how often the provider
+  // parses the text and nothing a caller can observe in the RESULT, and a storage engine that keeps no
+  // prepared form may decline it and execute immediately.
   // ==========================================================================================
   //
   // MULTI-STATEMENT BATCH EXECUTION is likewise carried in this one string: the legacy submits a batch
@@ -1873,8 +1944,14 @@ message ExecResponse {
   // The driver's own numeric code. Legacy SQLDBCode. NOT a RetCode and not comparable to sql_code.
   int64 sql_db_code = 4;
 
-  // The driver's message text, verbatim and opaque. Legacy SQLErrText. May be non-English; classify
-  // on the codes, never by parsing this.
+  // The driver's message text, LITERAL-REDACTED and opaque. Legacy SQLErrText. May be non-English;
+  // classify on the codes, never by parsing this.
+  //
+  // Redacted on the same terms, and for the same mechanism, as common.v1.DbError.sqlerrtext - see the
+  // full note there. The short form: opacity describes how a consumer may READ the field, not what
+  // the provider PUTS in it, and SQLite echoes the caller's own data into constraint and type
+  // failures. String, radix and numeric literals and comment bodies become placeholders; every other
+  // byte is unchanged, so a message that quoted no value arrives byte for byte.
   string sql_err_text = 5;
 
   // TRUE when the command actually committed. The field distinguishes "the statement succeeded" from
@@ -1956,23 +2033,40 @@ service CommandService {
   // of_setsql [:L29]. Empty statement is E_INVALID_SQL, and the legacy checks it twice.
   rpc SetSql(SetCommandSqlRequest) returns (SetCommandSqlResponse);
 
-  // Execute. Preserves positional binding, batch execution and error-text retrieval.
+  // Execute. Preserves ALL FOUR of the behaviours AAP 0.4.3 names for this verb: positional binding,
+  // THE LEADING-`@` PREFIX EXECUTION MODE, multi-statement batch execution, and error-text retrieval.
   //
-  // ============ NO LEADING-`@` MODE ON THIS RPC. THE STATEMENT IS PASSED VERBATIM. ================
-  // The `@` prefix carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and NEITHER
-  // of them is on the object this RPC drives:
-  //   1. A DATAWINDOW-OBJECT SELECTOR, in the transaction object's RETRIEVE path -
+  // ============ THE LEADING-`@` MODE IS ON THIS RPC. SEE ExecRequest.sql FOR THE GRAMMAR. ==========
+  // The `@` prefix carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and telling
+  // them apart is the whole subtlety - conflating them is how an earlier revision of this comment came
+  // to declare the mode absent:
+  //   1. A DATAWINDOW-OBJECT SELECTOR, on the RETRIEVE verb -
   //      `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [n_cst_thread_trans.sru:L309]. The rest
-  //      of the string is an object NAME, not SQL.
-  //   2. A STATEMENT-CACHING hint, on the SQLite binding's own `Exec` - the demonstration at
-  //      ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398 is written "@INSERT INTO ..." and the
-  //      comment above it at :L397 records that the prefix caches the statement to speed up re-parsing.
-  //      That object is n_sqlite, reached directly, not through the transaction object.
-  // This RPC drives `of_Exec` [n_cst_thread_trans.sru:L219-L238], whose body is a plain
-  // `EXECUTE IMMEDIATE :sqlCmd USING this` with NO prefix test of any kind. So a command statement
-  // beginning with `@` is passed to the provider verbatim and fails there, exactly as it does in the
-  // legacy. Producers must not strip the character and must not read it as a mode selector: doing either
-  // would synthesize a statement the legacy never runs.
+  //      of the string is an object NAME, not SQL. That verb is C-05's, and its managed translation is
+  //      C-05's own `data_object` field rather than a prefix - so THIS meaning is genuinely not here.
+  //   2. A STATEMENT-CACHING EXECUTION MODE, on the COMMAND verb - the demonstration at
+  //      ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398 is written "@INSERT INTO ..." with `?`
+  //      placeholders and five bound values, inside a ten-iteration loop [:L396-L406], and the comment
+  //      above it at :L397 records exactly what the prefix does. That is n_sqlite's own `Exec`
+  //      [n_sqlite.sru:L32-L43], and it is a command.
+  //
+  // MEANING 2 IS THIS RPC'S, AND THREE OTHER THINGS ON THIS SERVICE COME FROM THE SAME OBJECT: the four
+  // driver accessors ExecResponse publishes are n_sqlite's [n_sqlite.sru:L26-L29] and so is the recorded
+  // eleven-argument ceiling [:L33-L43]. C-07 is therefore the UNION of the two command surfaces - the
+  // transaction object's `of_Exec` [n_cst_thread_trans.sru:L219-L238] and the SQLite binding's `Exec` -
+  // and reading only the first half is what previously produced the claim that the mode "is not on this
+  // verb". A producer sending the documented prefix has its statement RUN, not refused.
+  //
+  // WHAT A SERVER DOES WITH IT, EXACTLY: the selector is removed - ONE character, the oracle's own
+  // `Mid(sql,2)` arithmetic - and the remainder is what the provider receives, what a SQL-preview hook
+  // observes, and what the DbError statement field carries. The statement-caching request travels beside
+  // the statement to the storage engine, which may honour it by retaining the prepared form or decline
+  // it and execute immediately; the OUTCOME is identical either way, because the mode changes how often
+  // the text is parsed and nothing a caller can observe in the result.
+  //
+  // NO PERFORMANCE PROMISE IS MADE OR IMPLIED (AAP 0.8.5). This repository publishes no latency budget,
+  // no throughput target and no availability commitment anywhere, so the mode is carried because the
+  // legacy carries it - not because any figure is claimed for it.
   rpc Exec(ExecRequest) returns (ExecResponse);
 }
 
@@ -2573,7 +2667,15 @@ message GetSessionStateResponse {
   int64 sql_code = 2;
   int64 sql_db_code = 3;
   int64 sql_nrows = 4;
+
+  // LITERAL-REDACTED, on the same terms as common.v1.DbError.sqlerrtext - see the full note there.
+  // It is the provider's own message and SQLite echoes the caller's data into constraint and type
+  // failures; literals and comment bodies become placeholders and every other byte is unchanged.
   string sql_err_text = 5;
+
+  // NOT redacted. This is a stored-procedure OUT value the caller itself asked for - the RESULT of the
+  // operation rather than a diagnostic about it - and masking a result would break the operation
+  // instead of protecting anything.
   string sql_return_data = 6;
 
   // of_issucceeded [:L84, :L340] - EXACTLY `SQLCode >= 0`.
@@ -2618,7 +2720,20 @@ message SetBrokenResponse {
 
 message GridSyntaxFromSqlRequest {
   SessionHandle session = 1;
+
   // The statement to derive a carrier syntax from.
+  //
+  // SUBJECT TO THE SAME READ-ONLY STATEMENT GRAMMAR AS QuerySpec.sql, AND FOR THE SAME REASON. This
+  // RPC is published under the `persistence.read` scope and its argument is caller-authored SQL that
+  // reaches the database engine, so an inadmissible statement is refused with
+  // common.v1.RetCode.Value.E_INVALID_SQL and no derivation is attempted. The full grammar, and the
+  // list of what is deliberately NOT refused, is stated once on QuerySpec.sql.
+  //
+  // The derivation asks the engine for a result SCHEMA rather than executing the statement, so this is
+  // defence in depth rather than the sole barrier - but a guard that relies on a collaborator's
+  // behaviour is a guard that breaks when the collaborator changes, so the grammar is enforced here
+  // too. An EMPTY statement is still refused by the legacy's own guard first, with the diagnostic the
+  // legacy sets to the code's own name [n_cst_thread_trans.sru:L296-L299].
   string sql = 2;
 }
 

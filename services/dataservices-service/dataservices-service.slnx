@@ -117,9 +117,10 @@
 -->
 <Solution>
   <!--
-    The DataServices application. Hosts the gRPC surface for contracts C-03 (DataWindowService) and
-    C-04 (ColumnExpressionService) on port 5102, plus the thin REST projection consumed only by
-    Gateway, the anonymous /health endpoint and the JWT protected /v1/ping endpoint. Its six shared
+    The DataServices application. Binds TWO TLS endpoints, one protocol version each: gRPC on port
+    5112 with Http2 for contracts C-03 (DataWindowService) and C-04 (ColumnExpressionService), and
+    REST on port 5102 with Http1 for the thin projection consumed only by Gateway, the anonymous
+    /health endpoint and the JWT protected /v1/ping endpoint. Its six shared
     ProjectReference entries pull the remainder of the build closure in behind it.
   -->
   <Project Path="PowerFramework.DataServices/PowerFramework.DataServices.csproj" />

@@ -547,6 +547,217 @@ public sealed class QueryServiceLeaseTests
     }
 
     // ---------------------------------------------------------------------------------------------
+    //  6. THE SESSION LIFECYCLE: NOTHING IS PUBLISHED AGAINST A SESSION THAT HAS BEGUN RETIRING
+    // ---------------------------------------------------------------------------------------------
+    //
+    //  A DIFFERENT EXCLUSION FROM THE ONE ABOVE, AND IT IS WHY BOTH LIVE IN THIS FILE. Sections 1 to 4
+    //  are about two operations overlapping on one TASK; this one is about a task being published into a
+    //  registry that a session teardown has already walked. EndSession marks its session closing inside
+    //  the session's lifecycle gate and only then purges the task registries, so a create that reaches
+    //  that gate after the mark must be refused - otherwise the task it registers survives the purge and
+    //  holds a pooled transaction that has been handed back, and the pool may already have re-issued that
+    //  transaction to a different session.
+    //
+    //  The mark is written here exactly as EndSession writes it - under the gate - so the case exercises
+    //  the real interleaving rather than a simulated flag.
+
+    [Fact]
+    public async Task ACreateThatReachesTheGateAfterTheClosingMarkIsRefusedAndPublishesNothing()
+    {
+        using Fixture fixture = new();
+
+        Assert.True(fixture.Sessions.TryResolve(fixture.Session, out TransactionSession? session));
+        Assert.NotNull(session);
+
+        using (session!.Gate.Enter())
+        {
+            session.MarkClosing();
+        }
+
+        CreateQueryTaskResponse refused = await fixture.Service.CreateQueryTask(
+            new CreateQueryTaskRequest { Session = new SessionHandle { SessionId = fixture.Session } },
+            Fixture.Context);
+
+        // The code the oracle answers for a transaction it cannot use
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113].
+        Assert.Equal(WireRetCode.EInvalidTransaction, refused.Status.RetCode);
+        Assert.Null(refused.Task);
+
+        // A DISTINCT DIAGNOSTIC FROM THE UNKNOWN-SESSION ONE: the handle WAS live when the caller sent it,
+        // so the message says the session began retiring rather than that it was never held.
+        Assert.Contains("began retiring", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not hold", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // AND NOTHING WAS PUBLISHED, which is the property that matters: a handle issued here would name a
+        // task the purge has already walked past.
+        Assert.Equal(0, fixture.Tasks.Count);
+    }
+
+    [Fact]
+    public async Task ALiveSessionStillPublishesSoTheRefusalIsNotUnconditional()
+    {
+        // THE OTHER HALF OF THE CLAIM. Without it the liveness test could be a constant refusal and the
+        // case above would still pass.
+        using Fixture fixture = new();
+
+        TaskHandle handle = await fixture.CreateTaskAsync();
+
+        Assert.NotEqual(string.Empty, handle.TaskId);
+        Assert.Equal(1, fixture.Tasks.Count);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  7. THE READ SCOPE IS ENFORCED, NOT ASSUMED
+    // ---------------------------------------------------------------------------------------------
+    //
+    //  THE BOUNDARY HALF OF A CLAIM WHOSE GRAMMAR HALF LIVES IN ReadOnlyStatementGuardTests. This
+    //  contract is published under `persistence.read`, and the justification on record for that used to
+    //  be that the legacy retrieval task generates SELECT statements and nothing else - true of the TASK
+    //  and silent about the SURFACE. Two of this contract's inputs are caller-authored SQL that reaches
+    //  the database: QuerySpec.sql, and QuerySpec.sql_syntax through its `retrieve="..."` clause. Left
+    //  ungated, a read-scoped credential reached INSERT, DELETE, DDL, PRAGMA and - because the provider
+    //  executes every statement in a batch it is handed - whole batches spliced behind a semicolon.
+    //
+    //  These cases live here rather than with the grammar because this file already owns a fixture with a
+    //  real session over a real pooled transaction and the PRODUCTION task factory, which is what makes
+    //  "no handle was issued" and "the statement was stored byte for byte" assertable rather than
+    //  simulated.
+
+    [Fact]
+    public async Task CreateQueryTaskRefusesAnInadmissibleStatementAndIssuesNoHandle()
+    {
+        using Fixture fixture = new();
+
+        CreateQueryTaskResponse refused = await fixture.Service.CreateQueryTask(
+            new CreateQueryTaskRequest
+            {
+                Session = new SessionHandle { SessionId = fixture.Session },
+                Spec = new QuerySpec { Sql = "SELECT 1; DELETE FROM COMPANY" },
+            },
+            Fixture.Context);
+
+        // The code this contract already answers for a statement it will not run [:L612, :L616, :L620],
+        // so no new value enters a consumer's branch set.
+        Assert.Equal(WireRetCode.EInvalidSql, refused.Status.RetCode);
+        Assert.Null(refused.Task);
+
+        // BEFORE TASK ACCEPTANCE, which is the property that matters: a handle issued here would name a
+        // task configured with a statement the caller's scope does not permit.
+        Assert.Equal(0, fixture.Tasks.Count);
+
+        // THE DIAGNOSTIC NAMES THE RULE AND NEVER THE REJECTED TEXT (constraint C-F). Echoing it would put
+        // a caller-authored value - and on an already-bound statement an interpolated literal - into a
+        // field documented as opaque display text.
+        Assert.DoesNotContain("DELETE FROM", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("read scope", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("C-07", refused.Status.ErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CreateQueryTaskRefusesAnInadmissibleSyntaxWithItsOwnDiagnostic()
+    {
+        using Fixture fixture = new();
+
+        CreateQueryTaskResponse refused = await fixture.Service.CreateQueryTask(
+            new CreateQueryTaskRequest
+            {
+                Session = new SessionHandle { SessionId = fixture.Session },
+                Spec = new QuerySpec { SqlSyntax = GridSyntax.From("DELETE FROM COMPANY", ["ID"]) },
+            },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidSql, refused.Status.RetCode);
+        Assert.Null(refused.Task);
+        Assert.Equal(0, fixture.Tasks.Count);
+
+        // A DISTINCT MESSAGE FROM THE STATEMENT ONE, because the caller sent a different field and the
+        // offending text is nested inside it: telling it "the statement" was refused would send it looking
+        // at the wrong request field.
+        Assert.Contains("DataWindow syntax", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("DELETE FROM", refused.Status.ErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnOrdinaryReadStatementIsStillAcceptedAndStoredByteForByte()
+    {
+        // WITHOUT THIS CASE THE GUARD COULD BE A CONSTANT REFUSAL and both cases above would still pass.
+        // It also pins that an ACCEPTED statement is stored unaltered: the guard REFUSES rather than
+        // rewrites, and byte-exact statement parity is the acceptance criterion for this whole layer -
+        // note the accepted statement contains a refused word as DATA inside a string literal.
+        using Fixture fixture = new();
+
+        const string Sql = "SELECT * FROM COMPANY WHERE NOTE = 'delete me'";
+
+        CreateQueryTaskResponse created = await fixture.Service.CreateQueryTask(
+            new CreateQueryTaskRequest
+            {
+                Session = new SessionHandle { SessionId = fixture.Session },
+                Spec = new QuerySpec { Sql = Sql },
+            },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+        Assert.NotNull(created.Task);
+        Assert.Equal(1, fixture.Tasks.Count);
+
+        Assert.True(fixture.Tasks.TryResolve(created.Task, out QueryTaskEntry? entry));
+        Assert.Equal(Sql, entry!.Task.Sql);
+    }
+
+    [Fact]
+    public async Task AnEmptyStatementIsStillAcceptedSoTheRunTimeCheckKeepsOwningIt()
+    {
+        // CONSTRAINT C-B, ASSERTED AT THE BOUNDARY. The oracle's setter is a plain assignment and the
+        // emptiness check happens later, inside the task body, where an empty statement answers
+        // E_INVALID_SQL with SQL为空! [:L615-L617]. The new scope guard must not move that rejection
+        // forward to configuration time, and the published contract says so - so a caller sending an
+        // explicitly empty statement must still get a handle.
+        using Fixture fixture = new();
+
+        CreateQueryTaskResponse created = await fixture.Service.CreateQueryTask(
+            new CreateQueryTaskRequest
+            {
+                Session = new SessionHandle { SessionId = fixture.Session },
+                Spec = new QuerySpec { Sql = string.Empty },
+            },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+        Assert.NotNull(created.Task);
+    }
+
+    [Fact]
+    public async Task TheGuardAlsoRunsOnTheRunItselfAndNotOnlyOnCreate()
+    {
+        // ApplySpec IS SHARED BY BOTH ENTRY POINTS, so a spec sent on Query must be gated exactly as one
+        // sent on CreateQueryTask. Without this case the guard could be wired into create alone and a
+        // caller would simply send its batch on the run instead.
+        using Fixture fixture = new();
+        TaskHandle handle = await fixture.CreateTaskAsync();
+
+        CollectingStream stream = new();
+
+        await fixture.Service.Query(
+            new QueryRequest
+            {
+                Task = handle,
+                Spec = new QuerySpec { Sql = "SELECT 1; DROP TABLE COMPANY" },
+            },
+            stream,
+            Fixture.Context);
+
+        OperationStatus status = Assert.Single(stream.Written).Status;
+
+        Assert.Equal(WireRetCode.EInvalidSql, status.RetCode);
+        Assert.Contains("read scope", status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP TABLE", status.ErrorText, StringComparison.Ordinal);
+
+        // NO RETRIEVAL RAN. The refusal happens while the spec is being merged, before the runner is
+        // reached at all, so the statement was never issued.
+        Assert.Equal(0, fixture.Runner.Runs);
+    }
+
+    // ---------------------------------------------------------------------------------------------
     //  THE FIXTURE - THE PRODUCTION TASK FACTORY, A GATED RUNNER, AND NO DATABASE
     // ---------------------------------------------------------------------------------------------
 

@@ -1677,6 +1677,111 @@ public sealed class DataWindowServiceContractTests
         Assert.Equal(StatusCode.InvalidArgument, failure.StatusCode);
     }
 
+    /// <summary>
+    /// ⚠ A BUFFER OUTSIDE THE THREE IS REFUSED, WHERE IT USED TO PRODUCE A SUCCESSFUL EMPTY STREAM.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A proto3 enum field is an open <see cref="int"/> on the wire, so <c>repeated DwBuffer</c> accepts 7
+    /// as readily as it accepts Primary!, Delete! and Filter!. The unknown value then simply never matched
+    /// the per-segment test, so the caller received a COMPLETE stream - final marker and all - carrying no
+    /// rows. That is the worst available failure shape, because <c>RetrieveChunk</c> has no outcome field:
+    /// a caller cannot tell it apart from a DataWindow that genuinely has no rows, so a typo'd or
+    /// version-skewed buffer reads as "no rows" rather than as "no such buffer".
+    /// </para>
+    /// <para>
+    /// The upstream assertions are the second half and are not decoration: the guard runs BEFORE the query
+    /// scope is opened, so a request that cannot be served costs neither a Persistence session nor a
+    /// borrowed transaction. A guard placed after the scope would refuse correctly and still pay for the
+    /// refusal.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task RetrieveRefusesABufferOutsideTheThreeBeforeItAcquiresAnythingUpstream()
+    {
+        C03Fixture fixture = new();
+
+        RetrieveRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Buffers.Add(DwBuffer.Primary);
+        request.Buffers.Add((DwBuffer)7);
+
+        C03StreamWriter<RetrieveChunk> writer = new();
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Retrieve(request, writer, fixture.Context));
+
+        Assert.Equal(StatusCode.InvalidArgument, failure.StatusCode);
+
+        // The offending value is named, so a caller with a repeated field does not have to bisect it.
+        Assert.Contains("7", failure.Status.Detail, StringComparison.Ordinal);
+
+        // NOTHING WAS STREAMED, so the refusal cannot be mistaken for an empty result.
+        Assert.Empty(writer.Written);
+
+        // AND NOTHING WAS ACQUIRED - no session, no task.
+        Assert.DoesNotContain(
+            nameof(FakeTransactionServiceClient.BeginSessionAsync),
+            fixture.Persistence.TransactionStub.Calls);
+        Assert.DoesNotContain(
+            nameof(FakeQueryServiceClient.CreateQueryTaskAsync),
+            fixture.Persistence.QueryStub.Calls);
+    }
+
+    /// <summary>
+    /// AND ALL THREE REAL BUFFERS ARE STILL ACCEPTED, so the guard above is not a blanket refusal of the
+    /// non-default buffers.
+    /// </summary>
+    /// <param name="buffer">The buffer to request.</param>
+    [Theory]
+    [InlineData(DwBuffer.Primary)]
+    [InlineData(DwBuffer.Delete)]
+    [InlineData(DwBuffer.Filter)]
+    public async Task RetrieveAcceptsEachOfTheThreeRealBuffers(DwBuffer buffer)
+    {
+        C03Fixture fixture = new();
+
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+        });
+
+        RetrieveRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Buffers.Add(buffer);
+
+        C03StreamWriter<RetrieveChunk> writer = new();
+
+        await fixture.Service.Retrieve(request, writer, fixture.Context);
+
+        // The final marker is the only chunk for an empty result, and its presence is what says the stream
+        // completed rather than being truncated.
+        Assert.NotEmpty(writer.Written);
+    }
+
+    /// <summary>
+    /// AND AN EMPTY BUFFER LIST IS STILL THE PRIMARY-ONLY DEFAULT, which the guard must not turn into a
+    /// refusal: the legacy default is that a freshly retrieved DataWindow has nothing in Delete! and
+    /// nothing in Filter!, so "unspecified" is a legitimate request rather than a missing one.
+    /// </summary>
+    [Fact]
+    public async Task RetrieveStillTreatsAnEmptyBufferListAsPrimaryOnly()
+    {
+        C03Fixture fixture = new();
+
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+        });
+
+        C03StreamWriter<RetrieveChunk> writer = new();
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            writer,
+            fixture.Context);
+
+        Assert.NotEmpty(writer.Written);
+    }
+
     [Fact]
     public async Task RetrieveArgumentsCarryTheirOneBasedLegacyOrdinal()
     {
@@ -1815,16 +1920,35 @@ public sealed class DataWindowServiceContractTests
     }
 
     /// <summary>
-    /// The session descriptor comes from configuration, and its password never returns.
+    /// The session descriptor comes from configuration, and NO connection-flag message travels with it -
+    /// so the connection-parameter string is the single authority for the two bind flags.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The descriptor is the reason a session exists: it is resolved ONCE by <c>BeginSession</c> so that its
-    /// log-password field does not travel on every later call. This asserts the configured values arrive and
-    /// that the two connection flags are carried, since Persistence parses them into the bind behaviour that
-    /// decides whether values are interpolated into the statement text at all.
+    /// log-password field does not travel on every later call.
+    /// </para>
+    /// <para>
+    /// ⚠ THE ABSENT FLAGS MESSAGE IS THE ASSERTION, AND THIS ROW USED TO ASSERT THE OPPOSITE. It was
+    /// written expecting <c>Flags.DisableBind</c> and <c>Flags.NcharBind</c> to arrive true, from two
+    /// independently settable options beside <c>DbParm</c> - and the very configuration it used demonstrates
+    /// why that shape was a defect. <c>DbParm="DisableBind=1"</c> resolves, by the oracle's own nested
+    /// reading [<c>n_cst_thread_task_sqlbase.sru:L127-L132</c>], to <c>disable_bind=true</c> and
+    /// <c>nchar_bind=FALSE</c>, because the second key is consulted only inside the first key's branch. The
+    /// flags this row asserted therefore DISAGREED with the string sent beside them, and Persistence
+    /// refuses such a session outright with <c>E_INVALID_ARGUMENT</c> - not the request, the SESSION, so
+    /// every retrieval and every update on the deployment would have failed.
+    /// </para>
+    /// <para>
+    /// The contract's flag message is a caller ASSERTION about what the string resolves to, and this
+    /// service forwards the string unexamined, so it has nothing independent to assert. Omitting it selects
+    /// the documented absent arm - "take them from the connection-parameter string" - which is the only
+    /// reading with one authority. The configuration below is kept EXACTLY as it was, deliberately: it is
+    /// the configuration that used to break the service, and it must now open a session cleanly.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task RetrieveOpensTheSessionFromTheConfiguredDescriptorIncludingBothConnectionFlags()
+    public async Task RetrieveOpensTheSessionFromTheConfiguredDescriptorAndSendsNoConnectionFlags()
     {
         DataServicesOptions configured = new()
         {
@@ -1835,8 +1959,6 @@ public sealed class DataWindowServiceContractTests
                 LogId = "operator",
                 LogPass = "not-echoed",
                 DbParm = "DisableBind=1",
-                DisableBind = true,
-                NCharBind = true,
             },
         };
 
@@ -1858,8 +1980,66 @@ public sealed class DataWindowServiceContractTests
         Assert.Equal("powerframework", opened.Descriptor_.Database);
         Assert.Equal("operator", opened.Descriptor_.Logid);
         Assert.Equal("not-echoed", opened.Descriptor_.Logpass);
-        Assert.True(opened.Flags.DisableBind);
-        Assert.True(opened.Flags.NcharBind);
+
+        // The string travels; nothing that could contradict it does.
+        Assert.Equal("DisableBind=1", opened.Descriptor_.Dbparm);
+        Assert.Null(opened.Flags);
+    }
+
+    /// <summary>
+    /// AND THERE IS NO WAY TO CONFIGURE A DISAGREEMENT, which is the half a behavioural assertion cannot
+    /// reach: the two flag properties are gone from the options surface entirely.
+    /// </summary>
+    /// <remarks>
+    /// A ROW ABOUT ABSENCE, DELIBERATELY. The sibling above proves the flags are not SENT today; this one
+    /// proves an operator cannot reintroduce the disagreement by setting them, and it is what would fail if
+    /// someone re-added the properties "for completeness" and wired them back onto the request. The names
+    /// are asserted by string because a property that does not exist cannot be named in code.
+    /// </remarks>
+    [Fact]
+    public void ThePersistenceSessionOptionsOfferNoWayToContradictTheConnectionParameterString()
+    {
+        Type options = typeof(PersistenceSessionOptions);
+
+        Assert.Null(options.GetProperty("DisableBind"));
+        Assert.Null(options.GetProperty("NCharBind"));
+
+        // The one input is still there, so the assertions above are about a REMOVED alternative rather
+        // than about a group that lost its whole purpose.
+        Assert.NotNull(options.GetProperty(nameof(PersistenceSessionOptions.DbParm)));
+    }
+
+    /// <summary>
+    /// The persistence client options carry no second, unread transaction group.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>DEAD CONFIGURATION IS WORSE THAN MISSING CONFIGURATION, WHICH IS WHY ITS ABSENCE IS ASSERTED.</b>
+    /// A <c>Transaction</c> group used to be declared here and bound from
+    /// <c>DataServices:Persistence:Transaction</c> while nothing in the service ever read it - and it
+    /// DISAGREED with the group that is read, defaulting the database to a table name and auto-commit to
+    /// true where the live group defaults to empty and false. An operator tuning the settings file would
+    /// have seen two plausible places to configure one session, changed the one with the more specific
+    /// defaults, observed no effect, and had nothing in the service to tell them why.
+    /// </para>
+    /// <para>
+    /// Asserted by string, because a property that does not exist cannot be named in code, and paired with
+    /// a positive assertion about the group that IS read so the row cannot pass by the whole surface having
+    /// been renamed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ThePersistenceClientOptionsDeclareNoSecondUnreadTransactionGroup()
+    {
+        Type options = typeof(PersistenceClientOptions);
+
+        Assert.Null(options.GetProperty("Transaction"));
+
+        // The group's remaining purpose is intact, so this is a row about a removed alternative rather than
+        // about a type that lost everything. The descriptor lives on PersistenceSessionOptions, bound from
+        // its own section, and that is the single authority the service reads.
+        Assert.NotNull(options.GetProperty(nameof(PersistenceClientOptions.Address)));
+        Assert.NotNull(typeof(PersistenceSessionOptions).GetProperty(nameof(PersistenceSessionOptions.Dbms)));
     }
 
     /// <summary>

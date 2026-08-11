@@ -28,24 +28,24 @@
 //  result delivery of the legacy recordset. Protocol buffers over gRPC carry all four; JSON over
 //  REST carries none of them well.
 //
-//  ONE PORT CARRIES BOTH PROTOCOLS, AND THAT IS DELIBERATE (constraint C-K)
-//  appsettings.json declares exactly ONE Kestrel endpoint, on the service's assigned port, with
-//  `Protocols = Http1AndHttp2`. gRPC requires HTTP/2 and the two REST routes are ordinary HTTP, and
-//  both are served from that single listener: on a TLS endpoint - which is the shape every internal
-//  address in the orchestration environment file declares - ALPN negotiates `h2` for a gRPC client and
-//  `http/1.1` for an ordinary one, per connection, so one port serves both with no protocol switch and
-//  no second endpoint anywhere in this file.
+//  TWO ENDPOINTS, ONE PROTOCOL VERSION EACH, AND THAT IS DELIBERATE (constraint C-K)
+//  appsettings.json declares TWO named Kestrel endpoints - `Rest https://+:5101` with `Http1` for the
+//  two REST routes, and `Grpc https://+:5111` with `Http2` for the four published gRPC contracts. Both
+//  are TLS, so ALPN could negotiate `h2` and `http/1.1` on ONE address and a single `Http1AndHttp2`
+//  endpoint would also work; the split is preferred because it keeps the readiness probe reachable over
+//  HTTP/1.1 without depending on ALPN behaviour in whatever proxy, sidecar or client fronts the address,
+//  and because it makes each port's protocol version a stated fact rather than a negotiated one.
 //
-//  ⚠ THE TLS PART OF THAT IS LOAD BEARING, AND IT WAS VERIFIED BY RUNNING THE SERVICE RATHER THAN
-//  ASSUMED. Kestrel does NOT enable prior-knowledge HTTP/2 on a PLAINTEXT `Http1AndHttp2` endpoint: it
-//  emits "HTTP/2 is not enabled ... TLS is not enabled. HTTP/2 requires TLS application protocol
-//  negotiation. Connections to this endpoint will use HTTP/1.1" and serves HTTP/1.1 only, which would
-//  silently take all four gRPC contracts off the air while leaving the REST routes working - the worst
-//  possible failure shape, because the readiness probe would still answer 200. So anyone tempted to
-//  "simplify" the configured URL from `https` to `http` must instead declare the endpoint as HTTP/2
-//  only, and would then lose the REST routes on that port. The scheme is a deployment decision and it
-//  belongs to configuration; the certificate arrives the same way, through the Kestrel certificate
-//  settings the orchestration layer supplies, which is why no certificate is named in this file.
+//  ⚠ WHY THE SCHEME IS LOAD BEARING, VERIFIED BY RUNNING THE SERVICE RATHER THAN ASSUMED. Kestrel does
+//  NOT enable prior-knowledge HTTP/2 on a PLAINTEXT `Http1AndHttp2` endpoint: it emits "HTTP/2 is not
+//  enabled ... TLS is not enabled. HTTP/2 requires TLS application protocol negotiation. Connections to
+//  this endpoint will use HTTP/1.1" and serves HTTP/1.1 only, which would silently take all four gRPC
+//  contracts off the air while leaving the REST routes working - the worst possible failure shape,
+//  because the readiness probe would still answer 200. That is why BOTH endpoints declare `https`, and
+//  why anyone tempted to "simplify" either URL to `http` must declare that endpoint HTTP/2-only and
+//  accept losing HTTP/1.1 on it. The scheme is a deployment decision and it belongs to configuration;
+//  the certificate arrives the same way, through the Kestrel certificate settings the orchestration
+//  layer supplies, which is why no certificate is named in this file.
 //
 //  THE PORT IS NEVER RESTATED IN CODE (constraint C-F). There is no UseUrls call, no literal port and
 //  no literal address below. The container definition EXPOSEs the port and the orchestration manifest
@@ -54,10 +54,12 @@
 //  DELIBERATELY RESERVED, COMMENTED placeholder for a deferred service and not a spare: binding it
 //  here would break the documented port map and violate constraint C-D in spirit.
 //
-//  NO HTTPS IS CONFIGURED HERE EITHER. There is no UseHttps, no development certificate, no HSTS and
-//  no HTTPS redirection. Mutual TLS is a documented per-pair fallback only, and no certificate
-//  material is provisioned for this service, so inventing a TLS story in code would be scaffolding
-//  for a capability nothing has asked for. The listener's scheme is configuration's business.
+//  NO HTTPS IS CONFIGURED IN CODE EITHER, WHICH IS NOT THE SAME AS NO HTTPS. Both configured endpoints
+//  declare `https`, and the certificate reaches Kestrel through the certificate settings the
+//  orchestration layer supplies - but there is no UseHttps call, no development certificate, no HSTS and
+//  no HTTPS redirection in this file. Mutual TLS remains a documented per-pair fallback that this
+//  service is not part of: it presents no client certificate, because it requests no token. The
+//  listener's scheme and material are configuration's business.
 //
 //  LEGACY REFERENCE (read only - never edited, never built, never shipped: constraint C-C)
 //  There is no legacy analogue for a host at all: PowerFramework is a LIBRARY with no process of its
@@ -2876,6 +2878,43 @@ internal sealed class UpdateTaskFactory : IUpdateTaskFactory
 
         return RetCode.OK;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// THE ONLY IMPLEMENTATION THAT ACTUALLY HOLDS A GATE, because it is the only <c>IUpdateTaskFactory</c>
+    /// with a session registry behind it. The session is re-resolved rather than carried over from
+    /// <see cref="TryCreate"/>, so a session that ended in between yields the unguarded-but-retiring answer
+    /// and the adapter refuses instead of publishing a task against a transaction nobody holds any more.
+    /// </para>
+    /// <para>
+    /// The liveness flag is read AFTER the gate is taken and returned as a snapshot, so it stays true for as
+    /// long as the window lives. That is what makes the adapter's test-then-register one step: <c>EndSession</c>
+    /// cannot mark the session closing while this window is open, because marking happens inside this same
+    /// gate.
+    /// </para>
+    /// </remarks>
+    public async ValueTask<UpdateTaskPublication> EnterPublicationAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sessionId);
+
+        if (!_sessions.TryResolve(sessionId, out TransactionSession? session) || session is null)
+        {
+            // ALREADY GONE, WHICH IS REPORTED AS RETIRING RATHER THAN AS LIVE. A session that has left the
+            // registry has had - or is having - its transaction handed back, so publishing against it is
+            // exactly the outcome this window exists to prevent. No gate is held because there is no
+            // session to hold one for.
+            return new UpdateTaskPublication(default, isSessionRetiring: true);
+        }
+
+        TransactionGateScope gate = await session.Gate
+            .EnterAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return new UpdateTaskPublication(gate, session.IsClosing);
+    }
 }
 
 /// <summary>
@@ -3030,9 +3069,12 @@ internal sealed class UpdateFaultCollector : IQueryFaultSink
 /// would fork one rule into two places.
 /// </para>
 /// <para>
-/// THE SESSION IS HELD BUT NOT DRIVEN. It is retained so the task can be correlated with the session it
-/// was created against, which is what the log records that pair the two read; the session's own lifecycle
-/// belongs to the transaction service.
+/// 🔴 THE SESSION IS HELD FOR TWO THINGS, AND THE SECOND IS LOAD-BEARING. It correlates the task with the
+/// session it was created against, which is what the log records that pair the two read - and it carries
+/// THE TRANSACTION GATE this surface takes around the run. Every operation on one pooled transaction
+/// object holds that gate, so the update cannot overlap a query, a command or a commit on the same object
+/// (AAP 0.4.5.4). The session's own LIFECYCLE still belongs to the transaction service; this surface only
+/// reads its liveness flag inside the gate, which is the one place the reading is trustworthy.
 /// </para>
 /// </remarks>
 internal sealed class UpdateTaskSurface : IUpdateTaskSurface
@@ -3147,6 +3189,33 @@ internal sealed class UpdateTaskSurface : IUpdateTaskSurface
     /// </remarks>
     public UpdateRunResult Execute(CancellationToken cancellationToken)
     {
+        // 🔴 THE TRANSACTION GATE, HELD ACROSS THE BODY AND THE RESULT CAPTURE BOTH. C-06 shares one
+        // pooled transaction object with C-05, C-07 and C-08 - the pool keys its entries on
+        // WHOLE-descriptor equality, so two sessions opened with equal descriptors are handed the SAME
+        // object [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L136-L172] - and the
+        // legacy is free of any race on it only because each pool lives on ONE worker thread [:L194-L206].
+        // A concurrent server has to reproduce that guarantee explicitly (AAP 0.4.5.4): the transaction's
+        // SQL code, error text and statement status are shared mutable state, and its rollback path saves,
+        // mutates and restores five of them [n_cst_thread_trans.sru:L163-L183], so a sibling landing
+        // between the save and the restore would observe state no single-threaded caller could.
+        //
+        // THE CAPTURE IS INSIDE THE GATE FOR THE SAME REASON THE BODY IS. The result is assembled from the
+        // proxy's latched counts, identity blocks and driver error - all written by the body from the
+        // transaction it just used - so releasing the gate before assembling it would let another operation
+        // overwrite what this run is about to report.
+        using TransactionGateScope gate = _session.Gate.Enter();
+
+        // THE LIVENESS TEST BELONGS INSIDE THE GATE. EndSession marks the session closing under this same
+        // gate BEFORE it hands the transaction back, so either this update is inside the gate first and
+        // completes, or the teardown is and this sees the flag. Executing anyway would write through a
+        // transaction the pool has already taken back - and may already have handed to another session.
+        // NOTHING IS PUBLISHED on this arm: no statement ran, so there is no outcome, no count and no
+        // identity block to report, and a caller reads the code rather than inferring from an empty payload.
+        if (_session.IsClosing)
+        {
+            return new UpdateRunResult { Code = RetCode.E_INVALID_TRANSACTION };
+        }
+
         // RAISED BEFORE THE BODY AND LOWERED IN A GUARANTEED finally. The substrate raises its running
         // flag as part of dispatching a task [n_cst_thread_task.sru:L164], and the guards that read it
         // are only meaningful while it is up. The finally is not defensive tidying either: a body that

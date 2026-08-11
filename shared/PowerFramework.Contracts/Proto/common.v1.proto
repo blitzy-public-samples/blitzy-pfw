@@ -1055,10 +1055,26 @@ message DbError {
   // which is why it is a plain integer here and not one of this file's enums. [dberrordata.srs:L4]
   int64 sqldbcode = 1;
 
-  // The driver's message text, verbatim. May be non-English: legacy call sites synthesize Chinese
-  // diagnostics for framework-detected conditions, for example the "no updatable table" case at
-  // [n_cst_thread_task_sqlupdate.sru:L190]. Consumers must treat this as opaque display text and
+  // The driver's message text, LITERAL-REDACTED. May be non-English: legacy call sites synthesize
+  // Chinese diagnostics for framework-detected conditions, for example the "no updatable table" case
+  // at [n_cst_thread_task_sqlupdate.sru:L190]. Consumers must treat this as opaque display text and
   // must not parse it to classify the error - use sqldbcode for that. [dberrordata.srs:L5]
+  //
+  // REDACTED ON THE SAME TERMS AS sqlsyntax, AND THE REASON IS THE SAME MECHANISM. Opacity describes
+  // how a consumer may READ this field; it says nothing about what the provider PUTS in it, and what
+  // SQLite puts in it routinely includes the caller's own data - a uniqueness violation names the
+  // duplicated column, a constraint or type failure quotes the offending value, a bad identifier
+  // echoes the text the caller sent. The legacy could publish that safely because it published
+  // nothing at all: PowerFramework is a library, and this field never left the process. Across this
+  // boundary it reaches a network peer.
+  //
+  // THE REDACTION IS LITERAL-SCOPED, so this remains a useful diagnostic. String literals, radix
+  // literals, numeric literals and comment bodies are replaced with placeholders; every other byte
+  // is copied through unchanged. A message that quotes no value therefore arrives byte for byte -
+  // `near "FROM": syntax error` and `NOT NULL constraint failed: COMPANY.NAME` are unaltered - so a
+  // consumer still learns WHICH condition failed and on which column. What it does not learn is the
+  // row data. Consumers must not treat this field as reproducing the driver's message byte for byte,
+  // because when the driver quoted a value it deliberately does not.
   string sqlerrtext = 2;
 
   // REDACTED STATEMENT TEXT. Placeholders only, never interpolated literals; empty is valid and

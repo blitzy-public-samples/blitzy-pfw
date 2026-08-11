@@ -346,16 +346,23 @@ internal interface ISqlUpdateCarrier : IDisposable
     /// implementation cannot measure.
     /// </para>
     /// <para>
-    /// <b>WHY IT IS READ BEFORE THE UPDATE RATHER THAN AFTER.</b>
-    /// <see cref="UpdateAttempt.Evidence"/> is an immutable input by design, because that is what
-    /// keeps every conflict arm reachable with no database and no concurrent writer (C-H). Measuring
-    /// beforehand is possible precisely because of what <c>updatewhere=1</c> means: the concurrency
-    /// predicate is the key column PLUS THE ORIGINAL VALUE OF EVERY MARKED COLUMN, and the
-    /// <c>Buffers/</c> anti-corruption layer already carries both the current and the original value
-    /// of every marked column per row - on the sole evidenced fixture all six of them
-    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>]. An implementation that can only
-    /// measure during execution answers <see langword="null"/> here and is no worse off than the
-    /// oracle.
+    /// 🔴 <b>IT IS READ AFTER THE UPDATE HAS EXECUTED, ON THE SAME TRANSACTION, AND NEVER BEFORE
+    /// IT.</b> The measurement does not exist beforehand: how many rows a predicate matched is not
+    /// knowable until the predicate has been submitted. This member is therefore the SAME member the
+    /// classifier declares on <see cref="IUpdateTarget.CaptureConcurrencyEvidence"/> - one carrier
+    /// implements both interfaces with one method - and the classifier pulls it at the one moment it is
+    /// authoritative: immediately after <c>Data.Update(true,false)</c> [<c>:L204</c>] returns and
+    /// before any success is published or anything is committed.
+    /// </para>
+    /// <para>
+    /// WHAT MAKES THE MEASUREMENT MEANINGFUL IS WHAT <c>updatewhere=1</c> MEANS: the concurrency
+    /// predicate is the key column PLUS THE ORIGINAL VALUE OF EVERY MARKED COLUMN - on the sole
+    /// evidenced fixture all six of them
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>] - so a statement that matched fewer
+    /// rows than it was generated for matched nothing for a row another writer had changed. An
+    /// implementation that cannot measure answers <see langword="null"/> and is no worse off than the
+    /// oracle, which keeps every conflict arm reachable through substitution with no database at all
+    /// (C-H).
     /// </para>
     /// </remarks>
     ConcurrencyEvidence? CaptureConcurrencyEvidence();
@@ -1643,10 +1650,12 @@ internal sealed class SqlUpdateTask : SqlTaskBase
             Errors = _errorSink,
             Cancellation = cancellation.Token,
 
-            // The optimistic-concurrency measurement, read ONCE here because the attempt is an
-            // immutable input. Null - the oracle's own state, since it measures nothing anywhere - keeps
-            // the failure arm a plain database error. See ISqlUpdateCarrier.CaptureConcurrencyEvidence.
-            Evidence = carrier.CaptureConcurrencyEvidence(),
+            // ⚠️ THE OPTIMISTIC-CONCURRENCY MEASUREMENT IS NOT ASSEMBLED HERE, AND MUST NOT BE. It does
+            // not exist yet: the classifier has not run `Data.Update(true,false)` [:L204] at this point,
+            // so anything readable now describes the PREVIOUS attempt - null on the first - and a
+            // zero-row optimistic miss would be classified as a clean success. The classifier pulls it
+            // from `Target` immediately after the update returns and before any success is published;
+            // see ISqlUpdateCarrier.CaptureConcurrencyEvidence and ConflictDetector.Classify steps 9a-9b.
         };
 
         UpdateOutcome outcome = _conflictDetector.Classify(attempt);

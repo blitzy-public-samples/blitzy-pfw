@@ -1272,20 +1272,32 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
 
     /// <summary>
     /// With the SHIPPED token bootstrap in place, the credential material's presence is reported as its own
-    /// component - ready when it is mounted, degraded when it is not, and the aggregate follows.
+    /// component, and EITHER accepted scheme satisfies it.
     /// </summary>
-    /// <param name="mounted">Whether both halves of the client identity are configured.</param>
+    /// <param name="mounted">Whether a client-certificate pair is configured as well as the secret.</param>
     /// <param name="expectedStatus">The status the route must answer with.</param>
     /// <param name="expectedEntry">The verdict the credential entry must carry.</param>
     /// <remarks>
     /// <para>
-    /// THE STATE THIS ROW PINS IS A REAL DEPLOYMENT STATE, NOT A CONTRIVED ONE. Gateway forwards every
-    /// proxied operation with a bearer token, the only way to obtain one is Security's issuance edge, and
-    /// contract C-01 protects that edge with mutual TLS and nothing else - so a Gateway with no client
-    /// certificate mounted can serve nothing. <c>orchestration/.env.example</c> records that leaving the
-    /// pair unset is legitimate and deliberately NOT a startup failure, which is precisely why readiness
-    /// has to be the thing that notices: an instance that starts and then refuses every request is exactly
-    /// what "not ready" means.
+    /// <b>BOTH ROWS ARE READY, AND THE SECOND ONE IS THE CORRECTION.</b> Contract C-01 accepts TWO caller
+    /// credentials on <c>POST /v1/tokens</c> - a shared secret presented as an HTTP <c>Basic</c> credential
+    /// naming a subject on Security's issuance roster, or a client certificate - as ALTERNATIVES, and its
+    /// own <c>security</c> block declares them so. <c>SECURITY_CLIENT_SECRET_GATEWAY</c> is the one the
+    /// documented bring-up supplies, with both certificate paths deliberately EMPTY:
+    /// <c>orchestration/.env.example</c> section 6.3 records that as a SUPPORTED state and names the
+    /// <c>Basic</c> scheme the primary one.
+    /// </para>
+    /// <para>
+    /// This row used to assert that the unmounted case was DEGRADED, which is answered <c>503</c> - so it
+    /// pinned a Gateway that could never report ready under the configuration the orchestration layer
+    /// documents. That is a stack which does not come up rather than a misleading warning, and the test
+    /// froze it. The verdict now follows the contract: a deployment presenting either scheme is ready.
+    /// </para>
+    /// <para>
+    /// PRESENTING NEITHER IS NOT A READINESS STATE AT ALL, which is why there is no third row here. The
+    /// composition root refuses to START a deployment that could present neither scheme, and
+    /// <see cref="ADeploymentPresentingNeitherAcceptedSchemeIsRefusedBeforeItCanReportAnything"/> pins that
+    /// - a fail-fast refusal rather than an instance that runs and reports itself unready.
     /// </para>
     /// <para>
     /// The fixture normally substitutes the bootstrap, so this row RESTORES the shipped client - which is
@@ -1295,7 +1307,7 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// </remarks>
     [Theory]
     [InlineData(true, HttpStatusCode.OK, HealthyToken)]
-    [InlineData(false, HttpStatusCode.ServiceUnavailable, DegradedToken)]
+    [InlineData(false, HttpStatusCode.OK, HealthyToken)]
     public async Task TheCredentialMaterialForTheTokenBootstrapIsItsOwnReportedComponent(
         bool mounted,
         HttpStatusCode expectedStatus,
@@ -1343,20 +1355,23 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
             expectedEntry,
             StateOf(ReadComponentStates(body.RootElement), CredentialsCheckName));
 
-        // Every upstream answered healthy, so the credential component is the ONLY thing that can have
-        // moved the aggregate - which is what makes the not-ready half attributable rather than incidental.
+        // Every upstream answered healthy, so the credential component is the ONLY thing that could have
+        // moved the aggregate - which is what makes a ready aggregate here attributable rather than
+        // incidental.
         Assert.All(ReadUpstreamStates(body.RootElement), entry => Assert.Equal(HealthyToken, entry.Value));
 
-        if (!mounted)
-        {
-            Assert.Equal(
-                DegradedToken,
-                body.RootElement.GetProperty(ServiceStatusMember).GetString());
-        }
+        // `status` and not `serviceStatus`: the READY shape carries the aggregate verdict under the former,
+        // and the latter belongs to the problem shape a not-ready answer uses.
+        Assert.Equal(HealthyToken, body.RootElement.GetProperty(StatusMember).GetString());
 
-        // NEITHER PATH REACHES THE ANONYMOUS BODY, on either verdict. A path names where private key
-        // material is mounted, and this route is world-readable by anything that can reach the port.
+        // NEITHER PATH NOR THE SECRET REACHES THE ANONYMOUS BODY. A path names where private key material is
+        // mounted and a secret is a credential; this route is world-readable by anything that can reach the
+        // port.
         Assert.DoesNotContain(nameof(GatewayOptions.MutualTls), raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            GatewayOptions.SecurityClientSecretConfigurationKey,
+            raw,
+            StringComparison.OrdinalIgnoreCase);
 
         if (!mounted)
         {
@@ -1368,6 +1383,43 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
 
         File.Delete(certificate);
         File.Delete(key);
+    }
+
+    /// <summary>
+    /// A deployment that could present NEITHER accepted issuance scheme is refused before it can report
+    /// anything at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS WHAT REPLACED THE DEGRADED READINESS VERDICT, and it is the stronger posture. An instance
+    /// that starts holding no credential can obtain no token and can therefore serve no proxied operation,
+    /// so reporting itself unready would leave an operator watching a process that will never become
+    /// useful. The composition root ends it instead - the fail-fast posture the legacy application object
+    /// sets by terminating on a structural fault rather than warning
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>].
+    /// </para>
+    /// <para>
+    /// The secret is cleared through the SAME flat configuration key the deployment supplies it on, applied
+    /// after the fixture's own, so what is exercised is the production resolution path rather than a
+    /// test-only door. No certificate pair is configured either, so neither scheme is available.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADeploymentPresentingNeitherAcceptedSchemeIsRefusedBeforeItCanReportAnything()
+    {
+        await using GatewayTestHostFixture host =
+            GatewayTestHostFixture.ForEnvironment(Environments.Production);
+
+        host.AdditionalSettings[GatewayOptions.SecurityClientSecretConfigurationKey] = string.Empty;
+
+        OptionsValidationException refused = Assert.Throws<OptionsValidationException>(
+            () => host.CreateAnonymousClient().Dispose());
+
+        // The refusal names the SETTING an operator supplies and quotes no value.
+        Assert.Contains(
+            GatewayOptions.SecurityClientSecretConfigurationKey,
+            string.Join(' ', refused.Failures),
+            StringComparison.Ordinal);
     }
 
     /// <summary>

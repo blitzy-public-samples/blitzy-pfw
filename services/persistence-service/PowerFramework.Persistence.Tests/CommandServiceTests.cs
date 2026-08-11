@@ -140,6 +140,18 @@ public sealed class CommandServiceTests
         /// <summary>The bound parameters of the most recent parameterized execution, in order.</summary>
         internal IReadOnlyList<object?> LastParameters { get; private set; } = [];
 
+        /// <summary>
+        /// Whether the most recent parameterized execution asked for the prepared-form mode - the port of
+        /// the leading-<c>@</c> execution mode C-07 preserves (AAP §0.4.3).
+        /// </summary>
+        /// <remarks>
+        /// RECORDED RATHER THAN HONOURED, because this engine keeps no prepared form and the seam's own
+        /// contract says an implementation may decline the request. What a boundary case has to prove is
+        /// that the mode was CARRIED to the engine at all: the earlier defect was that the prefix reached
+        /// the provider as statement text and the mode reached nothing.
+        /// </remarks>
+        internal bool LastCacheStatement { get; private set; }
+
         /// <summary>Signalled once execution has entered the provider. Null when unused.</summary>
         internal ManualResetEventSlim? Entered { get; set; }
 
@@ -223,6 +235,7 @@ public sealed class CommandServiceTests
             LastStatement = command.RenderedText;
             LastCanonicalStatement = command.CanonicalText;
             LastParameters = [.. command.Parameters];
+            LastCacheStatement = command.CacheStatement;
 
             // THE ONLY SEAM IN THIS SUITE THAT CAN HOLD AN OPERATION OPEN. The operation lease is taken
             // before the provider is reached and released after, so a test can only observe a HELD lease
@@ -288,6 +301,22 @@ public sealed class CommandServiceTests
 
         internal List<(long Code, string Info)> Errors { get; } = [];
 
+        /// <summary>
+        /// How many times the worker's teardown reached this host. THE DISPOSAL OBSERVER for the lifecycle
+        /// cases below: <c>SqlTaskBase.Dispose</c> routes through <c>OnUninit</c>
+        /// [<c>Tasks/SqlTaskBase.cs</c>, the port of the substrate's own uninit hook], so a count here is a
+        /// faithful record of whether the pair was actually torn down - which a sealed production worker
+        /// exposes no other way.
+        /// </summary>
+        internal int Uninits { get; private set; }
+
+        /// <summary>
+        /// Run inside <see cref="OnUninit"/>, so a test can inject a request at the exact moment a purge is
+        /// tearing this task down. That instant is the one the mark-before-purge ordering is about, and it
+        /// is unreachable from outside the purge.
+        /// </summary>
+        internal Action? OnUninitAction { get; set; }
+
         public bool IsMainThread => false;
 
         public bool IsCancelled => Cancelled;
@@ -312,6 +341,9 @@ public sealed class CommandServiceTests
 
         public void OnUninit()
         {
+            Uninits++;
+
+            OnUninitAction?.Invoke();
         }
 
         public long OnError(long errCode, string errInfo)
@@ -1621,7 +1653,13 @@ public sealed class CommandServiceTests
             "DELETE FROM ledger WHERE account = " + RedactionPlaceholder,
             response.Status.DbError.Sqlsyntax);
 
-        // The driver's own opaque text is carried VERBATIM and is never scrubbed - only the statement is.
+        // THE DRIVER'S OWN TEXT IS MASKED TOO, ON ALL THREE FIELDS - and this particular message arrives
+        // UNCHANGED, which is the point rather than a contradiction. The mask is LITERAL-SCOPED: string,
+        // radix and numeric literals and comment bodies become placeholders and every other byte is copied
+        // through, so a driver message that quotes no value is byte-identical after it. That is what keeps
+        // the field a useful diagnostic while removing the row data SQLite echoes into constraint and type
+        // failures - see AValueBearingDriverMessageIsMaskedOnEveryFieldThatCarriesIt below for the other
+        // half of the claim.
         Assert.Equal("near \"FROM\": syntax error", response.Status.DbError.Sqlerrtext);
         Assert.Equal("near \"FROM\": syntax error", response.Status.ErrorText);
         Assert.Equal("near \"FROM\": syntax error", response.SqlErrText);
@@ -1629,6 +1667,73 @@ public sealed class CommandServiceTests
         // The command path always raises with the Primary buffer and row 0 [:L110].
         Assert.Equal(DwBuffer.Primary, response.Status.DbError.Buffer);
         Assert.Equal(0L, response.Status.DbError.Row);
+        Assert.Equal(-1L, response.SqlCode);
+    }
+
+    /// <summary>
+    /// ⚠ A DRIVER MESSAGE THAT QUOTES THE OFFENDING VALUE IS MASKED ON EVERY FIELD THAT CARRIES IT
+    /// (constraint C-F).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE HALF OF THE REDACTION CLAIM THE STATEMENT FIELD ALONE COULD NOT ESTABLISH.</b> The message
+    /// field used to be copied through verbatim on the reasoning that it is opaque display text a consumer
+    /// must not parse. Opacity describes how a consumer may READ a field; it says nothing about what the
+    /// provider PUTS in it, and SQLite routinely puts the caller's own data there - a uniqueness violation
+    /// names the duplicated column, a constraint or type failure quotes the offending value, a bad
+    /// identifier echoes the text the caller sent. The legacy could publish that safely because it
+    /// published nothing: it is a library, and the message never left the process.
+    /// </para>
+    /// <para>
+    /// Three fields carry it on this one response - the payload's message, the status diagnostic and the
+    /// response's own <c>sql_err_text</c> - so all three are asserted. A fix applied to one and not the
+    /// others would leave the value reachable through whichever was missed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AValueBearingDriverMessageIsMaskedOnEveryFieldThatCarriesIt()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        // Shaped like a real SQLite constraint diagnostic that quotes the offending row value.
+        harness.Engine.ExecuteResult = SqlState.Failed(
+            -1,
+            "CHECK constraint failed: account = '90210-SECRET'");
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "DELETE FROM ledger WHERE account = :account",
+                Parameters = { Positional(90210L) },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EDbError, response.Status.RetCode);
+        Assert.NotNull(response.Status.DbError);
+
+        // THE QUOTED VALUE IS GONE FROM ALL THREE FIELDS.
+        Assert.DoesNotContain(
+            "90210-SECRET", response.Status.DbError.Sqlerrtext, StringComparison.Ordinal);
+        Assert.DoesNotContain("90210-SECRET", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("90210-SECRET", response.SqlErrText, StringComparison.Ordinal);
+
+        // ...replaced by the redactor's own placeholder rather than a hand-rolled mask, which is what
+        // makes the policy unweakenable from a call site.
+        Assert.Contains(
+            RedactionPlaceholder, response.Status.DbError.Sqlerrtext, StringComparison.Ordinal);
+        Assert.Contains(RedactionPlaceholder, response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains(RedactionPlaceholder, response.SqlErrText, StringComparison.Ordinal);
+
+        // ...AND THE MESSAGE STILL READS AS ITSELF, which is what keeps it useful to an operator: the
+        // condition, the column and even the LITERAL'S OWN DELIMITERS survive, so the message still shows
+        // that a quoted value stood there. Only the value itself does not.
+        Assert.Equal(
+            "CHECK constraint failed: account = '" + RedactionPlaceholder + "'",
+            response.Status.DbError.Sqlerrtext);
+
+        // The numeric code is untouched - it carries no caller data and is what a consumer classifies on.
         Assert.Equal(-1L, response.SqlCode);
     }
 
@@ -1848,10 +1953,12 @@ public sealed class CommandServiceTests
         Assert.NotSame(firstTask.Worker, secondTask.Worker);
 
         // Both run against the SAME session object, and therefore against its ONE gate - which is what
-        // serializes their executions against the single borrowed connection. The gate itself is not
-        // compared directly: System.Threading.Lock cannot be converted to another type without
-        // CS9216, and the shared session identity already establishes the shared gate.
+        // serializes their executions against the single borrowed connection. The gate is now compared
+        // DIRECTLY as well: it became a TransactionGate - a class - when the streaming query needed to hold
+        // it across an await, and a reference comparison on it is the strongest available statement that the
+        // two tasks are genuinely serialized rather than merely co-located on one session.
         Assert.Same(firstTask.Session, secondTask.Session);
+        Assert.Same(firstTask.Session.Gate, secondTask.Session.Gate);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1982,6 +2089,486 @@ public sealed class CommandServiceTests
         Assert.Equal(1, (int)AutoCommitMode.AcOn);
         Assert.Equal(2, (int)AutoCommitMode.AcNative);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    //  REGION 11 - THE SESSION LIFECYCLE: THE CLOSING MARK, THE PURGE, AND THE DISPOSAL HANDOFF
+    // ---------------------------------------------------------------------------------------------
+    //
+    //  THREE SEPARATE PROPERTIES, AND EACH ONE FAILED BEFORE THIS REGION EXISTED.
+    //
+    //    1. A create that reaches the session's lifecycle gate after the closing mark is REFUSED, and the
+    //       pair it had already built is torn down rather than leaked.
+    //    2. EndSession marks the session closing BEFORE it walks this registry, so there is no instant at
+    //       which a create can publish into a registry the purge has already passed.
+    //    3. The purge goes through the release/disposal handoff, so a task with an operation in flight is
+    //       NOT torn down underneath itself - destroying an object with work still pending against it is
+    //       hazard 1 [docs/PB多线程绕坑提示.md], and here it would dispose the worker's commit signal from
+    //       under a statement that is still executing.
+    //
+    //  Every case is deterministic: the closing mark is written explicitly under the gate exactly as
+    //  EndSession writes it, the operation lease is taken explicitly on the entry exactly as Exec takes it,
+    //  and property 2 is observed by injecting a create INSIDE the teardown the purge performs. Nothing
+    //  here waits on a timer or races two threads.
+
+    [Fact]
+    public async Task ACreateThatReachesTheGateAfterTheClosingMarkIsRefusedAndTearsDownItsPair()
+    {
+        Harness harness = new();
+        SessionHandle session = await OpenSession(harness);
+
+        Assert.True(harness.Sessions.TryResolve(session, out TransactionSession? resolved));
+        Assert.NotNull(resolved);
+
+        using (resolved!.Gate.Enter())
+        {
+            resolved.MarkClosing();
+        }
+
+        CreateCommandTaskResponse refused = await harness.Commands.CreateCommandTask(
+            new CreateCommandTaskRequest { Session = session },
+            Context);
+
+        // The code the oracle answers for a transaction it cannot use
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113].
+        Assert.Equal(WireRetCode.EInvalidTransaction, refused.Status.RetCode);
+        Assert.Null(refused.Task);
+        Assert.Contains("began retiring", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // NOTHING WAS PUBLISHED - the property that matters, because a handle issued here would name a task
+        // the purge has already walked past.
+        Assert.Equal(0, harness.Tasks.Count);
+
+        // AND THE PAIR IT BUILT WAS TORN DOWN, which is the second half: the worker's disposal is what
+        // returns its pool reference [n_cst_thread_task_sqlbase.sru:L160], so a refusal that forgot it would
+        // pin a connection for the life of the process.
+        Assert.NotNull(harness.Factory.LastTaskHost);
+        Assert.Equal(1, harness.Factory.LastTaskHost!.Uninits);
+    }
+
+    [Fact]
+    public async Task ALiveSessionStillPublishesSoTheRefusalIsNotUnconditional()
+    {
+        // THE OTHER HALF OF THE CLAIM ABOVE. Without it the liveness test could be a constant refusal and
+        // that case would still pass.
+        Harness harness = new();
+
+        TaskHandle handle = await CreateTask(harness);
+
+        Assert.NotEqual(string.Empty, handle.TaskId);
+        Assert.Equal(1, harness.Tasks.Count);
+        Assert.Equal(0, harness.Factory.LastTaskHost!.Uninits);
+    }
+
+    [Fact]
+    public async Task TheClosingMarkPrecedesThePurgeSoNoCreateCanPublishIntoAWalkedRegistry()
+    {
+        // THE ORDERING CASE, AND THE ONLY WAY TO OBSERVE IT FROM OUTSIDE. The purge's teardown reaches the
+        // worker-side host, so a create injected from there runs at the exact instant EndSession is walking
+        // this registry. If the mark were written AFTER the walk - which is what this handler used to do -
+        // the injected create would see a live session, publish a task, and that task would survive its own
+        // session holding a transaction the pool has taken back.
+        Harness harness = new();
+        SessionHandle session = await OpenSession(harness);
+
+        CreateCommandTaskResponse first = await harness.Commands.CreateCommandTask(
+            new CreateCommandTaskRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, first.Status.RetCode);
+
+        FakeTaskHost host = Assert.IsType<FakeTaskHost>(harness.Factory.LastTaskHost);
+
+        CreateCommandTaskResponse? duringPurge = null;
+
+        host.OnUninitAction = () => duringPurge = harness.Commands
+            .CreateCommandTask(new CreateCommandTaskRequest { Session = session }, Context)
+            .GetAwaiter()
+            .GetResult();
+
+        EndSessionResponse ended = await harness.Transactions.EndSession(
+            new EndSessionRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, ended.Status.RetCode);
+
+        // The injection actually ran - otherwise the assertion below would pass vacuously.
+        Assert.NotNull(duringPurge);
+        Assert.Equal(WireRetCode.EInvalidTransaction, duringPurge!.Status.RetCode);
+        Assert.Null(duringPurge.Task);
+
+        // AND THE REGISTRY IS EMPTY AFTERWARDS. This is the assertion the ordering exists for: the purge
+        // walked, the injected create refused, and no later arrival is left behind for a second walk to
+        // catch.
+        Assert.Equal(0, harness.Tasks.Count);
+    }
+
+    [Fact]
+    public async Task APurgeDoesNotTearDownATaskWithAnOperationInFlight()
+    {
+        Harness harness = new();
+        SessionHandle session = await OpenSession(harness);
+
+        CreateCommandTaskResponse created = await harness.Commands.CreateCommandTask(
+            new CreateCommandTaskRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+
+        CommandTask task = Resolve(harness, created.Task);
+        FakeTaskHost host = Assert.IsType<FakeTaskHost>(harness.Factory.LastTaskHost);
+
+        // THE LEASE Exec ITSELF TAKES, taken directly so the case is deterministic. There is no seam inside
+        // the production worker's execution to pause at, and TaskOperationLatchTests already exercises every
+        // interleaving of the state machine; what this case adds is that the PURGE respects it.
+        Assert.Equal(TaskLatchOutcome.Acquired, task.TryBeginOperation());
+
+        EndSessionResponse ended = await harness.Transactions.EndSession(
+            new EndSessionRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, ended.Status.RetCode);
+
+        // RETIRED FROM THE TABLE BUT NOT TORN DOWN. The handle is unreachable, so no new call can arrive,
+        // and the pair the in-flight operation is still using is intact.
+        Assert.Equal(0, harness.Tasks.Count);
+        Assert.Equal(0, host.Uninits);
+
+        // THE HANDOFF'S OTHER SIDE: the operation's own exit is told that disposal is now its duty, and it
+        // performs it. Exactly one of the two paths disposes, and it is this one.
+        Assert.True(task.EndOperation());
+
+        task.Dispose();
+
+        Assert.Equal(1, host.Uninits);
+    }
+
+    [Fact]
+    public async Task APurgeTearsDownATaskWithNothingInFlight()
+    {
+        // THE COMPLEMENT, WITHOUT WHICH THE HANDOFF COULD SIMPLY NEVER DISPOSE. A task with no operation in
+        // flight is the releaser's duty, and the purge performs it there and then.
+        Harness harness = new();
+        SessionHandle session = await OpenSession(harness);
+
+        CreateCommandTaskResponse created = await harness.Commands.CreateCommandTask(
+            new CreateCommandTaskRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+
+        FakeTaskHost host = Assert.IsType<FakeTaskHost>(harness.Factory.LastTaskHost);
+
+        Assert.Equal(0, host.Uninits);
+
+        EndSessionResponse ended = await harness.Transactions.EndSession(
+            new EndSessionRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, ended.Status.RetCode);
+        Assert.Equal(0, harness.Tasks.Count);
+        Assert.Equal(1, host.Uninits);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  REGION 12 - THE LEADING-`@` EXECUTION MODE (AAP §0.4.3 C-07)
+    // ---------------------------------------------------------------------------------------------
+    //  WHAT THESE CASES ARE PROTECTING
+    //  The AAP requires C-07's `Exec` to preserve "positional `?` binding, the leading-`@` prefix
+    //  execution mode, multi-statement batch execution, and error-text retrieval". Three of those
+    //  four were implemented; the mode was not, and the published contract said two contradictory
+    //  things about it at once - the request field documented the mode while the RPC comment declared
+    //  the statement passed verbatim. The observable consequence was the worst of the three possible
+    //  outcomes: a caller who sent the documented form got a provider syntax error, because "@INSERT
+    //  INTO ..." is not valid SQL in any dialect.
+    //
+    //  The legacy demonstration is one statement with five `?` placeholders, executed ten times in a
+    //  loop, under a comment recording that the prefix caches the statement to speed up re-parsing
+    //  [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406]. So the cases below pin four
+    //  separate facts, because getting any one of them wrong reintroduces the defect in a new shape:
+    //  the selector is REMOVED from what the provider receives; the mode is CARRIED to the engine;
+    //  the removal is exactly ONE character; and the installed statement keeps the selector so the
+    //  task stays re-runnable in the same mode.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// THE DEFECT, IN ONE CASE. A prefixed statement reaches the provider WITHOUT its selector, and the
+    /// mode reaches the engine instead - where previously the selector reached the provider as statement
+    /// text and the mode reached nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The statement is the oracle's own shape [<c>w_test_sqlite.srw:L398-L400</c>] - a prefixed insert
+    /// with placeholders and positional values - reduced to two columns. BOTH renderings are asserted:
+    /// the canonical form is what a provider binds against and the rendered form is what a
+    /// characterization recording compares, so a selector surviving into either one would report a
+    /// statement that was never executed.
+    /// </para>
+    /// <para>
+    /// The placeholders are spelled <c>:name</c> rather than <c>?</c> because that is THIS binder's
+    /// marker - the ported scan reads <c>ARG_PREFIX = ":"</c>
+    /// [<c>n_cst_thread_task_sqlbase.sru:L396, :L440</c>], and the <c>?</c> in the demonstration belongs
+    /// to the native binding's own argument list. "Positional" is carried by the EMPTY NAME, which the
+    /// binder reads as "the next unreplaced placeholder" - REGION 6 pins that separately. Combining the
+    /// mode with real binding is the point of this case, because the binder composes a FRESH statement
+    /// and a mode set before it runs is the one most easily lost.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task APrefixedStatementReachesTheProviderWithoutItsSelectorAndCarriesTheMode()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "@INSERT INTO COMPANY (NAME,AGE) VALUES (:name, :age)",
+                Parameters = { Positional(23L), Positional(25L) },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.Equal(1, harness.Engine.ExecuteCalls);
+
+        // The provider's text - placeholders bound - carries no selector.
+        Assert.Equal(
+            "INSERT INTO COMPANY (NAME,AGE) VALUES (@p1, @p2)",
+            harness.Engine.LastCanonicalStatement);
+
+        // The parity text - literals interpolated - carries no selector either.
+        Assert.Equal("INSERT INTO COMPANY (NAME,AGE) VALUES (23, 25)", harness.Engine.LastStatement);
+
+        // And the mode the selector chose did reach the engine, having survived the binder.
+        Assert.True(harness.Engine.LastCacheStatement);
+        Assert.Equal([23L, 25L], harness.Engine.LastParameters);
+    }
+
+    /// <summary>
+    /// THE COMPLEMENT, WITHOUT WHICH THE ARM ABOVE COULD BE UNCONDITIONAL. An ordinary statement binds
+    /// identically and carries no mode.
+    /// </summary>
+    [Fact]
+    public async Task AnUnprefixedStatementBindsIdenticallyAndCarriesNoMode()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "INSERT INTO COMPANY (NAME,AGE) VALUES (:name, :age)",
+                Parameters = { Positional(23L), Positional(25L) },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.Equal(
+            "INSERT INTO COMPANY (NAME,AGE) VALUES (@p1, @p2)",
+            harness.Engine.LastCanonicalStatement);
+        Assert.Equal("INSERT INTO COMPANY (NAME,AGE) VALUES (23, 25)", harness.Engine.LastStatement);
+        Assert.False(harness.Engine.LastCacheStatement);
+    }
+
+    /// <summary>
+    /// EXACTLY ONE CHARACTER IS REMOVED, which is the oracle's own <c>Mid(sql,2)</c> arithmetic
+    /// [<c>n_cst_thread_trans.sru:L310</c>]. A doubled selector is therefore NOT an escape sequence: the
+    /// second one survives into the statement and the provider is the layer that rejects it.
+    /// </summary>
+    [Fact]
+    public async Task ADoubledSelectorIsNotAnEscapeSequenceAndTheSecondOneReachesTheProvider()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = "@@INSERT INTO COMPANY (NAME) VALUES ('x')" },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.Equal("@INSERT INTO COMPANY (NAME) VALUES ('x')", harness.Engine.LastCanonicalStatement);
+        Assert.True(harness.Engine.LastCacheStatement);
+    }
+
+    /// <summary>
+    /// A LONE SELECTOR IS ANSWERED BY THE TRANSACTION AND NOT BY A NEW GUARD. <c>"@"</c> is not the empty
+    /// string, so it passes both emptiness guards [<c>:L45</c>, <c>:L65</c>] exactly as the oracle's
+    /// would; the empty remainder is then refused by the transaction's own first line with
+    /// <c>E_INVALID_ARGUMENT</c> [<c>n_cst_thread_trans.sru:L219</c>].
+    /// </summary>
+    /// <remarks>
+    /// ⚠ THE CODE IS <c>E_INVALID_ARGUMENT</c> AND NOT <c>E_INVALID_SQL</c>, and the difference is the
+    /// point of the case: short-circuiting the empty remainder inside the task would answer the
+    /// statement-shaped code, when the layer that actually owns the question answers the argument-shaped
+    /// one. That is the same route a null statement takes, and it is preserved rather than harmonized
+    /// (constraint C-B).
+    /// </remarks>
+    [Fact]
+    public async Task ALoneSelectorIsRefusedByTheTransactionRatherThanByANewGuard()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = "@" },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+
+        // The transaction refuses before the engine is reached [n_cst_thread_trans.sru:L219 precedes
+        // :L229], so no statement was issued.
+        Assert.Equal(0, harness.Engine.ExecuteCalls);
+    }
+
+    /// <summary>
+    /// THE INSTALLED STATEMENT KEEPS ITS SELECTOR, so a task re-run stays in the same mode. The mode is
+    /// derived from the statement text on every execution rather than latched at installation, which is
+    /// why there is no second source of truth for it to drift from.
+    /// </summary>
+    [Fact]
+    public async Task TheInstalledStatementKeepsItsSelectorSoARerunStaysInTheSameMode()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        const string Prefixed = "@INSERT INTO COMPANY (NAME) VALUES ('x')";
+
+        SetCommandSqlResponse installed = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = handle, Sql = Prefixed },
+            null!);
+
+        Assert.Equal(WireRetCode.Ok, installed.Status.RetCode);
+
+        CommandTask task = Resolve(harness, handle);
+
+        // Stored verbatim - the setter is a faithful port of `_sSQL = sql` [:L47] and interprets nothing.
+        Assert.Equal(Prefixed, task.Worker.Sql);
+        Assert.True(task.Worker.StatementSelectsCaching);
+
+        // Two executions of the one installed statement, which is the shape of the oracle's loop.
+        for (int iteration = 0; iteration < 2; iteration++)
+        {
+            ExecResponse response = await harness.Commands.Exec(
+                new ExecRequest { Task = handle },
+                Context);
+
+            Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+            Assert.Equal("INSERT INTO COMPANY (NAME) VALUES ('x')", harness.Engine.LastCanonicalStatement);
+            Assert.True(harness.Engine.LastCacheStatement);
+        }
+
+        Assert.Equal(2, harness.Engine.ExecuteCalls);
+        Assert.Equal(Prefixed, task.Worker.Sql);
+    }
+
+    /// <summary>
+    /// THE SELECTOR MUST BE THE FIRST CHARACTER, WITH NO WHITESPACE TOLERANCE. The oracle's sibling test
+    /// is <c>Left(sql,1) = "@"</c> [<c>n_cst_thread_trans.sru:L309</c>] - position one, exactly - so
+    /// trimming first would accept a form the legacy rejects, which is a widening rather than a
+    /// preservation (constraint C-B).
+    /// </summary>
+    [Fact]
+    public async Task ASelectorBehindWhitespaceIsNotASelector()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = " @INSERT INTO COMPANY (NAME) VALUES ('x')" },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+
+        // Forwarded whole, leading space and selector alike, because neither is this layer's business.
+        Assert.Equal(" @INSERT INTO COMPANY (NAME) VALUES ('x')", harness.Engine.LastCanonicalStatement);
+        Assert.False(harness.Engine.LastCacheStatement);
+    }
+
+    /// <summary>
+    /// THE MODE TRAVELS ON A BATCH TOO, because both are carried in the one statement string and neither
+    /// this layer nor the transaction splits or counts statements.
+    /// </summary>
+    [Fact]
+    public async Task ThePrefixedFormIsCompatibleWithABatchBecauseBothTravelInOneString()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        const string Batch =
+            "INSERT INTO COMPANY (NAME) VALUES ('Teddy');INSERT INTO COMPANY (NAME) VALUES ('Mark')";
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = '@' + Batch },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.Equal(Batch, harness.Engine.LastCanonicalStatement);
+        Assert.True(harness.Engine.LastCacheStatement);
+    }
+
+    /// <summary>
+    /// A FAILING PREFIXED STATEMENT REPORTS THE STATEMENT THE PROVIDER RAN, NOT THE ONE THE CALLER
+    /// TYPED - so the selector is absent from the error payload's statement field as well.
+    /// </summary>
+    /// <remarks>
+    /// This is the case that fixes the ORDER of the strip and the bind. Removing the selector after
+    /// binding would leave it sitting in front of an interpolated statement, and the payload would then
+    /// name a statement no execution ever issued. The field is redacted on its way to the wire, so the
+    /// assertion is made on the raised payload, which is where the unmasked text exists.
+    /// </remarks>
+    [Fact]
+    public async Task AFailingPrefixedStatementReportsTheStatementTheProviderRan()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        harness.Engine.ExecuteResult = SqlState.Failed(RetCode.SQLITE_CONSTRAINT, "constraint failed");
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = "@INSERT INTO COMPANY (NAME) VALUES ('x')" },
+            Context);
+
+        Assert.Equal(WireRetCode.EDbError, response.Status.RetCode);
+
+        CommandTask task = Resolve(harness, handle);
+        DbErrorData raised = task.Proxy.GetLastDbErrorData();
+
+        Assert.NotEqual(DbErrorData.Empty, raised);
+        Assert.Equal("INSERT INTO COMPANY (NAME) VALUES ('x')", raised.SqlSyntax);
+        Assert.DoesNotContain("@", raised.SqlSyntax, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE DECISION IS A PURE FUNCTION OF THE STATEMENT, so the two halves of it can be pinned without a
+    /// transaction, an engine or a task at all.
+    /// </summary>
+    /// <param name="statement">The statement.</param>
+    /// <param name="selects">Whether it selects the mode.</param>
+    [Theory]
+    [InlineData("@INSERT INTO COMPANY (NAME) VALUES ('x')", true)]
+    [InlineData("@", true)]
+    [InlineData("@@SELECT 1", true)]
+    [InlineData("INSERT INTO COMPANY (NAME) VALUES ('x')", false)]
+    [InlineData(" @SELECT 1", false)]
+    [InlineData("SELECT '@' FROM COMPANY", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void TheModeDecisionIsAPureFunctionOfTheStatementText(string? statement, bool selects) =>
+        Assert.Equal(selects, SqlCommandTask.SelectsStatementCaching(statement));
+
+    /// <summary>
+    /// AND THE REMOVAL IS EXACTLY ONE CHARACTER, including in the degenerate case where nothing is left.
+    /// </summary>
+    /// <param name="statement">A statement that selects the mode.</param>
+    /// <param name="executable">What the provider is asked to run.</param>
+    [Theory]
+    [InlineData("@SELECT 1", "SELECT 1")]
+    [InlineData("@@SELECT 1", "@SELECT 1")]
+    [InlineData("@", "")]
+    [InlineData("@ SELECT 1", " SELECT 1")]
+    public void TheSelectorRemovalTakesExactlyOneCharacter(string statement, string executable) =>
+        Assert.Equal(executable, SqlCommandTask.StripStatementCachingPrefix(statement));
 
     /// <summary>A server call context whose only interesting member is its cancellation token.</summary>
     /// <param name="cancellationToken">The token the handlers will observe.</param>

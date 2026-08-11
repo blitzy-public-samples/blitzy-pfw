@@ -828,88 +828,24 @@ public sealed class PersistenceClientOptions
     [Required(AllowEmptyStrings = false)]
     public string Address { get; set; } = string.Empty;
 
-    /// <summary>
-    /// The transaction descriptor every Persistence session this service opens is begun with. Bound from
-    /// <c>DataServices:Persistence:Transaction</c>.
-    /// </summary>
-    public PersistenceTransactionOptions Transaction { get; set; } = new();
-}
-
-/// <summary>
-/// The transaction descriptor DataServices presents when it opens a Persistence session. Bound from
-/// <c>DataServices:Persistence:Transaction</c>.
-/// </summary>
-/// <remarks>
-/// <para>
-/// CREATED BY THE DECOMPOSITION, AND REQUIRED BY IT. In the legacy the DataWindow and the transaction
-/// object live in one process and a retrieval reaches the connection directly; across the boundary drawn
-/// between the DataWindow service layer and the only component permitted to execute SQL, a retrieval must
-/// name the session it runs on. C-05's <c>QueryRequest</c> carries a <c>TaskHandle</c> as its first field
-/// for exactly that reason, and a task is created against a session. So this group is what lets a
-/// retrieval have a session at all.
-/// </para>
-/// <para>
-/// <b>NO CREDENTIAL FIELD EXISTS HERE AND NONE MAY BE ADDED.</b> The descriptor's <c>logid</c> and
-/// <c>logpass</c> fields are Persistence's own, and Persistence's SQLite engine REFUSES a descriptor that
-/// supplies a credential outright - the evidenced connection is a file URI with no user
-/// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L450-L456</c>]. Carrying a credential here would
-/// therefore add a secret to configuration in order to have it rejected, which is the worst of both
-/// (constraint C-F).
-/// </para>
-/// <para>
-/// The defaults name the evidenced database and nothing else. <c>Dbms</c> is deliberately EMPTY: the
-/// legacy enumerates exactly two dialects, SQL Server as 0 and Oracle as 1
-/// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61</c>], and SQLite - the only engine
-/// with an evidenced schema - is in neither. Naming one would assert a dialect the deployment does not run
-/// (constraint C-E).
-/// </para>
-/// </remarks>
-public sealed class PersistenceTransactionOptions
-{
-    /// <summary>
-    /// The database name the descriptor carries. Defaults to the one evidenced database.
-    /// </summary>
-    /// <remarks>
-    /// <c>COMPANY</c> is the only table the repository evidences any DDL for
-    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469</c>], and Persistence resolves its
-    /// actual file from its own SQLite options rather than from this name, so this is the descriptor's
-    /// identity rather than a connection string.
-    /// </remarks>
-    public string Database { get; set; } = "COMPANY";
-
-    /// <summary>
-    /// The DBMS token the descriptor carries. Empty by default - see the type remarks.
-    /// </summary>
-    public string Dbms { get; set; } = string.Empty;
-
-    /// <summary>
-    /// The server name the descriptor carries. Empty by default, because the evidenced connection is a
-    /// local file and names no server.
-    /// </summary>
-    public string ServerName { get; set; } = string.Empty;
-
-    /// <summary>
-    /// The <c>DBParm</c> string the descriptor carries. Empty by default.
-    /// </summary>
-    /// <remarks>
-    /// <c>DisableBind=1</c> is what makes the legacy interpolate literals instead of binding them, which
-    /// AAP §0.6.4 identifies as the mechanical root of the SQL-injection exposure. Leaving this empty
-    /// means bind variables are used, and a deployment that sets it is asking for the legacy's own
-    /// unbound behaviour deliberately rather than by omission.
-    /// </remarks>
-    public string DbParm { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Whether the session is opened in auto-commit mode. Defaults to <see langword="true"/>.
-    /// </summary>
-    /// <remarks>
-    /// TRUE, BECAUSE A RETRIEVAL IS A READ AND A SINGLE UPDATE IS ONE STATEMENT. Auto-commit means each
-    /// statement commits itself, which is what a caller sending one update per request expects; a
-    /// deployment that batches several updates across requests onto one session turns this off and commits
-    /// explicitly. The two settings are not independent: Persistence REFUSES an explicit commit while
-    /// auto-commit is on [<c>n_cst_thread_trans.sru:L240</c>], and that refusal is the legacy's own.
-    /// </remarks>
-    public bool AutoCommit { get; set; } = true;
+    // ==========================================================================================
+    //  NO Transaction PROPERTY LIVES HERE, AND THE REMOVAL IS THE FIX RATHER THAN AN OVERSIGHT.
+    //
+    //  A `PersistenceTransactionOptions Transaction` group used to be declared here and bound from
+    //  `DataServices:Persistence:Transaction`, carrying a database name, a DBMS token, a server
+    //  name, a DBParm string and an auto-commit flag. NOTHING EVER READ IT. The descriptor every
+    //  session is actually begun with comes from `DataServices:PersistenceSession`, which
+    //  Grpc/DataWindowService.BuildSessionRequest composes - and the two groups disagreed on their
+    //  defaults, the dead one defaulting the database to COMPANY and auto-commit to true where the
+    //  live one defaults the database to empty and auto-commit to false.
+    //
+    //  A DEAD CONFIGURATION GROUP IS WORSE THAN A MISSING ONE, which is why it is deleted rather
+    //  than annotated: it appears in a documented section name, an operator setting it observes no
+    //  effect whatsoever, and the value most likely to be set - auto-commit, whose two readings have
+    //  opposite consequences for a partially applied multi-row update - is the one that would look
+    //  most like it had taken. One operator-facing authority now exists for the session descriptor,
+    //  and it is the one the code reads.
+    // ==========================================================================================
 }
 
 /// <summary>
@@ -2766,10 +2702,36 @@ public sealed class PersistenceSessionOptions
 
     /// <summary>The provider parameter string. <c>[transactiondata.srs:L9]</c></summary>
     /// <remarks>
+    /// <para>
     /// Opaque to this service and forwarded unexamined. It is the value Persistence parses for the
     /// bind-disabling and national-character-binding flags
     /// [<c>n_cst_thread_task_sqlbase.sru:L128-L129</c>], and it can carry a whole connection string, which
     /// is why the contract's response view reserves its field number alongside the password's.
+    /// </para>
+    /// <para>
+    /// <b>⚠ THIS IS THE SINGLE AUTHORITY FOR THE TWO CONNECTION FLAGS, AND THERE IS DELIBERATELY NO
+    /// SECOND WAY TO SET THEM.</b> Persistence derives <c>DisableBind</c> and <c>NCharBind</c> from this
+    /// string by the oracle's own regular expressions and REFUSES a session whose explicitly supplied
+    /// flags disagree with what the string resolves to - correctly, because honouring a disagreeing flag
+    /// would mean rewriting the caller's connection string and ignoring one would let a caller believe it
+    /// had disabled binding when it had not. This class therefore exposed the flags as independently
+    /// settable properties and this service sent them alongside the string, which made a plausible partial
+    /// configuration - the string set and a flag forgotten, or both set but inconsistent under the nesting
+    /// rule - break EVERY session with <c>E_INVALID_ARGUMENT</c> rather than only the request that got it
+    /// wrong. The properties are gone; the string is the only input.
+    /// </para>
+    /// <para>
+    /// <b>THE NESTING RULE IS THE PART THAT MADE THE OLD SHAPE A TRAP.</b> The oracle reads
+    /// <c>NCharBind</c> ONLY inside the <c>DisableBind</c> branch [<c>:L127-L132</c>], so
+    /// <c>"DisableBind=1"</c> on its own resolves to <c>disable_bind=true, nchar_bind=FALSE</c> - and an
+    /// operator who set that string and then set both properties true, which reads as the obviously
+    /// consistent thing to do, produced a disagreement. Deriving both from one string cannot produce one.
+    /// </para>
+    /// <para>
+    /// This service still does not parse the string. It forwards it and lets the service that owns the
+    /// connection resolve it, which keeps ONE reproduction of the legacy regular expressions in the whole
+    /// system rather than two that can drift across a network boundary.
+    /// </para>
     /// </remarks>
     public string DbParm { get; set; } = string.Empty;
 
@@ -2789,20 +2751,24 @@ public sealed class PersistenceSessionOptions
     /// <summary>The user parameter string. <c>[transactiondata.srs:L12]</c></summary>
     public string UserParm { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Whether the connection disables bind variables, mirroring the parsed <c>DisableBind</c> flag.
-    /// </summary>
-    /// <remarks>
-    /// FALSE by default, deliberately. A true value means the runtime interpolates values as literals
-    /// rather than binding them [<c>n_cst_thread_task_sqlbase.sru:L128</c>], which is the mechanical root of
-    /// the legacy SQL-injection exposure and is also what puts live row data into the statement text the
-    /// error payload carries. The setting exists because the legacy has it; the default is the safe arm.
-    /// </remarks>
-    public bool DisableBind { get; set; }
-
-    /// <summary>
-    /// Whether the connection binds national-character parameters, mirroring the parsed <c>NCharBind</c>
-    /// flag.
-    /// </summary>
-    public bool NCharBind { get; set; }
+    // ==============================================================================================
+    //  NO DisableBind AND NO NCharBind PROPERTY LIVES HERE, AND THAT IS THE FIX RATHER THAN AN
+    //  OMISSION.
+    //
+    //  Both flags are DERIVED from DbParm by the legacy's own regular expressions
+    //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129], and Persistence
+    //  reproduces that derivation in exactly one place. Offering them here as independently settable
+    //  properties gave one behaviour two inputs, and a disagreement between the two is not a
+    //  recoverable request-level error: Persistence refuses the SESSION, so every retrieval and every
+    //  update on the deployment fails until the configuration is corrected.
+    //
+    //  The safe default the removed DisableBind property documented survives unchanged, because it was
+    //  never this property that produced it: an empty DbParm matches neither pattern, so binding stays
+    //  ENABLED and values travel as parameters rather than as interpolated literals. The shipped
+    //  settings file leaves DbParm empty, so a deployment that configures nothing gets the safe arm -
+    //  which is the same guarantee, with one fewer way to contradict it.
+    //
+    //  See the remarks on DbParm for the nesting rule that made the old shape a trap for exactly the
+    //  configuration an operator would most plausibly write.
+    // ==============================================================================================
 }

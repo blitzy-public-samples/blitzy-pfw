@@ -209,14 +209,15 @@ Assertions.Assert(
 _ = app.Services.GetRequiredService<InternalTlsTrust>();
 
 // THE OTHER HALF OF THE SAME HANDSHAKE, AND FOR THE SAME REASON. The anchor above says which authority
-// this service ACCEPTS; this says which certificate it PRESENTS. `POST /v1/tokens` is protected by
-// mutual TLS and by nothing else - a caller cannot present a bearer token in order to obtain its first
-// bearer token - so the identity is what makes every subsequent authenticated call reachable at all.
-// Resolved eagerly so a configured-but-unreadable PEM pair is a failure to launch rather than a 401
-// from the issuance edge that looks like an upstream problem. An UNCONFIGURED pair resolves to an empty
-// collection, which is not a fault here: it is a deployment that presents no identity, and
-// `SecurityClient` says so by name at the first token request rather than sending a request that can
-// only be refused.
+// this service ACCEPTS; this says which certificate it PRESENTS. `POST /v1/tokens` accepts a caller
+// credential and no bearer token - a caller cannot present a bearer token in order to obtain its first
+// bearer token - and a client certificate is ONE OF THE TWO credentials it accepts, the other being a
+// shared secret presented as an HTTP Basic credential. Resolved eagerly so a configured-but-unreadable
+// PEM pair is a failure to launch rather than a 401 from the issuance edge that looks like an upstream
+// problem. An UNCONFIGURED pair resolves to an empty collection, which is not a fault here: it is a
+// deployment that presents no certificate and authenticates with the secret instead, which is the
+// documented bring-up. `SecurityClient` refuses only when NEITHER scheme is configured, and says so by
+// naming every setting rather than sending a request that can only be refused.
 X509Certificate2Collection securityClientIdentity =
     app.Services.GetRequiredService<X509Certificate2Collection>();
 
@@ -865,13 +866,14 @@ internal static class DataServicesComposition
     /// any.
     /// </para>
     /// <para>
-    /// AND THE CHANNEL PRESENTS A CLIENT CERTIFICATE, WHICH IS WHAT MAKES ANY OF THE ABOVE REACHABLE.
-    /// Contract C-01 authenticates <c>POST /v1/tokens</c> with mutual TLS and with nothing else, because
-    /// a caller cannot present a bearer token in order to obtain its first bearer token. The identity is
-    /// loaded once from <c>DataServices:Security:MutualTls</c> and attached by
-    /// <see cref="CreateSecurityChannelHandler"/>; an unreadable or half-configured pair ends the host,
-    /// and an unset pair is the documented "presents nothing" posture that the client reports by name at
-    /// the first token request.
+    /// AND THE CHANNEL CAN PRESENT A CLIENT CERTIFICATE, WHICH IS ONE OF THE TWO WAYS THE ABOVE BECOMES
+    /// REACHABLE. Contract C-01 authenticates <c>POST /v1/tokens</c> with a caller credential and no
+    /// bearer token, because a caller cannot present a bearer token in order to obtain its first bearer
+    /// token, and it accepts EITHER a shared secret as an HTTP <c>Basic</c> credential or a client
+    /// certificate. The certificate identity is loaded once from <c>DataServices:Security:MutualTls</c>
+    /// and attached by <see cref="CreateSecurityChannelHandler"/>; an unreadable or half-configured pair
+    /// ends the host, and an unset pair is the documented posture of a deployment that authenticates with
+    /// the secret instead. The client refuses only when NEITHER scheme is configured.
     /// </para>
     /// </remarks>
     internal static IServiceCollection AddDataServicesClients(this IServiceCollection services)
@@ -888,9 +890,9 @@ internal static class DataServicesComposition
 
         // THE CLIENT IDENTITY THIS SERVICE PRESENTS, LOADED ONCE AND SHARED BY EVERY HANDLER ROTATION.
         // The options group existed before this line did, and nothing consumed it: the Security channel
-        // was built with the trust anchor and no certificate, so `POST /v1/tokens` - which is protected
-        // by mutual TLS and by nothing else - refused every request this service made, and with no
-        // credential neither the four Persistence contracts nor the crypto contract were reachable. A
+        // was built with the trust anchor and no certificate, so a deployment that had chosen the
+        // certificate scheme presented nothing at `POST /v1/tokens`, was refused there, and reached
+        // neither the four Persistence contracts nor the crypto contract with no credential at all. A
         // SINGLETON rather than a per-handler load because the client factory recycles its primary
         // handler on a schedule: reading the PEM pair inside that factory would open a fresh private-key
         // handle per rotation and never close one, and it is the single load that lets the eager resolve
@@ -1132,12 +1134,15 @@ internal static class DataServicesComposition
     /// </para>
     /// <para>
     /// AND THE CERTIFICATE IS THE HALF THAT WAS MISSING. Contract C-01 protects <c>POST /v1/tokens</c>
-    /// with mutual TLS and with nothing else, because a caller cannot present a bearer token in order to
-    /// obtain its first bearer token - so a channel carrying the anchor but no identity completes the
-    /// handshake, is refused at the endpoint, and leaves this service with no credential for any of the
-    /// four Persistence contracts or the crypto contract. The identity is resolved from the container
-    /// rather than loaded here for the reason recorded on its registration: the factory recycles this
-    /// handler on a schedule and the private key must be read once, not per rotation.
+    /// with a caller credential and no bearer token, because a caller cannot present a bearer token in
+    /// order to obtain its first bearer token; a client certificate is one of the two credentials it
+    /// accepts, and the other - a shared secret as an HTTP <c>Basic</c> credential - travels on the
+    /// request rather than in the handshake. So for a deployment that chose the certificate scheme, a
+    /// channel carrying the anchor but no identity completes the handshake, is refused at the endpoint,
+    /// and leaves this service with no credential for any of the four Persistence contracts or the crypto
+    /// contract. The identity is resolved from the container rather than loaded here for the reason
+    /// recorded on its registration: the factory recycles this handler on a schedule and the private key
+    /// must be read once, not per rotation.
     /// </para>
     /// <para>
     /// An EMPTY collection is the unconfigured pair, which is a legitimate deployment state rather than a
@@ -1305,132 +1310,30 @@ internal static class DataServicesComposition
     /// AAP calls for and leaves the rest of the pipeline as published.
     /// </para>
     /// </remarks>
-    /// <summary>
-    /// Builds the message handler the Security typed client sends through, attaching this service's
-    /// client certificate when the deployment configured one.
-    /// </summary>
-    /// <param name="serviceProvider">The provider the typed client was resolved from.</param>
-    /// <returns>The primary handler for the Security typed client.</returns>
-    /// <exception cref="InvalidOperationException">
-    /// The configured certificate pair cannot be loaded or is unusable as a client identity.
-    /// </exception>
-    /// <remarks>
-    /// <para>
-    /// THIS EXISTS BECAUSE A DECLARED SETTING THAT NOTHING READS IS WORSE THAN NO SETTING AT ALL.
-    /// <c>DataServices:Security:MutualTls</c> is bound and validated as a pair, and C-01 publishes
-    /// <c>mutualTls</c> as one of the two credentials it accepts on <c>POST /v1/tokens</c>. Without this
-    /// registration the typed client carried only a base address and a resilience pipeline, so a
-    /// deployment that mounted a certificate pair and read the settings document would believe it had
-    /// configured a credential that was never presented - and the refusal would arrive as a
-    /// <c>401</c> from Security with nothing in it to suggest the certificate had been dropped on this
-    /// side. Consuming the setting is what makes the published alternative reachable.
-    /// </para>
-    /// <para>
-    /// NORMAL SERVER-CERTIFICATE VALIDATION IS RETAINED, and no callback is installed. The one thing a
-    /// client-certificate configuration must not do is quietly become a trust-everything switch: no
-    /// <c>RemoteCertificateValidationCallback</c>, no <c>DangerousAcceptAnyServerCertificate</c>, and no
-    /// revocation relaxation appears here or anywhere in this file, so the platform's own chain
-    /// validation applies exactly as it would without a client identity. The legacy tree contains the
-    /// opposite pattern - a test window that disables server- and host-certificate validation outright
-    /// with an inline note saying so - and reproducing that here would import a weakness from a surface
-    /// this refactor does not carry.
-    /// </para>
-    /// <para>
-    /// FAIL FAST, AND ON THE FIRST RESOLVE RATHER THAN ON THE FIRST HANDSHAKE. A handler factory runs
-    /// when the typed client is first resolved, which for this client is the first token request. A pair
-    /// of paths that names a missing file, an unreadable file, a mismatched key or material the platform
-    /// cannot use as a client identity is therefore reported as a configuration fault with the
-    /// configuration KEYS named, rather than as a TLS handshake failure whose message names neither. The
-    /// paths themselves are never quoted: a path is not a credential, but it names where one is mounted,
-    /// and a startup log is the wrong place to publish that.
-    /// </para>
-    /// <para>
-    /// WHEN NO PAIR IS CONFIGURED THIS RETURNS THE ORDINARY HANDLER UNCHANGED - it is not an error, and
-    /// it is a supported topology: wherever TLS is terminated ahead of Security by a reverse proxy or a
-    /// mesh sidecar, the client certificate never reaches the application, so the credential is the
-    /// <c>Basic</c> one this client writes onto the request instead. A deployment configuring NEITHER is
-    /// refused at startup by the options validator, so this method never has to represent that case.
-    /// </para>
-    /// </remarks>
-    private static HttpMessageHandler ConfigureSecurityTransport(IServiceProvider serviceProvider)
-    {
-        ArgumentNullException.ThrowIfNull(serviceProvider);
-
-        MutualTlsClientOptions mutualTls = serviceProvider
-            .GetRequiredService<IOptions<DataServicesOptions>>()
-            .Value
-            .Security
-            .MutualTls;
-
-        SocketsHttpHandler handler = new();
-
-        if (!mutualTls.IsConfigured)
-        {
-            return handler;
-        }
-
-        handler.SslOptions.ClientCertificates =
-        [
-            LoadClientCertificate(mutualTls.CertificatePath, mutualTls.CertificateKeyPath),
-        ];
-
-        return handler;
-    }
-
-    /// <summary>
-    /// Loads a PEM certificate and its PEM private key into one certificate usable as a client identity.
-    /// </summary>
-    /// <param name="certificatePath">Path to the PEM certificate.</param>
-    /// <param name="keyPath">Path to the PEM private key.</param>
-    /// <returns>The loaded certificate, carrying its private key.</returns>
-    /// <exception cref="InvalidOperationException">The pair cannot be loaded or is unusable.</exception>
-    /// <remarks>
-    /// <para>
-    /// THE PKCS#12 ROUND TRIP IS NOT REDUNDANT. A certificate created from PEM files carries an
-    /// ephemeral key, and on Windows the TLS stack cannot use such a key for client authentication - the
-    /// handshake fails with an error that names neither the certificate nor the cause. Exporting to
-    /// PKCS#12 and re-importing produces a certificate whose key the platform will use, and it is
-    /// harmless where it was not required. It is done unconditionally rather than under an
-    /// operating-system test so that a deployment behaves the same way everywhere and this path is
-    /// exercised by every run rather than only by the platform that needs it.
-    /// </para>
-    /// <para>
-    /// EVERY FAILURE MODE IS TRANSLATED, AND NONE OF THEM QUOTES A PATH. A missing or unreadable file,
-    /// material that is not PEM, a key that does not match the certificate and a key algorithm the
-    /// platform will not accept all arrive as different exception types from three different APIs; each
-    /// becomes one <see cref="InvalidOperationException"/> naming the two configuration keys and
-    /// carrying the original as its inner exception for a diagnostic log. The inner exception is safe to
-    /// carry here precisely because it is the platform's own message about material, not a message this
-    /// code composed from a path.
-    /// </para>
-    /// </remarks>
-    private static X509Certificate2 LoadClientCertificate(string certificatePath, string keyPath)
-    {
-        try
-        {
-            using X509Certificate2 fromPem =
-                X509Certificate2.CreateFromPemFile(certificatePath, keyPath);
-
-            return X509CertificateLoader.LoadPkcs12(
-                fromPem.Export(X509ContentType.Pkcs12),
-                password: null,
-                X509KeyStorageFlags.EphemeralKeySet);
-        }
-        catch (Exception exception) when (exception is IOException
-            or UnauthorizedAccessException
-            or CryptographicException
-            or ArgumentException)
-        {
-            throw new InvalidOperationException(
-                "The client certificate configured for the token-issuance edge could not be loaded as a "
-                + "usable client identity. Check that 'DataServices:Security:MutualTls:CertificatePath' "
-                + "and 'DataServices:Security:MutualTls:CertificateKeyPath' both name readable "
-                + "PEM-encoded files, that the key belongs to the certificate, and that its algorithm is "
-                + "one this platform accepts for client authentication. Neither path is quoted here, "
-                + "because a startup log must not record where key material is mounted.",
-                exception);
-        }
-    }
+    // ==============================================================================================
+    //  THERE IS EXACTLY ONE SECURITY-CHANNEL HANDLER AND ONE CERTIFICATE LOADER IN THIS FILE.
+    //
+    //  A SECOND, UNREACHABLE PAIR used to sit here - ConfigureSecurityTransport plus its own
+    //  LoadClientCertificate - reading the same DataServices:Security:MutualTls group and building
+    //  the same client identity a different way. Nothing referenced either: the typed client is wired
+    //  to CreateSecurityChannelHandler above, which resolves the identity from the container that
+    //  LoadSecurityClientIdentity registers.
+    //
+    //  THE DUPLICATE WAS NOT MERELY REDUNDANT, IT DISAGREED WITH THE LIVE PAIR ON THREE THINGS, and
+    //  each disagreement is the kind a reader would resolve in the dead code's favour because it was
+    //  the more elaborate of the two:
+    //    * it loaded per handler ROTATION rather than once, so the private key would have been read
+    //      from disk on the factory's recycle schedule;
+    //    * it did a PKCS#12 export-and-reimport round trip the live loader does not, and justified it
+    //      by a Windows client-authentication requirement - on a service whose only runtime is a Linux
+    //      container;
+    //    * it never applied InternalTlsTrust, so a channel built by it would have carried the client
+    //      identity WITHOUT the trust anchor and failed the handshake it was meant to complete.
+    //
+    //  Deleting it also returns the doc comment below to the member it documents: XML documentation
+    //  attaches to the next member, so the dead pair sitting between ApplyResilience's summary and
+    //  ApplyResilience itself meant the summary described a method it was not on.
+    // ==============================================================================================
 
     private static void ApplyResilience(
         HttpStandardResilienceOptions resilience,
@@ -1754,11 +1657,11 @@ internal static class DataServicesComposition
     /// ONE COMPONENT CHECK IS ADDED, AND IT OPENS NO CHANNEL. <c>AddDataServicesHealthChecks</c>
     /// registers the credential precondition of the token bootstrap: every outward call this service
     /// makes carries a bearer token, the only way to obtain one is the issuance edge, and contract C-01
-    /// protects that edge with mutual TLS and nothing else. A deployment that mounts no client
-    /// certificate is a legitimate startup state - and one in which this service can serve nothing - so
-    /// it must not report READY. The check reads bound configuration only: no token is minted, no
-    /// handshake is attempted and no upstream is probed, so it is compatible with the paragraph above
-    /// rather than an exception to it.
+    /// protects that edge with EITHER of two caller credentials - an HTTP <c>Basic</c> client credential
+    /// or a client certificate - requiring one of them. A deployment presenting NEITHER is a state in
+    /// which this service can serve nothing, so it must not report READY. The check reads bound
+    /// configuration only: no token is minted, no handshake is attempted and no upstream is probed, so it
+    /// is compatible with the paragraph above rather than an exception to it.
     /// </para>
     /// <para>
     /// PROBLEM DETAILS so that the framework's own challenge and every error response answer

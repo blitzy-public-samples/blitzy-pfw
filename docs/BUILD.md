@@ -777,17 +777,17 @@ builds Debug. Add `-c Release` when that matters.
 
 ### 7.1 One image per service, multi-stage, non-root
 
-> **Three of the four `Dockerfile`s are authored; `services/persistence-service/Dockerfile` is not.**
-> The three that exist — `gateway-service`, `dataservices-service` and `security-service` — are real files
-> a reader can open, and the probe table below reports what each one actually does rather than what it
-> should do. **No image has been built from any of them and no container has been started** (§1.3), so
-> nothing in this section is a report of runtime behaviour. §7.2 in particular is a constraint the manifest
-> and the definitions have to agree on, and it is the one most easily got wrong — the three existing
-> definitions are authored against it, with every `COPY` path repository-root-relative.
+> **ALL FOUR `Dockerfile`s ARE AUTHORED.** `gateway-service`, `dataservices-service`,
+> `persistence-service` and `security-service` are each a real file a reader can open, and the probe table
+> below reports what each one actually does rather than what it should do. **Exactly one image — Security's
+> — has been built and started here** (§1.3); the other three have not, so nothing in this section is a
+> report of their runtime behaviour. §7.2 in particular is a constraint the manifest and the definitions
+> have to agree on, and it is the one most easily got wrong — all four definitions are authored against it,
+> with every `COPY` path repository-root-relative.
 
 Each service has its own container definition at `services/<service-name>/Dockerfile`, each producing
-**one image per service** — four images, matching the four independently deployable services (C-J). Three
-exist today; Persistence's does not.
+**one image per service** — four images, matching the four independently deployable services (C-J). All
+four exist today.
 
 Every image is **multi-stage**: an SDK image (`mcr.microsoft.com/dotnet/sdk:10.0`) for restore and build,
 and an ASP.NET runtime image (`mcr.microsoft.com/dotnet/aspnet:10.0`) for the final stage. The final
@@ -851,10 +851,10 @@ the remediation posture.
 
 > ### ⚠️ THIS ENTIRE SECTION IS A SPECIFICATION, NOT A RUNBOOK — NOTHING IN IT CAN BE RUN TODAY
 >
-> **`orchestration/docker-compose.yml` does not exist**, and neither does
-> `services/persistence-service/Dockerfile`. There is therefore no manifest to invoke and no complete set
-> of images to build, so **every `docker compose` command below will fail at the first line** — not
-> because of a configuration mistake but because its subject is absent.
+> **`orchestration/docker-compose.yml` does not exist.** All four container definitions do (§7.1), so
+> the images have subjects to build from — but nothing assembles them into a stack, so **every
+> `docker compose` command below will fail at the first line** — not because of a configuration mistake
+> but because the manifest it names is absent.
 >
 > What IS runnable today is exactly two things, and they are separated out into §8.0 below so a reader is
 > never handed a command whose target does not exist: preparing the environment file, and generating the
@@ -906,11 +906,21 @@ kinds is the mistake this table exists to prevent:
 | `DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH` | Paths | DataServices' client certificate and key for the same edge |
 
 **`SECURITY_MTLS_CERT_PATH` and `SECURITY_MTLS_KEY_PATH` are not in that roster and must not be
-reintroduced** — they belonged to a withdrawn second mutual-TLS listener. The mutual-TLS entries are
-required rather than optional for any topology that serves a request: `POST /v1/tokens` is protected by
-mutual TLS and by nothing else, because a caller cannot present a bearer token in order to obtain its
-first bearer token. **Persistence has no client pair**, because it reads Security's anonymous key set and
-calls nothing else there. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling
+reintroduced as service settings** — they belonged to a withdrawn second mutual-TLS listener. That
+prohibition is about the .NET services and this roster, and it is *not* a prohibition on the names
+themselves: `tests/e2e` reads exactly those two for the suite's **own client** pair
+(`tests/e2e/fixtures/service-endpoints.ts`), which is the opposite half of the same handshake. The hazard
+that creates is stated in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 and in `tests/e2e/README.md` §4.6;
+neither surface may be reconciled by renaming the other's variable, because each is correct for its own
+consumer. The mutual-TLS entries above are
+**optional**, and that is the correction: `POST /v1/tokens` is protected by a caller credential and by no
+bearer token — a caller cannot present a bearer token in order to obtain its first bearer token — and it
+accepts **either** a shared secret as an HTTP `Basic` credential (`SECURITY_CLIENT_SECRET_GATEWAY` and
+`SECURITY_CLIENT_SECRET_DATASERVICES` above, which the documented bring-up supplies) **or** a client
+certificate. So a deployment that supplies the secrets and leaves all four certificate paths empty is a
+supported one, and every service reports ready under it; a deployment presenting **neither** scheme is
+refused at startup. **Persistence has no client pair and no secret**, because it reads Security's anonymous
+key set and calls nothing else there. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling
 rule, and §4.1.1 there for what is and is not enforced about the signing key.
 
 **Two settings leaves look like validation of that key and are not.** Security's `appsettings.json`
@@ -1037,19 +1047,22 @@ observed **across a network**: there is no Compose manifest, so nothing has been
 - **Gateway reports healthy only after Persistence, DataServices and Security do.** This is to be
   expressed with `depends_on` using a **health condition**, so Compose gates Gateway behind its three
   upstreams rather than merely behind their container start.
-- The health gates address each service's **single** listener over **HTTP/1.1** — 5101, 5102,
-
-- **Gateway and DataServices report `Degraded` — and therefore `503` — until their client certificates
-  are mounted**, so the two gates on 5105 and 5102 depend on `GATEWAY_MTLS_*` and `DATASERVICES_MTLS_*`
-  being supplied. This is not hardening bolted onto readiness; it is readiness answering its own
-  question truthfully. Both services forward every operation with a bearer token, the only way to obtain
-  one is Security's issuance edge, and contract C-01 protects that edge with **mutual TLS and nothing
-  else** — because a caller cannot present a bearer token in order to obtain its first bearer token. An
-  unset pair is deliberately **not** a startup failure, which is precisely why the readiness verdict has
-  to be the thing that notices: a service that starts and then refuses every request is not ready, and a
-  `200` there would open the dependency gate onto an instance that can serve nothing. Each service names
-  the unmet setting in a `credentials` component entry of its `/health` body, and generating the local
-  set is one command block — see [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1.
+- **Gateway and DataServices report `Degraded` — and therefore `503` — until they hold one accepted
+  caller credential**, so the two gates on 5105 and 5102 depend on `SECURITY_CLIENT_SECRET_GATEWAY` /
+  `SECURITY_CLIENT_SECRET_DATASERVICES` **or** the `GATEWAY_MTLS_*` / `DATASERVICES_MTLS_*` pairs being
+  supplied. This is not hardening bolted onto readiness; it is readiness answering its own question
+  truthfully. Both services forward every operation with a bearer token, the only way to obtain one is
+  Security's issuance edge, and contract C-01 protects that edge with **either of two caller
+  credentials — an HTTP `Basic` client credential or a client certificate — requiring one of them**,
+  because a caller cannot present a bearer token in order to obtain its first bearer token. The shared
+  secret is the alternative the documented bring-up supplies, and `orchestration/.env.example` leaves
+  both certificate pairs deliberately empty; a certificate-only deployment needs **both** halves of its
+  pair, because half a pair cannot complete a handshake. Presenting neither scheme is refused at startup
+  rather than reported, which is why the readiness verdict is about the material and not about intent: a
+  service that starts and then refuses every request is not ready, and a `200` there would open the
+  dependency gate onto an instance that can serve nothing. Each service names the unmet setting in a
+  `credentials` component entry of its `/health` body, and generating the local certificate set is one
+  command block — see [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1.
 - The `curl` health gates address the **HTTP/1.1** listener of each service — 5101, 5102, 5104 and
   5105. The gRPC surfaces of Persistence and DataServices are on 5111 and 5112 and are not probed, because
   an HTTP/1.1 `GET` against an `Http2` endpoint answers `400`. All **four** gates are `https`; see
@@ -1087,20 +1100,21 @@ For the port map, the transport chosen per service and the reasoning behind the 
 
 ### 8.3 This path is unexercised — restated at the point of use
 
-**The Compose bring-up above cannot be run today, and has not been verified.** What is missing is now a
-short list rather than everything: the manifest it invokes does not exist, and one of the four container
-definitions it would build — `services/persistence-service/Dockerfile` — does not exist either. The other
-three are present, and **all four service applications have an entry point**: every one of them builds to a
-runnable executable and starts under `dotnet run`. Docker was additionally unavailable in the environment
-where this migration was planned, so neither the bring-up nor its ordered health probes could have been
-exercised in any case.
+**The Compose bring-up above cannot be run today, and has not been verified.** Exactly one thing is
+missing: **`orchestration/docker-compose.yml`**, the manifest the command invokes. Everything it would
+build is present — **all four container definitions exist** (`services/gateway-service/Dockerfile`,
+`services/dataservices-service/Dockerfile`, `services/persistence-service/Dockerfile` and
+`services/security-service/Dockerfile`), and **all four service applications have an entry point**: every
+one builds to a runnable executable and starts under `dotnet run`. Docker was additionally unavailable in
+the environment where this migration was planned, so neither the bring-up nor its ordered health probes
+could have been exercised there in any case.
 
-**Correctness of this path is not asserted at present.** Once the manifest and the fourth container
-definition are authored, it will rest on definition-and-manifest review plus the CI pipeline of §10;
-neither has occurred, because the manifest is absent and no workflow file exists. Treat the commands in
-this section as the **intended** path — the specification the remaining work will be written against — and
-not as a transcript of a successful run. §1.3 states the same limitation for a reader who started at the
-top.
+**Correctness of this path is not asserted at present.** Once the manifest is authored, it will rest on
+definition-and-manifest review plus the CI pipeline of §10 — and **that pipeline exists**:
+`.github/workflows/ci.yml` is present and defines the four-service matrix, so the missing half of that
+sentence is the manifest and nothing else. Treat the commands in this section as the **intended** path —
+the specification the remaining work will be written against — and not as a transcript of a successful run.
+§1.3 states the same limitation for a reader who started at the top.
 
 ---
 
@@ -1542,10 +1556,11 @@ legacy document itself is not edited.
   exercised.
 - **That any image has been published.** The image job builds all four and pushes them to the GitHub
   container registry only on a push to the default branch, authenticated with the automatically
-  provisioned token. No push has occurred from here; the four images were built locally to prove the
-  Dockerfiles, and one of them — `services/persistence-service/Dockerfile` — was the last of the four to
-  exist and is verified to produce a non-root image on port 5101 with a declared volume and a TLS health
-  probe.
+  provisioned token. No push has occurred from here, and no image build is claimed beyond the one §1.3
+  records: Security's image was built and started and reached Docker health `healthy`. The other three
+  definitions — including `services/persistence-service/Dockerfile`, whose runtime stage declares a
+  non-root user, a volume and a TLS health probe against its `Rest` endpoint on 5101 while `EXPOSE`ing
+  both 5101 and the `Grpc` endpoint on 5111 — are reviewed rather than built here.
 - **That any service has served a request across a network.** Every service test drives its host **in
   process**, so no test performs a TLS handshake, ALPN negotiation, real gRPC channel setup or
   client-certificate exchange. Nothing in this document should be read as evidence about a deployed

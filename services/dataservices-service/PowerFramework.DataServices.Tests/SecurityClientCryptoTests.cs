@@ -59,12 +59,14 @@ public sealed class SecurityClientCryptoTests
         DataServicesOptions options = new();
         options.Security.BaseAddress = "https://security.invalid/";
 
-        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST HAVE AN IDENTITY TO PRESENT. The issuance endpoint is
-        // authenticated by mutual TLS and by nothing else, so the client refuses to ask for a token when
-        // this deployment configures no certificate - a certificate-less request could only be refused,
-        // and the refusal would read like a Security fault rather than a missing setting. PATHS ONLY:
-        // nothing here is opened or loaded, because the client checks only whether an identity is
-        // configured and the composition root is what reads the material.
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST BE ABLE TO PRESENT ONE. The issuance endpoint accepts
+        // EITHER a shared secret as an HTTP Basic credential or a client certificate, and the client
+        // refuses to ask for a token when a deployment configures NEITHER - a credential-less request
+        // could only be refused, and the refusal would read like a Security fault rather than a missing
+        // setting. THE CERTIFICATE SCHEME IS CHOSEN HERE because its settings are PATHS: nothing below is
+        // opened or loaded, since the client checks only WHETHER a credential is configured and the
+        // composition root is what reads the material - whereas satisfying the guard with the secret would
+        // put a credential-shaped literal in a test file for no gain (C-F).
         options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
         options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
 
@@ -1401,12 +1403,14 @@ public sealed class SecurityClientCryptoTests
         DataServicesOptions options = new();
         options.Security.BaseAddress = "https://security.invalid/";
 
-        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST HAVE AN IDENTITY TO PRESENT. The issuance endpoint is
-        // authenticated by mutual TLS and by nothing else, so the client refuses to ask for a token when
-        // this deployment configures no certificate - a certificate-less request could only be refused,
-        // and the refusal would read like a Security fault rather than a missing setting. PATHS ONLY:
-        // nothing here is opened or loaded, because the client checks only whether an identity is
-        // configured and the composition root is what reads the material.
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST BE ABLE TO PRESENT ONE. The issuance endpoint accepts
+        // EITHER a shared secret as an HTTP Basic credential or a client certificate, and the client
+        // refuses to ask for a token when a deployment configures NEITHER - a credential-less request
+        // could only be refused, and the refusal would read like a Security fault rather than a missing
+        // setting. THE CERTIFICATE SCHEME IS CHOSEN HERE because its settings are PATHS: nothing below is
+        // opened or loaded, since the client checks only WHETHER a credential is configured and the
+        // composition root is what reads the material - whereas satisfying the guard with the secret would
+        // put a credential-shaped literal in a test file for no gain (C-F).
         options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
         options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
 

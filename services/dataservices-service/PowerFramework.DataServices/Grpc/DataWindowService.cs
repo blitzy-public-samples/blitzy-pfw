@@ -181,8 +181,6 @@ using GeneratedDataWindowServiceBase =
     global::PowerFramework.Contracts.DataServices.V1.DataWindowService.DataWindowServiceBase;
 using PersistenceBeginSessionRequest =
     global::PowerFramework.Contracts.Persistence.V1.BeginSessionRequest;
-using PersistenceConnectionFlags =
-    global::PowerFramework.Contracts.Persistence.V1.ConnectionParameterFlags;
 using PersistenceCreateQueryTaskRequest =
     global::PowerFramework.Contracts.Persistence.V1.CreateQueryTaskRequest;
 using PersistenceCreateUpdateTaskRequest =
@@ -1865,7 +1863,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <summary>
     /// Composes the session request every scope this service opens is begun with.
     /// </summary>
-    /// <returns>The request, carrying the configured descriptor and the two connection flags.</returns>
+    /// <returns>The request, carrying the configured descriptor.</returns>
     /// <remarks>
     /// <para>
     /// ONE PLACE, TWO CONTRACTS. Both C-05 retrieval and C-06 update begin a session first, and both begin
@@ -1879,27 +1877,38 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// cheap to build and there is no performance objective to trade against (AAP 0.8.5).
     /// </para>
     /// <para>
-    /// THE FLAGS ARE NOT CREDENTIALS AND ARE NOT OPTIONAL. Persistence parses <c>DisableBind</c> and
-    /// <c>NCharBind</c> into the bind behaviour that decides whether values are bound as parameters or
-    /// interpolated into the statement text at all
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129</c>], so dropping them
-    /// silently changes which statement the upstream generates.
+    /// <b>⚠ NO FLAGS MESSAGE IS SENT, AND THE OMISSION IS THE POINT.</b> The contract's
+    /// <c>ConnectionParameterFlags</c> is a caller ASSERTION about what the connection-parameter string
+    /// resolves to, not an instruction: Persistence derives <c>DisableBind</c> and <c>NCharBind</c> from
+    /// the string itself by the oracle's own regular expressions
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129</c>] and refuses a
+    /// session whose supplied flags disagree with that derivation. This service forwards the string
+    /// UNEXAMINED, so it has nothing independent to assert - an assertion built from two separate
+    /// configuration keys was not a second opinion, it was a second copy that could contradict the first.
+    /// Leaving the field unset selects the contract's documented absent arm, "take them from the
+    /// connection-parameter string", which is the only reading with one authority.
+    /// </para>
+    /// <para>
+    /// <b>WHAT THAT FIXED.</b> The flags used to be sent from independently settable
+    /// <c>DisableBind</c>/<c>NCharBind</c> options beside <c>DbParm</c>. Because the oracle reads
+    /// <c>NCharBind</c> only INSIDE the <c>DisableBind</c> branch, the obvious operator configuration -
+    /// <c>DbParm="DisableBind=1"</c> with both flags set true - resolves to <c>nchar_bind=false</c> and
+    /// therefore DISAGREED. And a disagreement is not a per-request error: it refuses the SESSION, so
+    /// every retrieval and every update failed until the configuration was corrected. One input cannot
+    /// disagree with itself.
     /// </para>
     /// <para>
     /// AN UNCONFIGURED DEPLOYMENT SENDS AN EMPTY DESCRIPTOR, which is the default and is deliberate: it
     /// names no database and holds no credential, and Persistence then resolves its own connection from its
-    /// own options (AAP 0.6.6). Nothing here is a literal - every field arrives through the options pattern
-    /// (constraint C-F).
+    /// own options (AAP 0.6.6). An empty connection-parameter string matches neither pattern, so binding
+    /// stays ENABLED and values travel as parameters rather than as interpolated literals - the safe arm,
+    /// reached without a second setting to keep in step. Nothing here is a literal: every field arrives
+    /// through the options pattern (constraint C-F).
     /// </para>
     /// </remarks>
     private BeginSessionRequest BuildSessionRequest() => new()
     {
         Descriptor_ = BuildTransactionDescriptor(),
-        Flags = new PersistenceConnectionFlags
-        {
-            DisableBind = _persistenceSession.DisableBind,
-            NcharBind = _persistenceSession.NCharBind,
-        },
     };
     /// <summary>
     /// Runs a release and swallows its failure into a log record.
@@ -2232,6 +2241,49 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         // NotSupportedException outright - see the remarks on DataWindowEventConversation.WriteAsync for
         // the full evidence. Every write below therefore uses the one-argument form.
         CancellationToken cancellationToken = context.CancellationToken;
+
+        // ==========================================================================================
+        //  EVERY REQUESTED BUFFER IS VALIDATED BEFORE ANY UPSTREAM WORK IS ACQUIRED.
+        //
+        //  A PROTO3 ENUM FIELD IS AN OPEN int ON THE WIRE, so `repeated DwBuffer` accepts 7 or -1 as
+        //  readily as it accepts Primary!, Delete! and Filter!. Without this guard an unknown value
+        //  simply never matched the per-segment test further down, and the caller got a SUCCESSFUL,
+        //  COMPLETE, EMPTY stream - final marker and all - for a request the service did not
+        //  understand. That is the worst available failure shape: the caller cannot distinguish it
+        //  from a genuinely empty result, so a typo'd or version-skewed buffer reads as "no rows"
+        //  instead of "no such buffer".
+        //
+        //  BEFORE THE SCOPE, DELIBERATELY. Acquiring the upstream query task opens a Persistence
+        //  session and borrows a pooled transaction, and a request that cannot be served must not
+        //  cost either. It is also the same ordering the blank-handle guard above already uses.
+        //
+        //  THE TEST IS AN EXPLICIT THREE-WAY PATTERN AND NOT Enum.IsDefined: it matches the sibling
+        //  guard in Persistence's own buffer layer [Buffers/ItemStatus.cs], reads as the closed
+        //  three-member domain the legacy actually has, and needs no reflection.
+        // ==========================================================================================
+        foreach (DwBuffer candidate in request.Buffers)
+        {
+            if (candidate is DwBuffer.Primary or DwBuffer.Delete or DwBuffer.Filter)
+            {
+                continue;
+            }
+
+            // THE NUMERIC VALUE IS NAMED AND NOTHING ELSE IS (constraint C-F). It is the caller's own
+            // enum ordinal - not row data, not a statement, not a credential - and a refusal that did
+            // not say which value was rejected would leave a caller with a repeated field to bisect
+            // by hand.
+            throw new RpcException(new Status(
+                StatusCode.InvalidArgument,
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Retrieve was asked for buffer {0}, which is not one of the three DataWindow "
+                    + "buffers. Supply Primary ({1}), Delete ({2}) or Filter ({3}), or leave the "
+                    + "field empty for Primary alone.",
+                    (int)candidate,
+                    (int)DwBuffer.Primary,
+                    (int)DwBuffer.Delete,
+                    (int)DwBuffer.Filter)));
+        }
 
         // Empty means the primary buffer only, which is the legacy default: a freshly retrieved DataWindow
         // has nothing in Delete! and nothing in Filter! until a filter or a delete has run. Built as a set

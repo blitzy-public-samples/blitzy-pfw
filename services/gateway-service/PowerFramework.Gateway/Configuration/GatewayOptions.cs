@@ -718,7 +718,9 @@ public sealed class GatewayOptions : IValidatableObject
     {
         /// <summary>
         /// The DataServices service's gRPC address. Defaults to the local topology's port
-        /// <b>5102</b> over <b>https</b>, which is that service's single listener.
+        /// <b>5112</b> over <b>https</b>, which is that service's HTTP/2 listener - the one the gRPC
+        /// contracts are served on. Its REST surface answers on 5102, and the remarks below record why
+        /// this member names the other endpoint of the same service.
         /// </summary>
         /// <remarks>
         /// <para>
@@ -1229,10 +1231,9 @@ public sealed class JwtBearerVerificationOptions : IValidatableObject
     /// </para>
     /// <para>
     /// DELIBERATELY UNSET, AND THE EMPTY DEFAULT IS THE POINT. An earlier form of this type defaulted
-    /// to the loopback address of the local topology. That put an environment-specific plain-HTTP
-    /// address into source, where it is invisible to a deployment review, and it meant a deployment
-    /// that configured nothing still got a usable-looking authority pointing at a host that does not
-    /// exist for it. With no default, the presence rule below rejects the omission by name, so an
+    /// to the loopback address of the local topology. That put an environment-specific address into
+    /// source, where it is invisible to a deployment review, and it meant a deployment that configured
+    /// nothing still got a usable-looking authority pointing at a host that does not exist for it. With no default, the presence rule below rejects the omission by name, so an
     /// unconfigured deployment fails to start with a message identifying the exact configuration key -
     /// which is the fail-fast posture the legacy framework had when a structural fault terminated the
     /// application rather than degrading it. The loopback value now lives in
@@ -1253,14 +1254,16 @@ public sealed class JwtBearerVerificationOptions : IValidatableObject
     /// explicitly rather than leaving it implied.
     /// </para>
     /// <para>
-    /// THE RELAXATION IS SCOPED TO DEVELOPMENT, and it was not always. An earlier form of the base
-    /// appsettings.json set this to <see langword="false"/> so that the local plain-HTTP topology
-    /// worked out of the box. Base settings load in EVERY environment and take precedence over a code
-    /// default, so that arrangement silently disabled transport security for metadata retrieval
-    /// everywhere - a production deployment that simply omitted an override inherited the relaxation
-    /// without anything saying so. It now lives in appsettings.Development.json alongside the
-    /// plain-HTTP authority it exists for, so the two travel together and neither reaches an
-    /// environment that did not ask for it. Do not move either one back into the base file.
+    /// <b>THERE IS NO RELAXATION ANY MORE, IN EITHER ENVIRONMENT, AND THAT IS THE CURRENT STATE.</b> An
+    /// earlier form of the base appsettings.json set this to <see langword="false"/> so that a local
+    /// plain-HTTP topology worked out of the box. Base settings load in EVERY environment and take
+    /// precedence over a code default, so that arrangement silently disabled transport security for
+    /// metadata retrieval everywhere - a production deployment that simply omitted an override inherited
+    /// the relaxation without anything saying so. It was first narrowed to appsettings.Development.json
+    /// and is now gone from both: every listener in this system terminates TLS in every environment, so
+    /// the Development authority is <c>https://localhost:5104</c> and BOTH settings files state
+    /// <see langword="true"/> here. Do not reintroduce a <see langword="false"/> anywhere - a local
+    /// certificate is what the local bring-up supplies, not a relaxation.
     /// </para>
     /// </remarks>
     public bool RequireHttpsMetadata { get; set; } = true;

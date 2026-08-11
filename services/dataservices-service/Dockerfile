@@ -341,12 +341,15 @@ COPY --from=build /app/publish ./
 # Kestrel__Endpoints__Rest__Url or Kestrel__Endpoints__Grpc__Url, because the environment provider is
 # added after appsettings.json and wins on an identical key.
 #
-# NO CERTIFICATE, NO KEY AND NO TRUST ANCHOR IS IN THIS IMAGE, AND NONE IS REQUIRED TO START IT
-# (constraint C-F). Neither endpoint terminates TLS, so there is no material to mount and nothing here
-# to hold a path to. A deployment that DOES terminate TLS collapses both endpoints back onto 5102 by
-# pointing Kestrel__Endpoints__Rest__Url at https://+:5102 with Protocols Http1AndHttp2, supplying
-# Kestrel__Certificates__Default__Path and __KeyPath from its own secret layer and clearing the Grpc
-# endpoint - ALPN then negotiates both versions on one address, with no change to this file.
+# NO CERTIFICATE, NO KEY AND NO TRUST ANCHOR IS BAKED INTO THIS IMAGE, AND NONE MAY BE (constraint C-F).
+# BOTH endpoints terminate TLS - appsettings.json declares Rest at https://+:5102 and Grpc at
+# https://+:5112 - so the server material and the trust anchor are MOUNTED READ-ONLY at run time from
+# the orchestration secret layer and named to the application by configuration key
+# (Kestrel__Certificates__Default__Path and __KeyPath, and INTERNAL_TLS_TRUSTED_CA_PATH). Nothing in
+# this file holds a path to material, and no path is a build input. A deployment that would rather serve
+# both protocol versions on ONE address collapses the pair by pointing Kestrel__Endpoints__Rest__Url at
+# https://+:5102 with Protocols Http1AndHttp2 and clearing the Grpc endpoint - ALPN then negotiates both
+# versions there, with no change to this file.
 ENV ASPNETCORE_HTTP_PORTS=""
 
 # EXPOSE documents the contract and does not create it; the binding above comes from configuration.

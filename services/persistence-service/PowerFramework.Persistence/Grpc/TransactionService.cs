@@ -113,6 +113,7 @@ using PowerFramework.Persistence.Authorization;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Runtime;
+using PowerFramework.Persistence.Sql;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
 
@@ -338,7 +339,7 @@ internal sealed class TransactionSession
         PoolLease lease,
         in TransactionData descriptor,
         IPooledTransaction transaction,
-        Lock gate)
+        TransactionGate gate)
     {
         SessionId = sessionId ?? throw new ArgumentNullException(nameof(sessionId));
         Lease = lease;
@@ -469,12 +470,16 @@ internal sealed class TransactionSession
     /// could ever see.
     /// </para>
     /// <para>
-    /// Held only across SYNCHRONOUS collaborator calls - every handler in this service completes
-    /// without awaiting anything while holding it - so it cannot deadlock and cannot be captured
-    /// across a continuation.
+    /// 🔴 <b>HOLDABLE ACROSS AN <see langword="await"/>, WHICH IS WHY IT IS NOT A
+    /// <see cref="System.Threading.Lock"/>.</b> One of the operations that must hold it is
+    /// asynchronous - C-05's <c>Query</c> streams its result, so its SQL execution and its result
+    /// capture span continuations - and a <c>Lock</c> cannot be held across one. That is precisely how
+    /// the streaming retrieval came to run UNGATED while every sibling operation was gated, and an
+    /// operation outside the gate makes the gate meaningless for the ones inside it, because the object
+    /// it protects is shared. See <c>Grpc/TransactionGate.cs</c> for the full reasoning.
     /// </para>
     /// </remarks>
-    internal Lock Gate { get; }
+    internal TransactionGate Gate { get; }
 }
 
 /// <summary>
@@ -543,7 +548,7 @@ internal sealed class TransactionSessionRegistry
     /// take the first gate for one transaction receive the same gate.
     /// </para>
     /// </remarks>
-    private readonly ConditionalWeakTable<IPooledTransaction, Lock> _gates = [];
+    private readonly ConditionalWeakTable<IPooledTransaction, TransactionGate> _gates = [];
 
     /// <summary>
     /// Creates the registry over its ceilings, its clock and the pool its teardown returns references to.
@@ -642,7 +647,7 @@ internal sealed class TransactionSessionRegistry
         // One gate per borrowed transaction, created on first use and shared thereafter. Two sessions
         // opened with equal descriptors reach this line with the SAME transaction instance and so leave
         // it holding the SAME gate - which is the whole point; see TransactionSession.Gate.
-        Lock gate = _gates.GetValue(transaction, static _ => new Lock());
+        TransactionGate gate = _gates.GetValue(transaction, static _ => new TransactionGate());
 
         while (true)
         {
@@ -799,7 +804,7 @@ internal sealed class TransactionSessionRegistry
             return RetCode.E_OUT_OF_BOUND;
         }
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             IPooledTransaction? borrowed = session.Transaction;
             long released = _pool.Release(session.Lease, ref borrowed);
@@ -1220,6 +1225,31 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     private const string UnknownSessionDiagnostic =
         "The request named no live transaction session. A session handle is issued by BeginSession, is "
         + "valid only on the instance that issued it, and is single-use: EndSession retires it.";
+
+    /// <summary>
+    /// The one sentence returned when a caller-supplied statement is not something a read-scoped caller
+    /// may ask this service to prepare.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>IT NAMES THE RULE AND NEVER THE REJECTED TEXT (constraint C-F).</b> Echoing the statement would
+    /// put a caller-authored value into a field documented as opaque display text; naming the rule tells a
+    /// caller what to change without quoting anything, and because it is a fixed sentence it passes
+    /// through <c>Errors/SqlRedactor.cs</c> byte for byte.
+    /// </para>
+    /// <para>
+    /// The wording is deliberately the same rule as C-05's, because it IS the same rule with the same
+    /// implementation behind it - <c>Sql/ReadOnlyStatementGuard.cs</c>. Two differently worded statements
+    /// of one grammar would be two things to drift.
+    /// </para>
+    /// </remarks>
+    private const string InadmissibleStatementDiagnostic =
+        "The supplied statement is not admissible on this contract. Syntax derivation is published under "
+        + "the read scope, so it accepts ONE statement beginning with SELECT, WITH or VALUES, and refuses "
+        + "data manipulation, data definition, PRAGMA, ATTACH, DETACH, transaction control, procedure "
+        + "execution, extension loading, SQL comments and any second statement after a semicolon. Send "
+        + "state-changing statements to the write-scoped C-07 command contract instead. The rejected text "
+        + "is deliberately not quoted here.";
 
     /// <summary>
     /// The one sentence returned when the caller's request was cancelled before this service issued the
@@ -1731,8 +1761,11 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// it: the REFERENCE is released, and whether the connection closes is the pool's decision.
     /// </summary>
     /// <param name="request">The session to end.</param>
-    /// <param name="context">The call context. Not consulted.</param>
-    /// <returns>A completed task carrying the outcome.</returns>
+    /// <param name="context">
+    /// The call context. Not consulted - see the uncancellable-wait paragraph below for why a teardown does
+    /// not take its caller's token.
+    /// </param>
+    /// <returns>The outcome.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
@@ -1753,10 +1786,49 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// of the array [<c>:L101-L114</c>]. Both decisions are the pool's; this service makes neither.
     /// </para>
     /// <para>
-    /// <b>The handle is retired before either pool call.</b> Retiring first is what makes a handle
-    /// single-use under concurrency: a second EndSession naming the same handle loses the removal race
-    /// and reports the unknown-session outcome rather than releasing a second reference the caller
-    /// never took.
+    /// <b>THE CLOSING MARK COMES FIRST, BEFORE THE RETIREMENT AND BEFORE THE PURGE, AND THE ORDER IS THE
+    /// WHOLE OF THE LIFECYCLE GUARANTEE.</b> Retiring the handle stops a caller RESOLVING the session; it
+    /// does nothing about a caller that resolved it a moment earlier and is still on its way to the gate,
+    /// and it does nothing about a create that is between building a task and publishing it. Marking the
+    /// session closing inside the gate closes both windows at once, because every operating path and every
+    /// publication path tests that flag inside the same gate:
+    /// </para>
+    /// <list type="number">
+    ///   <item><description>
+    ///   an operation already inside the gate finishes first - this call blocks behind it - so nothing is
+    ///   torn out from under a statement in flight;
+    ///   </description></item>
+    ///   <item><description>
+    ///   an operation not yet in the gate enters after the mark, reads <c>IsClosing</c> and refuses with
+    ///   <c>E_INVALID_TRANSACTION</c> rather than touching a transaction on its way back to the pool;
+    ///   </description></item>
+    ///   <item><description>
+    ///   a create that publishes BEFORE the mark is seen by the purge below, and a create that reaches the
+    ///   gate AFTER the mark refuses - so no task can be published into a registry the purge has already
+    ///   walked. Marking AFTER the purge, which is what this handler used to do, left exactly that gap.
+    ///   </description></item>
+    /// </list>
+    /// <para>
+    /// <b>The handle is retired before either pool call.</b> Retiring is what makes a handle single-use
+    /// under concurrency: a second EndSession naming the same handle loses the removal race and reports the
+    /// unknown-session outcome rather than releasing a second reference the caller never took. It follows
+    /// the mark rather than preceding it because the mark is the safety property and the removal is only
+    /// the bookkeeping; a second EndSession that marks an already-marked session changes nothing.
+    /// </para>
+    /// <para>
+    /// <b>THE GATE IS AWAITED RATHER THAN BLOCKED ON.</b> A streaming retrieval holds the gate for the whole
+    /// of its stream, so a blocking acquisition here would pin a request thread for that entire duration.
+    /// Awaiting yields the thread instead, which changes no observable outcome and no ordering.
+    /// </para>
+    /// <para>
+    /// <b>BUT THE WAIT IS UNCANCELLABLE, AND THAT IS DELIBERATE RATHER THAN AN OVERSIGHT.</b> This handler is
+    /// a TEARDOWN, and its steps are not independently meaningful: abandoning it between the closing mark and
+    /// the release would leave a session that is retired from its registry, marked unusable, purged of its
+    /// tasks - and still holding a pool reference nothing will ever return, because no later call can name it.
+    /// A caller that goes away mid-teardown therefore gets the teardown finished on its behalf rather than a
+    /// half-dismantled session and a pinned connection. It is also why the call context is still not
+    /// consulted here; the only cancellable waits in this service are the ones whose abandonment leaves no
+    /// residue.
     /// </para>
     /// <para>
     /// The bounds guard runs before the pool calls so that an index invalidated by another session's
@@ -1765,7 +1837,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// </para>
     /// </remarks>
     [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
-    public override Task<EndSessionResponse> EndSession(
+    public override async Task<EndSessionResponse> EndSession(
         EndSessionRequest request,
         ServerCallContext context)
     {
@@ -1773,23 +1845,34 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         if (!_sessions.TryResolve(request.Session, out TransactionSession? session) || session is null)
         {
-            return Task.FromResult(new EndSessionResponse
+            return new EndSessionResponse
             {
                 Status = TransactionWireCodes.Status(
                     RetCode.E_INVALID_TRANSACTION,
                     UnknownSessionDiagnostic),
-            });
+            };
         }
 
-        // Retire first, so the handle is single-use even under a concurrent second EndSession.
+        // ------------------------------------------------------------------------------------------
+        //  MARK CLOSING FIRST, INSIDE THE GATE. Everything below - the retirement, the purge and the
+        //  release - is bookkeeping that this single flag makes safe. Waiting for the gate here also
+        //  waits out any operation currently in flight on the transaction, so the purge below can never
+        //  meet a running statement.
+        // ------------------------------------------------------------------------------------------
+        using (await session.Gate.EnterAsync(CancellationToken.None).ConfigureAwait(false))
+        {
+            session.MarkClosing();
+        }
+
+        // Retire next, so the handle is single-use even under a concurrent second EndSession.
         if (!_sessions.TryRemove(session.SessionId))
         {
-            return Task.FromResult(new EndSessionResponse
+            return new EndSessionResponse
             {
                 Status = TransactionWireCodes.Status(
                     RetCode.E_INVALID_TRANSACTION,
                     UnknownSessionDiagnostic),
-            });
+            };
         }
 
         // ------------------------------------------------------------------------------------------
@@ -1805,6 +1888,13 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         //  It runs before the lease guard as well, because the tasks must go whatever the lease turns out
         //  to be - the session is already retired from its own registry at this point, so its handles can
         //  never be legitimately used again regardless of what the pool says.
+        //
+        //  AND IT RUNS AFTER THE CLOSING MARK, which is what makes the walk exhaustive. A create that had
+        //  not yet published when the mark went up now refuses at the gate instead of publishing, so this
+        //  is the LAST set of tasks that can exist for this session - there is no later arrival for a
+        //  second walk to catch. Each entry goes through its registry's release/disposal handoff rather
+        //  than a direct teardown, so an operation still in flight disposes itself on exit instead of
+        //  being disposed underneath itself [docs/PB多线程绕坑提示.md, hazard 1].
         // ------------------------------------------------------------------------------------------
         int retiredQueries = _queryTasks.PurgeSession(session.SessionId);
         int retiredUpdates = _updateTasks.PurgeSession(session.SessionId);
@@ -1825,27 +1915,24 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         long guard = GuardLease(session.Lease);
         if (guard != RetCode.OK)
         {
-            return Task.FromResult(new EndSessionResponse
+            return new EndSessionResponse
             {
                 Status = TransactionWireCodes.Status(guard),
-            });
+            };
         }
 
         long rtCode;
 
-        lock (session.Gate)
+        using (await session.Gate.EnterAsync(CancellationToken.None).ConfigureAwait(false))
         {
             // [n_cst_thread_task_sqlbase.sru:L141] of_Release - hands the borrowed object back and
             // disconnects only on the last reference. The reference is passed by `ref` because the
             // oracle's signature is `ref n_cst_thread_trans` and the pool nulls the caller's handle
             // [n_cst_thread_trans_pool.sru:L129].
-            // MARKED CLOSING FIRST, INSIDE THE GATE, and this single line is what makes the lifecycle
-            // atomic. Retiring the handle from the registry above is not enough on its own: a request that
-            // resolved this session a moment earlier is already past that check and would enter this gate
-            // after the release below and operate on a handed-back transaction. Every other operation tests
-            // this flag inside this same gate, so the two cannot interleave.
-            session.MarkClosing();
-
+            //
+            // The session was marked closing in the FIRST gate acquisition above, before the retirement
+            // and before the purge, so by the time this release runs nothing can be operating on the
+            // transaction and nothing can have been published against it since the purge walked.
             IPooledTransaction? borrowed = session.Transaction;
             long released = _pool.Release(session.Lease, ref borrowed);
 
@@ -1863,10 +1950,10 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             session.Lease.Id,
             rtCode);
 
-        return Task.FromResult(new EndSessionResponse
+        return new EndSessionResponse
         {
             Status = TransactionWireCodes.Status(rtCode),
-        });
+        };
     }
 
     /// <summary>
@@ -1934,7 +2021,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         bool closing;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             closing = session.IsClosing;
 
@@ -2016,7 +2103,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         bool closing;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             closing = session.IsClosing;
 
@@ -2242,7 +2329,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         long rtCode;
         DbErrorData captured;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             if (session.IsClosing)
             {
@@ -2324,7 +2411,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         bool closing;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             closing = session.IsClosing;
 
@@ -2414,7 +2501,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         bool closing;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             closing = session.IsClosing;
 
@@ -2503,7 +2590,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         GetSessionStateResponse response;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             if (session.IsClosing)
             {
@@ -2532,7 +2619,20 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 SqlCode = transaction.SqlCode,
                 SqlDbCode = transaction.SqlDbCode,
                 SqlNrows = transaction.SqlNRows,
-                SqlErrText = transaction.SqlErrText,
+
+                // 🔴 MASKED, AND IT IS THE ONLY MEMBER HERE THAT NEEDS TO BE. This is the provider's own
+                // message, and what SQLite puts in it routinely includes the caller's data - a uniqueness
+                // violation names the duplicated column, a constraint or type failure quotes the offending
+                // value. The legacy could publish it safely because it published nothing: it is a library
+                // and the field never left the process. Across this boundary it reaches a network peer, so
+                // the same literal-scoped policy the statement field always had covers it too. A message
+                // quoting no value is byte-identical after masking, so a caller reading this for display
+                // loses nothing it was entitled to (constraints C-F, C-B).
+                SqlErrText = SqlRedactor.Instance.Redact(transaction.SqlErrText),
+
+                // NOT MASKED, DELIBERATELY. The return data is a stored-procedure OUT value the caller
+                // itself asked for - it is the RESULT of the operation rather than a diagnostic about it,
+                // and masking a result would break the operation instead of protecting anything.
                 SqlReturnData = transaction.SqlReturnData,
 
                 // [:L340] SQLCode >= 0 - which is why 100 is a success.
@@ -2583,7 +2683,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         bool closing;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             // THE CLOSING GUARD, and this handler needs it as much as the ones that route through
             // RunAndProject: clearing state MUTATES the transaction, so on a session that is retiring it
@@ -2732,9 +2832,30 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             });
         }
 
+        // 🔴 THE READ-SCOPE ADMISSIBILITY TEST, ON THE SECOND SURFACE THAT TAKES A CALLER-AUTHORED
+        // STATEMENT. This RPC is published under the READ scope and its argument goes to the provider, so
+        // it needs the same gate C-05's QuerySpec.sql does - a guard applied to one of the two and not the
+        // other would leave the read scope reaching arbitrary SQL through whichever one was missed.
+        //
+        // THE DERIVATION PREPARES RATHER THAN EXECUTES - the surface asks the provider for a schema only -
+        // so this test is defence in depth rather than the sole barrier. That is the reason it is here
+        // rather than absent: "the provider will not step it" is a property of a collaborator this
+        // handler does not own, and a guard that depends on one is a guard that breaks when the
+        // collaborator changes. The refusal is the same code and the same fixed sentence C-05 answers, so
+        // no new value enters a consumer's branch set (constraints C-G, C-F).
+        if (!ReadOnlyStatementGuard.IsAdmissibleStatement(sql))
+        {
+            return Task.FromResult(new GridSyntaxFromSqlResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.E_INVALID_SQL,
+                    InadmissibleStatementDiagnostic),
+            });
+        }
+
         GridSyntaxOutcome derived;
 
-        lock (session.Gate)
+        using (session.Gate.Enter())
         {
             derived = _querySurface.GridSyntaxFromSql(session.Transaction, sql);
         }

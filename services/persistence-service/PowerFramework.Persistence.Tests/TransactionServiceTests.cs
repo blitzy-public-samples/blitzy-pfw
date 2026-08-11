@@ -1184,6 +1184,79 @@ public sealed class TransactionServiceTests
         Assert.Equal(string.Empty, response.Status.ErrorText);
     }
 
+    [Fact]
+    public async Task GridSyntaxFromSqlEnforcesTheReadOnlyStatementGrammarBeforeAnyDerivation()
+    {
+        // ⚠ THE SECOND READ-SCOPED SURFACE THAT TAKES CALLER-AUTHORED SQL, and it needs the same gate
+        // C-05's QuerySpec.sql does: a guard applied to one of the two and not the other would leave the
+        // read scope reaching arbitrary SQL through whichever was missed. The grammar itself is pinned in
+        // ReadOnlyStatementGuardTests; what this case adds is that this RPC actually applies it, and
+        // applies it BEFORE the derivation - the query surface is never called at all.
+        //
+        // The derivation asks the engine for a result SCHEMA rather than executing the statement, so this
+        // is defence in depth rather than the sole barrier. That is precisely why it is asserted: "the
+        // provider will not step it" is a property of a collaborator this handler does not own.
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        GridSyntaxFromSqlResponse refused = await harness.Service.GridSyntaxFromSql(
+            new GridSyntaxFromSqlRequest { Session = session, Sql = "DROP TABLE COMPANY" },
+            null!);
+
+        Assert.Equal(WireRetCode.EInvalidSql, refused.Status.RetCode);
+        Assert.Equal(string.Empty, refused.Syntax);
+
+        // NOTHING WAS DERIVED, which is what makes this a pre-derivation guard rather than a filter on the
+        // way out.
+        Assert.Equal(0, harness.QuerySurface.Calls);
+
+        // THE DIAGNOSTIC NAMES THE RULE AND NEVER THE REJECTED TEXT (constraint C-F).
+        Assert.DoesNotContain("DROP TABLE", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("read scope", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("C-07", refused.Status.ErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GridSyntaxFromSqlStillDerivesForAnOrdinaryReadStatement()
+    {
+        // THE OTHER HALF OF THE CLAIM. Without it the guard could be a constant refusal and the case above
+        // would still pass. The accepted statement carries a refused word as DATA inside a string literal,
+        // so it also pins that the grammar is quote-aware rather than a substring search.
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        GridSyntaxFromSqlResponse derived = await harness.Service.GridSyntaxFromSql(
+            new GridSyntaxFromSqlRequest
+            {
+                Session = session,
+                Sql = "SELECT * FROM COMPANY WHERE NOTE = 'drop table x'",
+            },
+            null!);
+
+        Assert.Equal(WireRetCode.Ok, derived.Status.RetCode);
+        Assert.Equal("table(column=(x))", derived.Syntax);
+        Assert.Equal(1, harness.QuerySurface.Calls);
+    }
+
+    [Fact]
+    public async Task GridSyntaxFromSqlStillReportsAnEmptyStatementThroughTheLegacyGuardFirst()
+    {
+        // CONSTRAINT C-B. The legacy refuses an empty statement with its own guard and sets the diagnostic
+        // to the CODE'S OWN NAME rather than to a sentence [n_cst_thread_trans.sru:L296-L299]. The new
+        // scope guard must not intercept that case and answer its own message instead, because the legacy
+        // diagnostic is observable.
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        GridSyntaxFromSqlResponse refused = await harness.Service.GridSyntaxFromSql(
+            new GridSyntaxFromSqlRequest { Session = session, Sql = string.Empty },
+            null!);
+
+        Assert.Equal(WireRetCode.EInvalidSql, refused.Status.RetCode);
+        Assert.Equal(nameof(RetCode.E_INVALID_SQL), refused.Status.ErrorText);
+        Assert.Equal(0, harness.QuerySurface.Calls);
+    }
+
     // ---------------------------------------------------------------------------------------------
     //  13. THE RET CODE CORRESPONDENCE - the review invariant, asserted value for value
     // ---------------------------------------------------------------------------------------------

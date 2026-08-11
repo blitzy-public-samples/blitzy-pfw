@@ -421,6 +421,37 @@ public sealed class ScopeAuthorizationTests
         }
     }
 
+    /// <summary>
+    /// The scope handler is registered EXACTLY ONCE, so one scope decision is evaluated once.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE COMPOSITION ROOT USED TO CALL <c>AddScopeAuthorization</c> TWICE.</b> Two convergent
+    /// remediations of the same finding each added the line, and the helper registers its handler with
+    /// <c>AddSingleton</c> rather than <c>TryAddSingleton</c> - so the container held two
+    /// <see cref="ScopeHandler"/> instances and the framework, which resolves EVERY registered handler for
+    /// a requirement, invoked both on every gated request. The duplicate was harmless to the verdict, which
+    /// is exactly why it needed asserting: it emitted two records for one decision and gave a future edit
+    /// two places to diverge.
+    /// </para>
+    /// <para>
+    /// Counted from the RUNNING HOST'S provider rather than from a hand-built collection, because the
+    /// property under test is a property of this service's composition root and a local registration would
+    /// prove only that the helper is idempotent - which it is not.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheScopeHandlerIsRegisteredExactlyOnce()
+    {
+        await using GatewayTestHostFixture host = new();
+
+        IEnumerable<IAuthorizationHandler> handlers =
+            host.Services.GetServices<IAuthorizationHandler>();
+
+        Assert.Single(handlers, static handler => handler is ScopeHandler);
+    }
+
     /// <summary>The handler grants a scope carried inside a space-delimited claim, at any position.</summary>
     /// <param name="claim">The claim value.</param>
     /// <param name="scope">The scope required.</param>

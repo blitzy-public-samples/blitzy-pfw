@@ -5,9 +5,10 @@
 
     The per service solution for the Persistence service of the PowerFramework .NET 10
     decomposition. Persistence is the ONLY service in the system that generates or executes SQL
-    and the ONLY one that holds a storage provider. It listens on port 5101, speaks gRPC for
-    contracts C-05 Query, C-06 Update, C-07 Command and C-08 Transaction, and exposes REST
-    /health anonymously alongside /v1/ping behind a JWT. It validates tokens only and never mints
+    and the ONLY one that holds a storage provider. It binds TWO TLS endpoints, one protocol version
+    each: REST on port 5101 with Http1, carrying the anonymous /health and the JWT protected
+    /v1/ping, and gRPC on port 5111 with Http2, carrying contracts C-05 Query, C-06 Update,
+    C-07 Command and C-08 Transaction. It validates tokens only and never mints
     one, because Security is the sole issuer in the system.
 
     WHY THIS FILE EXISTS, AND WHY IT IS NOT BOILERPLATE

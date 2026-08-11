@@ -374,6 +374,26 @@ builder.Services
 // read the same `scope` claim with the same ordinal, space-delimited semantics, so they agree by
 // construction; the requirement form is registered because ScopeAuthorizationTests drives it directly,
 // and the named form is registered because the endpoints reference `<Endpoint>.ScopePolicyName`.
+//
+// AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK BELOW ONLY DELIVERS THE FIRST. This service's
+// published contract declares a 403 on thirty-nine operations whose shared description says the token is
+// valid but does not carry the scope the operation requires, "deliberately distinguished from 401 so a
+// caller can tell a missing credential from an insufficient one". Until these policies existed nothing
+// here read the scope claim, so every authenticated route was reachable by any token addressed to this
+// service and the published 403 was unreachable - at the one boundary in the whole system that external
+// clients can reach.
+//
+// The vocabulary, the reason the ingress names capabilities while every internal service namespaces its
+// scopes by service, the reason the framework's own claim requirement cannot express the check (the claim
+// is ONE value carrying a SPACE-DELIMITED set), and the two surfaces that deliberately carry NO scope
+// requirement are all recorded in Authorization/ScopeAuthorization.cs.
+//
+// CALLED EXACTLY ONCE, AND THAT IS A CORRECTNESS PROPERTY RATHER THAN TIDINESS. The helper registers its
+// handler with AddSingleton, not TryAddSingleton, so a second call adds a SECOND ScopeHandler to the
+// container: the framework resolves every registered handler for a requirement and invokes each, so every
+// scope decision in the service would be evaluated twice - two log records for one decision, and two
+// chances for a future handler edit to diverge from its own duplicate. The two convergent remediations
+// described above each added this line, and this is the merged single registration they intended.
 builder.Services.AddScopeAuthorization();
 
 builder.Services
@@ -399,20 +419,6 @@ builder.Services
             .RequireAuthenticatedUser()
             .RequireAssertion(static context =>
                 GrantsScope(context.User, DataServicesProxyEndpoints.RequiredScope)));
-
-// AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK ABOVE ONLY DELIVERS THE FIRST. This service's
-// published contract declares a 403 on thirty-nine operations whose shared description says the token is
-// valid but does not carry the scope the operation requires, "deliberately distinguished from 401 so a
-// caller can tell a missing credential from an insufficient one". Until these policies existed nothing
-// here read the scope claim, so every authenticated route was reachable by any token addressed to this
-// service and the published 403 was unreachable - at the one boundary in the whole system that external
-// clients can reach.
-//
-// The vocabulary, the reason the ingress names capabilities while every internal service namespaces its
-// scopes by service, the reason the framework's own claim requirement cannot express the check (the claim
-// is ONE value carrying a SPACE-DELIMITED set), and the two surfaces that deliberately carry NO scope
-// requirement are all recorded in Authorization/ScopeAuthorization.cs.
-builder.Services.AddScopeAuthorization();
 
 // --------------------------------------------------------------------------------------------------
 // 6. THE TWO TYPED CLIENTS - EXACTLY TWO, AND THESE TWO
@@ -808,6 +814,17 @@ app.Run();
 /// <c>Endpoints/DeferredCapabilityEndpoints.cs</c> writes by hand, so the two agree.
 /// </para>
 /// <para>
+/// <b>429 IS CLASSIFIED BECAUSE THIS SERVICE PRODUCES IT, AND IT WAS THE ONE PUBLISHED STATUS MISSING
+/// HERE.</b> <c>Endpoints/DataServicesProxyEndpoints.cs</c> declares it on every projected route and
+/// reaches it twice - from an upstream <c>ResourceExhausted</c>, and from an in-band <c>E_BUSY</c> outcome -
+/// so it is a status a caller genuinely receives. Without an arm it fell to <c>UNKNOWN</c>, which reports
+/// "unclassifiable" for a refusal this service classifies precisely everywhere else, and it broke the
+/// round trip: the in-band direction maps <c>E_BUSY</c> ONTO 429, so the reverse must map 429 back onto
+/// <c>E_BUSY</c> or the two directions disagree about the same event. It shares the code with 503 for the
+/// reason the two refusals share a nature - the request was declined because capacity was not available -
+/// and the statuses stay distinct so a caller can still tell a shed request from an unavailable upstream.
+/// </para>
+/// <para>
 /// THE REFUSAL AND THE FORBIDDEN CASE SHARE ONE CODE, AND THAT ASYMMETRY IS PRESERVED RATHER THAN PAPERED
 /// OVER. The legacy algebra declares exactly one access code and draws no distinction between "no
 /// credential" and "credential without permission". The HTTP statuses stay distinct, so a caller can still
@@ -835,6 +852,7 @@ static long ClassifyFailure(int statusCode)
         StatusCodes.Status405MethodNotAllowed => RetCode.E_NO_SUPPORT,
         StatusCodes.Status408RequestTimeout => RetCode.E_TIME_OUT,
         StatusCodes.Status415UnsupportedMediaType => RetCode.E_INVALID_TYPE,
+        StatusCodes.Status429TooManyRequests => RetCode.E_BUSY,
         StatusCodes.Status501NotImplemented => RetCode.E_NO_IMPLEMENTATION,
         StatusCodes.Status503ServiceUnavailable => RetCode.E_BUSY,
         StatusCodes.Status504GatewayTimeout => RetCode.E_TIME_OUT,

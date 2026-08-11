@@ -206,8 +206,11 @@ info:
     else. Two schemes establish it, and the operation accepts EITHER:
 
     - **`clientCredential`** - the caller presents the credential this service holds for it in its
-      configured issuance roster. This is the scheme a plaintext listener can carry, and the attached
-      environment binds this service on one (see `servers`), so it is the primary path.
+      configured issuance roster. It is read from the request itself, so it survives a topology that
+      terminates TLS ahead of this service in a proxy or a mesh sidecar - which strips any client
+      certificate before the application sees it - and it is the scheme the documented bring-up
+      supplies. That is what makes it the primary path, rather than anything about the listener: the
+      listener is `https` (see `servers`) in every environment.
     - **`mutualTls`** - a client certificate presented during the TLS handshake. Reachable only where
       a deployment terminates TLS at this listener. This is the documented fallback for exactly the
       pair where a token issuer is inappropriate, and the token-issuance edge is that pair.
@@ -482,24 +485,46 @@ paths:
 
         ## Caller identity comes from the transport, not from the body (C-G)
 
-        This operation is protected by **mutual TLS** and by nothing else, and that is a structural
-        necessity rather than a preference: **a caller cannot present a bearer token in order to
-        obtain its first bearer token.** Mutual TLS is the documented fallback for exactly the pair
-        where a token issuer is inappropriate, and the token-issuance edge is that pair. It is
-        therefore the **single mutual-TLS edge in the system**, and the requirement is mandatory on
-        this operation rather than optional hardening.
+        This operation is protected by **a caller credential and by no bearer token**, and that is a
+        structural necessity rather than a preference: **a caller cannot present a bearer token in
+        order to obtain its first bearer token.** It therefore OVERRIDES this document's bearer
+        requirement with the two schemes below, and a request presenting neither is refused with
+        `401`.
 
-        Because a client certificate exists only inside a TLS handshake, this operation presupposes
-        the `https` scheme, and it is the one path in this document that **must not be terminated by
-        an intermediary proxy**. The service has exactly ONE listener - `https://+:5104`,
-        `Http1AndHttp2`, `ClientCertificateMode` `AllowCertificate` - and this operation is published
-        on it, as is every other path in this document. `AllowCertificate` means Kestrel REQUESTS a
-        certificate and hands whatever it receives to the application without demanding one, so the
-        requirement is enforced HERE, per operation, rather than at the listener: a caller that
-        presents none completes the handshake and is refused **by this operation**, while `/health`,
-        the key set and the discovery document stay anonymously reachable on the same listener. There
-        is consequently no address, on any topology, at which a token is minted without a client
-        certificate - and no cleartext listener anywhere on which this operation could be reached.
+        **TWO ALTERNATIVES, AND EITHER SATISFIES THE OPERATION** - exactly as the `security` block
+        under this description declares them:
+
+        - `clientCredential` - a shared secret presented as an HTTP `Basic` credential whose user-id
+          is the caller's service subject on this service's issuance roster. **This is the primary
+          scheme**, because the operation reads the header itself and so works wherever the handshake
+          is terminated: a reverse proxy or a mesh sidecar that terminates TLS ahead of this service
+          strips any client certificate, and on such a topology `Basic` is the only scheme that can
+          reach the service at all. It is the scheme the documented bring-up supplies, through one
+          secret per calling identity.
+        - `mutualTls` - a client certificate, which is the stronger alternative where a deployment
+          terminates TLS at this service and issues caller certificates from an authority this
+          service is configured to trust. Mutual TLS is the documented fallback for exactly the pair
+          where a token issuer is inappropriate, and the token-issuance edge is that pair - so this
+          is the **single mutual-TLS edge in the system**.
+
+        The requirement is mandatory on this operation rather than optional hardening: issuance is
+        authenticated on **every** topology, which is what C-G requires, and the certificate is the
+        stronger alternative rather than the only path. Neither scheme carries the credential in the
+        request body.
+
+        Because a client certificate exists only inside a TLS handshake, the `mutualTls` alternative
+        presupposes the `https` scheme and **must not be terminated by an intermediary proxy** - and
+        where it is terminated, `clientCredential` is what keeps the operation authenticated rather
+        than unreachable. The service has exactly ONE listener - `https://+:5104`, `Http1`,
+        `ClientCertificateMode` `AllowCertificate` - and this operation is published on it, as is
+        every other path in this document, so there is no cleartext listener anywhere on which this
+        operation could be reached. `AllowCertificate` means Kestrel REQUESTS a certificate and hands
+        whatever it receives to the application without demanding one, so the credential requirement
+        is enforced HERE, per operation, rather than at the listener: a caller that presents nothing
+        completes the handshake and is refused **by this operation**, while `/health`, the key set and
+        the discovery document stay anonymously reachable on the same listener. `RequireCertificate`
+        is deliberately NOT used, because aborting the handshake for a certificate-less client would
+        break the anonymous `/health` probe and with it the readiness chain that gates the ingress.
         Section 2a of the document description carries the full termination model.
 
         Consequently the request BODY carries **no credential of any kind** - no client secret, no
@@ -517,7 +542,10 @@ paths:
         client authentication and no `refresh_token` anywhere in this contract. Inventing an OAuth
         2.0 flow the contract does not define would be a new feature, and refresh semantics
         specifically would be one: the contract says *short-lived service token*, and a caller that
-        needs another one calls this operation again over the same mutually authenticated channel.
+        needs another one calls this operation again presenting the same caller credential. The
+        `clientCredential` scheme is an HTTP `Basic` credential and is NOT the OAuth 2.0
+        `client_credentials` grant: there is no grant type, no token-endpoint client-authentication
+        method registry, and the roster this service authenticates against is its own.
         The discovery document's `grant_types_supported` member is metadata that stock consumers
         read, and it is not a request parameter of this operation.
 

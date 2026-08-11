@@ -1550,8 +1550,11 @@ public class PersistenceClient
     //  THIS CLIENT IMPLEMENTS NEITHER GRAMMAR. The statement text and the parameter names are opaque
     //  payload, carried to Persistence exactly as supplied - it is the service that binds and executes,
     //  so it is the one place either grammar may be interpreted. THE LEADING `@` PREFIX IS CARRIED
-    //  THROUGH VERBATIM AS PART OF THE STATEMENT TEXT, with NO performance claim attached to it: it is a
-    //  preserved legacy affordance, not an optimization made here.
+    //  THROUGH VERBATIM AS PART OF THE STATEMENT TEXT, and forwarding it is what makes the mode
+    //  REACHABLE: Persistence removes the selector before the statement reaches the provider and treats
+    //  it as the statement-caching execution mode C-07 preserves (AAP 0.4.3), so a client that stripped
+    //  the character here would silently cancel a mode the caller selected. NO performance claim is
+    //  attached to it at either end: it is a preserved legacy affordance, not an optimization.
     // ==============================================================================================
 
     /// <summary>

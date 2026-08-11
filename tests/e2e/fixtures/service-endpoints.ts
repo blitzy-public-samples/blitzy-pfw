@@ -27,13 +27,13 @@
  * either; where a value here and a value there ever differ, those are right
  * and this is wrong.
  *
- *   5101  Persistence   PowerFramework.Persistence   http, Http1 — REST /health, /v1/ping
- *   5111  Persistence   PowerFramework.Persistence   http, Http2 — gRPC (C-05..C-08)
- *   5102  DataServices  PowerFramework.DataServices  http, Http1 — /health, /v1/ping, thin
+ *   5101  Persistence   PowerFramework.Persistence   https, Http1 — REST /health, /v1/ping
+ *   5111  Persistence   PowerFramework.Persistence   https, Http2 — gRPC (C-05..C-08)
+ *   5102  DataServices  PowerFramework.DataServices  https, Http1 — /health, /v1/ping, thin
  *                                                      projection
  *   5112  DataServices  PowerFramework.DataServices  https, Http2 — gRPC (C-03, C-04)
  *   5104  Security      PowerFramework.Security      https, Http1 — the sole token issuer
- *   5105  Gateway       PowerFramework.Gateway       https — REST + OpenAPI, the sole ingress
+ *   5105  Gateway       PowerFramework.Gateway       https, Http1 — REST + OpenAPI, sole ingress
  *
  * EVERY LISTENER TERMINATES TLS, AND TWO SERVICES BIND TWO OF THEM. Every boundary
  * in this map is created by the decomposition itself, every request across one
@@ -404,7 +404,7 @@ export const SECURITY_DEFAULT_BASE_URL: string = 'https://localhost:5104';
  *
  * All three sides agree, which is what makes this a default rather than an
  * assumption. `services/security-service/PowerFramework.Security/appsettings.json`
- * declares exactly ONE Kestrel endpoint — `https://+:5104`, `Http1AndHttp2`, with
+ * declares exactly ONE Kestrel endpoint — `https://+:5104`, `Http1`, with
  * `ClientCertificateMode: AllowCertificate` — in the base file, and the
  * Development overlay overrides that same endpoint key rather than adding a
  * second; and `docs/ARCHITECTURE.md` §4.1 records the same listener.

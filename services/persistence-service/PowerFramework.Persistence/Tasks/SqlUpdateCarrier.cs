@@ -184,6 +184,17 @@ namespace PowerFramework.Persistence.Tasks
         /// <summary>The suffix of the per-column identifier property.</summary>
         internal const string IdSuffix = ".ID";
 
+        /// <summary>
+        /// The statement that answers the identity the store assigned to the most recent insert on the
+        /// current connection.
+        /// </summary>
+        /// <remarks>
+        /// CONNECTION-SCOPED BY DEFINITION, which is why it is read through the same command source the
+        /// insert ran on and immediately after it. It carries no parameter, no identifier and no value, so
+        /// it is a fixed statement rather than a composed one and there is nothing in it to interpolate.
+        /// </remarks>
+        internal const string LastInsertRowIdStatement = "SELECT last_insert_rowid()";
+
         /// <summary>The store this carrier wraps.</summary>
         private readonly ISqlDataStore _store;
 
@@ -467,6 +478,20 @@ namespace PowerFramework.Persistence.Tasks
                 return DataWindowBufferStore.DataStoreFailure;
             }
 
+            // THE KEY-IN-PLACE SETTING, READ ONCE FROM THE RUNTIME VALUE THE PREPARE STEP INSTALLED and
+            // not from a descriptor. `_of_updateprepare` writes it through the modification script
+            // [n_cst_thread_task_sqlupdate.sru:L135-L141] and the key-change workaround at [:L155] gates
+            // on the DESCRIBED value for the same reason: a descriptor that leaves the setting absent
+            // leaves the carrier's own definition in force, which on the sole evidenced fixture is `no`
+            // [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14].
+            //
+            // ORDINAL AND CASE-SENSITIVE, because PowerScript's `=` on strings is. Anything other than
+            // exactly "no" - including "yes", "!", "?" and empty - leaves a key change an ordinary UPDATE.
+            bool keyChangeIsDeleteAndInsert = string.Equals(
+                Describe(UpdateKeyInPlaceProperty),
+                UpdateWhereBuilder.NoLiteral,
+                StringComparison.Ordinal);
+
             long inserted = 0L;
             long updated = 0L;
             long deleted = 0L;
@@ -494,7 +519,7 @@ namespace PowerFramework.Persistence.Tasks
                 // drop the commonest delete there is.
                 foreach (long row in RowsOf(DwBuffer.Delete))
                 {
-                    long removed = ApplyDelete(commands, table, plan, row);
+                    long removed = ApplyDelete(commands, table, plan, DwBuffer.Delete, row);
 
                     if (removed == 0L)
                     {
@@ -534,6 +559,51 @@ namespace PowerFramework.Persistence.Tasks
 
                         if (status == ItemStatus.DataModified)
                         {
+                            // ============ THE `updatekeyinplace=no` KEY CHANGE: DELETE PLUS INSERT =====
+                            // 🔴 A CHANGED KEY IS NOT AN UPDATE WHEN KEY-IN-PLACE IS OFF, AND EMITTING
+                            // ONE WRITES THE WRONG STATEMENT. `updatekeyinplace=no` [dw_sqlite.srd:L14 -
+                            // the sole evidenced fixture sets it, so this is the ORDINARY path and not a
+                            // rare branch] means PowerBuilder performs a key change as a DELETE of the
+                            // old row followed by an INSERT of the new one. An UPDATE that assigned the
+                            // key would leave the row's identity rewritten in place, which is a different
+                            // database state and a different set of trigger and constraint effects.
+                            //
+                            // The pair is applied ATOMICALLY: both statements run inside the caller's
+                            // pooled transaction, and the INSERT is skipped outright when the DELETE
+                            // matched nothing, so no half of the pair can ever land alone. A zero-row
+                            // DELETE is the concurrency mismatch itself and is recorded as such below.
+                            if (keyChangeIsDeleteAndInsert && HasKeyChange(plan, buffer, row))
+                            {
+                                long removedForKeyChange =
+                                    ApplyDelete(commands, table, plan, buffer, row);
+
+                                deleted++;
+
+                                if (removedForKeyChange == 0L)
+                                {
+                                    // THE INSERT DOES NOT RUN. Another writer changed or removed the row
+                                    // underneath this caller, so the delete's optimistic predicate matched
+                                    // nothing; inserting anyway would duplicate the row it failed to
+                                    // remove. The shortfall reaches the classifier as a mismatch.
+                                    unmatched.Add((buffer, row));
+
+                                    continue;
+                                }
+
+                                affected += removedForKeyChange
+                                    + ApplyInsert(
+                                        commands,
+                                        table,
+                                        plan,
+                                        buffer,
+                                        row,
+                                        assignChangedKeys: true);
+
+                                inserted++;
+
+                                continue;
+                            }
+
                             long changed = ApplyUpdate(commands, table, plan, buffer, row);
 
                             if (changed == 0L)
@@ -597,7 +667,13 @@ namespace PowerFramework.Persistence.Tasks
             {
                 RowsExpected = expected,
                 RowsMatched = affected,
-                Rows = ProjectUnmatchedRows(plan, unmatched),
+
+                // THE REREAD HAPPENS HERE, INSIDE THE SAME TRANSACTION AND WHILE THE COMMAND SOURCE IS
+                // STILL IN SCOPE. Once this method returns the connection is no longer addressable from
+                // the classifier, and the row ordinals that name the conflicting rows are gone with the
+                // walk - so a later reread could neither be attributed to a row nor be certain of
+                // observing the same isolation snapshot the failed predicate was compared against.
+                Rows = ProjectUnmatchedRows(commands, table, plan, unmatched),
             };
 
             _store.Carrier.OnUpdateEnd(inserted, updated, deleted);
@@ -1090,6 +1166,8 @@ namespace PowerFramework.Persistence.Tasks
         /// </para>
         /// </remarks>
         private IReadOnlyList<ConflictRow> ProjectUnmatchedRows(
+            ISqliteCommandSource commands,
+            string table,
             UpdateColumnPlan plan,
             List<(DwBuffer Buffer, long Row)> unmatched)
         {
@@ -1098,7 +1176,7 @@ namespace PowerFramework.Persistence.Tasks
                 return [];
             }
 
-            ConflictColumn[] columns = [.. plan.UpdatableColumns
+            ConflictColumn[] columns = [.. plan.ConflictColumns
                 .Where(static column => column.Number >= ItemStatusMachine.FirstColumnNumber
                     && !string.IsNullOrWhiteSpace(column.Name))
                 .Select(static column => new ConflictColumn(column.Name, column.Number))];
@@ -1110,6 +1188,11 @@ namespace PowerFramework.Persistence.Tasks
                 return [];
             }
 
+            ConflictColumn[] keyColumns = [.. plan.KeyColumns
+                .Where(static column => column.Number >= ItemStatusMachine.FirstColumnNumber
+                    && !string.IsNullOrWhiteSpace(column.Name))
+                .Select(static column => new ConflictColumn(column.Name, column.Number))];
+
             List<ConflictRow> rows = new(unmatched.Count);
 
             foreach ((DwBuffer buffer, long row) in unmatched)
@@ -1118,10 +1201,157 @@ namespace PowerFramework.Persistence.Tasks
                     _store.Carrier,
                     buffer,
                     row,
-                    columns));
+                    columns,
+                    ReadStorageRow(commands, table, keyColumns, columns, buffer, row)));
             }
 
             return rows;
+        }
+
+        /// <summary>
+        /// Rereads one conflicting row's CURRENT values out of storage, on the connection the failed
+        /// statement ran on.
+        /// </summary>
+        /// <param name="commands">
+        /// The command source. <b>THE SAME ONE THE UPDATE RAN ON</b> - see the remarks.
+        /// </param>
+        /// <param name="table">The update table.</param>
+        /// <param name="keyColumns">The key columns, whose ORIGINAL values address the row.</param>
+        /// <param name="columns">The columns to read, in payload order.</param>
+        /// <param name="buffer">The buffer the submitted row lives in.</param>
+        /// <param name="row">The one-based row number within <paramref name="buffer"/>.</param>
+        /// <returns>
+        /// The storage values keyed by one-based column number, or <see langword="null"/> when the row
+        /// could not be read - either because no key column is installed to address it by, or because
+        /// STORAGE NO LONGER HOLDS IT.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// 🔴 <b>WHY THE CURRENT VALUES MUST COME FROM STORAGE AND NOT FROM THE CARRIER.</b> The
+        /// contract declares <c>current_values</c> as "the CURRENT server-side values of the marked
+        /// columns - the state a retry would be rebased onto"
+        /// [<c>shared/PowerFramework.Contracts/Proto/common.v1.proto</c>, <c>ConflictRow</c>]. The carrier
+        /// holds what THE CALLER SUBMITTED, so projecting it would echo the caller's own edit back at it as
+        /// though it were the winning writer's state - and a caller that rebased on that would resubmit the
+        /// identical values and conflict again for ever. The whole diagnostic value of the payload is the
+        /// difference between what the caller believed and what is actually stored, and only a reread can
+        /// supply the second half.
+        /// </para>
+        /// <para>
+        /// <b>ON THE SAME CONNECTION AND THEREFORE INSIDE THE SAME TRANSACTION.</b> Read through the
+        /// command source the statements ran on, so the state reported is the state the failed predicate
+        /// was compared against under the same isolation. A second connection could observe a different
+        /// snapshot and would report a row state that never coexisted with the failure.
+        /// </para>
+        /// <para>
+        /// <b>ADDRESSED BY THE KEY COLUMNS' ORIGINAL VALUES</b>, because that is the one part of the
+        /// failed predicate that still identifies the row: under <c>updatewhere=1</c> the mismatch is a
+        /// NON-key column moving underneath the caller, so the key still locates it. With no key column
+        /// installed there is nothing to address the row by and the reread declines rather than guessing a
+        /// predicate.
+        /// </para>
+        /// <para>
+        /// <b>AN EMPTY RESULT IS AN ANSWER, NOT A FAULT.</b> The other writer may have DELETED the row.
+        /// The projection then reports the original values with NO current values, and the pairing of a
+        /// populated original set against an empty current set is what tells a caller the row is gone -
+        /// distinct from a row whose values changed, which reports both sets.
+        /// </para>
+        /// <para>
+        /// PARAMETERIZED, and the statement carries only identifiers from the carrier's own installed
+        /// column model - never a caller-supplied fragment. It is a plain SELECT and mutates nothing, so
+        /// it cannot alter the state it is reporting.
+        /// </para>
+        /// </remarks>
+        private IReadOnlyDictionary<int, object?>? ReadStorageRow(
+            ISqliteCommandSource commands,
+            string table,
+            IReadOnlyList<ConflictColumn> keyColumns,
+            IReadOnlyList<ConflictColumn> columns,
+            DwBuffer buffer,
+            long row)
+        {
+            if (keyColumns.Count == 0)
+            {
+                return null;
+            }
+
+            StringBuilder statement = new("SELECT ");
+
+            for (int index = 0; index < columns.Count; index++)
+            {
+                if (index > 0)
+                {
+                    _ = statement.Append(", ");
+                }
+
+                _ = statement.Append(columns[index].Name);
+            }
+
+            _ = statement.Append(" FROM ").Append(table).Append(" WHERE ");
+
+            List<object?> values = [];
+
+            for (int index = 0; index < keyColumns.Count; index++)
+            {
+                if (index > 0)
+                {
+                    _ = statement.Append(" AND ");
+                }
+
+                object? original =
+                    _store.Carrier.GetItemOriginalValue(row, keyColumns[index].Number, buffer);
+
+                if (original is null)
+                {
+                    // AN EQUALITY AGAINST NULL IS NEVER TRUE IN SQL, so the null key is compared with
+                    // IS NULL exactly as the update predicate does - the two must agree or the reread
+                    // would address a different row than the statement did.
+                    _ = statement.Append(keyColumns[index].Name).Append(" IS NULL");
+
+                    continue;
+                }
+
+                values.Add(original);
+
+                _ = statement
+                    .Append(keyColumns[index].Name)
+                    .Append(" = @p")
+                    .Append(values.Count.ToString(CultureInfo.InvariantCulture));
+            }
+
+            using SqliteCommand command = commands.CreateCommand();
+            command.CommandText = statement.ToString();
+
+            for (int index = 0; index < values.Count; index++)
+            {
+                _ = command.Parameters.AddWithValue(
+                    "@p" + (index + 1).ToString(CultureInfo.InvariantCulture),
+                    values[index] ?? DBNull.Value);
+            }
+
+            using SqliteDataReader reader = command.ExecuteReader();
+
+            if (!reader.Read())
+            {
+                _logger.LogWarning(
+                    "A conflicting row could not be reread from storage, so the conflict payload reports "
+                        + "its submitted originals with no current values - the row no longer exists.");
+
+                return null;
+            }
+
+            Dictionary<int, object?> storage = new(columns.Count);
+
+            for (int index = 0; index < columns.Count; index++)
+            {
+                // DBNull IS FOLDED ONTO NULL, because null is a value in this model and the wire
+                // projection has a published null arm for it; leaving DBNull would reach the value mapper
+                // as a type it cannot express and fail the projection of a legitimate stored null.
+                storage[columns[index].Number] =
+                    reader.IsDBNull(index) ? null : reader.GetValue(index);
+            }
+
+            return storage;
         }
 
         /// <summary>
@@ -1195,6 +1425,7 @@ namespace PowerFramework.Persistence.Tasks
         {
             string[] columns = ColumnModel();
 
+            List<UpdateColumn> all = [];
             List<UpdateColumn> updatable = [];
             List<UpdateColumn> keys = [];
             List<UpdateColumn> whereColumns = [];
@@ -1203,6 +1434,8 @@ namespace PowerFramework.Persistence.Tasks
             {
                 // ONE-BASED column numbers on the carrier against the zero-based array index here.
                 UpdateColumn column = new(columns[index], index + 1);
+
+                all.Add(column);
 
                 if (IsFlagSet(columns[index] + UpdateSuffix))
                 {
@@ -1220,7 +1453,7 @@ namespace PowerFramework.Persistence.Tasks
                 }
             }
 
-            return new UpdateColumnPlan(updatable, keys, whereColumns);
+            return new UpdateColumnPlan(all, updatable, keys, whereColumns);
         }
 
         /// <summary>
@@ -1250,21 +1483,81 @@ namespace PowerFramework.Persistence.Tasks
         /// <param name="commands">The command source.</param>
         /// <param name="table">The update table.</param>
         /// <param name="plan">The installed column plan.</param>
-        /// <param name="row">The one-based row number within the delete buffer.</param>
+        /// <param name="buffer">
+        /// The buffer the row lives in. <see cref="DwBuffer.Delete"/> for an ordinary pending delete, and
+        /// a MODIFIABLE buffer for the first half of a <c>updatekeyinplace=no</c> key change - which is
+        /// why this is a parameter rather than the delete buffer assumed: the row whose key changed sits
+        /// in the primary or filter buffer and its predicate must be read from there.
+        /// </param>
+        /// <param name="row">The one-based row number within <paramref name="buffer"/>.</param>
         /// <returns>The rows the statement affected.</returns>
         private long ApplyDelete(
             ISqliteCommandSource commands,
             string table,
             UpdateColumnPlan plan,
+            DwBuffer buffer,
             long row)
         {
             StringBuilder statement = new("DELETE FROM ");
             _ = statement.Append(table);
 
             List<object?> values = [];
-            AppendWhere(statement, plan, DwBuffer.Delete, row, values);
+            AppendWhere(statement, plan, buffer, row, values);
 
-            return Execute(commands, statement.ToString(), values, SqlPreviewType.Delete, DwBuffer.Delete);
+            return Execute(commands, statement.ToString(), values, SqlPreviewType.Delete, buffer);
+        }
+
+        /// <summary>
+        /// Whether one row's key has genuinely changed - a key column that is both marked modified AND
+        /// holds a value differing from its original.
+        /// </summary>
+        /// <param name="plan">The installed column plan.</param>
+        /// <param name="buffer">The buffer the row lives in.</param>
+        /// <param name="row">The one-based row number within <paramref name="buffer"/>.</param>
+        /// <returns><see langword="true"/> when at least one key column changed value.</returns>
+        /// <remarks>
+        /// <para>
+        /// <b>BOTH CONJUNCTS ARE LOAD-BEARING, AND THE VALUE COMPARISON IS THE ONE THAT MATTERS.</b> The
+        /// legacy's own key-change workaround RE-STAMPS every modified key column as
+        /// <c>DataModified!</c> without altering its value
+        /// [<c>n_cst_thread_task_sqlupdate.sru:L155-L167</c>, ported at
+        /// <c>Concurrency/UpdateWhereBuilder.cs</c> <c>ApplyKeyChangeRefresh</c>], so a status test alone
+        /// would report a key change for a row whose key never moved - and would then emit a DELETE plus
+        /// INSERT that discards and re-creates a row for no reason, losing its generated identity in the
+        /// process. Requiring the value to differ as well is what distinguishes the workaround's
+        /// re-stamp from a real key edit.
+        /// </para>
+        /// <para>
+        /// The status is still required, because an unmodified column's original value IS its current
+        /// value [<c>Buffers/DataWindowBuffers.cs</c> <c>CarrierRow.GetOriginalValue</c>], so the
+        /// comparison alone can never fire without it and stating it makes the intent explicit.
+        /// </para>
+        /// <para>
+        /// NULL IS A VALUE ON BOTH SIDES. <c>Equals</c> is reached through the static helper so that null
+        /// versus null is "unchanged" and null versus a value is "changed", rather than either being
+        /// coerced to zero or to the empty string - a coercion here would silently suppress or invent a
+        /// key change.
+        /// </para>
+        /// </remarks>
+        private bool HasKeyChange(UpdateColumnPlan plan, DwBuffer buffer, long row)
+        {
+            foreach (UpdateColumn column in plan.KeyColumns)
+            {
+                if (_store.Carrier.GetItemStatus(row, column.Number, buffer) == ItemStatus.NotModified)
+                {
+                    continue;
+                }
+
+                object? current = _store.Carrier.GetItemValue(row, column.Number, buffer);
+                object? original = _store.Carrier.GetItemOriginalValue(row, column.Number, buffer);
+
+                if (!Equals(current, original))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -1275,19 +1568,38 @@ namespace PowerFramework.Persistence.Tasks
         /// <param name="plan">The installed column plan.</param>
         /// <param name="buffer">The buffer the row lives in.</param>
         /// <param name="row">The one-based row number within that buffer.</param>
+        /// <param name="assignChangedKeys">
+        /// <see langword="true"/> only for the INSERT half of a <c>updatekeyinplace=no</c> key change, where
+        /// the caller assigned a SPECIFIC key and that key must be written even when the column also
+        /// carries the identity flag. <see langword="false"/> for an ordinary insert of a new row, where
+        /// the store assigns the identity.
+        /// </param>
         /// <returns>The rows the statement affected.</returns>
         /// <remarks>
+        /// <para>
         /// THE IDENTITY COLUMN IS OMITTED FROM THE COLUMN LIST, which is what lets the store assign it and
         /// is the whole reason the identity round trip exists: the caller reads the assigned values back
         /// out afterwards. Including it would insert the carrier's placeholder and make the round trip
         /// report a value the store never generated.
+        /// </para>
+        /// <para>
+        /// 🔴 <b>AND THE ASSIGNED VALUE IS READ BACK ONTO THE ROW BEFORE THIS METHOD RETURNS.</b> Omitting
+        /// the column is only half of the round trip; without the read-back the carrier still holds
+        /// whatever placeholder the caller sent, and
+        /// <c>Concurrency/IdentityColumnResolver.CollectPrimaryValues</c> - which reads
+        /// <c>GetItemNumber(row, identityColumn)</c> off this same carrier
+        /// [<c>n_cst_thread_task_sqlupdate.sru:L231</c>] - would report that placeholder as the generated
+        /// identity. A caller that inserted rows could then never reconcile them with the values the
+        /// database actually assigned, which is precisely what the identity block exists to tell it.
+        /// </para>
         /// </remarks>
         private long ApplyInsert(
             ISqliteCommandSource commands,
             string table,
             UpdateColumnPlan plan,
             DwBuffer buffer,
-            long row)
+            long row,
+            bool assignChangedKeys = false)
         {
             StringBuilder statement = new("INSERT INTO ");
             _ = statement.Append(table).Append(" ( ");
@@ -1297,7 +1609,14 @@ namespace PowerFramework.Persistence.Tasks
 
             foreach (UpdateColumn column in plan.UpdatableColumns)
             {
-                if (IsFlagSet(column.Name + IdentitySuffix))
+                // THE IDENTITY COLUMN IS OMITTED FOR A GENUINELY NEW ROW AND WRITTEN FOR A CHANGED KEY,
+                // and the asymmetry is the difference between the two operations rather than an
+                // inconsistency. A new row has no key yet, so the store assigns one and the round trip
+                // reports it. A KEY CHANGE is the caller assigning a SPECIFIC key: omitting it there would
+                // let the store pick a value the caller did not ask for, so the row would be re-created
+                // under a different key and the requested change would be silently discarded.
+                if (IsFlagSet(column.Name + IdentitySuffix)
+                    && !(assignChangedKeys && IsFlagSet(column.Name + KeySuffix)))
                 {
                     continue;
                 }
@@ -1326,7 +1645,93 @@ namespace PowerFramework.Persistence.Tasks
 
             _ = statement.Append(" )");
 
-            return Execute(commands, statement.ToString(), values, SqlPreviewType.Insert, buffer);
+            long affected = Execute(commands, statement.ToString(), values, SqlPreviewType.Insert, buffer);
+
+            if (affected > 0L)
+            {
+                WriteBackGeneratedIdentity(commands, plan, buffer, row);
+            }
+
+            return affected;
+        }
+
+        /// <summary>
+        /// Reads the identity the store assigned to the row just inserted and writes it onto that row.
+        /// </summary>
+        /// <param name="commands">
+        /// The command source. <b>THE SAME ONE THE INSERT RAN ON, which is a correctness requirement
+        /// rather than an efficiency one</b> - see the remarks.
+        /// </param>
+        /// <param name="plan">The installed column plan.</param>
+        /// <param name="buffer">The buffer the inserted row lives in.</param>
+        /// <param name="row">The one-based row number within <paramref name="buffer"/>.</param>
+        /// <remarks>
+        /// <para>
+        /// <b>THE RETRIEVAL IS CONNECTION-SCOPED AND IS ONLY CORRECT IMMEDIATELY AFTER THE INSERT.</b>
+        /// <c>last_insert_rowid()</c> answers the most recent successful insert ON THIS CONNECTION, so it
+        /// is read through the same command source the statement ran on and before any other statement can
+        /// run - the walk is serialized by the transaction gate, and this call sits inside the same
+        /// per-row step as the insert it belongs to. Reading it on a second connection, or after a later
+        /// insert, would attribute one row's identity to another.
+        /// </para>
+        /// <para>
+        /// NOTHING HAPPENS WHEN NO IDENTITY COLUMN IS INSTALLED, which is the ordinary case for a table
+        /// without one. The column is found from the installed <c>.Identity</c> flag rather than from a
+        /// descriptor, so it is the same source the insert used when it decided to omit a column - one
+        /// reading, not two.
+        /// </para>
+        /// <para>
+        /// <b>THE WRITE FLIPS NO STATUS, DELIBERATELY.</b> <see cref="DataWindowBufferStore.SetItemValue"/>
+        /// changes the value and nothing else [<c>Buffers/DataWindowBuffers.cs</c>
+        /// <c>CarrierRow.SetValue</c>], so the row keeps the <c>NewModified!</c> status that makes the
+        /// resolver collect it [<c>n_cst_thread_task_sqlupdate.sru:L230, :L238</c>]. A write that stamped a
+        /// status would silently remove the row from the collection it exists to feed.
+        /// </para>
+        /// <para>
+        /// A NON-NUMERIC OR ABSENT ANSWER LEAVES THE ROW ALONE rather than writing a zero. The resolver
+        /// preserves null as null on purpose, and fabricating a zero identity would put a value on the wire
+        /// that no row carries.
+        /// </para>
+        /// </remarks>
+        private void WriteBackGeneratedIdentity(
+            ISqliteCommandSource commands,
+            UpdateColumnPlan plan,
+            DwBuffer buffer,
+            long row)
+        {
+            UpdateColumn? identityColumn = null;
+
+            foreach (UpdateColumn candidate in plan.AllColumns)
+            {
+                if (IsFlagSet(candidate.Name + IdentitySuffix))
+                {
+                    identityColumn = candidate;
+                    break;
+                }
+            }
+
+            if (identityColumn is null)
+            {
+                return;
+            }
+
+            using SqliteCommand command = commands.CreateCommand();
+            command.CommandText = LastInsertRowIdStatement;
+
+            object? scalar = command.ExecuteScalar();
+            long? generated = ToNumber(scalar);
+
+            if (generated is null)
+            {
+                _logger.LogWarning(
+                    "The storage engine answered no generated identity for an inserted row, so the "
+                        + "carrier's own value for column {ColumnNumber} was left as it stands.",
+                    identityColumn.Value.Number);
+
+                return;
+            }
+
+            _ = _store.Carrier.SetItemValue(row, identityColumn.Value.Number, buffer, generated.Value);
         }
 
         /// <summary>
@@ -1519,12 +1924,43 @@ namespace PowerFramework.Persistence.Tasks
         private readonly record struct UpdateColumn(string Name, int Number);
 
         /// <summary>The installed column flags, read back from the prepare step's modification script.</summary>
+        /// <param name="AllColumns">
+        /// Every column of the carrier's model, in ONE-BASED column order, whatever flags it carries.
+        /// Carried because two decisions are not expressible from the flagged subsets: the identity column
+        /// need not be updatable, and the conflict projection reports the union of key and marked columns
+        /// in model order rather than in the order either subset happens to hold them.
+        /// </param>
         /// <param name="UpdatableColumns">The columns marked updatable, in column order.</param>
         /// <param name="KeyColumns">The columns marked as keys, in column order.</param>
         /// <param name="WhereClauseColumns">The columns marked for the concurrency predicate.</param>
         private sealed record UpdateColumnPlan(
+            IReadOnlyList<UpdateColumn> AllColumns,
             IReadOnlyList<UpdateColumn> UpdatableColumns,
             IReadOnlyList<UpdateColumn> KeyColumns,
-            IReadOnlyList<UpdateColumn> WhereClauseColumns);
+            IReadOnlyList<UpdateColumn> WhereClauseColumns)
+        {
+            /// <summary>
+            /// The columns the conflict payload reports: every KEY column and every column marked for the
+            /// concurrency predicate, in one-based model order, with no duplicate.
+            /// </summary>
+            /// <remarks>
+            /// <para>
+            /// 🔴 <b>THE UNION, NOT EITHER HALF, AND NOT THE UPDATABLE SET.</b> Under
+            /// <c>updatewhere=1</c> the failed statement's predicate was the key column PLUS the original
+            /// value of every marked column, so those are exactly the columns whose comparison decided the
+            /// conflict - and a caller rebasing a retry needs all of them. Reporting the UPDATABLE set
+            /// instead would omit a key-only or marked-only column, which is the column most likely to be
+            /// the one that moved; reporting only the keys would omit the values that actually mismatched.
+            /// </para>
+            /// <para>
+            /// MODEL ORDER IS PRESERVED because a consumer comparing two value lists position by position
+            /// needs a stable order, and the model's own one-based column order is the only order both
+            /// halves of the union share.
+            /// </para>
+            /// </remarks>
+            internal IReadOnlyList<UpdateColumn> ConflictColumns =>
+                [.. AllColumns.Where(column =>
+                    KeyColumns.Contains(column) || WhereClauseColumns.Contains(column))];
+        }
     }
 }

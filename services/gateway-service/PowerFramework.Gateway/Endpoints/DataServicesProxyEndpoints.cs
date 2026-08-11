@@ -1564,7 +1564,17 @@ public static class DataServicesProxyEndpoints
 
         if (operation.DeclaresConflict)
         {
-            route.ProducesProblem(StatusCodes.Status409Conflict, MediaTypeNames.Application.ProblemJson);
+            // NOT `ProducesProblem`, AND THE DIFFERENCE IS THE WHOLE POINT OF THE 409.
+            //
+            // `ProducesProblem` publishes the bare problem shape, so a consumer reading the generated
+            // document could not see that a `conflict` member is present - while the authored contract
+            // declares a `ConflictProblemDetails` schema for exactly this response, and the projection
+            // does attach the detail. Three artifacts, one of them silently disagreeing, on the one body
+            // a caller has to ACT on rather than merely read. See ConflictProblemDetails at the foot of
+            // this file for why a caller that cannot see WHICH column moved cannot construct a retry.
+            route.Produces<ConflictProblemDetails>(
+                StatusCodes.Status409Conflict,
+                MediaTypeNames.Application.ProblemJson);
         }
 
         // THE FOUR STATUSES EVERY PROJECTED OPERATION CAN REALLY PRODUCE, declared unconditionally
@@ -1678,13 +1688,34 @@ public static class DataServicesProxyEndpoints
                 return RejectRequest(httpContext, bindingFailure);
             }
 
-            return RenderStream(
-                invoke(client, request, cancellationToken),
-                httpContext.RequestServices
-                    .GetRequiredService<IOptions<GatewayOptions>>()
-                    .Value
-                    .RestProjection
-                    .MaxStreamedElements);
+            // ==================================================================================
+            //  THE FIRST ELEMENT IS PULLED HERE, INSIDE THE SHARED FAILURE PATH, AND THAT PLACEMENT
+            //  IS THE WHOLE OF THE FIX.
+            //
+            //  The result this returns writes the status line and the opening bracket as its FIRST
+            //  act, and the framework executes it only after this method has returned - so a stream
+            //  that faulted before producing anything used to fault INSIDE the result, after 200 and
+            //  `[` were already on the wire, and could not reach the translation every other route
+            //  shares. A caller asking for a retrieval against a DataWindow that does not exist
+            //  received `200` and a truncated array where it should have received `404`, and the
+            //  streaming type's own remarks claimed the opposite.
+            //
+            //  Pulling the first element while still inside ProjectAsync's try means a pre-first-item
+            //  RpcException, HttpRequestException or cancellation is caught by the arms above and
+            //  becomes a proper problem response with nothing written. Once the first element is in
+            //  hand the trade reverts to the documented one: the headers go out and a LATER fault
+            //  ends the body unterminated.
+            // ==================================================================================
+            return await StreamedSequenceResult<TResponse>
+                .PrefetchAsync(
+                    invoke(client, request, cancellationToken),
+                    httpContext.RequestServices
+                        .GetRequiredService<IOptions<GatewayOptions>>()
+                        .Value
+                        .RestProjection
+                        .MaxStreamedElements,
+                    cancellationToken)
+                .ConfigureAwait(false);
         });
 
     /// <summary>
@@ -1943,23 +1974,6 @@ public static class DataServicesProxyEndpoints
     }
 
     /// <summary>
-    /// Renders a projected server stream as a JSON array, in arrival order.
-    /// </summary>
-    /// <typeparam name="TResponse">The protobuf message each element carries.</typeparam>
-    /// <param name="elements">The upstream stream.</param>
-    /// <returns><c>200</c> carrying the rendered collection.</returns>
-    /// <remarks>
-    /// The array is assembled from each element's own rendering, so no element is merged with another and
-    /// none of the per-element metadata the chunking and sequencing contracts depend on is flattened away.
-    /// Order is arrival order and is never sorted.
-    /// </remarks>
-    private static IResult RenderStream<TResponse>(
-        IAsyncEnumerable<TResponse> elements,
-        int maximumElements)
-        where TResponse : class, IMessage, new()
-        => new StreamedSequenceResult<TResponse>(elements, maximumElements);
-
-    /// <summary>
     /// Forwards an upstream server stream to the response as one JSON array, element by element.
     /// </summary>
     /// <typeparam name="TResponse">The protobuf message each element carries.</typeparam>
@@ -1986,8 +2000,18 @@ public static class DataServicesProxyEndpoints
     /// response body without a closing bracket rather than turning into a problem document. A caller
     /// therefore detects it as malformed JSON, which is a detectable failure and not a silent one - a
     /// truncated array that closed cleanly would be indistinguishable from a complete one, and that is the
-    /// outcome this deliberately does NOT produce. A failure BEFORE the first element still becomes a
-    /// proper problem response, because nothing has been written at that point.
+    /// outcome this deliberately does NOT produce.
+    /// </para>
+    /// <para>
+    /// <b>⚠ A FAILURE BEFORE THE FIRST ELEMENT DOES BECOME A PROPER PROBLEM RESPONSE - AND IT IS
+    /// <see cref="PrefetchAsync"/> THAT MAKES THAT TRUE RATHER THAN THIS PARAGRAPH.</b> This type used to
+    /// take the sequence itself and pull its first element from inside <see cref="ExecuteAsync"/>, which
+    /// the framework runs AFTER the projection has returned - so the status line and the opening bracket
+    /// were already on the wire and a pre-first-item fault could not reach the shared failure path at all.
+    /// A caller retrieving a DataWindow that did not exist received <c>200</c> and a truncated array
+    /// instead of <c>404</c>, while this remark claimed otherwise. The first element is now pulled by the
+    /// factory, inside the projection, and only an instance holding it can be constructed - so the
+    /// distinction the paragraph above draws is enforced by the type's shape and not by convention.
     /// </para>
     /// <para>
     /// The bound is enforced while forwarding rather than after, so an unbounded upstream cannot make this
@@ -2005,7 +2029,8 @@ public static class DataServicesProxyEndpoints
     /// be made to overproduce on demand. Only this service's own test assembly sees it.
     /// </remarks>
     internal sealed class StreamedSequenceResult<TResponse>(
-        IAsyncEnumerable<TResponse> elements,
+        IAsyncEnumerator<TResponse> elements,
+        bool hasFirstElement,
         int maximumElements) : IResult
         where TResponse : class, IMessage, new()
     {
@@ -2013,12 +2038,74 @@ public static class DataServicesProxyEndpoints
         private static readonly byte[] ArrayClose = "]"u8.ToArray();
         private static readonly byte[] ElementSeparator = ","u8.ToArray();
 
+        /// <summary>
+        /// Opens the upstream stream and pulls its FIRST element, then hands back a result that will
+        /// forward that element and everything after it.
+        /// </summary>
+        /// <param name="elements">The upstream stream, enumerated once.</param>
+        /// <param name="maximumElements">The configured bound on how many elements will be forwarded.</param>
+        /// <param name="cancellationToken">The caller's cancellation, bound into the enumeration.</param>
+        /// <returns>The result to answer with.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="elements"/> is <see langword="null"/>.</exception>
+        /// <remarks>
+        /// <para>
+        /// <b>THIS METHOD IS WHERE A PRE-FIRST-ITEM FAULT BECOMES A PROBLEM RESPONSE.</b> It is awaited
+        /// inside the projection's shared try, so an <see cref="RpcException"/>, a transport failure or a
+        /// cancellation raised while opening the stream is caught and translated exactly as it is on a
+        /// unary route - with nothing written, because the result that writes has not been constructed
+        /// yet. Pulling the same element from inside <see cref="ExecuteAsync"/> instead put the fault
+        /// after the status line, where no translation can reach it.
+        /// </para>
+        /// <para>
+        /// <b>THE ENUMERATOR IS DISPOSED HERE IF AND ONLY IF THE PULL THROWS.</b> On success it is owned
+        /// by the returned result, which disposes it on every path out of
+        /// <see cref="ExecuteAsync"/> - including the bound refusal and the caller's abort. Disposing it
+        /// on the failure path matters because a gRPC call enumerator holds the call: leaving it
+        /// undisposed would hold the upstream call open for a request that has already been answered with
+        /// a problem document.
+        /// </para>
+        /// <para>
+        /// <b>NOTHING IS BUFFERED BY THE PREFETCH.</b> Exactly one element is pulled, which is the
+        /// element that has to be pulled in order to know whether the stream can start at all. The rest
+        /// are still forwarded one at a time.
+        /// </para>
+        /// </remarks>
+        internal static async Task<IResult> PrefetchAsync(
+            IAsyncEnumerable<TResponse> elements,
+            int maximumElements,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(elements);
+
+            IAsyncEnumerator<TResponse> enumerator = elements.GetAsyncEnumerator(cancellationToken);
+
+            bool hasFirst;
+
+            try
+            {
+                hasFirst = await enumerator.MoveNextAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                await enumerator.DisposeAsync().ConfigureAwait(false);
+
+                throw;
+            }
+
+            return new StreamedSequenceResult<TResponse>(enumerator, hasFirst, maximumElements);
+        }
+
         /// <inheritdoc/>
         public async Task ExecuteAsync(HttpContext httpContext)
         {
             ArgumentNullException.ThrowIfNull(httpContext);
 
             CancellationToken cancellationToken = httpContext.RequestAborted;
+
+            // OWNED FROM HERE, AND RELEASED ON EVERY PATH - the ordinary end, the bound refusal, a
+            // mid-stream upstream fault and the caller's abort alike. A gRPC call enumerator holds the
+            // call, so an undisposed one holds the upstream open after this response has ended.
+            await using IAsyncEnumerator<TResponse> owned = elements;
 
             httpContext.Response.StatusCode = StatusCodes.Status200OK;
             httpContext.Response.ContentType = MediaTypeNames.Application.Json;
@@ -2029,9 +2116,12 @@ public static class DataServicesProxyEndpoints
 
             int written = 0;
 
-            await foreach (TResponse element in elements
-                .WithCancellation(cancellationToken)
-                .ConfigureAwait(false))
+            // The FIRST element is already in hand from the prefetch, so the loop reads Current and then
+            // advances rather than advancing first. That ordering is what makes the prefetched element
+            // part of the forwarded document instead of being consumed and dropped.
+            bool available = hasFirstElement;
+
+            while (available)
             {
                 if (written >= maximumElements)
                 {
@@ -2060,11 +2150,13 @@ public static class DataServicesProxyEndpoints
                 }
 
                 // Encoded one element at a time, so the transient string is one element wide.
-                byte[] encoded = Encoding.UTF8.GetBytes(ResponseFormatter.Format(element));
+                byte[] encoded = Encoding.UTF8.GetBytes(ResponseFormatter.Format(elements.Current));
 
                 await writer.WriteAsync(encoded, cancellationToken).ConfigureAwait(false);
 
                 written++;
+
+                available = await elements.MoveNextAsync().ConfigureAwait(false);
             }
 
             await writer.WriteAsync(ArrayClose, cancellationToken).ConfigureAwait(false);
@@ -3143,4 +3235,73 @@ public sealed record ProtoPayload
     /// </remarks>
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? Members { get; init; }
+}
+
+/// <summary>
+/// The published shape of the <c>409</c> body: the problem object plus the optimistic-concurrency conflict
+/// detail, mirroring the authored contract's <c>ConflictProblemDetails</c> schema.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>THE ONE PROJECTED BODY IN THIS FILE THAT IS NOT PUBLISHED AS A BARE PROBLEM, AND THE REASON IS
+/// BEHAVIOURAL.</b> Every other failure body a consumer only has to READ; this one a consumer has to ACT
+/// on. On an <c>updatewhereclause</c> mismatch the caller must choose between retrying and surfacing, and
+/// it can only construct a retry if it can see which column moved underneath it. Registering the 409 as
+/// <c>ProducesProblem</c> published the bare problem shape, so the generated document gave no indication
+/// that a <c>conflict</c> member is present at all - and a caller reading only that document would
+/// re-send the same stale original values and receive the same 409 for ever
+/// [AAP §0.6.3.8: callers implement an explicit retry-or-surface policy, and there is no silent overwrite
+/// anywhere].
+/// </para>
+/// <para>
+/// <b>THE MEMBER IS TYPED AS THE GENERATED <c>common.v1.ConflictDetail</c> RATHER THAN TRANSCRIBED.</b>
+/// Transcribing it would mean restating <c>ConflictDetail</c>, <c>ConflictRow</c>, <c>ColumnValue</c>,
+/// <c>AnyValue</c> and its nested value types here, five levels of a second source of truth with nothing
+/// keeping it in step with <c>Proto/common.v1.proto</c> - and the first divergence would be silent, on the
+/// one payload where a silent divergence stops a caller retrying. Pointing at the generated type makes the
+/// published schema DERIVED from the protocol definition.
+/// </para>
+/// <para>
+/// <b>⚠ THIS TYPE DESCRIBES THE BODY; IT DOES NOT PRODUCE IT.</b> <c>ProjectConflict</c> renders the
+/// detail through the canonical protobuf JSON mapping and attaches it as a problem extension member, and
+/// that is deliberate rather than an inconsistency: the canonical mapping is what makes 64-bit fields
+/// arrive as JSON strings and what a consumer of the upstream contract already parses, so serialising the
+/// generated type through the default JSON options instead would change the emitted body. The member name
+/// below is taken from the same constant the projection writes, so the published schema and the emitted
+/// body cannot disagree about it. The sibling projection in DataServices resolves it the same way, for the
+/// same reason.
+/// </para>
+/// <para>
+/// Both value sets travel on every row, which is a requirement rather than a convenience: the one updatable
+/// DataWindow in the legacy estate declares <c>updatewhere=1</c> and marks all six of its columns
+/// <c>updatewhereclause=yes</c> [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], and
+/// <c>updatewhere=1</c> is the "key and updateable columns" mode - so the generated WHERE clause compared
+/// the key column PLUS the original value of every updateable column. Current values alone could not
+/// express what the failed statement actually compared.
+/// </para>
+/// <para>
+/// A CLASS RATHER THAN A RECORD, unlike <see cref="ProtoPayload"/> above: it extends the framework's
+/// <see cref="ProblemDetails"/> so the problem members and the <c>retCode</c> extension stay
+/// single-sourced, and a record may only inherit from another record.
+/// </para>
+/// </remarks>
+public sealed class ConflictProblemDetails : ProblemDetails
+{
+    /// <summary>
+    /// The conflict detail exactly as it arrived, field for field with <c>common.v1.ConflictDetail</c>.
+    /// </summary>
+    /// <remarks>
+    /// Integer members of the referenced message are 64-bit and are emitted as JSON STRINGS, because that
+    /// is what the canonical protobuf JSON mapping requires of a 64-bit field; the authored contract
+    /// expresses the same fact as an <c>[integer, string]</c> union. A consumer parsing them as unquoted
+    /// numbers will fail on real traffic.
+    /// </remarks>
+    [JsonPropertyName(ConflictMemberName)]
+    public ConflictDetail? Conflict { get; init; }
+
+    /// <summary>
+    /// The member name, matching the extension member the projection actually writes so the published
+    /// schema and the emitted body cannot disagree.
+    /// </summary>
+    private const string ConflictMemberName = "conflict";
 }

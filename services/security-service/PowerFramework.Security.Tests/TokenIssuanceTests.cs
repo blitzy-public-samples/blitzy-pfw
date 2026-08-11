@@ -108,10 +108,14 @@
 //
 //    `POST /v1/tokens` is the system's one MUTUAL-TLS edge, and that is the contract rather than a
 //    local decision: a caller cannot present a bearer token in order to obtain its first one, so the
-//    published document applies the `mutualTls` scheme to this operation as an OVERRIDE of the
-//    document-level bearer requirement [shared/PowerFramework.Contracts/OpenApi/security.v1.yaml].
-//    The route's own policy requires a client certificate on the connection and the handler checks for
-//    one unconditionally. Three consequences shape this file, and none of them is a workaround:
+//    published document applies `clientCredential` AND `mutualTls` to this operation as an OVERRIDE of
+//    the document-level bearer requirement, as two ALTERNATIVES either of which satisfies it
+//    [shared/PowerFramework.Contracts/OpenApi/security.v1.yaml]. The route's own policy requires one of
+//    the two on the request - a shared secret as an HTTP `Basic` credential, or a client certificate on
+//    the connection - and the handler checks for one unconditionally. THIS FILE EXERCISES THE
+//    CERTIFICATE ALTERNATIVE, which is the one that cannot be reached without a handshake; the sibling
+//    rows covering the `Basic` alternative live in `IssuanceRosterTests.cs`, beside the roster it is
+//    authenticated against. Three consequences shape this file, and none of them is a workaround:
 //
 //      * THE SUBSTANCE IS ASSERTED WITHOUT HTTP AT ALL, against `TokenIssuer` resolved from the booted
 //        host. That is where claim fidelity, the lifetime, determinism and the audience gate live.

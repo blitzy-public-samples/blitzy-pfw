@@ -1958,11 +1958,31 @@ internal readonly record struct QuerySettingOutcome(long Code, string? ErrorText
 /// echoes a rejected value (constraint C-F).
 /// </para>
 /// </remarks>
-// ============ THE SCOPE THIS CONTRACT REQUIRES (constraint C-G) ============
-// C-05 issues only SELECT statements - the retrieval task generates nothing else
-// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru] - so every RPC on this
-// contract, the task lifecycle and the setters included, needs the READ scope and no more. The
-// task handle and its configuration are per-caller server state, not stored data.
+// ============ THE SCOPE THIS CONTRACT REQUIRES, AND HOW IT IS KEPT (constraint C-G) ============
+// C-05 is the RETRIEVAL contract: the legacy task it ports generates SELECT statements and nothing
+// else [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru], so every RPC here - the
+// task lifecycle and the setters included - needs the READ scope and no more. The task handle and
+// its configuration are per-caller server state, not stored data.
+//
+// ⚠ BUT "THE TASK GENERATES ONLY SELECT" IS A STATEMENT ABOUT THE LEGACY TASK, NOT A GUARANTEE
+// ABOUT THIS SURFACE, AND READING IT AS ONE WAS A REAL DEFECT. Three of this contract's inputs are
+// caller-authored SQL rather than task-generated: QuerySpec.sql, QuerySpec.sql_syntax (whose
+// `retrieve="..."` clause is what executes) and SqlClauseSpec.clause. The oracle's setters guard
+// none of them, because a library has no caller whose rights are narrower than the process's - and
+// across this boundary there is one. Left ungated, a credential minted for `persistence.read`
+// reached INSERT, DELETE, DDL, PRAGMA, ATTACH and, because the provider executes every statement in
+// a batch it is handed, whole batches spliced behind a semicolon. So the scope is now ENFORCED
+// rather than assumed, at two named places:
+//
+//    * Sql/ReadOnlyStatementGuard.cs gates QuerySpec.sql and QuerySpec.sql_syntax, admitting ONE
+//      statement that begins with SELECT, WITH or VALUES and refusing everything named above;
+//    * Sql/ClauseModifier.cs gates SqlClauseSpec.clause with its own, narrower, fragment grammar.
+//
+// Both REFUSE rather than rewrite - byte-exact statement parity is the acceptance criterion - and
+// both answer a code this contract already had. Neither moves the oracle's own run-time emptiness
+// and malformedness checks forward to configuration time (constraint C-B). The published grammar
+// lives on persistence.v1.QuerySpec.sql, .sql_syntax and SqlClauseSpec.clause, and the two guards
+// are the implementation of that text; the three must not drift.
 //
 // The route mapping in Program.cs additionally requires an authenticated principal, and the
 // fallback policy would close the door even if the mapping forgot to. This attribute is the
@@ -1983,6 +2003,85 @@ internal sealed class QueryService : GeneratedQueryServiceBase
         "The request named a transaction session this instance does not hold, so no query task was "
         + "created. Begin a session first; a session handle is not portable across instances. The "
         + "handle value is deliberately not quoted here.";
+
+    /// <summary>
+    /// Answered when the session a task belongs to began retiring before the retrieval reached the
+    /// transaction.
+    /// </summary>
+    /// <remarks>
+    /// A DISTINCT MESSAGE FROM THE UNKNOWN-SESSION ONE, deliberately: the handle WAS live when the caller
+    /// sent it, so telling it the session was never known would send it looking for a mistake it did not
+    /// make. The code is the one the legacy answers for a transaction it cannot use
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113</c>], and no handle value is
+    /// quoted (constraint C-F).
+    /// </remarks>
+    private const string SessionClosingText =
+        "The transaction session this task belongs to was ending as the retrieval reached the transaction, "
+        + "so no statement was issued. Open a new session and retry; nothing was retrieved and no state "
+        + "was changed.";
+
+    /// <summary>
+    /// Answered when the session a task was being created against began retiring before the task could be
+    /// published.
+    /// </summary>
+    /// <remarks>
+    /// A THIRD MESSAGE RATHER THAN A REUSE OF EITHER OF THE TWO ABOVE, because the caller's position is
+    /// different again: its session handle was live when it sent the request, and no task handle was ever
+    /// issued, so there is nothing for it to release and nothing to retry with except a NEW session. The
+    /// code is <c>E_INVALID_TRANSACTION</c> - the one the legacy answers for a transaction it cannot use
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113</c>] - and no handle value is
+    /// quoted (constraint C-F).
+    /// </remarks>
+    private const string SessionClosingOnCreateText =
+        "The transaction session named by this request began retiring before the query task could be "
+        + "published against it, so no task was created and no handle was issued. Open a new session and "
+        + "retry.";
+
+    /// <summary>
+    /// Answered when a caller-supplied statement is not something a read-scoped caller may ask this
+    /// contract to run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>IT NAMES THE RULE AND NEVER THE REJECTED TEXT (constraint C-F).</b> Echoing the statement back
+    /// would put a caller-authored value - and, on a statement that was already parameter-bound, an
+    /// interpolated literal - into a field documented as opaque display text, which is exactly what
+    /// <c>Errors/SqlRedactor.cs</c> exists to prevent. Naming the rule instead tells a caller what to
+    /// change without quoting anything, and it is a fixed sentence, so it passes through the redactor
+    /// byte for byte.
+    /// </para>
+    /// <para>
+    /// It is DELIBERATELY not phrased as an authorization failure. The caller's credential is valid and
+    /// its scope is the one this contract requires; what it asked for is outside that scope's capability.
+    /// <c>E_INVALID_SQL</c> - the code this contract already answers for a statement it will not run
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L612, :L616, :L620</c>] - is
+    /// therefore the honest answer, and it introduces no new value into a consumer's branch set.
+    /// </para>
+    /// </remarks>
+    private const string InadmissibleStatementText =
+        "The supplied statement is not admissible on this contract. C-05 is published under the read "
+        + "scope, so it accepts ONE statement beginning with SELECT, WITH or VALUES, and refuses data "
+        + "manipulation, data definition, PRAGMA, ATTACH, DETACH, transaction control, procedure "
+        + "execution, extension loading, SQL comments and any second statement after a semicolon. Send "
+        + "state-changing statements to the write-scoped C-07 command contract instead. The rejected "
+        + "text is deliberately not quoted here.";
+
+    /// <summary>
+    /// Answered when a caller-supplied DataWindow syntax declares a retrieval a read-scoped caller may
+    /// not ask this contract to run.
+    /// </summary>
+    /// <remarks>
+    /// A DISTINCT MESSAGE FROM <see cref="InadmissibleStatementText"/>, because the caller sent a
+    /// different field and the offending text is nested inside it: telling it that "the statement" was
+    /// refused when it supplied a syntax blob would send it looking at the wrong request field.
+    /// </remarks>
+    private const string InadmissibleSyntaxText =
+        "The retrieval statement declared by the supplied DataWindow syntax is not admissible on this "
+        + "contract. C-05 is published under the read scope, so the syntax's retrieve clause must carry "
+        + "ONE statement beginning with SELECT, WITH or VALUES, and may not carry data manipulation, "
+        + "data definition, PRAGMA, ATTACH, DETACH, transaction control, procedure execution, extension "
+        + "loading, SQL comments or any second statement after a semicolon. The rejected text is "
+        + "deliberately not quoted here.";
 
     /// <summary>Answered when a request names a task handle this instance does not hold.</summary>
     private const string UnknownTaskText =
@@ -2110,24 +2209,40 @@ internal sealed class QueryService : GeneratedQueryServiceBase
     /// setting was wrong. The half-configured task is disposed on the spot rather than leaked, which is
     /// hazard 2's deterministic release applied to a failure path.
     /// </para>
+    /// <para>
+    /// <b>PUBLICATION IS ATOMIC WITH THE SESSION'S LIVENESS, AND ONLY PUBLICATION IS.</b> Resolving the
+    /// session, building the task and merging the specification all touch nothing but the unpublished task
+    /// itself, so they run outside the session's lifecycle gate. The step that MUST be atomic is the one
+    /// that makes the task reachable: <c>EndSession</c> marks its session closing inside that gate and only
+    /// then walks the registries, so a registration performed outside the gate could land after the walk
+    /// and leave a task holding a transaction the pool has already taken back. Testing
+    /// <c>IsClosing</c> and registering inside one acquisition removes that interleaving - either the
+    /// registration precedes the mark and the walk finds it, or it reaches the gate after the mark and is
+    /// refused.
+    /// </para>
+    /// <para>
+    /// The gate is AWAITED rather than blocked on, because a streaming retrieval on the same transaction
+    /// holds it for the whole of its stream and a blocking acquisition would pin a request thread for that
+    /// duration. Nothing observable changes.
+    /// </para>
     /// </remarks>
-    public override Task<CreateQueryTaskResponse> CreateQueryTask(
+    public override async Task<CreateQueryTaskResponse> CreateQueryTask(
         CreateQueryTaskRequest request,
         ServerCallContext context)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(context);
 
-        if (!_sessions.TryResolve(request.Session, out TransactionSession? session))
+        if (!_sessions.TryResolve(request.Session, out TransactionSession? session) || session is null)
         {
             _logger?.LogWarning(
                 "A query task could not be created because the named transaction session is not held by "
                 + "this instance.");
 
-            return Task.FromResult(new CreateQueryTaskResponse
+            return new CreateQueryTaskResponse
             {
                 Status = QueryWireCodes.Status(RetCode.E_INVALID_TRANSACTION, UnknownSessionText),
-            });
+            };
         }
 
         QueryFaultRecorder faults = new();
@@ -2146,33 +2261,57 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             // and no response. The type also overrides ToString and PrintMembers so that its log-password,
             // connection-parameter and user-parameter fields have no printing path at all - which is what
             // makes a stray `$"... {descriptor}"` impossible rather than merely discouraged.
-            TransactionData descriptor = session!.Descriptor;
+            TransactionData descriptor = session.Descriptor;
 
             long bound = task.SetTransData(descriptor);
 
             if (bound != RetCode.OK)
             {
-                return Task.FromResult(new CreateQueryTaskResponse
+                return new CreateQueryTaskResponse
                 {
                     Status = QueryWireCodes.Status(bound),
-                });
+                };
             }
 
             QuerySettingOutcome applied = ApplySpec(task, request.Spec);
 
             if (!applied.IsAccepted)
             {
-                return Task.FromResult(new CreateQueryTaskResponse
+                return new CreateQueryTaskResponse
                 {
                     Status = applied.ToStatus(),
-                });
+                };
             }
 
-            QueryTaskEntry? entry = _tasks.Register(
-                session.SessionId,
-                task,
-                faults,
-                out string quotaDiagnostic);
+            QueryTaskEntry? entry;
+            string quotaDiagnostic;
+
+            // ------------------------------------------------------------------------------------------
+            //  THE PUBLICATION, AND THE ONLY PART OF THIS HANDLER THAT IS GATED. See the remarks above for
+            //  why the liveness test and the registration have to be one step rather than two.
+            // ------------------------------------------------------------------------------------------
+            using (await session.Gate.EnterAsync(context.CancellationToken).ConfigureAwait(false))
+            {
+                if (session.IsClosing)
+                {
+                    _logger?.LogWarning(
+                        "A query task was not published because its transaction session began retiring "
+                        + "first. The handle value is deliberately not recorded.");
+
+                    return new CreateQueryTaskResponse
+                    {
+                        Status = QueryWireCodes.Status(
+                            RetCode.E_INVALID_TRANSACTION,
+                            SessionClosingOnCreateText),
+                    };
+                }
+
+                entry = _tasks.Register(
+                    session.SessionId,
+                    task,
+                    faults,
+                    out quotaDiagnostic);
+            }
 
             if (entry is null)
             {
@@ -2183,10 +2322,10 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                     "CreateQueryTask refused a task because a handle ceiling was reached: {Diagnostic}",
                     quotaDiagnostic);
 
-                return Task.FromResult(new CreateQueryTaskResponse
+                return new CreateQueryTaskResponse
                 {
                     Status = QueryWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
-                });
+                };
             }
 
             registered = true;
@@ -2195,11 +2334,11 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                 "Created a query task against session {SessionId}.",
                 entry.SessionId);
 
-            return Task.FromResult(new CreateQueryTaskResponse
+            return new CreateQueryTaskResponse
             {
                 Status = QueryWireCodes.Status(RetCode.OK),
                 Task = new TaskHandle { TaskId = entry.TaskId },
-            });
+            };
         }
         finally
         {
@@ -2765,10 +2904,62 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             return;
         }
 
+        // 🔴 THE TRANSACTION GATE, TAKEN FOR THE WHOLE OF THE RETRIEVAL. C-05 shares one pooled
+        // transaction object with C-06, C-07 and C-08 - the pool keys its entries on WHOLE-descriptor
+        // equality, so two sessions opened with equal descriptors are handed the SAME object
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L136-L172] - and the legacy is
+        // free of any race on it only because each pool lives on ONE worker thread [:L194-L206]. A
+        // concurrent server has to reproduce that guarantee explicitly, and a retrieval that ran outside
+        // the gate while its siblings ran inside it made the gate meaningless for all of them: the
+        // transaction's own SQL code, error text and statement status are shared mutable state, and its
+        // rollback path saves, mutates and restores five of them [n_cst_thread_trans.sru:L163-L183].
+        //
+        // IT IS TAKEN ASYNCHRONOUSLY, which is the reason the gate is not a Lock: this method awaits
+        // inside its critical section - the retrieval streams - so a Lock could not span it. See
+        // Grpc/TransactionGate.cs.
+        //
+        // THE SESSION IS RESOLVED FROM THE TASK'S OWN RECORD rather than from the request, so a caller
+        // cannot name one session's task while presenting another's handle. An unresolvable session means
+        // the session ended between the task's creation and now, which is the same refusal as a closing one.
+        if (!_sessions.TryResolve(entry.SessionId, out TransactionSession? session) || session is null)
+        {
+            await WriteGuardStatusAsync(
+                    responseStream,
+                    QueryWireCodes.Status(RetCode.E_INVALID_TRANSACTION, UnknownSessionText),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (entry.EndRun())
+            {
+                entry.Dispose();
+            }
+
+            return;
+        }
+
         using QueryStreamSink sink = new(responseStream, entry, cancellationToken);
 
         try
         {
+            using TransactionGateScope gate = await session.Gate
+                .EnterAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            // 🔴 THE LIVENESS TEST BELONGS INSIDE THE GATE. EndSession marks the session closing under
+            // this same gate BEFORE it hands the transaction back, so either this retrieval is inside the
+            // gate first and runs to completion, or the teardown is and this sees the flag. A test taken
+            // outside the gate - or before it - is the check-then-act this ordering removes.
+            if (session.IsClosing)
+            {
+                _ = await sink
+                    .WriteTerminalStatusAsync(
+                        QueryWireCodes.Status(RetCode.E_INVALID_TRANSACTION, SessionClosingText),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                return;
+            }
+
             QuerySettingOutcome merged = ApplySpec(entry.Task, request.Spec);
             long outcome = merged.Code;
 
@@ -2782,6 +2973,10 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                 // paging totals all arrive through synchronous callbacks with no await point of their own,
                 // so this is where they go out. A drain failure is reported only when the retrieval itself
                 // succeeded, because the retrieval's own code is the more specific answer.
+                //
+                // IT RUNS INSIDE THE GATE TOO, because it publishes state the retrieval captured from the
+                // transaction: releasing the gate before the capture is complete would let a sibling
+                // operation mutate that state between the execution and the report.
                 long tail = await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
 
                 if (outcome == RetCode.OK)
@@ -3244,6 +3439,17 @@ internal sealed class QueryService : GeneratedQueryServiceBase
         // 3 - of_setsqlsyntax [:L68]. Blanks the data object [:L474-L475].
         if (spec.HasSqlSyntax)
         {
+            // 🔴 THE READ-SCOPE ADMISSIBILITY TEST, BEFORE THE SETTER AND NOT AFTER IT. A syntax blob
+            // carries its own retrieval statement in a `retrieve="..."` clause, and that clause is what
+            // the DataWindow runtime registers and this service ultimately executes - so the syntax path
+            // reaches the provider exactly as the statement path does, and needs the same gate. Testing
+            // BEFORE the setter is what makes the refusal total: the setter also BLANKS the data-object
+            // name [:L475], so calling it and then refusing would leave the task with neither source.
+            if (!ReadOnlyStatementGuard.IsAdmissibleSyntax(spec.SqlSyntax))
+            {
+                return QuerySettingOutcome.Refused(RetCode.E_INVALID_SQL, InadmissibleSyntaxText);
+            }
+
             applied = QuerySettingOutcome.From(task.SetSqlSyntax(spec.SqlSyntax));
 
             if (!applied.IsAccepted)
@@ -3252,14 +3458,30 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             }
         }
 
-        // 4 - of_setsql [:L67]. NO GUARD AT ALL, and the asymmetry with the command contract is real and
-        // preserved: this setter is a plain assignment [:L468] while the command task rejects an empty
-        // statement immediately. The emptiness check on THIS path happens later, inside the task body,
-        // where an empty statement answers E_INVALID_SQL with the diagnostic SQL为空! [:L616-L617]. Moving
-        // the check forward would make a caller see a rejection at configuration time that the legacy
-        // defers to run time (constraint C-B).
+        // 4 - of_setsql [:L67]. THE ORACLE'S SETTER HAS NO GUARD AT ALL, and the asymmetry with the
+        // command contract is real and preserved: it is a plain assignment [:L468] while the command task
+        // rejects an empty statement immediately. The EMPTINESS check on this path still happens later,
+        // inside the task body, where an empty statement answers E_INVALID_SQL with the diagnostic
+        // SQL为空! [:L616-L617] - moving THAT forward would make a caller see a rejection at configuration
+        // time that the legacy defers to run time (constraint C-B).
+        //
+        // 🔴 WHAT IS NEW HERE IS NOT THE EMPTINESS CHECK BUT THE READ-SCOPE ADMISSIBILITY TEST, and it is
+        // a different question with a different justification. This whole contract is published under the
+        // READ scope, and the legacy could not have needed a gate because a library has no caller whose
+        // rights are narrower than the process's. Across this boundary it does: without the test, a
+        // credential minted for `persistence.read` reaches INSERT, DELETE, DDL, PRAGMA and - because the
+        // provider executes every statement in a batch it is handed - whole batches spliced behind a
+        // semicolon. That is a REQUIRED ADDITION in the sense AAP 0.4.2.6 uses for the statement
+        // redactor, and it narrows the contract with a DEFINED error rather than widening it with a guess
+        // (AAP 0.1.5, constraint C-G). Sql/ReadOnlyStatementGuard.cs owns the grammar and states exactly
+        // what it does not touch; an empty or malformed statement stays admissible here.
         if (spec.HasSql)
         {
+            if (!ReadOnlyStatementGuard.IsAdmissibleStatement(spec.Sql))
+            {
+                return QuerySettingOutcome.Refused(RetCode.E_INVALID_SQL, InadmissibleStatementText);
+            }
+
             applied = QuerySettingOutcome.From(task.SetSql(spec.Sql));
 
             if (!applied.IsAccepted)

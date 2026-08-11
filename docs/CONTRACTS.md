@@ -61,7 +61,7 @@ list of a 26-method service is a list that silently falls behind the schema. The
 
 | Contract | Surface | Count | Streaming shapes |
 | --- | --- | --- | --- |
-| C-01 `TokenService` | REST | 3 operations | — (one `mutualTls`, two anonymous) |
+| C-01 `TokenService` | REST | 3 operations | — (one takes `clientCredential` OR `mutualTls`, two anonymous) |
 | C-02 `CryptoService` | REST | 18 operations: 17 covering all **63** legacy overloads, plus one authored release operation | — (all `bearerAuth`) |
 | C-03 `DataWindowService` | gRPC | 16 methods | 1 server stream, 1 bidirectional |
 | C-04 `ColumnExpressionService` | gRPC | 26 methods | 1 server stream, 2 bidirectional (both **inverted**) |
@@ -256,7 +256,7 @@ reference to an existing one.
 
 | ID | Contract | Transport | Served by | Consumed by | Shape that decided it |
 | --- | --- | --- | --- | --- | --- |
-| **C-01** | `security.v1.TokenService` | REST + JWKS over HTTPS; issuance is **mutual-TLS-only** | Security | Gateway, DataServices, Persistence | Stateless issuance; stock bearer handlers must self-configure over plain HTTP semantics, and the channel must be TLS because a client certificate cannot be presented without it |
+| **C-01** | `security.v1.TokenService` | REST + JWKS over HTTPS; issuance takes **`clientCredential` OR `mutualTls`** and no bearer token | Security | Gateway, DataServices, Persistence | Stateless issuance; stock bearer handlers must self-configure over plain HTTP semantics, and the channel must be TLS because a client certificate cannot be presented without it — while the `Basic` alternative is what keeps issuance authenticated where an intermediary terminates TLS |
 | **C-02** | `security.v1.CryptoService` | REST | Security | DataServices | 63 stateless cryptographic overloads across 17 operations, plus one authored release operation; no ordering, nothing to stream |
 | **C-03** | `dataservices.v1.DataWindowService` | gRPC (server + bidirectional streaming) | DataServices | Gateway | A 22-event ordered chain with a `ref string` out-parameter, an `any` return, and cross-event mutable state |
 | **C-04** | `dataservices.v1.ColumnExpressionService` | gRPC (two inverted streams) | DataServices | Gateway | A macro protocol the *application* implements, plus a seven-structure expression model containing a live object pointer |
@@ -1719,6 +1719,72 @@ while keeping the **observable generated statement** unchanged, and each site is
 known legacy defect. What is *not* done is silently altering the generated statement, because that
 would change observable behaviour (C-B).
 
+The clause body itself is **not** accepted unconditionally, though. `Sql/ClauseModifier.cs` refuses a
+body that carries statement structure — a semicolon, a comment introducer, an unbalanced delimiter or a
+statement verb outside a quoted context — and answers `E_INVALID_ARGUMENT`, the same code the legacy's own
+guard already answers for a non-positive index or an empty clause. It **refuses rather than rewrites**, so
+an accepted clause is stored byte for byte and statement parity is untouched.
+
+### 8.3a The read-only statement grammar, and why the scope needed enforcing
+
+C-05 is published under the `persistence.read` scope. An earlier revision of this section justified that
+by observing that the legacy retrieval task generates `SELECT` statements and nothing else — which is true
+of the **task** and says nothing about the **surface**. Three of this contract's inputs are caller-authored
+SQL rather than task-generated:
+
+| Field | What it reaches | Gated by |
+| --- | --- | --- |
+| `QuerySpec.sql` | the statement the carrier retrieves through | `Sql/ReadOnlyStatementGuard.cs` |
+| `QuerySpec.sql_syntax` | its `retrieve="..."` clause becomes the registered statement | `Sql/ReadOnlyStatementGuard.cs` |
+| `SqlClauseSpec.clause` | spliced into the parsed statement | `Sql/ClauseModifier.cs` (§8.3) |
+
+> **A read-scoped credential that can reach an arbitrary statement is not a read scope.** The provider
+> executes every statement in a batch it is handed, so one spliced semicolon turns a retrieval into a
+> retrieval plus a `DELETE`; and even without a batch, `WITH x AS (...) INSERT INTO ...` is valid SQL whose
+> leading keyword is not a mutation at all.
+
+The legacy needed no gate because it is a **library**: it opens no socket and has no caller whose rights
+are narrower than the process's. This contract does, so the scope is now **enforced** rather than assumed.
+A statement is accepted only when all of the following hold; otherwise it is refused with
+`E_INVALID_SQL`, nothing is stored, and the diagnostic names the rule **without quoting the rejected
+text**:
+
+1. It is **one** statement. A semicolon is admitted only as a trailing terminator with nothing but
+   whitespace after it.
+2. Its first bare word is `SELECT`, `WITH` or `VALUES`.
+3. Outside string literals, quoted identifiers and bracketed identifiers it contains none of `INSERT`,
+   `UPDATE`, `DELETE`, `UPSERT`, `MERGE`, `INTO`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `RENAME`,
+   `REINDEX`, `VACUUM`, `ANALYZE`, `ATTACH`, `DETACH`, `PRAGMA`, `BEGIN`, `COMMIT`, `ROLLBACK`,
+   `SAVEPOINT`, `GRANT`, `REVOKE`, `DENY`, `EXEC`, `EXECUTE`, `CALL`, `DECLARE`, `WAITFOR`, `SHUTDOWN`,
+   `RECONFIGURE`, `BACKUP`, `RESTORE`, `OPENROWSET`, `OPENQUERY`, `OPENDATASOURCE`, `LOAD_EXTENSION`, or
+   any name beginning `xp_` or `sp_`. `REPLACE` is admitted only as a function call — immediately followed
+   by `(` — and refused as the SQLite DML verb. Rule 2 alone is insufficient, which is why rule 3 spans
+   the whole statement.
+4. It carries no SQL comment: neither `--` nor `/* */`.
+5. Its parentheses balance and every quoted run is terminated.
+6. It contains no control character other than tab, carriage return and line feed.
+
+`LOAD_EXTENSION` is the one entry that is not a statement verb, and it is the most important: it is a
+scalar **function**, reachable from inside an ordinary select list, and what it does is load and execute
+arbitrary native code. The provider disables extension loading by default, but a guard that depends on a
+provider default is a guard that breaks when the default is changed somewhere else.
+
+**What is deliberately not refused**, so a caller can predict the boundary exactly: an **empty** statement
+— the legacy defers that check to run time, where it answers `E_INVALID_SQL` with `SQL为空!`
+[`:L615-L617`], and moving it forward would be the behavioural change C-B forbids; a **malformed**
+statement, which the provider still rejects with the provider's own diagnostic; an unknown table or column;
+and a statement whose literals or identifiers happen to contain a refused word as **data** —
+`WHERE note = 'delete me'` and `WHERE [delete] = 1` are both accepted.
+
+The same grammar gates C-08's `GridSyntaxFromSql`, which is the other read-scoped RPC taking
+caller-authored SQL. Its derivation asks the engine for a result schema rather than executing the
+statement, so the gate there is defence in depth — but a guard that relies on a collaborator's behaviour
+is a guard that breaks when the collaborator changes.
+
+**Send state-changing statements to C-07 instead.** `CommandService` is published under
+`persistence.write` and DML is its entire purpose [`n_cst_thread_task_sqlupdate.sru:L204`]; this is a scope
+boundary rather than a capability the system lacks.
+
 ### 8.4 Paging parity is byte-exact generated SQL
 
 The dispatch is a `choose case` on the connection's dialect selector at
@@ -1821,7 +1887,7 @@ The short-circuit is observable through the absence of a statement, so the contr
 consumer must not infer from a missing count query that counting failed. Counting is additionally
 suppressed entirely for a stored-procedure source or when the page-counting switch is off [`:L818`].
 
-### 8.6 Errors, and the one field that must be redacted
+### 8.6 Errors, and the two fields that must be redacted
 
 Failures return a structured `DbError` mirroring the legacy error event field for field. The legacy
 structure is `ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L3-L9`:
@@ -1829,13 +1895,46 @@ structure is `ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L3-L9`:
 | Legacy field | Locator | Carried as |
 | --- | --- | --- |
 | `sqldbcode` | `:L4` | The driver's own numeric code |
-| `sqlerrtext` | `:L5` | The driver's message text |
-| `sqlsyntax` | `:L6` | **One redacted string field — see below** |
+| `sqlerrtext` | `:L5` | **A redacted string field — see below** |
+| `sqlsyntax` | `:L6` | **A redacted string field — see below** |
 | `buffer` | `:L7` | The offending buffer selector: primary, delete, or filter |
 | `row` | `:L8` | The offending row number |
 
-> **The statement field is a single redacted string. It is never echoed verbatim, and the wire carries
-> no separate parameter collection beside it.**
+> **Both provider-derived strings are redacted. Neither is echoed verbatim, and the wire carries no
+> separate parameter collection beside the statement.**
+
+**The message field was added to this rule after the statement field, and the correction matters.** An
+earlier revision of this section redacted the statement alone, on the reasoning that the message is
+opaque display text a consumer must not parse. That reasoning was incomplete: **opacity describes how a
+consumer may read a field, not what the provider puts in it.** What SQLite puts in the message routinely
+includes the caller's own data — a uniqueness violation names the duplicated column, a constraint or type
+failure quotes the offending value, and a bad identifier echoes the text the caller sent. The legacy
+could publish that safely because it published nothing at all: PowerFramework is a library and the
+message never left the process. Across this boundary it reaches a network peer.
+
+The same correction applies to **every** provider-derived string on **every** contract, not only to this
+payload, and the published fields are enumerated so the rule is checkable rather than implied:
+
+| Contract | Field | Source | Redacted |
+| --- | --- | --- | --- |
+| all | `common.v1.DbError.sqlsyntax` | the generated statement | yes |
+| all | `common.v1.DbError.sqlerrtext` | the provider's message | yes |
+| C-07 | `ExecResponse.sql_err_text` | the transaction's message [`:L101`, `:L111`] | yes |
+| C-07 | `OperationStatus.error_text` on a driver arm | the transaction's or the acquired payload's message [`:L72`, `:L101`, `:L111`] | yes |
+| C-06 | `OperationStatus.error_text` on a driver arm | the transaction's message [`:L390`] | yes |
+| C-05 | `OperationStatus.error_text` on a terminal stream status | whatever the worker raised | yes |
+| C-08 | `GetSessionStateResponse.sql_err_text` | the transaction's message | yes |
+| C-08 | `GetSessionStateResponse.sql_return_data` | a stored-procedure OUT value | **no** — it is a caller-requested RESULT, not a diagnostic |
+| all | `OperationStatus.error_text` on a framework arm | a fixed sentence this codebase authored | passes through unchanged |
+
+**The redaction is literal-scoped, which is why it costs no diagnostic value.** String literals, radix
+literals, numeric literals and comment bodies become placeholders; every other byte is copied through
+unchanged. So a driver message that quotes no value arrives byte for byte — `near "FROM": syntax error`
+and `NOT NULL constraint failed: COMPANY.NAME` are unaltered — and every framework-authored Chinese
+diagnostic the legacy synthesizes is unaltered too. An operator still learns which condition failed and
+on which column; what no longer travels is the row data. Consumers must not treat a redacted field as
+reproducing the provider's text byte for byte, because where the provider quoted a value it deliberately
+does not.
 
 **The shape is decided, not open.** Two shapes were permitted when this control was specified — one
 redacted field, or a statement plus a separate parameter collection — and **the single redacted field is
@@ -2194,11 +2293,12 @@ use.
 | 3 | `Reset` | `ResetCommandTaskRequest` → `ResetCommandTaskResponse` | unary | `of_reset` [`:L27`, `:L32-L38`]. **`E_BUSY` while running**, and **it restores `AC_OFF` on success** — so a reset task returns to the no-transaction-handling commit mode rather than keeping whatever was set |
 | 4 | `SetAutoCommit` | `SetCommandAutoCommitRequest` → `SetCommandAutoCommitResponse` | unary | `of_setautocommit` [`:L28`]. **Three-valued, not boolean** — see [§10.2](#102-the-commit-mode-is-three-valued-not-boolean) |
 | 5 | `SetSql` | `SetCommandSqlRequest` → `SetCommandSqlResponse` | unary | `of_setsql` [`:L29`]. **An empty statement is `E_INVALID_SQL`, and the legacy checks it twice** — the redundant second check is preserved rather than tidied away |
-| 6 | `Exec` | `ExecRequest` → `ExecResponse` | unary | Executes a command returning no result set, preserving positional `?` binding, batch execution and error-text retrieval — the three behaviours of [§10.1](#101-exec-and-the-three-behaviours-it-preserves). **The leading-`@` prefix is not a mode on this verb** — see the same section |
+| 6 | `Exec` | `ExecRequest` → `ExecResponse` | unary | Executes a command returning no result set, preserving all **four** of the behaviours the AAP names for this verb: positional binding, **the leading-`@` prefix execution mode**, batch execution and error-text retrieval — [§10.1](#101-exec-and-the-four-behaviours-it-preserves) |
 
-### 10.1 `Exec` and the three behaviours it preserves
+### 10.1 `Exec` and the four behaviours it preserves
 
-`Exec` executes a command that returns no result set. The three behaviours the contract carries:
+`Exec` executes a command that returns no result set. AAP §0.4.3 names four behaviours for this verb, and
+all four are carried:
 
 - **Positional `?` binding.** Arguments are supplied positionally and substituted into the statement in
   order. The legacy demonstrates it directly:
@@ -2206,27 +2306,62 @@ use.
   `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398-L400`, and a single-placeholder update at
   `:L313`. Binding is applied before execution and a binding failure yields
   `RetCode.E_SQL_BIND_ARG_FAILED` [`n_cst_thread_task_sqlcommand.sru:L81-L86`].
+- **The leading-`@` prefix execution mode** — §10.1a below.
 - **Multi-statement batch execution**, demonstrated at `w_test_sqlite.srw:L381-L392`, where a batch is
   submitted and rolled back as a unit on failure.
 - **Error-text retrieval.** The result carries the numeric code and the driver text, drawn from the
   accessors the legacy exposes for exactly this purpose [`n_sqlite.sru:L26-L29` — row count, code, driver
   code, and error text].
 
-**The leading-`@` prefix is deliberately NOT among them, and the reason is that it belongs to two other
-objects.** The character carries two unrelated legacy meanings, neither on the object this verb drives:
+### 10.1a The leading-`@` prefix execution mode, and the two meanings behind one character
 
-- a **DataWindow-object selector**, in the transaction object's *retrieve* path —
+A statement whose **first character is `@`** selects the statement-caching execution mode. The prefix
+travels inside the statement string — `ExecRequest.sql` or `SetCommandSqlRequest.sql` — and is
+deliberately not hoisted into a separate boolean field, because it is the statement text that selects the
+mode and splitting it would create two sources of truth for one decision.
+
+**The character carries two unrelated legacy meanings, and telling them apart is the whole subtlety.**
+Conflating them is how this section previously came to declare the mode absent from a verb that carries it:
+
+- a **DataWindow-object selector**, on the *retrieve* verb —
   `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [`n_cst_thread_trans.sru:L309`], where the rest
-  of the string is an object name rather than SQL; and
-- a **statement-caching hint** on the SQLite binding's own `Exec` — the demonstration at
-  `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398` is written `"@INSERT INTO …"` and the comment at
-  `:L397` records that the prefix caches the statement to speed up re-parsing. That is `n_sqlite`,
-  reached directly, not through the transaction object.
+  of the string is an object name rather than SQL. That verb is C-05's, and its managed translation is
+  C-05's own `data_object` field rather than a prefix, so **this** meaning is genuinely not on C-07; and
+- a **statement-caching execution mode** on the SQLite binding's own `Exec` — the demonstration at
+  `w_test_sqlite.srw:L398` is written `"@INSERT INTO …"` with `?` placeholders and five bound values,
+  inside a ten-iteration loop [`:L396-L406`], and the comment at `:L397` records exactly what the prefix
+  does: 语句缓存 — statement caching — 空间换时间, trading space for time. That is `n_sqlite`
+  [`n_sqlite.sru:L32-L43`], and it is a **command**.
 
-C-07's `Exec` drives `of_Exec` [`n_cst_thread_trans.sru:L219-L238`], whose body is a plain
-`EXECUTE IMMEDIATE :sqlCmd USING this` with no prefix test of any kind. A command statement beginning
-with `@` is therefore passed to the provider verbatim and fails there — exactly as in the legacy.
-Producers must not strip the character and must not treat it as a mode selector.
+**The second meaning is C-07's**, and three other things on this service come from the same object: the
+four driver accessors `ExecResponse` publishes are `n_sqlite`'s [`n_sqlite.sru:L26-L29`] and so is the
+recorded eleven-argument ceiling [`:L33-L43`]. C-07 is therefore the *union* of the two command surfaces —
+the transaction object's `of_Exec` [`n_cst_thread_trans.sru:L219-L238`] and the SQLite binding's `Exec` —
+and reading only the first half is what produced the earlier claim that the mode was not on this verb.
+A producer sending the documented prefix has its statement **run**, not refused with a syntax error.
+
+The grammar, exactly, so a producer can predict what the provider receives:
+
+| # | Rule | Consequence |
+| ---: | --- | --- |
+| 1 | The selector is **position one**, with no whitespace tolerance — the oracle's own `Left(sql,1) = "@"` | `" @INSERT …"` does **not** select the mode and is forwarded whole, leading space and all |
+| 2 | **Exactly one character** is removed — the oracle's own `Mid(sql,2)` | `"@@INSERT …"` yields `"@INSERT …"`; a doubled selector is not an escape sequence, and the survivor reaches the provider and fails there |
+| 3 | The **remainder** is what every observer sees | The before- and after-command hooks, the `DbError` statement field, a SQL preview and any log record all carry the statement the provider ran — never the selector |
+| 4 | A **lone `"@"`** is answered by the transaction, not by a statement-shaped code | It is not the empty string, so it passes both emptiness guards [`:L45`, `:L65`]; the empty remainder is then refused with `E_INVALID_ARGUMENT` [`n_cst_thread_trans.sru:L219`] — the same route a null statement takes |
+| 5 | The mode **composes** with everything else on the request | Compatible with positional binding, with a multi-statement batch, and with all three autocommit values, because none of those is decided by the statement's first character |
+
+**No performance promise is made or implied (AAP §0.8.5).** The repository publishes no latency budget, no
+throughput target and no availability commitment anywhere. The mode changes how often the provider parses
+the statement text and nothing a caller can observe in the *result*, so a storage engine that keeps no
+prepared form may decline the request and execute immediately. What is guaranteed is that the mode is
+**carried** rather than dropped, and that the selector never reaches the provider as statement text.
+
+The shipped SQLite engine honours it by retaining the prepared command, keyed on the **placeholder** form
+of the statement so one retained entry serves every value set — which is what makes the oracle's
+ten-iteration loop one retention and nine matches. The store is bounded and evicts the least recently
+matched entry, because the legacy comment itself describes the mode as trading space for time, and it is
+released whenever the connection closes, because a prepared statement cannot outlive the connection it was
+prepared against.
 
 ### 10.2 The commit mode is three-valued, not boolean
 
@@ -2486,7 +2621,7 @@ statuses back. The status mapping is the substantive part:
 | `Unavailable` | `503` | The upstream answered that it is not currently serving — distinct from `502`, where it answered nothing at all |
 | `DeadlineExceeded` | `504` | The deadline this service sets on the outbound call elapsed |
 | `AlreadyExists` | `409` | Translated but declared on no operation; see below |
-| `Internal` / `Unknown` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-one-field-that-must-be-redacted) |
+| `Internal` / `Unknown` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-two-fields-that-must-be-redacted) |
 
 Each operation declares the responses it can **actually** produce rather than the whole table, because a
 status every generated client must branch on but no operation can return hides the real surface. That rule
@@ -2756,7 +2891,7 @@ new-boundary decision rather than a behavioural change:
 | --- | --- | --- | --- |
 | 1 | Key material becomes an opaque reference | [§5.2](#52-the-contract-level-secrets-rule) | The legacy passes raw keys between in-process objects; there is no wire to preserve |
 | 2 | The log-password, connection-parameter and user-parameter fields are forbidden on the response | [§11.2](#112-the-transaction-descriptor-mirrors-the-legacy-structure-field-for-field) | Same reason, plus a typed flag allowlist supplies the one behaviourally significant value the parameter string carried |
-| 3 | The generated-statement field is redacted or split | [§8.6](#86-errors-and-the-one-field-that-must-be-redacted) | The legacy field carries interpolated literals and the legacy logger redacts nothing |
+| 3 | The generated-statement field is redacted or split | [§8.6](#86-errors-and-the-two-fields-that-must-be-redacted) | The legacy field carries interpolated literals, the legacy message echoes offending values, and the legacy logger redacts neither |
 | 4 | The random-generation length is capped, with the legacy maximum recorded | [§5.4](#54-the-random-generators-are-determinism-seams) | The legacy is an in-process call whose caller and callee share a process and a fate; across a boundary an authenticated caller could ask the **sole token issuer** for a multi-gigabyte allocation, so an unbounded domain is a denial-of-service primitive the legacy could not have had |
 | 5 | Expression parity text must not be executed | [§6.9](#69-the-four-headless-models-and-their-reachable-operations) | The text is preserved byte-exactly and still travels; only the *sink* changes, from "evaluate this string" to "bind these values" |
 

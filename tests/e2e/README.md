@@ -271,9 +271,9 @@ Each of those overrides a decision taken for a correctness or a secrets reason �
 
 > ⚠️ **PLANNED, NOT AVAILABLE.** `orchestration/docker-compose.yml` **does not exist in this
 > repository**, and neither does `orchestration/README.md`; `orchestration/` holds only `.env.example`.
-> `services/persistence-service/Dockerfile` is absent too, so even the definitions cannot be fully
-> assembled. **There is therefore no way to bring a stack up today, and every live-stack assertion in
-> this suite is unrunnable until that changes.** Everything in this section describes the intended
+> All four service `Dockerfile`s DO exist, so what is missing is not a definition but the manifest that
+> assembles them with its readiness chain and its volume. **There is therefore no way to bring a stack up
+> today, and every live-stack assertion in this suite is unrunnable until that changes.** Everything in this section describes the intended
 > path so the suite's design is legible — it is not a runbook that can be followed now. What *can* be
 > run today is [§3](#3-install-and-run)'s install, type check and collection pass, which need no
 > stack.
@@ -487,17 +487,27 @@ be able to obtain a token and a consumer must be able to fetch a key set — plu
 Persistence functionally**; doing so would test a boundary no external caller has and would prove
 nothing about the ingress.
 
-### 4.6 The client identity this suite presents, and the one it must not
+### 4.6 The caller credential this suite presents, and the one it must not
 
-`POST /v1/tokens` is authenticated by a **client certificate and by nothing else** — a caller cannot
-present a bearer token in order to obtain its first bearer token. So the suite needs an identity of its
-own, and two things about it are easy to get wrong in ways that surface as a `403` rather than as a
-configuration error.
+`POST /v1/tokens` is authenticated by a **caller credential and by no bearer token** — a caller cannot
+present a bearer token in order to obtain its first bearer token — and it accepts **either of two**:
 
-**The identity must match the `subject` the suite requests.** Security establishes the caller identity
-from the certificate and then reconciles the request body's `subject` against it, refusing a mismatch with
-`403` — deliberately, because a caller that could name any subject it liked would make the certificate
-decorative. The suite requests `pfw-e2e-suite` by default, and **the recipe in
+- **`clientCredential`** — a shared secret presented as an HTTP `Basic` credential whose user-id is a
+  subject on Security's issuance roster, supplied through `SECURITY_CLIENT_ID` and
+  `SECURITY_CLIENT_SECRET`. **This is the path the documented bring-up uses**, and it needs no certificate
+  material at all.
+- **`mutualTls`** — a client certificate, supplied through `SECURITY_MTLS_CERT_PATH` and
+  `SECURITY_MTLS_KEY_PATH`, for a deployment that terminates TLS at Security and issues caller
+  certificates.
+
+Either satisfies the operation; a request presenting neither is refused with `401`. The suite therefore
+needs one of the two, and it treats a run configuring **neither** as unprovisioned — not a run that merely
+configured no certificate, which is the ordinary case.
+
+**The identity must match the `subject` the suite requests, under either scheme.** Security establishes the
+caller identity from whichever credential was presented — the `Basic` user-id, or the certificate — and
+then reconciles the request body's `subject` against it, refusing a mismatch with `403` — deliberately,
+because a caller that could name any subject it liked would make the credential decorative. The suite requests `pfw-e2e-suite` by default, and **the recipe in
 [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §9.3.1 generates a client certificate for that
 identity alongside Gateway's and DataServices'.** An earlier form of that recipe generated only the two
 service identities, on the reasoning that only the two services call the issuance endpoint — which
@@ -518,9 +528,11 @@ neither; the server half is supplied once through `TLS_CERTIFICATE_PATH` and `TL
 so an operator following the template leaves them unset and the authenticated specs **skip** with that
 reason rather than failing — which is why this hazard only bites someone who fills them in by hand.
 
-**With no certificate configured at all, the authenticated specs skip and say so.** That is the intended
+**With NEITHER credential configured, the authenticated specs skip and say so.** That is the intended
 posture rather than a gap: `GET /v1/ping` answering `401` without a token is the property C-G actually
-requires, and it is provable with no certificate at all.
+requires, and it is provable with no credential at all. Note the boundary carefully — it is *neither*, not
+*no certificate*: a run that supplies the `Basic` pair is fully provisioned and every authenticated spec
+runs, which is what the documented bring-up produces.
 
 ---
 
@@ -989,8 +1001,11 @@ assumptions:
   `services/dataservices-service/Dockerfile`, `services/security-service/Dockerfile` and
   `services/persistence-service/Dockerfile` are all present, all four `Program.cs` entry points exist, and
   all four services build and test independently in Release with zero warnings. What has **not** been
-  observed is any of those images *running*: no container has been started here, so nothing about their
-  layers, their `HEALTHCHECK`s or their non-root switches has been exercised against a live process.
+  observed is those images *running as a stack*: [`../../docs/BUILD.md`](../../docs/BUILD.md) §1.3 records
+  that exactly one image, Security's, was built and started and reached Docker health `healthy`, and no
+  container has been started from this suite at all — so nothing about the other three definitions' layers,
+  `HEALTHCHECK`s or non-root switches has been exercised against a live process, and no inter-service
+  edge has been exercised at any point.
 
 Consequently the two `orchestration/` rows in [§13](#13-cross-references) are **named in plain text
 rather than linked**: they are the paths the plan declares and where the corresponding work belongs, and

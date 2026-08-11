@@ -272,6 +272,22 @@ public sealed class UpdateServiceTests
 
     private sealed class FakeTaskFactory : IUpdateTaskFactory
     {
+        /// <summary>
+        /// When set, the publication window this factory answers reports the session as already retiring, so
+        /// the adapter's post-build liveness arm is reachable without a pool, a session registry or a
+        /// database.
+        /// </summary>
+        /// <remarks>
+        /// The default interface implementation of <see cref="IUpdateTaskFactory.EnterPublicationAsync"/>
+        /// answers an unguarded, live window - correct for a double with no sessions to retire - so this flag
+        /// is how a test asks for the other answer. The REAL gate behaviour is pinned separately, against the
+        /// provisioned factory, in <c>PersistenceTaskCompositionTests</c>.
+        /// </remarks>
+        internal bool PublicationRetiring { get; set; }
+
+        /// <summary>How many publication windows this factory was asked for.</summary>
+        internal int PublicationsEntered { get; private set; }
+
         internal long CreateResult { get; set; } = RetCode.OK;
 
         internal bool ProduceNull { get; set; }
@@ -296,6 +312,18 @@ public sealed class UpdateServiceTests
             task = surface;
 
             return RetCode.OK;
+        }
+
+        public ValueTask<UpdateTaskPublication> EnterPublicationAsync(
+            string sessionId,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(sessionId);
+
+            PublicationsEntered++;
+
+            return ValueTask.FromResult(
+                new UpdateTaskPublication(default, isSessionRetiring: PublicationRetiring));
         }
     }
     private static readonly ServerCallContext Context = new FakeCallContext(CancellationToken.None);
@@ -847,6 +875,181 @@ public sealed class UpdateServiceTests
         Assert.Null(response.Counts);
     }
 
+    /// <summary>
+    /// 🔴 A conflict the REAL classifier produced from a REAL measurement - rather than one assembled by
+    /// the test - is relayed as <c>Aborted</c> with its detail intact.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THE OUTCOME IS NOT HAND-BUILT HERE.</b> The sibling exercise below builds a
+    /// <c>ConflictDetected</c> outcome directly, which proves the relay but cannot prove that the classifier
+    /// ever produces one on the path a caller takes. Two defects survived exactly that gap: the
+    /// measurement was read before the update had run, and the classifier consulted it only after the
+    /// success arm had returned. This exercise drives the shipped <see cref="ConflictDetector"/> with a
+    /// target that reports a CLAIMED SUCCESS over a zero-row match - the shape a stale write really has -
+    /// and asserts the service relays what comes out.
+    /// </para>
+    /// <para>
+    /// The database itself is exercised in
+    /// <c>PersistenceRuntimeTests.AStaleRowWorkflowAnswersAbortedWithStorageStateAndNeverOverwrites</c>,
+    /// which runs the same classifier against a real competing write; this one covers the C-06 hop.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AClassifierProducedConflictIsRelayedAsAbortedFromAClaimedSuccess()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        ConflictRow conflicting = new()
+        {
+            Buffer = DwBuffer.Primary,
+            Row = 1,
+            ItemStatus = ItemStatus.DataModified,
+            CurrentValues = { new ColumnValue { ColumnId = 3, Value = new AnyValue { Int64Value = 99 } } },
+            OriginalValues = { new ColumnValue { ColumnId = 3, Value = new AnyValue { Int64Value = 32 } } },
+        };
+
+        RelayUpdateTarget target = new()
+        {
+            // THE UPDATE CLAIMS SUCCESS, which is what a zero-row match really answers: no provider raised
+            // anything, so the DataWindow contract reports 1.
+            UpdateResult = DataWindowBufferStore.DataStoreSuccess,
+            Evidence = new ConcurrencyEvidence
+            {
+                RowsExpected = 1L,
+                RowsMatched = 0L,
+                Rows = [conflicting],
+            },
+        };
+
+        UpdateOutcome classified = new ConflictDetector(SqlRedactor.Instance).Classify(new UpdateAttempt
+        {
+            Transaction = new RelayUpdateTransaction(),
+            Target = target,
+            Identity = new IdentityTableSurfaces(target, target),
+            Errors = new RelayErrorSink(),
+            Cancellation = TestContext.Current.CancellationToken,
+        });
+
+        Assert.Equal(UpdateOutcomeKind.Conflict, classified.Kind);
+
+        surface.Result = new UpdateRunResult { Code = classified.Code, Outcome = classified };
+
+        RpcException raised = await Assert.ThrowsAsync<RpcException>(
+            () => service.Update(new UpdateRequest { Task = handle }, Context));
+
+        Assert.Equal(StatusCode.Aborted, raised.StatusCode);
+
+        byte[]? raw = raised.Trailers.GetValueBytes(ConflictDetector.RichErrorTrailerKey);
+        Assert.NotNull(raw);
+
+        RichErrorTrailer trailer = RichErrorTrailer.Parser.ParseFrom(raw);
+        Assert.Equal(RichErrorTrailer.DetailOneofCase.Conflict, trailer.DetailCase);
+        Assert.Equal(RetCode.E_DB_ERROR, trailer.RetCode);
+
+        ConflictRow relayed = Assert.Single(trailer.Conflict.Rows);
+        Assert.Equal(99L, relayed.CurrentValues[0].Value.Int64Value);
+        Assert.Equal(32L, relayed.OriginalValues[0].Value.Int64Value);
+
+        // THE MEASUREMENT WAS READ AFTER THE UPDATE RAN, never before it.
+        Assert.Equal(1, target.UpdateCalls);
+        Assert.True(target.EvidenceReadAfterUpdate);
+    }
+
+    /// <summary>
+    /// The update target one relayed classification runs against: it claims success and reports a zero-row
+    /// match, which is the shape a stale write has.
+    /// </summary>
+    private sealed class RelayUpdateTarget : IUpdateTarget, IIdentityColumnMetadata, IIdentityValueSource
+    {
+        internal long UpdateResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
+
+        internal ConcurrencyEvidence? Evidence { get; set; }
+
+        internal int UpdateCalls { get; private set; }
+
+        /// <summary>Whether every measurement read happened after the update had run.</summary>
+        internal bool EvidenceReadAfterUpdate { get; private set; } = true;
+
+        public void ClearState()
+        {
+        }
+
+        public long Update(bool acceptText, bool resetFlag, CancellationToken cancellationToken = default)
+        {
+            UpdateCalls++;
+
+            return UpdateResult;
+        }
+
+        public ConcurrencyEvidence? CaptureConcurrencyEvidence()
+        {
+            if (UpdateCalls == 0)
+            {
+                EvidenceReadAfterUpdate = false;
+
+                return null;
+            }
+
+            return Evidence;
+        }
+
+        public string DescribeUpdateTable() => "COMPANY";
+
+        public int GetColumnCount() => 0;
+
+        public string DescribeColumnIdentity(string identityProperty) => string.Empty;
+
+        public string DescribeColumnDbName(string dbNameProperty) => string.Empty;
+
+        public long GetInsertedCount() => 0L;
+
+        public long GetUpdatedCount() => 0L;
+
+        public long GetDeletedCount() => 0L;
+
+        public long RowCount() => 0L;
+
+        public long FilteredCount() => 0L;
+
+        public ItemStatus GetItemStatus(long row, int columnIndex, DwBuffer buffer) =>
+            ItemStatus.NotModified;
+
+        public long? GetItemNumber(long row, int columnNumber) => null;
+
+        public long? GetItemNumber(long row, int columnNumber, DwBuffer buffer, bool originalValue) => null;
+    }
+
+    /// <summary>The transaction surface a relayed classification reads: the provider raised nothing.</summary>
+    private sealed class RelayUpdateTransaction : IUpdateTransaction
+    {
+        public long SqlCode => 0L;
+
+        public long SqlDbCode => 0L;
+
+        public string SqlErrText => string.Empty;
+
+        public bool IsFailed() => false;
+
+        public long OnBeforeUpdate() => RetCode.OK;
+
+        public void OnAfterUpdate(long updateResult)
+        {
+        }
+    }
+
+    /// <summary>Swallows the two error channels; this exercise asserts the relayed status, not the raises.</summary>
+    private sealed class RelayErrorSink : IUpdateErrorSink
+    {
+        public void OnDbError(in DbErrorData error)
+        {
+        }
+
+        public void OnError(long code, string errorText)
+        {
+        }
+    }
+
     [Fact]
     public async Task AConcurrencyMismatchIsAbortedWithAPopulatedConflictDetail()
     {
@@ -1181,5 +1384,192 @@ public sealed class UpdateServiceTests
         _ = await service.Update(new UpdateRequest { Task = handle }, context);
 
         Assert.Equal(source.Token, surface.TokenSeen);
+    }
+
+    // ---- the session lifecycle: the publication window and the disposal handoff -------------------
+    //
+    //  TWO PROPERTIES, BOTH OF WHICH FAILED BEFORE THIS SECTION EXISTED.
+    //
+    //    1. A create whose publication window reports the session retiring is REFUSED, and the surface it
+    //       had already built is disposed rather than leaked. Publishing there would leave a task holding a
+    //       pooled transaction that EndSession has handed back - and the pool may already have re-issued it
+    //       to a different session [n_cst_thread_trans_pool.sru:L94-L114].
+    //    2. The registry's purge, drain and reclaim go through the release/disposal handoff, so a task with
+    //       an operation in flight is not torn down underneath itself; destroying an object with work still
+    //       pending against it is hazard 1 [docs/PB多线程绕坑提示.md].
+    //
+    //  Both are deterministic. The window's answer is set on the double, and the operation lease is taken
+    //  directly on the entry exactly as the three mutators take it.
+
+    [Fact]
+    public async Task ACreateWhosePublicationWindowReportsTheSessionRetiringIsRefusedAndDisposesTheSurface()
+    {
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
+
+        factory.PublicationRetiring = true;
+
+        CreateUpdateTaskResponse refused = await service.CreateUpdateTask(
+            new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
+            Context);
+
+        // The code the oracle answers for a transaction it cannot use
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L113].
+        Assert.Equal(WireRetCode.EInvalidTransaction, refused.Status.RetCode);
+        Assert.Null(refused.Task);
+        Assert.Contains("began retiring", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // The window WAS entered - otherwise this case would pass against a handler that ignored it.
+        Assert.Equal(1, factory.PublicationsEntered);
+
+        // NOTHING PUBLISHED, and the surface the factory built was dropped deterministically. Leaving it
+        // would pin its pool reference for the life of the process
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L174].
+        Assert.Equal(0, registry.Count);
+
+        FakeTaskSurface built = Assert.Single(factory.Created);
+        Assert.True(built.Disposed);
+    }
+
+    [Fact]
+    public async Task ALiveWindowStillPublishesSoTheRefusalIsNotUnconditional()
+    {
+        // THE OTHER HALF OF THE CLAIM ABOVE. Without it the liveness arm could be a constant refusal and
+        // that case would still pass.
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
+
+        CreateUpdateTaskResponse created = await service.CreateUpdateTask(
+            new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+        Assert.NotNull(created.Task);
+        Assert.Equal(1, factory.PublicationsEntered);
+        Assert.Equal(1, registry.Count);
+        Assert.False(Assert.Single(factory.Created).Disposed);
+    }
+
+    [Fact]
+    public async Task APurgeDoesNotDisposeATaskWithAnOperationInFlight()
+    {
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) =
+            CreateService();
+
+        CreateUpdateTaskResponse created = await service.CreateUpdateTask(
+            new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+        Assert.True(registry.TryResolve(created.Task, out UpdateTaskEntry? entry));
+        Assert.NotNull(entry);
+
+        FakeTaskSurface surface = Assert.Single(factory.Created);
+
+        // THE LEASE THE THREE MUTATORS TAKE, taken directly so the case is deterministic. What it adds over
+        // TaskOperationLatchTests is that the PURGE respects it.
+        Assert.Equal(TaskLatchOutcome.Acquired, entry!.TryBeginOperation());
+
+        Assert.Equal(1, registry.PurgeSession("s-1"));
+
+        // RETIRED FROM THE TABLE BUT NOT DISPOSED: the handle is unreachable, so no new call can arrive, and
+        // the surface the in-flight operation is still using is intact.
+        Assert.Equal(0, registry.Count);
+        Assert.False(surface.Disposed);
+
+        // THE HANDOFF'S OTHER SIDE: the operation's own exit is told disposal is now its duty, and performs
+        // it. Exactly one of the two paths disposes, and it is this one.
+        Assert.True(entry.EndOperation());
+
+        entry.DisposeTask();
+
+        Assert.True(surface.Disposed);
+    }
+
+    [Fact]
+    public async Task APurgeDisposesATaskWithNothingInFlight()
+    {
+        // THE COMPLEMENT, WITHOUT WHICH THE HANDOFF COULD SIMPLY NEVER DISPOSE.
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
+
+        CreateUpdateTaskResponse created = await service.CreateUpdateTask(
+            new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+
+        FakeTaskSurface surface = Assert.Single(factory.Created);
+
+        Assert.False(surface.Disposed);
+        Assert.Equal(1, registry.PurgeSession("s-1"));
+        Assert.Equal(0, registry.Count);
+        Assert.True(surface.Disposed);
+    }
+
+    [Fact]
+    public async Task ADrainDoesNotDisposeATaskWithAnOperationInFlight()
+    {
+        // THE SHUTDOWN PATH TAKES THE SAME HANDOFF AS THE PURGE. It is a separate member with its own loop,
+        // so a fix applied to one and not the other would leave the host tearing down a task mid-operation
+        // on the way out - the same hazard, at the least observable moment.
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
+
+        CreateUpdateTaskResponse created = await service.CreateUpdateTask(
+            new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+        Assert.True(registry.TryResolve(created.Task, out UpdateTaskEntry? entry));
+
+        FakeTaskSurface surface = Assert.Single(factory.Created);
+
+        Assert.Equal(TaskLatchOutcome.Acquired, entry!.TryBeginOperation());
+        Assert.Equal(1, registry.Drain());
+
+        Assert.Equal(0, registry.Count);
+        Assert.False(surface.Disposed);
+
+        Assert.True(entry.EndOperation());
+
+        entry.DisposeTask();
+
+        Assert.True(surface.Disposed);
+    }
+
+    [Fact]
+    public async Task AnIdleReclaimDoesNotDisposeATaskWithAnOperationInFlight()
+    {
+        // THE THIRD LOOP, AND THE ONE THE OLD CODE ARGUED DID NOT NEED THE HANDOFF - on the grounds that
+        // every C-06 operation refreshes the stamp on the way in, so a task in use is never near the idle
+        // window. "Never" was too strong: an update against a contended file-backed store can outrun the
+        // window, and the teardown would then land on a task still executing. The handoff costs nothing and
+        // removes the argument.
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
+
+        CreateUpdateTaskResponse created = await service.CreateUpdateTask(
+            new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, created.Status.RetCode);
+        Assert.True(registry.TryResolve(created.Task, out UpdateTaskEntry? entry));
+
+        FakeTaskSurface surface = Assert.Single(factory.Created);
+
+        Assert.Equal(TaskLatchOutcome.Acquired, entry!.TryBeginOperation());
+
+        // A window of zero against a clock read far in the future: every entry is past it, deterministically
+        // and without waiting.
+        Assert.Equal(
+            1,
+            registry.ReclaimIdle(
+                DateTimeOffset.UnixEpoch.AddYears(100),
+                TimeSpan.Zero));
+
+        Assert.Equal(0, registry.Count);
+        Assert.False(surface.Disposed);
+
+        Assert.True(entry.EndOperation());
+
+        entry.DisposeTask();
+
+        Assert.True(surface.Disposed);
     }
 }

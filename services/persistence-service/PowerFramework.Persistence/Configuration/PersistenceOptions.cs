@@ -22,15 +22,18 @@
 //  Every property name below equals its section or key name CHARACTER FOR CHARACTER, because a
 //  mismatch does not error and does not warn - it binds silently to the default.
 //
-//  THE HOST OWNS THE LISTENER, AND THIS FILE DOES NOT RESTATE IT
-//  The single endpoint on port 5101 with `Protocols: Http1AndHttp2` is declared in the standard
-//  `Kestrel` section of appsettings.json and bound by the ASP.NET Core host itself. One port has to
-//  carry HTTP/2 gRPC for the four published contracts AND HTTP/1.1 REST for the readiness probe and the
-//  authentication proof at the same time, which is exactly what `Http1AndHttp2` states. Reading it from
-//  configuration already satisfies "never hardcode a port", so no port or protocol property appears
-//  here: two binders over one key is a silent-divergence risk, and a second port key would create the
-//  settings-versus-options mismatch this file exists to avoid. That is why the number 5101 appears in
-//  this documentation and in no executable line of this file.
+//  THE HOST OWNS THE LISTENERS, AND THIS FILE DOES NOT RESTATE THEM
+//  TWO endpoints are declared in the standard `Kestrel` section of appsettings.json and bound by the
+//  ASP.NET Core host itself: `Rest` at `https://+:5101` with `Protocols: Http1`, carrying the readiness
+//  probe and the authentication proof, and `Grpc` at `https://+:5111` with `Protocols: Http2`, carrying
+//  the four published contracts C-05..C-08. Both terminate TLS. One protocol version per endpoint is a
+//  measured decision rather than a limitation - both being TLS, ALPN could negotiate `h2` and
+//  `http/1.1` on a single address - and the split is kept so a probe and a gRPC channel each address a
+//  listener that can only answer the thing it is for, and misaddressing either fails at once instead of
+//  at a later layer. Reading both from configuration already satisfies "never hardcode a port", so no
+//  port or protocol property appears here: two binders over one key is a silent-divergence risk, and a
+//  second port key would create the settings-versus-options mismatch this file exists to avoid. That is
+//  why the numbers 5101 and 5111 appear in this documentation and in no executable line of this file.
 //
 //  LEGACY SOURCES - READ AS SPECIFICATION, NEVER EDITED (constraint C-C)
 //  Every default below is the legacy value, and every one carries its ws_objects locator on the member
@@ -209,10 +212,10 @@ namespace PowerFramework.Persistence.Configuration;
 /// keeps its default forever.
 /// </para>
 /// <para>
-/// The listening endpoint is NOT here. Port 5101 and <c>Http1AndHttp2</c> are declared in the standard
-/// <c>Kestrel</c> section and bound by the host, because one port must carry HTTP/2 gRPC and HTTP/1.1
-/// REST simultaneously and the host is the component that can do that. Restating a port here would put
-/// two binders over one key.
+/// The listening endpoints are NOT here. Both are declared in the standard <c>Kestrel</c> section and
+/// bound by the host: <c>Rest https://+:5101</c> with <c>Http1</c> for the readiness probe and the
+/// authentication proof, and <c>Grpc https://+:5111</c> with <c>Http2</c> for the four published gRPC
+/// contracts. Restating a port here would put two binders over one key.
 /// </para>
 /// <para>
 /// Validation is <see cref="PersistenceOptionsValidator"/>, which is required rather than optional:

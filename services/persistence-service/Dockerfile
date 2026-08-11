@@ -170,11 +170,13 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 
 # curl, for the readiness probe below and for nothing else.
 #
-# This base image ships neither curl nor wget. The Gateway sibling avoids installing anything by
-# probing its PLAINTEXT listener through bash /dev/tcp; that technique cannot serve this image,
-# because this service's only listener terminates TLS and a raw socket cannot complete a handshake.
-# So one package is installed, exactly as the Security sibling does for the same reason. Without it a
-# compose `depends_on: condition: service_healthy` gate on this service could never be satisfied.
+# This base image ships neither curl nor wget. Every listener in this estate terminates TLS, so a raw
+# socket cannot complete a handshake and bash /dev/tcp cannot serve as a probe here. The Gateway,
+# DataServices and Security siblings answer that with the openssl s_client pipeline the base image does
+# ship; this definition installs one package instead and probes with curl, which is the one place in the
+# four that accepts an install rather than working around it - the chain is verified either way, and the
+# curl form is the readable one. Without a usable probe a compose
+# `depends_on: condition: service_healthy` gate on this service could never be satisfied.
 #
 # Kept as small as the requirement allows: one package, no recommended extras, and the package lists
 # removed in the SAME layer so nothing is cached into the image. Installed BEFORE the USER switch
@@ -230,25 +232,37 @@ RUN mkdir -p /var/lib/powerframework \
   && chown -R $APP_UID:$APP_UID /var/lib/powerframework
 VOLUME ["/var/lib/powerframework"]
 
-# THE LISTENING PORT - 5101, DOCUMENTED HERE AND ESTABLISHED IN CONFIGURATION
+# THE LISTENING PORTS - TWO OF THEM, DOCUMENTED HERE AND ESTABLISHED IN CONFIGURATION
 #
-# ASPNETCORE_HTTP_PORTS is cleared rather than set. appsettings.json declares one Kestrel endpoint,
-# https://+:5101 with Http1AndHttp2, and that endpoint carries a protocol set a bare port number
-# cannot express - Http2 is not optional here, it is what gRPC runs on. Leaving the variable
-# populated, including with the base image's own 8080, would add a SECOND plaintext listener beside
-# the configured one, so it is emptied. EXPOSE therefore DOCUMENTS the contract rather than
-# establishing it, and 5101 is this service's slot in the retained 5101-5105 band:
+# ASPNETCORE_HTTP_PORTS is cleared rather than set. appsettings.json declares TWO named Kestrel
+# endpoints, and each carries a protocol set a bare port number cannot express:
 #
-#     5101  Persistence     gRPC + REST /health and /v1/ping, TLS - THIS IMAGE
-#     5102  DataServices    gRPC primary + a thin REST projection for Gateway, TLS
+#     Rest  https://+:5101  Http1   - /health and /v1/ping
+#     Grpc  https://+:5111  Http2   - the four published gRPC contracts, C-05 through C-08
+#
+# ONE PROTOCOL VERSION EACH, RATHER THAN Http1AndHttp2 ON ONE PORT, and that is a measured decision
+# rather than a preference: on a TLS endpoint ALPN negotiates between the two versions, but the
+# distinct endpoints keep the readiness probe reachable over HTTP/1.1 with no dependence on ALPN
+# behaviour in whatever proxy or client sits in front of it. A deployment that prefers one address
+# collapses them by pointing Kestrel__Endpoints__Rest__Url at https://+:5101 with Protocols
+# Http1AndHttp2 and clearing the Grpc endpoint - the environment provider is added after
+# appsettings.json and wins on an identical key, so that needs no change to this file.
+#
+# Leaving ASPNETCORE_HTTP_PORTS populated, including with the base image's own 8080, would add a
+# SECOND, PLAINTEXT listener beside the configured pair, so it is emptied. EXPOSE therefore DOCUMENTS
+# the contract rather than establishing it. 5101 is this service's slot in the retained 5101-5105
+# band; 5111 is internal to the orchestration network and is not named by the attached environment:
+#
+#     5101  Persistence     REST /health and /v1/ping over TLS - THIS IMAGE (gRPC on 5111)
+#     5102  DataServices    REST projection for Gateway over TLS (gRPC on 5112)
 #     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible rather than
 #           being reassigned to one of the four services this phase builds. Nothing is provisioned
 #           for it here: no stage, no variable, no build input.
 #     5104  Security        REST + OpenAPI over TLS, and the system's SOLE token issuer
-#     5105  Gateway         REST + OpenAPI, the documented composition-root access URL
+#     5105  Gateway         REST + OpenAPI over TLS, the documented composition-root access URL
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV ASPNETCORE_HTTP_PORTS=
-EXPOSE 5101
+EXPOSE 5101 5111
 
 # NON-ROOT, SWITCHED BEFORE THE PROBE AND BEFORE THE ENTRY POINT.
 # APP_UID is published by the base image as 1654 and corresponds to the unprivileged `app` user and

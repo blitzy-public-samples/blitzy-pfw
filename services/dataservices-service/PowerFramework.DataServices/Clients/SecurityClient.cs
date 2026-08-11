@@ -2373,13 +2373,13 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         ServiceTokenRequest request,
         CancellationToken cancellationToken)
     {
-        // ADDRESS BEFORE IDENTITY, deliberately. Both are configuration faults that make issuance
+        // ADDRESS BEFORE CREDENTIAL, deliberately. Both are configuration faults that make issuance
         // unreachable, and reporting the more fundamental one first is what makes the message actionable:
-        // a host with no address configured has nothing to present a certificate TO, so naming the
-        // missing certificate there would send an operator to the wrong setting. The sender checks the
+        // a host with no address configured has nothing to present a credential TO, so naming a missing
+        // credential setting there would send an operator to the wrong setting. The sender checks the
         // address too; checking it here as well is what fixes the ORDER rather than duplicating a guard.
         EnsureBaseAddress("issueToken");
-        EnsureClientIdentityConfigured();
+        EnsureIssuanceCredentialConfigured();
         _logger.LogDebug(
             "Requesting a service token from Security for subject {Subject} and audience {Audience} "
             + "with {RequestedScopeCount} requested scope(s).",
@@ -3368,45 +3368,59 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     }
 
     /// <summary>
-    /// Refuses to ask for a token when this deployment configures no client identity to present,
-    /// naming the two settings an operator must supply.
+    /// Refuses to ask for a token when this deployment configures NEITHER credential the issuance
+    /// operation accepts, naming every setting an operator could supply.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// Neither <c>DataServices:Security:MutualTls:CertificatePath</c> nor its key sibling is set.
+    /// No issuance shared secret is configured AND no client-certificate pair is configured.
     /// </exception>
     /// <remarks>
     /// <para>
-    /// NAME THE CAUSE, NOT THE SYMPTOM - THE SAME RULE <see cref="EnsureBaseAddress"/> FOLLOWS.
-    /// Contract C-01 protects the issuance endpoint with mutual TLS and with nothing else, because a
-    /// caller cannot present a bearer token in order to obtain its first bearer token. A request sent
-    /// with no client certificate therefore cannot succeed - it is refused for want of a caller
-    /// identity - and the refusal arrives as an ordinary authentication failure that reads like a
-    /// credential problem at Security rather than a missing setting here. Checking first turns that into
-    /// a message naming the two keys, which is the difference between an operator fixing configuration
-    /// and an operator investigating the wrong service.
+    /// NAME THE CAUSE, NOT THE SYMPTOM - THE SAME RULE <see cref="EnsureBaseAddress"/> FOLLOWS. A
+    /// request that carries no caller credential at all cannot succeed - it is refused for want of an
+    /// identity - and that refusal arrives as an ordinary authentication failure, which reads like a
+    /// credential problem at Security rather than a missing setting here. Checking first turns it into a
+    /// message naming the settings, which is the difference between an operator fixing configuration and
+    /// an operator investigating the wrong service.
     /// </para>
     /// <para>
-    /// This reads the bound options ONLY to decide whether an identity is configured. It does not open,
-    /// load or touch the material, and it never quotes either path: a path names where a private key is
-    /// mounted, and neither a log nor an exception message is a place to publish that. Loading and
-    /// validating the pair belongs to the composition root, which does it once at startup.
+    /// <b>EITHER SCHEME SATISFIES THIS, AND DEMANDING THE CERTIFICATE WAS A FUNCTIONAL OUTAGE RATHER THAN
+    /// STRICTNESS.</b> Contract C-01 accepts TWO caller credentials on <c>POST /v1/tokens</c> - a shared
+    /// secret presented as an HTTP <c>Basic</c> credential naming a subject on Security's issuance
+    /// roster, or a client certificate - and its own <c>security</c> block declares them as
+    /// alternatives. This guard used to test the certificate pair ALONE, so the documented bring-up,
+    /// which supplies <see cref="SecurityClientOptions.ClientSecretConfigurationKey"/> and leaves both
+    /// certificate paths EMPTY, was refused here before a request was ever sent - and refused with a
+    /// message telling the operator to configure the one scheme that deployment had deliberately not
+    /// adopted. The condition is now the same <see cref="SecurityClientOptions.HasIssuanceCredential"/>
+    /// the options validator enforces at startup, so the client and the validator cannot disagree about
+    /// what "configured" means.
+    /// </para>
+    /// <para>
+    /// This reads the bound options ONLY to decide whether a credential is configured. It does not open,
+    /// load or touch any material, it never quotes either certificate path - a path names where a private
+    /// key is mounted, and neither a log nor an exception message is a place to publish that - and it
+    /// never quotes the secret. Loading and validating the certificate pair belongs to the composition
+    /// root, which does it once at startup.
     /// </para>
     /// </remarks>
-    private void EnsureClientIdentityConfigured()
+    private void EnsureIssuanceCredentialConfigured()
     {
-        if (_options.Value.Security?.MutualTls.IsConfigured != false)
+        if (_options.Value.Security?.HasIssuanceCredential != false)
         {
             return;
         }
 
         throw new InvalidOperationException(string.Create(
             CultureInfo.InvariantCulture,
-            $"This host presents no client certificate, so it cannot obtain a service token: the "
-            + $"issuance endpoint is authenticated by mutual TLS and by nothing else, and a "
-            + $"certificate-less request can only be refused. Set both "
-            + $"'{ClientCertificateConfigurationKey}' and '{ClientCertificateKeyConfigurationKey}' to "
-            + $"the material this deployment mounts. Neither path is reproduced in this message, "
-            + $"because a diagnostic must not record where key material is mounted."));
+            $"This host presents no caller credential, so it cannot obtain a service token: the "
+            + $"issuance operation accepts a shared secret as an HTTP Basic credential or a client "
+            + $"certificate, and a request presenting neither can only be refused. Set "
+            + $"'{SecurityClientOptions.ClientSecretConfigurationKey}' - the documented bring-up path - "
+            + $"or both '{ClientCertificateConfigurationKey}' and "
+            + $"'{ClientCertificateKeyConfigurationKey}' to the material this deployment mounts. No "
+            + $"value and no path is reproduced in this message, because a diagnostic must not record a "
+            + $"secret or where key material is mounted."));
     }
 
     // ==============================================================================================

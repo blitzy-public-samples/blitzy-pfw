@@ -459,6 +459,38 @@ internal interface IUpdateTarget
     /// NOT a return code - see this file's header.
     /// </returns>
     long Update(bool acceptText, bool resetFlag, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The affected-row measurement for the statements <see cref="Update"/> just ran, or
+    /// <see langword="null"/> when nothing was measured.
+    /// </summary>
+    /// <returns>
+    /// The evidence, whose counts describe THE STATEMENTS THIS ATTEMPT GENERATED and nothing earlier.
+    /// <see langword="null"/> means "not measured", which is the oracle's own state - it performs no
+    /// rows-affected check anywhere - and declines the conflict narrowing.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>READ AFTER THE UPDATE HAS EXECUTED, ON THE SAME TRANSACTION, AND NEVER BEFORE IT.</b> The
+    /// measurement does not exist until the statements have run: an implementation cannot know how many
+    /// rows a predicate matched until the predicate has been submitted. A pre-captured value is
+    /// therefore always the PREVIOUS attempt's - null on the first - and reading one would make a
+    /// zero-row optimistic miss indistinguishable from a clean success. That is why this is a member of
+    /// the target rather than a field of <see cref="UpdateAttempt"/>: an attempt is an immutable input
+    /// assembled before the update, and this value cannot be.
+    /// </para>
+    /// <para>
+    /// IT IS PULLED BY THE CLASSIFIER RATHER THAN PUSHED BY THE EXECUTOR, because only the classifier
+    /// knows the one moment at which it is both available and still authoritative - after
+    /// <see cref="Update"/> returns and before any success is published or anything is committed.
+    /// </para>
+    /// <para>
+    /// AN IMPLEMENTATION THAT CANNOT MEASURE ANSWERS <see langword="null"/> AND IS NO WORSE OFF THAN THE
+    /// ORACLE. Every conflict arm therefore stays reachable with no database at all, which is what keeps
+    /// the classification testable through substitution (constraint C-H).
+    /// </para>
+    /// </remarks>
+    ConcurrencyEvidence? CaptureConcurrencyEvidence();
 }
 
 
@@ -730,15 +762,13 @@ internal sealed record UpdateAttempt
     /// </value>
     internal CancellationToken Cancellation { get; init; }
 
-    /// <summary>
-    /// The affected-row measurement, or <see langword="null"/> when nothing was measured.
-    /// </summary>
-    /// <value>
-    /// Consulted ONLY on the else arm at [<c>:L250</c>], and only to narrow that arm's outcome. It is
-    /// never read on the sentinel arm, the veto arm, either cancellation arm or the success arm, so a
-    /// populated value cannot change any of them.
-    /// </value>
-    internal ConcurrencyEvidence? Evidence { get; init; }
+    // ⚠️ THERE IS DELIBERATELY NO `Evidence` MEMBER HERE, AND ITS ABSENCE IS THE FIX RATHER THAN AN
+    // OMISSION. The affected-row measurement cannot be an input of an attempt: an attempt is assembled
+    // BEFORE the update runs, and the measurement does not exist until AFTER it has. A pre-captured
+    // value is therefore always the previous attempt's - null on the first - so a zero-row optimistic
+    // miss read as success. The measurement is pulled from
+    // IUpdateTarget.CaptureConcurrencyEvidence() at the one moment it is authoritative: immediately
+    // after Update returns, before any success is published and before anything is committed.
 }
 
 #endregion
@@ -1401,7 +1431,18 @@ internal sealed class ConflictDetector
     /// The two calls it DOES make that change something are the oracle's own:
     /// <see cref="IUpdateTarget.ClearState"/> [<c>:L186</c>] and <see cref="IUpdateTarget.Update"/>
     /// [<c>:L204</c>]. Nothing here resets the carrier, because the update is invoked with the reset flag
-    /// clear.
+    /// clear. The third call, <see cref="IUpdateTarget.CaptureConcurrencyEvidence"/>, is a pure read.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE ONE ORDERING THAT IS NOT THE ORACLE'S, AND WHY IT SITS WHERE IT DOES.</b> The
+    /// affected-row measurement is read from the target immediately after the update returns - steps 9a
+    /// and 9b below - and a shortfall is classified as a conflict BEFORE the success arm at
+    /// [<c>:L214</c>] can be taken. It has to be in that order: the DataWindow update contract answers
+    /// success for a statement that matched zero rows, so a mismatch reaches this method wearing a
+    /// claimed success, and classifying after the success arm would publish the identity round trip,
+    /// publish the counts, and let the caller's epilogue commit. The narrowing itself is an ADDITION the
+    /// oracle cannot reach at all - it measures nothing - and it changes no legacy arm: the returned code
+    /// is still <c>RetCode.E_DB_ERROR</c>, so the epilogue still rolls back (AAP 0.6.3.8).
     /// </para>
     /// </remarks>
     internal UpdateOutcome Classify(UpdateAttempt attempt)
@@ -1579,6 +1620,50 @@ internal sealed class ConflictDetector
                 updateTable: updateTable);
         }
 
+        // ============ STEP 9a: THE MEASUREMENT, READ HERE AND NOWHERE ELSE ========================
+        // 🔴 AFTER THE STATEMENTS HAVE RUN, ON THE SAME TRANSACTION, AND BEFORE ANY SUCCESS ARM.
+        //
+        // The evidence describes what THIS attempt's statements affected, so it cannot be read before
+        // STEP 6 - there would be nothing to read - and it must not be read after a success has been
+        // published, because by then the caller's epilogue has already committed. This single line is
+        // the ordering the whole optimistic-concurrency contract rests on.
+        //
+        // THE ORACLE MEASURES NOTHING ANYWHERE IN ITS UPDATE PATH, so a null answer is its own state and
+        // the arms below then behave exactly as it does.
+        ConcurrencyEvidence? evidence = attempt.Target.CaptureConcurrencyEvidence();
+
+        // ============ STEP 9b: A SHORTFALL IS A CONFLICT *BEFORE* IT CAN BE A SUCCESS =============
+        // 🔴 TESTED AHEAD OF STEP 10, WHICH IS THE POINT. `Data.Update(true,false)` answers 1 whenever
+        // every generated statement executed without a DBMS ERROR, and a statement that matched ZERO
+        // rows is not a DBMS error on any provider - the driver returns a count of zero and raises
+        // nothing. So under `updatewhere=1` the classic optimistic miss arrives here as a CLAIMED
+        // SUCCESS, and a classifier that reached STEP 10 first would report it as one, publish the
+        // identity round trip and the counts, and let the epilogue COMMIT. The row would not have been
+        // overwritten - the predicate carried the originals, so nothing matched - but the caller would
+        // be told its edit applied when it did not, which is the same class of harm.
+        //
+        // IT MUST NOT SWALLOW A GENUINE DATABASE ERROR, and it cannot: IsConcurrencyMismatch requires
+        // positive evidence, declines whenever the provider itself faulted, and declines an empty row
+        // list. A constraint violation, a connection fault and a syntax error therefore stay database
+        // errors carrying the legacy's own code and text on the else arm below.
+        //
+        // THE RETURN CODE IS THE LEGACY'S OWN, RetCode.E_DB_ERROR - so RequiresRollback is true, the
+        // epilogue rolls back rather than commits, and no legacy arm changes. Only the outcome's KIND
+        // narrows and a payload is added (AAP 0.6.3.8).
+        if (IsConcurrencyMismatch(evidence))
+        {
+            DbErrorData mismatchError =
+                Redact(DbErrorData.FromTransaction(transaction.SqlDbCode, transaction.SqlErrText));
+
+            return UpdateOutcome.ConflictDetected(
+                BuildConflictDetail(evidence, updateTable),
+                mismatchError,
+                updateTable,
+                updateResult,
+                observedByHook,
+                overrideApplied);
+        }
+
         // STEP 10 [:L214] - `if rtCode = 1 then`
         //
         // SUCCESS IS THE LITERAL VALUE 1, IN THE DATAWINDOW CODE SPACE. It is NOT RetCode.OK, which is 0,
@@ -1617,26 +1702,14 @@ internal sealed class ConflictDetector
         DbErrorData failureError =
             Redact(DbErrorData.FromTransaction(transaction.SqlDbCode, transaction.SqlErrText));
 
-        // ============ THE ONE NET-NEW ARM: THE OPTIMISTIC-CONCURRENCY NARROWING ==================
-        // The oracle cannot reach this decision at all - it performs no rows-affected check anywhere in
-        // its update path - so this is an ADDITION layered on top of the arm above, never a replacement
-        // for it. The return code stays RetCode.E_DB_ERROR, so no legacy arm changes; only the outcome's
-        // KIND narrows and a payload is added.
+        // ⚠️ THE NARROWING IS NOT REPEATED HERE, AND THAT IS DELIBERATE. STEP 9b above already tested
+        // the measurement, on BOTH the claimed-success and the reported-failure path, because it runs
+        // before this branch splits. A second test here would be dead code that implied the arm above
+        // covered only successes - and a reader who added one would be tempted to weaken the first.
         //
-        // IT MUST NOT SWALLOW A GENUINE DATABASE ERROR. IsConcurrencyMismatch requires positive evidence
-        // and declines whenever the provider itself faulted, so a constraint violation, a connection fault
-        // and a syntax error each stay a database error carrying the legacy's own code and text.
-        if (IsConcurrencyMismatch(attempt.Evidence))
-        {
-            return UpdateOutcome.ConflictDetected(
-                BuildConflictDetail(attempt.Evidence, updateTable),
-                failureError,
-                updateTable,
-                updateResult,
-                observedByHook,
-                overrideApplied);
-        }
-
+        // So a DataWindow-reported failure whose evidence shows a shortfall has ALREADY returned a
+        // conflict; anything reaching this line is a genuine database error carrying the transaction's
+        // own code and text.
         return UpdateOutcome.DatabaseError(
             failureError,
             errorReported: false,
@@ -1813,7 +1886,15 @@ internal sealed class ConflictDetector
     /// <param name="row">The ONE-BASED row ordinal (R9).</param>
     /// <param name="columns">
     /// The marked columns, in the order they should appear on the payload. Supplied by the caller so that
-    /// no table name, column name or column count is ever hardcoded here (C-E).
+    /// no table name, column name or column count is ever hardcoded here (C-E). The set to pass is the
+    /// UNION of the key columns and the columns marked for the concurrency predicate, because those are
+    /// exactly the columns whose comparison decided the conflict.
+    /// </param>
+    /// <param name="storageValues">
+    /// The row's CURRENT values as STORAGE holds them, keyed by one-based column number, read by the
+    /// caller on the same connection and transaction the failed statement ran on.
+    /// <see langword="null"/> when the row could not be reread - it no longer exists, or no key column is
+    /// installed to address it by - in which case no current value is projected at all.
     /// </param>
     /// <returns>The projected row.</returns>
     /// <exception cref="ArgumentNullException">
@@ -1856,7 +1937,8 @@ internal sealed class ConflictDetector
         DataWindowBufferStore store,
         DwBuffer buffer,
         long row,
-        IReadOnlyList<ConflictColumn> columns)
+        IReadOnlyList<ConflictColumn> columns,
+        IReadOnlyDictionary<int, object?>? storageValues = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(columns);
@@ -1894,14 +1976,32 @@ internal sealed class ConflictDetector
                         + "ordinal usually means a one-based ordinal was rebased by mistake.");
             }
 
-            projected.CurrentValues.Add(
-                ProjectColumnValue(
-                    column,
-                    store.GetItemValue(row, column.Number, buffer),
-                    store.GetItemStatus(row, column.Number, buffer)));
+            // 🔴 THE CURRENT VALUES COME FROM STORAGE WHENEVER STORAGE COULD BE READ, and only then from
+            // the carrier. The contract declares this member as the CURRENT SERVER-SIDE state - the state
+            // a retry would be rebased onto - so echoing the caller's own submitted value here would
+            // send it round a retry loop resubmitting the identical values for ever. The reread is the
+            // caller's job because only the executor holds the connection the failed statement ran on;
+            // this method reports what it is given and never re-derives it.
+            //
+            // A NULL DICTIONARY MEANS THE ROW COULD NOT BE READ - it no longer exists, or no key column
+            // was installed to address it by - and NO current value is projected at all. The pairing of a
+            // populated original set against an EMPTY current set is what distinguishes "the row was
+            // deleted" from "the row changed", which is the same distinction the counts pair carries.
+            if (storageValues is not null)
+            {
+                projected.CurrentValues.Add(
+                    ProjectColumnValue(
+                        column,
+                        storageValues.TryGetValue(column.Number, out object? stored) ? stored : null,
+                        store.GetItemStatus(row, column.Number, buffer)));
+            }
 
-            // THE ORIGINAL-VALUE SHADOW. The store answers the current value for a column that was never
-            // modified, which is exactly what the legacy where clause would have carried for it.
+            // THE ORIGINAL-VALUE SHADOW - WHAT THE CALLER BELIEVED WAS CURRENT, and literally what the
+            // failed statement's where clause carried under updatewhere=1. It is read from the CARRIER
+            // deliberately: it is the caller's own submitted state, it is not recomputable from storage,
+            // and comparing it against the storage values above is the whole diagnostic value of this
+            // payload. The store answers the current value for a column that was never modified, which is
+            // exactly what the legacy where clause would have carried for it.
             projected.OriginalValues.Add(
                 ProjectColumnValue(
                     column,

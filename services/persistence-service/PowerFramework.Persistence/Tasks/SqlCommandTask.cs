@@ -26,15 +26,19 @@
 // -------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE OWNS, AND WHAT IT ONLY DRIVES
 // -------------------------------------------------------------------------------------------------
-//  OWNS   the statement, the tri-valued auto-commit mode, the reset, and the execution sequence of
-//         `event ondotask` [:L60-L115] with its two epilogues.
+//  OWNS   the statement, the tri-valued auto-commit mode, the reset, the execution sequence of
+//         `event ondotask` [:L60-L115] with its two epilogues, and the INTERPRETATION of the
+//         leading-`@` execution mode - see "THE LEADING `@` IS A MODE SELECTOR, NOT SQL" below.
 //
 //  DRIVES but does not implement (constraint C-A; verified against the oracle rather than assumed):
 //      * statement execution, positional `?` binding at the provider, multi-statement batch
 //        execution and error-text retrieval - all of these are the pooled transaction's `Exec` and
 //        `SQLErrText` [n_cst_thread_trans.sru:L219-L240], ported in Transactions/TransactionPool.cs
+//      * the RETENTION of a prepared statement that the `@` mode requests - this file decides the
+//        mode and strips the selector, and the engine that owns the connection keeps the prepared
+//        form [Data/SqliteTransactionEngine.cs]. A prepared statement belongs to a connection, and
+//        this task does not own one.
 //  DOES NOT CARRY AT ALL:
-//      * the leading-`@` prefix - see "THE LEADING `@` IS NOT SQL" below
 //      * the dialect resolver `of_GetDBType` [n_cst_thread_trans.sru:L356-L362], also in Transactions/
 //      * parameter storage, the placeholder scan and literal rendering - `SqlTaskBase.BindParams`
 //      * the DbError payload shape and its redaction - Errors/DbErrorData.cs, Errors/SqlRedactor.cs
@@ -82,23 +86,44 @@
 //  applies to DBT_MSSQL/DBT_ORACLE [same file, :L2031-L2035] and to DwBuffer [common.v1.proto:L655].
 //
 // -------------------------------------------------------------------------------------------------
-//  THE LEADING `@` IS NOT SQL  (constraint C-K)
+//  THE LEADING `@` IS A MODE SELECTOR, NOT SQL  (AAP §0.4.3 C-07 - constraints C-B, C-K)
 // -------------------------------------------------------------------------------------------------
-//  The character carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and NEITHER is
-//  on the object this task drives:
-//      1. A DATAWINDOW-OBJECT SELECTOR, in the transaction object's RETRIEVE path - the rest of the
-//         string is that object's NAME rather than SQL:
+//  The character carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and the
+//  distinction between them is the whole subtlety - conflating them is how this file previously came
+//  to claim the mode did not exist here at all:
+//      1. A DATAWINDOW-OBJECT SELECTOR, on the RETRIEVE verb - the rest of the string is that
+//         object's NAME rather than SQL:
 //         `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [n_cst_thread_trans.sru:L309].
-//      2. A STATEMENT-CACHING hint, on the SQLite binding's own Exec. The demonstration at
-//         ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398 is written "@INSERT INTO ..." and the
-//         comment above it at :L397 records that the prefix caches the statement to speed up
-//         re-parsing on a later execution. That object is n_sqlite, called DIRECTLY - not through the
-//         transaction object this task uses.
-//  This task drives `of_Exec` [n_cst_thread_trans.sru:L219-L238], whose whole body is
-//  `EXECUTE IMMEDIATE :sqlCmd USING this` with NO prefix test of any kind. So a command statement
-//  beginning with `@` is passed to the provider VERBATIM and fails there, exactly as in the legacy.
-//  Reading it as "a SQL prefix to strip" would synthesize a statement the legacy never runs, and
-//  reading it as a mode selector would promise a behaviour this verb does not have.
+//         That verb is C-05's, not C-07's, and its managed translation is C-05's separate
+//         `data_object` field rather than a prefix - so nothing about it belongs in this file.
+//      2. A STATEMENT-CACHING EXECUTION MODE, on the COMMAND verb. The demonstration at
+//         ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398 is written "@INSERT INTO ..." with
+//         `?` placeholders and five bound values, inside a ten-iteration loop [:L396-L406], and the
+//         comment above it at :L397 records exactly what the prefix does - 语句缓存, statement
+//         caching, 空间换时间, trading space for time. That is the SQLite binding's own `Exec`
+//         [n_sqlite.sru:L32-L43], and it is a command verb.
+//
+//  MEANING 2 IS C-07'S, AND THE AAP SAYS SO IN TERMS: C-07's `Exec` "preserves positional `?`
+//  binding, the leading-`@` prefix execution mode, multi-statement batch execution, and error-text
+//  retrieval" [AAP §0.4.3]. Three of those four are also drawn from n_sqlite rather than from the
+//  transaction object - the four driver accessors C-07 publishes are n_sqlite's [n_sqlite.sru:L26-L29]
+//  and so is the recorded eleven-argument ceiling [:L33-L43] - so C-07 is the UNION of the two
+//  command surfaces, and reading only the transaction half is what produced the earlier claim that
+//  the mode "is not on this verb". Under the AAP's own precedence the frozen plan settles it.
+//
+//  WHAT THAT MEANS MECHANICALLY, AND WHY THE PREFIX CANNOT SURVIVE INTO THE STATEMENT:
+//  "@INSERT INTO ..." is not valid SQL in any dialect, and the legacy demonstration succeeds - it
+//  message-boxes and returns on failure [:L401-L405] - so the prefix is consumed by the binding and
+//  exactly one character is removed, the same `Mid(sql,2)` arithmetic the sibling meaning uses. The
+//  mode selector is therefore NOT part of the statement, and this file removes it BEFORE binding, so
+//  every observer downstream - the before-command and after-command hooks, the DbError payload's
+//  statement field, the SQL preview, the log record - sees the statement the provider actually ran.
+//  Leaving it in would report a statement that was never executed.
+//
+//  WHAT IS *NOT* CLAIMED (AAP §0.8.5): no latency, throughput or saving. The repository publishes no
+//  performance objective anywhere, so the mode is preserved because a caller who sends the documented
+//  prefix must have their statement RUN rather than refused, and the retention is observable as a
+//  count of prepared-form matches - never as a duration.
 //
 // -------------------------------------------------------------------------------------------------
 //  THE ARITY CEILINGS ARE RECORDED, NOT ENFORCED  (AAP §0.2.1.4 - constraints C-D, C-K)
@@ -247,23 +272,42 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Documented, deliberately not implemented here (constraint C-K).</b> The command path
-    /// <c>of_Exec</c> [<c>n_cst_thread_trans.sru:L219-L238</c>] is a plain
-    /// <c>EXECUTE IMMEDIATE :sqlCmd USING this</c> with no prefix test at all, so a command statement
-    /// beginning with this character is passed to the provider VERBATIM and fails there - which is
-    /// exactly what the legacy does with it.
+    /// <b>Documented, deliberately not implemented here - and this is the meaning that genuinely is
+    /// NOT C-07's (constraint C-K).</b> It belongs to the RETRIEVE verb, whose managed translation is
+    /// C-05's separate <c>data_object</c> field: naming an object is a different act from executing a
+    /// statement, so it gets a field of its own rather than an in-band prefix.
     /// </para>
     /// <para>
-    /// <b>The same character means something ELSE on a third object, and conflating the two is the
-    /// mistake this constant exists to prevent.</b> On the SQLite binding's own <c>Exec</c> - n_sqlite,
-    /// called directly rather than through the transaction object - a leading <c>@</c> is a
-    /// STATEMENT-CACHING hint [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>]. Neither
-    /// meaning reaches C-07, so the contract documents the prefix as carried verbatim rather than as a
-    /// mode, and a reader looking for "the leading-@ execution mode" on this verb will find this note
-    /// instead of a behaviour that is not there.
+    /// <b>⚠ THE SAME CHARACTER MEANS SOMETHING ELSE ON THE COMMAND VERB, AND CONFLATING THE TWO IS THE
+    /// MISTAKE THIS PAIR OF CONSTANTS EXISTS TO PREVENT.</b> On a command the prefix selects the
+    /// statement-caching execution mode, which C-07 does carry and this task does implement - see
+    /// <see cref="StatementCachingPrefix"/>. An earlier revision of this file reasoned from the
+    /// transaction object's <c>of_Exec</c> alone, concluded that neither meaning reached C-07, and
+    /// documented the prefix as passed through verbatim; that was wrong, and the reasoning is recorded
+    /// in this file's header so it cannot be re-derived.
     /// </para>
     /// </remarks>
     internal const char DataWindowObjectPrefix = '@';
+
+    /// <summary>
+    /// The character that, on a COMMAND, selects the statement-caching execution mode - the mode AAP
+    /// §0.4.3 requires C-07's <c>Exec</c> to preserve.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The oracle demonstrates it directly: <c>Exec("@INSERT INTO COMPANY ... VALUES (?, ?, ?, ?, ?)",
+    /// "Paul", 32, "California", 20000, "1999-05-08")</c> inside a ten-iteration loop, under a comment
+    /// stating that the prefix caches the statement to speed up re-parsing and trades space for time
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406</c>].
+    /// </para>
+    /// <para>
+    /// <b>THE SAME CHARACTER AS <see cref="DataWindowObjectPrefix"/>, AND DELIBERATELY DECLARED
+    /// TWICE.</b> One constant would suggest one meaning. Two constants with the same value and
+    /// different names say what is actually true: two verbs read the same byte differently, and a
+    /// reader who arrives at either one is told about the other.
+    /// </para>
+    /// </remarks>
+    internal const char StatementCachingPrefix = '@';
 
     /// <summary>
     /// The provider code that means "not found" and READS AS SUCCESS -
@@ -425,6 +469,75 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// <see cref="SetSql"/> stores <see langword="null"/> when it is given one.
     /// </remarks>
     internal string? Sql => _sql;
+
+    /// <summary>
+    /// Whether the installed statement selects the statement-caching execution mode - the read of the
+    /// leading-<c>@</c> prefix AAP §0.4.3 requires C-07 to preserve.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A testability seam (constraint C-H), and the ONLY one the mode needs on this object.</b> The
+    /// mode's other half - whether a prepared form was actually matched - belongs to the engine that owns
+    /// the connection and is published by <c>Data/IPreparedStatementStore</c>. What this property answers
+    /// is the half this task decides: did the caller's statement ask for the mode. Without it a test
+    /// could only observe the decision indirectly, through a store that a substituted engine may not
+    /// even have.
+    /// </para>
+    /// <para>
+    /// <b>DERIVED, NEVER STORED, so it cannot disagree with the statement.</b> The mode is selected by
+    /// the statement text [<c>w_test_sqlite.srw:L398</c>], so a separate field holding the decision would
+    /// be a second source of truth for one fact and a way for the two to drift when
+    /// <see cref="SetSql"/> or <see cref="Reset"/> ran.
+    /// </para>
+    /// <para>
+    /// <see langword="false"/> for a null statement, for the empty statement, and for anything whose
+    /// first character is not the selector - the same three-valued tolerance the guards around it have.
+    /// </para>
+    /// </remarks>
+    internal bool StatementSelectsCaching => SelectsStatementCaching(_sql);
+
+    /// <summary>
+    /// Whether a statement selects the statement-caching execution mode.
+    /// </summary>
+    /// <param name="statement">The statement, which may be <see langword="null"/> or empty.</param>
+    /// <returns><see langword="true"/> when its first character is the selector.</returns>
+    /// <remarks>
+    /// <b>ORDINAL, FIRST CHARACTER ONLY, NO TRIMMING.</b> The oracle's sibling test is
+    /// <c>Left(sql,1) = "@"</c> [<c>n_cst_thread_trans.sru:L309</c>] - position one, exactly, with no
+    /// whitespace tolerance - so a statement whose first character is a space and whose second is the
+    /// selector does NOT select the mode. Trimming first would accept a form the legacy rejects, which
+    /// is a widening rather than a preservation (constraint C-B).
+    /// </remarks>
+    internal static bool SelectsStatementCaching(string? statement) =>
+        statement is { Length: > 0 } && statement[0] == StatementCachingPrefix;
+
+    /// <summary>
+    /// Removes the mode selector from a statement, leaving the SQL the provider is asked to run.
+    /// </summary>
+    /// <param name="statement">A statement that selects the mode.</param>
+    /// <returns>The statement without its leading selector.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>EXACTLY ONE CHARACTER, WHICH IS THE ORACLE'S OWN <c>Mid(sql,2)</c> ARITHMETIC</b>
+    /// [<c>n_cst_thread_trans.sru:L310</c>]. So <c>"@@INSERT ..."</c> yields <c>"@INSERT ..."</c>, which
+    /// then reaches the provider and fails there - a doubled selector is not an escape sequence, and
+    /// inventing one would add a grammar the legacy does not have.
+    /// </para>
+    /// <para>
+    /// <b>A LONE SELECTOR YIELDS THE EMPTY STRING, AND THAT IS LEFT TO BE ANSWERED DOWNSTREAM.</b> The
+    /// statement <c>"@"</c> is not empty, so it passes both emptiness guards
+    /// [<c>:L45</c>, <c>:L65</c>] exactly as the oracle's would; the empty remainder is then refused by
+    /// the transaction's own first line with <see cref="RetCode.E_INVALID_ARGUMENT"/>
+    /// [<c>n_cst_thread_trans.sru:L219</c>]. That is the same route a null statement takes, and
+    /// short-circuiting it here would answer a different code than the layer that owns the question.
+    /// </para>
+    /// </remarks>
+    internal static string StripStatementCachingPrefix(string statement)
+    {
+        ArgumentNullException.ThrowIfNull(statement);
+
+        return statement.Length <= 1 ? string.Empty : statement[1..];
+    }
 
     /// <summary>
     /// Whether this task is currently inside its own task body - the narrowed equivalent of the
@@ -818,10 +931,32 @@ internal sealed class SqlCommandTask : SqlTaskBase
             // yields it.
             sql = _sql ?? string.Empty;
 
-            // The statement in BOTH forms. Until the binder runs, the two are the same text with no
-            // parameters - which is exactly right for a parameterless statement: there is nothing to
-            // bind, so there is nothing for the two forms to differ about.
-            SqlBoundStatement bound = SqlBoundStatement.Unbound(sql);
+            // -------------------------------------------------------------------------------------
+            // THE LEADING-`@` EXECUTION MODE, INTERPRETED HERE AND NOWHERE ELSE (AAP §0.4.3 C-07).
+            // -------------------------------------------------------------------------------------
+            // The prefix selects statement caching [w_test_sqlite.srw:L397-L398] and is NOT part of the
+            // statement, so it is consumed off the SNAPSHOT rather than off the field: `_sql` keeps the
+            // caller's text verbatim, so the task stays re-runnable in the same mode and `Sql` still
+            // reports what was installed.
+            //
+            // BEFORE THE BINDER, AND THE ORDER MATTERS FOR THE OBSERVABLE TEXT. The binder rewrites the
+            // statement in place and its output is what every downstream observer sees - the two hooks,
+            // the DbError payload's statement field, the SQL preview, the log record. Stripping after it
+            // would leave the selector sitting in front of an interpolated statement that the provider
+            // never received, which is a statement no execution ever ran.
+            bool cacheStatement = SelectsStatementCaching(sql);
+            if (cacheStatement)
+            {
+                sql = StripStatementCachingPrefix(sql);
+            }
+
+            // The statement in BOTH forms, carrying the mode. Until the binder runs, the two texts are
+            // the same text with no parameters - which is exactly right for a parameterless statement:
+            // there is nothing to bind, so there is nothing for the two forms to differ about.
+            SqlBoundStatement bound = SqlBoundStatement.Unbound(sql) with
+            {
+                CacheStatement = cacheStatement,
+            };
 
             // [:L81] `if of_HasParams() then` - binding is skipped entirely when the collection is
             // empty, so a parameterless statement is never scanned or rewritten.
@@ -844,6 +979,12 @@ internal sealed class SqlCommandTask : SqlTaskBase
                     sql,
                     (long)transaction.GetDbType(),
                     out bound);
+
+                // THE MODE IS RE-APPLIED BECAUSE THE BINDER COMPOSES A FRESH STATEMENT. `BindParams` is
+                // the base's, it knows nothing about C-07's prefix, and it writes `out bound` from
+                // scratch - so a mode set on the pre-binding value would be silently dropped for exactly
+                // the statements the legacy demonstration uses, which are the parameterized ones.
+                bound = bound with { CacheStatement = cacheStatement };
 
                 // The observable form is written back so every later observer - the diagnostic below, the
                 // preview hook, the error payload - sees exactly the text the oracle would have produced.

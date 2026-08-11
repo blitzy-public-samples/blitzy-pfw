@@ -376,11 +376,13 @@ public static class HealthEndpoints
     /// <para>
     /// WHY IT IS A COMPONENT OF READINESS AND NOT MERELY CONFIGURATION. Gateway forwards every proxied
     /// operation to DataServices with a bearer token, and the only way to obtain one is Security's
-    /// issuance edge - which contract C-01 protects with MUTUAL TLS and nothing else, because a caller
-    /// cannot present a bearer token in order to obtain its first bearer token. A deployment that mounts
-    /// no client certificate is a legitimate startup state and deliberately not a startup failure, and it
-    /// is also a state in which every proxied operation is refused for want of a caller identity.
-    /// Reporting ready in that state is the readiness endpoint answering its own question wrongly.
+    /// issuance edge - which contract C-01 protects with EITHER OF TWO CREDENTIALS, an HTTP Basic client
+    /// credential or a client certificate, and requires one of them, because a caller cannot present a
+    /// bearer token in order to obtain its first bearer token. A deployment presenting NEITHER is a state
+    /// in which every proxied operation is refused for want of a caller identity, so reporting ready in it
+    /// is the readiness endpoint answering its own question wrongly. Which of the two schemes satisfies
+    /// this component, and why requiring the certificate pair alone was an outage rather than strictness,
+    /// is recorded on <see cref="EvaluateCredentialReadiness"/>.
     /// </para>
     /// <para>
     /// Named individually rather than folded into <see cref="ComponentsCheckName"/> for the same reason
@@ -905,12 +907,25 @@ public static class HealthEndpoints
     /// entry appears.
     /// </para>
     /// <para>
-    /// BOTH HALVES OF THE PAIR ARE REQUIRED, which is stricter than the options group's own
-    /// <c>IsConfigured</c> property. That property is an OR: it answers "did the operator intend to
-    /// configure an identity", so the startup validator can refuse a half-set pair as the typo it is.
-    /// Readiness asks whether a handshake can be completed, and a certificate without its key cannot be
-    /// loaded. The composition root already refuses to START on a half-set pair, so the two tests can only
-    /// disagree in a host that bypassed both the validator and the identity loader.
+    /// <b>EITHER ACCEPTED SCHEME MAKES THIS COMPONENT READY, AND REQUIRING THE CERTIFICATE PAIR WAS AN
+    /// OUTAGE RATHER THAN STRICTNESS.</b> Contract C-01 accepts TWO caller credentials on
+    /// <c>POST /v1/tokens</c> - a shared secret presented as an HTTP <c>Basic</c> credential naming a
+    /// subject on Security's issuance roster, or a client certificate - as ALTERNATIVES, and
+    /// <see cref="GatewayOptions.SecurityClientSecret"/> is the one the documented bring-up supplies while
+    /// both certificate paths stay deliberately EMPTY. This component used to report degraded on exactly
+    /// that configuration, and degraded is answered <c>503</c>: Gateway would never have reported ready
+    /// under the configuration the orchestration layer documents, which is a stack that does not come up
+    /// rather than a misleading warning.
+    /// </para>
+    /// <para>
+    /// THE CERTIFICATE PAIR IS STILL TESTED AS A PAIR, because half a pair cannot complete a handshake: a
+    /// certificate without its key cannot be loaded and a key with no certificate has nothing to present.
+    /// So a certificate-only deployment needs both halves while a secret-configured deployment needs
+    /// neither - which is what the options group's own <c>HasIssuanceCredential</c> cannot express, since
+    /// it is an OR over "did the operator INTEND a scheme" and exists so the startup validator can refuse
+    /// a deployment that intended nothing. The composition root already refuses to START on a half-set
+    /// pair, so this test and the validator can only disagree in a host that bypassed both the validator
+    /// and the identity loader.
     /// </para>
     /// </remarks>
     private static (HealthStatus Status, ComponentHealthCheck Entry)? EvaluateCredentialReadiness(
@@ -929,8 +944,12 @@ public static class HealthEndpoints
 
         GatewayOptions.MutualTlsClientOptions identity = options.MutualTls;
 
-        if (!string.IsNullOrWhiteSpace(identity.CertificatePath)
-            && !string.IsNullOrWhiteSpace(identity.CertificateKeyPath))
+        bool presentsSecret = !string.IsNullOrWhiteSpace(options.SecurityClientSecret);
+
+        bool presentsCertificate = !string.IsNullOrWhiteSpace(identity.CertificatePath)
+            && !string.IsNullOrWhiteSpace(identity.CertificateKeyPath);
+
+        if (presentsSecret || presentsCertificate)
         {
             return (
                 HealthStatus.Healthy,
@@ -942,15 +961,17 @@ public static class HealthEndpoints
                 });
         }
 
-        // NEITHER PATH IS REPRODUCED, not even on the operator channel. A path names where private key
-        // material is mounted, and a log is not exempt from that concern; the two SETTING NAMES are what an
-        // operator needs in order to act. Warning rather than error: the material has not failed, it has
-        // not arrived, and supplying it is an orchestration act.
+        // NO VALUE AND NO PATH IS REPRODUCED, not even on the operator channel. A path names where private
+        // key material is mounted and a secret is a credential; a log is exempt from neither concern. The
+        // SETTING NAMES are what an operator needs in order to act. Warning rather than error: the material
+        // has not failed, it has not arrived, and supplying it is an orchestration act.
         logger.LogWarning(
-            "Gateway presents no client certificate, so it cannot obtain a service token: the issuance "
-                + "edge is authenticated by mutual TLS and by nothing else, and a certificate-less request "
-                + "can only be refused. Set both '{Certificate}' and '{Key}' to the material this "
-                + "deployment mounts. Reporting the {Check} component {Status}.",
+            "Gateway presents no caller credential, so it cannot obtain a service token: the issuance "
+                + "operation accepts a shared secret as an HTTP Basic credential or a client certificate, "
+                + "and a request presenting neither can only be refused. Set '{Secret}' - the documented "
+                + "bring-up path - or both '{Certificate}' and '{Key}' to the material this deployment "
+                + "mounts. Reporting the {Check} component {Status}.",
+            GatewayOptions.SecurityClientSecretConfigurationKey,
             $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
                 + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath)}",
             $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"

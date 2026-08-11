@@ -103,12 +103,13 @@ public sealed class TokenBootstrapReadinessTests
     /// and a key has nothing to present without its certificate.
     /// </para>
     /// <para>
-    /// THE HALF-SET ROWS ARE ALSO WHERE THIS CHECK IS DELIBERATELY STRICTER THAN THE SHIPPED CLIENT'S OWN
-    /// <c>IsConfigured</c> TEST, which is an OR. That property answers "did the operator intend to
-    /// configure an identity", so the client can name the two missing settings instead of surfacing an
-    /// authentication failure; readiness answers "can a handshake be completed", and half a pair cannot.
-    /// The two can only disagree in a host that bypassed both the validator and the identity loader, and
-    /// for such a host the stricter answer is the honest one.
+    /// EVERY ROW HERE ALSO CONFIGURES NO SHARED SECRET, WHICH IS WHAT MAKES THEM NOT-READY. Contract C-01
+    /// accepts two caller credentials as alternatives, so an absent certificate pair is only fatal when the
+    /// other scheme is absent too - that is the subject of
+    /// <see cref="A_configured_shared_secret_is_ready_whatever_the_certificate_pair_looks_like"/>. What
+    /// remains true on these rows is that half a certificate pair cannot complete a handshake: a
+    /// certificate cannot be presented without its key and a key has nothing to present without its
+    /// certificate, so a deployment that chose the certificate scheme and mis-set it is not ready.
     /// </para>
     /// </remarks>
     [Theory]
@@ -127,6 +128,11 @@ public sealed class TokenBootstrapReadinessTests
         options.Security.MutualTls.CertificatePath = certificate;
         options.Security.MutualTls.CertificateKeyPath = key;
 
+        // Stated rather than implied: these rows are about the certificate scheme, and the OTHER scheme is
+        // deliberately absent. Configuring it would make every row below ready, which is the point of the
+        // sibling theory.
+        Assert.True(string.IsNullOrWhiteSpace(options.Security.ClientSecret));
+
         HealthCheckResult result = await EvaluateAsync(
             options,
             HealthStatus.Degraded,
@@ -137,6 +143,58 @@ public sealed class TokenBootstrapReadinessTests
         // behaves identically - the distinction is what an operator is told to do about it.
         Assert.Equal(HealthStatus.Degraded, result.Status);
         Assert.Equal(NotReadyDescription, result.Description);
+    }
+
+    /// <summary>
+    /// A configured shared secret reports READY whatever the certificate pair looks like, because the two
+    /// schemes are alternatives.
+    /// </summary>
+    /// <param name="shape">The certificate-pair shape this row pairs with the secret.</param>
+    /// <param name="certificate">The configured certificate path.</param>
+    /// <param name="key">The configured key path.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE FIRST ROW IS THE DOCUMENTED BRING-UP, AND IT USED TO REPORT NOT READY.</b> This check
+    /// required BOTH HALVES OF THE CERTIFICATE PAIR and nothing else, so a deployment supplying
+    /// <c>SECURITY_CLIENT_SECRET_DATASERVICES</c> and leaving both paths deliberately empty - which
+    /// <c>orchestration/.env.example</c> section 6.3 records as a SUPPORTED state, naming the <c>Basic</c>
+    /// scheme the primary one - reported not ready forever. This service's readiness is one of the three
+    /// Gateway's own gate waits on, so the consequence was a stack that never came up.
+    /// </para>
+    /// <para>
+    /// THE HALF-SET ROWS ARE INCLUDED ON PURPOSE. A mis-set certificate path alongside a working secret is
+    /// still a deployment that can obtain a token, so it is READY: the certificate scheme is the
+    /// alternative it is not using. The startup validator is what tells an operator about the typo, and it
+    /// does so without pretending the service cannot work.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("no certificate pair at all", "", "")]
+    [InlineData("only the certificate set", CertificatePath, "")]
+    [InlineData("only the key set", "", CertificateKeyPath)]
+    [InlineData("a complete pair as well", CertificatePath, CertificateKeyPath)]
+    public async Task A_configured_shared_secret_is_ready_whatever_the_certificate_pair_looks_like(
+        string shape,
+        string certificate,
+        string key)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(shape));
+
+        DataServicesOptions options = Configured();
+        options.Security.MutualTls.CertificatePath = certificate;
+        options.Security.MutualTls.CertificateKeyPath = key;
+
+        // NOT MATERIAL AND NOT CREDENTIAL-SHAPED. The check reads only whether a secret is PRESENT; it
+        // never authenticates with it, so a marker is the honest value to write here (C-F).
+        options.Security.ClientSecret = "readiness-not-a-real-secret";
+
+        HealthCheckResult result = await EvaluateAsync(
+            options,
+            HealthStatus.Degraded,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+        Assert.Equal(ReadyDescription, result.Description);
     }
 
     /// <summary>

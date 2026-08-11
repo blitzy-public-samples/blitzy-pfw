@@ -986,13 +986,16 @@ public static class TokenEndpoints
     /// been honoured.
     /// </para>
     /// <para>
-    /// THE CERTIFICATE PATH IS RETAINED, NOT VESTIGIAL. The attached environment fixes every listener in
-    /// this system to plain HTTP, so on the topology this repository actually runs no client certificate
-    /// can be presented at all and the secret scheme is the only reachable one. A deployment that
-    /// terminates TLS and issues client certificates - the shape the local certificate recipe in
-    /// docs/ARCHITECTURE.md section 9.3.1 describes - reaches the other path, and a roster entry that
-    /// names no secret configuration key is exactly such a caller. Removing the path would delete a
-    /// working credential scheme the published contract declares.
+    /// BOTH PATHS ARE LIVE, AND NEITHER IS VESTIGIAL. This service's own listener is
+    /// <c>https://+:5104</c> with <c>ClientCertificateMode</c> <c>AllowCertificate</c>, so a client
+    /// certificate CAN be presented and the second path is reachable on the topology this repository
+    /// runs. Which one a given caller uses is a deployment fact rather than a code one: a deployment
+    /// that mounts caller certificates from the local authority the certificate recipe in
+    /// docs/ARCHITECTURE.md section 9.3.1 describes reaches the certificate path, and a roster entry
+    /// naming no secret configuration key is exactly such a caller - while a deployment that terminates
+    /// TLS ahead of this service in a proxy or a mesh sidecar has no certificate for the application to
+    /// read at all, and the secret scheme is then the only one that can reach the operation. Removing
+    /// either path would delete a working credential scheme the published contract declares.
     /// </para>
     /// <para>
     /// A CERTIFICATE IDENTITY IS NOT MATCHED AGAINST THE ROSTER HERE, deliberately, and the asymmetry is
@@ -1324,14 +1327,14 @@ public static class TokenEndpoints
     /// </para>
     /// <para>
     /// WHAT THE MIDDLEWARE DOES WITH A FAILURE, STATED SO IT IS NOT DISCOVERED AT A FAILING PROBE. A
-    /// caller that presents neither a certificate nor a token is CHALLENGED and receives the
-    /// unauthorized status, which is exactly what the contract declares for a request with no
-    /// certificate. A caller that presents a valid bearer token but no certificate is instead FORBIDDEN
-    /// and receives the forbidden status - the framework's own classification of an authenticated
-    /// caller who fails a policy - and the contract's forbidden response covers it: a caller offering a
-    /// credential this operation does not accept is not permitted to obtain a token. Neither path mints
-    /// anything, and there is no address on any topology at which a token is issued without a
-    /// certificate.
+    /// caller that presents neither of the two accepted credentials is CHALLENGED and receives the
+    /// unauthorized status, which is exactly what the contract declares for a request carrying no
+    /// caller credential. A caller that presents a valid bearer token and neither accepted credential
+    /// is instead FORBIDDEN and receives the forbidden status - the framework's own classification of
+    /// an authenticated caller who fails a policy - and the contract's forbidden response covers it: a
+    /// caller offering a credential this operation does not accept is not permitted to obtain a token.
+    /// Neither path mints anything, and there is no address on any topology at which a token is issued
+    /// to a caller presenting NEITHER accepted credential.
     /// </para>
     /// </remarks>
     private static void ConfigureIssuancePolicy(AuthorizationPolicyBuilder policy)

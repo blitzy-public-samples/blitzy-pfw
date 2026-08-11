@@ -119,7 +119,9 @@
 //  sole cross-service coupling. No storage provider, connection or DbContext (C-E). No key, token
 //  or credential literal (C-F). No project, container, test or placeholder for DesignSystem,
 //  Documents, Integration or ScriptBridge (C-D). `/health` and `/v1/ping` live in the sibling
-//  `Endpoints/` folder and are deliberately not defined here (C-L); this service is gRPC on 5102.
+//  `Endpoints/` folder and are deliberately not defined here (C-L); those routes are answered by the
+//  `Rest` endpoint on 5102, while this service's gRPC surface is answered by the `Grpc` endpoint on
+//  5112 - one protocol version each, so an HTTP/1.1 request cannot arrive here at all.
 //
 //  FAIL-FAST, NEVER GRACEFUL DEGRADATION (AAP 0.1.4, 0.6.7). A structurally impossible state - an
 //  unknown or expired session, a handle that is not co-resident, a blocked cross-instance foreign

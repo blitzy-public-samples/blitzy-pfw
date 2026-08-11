@@ -225,10 +225,17 @@ info:
     | Service | Port | Role in relation to this document |
     | --- | --- | --- |
     | Persistence | **5101** | No operation of this document reaches it - Gateway never *calls* Persistence. Gateway does *read* its anonymous `/health` on this port, which is what lets `/health` here name all three upstreams |
-    | DataServices | **5102** | The gRPC upstream every `/v1/datawindow` operation projects onto |
+    | Persistence | **5111** | Its `Http2` endpoint, carrying contracts C-05..C-08. Gateway holds no Persistence client, so no hop of this document lands here either |
+    | DataServices | **5102** | Its `Http1` endpoint - the anonymous `/health` Gateway reads, and the thin REST projection |
+    | DataServices | **5112** | Its `Http2` endpoint: **the gRPC upstream every `/v1/datawindow` operation projects onto** |
     | *(reserved)* | **5103** | **Deliberately unallocated** - see below |
     | Security | **5104** | The token issuer and the JWKS publisher Gateway verifies against |
     | **Gateway** | **5105** | **This document's listener** and the composition-root access URL |
+
+    Every listener above terminates TLS, and the two gRPC-carrying services bind TWO endpoints each with
+    ONE protocol version apiece: 5101/5102 are `Http1` and 5111/5112 are `Http2`. That is why an
+    operation of this document projects onto 5112 rather than 5102 - an HTTP/2 gRPC call to the `Http1`
+    endpoint fails at negotiation instead of arriving somewhere it cannot be served.
 
     **5103 is reserved rather than reassigned, and that is a decision.** The attached environment had
     assigned it to a design service, and DesignSystem is precisely one of the four deferred services, so

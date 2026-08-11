@@ -694,21 +694,29 @@ trust anchor it validates presented client certificates against, `SECURITY_MTLS_
 client certificate each calling service presents — `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` and
 `DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH`. All are paths, all mounted from the
 orchestration secret layer, and none is material. **`SECURITY_MTLS_CERT_PATH` and
-`SECURITY_MTLS_KEY_PATH` are not part of this roster and must not be reintroduced**: they belonged to a
+`SECURITY_MTLS_KEY_PATH` are not part of this roster and must not be reintroduced as service settings**
+(the end-to-end suite reads the same two names for its own CLIENT pair, which is a different consumer and
+is not affected by this rule): they belonged to a
 withdrawn second mutual-TLS listener, and the server certificate now comes from the shared
 `TLS_CERTIFICATE_*` pair above.
 
-> **The trust anchor is declared but not yet installed anywhere, and that gap is the one thing in this
-> section that is not operable.** `SECURITY_MTLS_CLIENT_CA_PATH` is consumed by a container definition
-> and a Compose manifest rather than by an ASP.NET Core configuration key, because *which* issuers are
-> acceptable is the container's OS trust store. `services/security-service/Dockerfile` **installs no
-> trust anchor** — it has no `ca-certificates` step, no `update-ca-certificates`, and Security registers
-> no explicit chain-validation callback — and `orchestration/docker-compose.yml` does not exist, so
-> nothing mounts the file the variable names. **Mutual-TLS caller authentication is therefore declared
-> and unexercised, not operable**, and §4.3 repeats the point at its own point of use. Closing it needs
-> one of exactly two things: copy the CA into the runtime stage and run `update-ca-certificates` there,
-> or validate presented chains explicitly against that file in application code. Until one lands, no
-> statement anywhere may describe issuance as working.
+> **The trust anchor is READ by application code; what is still missing is the mount.**
+> `SECURITY_MTLS_CLIENT_CA_PATH` is consumed by an ASP.NET Core configuration key after all —
+> `Security:MutualTls:ClientCaPath`, loaded at startup by `CallerCertificateTrust.Load` in Security's
+> composition root and installed as Kestrel's `ClientCertificateValidation` callback, which builds a
+> presented caller certificate's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor
+> alone. That is the second of the two implementations that were open, and it is why
+> `services/security-service/Dockerfile` deliberately **installs no trust anchor**: no `ca-certificates`
+> step and no `update-ca-certificates`, because the OS trust store is not the decider and the runtime
+> stage needs no root-privileged step. A configured-but-unreadable anchor is a refusal to start.
+> `AllowAnyClientCertificate` is called nowhere in the repository.
+>
+> **What is not operable is the mount.** `orchestration/docker-compose.yml` does not exist, so nothing
+> places the file the variable names; with the path unset the callback defers to the platform's own
+> verdict. **The certificate alternative on the issuance edge is therefore unexercised end to end**, and
+> §4.3 repeats the point at its own point of use. That is a gap in ONE of the two accepted schemes:
+> `POST /v1/tokens` also accepts a shared secret as an HTTP `Basic` credential, which is what the
+> documented bring-up supplies, so no statement here should be read as "issuance is unauthenticated".
 
 [`BUILD.md`](BUILD.md) §8 and `orchestration/.env.example` §1 restate the variable roster, and the three
 must agree word for word.
@@ -854,20 +862,20 @@ each of the two services that request tokens — Gateway and DataServices. **Per
 because it reads Security's anonymous key set and calls nothing else there, and provisioning a credential
 for a caller that never authenticates would create material nothing consumes and nobody rotates.
 
-> **Scaffolded is not the same as operable, and on this edge the difference is the whole story.**
-> The settings exist, both typed clients read them, and the listener requests a client certificate — but
-> **nothing in this repository yet establishes which issuers Security trusts.** Chain verification for a
-> presented client certificate is done against the container's OS trust store, and
-> `services/security-service/Dockerfile` installs no trust anchor: no `ca-certificates` package step, no
-> `update-ca-certificates`, and no explicit chain-validation callback registered in application code.
-> `orchestration/docker-compose.yml` does not exist either, so nothing mounts the file
-> `SECURITY_MTLS_CLIENT_CA_PATH` names. **Mutual-TLS caller authentication is therefore declared and
-> unexercised.** Two implementations would close it, and exactly one of them must be chosen and recorded:
-> copy the CA into the runtime stage and run `update-ca-certificates` there, so the OS store validates
-> chains; or validate presented chains explicitly in application code against the file that variable
-> names, which keeps the anchor out of the image but moves security-critical logic into hand-written code.
-> Until one lands, **no document may describe issuance as working**, and §4.1.1 says the same at its own
-> point of use.
+> **Scaffolded is not the same as operable, and on this edge the difference is one mount.**
+> The settings exist, both typed clients read them, the listener requests a client certificate, and
+> **which issuers Security trusts IS established in application code**: `Security:MutualTls:ClientCaPath`
+> is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which chains a
+> presented certificate under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. The OS trust
+> store is deliberately not the decider, which is why `services/security-service/Dockerfile` installs no
+> trust anchor and needs no root step. What is missing is the mount:
+> `orchestration/docker-compose.yml` does not exist, so nothing places the file
+> `SECURITY_MTLS_CLIENT_CA_PATH` names, and with the path unset the callback defers to the platform's own
+> verdict. **The certificate alternative on this edge is therefore declared and unexercised end to end** —
+> one of the two accepted schemes, alongside the shared secret the documented bring-up supplies — and
+> §4.1.1 says the same at its own point of use. The option not taken is recorded because it was a real
+> choice: copying the CA into the runtime stage and running `update-ca-certificates` there would have kept
+> validation in framework code, at the cost of a deployment-specific anchor in an image layer.
 
 Three consequences belong in a secrets register specifically:
 

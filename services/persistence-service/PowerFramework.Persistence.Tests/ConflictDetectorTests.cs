@@ -132,8 +132,32 @@ internal sealed class RecordingUpdateTarget : IUpdateTarget
     /// <summary>Runs when the update is invoked, so a test can cancel mid-flight.</summary>
     internal Action? OnUpdateInvoked { get; set; }
 
+    /// <summary>
+    /// The affected-row measurement this target answers, and <b>ONLY ONCE THE UPDATE HAS RUN</b>.
+    /// </summary>
+    /// <remarks>
+    /// THE FAKE ENFORCES THE ORDERING THE CONTRACT REQUIRES rather than merely permitting it: the
+    /// measurement is answered as <see langword="null"/> until <see cref="Update"/> has been invoked, which
+    /// is what a real carrier does - it cannot know how many rows a predicate matched before submitting it.
+    /// A classifier that read the evidence before running the update would therefore see nothing here, and
+    /// the tests that assert the conflict arm would fail rather than pass on a value no real carrier could
+    /// have supplied at that moment.
+    /// </remarks>
+    internal ConcurrencyEvidence? Evidence { get; set; }
+
+    /// <summary>How many times the measurement was read.</summary>
+    internal int CaptureConcurrencyEvidenceCalls { get; private set; }
+
     /// <inheritdoc/>
     public void ClearState() => ClearStateCalls++;
+
+    /// <inheritdoc/>
+    public ConcurrencyEvidence? CaptureConcurrencyEvidence()
+    {
+        CaptureConcurrencyEvidenceCalls++;
+
+        return UpdateCalls.Count == 0 ? null : Evidence;
+    }
 
     /// <inheritdoc/>
     public long Update(bool acceptText, bool resetFlag, CancellationToken cancellationToken = default)
@@ -289,15 +313,23 @@ public sealed class ConflictDetectorTests
     /// </remarks>
     private UpdateAttempt Attempt(
         bool transaction = true,
-        ConcurrencyEvidence? evidence = null) => new()
+        ConcurrencyEvidence? evidence = null)
+    {
+        // THE MEASUREMENT IS INSTALLED ON THE TARGET, NOT ON THE ATTEMPT, because that is where the
+        // classifier reads it from and when: after the update has run. An attempt is assembled BEFORE the
+        // update and cannot carry a measurement that does not exist yet - see
+        // IUpdateTarget.CaptureConcurrencyEvidence.
+        _target.Evidence = evidence;
+
+        return new UpdateAttempt
         {
             Transaction = transaction ? _transaction : null,
             Target = _target,
             Identity = new IdentityTableSurfaces(_surfaces, _surfaces),
             Errors = _sink,
             Cancellation = _cancellation,
-            Evidence = evidence,
         };
+    }
 
     /// <summary>
     /// Asserts a reference is present and returns it, since <c>Assert.NotNull</c> answers nothing.
@@ -979,11 +1011,28 @@ public sealed class ConflictDetectorTests
     }
 
     /// <summary>
-    /// Evidence is IGNORED on every arm other than the else arm, so it cannot promote a sentinel, a veto, a
-    /// cancellation or a success into a conflict.
+    /// 🔴 A MEASURED MISMATCH IS A CONFLICT EVEN WHEN THE UPDATE CLAIMED SUCCESS - and the measurement is
+    /// still ignored on every arm that never reached a statement.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FIRST ASSERTION IS THE WHOLE POINT AND IT IS THE ONE A CLASSIFIER GETS WRONG.
+    /// <c>Data.Update(true,false)</c> answers <c>1</c> whenever every generated statement executed without
+    /// a DBMS ERROR, and a statement that matched ZERO rows is not a DBMS error on any provider - so the
+    /// classic optimistic miss arrives wearing a CLAIMED SUCCESS. Classifying the measurement only on the
+    /// failure arm would report that miss as a success, publish the identity round trip and the counts, and
+    /// let the caller's epilogue COMMIT: the caller would be told its edit applied when nothing was
+    /// written.
+    /// </para>
+    /// <para>
+    /// THE REMAINING ASSERTIONS ARE THE OTHER HALF OF THE SAME CLAIM. An arm that returns before a
+    /// statement is generated has nothing to measure, so a populated measurement must not promote it: a
+    /// failed acquisition, a sentinel update table and a clean veto each keep the outcome the oracle gives
+    /// them.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public void EvidenceCannotChangeAnyArmOtherThanTheElseArm()
+    public void AMeasuredMismatchNarrowsAClaimedSuccessButNeverAPreStatementArm()
     {
         ConcurrencyEvidence mismatch = new()
         {
@@ -992,10 +1041,27 @@ public sealed class ConflictDetectorTests
             Rows = [BuildFixtureConflictRow()],
         };
 
-        // A success.
-        Assert.Equal(
-            UpdateOutcomeKind.Succeeded,
-            _detector.Classify(Attempt(evidence: mismatch)).Kind);
+        // A CLAIMED SUCCESS OVER A ZERO-ROW MATCH IS A CONFLICT, NOT A SUCCESS.
+        _target.UpdateResult = DataWindowBufferStore.DataStoreSuccess;
+
+        UpdateOutcome narrowed = _detector.Classify(Attempt(evidence: mismatch));
+
+        Assert.Equal(UpdateOutcomeKind.Conflict, narrowed.Kind);
+
+        // THE LEGACY CODE IS UNCHANGED, so the epilogue rolls back rather than commits.
+        Assert.Equal(RetCode.E_DB_ERROR, narrowed.Code);
+        Assert.False(narrowed.IsSucceeded);
+        Assert.True(narrowed.RequiresRollback);
+
+        // NOTHING IS PUBLISHED FROM A CONFLICT: no identity round trip and no counts report.
+        Assert.Null(narrowed.Identity);
+        Assert.NotNull(narrowed.Conflict);
+
+        // AND THE MEASUREMENT WAS READ AFTER THE UPDATE RAN, which is the only moment it exists. The fake
+        // answers null until the update has been invoked, so a classifier reading it earlier would have
+        // seen nothing and this assertion would not hold.
+        Assert.Single(_target.UpdateCalls);
+        Assert.True(_target.CaptureConcurrencyEvidenceCalls >= 1);
 
         // A sentinel.
         _surfaces.UpdateTable = "!";
@@ -1344,11 +1410,19 @@ public sealed class ConflictDetectorTests
     }
 
     /// <summary>
-    /// The conflict-row projection reads BOTH values per marked column out of the buffer store, keeps null
-    /// distinct from zero, and reads the ROW status with column index zero.
+    /// The conflict-row projection reports the CURRENT values from STORAGE and the ORIGINAL values from the
+    /// buffer store, keeps null distinct from zero, and reads the ROW status with column index zero.
     /// </summary>
+    /// <remarks>
+    /// 🔴 THE TWO SIDES COME FROM TWO DIFFERENT PLACES, AND THAT IS THE CONTRACT. <c>current_values</c> is
+    /// declared as the CURRENT SERVER-SIDE state a retry would be rebased onto, so it is read from storage;
+    /// <c>original_values</c> is what the caller believed was current and literally what the failed
+    /// <c>updatewhere=1</c> predicate carried, so it is read from the carrier. This exercise deliberately
+    /// makes all three differ - carrier-current, carrier-original and storage - so that a projection which
+    /// echoed the carrier's current value back as the server's state could not pass.
+    /// </remarks>
     [Fact]
-    public void ProjectConflictRowReadsBothValuesOutOfTheBufferStore()
+    public void ProjectConflictRowReportsStorageCurrentValuesAndCarrierOriginals()
     {
         DataWindowBufferStore store = new();
 
@@ -1372,8 +1446,17 @@ public sealed class ConflictDetectorTests
             new ConflictColumn("address", 3),
         ];
 
+        // WHAT STORAGE HOLDS - the winning writer's state, which is none of the three values above for
+        // column 2 and is a genuine stored NULL for column 3.
+        Dictionary<int, object?> storage = new()
+        {
+            [1] = 7L,
+            [2] = "someone else",
+            [3] = null,
+        };
+
         ConflictRow projected =
-            ConflictDetector.ProjectConflictRow(store, DwBuffer.Primary, 1L, columns);
+            ConflictDetector.ProjectConflictRow(store, DwBuffer.Primary, 1L, columns, storage);
 
         Assert.Equal(DwBuffer.Primary, projected.Buffer);
         Assert.Equal(1L, projected.Row);
@@ -1386,18 +1469,32 @@ public sealed class ConflictDetectorTests
 
         Assert.Equal("name", projected.CurrentValues[1].ColumnName);
         Assert.Equal(2L, projected.CurrentValues[1].ColumnId);
-        Assert.Equal("current", projected.CurrentValues[1].Value.StringValue);
 
-        // THE ORIGINAL-VALUE SHADOW IS WHAT updatewhere=1 COMPARED, and it differs from the current value.
+        // 🔴 THE STORED VALUE, NOT THE CALLER'S SUBMITTED ONE. A caller rebasing a retry on "current"
+        // would resubmit its own edit and conflict again for ever.
+        Assert.Equal("someone else", projected.CurrentValues[1].Value.StringValue);
+
+        // THE ORIGINAL-VALUE SHADOW IS WHAT updatewhere=1 COMPARED, read from the CARRIER, and it differs
+        // from both the caller's current value and the stored one.
         Assert.Equal("original", projected.OriginalValues[1].Value.StringValue);
 
-        // A column that was never modified answers its current value on both sides.
+        // A column neither side changed answers the same value on both sides.
         Assert.Equal(7L, projected.CurrentValues[0].Value.Int64Value);
         Assert.Equal(7L, projected.OriginalValues[0].Value.Int64Value);
 
-        // NULL IS A VALUE, NOT AN ABSENCE, and is never coerced to zero or empty.
+        // NULL IS A VALUE, NOT AN ABSENCE, and is never coerced to zero or empty - on either side.
         Assert.True(projected.CurrentValues[2].Value.IsNull);
         Assert.True(projected.CurrentValues[2].HasItemStatus);
+        Assert.True(projected.OriginalValues[2].Value.IsNull);
+
+        // AND WHEN STORAGE COULD NOT BE READ, NO CURRENT VALUE IS INVENTED. The other writer deleted the
+        // row: the originals still travel so the caller can see what it believed, and the empty current set
+        // is what distinguishes "the row is gone" from "the row changed".
+        ConflictRow deleted =
+            ConflictDetector.ProjectConflictRow(store, DwBuffer.Primary, 1L, columns);
+
+        Assert.Empty(deleted.CurrentValues);
+        Assert.Equal(3, deleted.OriginalValues.Count);
     }
 
     /// <summary>
@@ -1436,8 +1533,23 @@ public sealed class ConflictDetectorTests
         Assert.False(new ConflictColumn("id", 0).IsAddressable);
         Assert.False(new ConflictColumn(string.Empty, 1).IsAddressable);
 
-        // A runtime type outside the published value arms cannot be put on the contract.
+        // A runtime type outside the published value arms cannot be put on the contract, on EITHER side.
+        // Storage first, because a stored value is the side a caller acts on.
+        Assert.Throws<InvalidOperationException>(
+            () => ConflictDetector.ProjectConflictRow(
+                store,
+                DwBuffer.Primary,
+                1L,
+                valid,
+                new Dictionary<int, object?> { [1] = Guid.NewGuid() }));
+
+        // And the carrier's own original-value shadow.
+        store.SetItemValue(1L, 1, DwBuffer.Primary, 0L);
+        store.RowAt(1L, DwBuffer.Primary).Baseline();
         store.SetItemValue(1L, 1, DwBuffer.Primary, Guid.NewGuid());
+        store.RowAt(1L, DwBuffer.Primary).Baseline();
+        store.SetItemValue(1L, 1, DwBuffer.Primary, 1L);
+
         Assert.Throws<InvalidOperationException>(
             () => ConflictDetector.ProjectConflictRow(store, DwBuffer.Primary, 1L, valid));
     }
@@ -1478,6 +1590,12 @@ public sealed class ConflictDetectorTests
     /// column name appears in this exercise.
     /// </summary>
     /// <returns>The row.</returns>
+    /// <remarks>
+    /// THE CURRENT VALUES ARE SUPPLIED AS STORAGE VALUES, which is the only way a real executor produces
+    /// them: the carrier holds what the CALLER submitted, so the payload's current set has to come from a
+    /// reread on the connection the failed statement ran on. The winning writer's name differs from the
+    /// caller's, which is what makes the row a conflict rather than a no-op.
+    /// </remarks>
     private static ConflictRow BuildFixtureConflictRow()
     {
         DataWindowBufferStore store = new();
@@ -1491,7 +1609,8 @@ public sealed class ConflictDetectorTests
             store,
             DwBuffer.Primary,
             1L,
-            [new ConflictColumn("id", 1), new ConflictColumn("name", 2)]);
+            [new ConflictColumn("id", 1), new ConflictColumn("name", 2)],
+            new Dictionary<int, object?> { [1] = 1L, [2] = "Someone else" });
     }
 
     #endregion

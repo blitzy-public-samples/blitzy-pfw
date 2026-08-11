@@ -257,12 +257,12 @@ public static class HealthEndpoints
     /// IT HAS AN ENTRY OF ITS OWN RATHER THAN BEING FOLDED INTO <see cref="ComponentsCheckName"/>, FOR
     /// THE SAME REASON THE CHECK EXISTS AT ALL. Every call this service makes outward - to Persistence
     /// for contracts C-05..C-08, to Security for C-02 - carries a bearer token, and the only way to
-    /// obtain one is the issuance edge, which contract C-01 protects with MUTUAL TLS and nothing else,
-    /// because a caller cannot present a bearer token in order to obtain its first bearer token. A
-    /// deployment that mounts no client certificate therefore started, reported ready, satisfied the
-    /// Compose dependency gate, and then had every outward call refused for want of a caller identity.
-    /// Naming the entry is what lets the thing polling this route see which precondition is unmet rather
-    /// than only that something is.
+    /// obtain one is the issuance edge. Contract C-01 protects that edge with EITHER OF TWO CREDENTIALS -
+    /// an HTTP Basic client credential or a client certificate - and requires one of them, because a
+    /// caller cannot present a bearer token in order to obtain its first bearer token. A deployment
+    /// presenting NEITHER therefore started, reported ready, satisfied the Compose dependency gate, and
+    /// then had every outward call refused for want of a caller identity. Naming the entry is what lets
+    /// the thing polling this route see which precondition is unmet rather than only that something is.
     /// </para>
     /// <para>
     /// Doubles as the REGISTRATION name of <see cref="TokenBootstrapHealthCheck"/>, which is what lets
@@ -1042,27 +1042,40 @@ internal sealed class TokenBootstrapHealthCheck : IHealthCheck
             return Task.FromResult(new HealthCheckResult(failureStatus, NotReadyDescription));
         }
 
-        // BOTH HALVES, WHICH IS STRICTER THAN THE CLIENT'S OWN `IsConfigured` TEST, DELIBERATELY. That
-        // property is an OR - it answers "did the operator intend to configure a client identity", which
-        // is the right question for a diagnostic, because it lets the client say "you set neither" rather
-        // than reporting an authentication failure. Readiness asks a different question: can a handshake
-        // actually be completed. A certificate without its key cannot be loaded, and a key with no
-        // certificate has nothing to present, so half a pair answers no. The composition root refuses to
-        // START on a half-set pair, so the two tests can only disagree in a host that bypassed both the
-        // options validator and the identity loader - and for such a host the stricter answer is the
-        // honest one.
-        if (string.IsNullOrWhiteSpace(security.MutualTls.CertificatePath)
-            || string.IsNullOrWhiteSpace(security.MutualTls.CertificateKeyPath))
+        // EITHER ACCEPTED SCHEME MAKES THIS HOST READY, AND DEMANDING THE CERTIFICATE PAIR WAS AN OUTAGE
+        // RATHER THAN STRICTNESS. Contract C-01 accepts TWO caller credentials on POST /v1/tokens - a
+        // shared secret presented as an HTTP Basic credential, or a client certificate - as alternatives.
+        // This check used to require BOTH HALVES OF THE CERTIFICATE PAIR and nothing else, so the
+        // documented bring-up, which supplies SECURITY_CLIENT_SECRET_DATASERVICES and leaves both
+        // certificate paths deliberately EMPTY ("this deployment presents no client certificate, which is
+        // a supported state" - orchestration/.env.example section 6.3), reported NOT READY forever. And
+        // this service's readiness is one of the three Gateway's own readiness gate waits on, so the
+        // consequence was not a misleading warning: it was a stack that never came up, under exactly the
+        // configuration the orchestration layer documents.
+        //
+        // THE PAIR IS STILL TESTED AS A PAIR, because half a pair cannot complete a handshake: a
+        // certificate without its key cannot be loaded and a key with no certificate has nothing to
+        // present. So a certificate-only deployment needs both halves, while a secret-configured
+        // deployment needs neither. That is what `HasIssuanceCredential` cannot express on its own - it
+        // is an OR over "did the operator INTEND a scheme" - which is why the condition is written out
+        // here rather than delegated: readiness asks whether a credential could actually be presented.
+        bool presentsSecret = !string.IsNullOrWhiteSpace(security.ClientSecret);
+
+        bool presentsCertificate = !string.IsNullOrWhiteSpace(security.MutualTls.CertificatePath)
+            && !string.IsNullOrWhiteSpace(security.MutualTls.CertificateKeyPath);
+
+        if (!presentsSecret && !presentsCertificate)
         {
-            // NEITHER PATH IS REPRODUCED, not even here. A path names where private key material is
-            // mounted, and a log is not exempt from that concern; the two SETTING NAMES are what an
-            // operator needs in order to act.
+            // NO VALUE AND NO PATH IS REPRODUCED, not even here. A path names where private key material
+            // is mounted and a secret is a credential; a log is exempt from neither concern. The SETTING
+            // NAMES are what an operator needs in order to act.
             _logger.LogWarning(
-                "This host presents no client certificate, so it cannot obtain a service token: the "
-                    + "issuance edge is authenticated by mutual TLS and by nothing else, and a "
-                    + "certificate-less request can only be refused. Set both '{Certificate}' and "
-                    + "'{Key}' to the material this deployment mounts. Reporting the {Check} readiness "
-                    + "check not ready.",
+                "This host presents no caller credential, so it cannot obtain a service token: the "
+                    + "issuance operation accepts a shared secret as an HTTP Basic credential or a client "
+                    + "certificate, and a request presenting neither can only be refused. Set '{Secret}' "
+                    + "- the documented bring-up path - or both '{Certificate}' and '{Key}' to the "
+                    + "material this deployment mounts. Reporting the {Check} readiness check not ready.",
+                SecurityClientOptions.ClientSecretConfigurationKey,
                 $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
                     + $":{nameof(SecurityClientOptions.MutualTls)}"
                     + $":{nameof(MutualTlsClientOptions.CertificatePath)}",

@@ -12,11 +12,13 @@
 //  them because both were CORRECTLY DESCRIBED by their own comments and neither was true.
 //
 //    1. THE CLIENT IDENTITY WAS CONFIGURABLE AND NEVER ATTACHED. Contract C-01 protects
-//       POST /v1/tokens with mutual TLS and with nothing else - a caller cannot present a bearer token
-//       in order to obtain its first bearer token - so a Security channel built with the trust anchor
-//       and no client certificate completes its handshake, is refused at the endpoint, and leaves this
-//       service with no credential for ANY of the four Persistence contracts or the crypto contract.
-//       The options group had existed since it was authored; nothing read it.
+//       POST /v1/tokens with a caller credential and no bearer token - a caller cannot present a bearer
+//       token in order to obtain its first bearer token - and it accepts EITHER a shared secret as an
+//       HTTP Basic credential or a client certificate. So for a deployment that chose the certificate
+//       scheme, a Security channel built with the trust anchor and no client certificate completed its
+//       handshake, was refused at the endpoint, and left this service with no credential for ANY of the
+//       four Persistence contracts or the crypto contract. The options group had existed since it was
+//       authored; nothing read it.
 //    2. THE HELD CREDENTIAL WAS NEVER HELD. A typed HttpClient is registered TRANSIENT by the
 //       framework. With the store owned by the client as a field, every resolve produced an EMPTY
 //       store, so the documented "reuse a held token until it lapses" path was never reached across
@@ -41,6 +43,7 @@
 // ==================================================================================================
 
 using System.Globalization;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -368,17 +371,26 @@ public sealed class SecurityCredentialCompositionTests
     }
 
     /// <summary>
-    /// A client with no configured identity refuses to ask for a token, and names the two settings.
+    /// A client that could present NEITHER accepted scheme refuses to ask for a token, and names every
+    /// setting an operator could supply.
     /// </summary>
     /// <remarks>
-    /// THE OTHER HALF OF "FAIL WHEN ABSENT". Startup does not end on an unconfigured pair, because
-    /// both-empty is a documented posture and the shipped defaults use it - so the refusal happens at
-    /// the first token request, which is the first moment the absence is actually fatal. Naming the keys
-    /// is the whole value: without this the request goes out certificate-less, comes back rejected, and
-    /// reads like a credential fault at Security rather than a missing setting here.
+    /// <para>
+    /// THE OTHER HALF OF "FAIL WHEN ABSENT". Startup does not end on an unconfigured certificate pair,
+    /// because both-empty is a documented posture and the shipped defaults use it - so this refusal
+    /// happens at the first token request, which is the first moment the absence is actually fatal.
+    /// Naming the settings is the whole value: without it the request goes out with no credential, comes
+    /// back rejected, and reads like a credential fault at Security rather than a missing setting here.
+    /// </para>
+    /// <para>
+    /// ALL THREE SETTINGS ARE NAMED, not just the certificate pair. Contract C-01 accepts two caller
+    /// credentials as alternatives, so a diagnostic naming only one of them would send an operator to
+    /// adopt a scheme their deployment had deliberately not chosen - which is exactly what this guard
+    /// used to do.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task AClientWithNoIdentityRefusesToRequestATokenAndNamesTheSettings()
+    public async Task AClientWithNeitherAcceptedSchemeRefusesToRequestATokenAndNamesEverySetting()
     {
         using System.Net.Http.HttpClient httpClient = new()
         {
@@ -400,12 +412,82 @@ public sealed class SecurityCredentialCompositionTests
                 TestContext.Current.CancellationToken));
 
         Assert.Contains(
+            SecurityClientOptions.ClientSecretConfigurationKey,
+            failure.Message,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "DataServices:Security:MutualTls:CertificatePath",
             failure.Message,
             StringComparison.Ordinal);
         Assert.Contains(
             "DataServices:Security:MutualTls:CertificateKeyPath",
             failure.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A client configured with ONLY the shared secret - the documented bring-up - obtains a token and
+    /// presents that secret as an HTTP <c>Basic</c> credential.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE ROW THAT WOULD HAVE FAILED, AND ITS ABSENCE IS WHY THE DEFECT SURVIVED.</b> The
+    /// client's pre-flight guard used to test the certificate pair ALONE, so this exact configuration -
+    /// <c>SECURITY_CLIENT_SECRET_DATASERVICES</c> supplied, both certificate paths deliberately empty,
+    /// which <c>orchestration/.env.example</c> section 6.3 records as a SUPPORTED state and names the
+    /// primary scheme - was refused before a request was ever sent. Every downstream call this service
+    /// makes needs a token, so the documented bring-up could reach nothing at all.
+    /// </para>
+    /// <para>
+    /// THE HEADER IS ASSERTED AS WELL AS THE OUTCOME, because a token obtained without the credential
+    /// travelling would prove only that the guard had been removed. The scheme name is asserted and the
+    /// PARAMETER IS NOT DECODED OR COMPARED: this test writes a placeholder value and asserting the value
+    /// would put a credential-shaped comparison in a test file for no gain.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AClientPresentingOnlyTheSharedSecretObtainsATokenAndSendsItAsABasicCredential()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            "{\"access_token\":\"composition.not-a-real-token.value\",\"token_type\":\"Bearer\","
+            + "\"expires_in\":300,\"scope\":\"persistence.query\"}");
+
+        using System.Net.Http.HttpClient httpClient = new(handler, disposeHandler: false)
+        {
+            BaseAddress = new Uri(LoopbackSecurityAddress, UriKind.Absolute),
+        };
+
+        DataServicesOptions options = new();
+        options.Security.BaseAddress = LoopbackSecurityAddress;
+
+        // NOT MATERIAL AND NOT CREDENTIAL-SHAPED. It is a marker this test writes and Security never sees;
+        // a realistic-looking value in a test file invites being mistaken for real material (C-F).
+        options.Security.ClientSecret = "composition-not-a-real-secret";
+
+        SecurityClient client = new(
+            httpClient,
+            Options.Create(options),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<SecurityClient>.Instance,
+            TimeProvider.System);
+
+        ServiceToken token = await client.GetTokenAsync(
+            new ServiceTokenRequest("dataservices", "persistence", ["persistence.query"]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("composition.not-a-real-token.value", token.AccessToken);
+
+        HttpRequestMessage sent = Assert.Single(handler.Requests);
+
+        Assert.Equal(RecordingHandler.TokenPath, sent.RequestUri?.AbsolutePath);
+        Assert.Equal("Basic", sent.Headers.Authorization?.Scheme, StringComparer.Ordinal);
+        Assert.False(string.IsNullOrEmpty(sent.Headers.Authorization?.Parameter));
+
+        // AND NO CREDENTIAL IS IN THE BODY, which is the property C-01 states in its own description: the
+        // request schema carries no secret, password, API key, assertion or key material.
+        Assert.DoesNotContain(
+            options.Security.ClientSecret,
+            Assert.Single(handler.Bodies),
             StringComparison.Ordinal);
     }
 

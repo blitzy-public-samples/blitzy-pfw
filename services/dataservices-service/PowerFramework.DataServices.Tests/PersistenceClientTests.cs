@@ -2316,8 +2316,10 @@ public sealed class PersistenceClientTests
     /// <remarks>
     /// Order matters because an unnamed parameter is matched POSITIONALLY, stopping after one substitution
     /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L460, :L472]. The statement text is
-    /// carried verbatim, INCLUDING a leading statement-caching prefix, which is a preserved legacy
-    /// affordance and carries no claim of any kind.
+    /// carried verbatim, INCLUDING a leading statement-caching selector - and forwarding it unread is what
+    /// makes the mode reachable, because Persistence is the layer that removes the selector and honours the
+    /// mode (AAP §0.4.3 C-07). A client that stripped the character here would silently cancel a mode the
+    /// caller selected. No performance claim attaches to it at either end.
     /// </remarks>
     [Fact]
     public async Task ExecAsync_ConvenienceFormPreservesOrderAndAbsence()

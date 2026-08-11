@@ -168,6 +168,19 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // Nothing else about TLS is touched: the protocol set, the server certificate and the revocation
 // posture of the SERVER side all stay as configured, and no server-certificate validation anywhere is
 // relaxed.
+//
+// THIS ACCEPT-AND-DEFER CALLBACK IS SUPERSEDED FURTHER DOWN THIS FILE, AND THAT IS THE INTENDED READING
+// ORDER RATHER THAN A LEFTOVER. `CallerCertificateTrust.Load` below reads
+// `Security:MutualTls:ClientCaPath` and reassigns `ClientCertificateValidation` to a callback that
+// chains a presented certificate under X509ChainTrustMode.CustomRootTrust against that anchor alone, so
+// with an anchor configured the listener does NOT accept every certificate: the later registration wins,
+// because ConfigureHttpsDefaults assigns the same property and runs after this one. What remains true of
+// this block either way is the argument AGAINST the platform default that would otherwise apply, which is
+// the argument the later registration acts on: the trust decision is redirected to a named anchor instead
+// of the container's OS store, and it is redirected at a place a test can drive and a reader can audit.
+// This assignment is the unconditional baseline that argument leaves behind, and the later one replaces it
+// in both configurations - with an anchor, a fresh chain is built against that anchor alone under
+// NoFlag; with none, the platform's own verdict stands, which is what Kestrel would have reached unaided.
 // --------------------------------------------------------------------------------------------------
 builder.WebHost.ConfigureKestrel(static kestrel =>
     kestrel.ConfigureHttpsDefaults(static https =>
@@ -221,9 +234,11 @@ builder.Services.AddSingleton<IValidateOptions<SecurityOptions>, SecurityOptions
 // --------------------------------------------------------------------------------------------------
 // CALLER-CERTIFICATE TRUST - THE HALF OF THE MUTUAL-TLS EDGE THAT WAS MISSING
 //
-// POST /v1/tokens authenticates its caller by client certificate and by nothing else, and
-// Endpoints/TokenEndpoints.cs reconciles that certificate's common name against the claimed subject. A
-// NAME PROVES NOTHING ON ITS OWN: unless the certificate's chain is verified against a known authority,
+// POST /v1/tokens accepts TWO caller credentials - a shared secret presented as an HTTP Basic credential,
+// or a client certificate - and this section is the trust half of the SECOND of them. When a caller
+// authenticates by certificate, Endpoints/TokenEndpoints.cs reconciles that certificate's common name
+// against the claimed subject. A NAME PROVES NOTHING ON ITS OWN: unless the certificate's chain is
+// verified against a known authority,
 // any caller can present a self-signed certificate whose common name is `powerframework-gateway` and be
 // issued a Gateway token for every audience Gateway is allowed. The documented topology issues caller
 // certificates from a LOCAL authority that is in no container's operating-system trust store, so the

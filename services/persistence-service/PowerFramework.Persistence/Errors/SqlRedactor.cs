@@ -1443,7 +1443,7 @@ internal static class DbErrorDataExtensions
     /// </param>
     /// <returns>
     /// A message whose five fields correspond to the five members of the legacy structure in the
-    /// legacy's own order [ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L4-L8], with field 3
+    /// legacy's own order [ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L4-L8], with fields 2 AND 3
     /// masked by <see cref="SqlRedactor.Instance"/>.
     /// </returns>
     /// <remarks>
@@ -1475,11 +1475,30 @@ internal static class DbErrorDataExtensions
     /// edge one: six of the nine legacy raise sites pass <c>""</c> for it.
     /// </para>
     /// <para>
-    /// <b>Nothing but the statement is touched (constraint C-B).</b> The provider code, the message
-    /// text - including the one hardcoded Chinese diagnostic the legacy synthesizes,
-    /// <see cref="DbErrorMessages.NoUpdatableTable"/> - the buffer and the row ordinal are copied
-    /// verbatim. In particular the row ordinal stays ONE-BASED, because that is legacy contract and
-    /// not an off-by-one to normalise, and the buffer is copied as-is including
+    /// <b>BOTH PROVIDER-DERIVED STRINGS ARE MASKED, AND THE MESSAGE ONE IS THE LATER ADDITION.</b> This
+    /// projection originally masked the statement alone, on the reasoning that the message is opaque
+    /// display text a consumer must not parse. That reasoning was incomplete and a review found it: opacity
+    /// is about how a consumer may READ the field, not about what the field CONTAINS, and what SQLite puts
+    /// in it routinely includes the caller's own data - a uniqueness violation names the duplicated column,
+    /// a constraint or type failure quotes the offending value, and a bad identifier echoes the text the
+    /// caller sent. The legacy could publish that safely because it published nothing: it is a library, and
+    /// the message never left the process. Across this boundary it reaches a network peer, so the same
+    /// policy that the statement field always had now covers the message field too - which is what makes
+    /// EVERY provider-derived string on this payload masked rather than just the one that was obvious.
+    /// </para>
+    /// <para>
+    /// <b>AND THE MASK IS LITERAL-SCOPED, WHICH IS WHY THIS COSTS NO DIAGNOSTIC VALUE (constraint C-B).</b>
+    /// The redactor masks string literals, radix literals, numeric literals and comment bodies, and copies
+    /// everything else through byte for byte. A driver message that quotes no value therefore arrives
+    /// UNCHANGED - <c>near "FROM": syntax error</c>, <c>NOT NULL constraint failed: COMPANY.NAME</c> and the
+    /// one hardcoded Chinese diagnostic the legacy synthesizes,
+    /// <see cref="DbErrorMessages.NoUpdatableTable"/>, are all byte-identical after masking - so an operator
+    /// still learns which condition failed and on which column. What is lost is precisely the row data.
+    /// </para>
+    /// <para>
+    /// <b>The two non-string members are still copied verbatim.</b> The provider code, the buffer and the
+    /// row ordinal carry no caller data at all. In particular the row ordinal stays ONE-BASED, because that
+    /// is legacy contract and not an off-by-one to normalise, and the buffer is copied as-is including
     /// <see cref="DwBuffer.Filter"/>, whose row order is inverted relative to the source.
     /// </para>
     /// </remarks>
@@ -1490,11 +1509,15 @@ internal static class DbErrorDataExtensions
             // 1 - long sqldbcode [dberrordata.srs:L4]
             Sqldbcode = error.SqlDbCode,
 
-            // 2 - string sqlerrtext [:L5] - opaque display text, copied verbatim, never scrubbed
-            Sqlerrtext = error.SqlErrText,
+            // 2 - string sqlerrtext [:L5] - opaque display text, and MASKED, because opaque describes
+            //     how a consumer may read it and not what the provider puts in it. See the remarks: a
+            //     message that quotes no value passes through byte for byte, so the masking costs an
+            //     operator nothing and removes the row data SQLite echoes into constraint and type
+            //     failures.
+            Sqlerrtext = SqlRedactor.Instance.Redact(error.SqlErrText),
 
-            // 3 - string sqlsyntax [:L6] - THE ONE FIELD THAT IS MASKED. The policy is reached
-            //     directly and is not a parameter, so this line cannot be weakened from a call site
+            // 3 - string sqlsyntax [:L6] - masked on the same terms. BOTH policies are reached directly
+            //     rather than accepted as parameters, so neither line can be weakened from a call site
             //     or from a container registration.
             Sqlsyntax = SqlRedactor.Instance.Redact(error.SqlSyntax),
 
