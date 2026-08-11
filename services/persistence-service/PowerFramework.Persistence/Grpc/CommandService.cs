@@ -905,6 +905,66 @@ internal sealed class CommandService : GeneratedCommandServiceBase
         "Another execution, reset or setter is in flight for this command task, so the request was "
         + "refused. Retry once it has completed.";
 
+    /// <summary>
+    /// The diagnostic for a statement that is present but consists only of whitespace.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE WORKER'S GUARD IS AN EMPTINESS TEST AND STAYS ONE.</b> The oracle writes
+    /// <c>if sql = "" then return RetCode.E_INVALID_SQL</c> [<c>:L45</c>] and repeats it in the task body
+    /// [<c>:L65-L68</c>]; neither tests blankness, so neither refuses a run of spaces. Those two guards are
+    /// preserved verbatim (constraint C-B) and this refusal sits ABOVE them, at the published boundary.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE BOUNDARY REFUSES WHAT THE WORKER TOLERATES.</b> A whitespace-only statement is not
+    /// tolerated-and-executed - it is accepted, submitted, and answered as a SUCCESS THAT DID NOTHING.
+    /// Measured against the shipped provider, a command whose text is only whitespace returns a row count
+    /// of <c>-1</c> without raising anything, so a caller received <c>0/Success</c> for a statement that
+    /// never ran. Refusing it here with the contract's own bad-statement code turns a silent no-op into an
+    /// actionable answer, and it narrows the boundary with a defined error rather than widening it with a
+    /// guess (AAP §0.1.5).
+    /// </para>
+    /// <para>
+    /// <b>ONLY PURE WHITESPACE.</b> A statement of comments - <c>"-- nothing"</c> - is not blank and is not
+    /// refused; it reaches the provider exactly as before.
+    /// </para>
+    /// <para>
+    /// The empty-statement arm deliberately keeps the oracle's message-free answer, so the two are
+    /// distinguishable: an empty statement answers <c>E_INVALID_SQL</c> with NO diagnostic because that is
+    /// what the legacy setter does, and a blank one answers the same code WITH this diagnostic because the
+    /// refusal is the boundary's own.
+    /// </para>
+    /// </remarks>
+    private const string BlankStatementDiagnostic =
+        "The statement consists only of whitespace. A blank statement submits nothing and would be "
+        + "reported as a success that changed no rows, so it is refused. Send the statement text, or omit "
+        + "the field to run the statement already installed on this task.";
+
+    /// <summary>
+    /// The diagnostic for an autocommit value outside the three declared enumerators.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE WORKER VALIDATES NOTHING, AND THAT STAYS TRUE.</b> The legacy setter is
+    /// <c>of_setautocommit(readonly long autocommit)</c> with no domain check [<c>:L28</c>, <c>:L40-L43</c>],
+    /// and the task body's dispatch treats every unrecognised value as the <c>AC_OFF</c> arm - "ANY OTHER
+    /// VALUE, which is to say AC_OFF" [<c>:L107-L109</c>]. Both are preserved (constraint C-B), and
+    /// <c>AC_OFF</c> remains reachable by asking for it.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE BOUNDARY REFUSES ANYWAY.</b> A proto3 enum is OPEN, so a number outside the declared set
+    /// travels intact and arrives here as a value the CONTRACT does not define. That is a malformed request
+    /// rather than a legacy input: silently folding it into <c>AC_OFF</c> means a caller who sent a value
+    /// they believed meant "commit" gets "do not commit" and is told nothing. The three enumerators are
+    /// exhaustive by construction - the contract states outright that no synthetic sentinel is needed
+    /// because <c>AC_OFF</c> already occupies zero - so anything else is unambiguously out of domain.
+    /// </para>
+    /// </remarks>
+    private const string AutoCommitOutOfDomainDiagnostic =
+        "The autocommit value is outside the three modes this contract declares (AC_OFF, AC_ON, "
+        + "AC_NATIVE). An undeclared value is not a fourth mode and is refused rather than folded into "
+        + "AC_OFF, which would commit nothing while reporting success.";
+
     private readonly TransactionSessionRegistry _sessions;
     private readonly CommandTaskRegistry _tasks;
     private readonly ICommandTaskFactory _factory;
@@ -1099,6 +1159,33 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     /// list the caller sent.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Whether a statement is present but blank - see <see cref="BlankStatementDiagnostic"/>.
+    /// </summary>
+    /// <param name="sql">The statement as sent.</param>
+    /// <returns>
+    /// <see langword="true"/> only for a non-empty run of whitespace. The EMPTY string answers
+    /// <see langword="false"/>, so it still reaches the worker's own oracle-faithful guard and still
+    /// carries that guard's message-free answer.
+    /// </returns>
+    private static bool IsBlankStatement(string sql) =>
+        sql.Length > 0 && string.IsNullOrWhiteSpace(sql);
+
+    /// <summary>
+    /// Whether an autocommit value is one of the three the contract declares - see
+    /// <see cref="AutoCommitOutOfDomainDiagnostic"/>.
+    /// </summary>
+    /// <param name="mode">The value as sent.</param>
+    /// <returns><see langword="true"/> for AC_OFF, AC_ON or AC_NATIVE and nothing else.</returns>
+    /// <remarks>
+    /// Written as an explicit pattern over all three enumerators rather than as a reflective
+    /// <c>Enum.IsDefined</c> test, for two reasons: the pattern is checked by the compiler when a fourth
+    /// mode is ever added to the contract, and it states the domain in the same terms the diagnostic and
+    /// the protocol definition state it in.
+    /// </remarks>
+    private static bool IsDeclaredAutoCommitMode(AutoCommitMode mode) =>
+        mode is AutoCommitMode.AcOff or AutoCommitMode.AcOn or AutoCommitMode.AcNative;
+
     private static long ApplyParameters(
         SqlCommandTaskProxy proxy,
         IReadOnlyList<PositionalParameter> parameters)
@@ -1576,6 +1663,19 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
+        // THE DOMAIN TEST IS AHEAD OF THE LEASE, because a malformed request is malformed whether or not
+        // the task is busy, and refusing it costs nothing that a busy task could invalidate. See
+        // AutoCommitOutOfDomainDiagnostic for why the boundary refuses what the worker tolerates.
+        if (!IsDeclaredAutoCommitMode(request.Autocommit))
+        {
+            return Task.FromResult(new SetCommandAutoCommitResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.E_INVALID_ARGUMENT,
+                    AutoCommitOutOfDomainDiagnostic),
+            });
+        }
+
         if (!TryLease(task, out OperationStatus refusal))
         {
             return Task.FromResult(new SetCommandAutoCommitResponse { Status = refusal });
@@ -1583,7 +1683,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
 
         try
         {
-            // Forwarded unchanged, including a value outside the three enumerators. The caller-side twin's
+            // Forwarded unchanged once the value is in domain. The caller-side twin's
             // busy guard [n_cst_threading_task_sqlcommand.sru:L43] is the only guard INSIDE this path; the
             // lease above is what stops the setter overlapping an execution that would otherwise pick the
             // new mode up half-way through its own epilogue.
@@ -1668,6 +1768,19 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             return Task.FromResult(new SetCommandSqlResponse
             {
                 Status = TransactionWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskDiagnostic),
+            });
+        }
+
+        // THE BLANK-STATEMENT REFUSAL, AHEAD OF THE LEASE for the same reason the autocommit domain test
+        // is: a blank statement is blank whether or not the task is busy. See BlankStatementDiagnostic for
+        // why the boundary refuses what the worker's emptiness guard tolerates, and note that an EMPTY
+        // statement is deliberately NOT caught here - it belongs to the worker's guard and to that guard's
+        // message-free answer.
+        if (IsBlankStatement(request.Sql))
+        {
+            return Task.FromResult(new SetCommandSqlResponse
+            {
+                Status = TransactionWireCodes.Status(RetCode.E_INVALID_SQL, BlankStatementDiagnostic),
             });
         }
 
@@ -1853,6 +1966,19 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             // [n_cst_threading_task_sqlbase.sru:L57, :L73, :L95, :L110, :L124, :L144, :L162, :L179, :L188].
             if (request.HasSql)
             {
+                // A PRESENT-BUT-BLANK statement is refused here on the same terms the setter RPC refuses
+                // it, so the two entry points cannot disagree about one statement. Set-but-EMPTY still
+                // falls through to the setter's own guard below, message-free, exactly as before.
+                if (IsBlankStatement(request.Sql))
+                {
+                    return Task.FromResult(new ExecResponse
+                    {
+                        Status = TransactionWireCodes.Status(
+                            RetCode.E_INVALID_SQL,
+                            BlankStatementDiagnostic),
+                    });
+                }
+
                 long statementCode = task.Proxy.SetSql(request.Sql);
                 if (Predicates.IsFailed(statementCode))
                 {
@@ -1880,10 +2006,22 @@ internal sealed class CommandService : GeneratedCommandServiceBase
 
             // -------------------------------------------------------------------------------------------
             // STEP 3 - the OPTIONAL autocommit override. Unset uses the task's setting, whose default is
-            // AC_OFF [:L21]. Validates nothing, exactly as the oracle validates nothing [:L40-L43].
+            // AC_OFF [:L21]. The WORKER validates nothing, exactly as the oracle validates nothing
+            // [:L40-L43]; the DOMAIN is checked here, at the boundary, on the same terms the setter RPC
+            // checks it - see AutoCommitOutOfDomainDiagnostic.
             // -------------------------------------------------------------------------------------------
             if (request.HasAutocommit)
             {
+                if (!IsDeclaredAutoCommitMode(request.Autocommit))
+                {
+                    return Task.FromResult(new ExecResponse
+                    {
+                        Status = TransactionWireCodes.Status(
+                            RetCode.E_INVALID_ARGUMENT,
+                            AutoCommitOutOfDomainDiagnostic),
+                    });
+                }
+
                 long autoCommitCode = task.Proxy.SetAutoCommit(request.Autocommit);
                 if (Predicates.IsFailed(autoCommitCode))
                 {

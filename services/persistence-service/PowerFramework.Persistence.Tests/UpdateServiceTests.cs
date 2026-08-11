@@ -58,11 +58,13 @@ using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Grpc;
+using PowerFramework.Persistence.Tasks;
 
 // The adapter and the generated contract wrapper share the simple name UpdateService, exactly as
 // GlobalUsings.cs anticipates for this folder. An alias directive is resolved ahead of the namespace
 // imports at the same scope, so it is the fix for CS0104 rather than another candidate for it - and it
 // RENAMES a reference without collapsing either type: both remain distinct and both remain reachable.
+using DataObjectDefinitionRegistry = PowerFramework.Persistence.Data.DataObjectDefinitionCatalogue;
 using UpdateService = PowerFramework.Persistence.Grpc.UpdateService;
 
 namespace PowerFramework.Persistence.Tests;
@@ -224,6 +226,16 @@ public sealed class UpdateServiceTests
             return Busy ? RetCode.E_BUSY : RetCode.OK;
         }
 
+        // MIRRORS THE REAL SURFACE, WHICH READS THE WORKER'S TWO SOURCE FIELDS: either one non-empty is a
+        // source. Modelled rather than hard-coded true so that a test which prepares WITHOUT naming a source
+        // meets the same refusal a real task would.
+        public bool HasUpdateSource =>
+            DataObjectSeen is { Length: > 0 } || SqlSyntaxSeen is { Length: > 0 };
+
+        // MIRRORS THE REAL SURFACE: the data object the task currently holds, which the source setters clear
+        // each other out of. Empty rather than null, because the real member answers the worker's own field.
+        public string DataObject => SqlSyntaxSeen is { Length: > 0 } ? string.Empty : DataObjectSeen ?? string.Empty;
+
         public long SetUpdateData(CarrierState? updateData, long updateRows)
         {
             _calls.Add(nameof(SetUpdateData));
@@ -334,7 +346,7 @@ public sealed class UpdateServiceTests
         FakeTaskFactory factory = new();
         UpdateTaskRegistry registry = new(Options.Create(new PersistenceOptions()), TimeProvider.System);
 
-        return (new UpdateService(factory, registry), factory, registry);
+        return (new UpdateService(factory, registry, new DataObjectDefinitionRegistry()), factory, registry);
     }
 
     private static async Task<(UpdateService Service, FakeTaskSurface Surface, TaskHandle Handle,
@@ -475,6 +487,18 @@ public sealed class UpdateServiceTests
 
     // ---- PrepareUpdate ---------------------------------------------------------------------------
 
+    /// <summary>
+    /// The data-object name these cases name so that the prepare has a source to run against.
+    /// </summary>
+    /// <remarks>
+    /// A PREPARE MUST LEAVE THE TASK HOLDING A SOURCE, and PrepareUpdate is the only place either source can
+    /// be set - so a request naming neither, against a task that holds neither, is refused with the very code
+    /// its Update would have answered. These cases are about the DESCRIPTOR half of the call, so they name a
+    /// source to get past that admission rule rather than asserting anything about it; the rule itself is
+    /// pinned by its own case below.
+    /// </remarks>
+    private const string EvidencedDataObject = "dw_sqlite";
+
     private static TableUpdateContract Company(string name = "COMPANY") => new()
     {
         Name = name,
@@ -493,7 +517,13 @@ public sealed class UpdateServiceTests
         stated.Updatekeyinplace = false;
 
         PrepareUpdateResponse response = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, MultiTableUpdate = true, Tables = { stated } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { stated },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
@@ -514,7 +544,13 @@ public sealed class UpdateServiceTests
         (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
 
         _ = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, Tables = { Company() } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { Company() },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         RecordedAddCall add = Assert.Single(surface.Adds);
@@ -532,7 +568,13 @@ public sealed class UpdateServiceTests
         zero.Updatewhere = 0L;
 
         _ = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, Tables = { zero } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { zero },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         RecordedAddCall add = Assert.Single(surface.Adds);
@@ -550,7 +592,13 @@ public sealed class UpdateServiceTests
         only.Updatekeyinplace = false;
 
         _ = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, Tables = { only } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { only },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         RecordedAddCall add = Assert.Single(surface.Adds);
@@ -568,7 +616,13 @@ public sealed class UpdateServiceTests
         noIdentity.Identitycolumn = string.Empty;
 
         PrepareUpdateResponse accepted = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, Tables = { noIdentity } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { noIdentity },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         Assert.Equal(WireRetCode.Ok, accepted.Status.RetCode);
@@ -578,7 +632,13 @@ public sealed class UpdateServiceTests
         surface.AddResult = RetCode.E_INVALID_ARGUMENT;
 
         PrepareUpdateResponse refused = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, Tables = { Company(), Company("SECOND") } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { Company(), Company("SECOND") },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
@@ -634,15 +694,306 @@ public sealed class UpdateServiceTests
     {
         (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
 
+        // THE SOURCE IS NAMED AND THE ARRAY IS EMPTY, which is exactly the shape a single-table caller
+        // sends: the carrier's own compiled definition governs the update table, the key columns and the
+        // identity column, and no descriptor is prepared at all.
         PrepareUpdateResponse response = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, MultiTableUpdate = false },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Empty(surface.Adds);
         Assert.False(surface.MultiTableSeen);
-        Assert.Null(surface.DataObjectSeen);
+        Assert.Equal(EvidencedDataObject, surface.DataObjectSeen);
         Assert.Null(surface.SqlSyntaxSeen);
+    }
+
+    /// <summary>
+    /// A prepare that would leave the task with no source at all is refused with the code its own
+    /// <c>Update</c> would have answered, and nothing is recorded.
+    /// </summary>
+    /// <remarks>
+    /// <b>A SUCCESS THE CALLER COULD NOT ACT ON.</b> The two sources are mutually exclusive and each setter
+    /// clears the other, and this RPC is the ONLY place either can be set - <c>Update</c> carries the payload
+    /// and nothing else, and <c>Reset</c> only clears. So a task left holding neither has exactly one
+    /// reachable future: the no-source arm at
+    /// <c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L326-L330</c>. This case pins
+    /// that the code and the diagnostic are that arm's own, that the refusal is atomic, and that a prepare
+    /// naming no source is STILL admitted once the task holds one - which is the incremental order a
+    /// multi-table caller uses.
+    /// </remarks>
+    [Fact]
+    public async Task APrepareThatWouldLeaveTheTaskWithoutASourceIsRefusedWithTheRunsOwnCode()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest { Task = handle, MultiTableUpdate = false },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidDataobject, refused.Status.RetCode);
+        Assert.Equal(SqlUpdateTask.InvalidDataObjectMessage, refused.Status.ErrorText);
+
+        // ATOMIC: nothing was cleared, nothing was switched, nothing was recorded.
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+
+        // ONCE A SOURCE IS HELD, A SOURCE-FREE PREPARE IS ORDINARY AGAIN - the second call of the only
+        // incremental order that can work.
+        PrepareUpdateResponse seeded = await service.PrepareUpdate(
+            new PrepareUpdateRequest { Task = handle, DataObject = EvidencedDataObject },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, seeded.Status.RetCode);
+
+        PrepareUpdateResponse descriptorsOnly = await service.PrepareUpdate(
+            new PrepareUpdateRequest { Task = handle, MultiTableUpdate = true, Tables = { Company() } },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, descriptorsOnly.Status.RetCode);
+        Assert.Equal("COMPANY", Assert.Single(surface.Adds).Name);
+    }
+
+    /// <summary>
+    /// A descriptor sent with the multi-table switch off that names a DIFFERENT update table from the one
+    /// the data object's definition declares is REFUSED, and nothing is recorded.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WITH THE SWITCH OFF THE ARRAY IS NEVER APPLIED</b> - the oracle's <c>_of_UpdatePrepare</c> has one
+    /// caller and it is inside the multi-table branch [<c>:L365</c> versus <c>:L371</c>] - so the data
+    /// object's own definition governs the update table. In process that was harmless because the caller
+    /// could see which datastore it had loaded. Across the boundary it is not: the caller names table X, is
+    /// told OK, and the update writes to whatever the definition declares, reported as a success with
+    /// nothing in the response to reveal the redirection.
+    /// </para>
+    /// <para>
+    /// <b>THE REFUSAL IS SCOPED TO THE MISDIRECTION AND NOTHING ELSE.</b> A descriptor that AGREES with the
+    /// definition is admitted: it is still inert, but inert and agreeing redirects no write - and it is the
+    /// shape a caller that derives its descriptor FROM the definition necessarily sends, which is what this
+    /// system's own DataServices consumer does on every update. Both halves are pinned here, because a
+    /// refusal that covered the agreeing shape would break the only cross-service update path in the estate.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADescriptorNamingAnotherTableWithTheSwitchOffIsRefusedAndAnAgreeingOneIsNot()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables = { Company("QA_PROBE") },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Equal(UpdateService.DescriptorsWithoutMultiTableDiagnostic, refused.Status.ErrorText);
+
+        // NOTHING WAS RECORDED, so the refusal leaves the task exactly as it was - no clear, no switch, no
+        // add, no source, and in particular no half-applied descriptor array.
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+
+        // AND THE REFUSAL QUOTES NO CALLER VALUE. Neither table name is echoed (constraint C-F).
+        Assert.DoesNotContain("QA_PROBE", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("COMPANY", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // AN AGREEING DESCRIPTOR IS ADMITTED, and its case is not what decides it: a table name is an
+        // identifier and SQLite compares identifiers without regard to case.
+        PrepareUpdateResponse agreeing = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables = { Company("company") },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, agreeing.Status.RetCode);
+        Assert.Equal("company", Assert.Single(surface.Adds).Name);
+    }
+
+    /// <summary>
+    /// The misdirection check reads the data object the task ALREADY holds when the request names none.
+    /// </summary>
+    /// <remarks>
+    /// Both source setters are presence-gated, so an unstated source survives from an earlier prepare and is
+    /// what the update will actually run against. Comparing only against the request's own field would let a
+    /// second prepare slip a contradicting descriptor past the check.
+    /// </remarks>
+    [Fact]
+    public async Task TheMisdirectionCheckUsesTheSourceTheTaskAlreadyHolds()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.PrepareUpdate(
+                new PrepareUpdateRequest { Task = handle, DataObject = EvidencedDataObject },
+                Context)).Status.RetCode);
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                Tables = { Company("QA_PROBE") },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Empty(surface.Adds);
+    }
+
+    /// <summary>
+    /// A descriptor naming a column the governing definition does not declare is refused with the oracle's
+    /// own invalid-column arm, even with the multi-table switch off.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SAME ANSWER THE SWITCH-ON PATH GIVES, ARRIVING ONE CALL EARLIER. With the switch on, the preparer
+    /// resolves each key column and fails with <c>E_INTERNAL_ERROR</c> and 无效的列名: plus the name
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L118-L122</c>], and the
+    /// carrier's own <c>Modify</c> refuses an unknown updatable column for the same reason. With the switch
+    /// off the descriptor is inert, so nothing used to resolve it at all and the update proceeded on the
+    /// definition's own columns while reporting success - which is what made an unknown column name look
+    /// accepted.
+    /// </para>
+    /// <para>
+    /// ONLY EXISTENCE IS CHECKED, NEVER THE FLAGS. A caller may legitimately declare a subset of the
+    /// definition's updatable or key columns, and with the switch off the definition's own flags govern
+    /// anyway - so a flag comparison would refuse requests that are neither wrong nor harmful.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("updatable")]
+    [InlineData("key")]
+    [InlineData("identity")]
+    public async Task ADescriptorNamingAnUndeclaredColumnIsRefusedWithTheOraclesOwnArm(string position)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        TableUpdateContract descriptor = Company();
+
+        switch (position)
+        {
+            case "updatable":
+                descriptor.Updatablecolumns.Add("no_such_column");
+                break;
+
+            case "key":
+                descriptor.Keycolumns.Add("no_such_column");
+                break;
+
+            default:
+                descriptor.Identitycolumn = "no_such_column";
+                break;
+        }
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables = { descriptor },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInternalError, refused.Status.RetCode);
+        Assert.Equal(
+            UpdateWhereBuilder.InvalidColumnNameMessage + "no_such_column",
+            refused.Status.ErrorText);
+
+        // ATOMIC: nothing was cleared, switched, added or installed.
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+    }
+
+    /// <summary>
+    /// A descriptor declaring a SUBSET of the definition's columns is admitted, in any letter case.
+    /// </summary>
+    /// <remarks>
+    /// The existence test must not become a flag or completeness test: a caller that declares only the
+    /// columns it intends to write is neither wrong nor harmful, and with the switch off the definition's own
+    /// flags govern regardless.
+    /// </remarks>
+    [Fact]
+    public async Task ADescriptorDeclaringASubsetOfDeclaredColumnsIsAdmitted()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        TableUpdateContract subset = new()
+        {
+            Name = "COMPANY",
+            Updatablecolumns = { "NAME", "salary" },
+            Keycolumns = { "ID" },
+            Identitycolumn = string.Empty,
+        };
+
+        PrepareUpdateResponse admitted = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables = { subset },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, admitted.Status.RetCode);
+        Assert.Equal("COMPANY", Assert.Single(surface.Adds).Name);
+    }
+
+    /// <summary>
+    /// A data object that resolves to no definition is not compared against, and neither is a request whose
+    /// source is a SQL syntax.
+    /// </summary>
+    /// <remarks>
+    /// A DELIBERATE LIMIT RATHER THAN AN OVERSIGHT. Neither can misdirect a write - an update against an
+    /// unresolvable definition fails for want of an update table before any statement reaches the engine, and
+    /// a syntax-sourced update takes its table from the syntax, which this boundary does not parse. Refusing
+    /// either would narrow the contract without protecting anything.
+    /// </remarks>
+    [Fact]
+    public async Task AnUnresolvableDefinitionAndASyntaxSourceAreNotCompared()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse unknown = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = "d_not_registered",
+                Tables = { Company("QA_PROBE") },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, unknown.Status.RetCode);
+
+        PrepareUpdateResponse syntax = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                SqlSyntax = "release 12.5;",
+                Tables = { Company("QA_PROBE") },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, syntax.Status.RetCode);
+        Assert.Equal(2, surface.Adds.Count);
     }
 
     [Fact]
@@ -652,7 +1003,13 @@ public sealed class UpdateServiceTests
         surface.Busy = true;
 
         PrepareUpdateResponse response = await service.PrepareUpdate(
-            new PrepareUpdateRequest { Task = handle, Tables = { Company() } },
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { Company() },
+                DataObject = EvidencedDataObject,
+            },
             Context);
 
         Assert.Equal(WireRetCode.EBusy, response.Status.RetCode);
@@ -1176,8 +1533,20 @@ public sealed class UpdateServiceTests
     {
         Assert.Throws<ArgumentNullException>(() => new UpdateService(
                 null!,
-                new UpdateTaskRegistry(Options.Create(new PersistenceOptions()), TimeProvider.System)));
-        Assert.Throws<ArgumentNullException>(() => new UpdateService(new FakeTaskFactory(), null!));
+                new UpdateTaskRegistry(Options.Create(new PersistenceOptions()), TimeProvider.System),
+                new DataObjectDefinitionRegistry()));
+        Assert.Throws<ArgumentNullException>(() => new UpdateService(
+                new FakeTaskFactory(),
+                null!,
+                new DataObjectDefinitionRegistry()));
+
+        // THE DEFINITION REGISTRY IS REQUIRED TOO, because it is what the prepare boundary compares a
+        // descriptor's update table against - a container that failed to register it would otherwise drop
+        // that check silently.
+        Assert.Throws<ArgumentNullException>(() => new UpdateService(
+                new FakeTaskFactory(),
+                new UpdateTaskRegistry(Options.Create(new PersistenceOptions()), TimeProvider.System),
+                null!));
     }
 
     // ---- the Phase 7 review invariant ------------------------------------------------------------

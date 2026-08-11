@@ -1225,6 +1225,30 @@ internal static class CarrierValue
                 return true;
 
             case AnyValue.KindOneofCase.DoubleValue:
+                // NOT-A-NUMBER IS REFUSED HERE RATHER THAN AT THE STORAGE ENGINE, AND THE TWO INFINITIES
+                // ARE NOT. The distinction is the provider's, measured rather than assumed: binding
+                // double.NaN raises InvalidOperationException("Cannot store 'NaN' values.") - a fault, not
+                // a database error, so it passes straight through the update walk's SqliteException arm and
+                // escapes the RPC as an unhandled Internal with no diagnostic at all - while both
+                // infinities bind and store normally. Refusing NaN at the decode seam converts that into
+                // each caller's OWN defined refusal: an update payload becomes E_INVALID_DATA with
+                // 无效的更新数据! [n_cst_thread_task_sqlupdate.sru:L343] and a command or query parameter
+                // becomes E_INVALID_ARGUMENT, all before a single statement is generated - so a multi-row
+                // payload cannot half-apply either.
+                //
+                // A CONTRACT NARROWING, STATED AS ONE. AnyValue.double_value carries an IEEE 754 double and
+                // the protocol definition does not exclude NaN, so refusing it is a narrowing - taken
+                // deliberately because the alternatives are worse: the legacy has no NaN at all (PowerScript
+                // has no literal for it and the evidenced fixture's salary column is decimal), so there is no
+                // legacy behaviour to preserve, and silently substituting null or zero would write a value
+                // the caller never sent. Narrow with a defined error rather than widen with a guess.
+                //
+                // THE SAME ARM COVERS float.NaN, which the projection above widens into this arm.
+                if (double.IsNaN(wire.DoubleValue))
+                {
+                    return false;
+                }
+
                 value = wire.DoubleValue;
                 return true;
 
@@ -1574,6 +1598,83 @@ internal class DataWindowBufferStore
     /// installed value is what makes that rewrite observable without a database.
     /// </remarks>
     internal string? SqlPreviewStatement { get; private set; }
+
+    /// <summary>
+    /// The carrier's column NAMES in column order, or an empty list when the names are not known.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THE CARRIER HOLDS NAMES AT ALL, WHEN THE LEGACY BLOB DOES NOT.</b> Every payload this
+    /// service emits carries <c>common.v1.ColumnValue</c>, and that message's contract is explicit that
+    /// "BOTH IDENTIFIERS ARE CARRIED, and neither is redundant" - a name survives a column reorder while
+    /// an ordinal does not, and the status APIs take the ordinal. Only <c>item_status</c> is optional
+    /// there. The codecs on either side of this type had no name to put in the field, so they left it
+    /// empty and said so in a comment; the fix is to give them one rather than to keep documenting its
+    /// absence, because a consumer holding a nameless column has to build the lookup table the contract
+    /// says it should not need.
+    /// </para>
+    /// <para>
+    /// <b>ORDER IS THE CONTRACT.</b> Index <c>n</c> of this list is the name of the ONE-BASED column
+    /// <c>n + 1</c>, matching every other column-number surface on this type. Deliberately NOT a
+    /// dictionary: the ordering is what relates a name to an ordinal, and a map would have to carry the
+    /// ordinal as data to say the same thing.
+    /// </para>
+    /// <para>
+    /// EMPTY IS A LEGITIMATE STATE AND MEANS "NOT KNOWN", never "no columns". A carrier populated from a
+    /// changeset the caller supplied has genuinely never been told the names, and in that state the codecs
+    /// leave <c>column_name</c> empty exactly as they did before - an empty string is what the contract's
+    /// own consumers already tolerate, whereas a fabricated name would be worse than none.
+    /// </para>
+    /// </remarks>
+    internal IReadOnlyList<string> ColumnNames { get; private set; } = [];
+
+    /// <summary>
+    /// Records the carrier's column names in column order.
+    /// </summary>
+    /// <param name="names">
+    /// The names, index <c>n</c> naming one-based column <c>n + 1</c>. A <see langword="null"/> or empty
+    /// sequence clears them back to "not known".
+    /// </param>
+    /// <remarks>
+    /// COPIED RATHER THAN ALIASED. The retrieve path holds its name array for the length of one fill and
+    /// is free to reuse it; a carrier that aliased it could have its identifiers changed underneath a
+    /// codec that had not run yet. Entries that are null or blank are stored as the empty string, so a
+    /// partially named definition yields named columns where it has names and unnamed ones where it does
+    /// not, rather than failing the retrieval over an identifier that is only ever advisory.
+    /// </remarks>
+    internal void SetColumnNames(IReadOnlyList<string>? names)
+    {
+        if (names is null || names.Count == 0)
+        {
+            ColumnNames = [];
+
+            return;
+        }
+
+        string[] copied = new string[names.Count];
+
+        for (int index = 0; index < names.Count; index++)
+        {
+            copied[index] = string.IsNullOrWhiteSpace(names[index]) ? string.Empty : names[index];
+        }
+
+        ColumnNames = copied;
+    }
+
+    /// <summary>
+    /// The recorded name of a ONE-BASED column, or the empty string when it is not known.
+    /// </summary>
+    /// <param name="columnNumber">The one-based column number.</param>
+    /// <returns>The name, or the empty string.</returns>
+    /// <remarks>
+    /// Answers the empty string for the row-status ordinal 0 as well as for an out-of-range number,
+    /// because 0 denotes THE ROW ITSELF under the convention <c>common.v1.ColumnValue.column_id</c>
+    /// records, and the row is not a column with a name.
+    /// </remarks>
+    internal string ColumnNameOf(long columnNumber) =>
+        columnNumber >= 1 && columnNumber <= ColumnNames.Count
+            ? ColumnNames[(int)(columnNumber - 1)]
+            : string.Empty;
 
     #region Counts
 

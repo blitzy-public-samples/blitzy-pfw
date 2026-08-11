@@ -912,6 +912,82 @@ public sealed class FullStateCodecTests
     /// mirror image of the constraint that forces every type in the system under test to be internal in
     /// the first place.
     /// </remarks>
+    /// <summary>
+    /// ⚠ A CAPTURED COLUMN CARRIES ITS <b>NAME</b> AS WELL AS ITS ORDINAL, when the carrier knows the name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>common.v1.ColumnValue</c> states that "BOTH IDENTIFIERS ARE CARRIED, and neither is redundant" -
+    /// a name survives a column reorder while an ordinal does not, and the status APIs take the ordinal -
+    /// and it marks only <c>item_status</c> optional. This codec left <c>column_name</c> empty and
+    /// documented the omission, which left every consumer to build the lookup table the contract says it
+    /// should not need. The name comes from the carrier's own recorded column order rather than from the
+    /// legacy blob, which genuinely has no names in it.
+    /// </para>
+    /// <para>
+    /// BOTH VALUE LISTS ARE ASSERTED. The original-value list is the one the concurrency predicate is read
+    /// from, so a name present on the current value and absent on its shadow would be the more confusing
+    /// of the two possible half-fixes.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Capture_CarriesTheColumnNameWhenTheCarrierKnowsIt_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore source = NewCrosstabCarrier();
+        SeedRow(source, DwBuffer.Primary, "one", ItemStatus.DataModified);
+
+        // The carrier learns its names exactly as a retrieval teaches it: index n names one-based column
+        // n + 1.
+        source.SetColumnNames(["alpha", "beta", "gamma"]);
+
+        CarrierState? image = FullStateCodec.Capture(source);
+
+        Assert.NotNull(image);
+
+        DataWindowRow captured = Assert.Single(
+            image.Segments.Single(segment => segment.Buffer == DwBuffer.Primary).Rows);
+
+        Assert.NotEmpty(captured.Columns);
+
+        foreach (ColumnValue column in captured.Columns)
+        {
+            Assert.Equal(source.ColumnNameOf(column.ColumnId), column.ColumnName);
+            Assert.NotEmpty(column.ColumnName);
+        }
+
+        foreach (ColumnValue original in captured.OriginalValues)
+        {
+            Assert.Equal(source.ColumnNameOf(original.ColumnId), original.ColumnName);
+        }
+    }
+
+    /// <summary>
+    /// AND IT STAYS EMPTY WHEN THE CARRIER WAS NEVER TOLD THE NAMES - a carrier built from a payload rather
+    /// than from a retrieval.
+    /// </summary>
+    /// <remarks>
+    /// An absent name is what the contract's consumers already tolerate; a FABRICATED one - "column3", or
+    /// the ordinal rendered as text - would be worse, because it would be indistinguishable from a real
+    /// identifier and would not survive the reorder the field exists to survive.
+    /// </remarks>
+    [Fact]
+    public void Capture_LeavesTheColumnNameEmptyWhenItIsNotKnown_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore source = NewCrosstabCarrier();
+        SeedRow(source, DwBuffer.Primary, "one", ItemStatus.DataModified);
+
+        Assert.Empty(source.ColumnNames);
+
+        CarrierState? image = FullStateCodec.Capture(source);
+
+        Assert.NotNull(image);
+
+        DataWindowRow captured = Assert.Single(
+            image.Segments.Single(segment => segment.Buffer == DwBuffer.Primary).Rows);
+
+        Assert.All(captured.Columns, column => Assert.Equal(string.Empty, column.ColumnName));
+    }
+
     [Theory]
     [InlineData("DataWindowReceiver")]
     [InlineData("DataStoreReceiver")]

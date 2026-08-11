@@ -2176,6 +2176,100 @@ public sealed class TransactionPoolTests
     }
 
     /// <summary>
+    /// ⚠ THE LAST STATEMENT'S ROW COUNT SURVIVES A COMMIT, because a commit affects no rows and therefore
+    /// has no row count of its own to publish.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the defect behind an <c>ExecResponse.sql_nrows</c> of zero under <c>AC_ON</c>: the commit's
+    /// own state was assigned wholesale, and its count is zero, so the count the caller's INSERT, UPDATE or
+    /// DELETE had just reported was erased on the way through the epilogue's commit
+    /// [<c>n_cst_thread_task_sqlcommand.sru:L99</c>]. The identical statement under <c>AC_OFF</c> never
+    /// passed through a commit and reported correctly, which is exactly the asymmetry that made the fault
+    /// visible.
+    /// </para>
+    /// <para>
+    /// It is the legacy reading and not a convenience: the oracle's accessor is the SQLite binding's own
+    /// <c>SQLNRows()</c> [<c>n_sqlite.sru:L26</c>], a separate call from its <c>Commit()</c>, and the
+    /// underlying change counter is not reset by a commit - measured directly against the shipped provider,
+    /// <c>changes()</c> still answers the DML's count after an explicit commit.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ACommitPreservesTheRowCountTheLastStatementReported()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { ExecuteResult = SqlState.Succeeded(4) };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect(TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            RetCode.OK,
+            transaction.Exec("UPDATE COMPANY SET AGE = 9", TestContext.Current.CancellationToken));
+        Assert.Equal(4L, transaction.SqlNRows);
+
+        // The commit itself reports nothing about rows - its own state carries zero.
+        Assert.Equal(RetCode.OK, transaction.Commit(autoRollback: true));
+
+        Assert.Equal(4L, transaction.SqlNRows);
+
+        // And the commit's OWN outcome still lands on the members that carry an outcome.
+        Assert.Equal(0L, transaction.SqlCode);
+        Assert.Equal(string.Empty, transaction.SqlErrText);
+    }
+
+    /// <summary>
+    /// The same preservation on the AUTO-COMMIT CHECKPOINT, which is the member the <c>AC_ON</c> epilogue
+    /// actually reaches through the task's commit helper.
+    /// </summary>
+    [Fact]
+    public void TheAutoCommitCheckpointPreservesTheRowCountToo()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new() { ExecuteResult = SqlState.Succeeded(2) };
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect(TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            RetCode.OK,
+            transaction.Exec("DELETE FROM COMPANY WHERE AGE > 90", TestContext.Current.CancellationToken));
+
+        Assert.Equal(RetCode.OK, transaction.AutoCommitCheckpoint());
+        Assert.Equal(2L, transaction.SqlNRows);
+    }
+
+    /// <summary>
+    /// A FAILING commit preserves it as well: the commit still affected no rows, so the previous
+    /// statement's count remains the truth about the last statement, and the FAILURE is carried by
+    /// <c>SqlCode</c> - the member that carries outcomes.
+    /// </summary>
+    [Fact]
+    public void AFailedCommitPreservesTheRowCountAndReportsTheFailureThroughSqlCode()
+    {
+        FakeClock clock = new(ClockStart);
+        FakeEngine engine = new()
+        {
+            ExecuteResult = SqlState.Succeeded(3),
+            CommitResult = SqlState.Failed(5, "database is locked"),
+        };
+
+        using PooledTransaction transaction = new(engine, clock);
+
+        Assert.Equal(RetCode.OK, transaction.Connect(TestContext.Current.CancellationToken));
+        Assert.Equal(
+            RetCode.OK,
+            transaction.Exec("INSERT INTO COMPANY (NAME) VALUES ('x')", TestContext.Current.CancellationToken));
+
+        Assert.Equal(RetCode.E_DB_ERROR, transaction.Commit(autoRollback: false));
+
+        Assert.Equal(3L, transaction.SqlNRows);
+        Assert.Equal(-1L, transaction.SqlCode);
+        Assert.Equal("database is locked", transaction.SqlErrText);
+    }
+
+    /// <summary>
     /// The state stamp overwrites all five values at once and touches nothing else - the port of the
     /// legacy SQL-state properties being assignable [trans :L176-L180, :L517-L521].
     /// </summary>

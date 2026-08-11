@@ -992,25 +992,36 @@ internal sealed class SqlCommandTask : SqlTaskBase
 
                 if (Predicates.IsFailed(bindCode))
                 {
-                    // [:L83] the verbatim Chinese diagnostic again. The statement is deliberately NOT
-                    // included: a half-bound statement is the most literal-dense form it ever takes,
-                    // and the oracle does not surface it here either.
-                    _ = OnError(RetCode.E_SQL_BIND_ARG_FAILED, BindArgumentFailureMessage);
-
-                    if (_logger.IsEnabled(LogLevel.Warning))
-                    {
-                        // Constraint C-F: the statement reaches the record only through the redactor,
-                        // which has no disabled mode. Guarded so the projection is not computed when
-                        // the level is off.
-                        _logger.LogWarning(
-                            "SQL parameter binding failed under auto-commit mode {AutoCommitMode}. Statement: {SqlSyntax}",
-                            _autoCommit,
-                            SqlRedactor.Instance.Redact(sql));
-                    }
-
-                    // [:L84]
-                    return RetCode.E_SQL_BIND_ARG_FAILED;
+                    // [:L83-L84] the verbatim Chinese diagnostic, the redacted record, and the code.
+                    return RefuseParameterBinding(sql);
                 }
+            }
+
+            // -------------------------------------------------------------------------------------
+            // A STATEMENT WITH PLACEHOLDERS AND NO PARAMETERS AT ALL - the arm the oracle never had
+            // to have, because it could not reach the fault this one prevents.
+            // -------------------------------------------------------------------------------------
+            // The binder above is gated on the collection being non-empty [:L81], mirroring the oracle's
+            // own `if nCount = 0 then return RetCode.FAILED`
+            // [n_cst_thread_task_sqlbase.sru:L400-L401]. So a statement carrying `?` or `:name` with an
+            // EMPTY collection was never scanned and reached the provider with its markers intact - where
+            // Microsoft.Data.Sqlite refuses it with an InvalidOperationException that escaped this whole
+            // layer as an UNHANDLED fault carrying no defined code.
+            //
+            // THE ANSWER IS THE ONE THE POPULATED PATH ALREADY GIVES FOR THE SAME CONDITION. An unmatched
+            // placeholder is E_OUT_OF_BOUND inside the binder [:L476-L479], which this task reports as
+            // E_SQL_BIND_ARG_FAILED - so answering the same code here makes the two arms agree instead of
+            // introducing a third behaviour. The contract publishes exactly this code for a binding
+            // failure.
+            //
+            // NARROWED, NOT WIDENED (AAP §0.1.5). This refuses a statement that previously FAULTED; it
+            // never accepts one that previously failed. The detector recognises only the two placeholder
+            // forms C-07 publishes and skips quoted runs and comments - see
+            // SqlTaskBase.ContainsUnboundStatementParameterMarker for why it is more SQL-literate than the
+            // oracle's own scan and why `@name` and `$name` are deliberately left to the provider.
+            else if (ContainsUnboundStatementParameterMarker(sql))
+            {
+                return RefuseParameterBinding(sql);
             }
 
             // -------------------------------------------------------------------------------------
@@ -1144,6 +1155,44 @@ internal sealed class SqlCommandTask : SqlTaskBase
             // faulted does not stay permanently busy and permanently un-resettable.
             _running = false;
         }
+    }
+
+    /// <summary>
+    /// The binding-failure epilogue - <c>:L83-L84</c> in full, shared by the two arms that reach it.
+    /// </summary>
+    /// <param name="sql">
+    /// The statement as it stands, selector already removed and partially rewritten when the binder got
+    /// that far. Used ONLY as the redactor's input.
+    /// </param>
+    /// <returns><see cref="RetCode.E_SQL_BIND_ARG_FAILED"/>, always - the oracle's own <c>:L84</c>.</returns>
+    /// <remarks>
+    /// <para>
+    /// Factored because two conditions produce the identical observable outcome and a duplicate is how the
+    /// two come to disagree: the binder answering a failure for a statement that HAS parameters, and the
+    /// pre-execution detector finding a placeholder in a statement that has NONE.
+    /// </para>
+    /// <para>
+    /// <b>The statement is deliberately absent from the raised event</b> [<c>:L83</c>]: a half-bound
+    /// statement is the most literal-dense form it ever takes, and the oracle does not surface it there
+    /// either. It reaches the LOG only through the sanctioned redactor, which has no disabled mode
+    /// (constraint C-F), and the projection is computed only when the level is on.
+    /// </para>
+    /// </remarks>
+    private long RefuseParameterBinding(string sql)
+    {
+        // [:L83] the verbatim Chinese diagnostic.
+        _ = OnError(RetCode.E_SQL_BIND_ARG_FAILED, BindArgumentFailureMessage);
+
+        if (_logger.IsEnabled(LogLevel.Warning))
+        {
+            _logger.LogWarning(
+                "SQL parameter binding failed under auto-commit mode {AutoCommitMode}. Statement: {SqlSyntax}",
+                _autoCommit,
+                SqlRedactor.Instance.Redact(sql));
+        }
+
+        // [:L84]
+        return RetCode.E_SQL_BIND_ARG_FAILED;
     }
 
     #endregion

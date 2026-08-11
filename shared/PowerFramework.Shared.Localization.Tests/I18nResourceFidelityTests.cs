@@ -117,7 +117,12 @@ public class I18nResourceFidelityTests
     /// </remarks>
     private static bool TryLocateOracle(out string? oraclePath)
     {
-        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        // STARTS AT THE EMBEDDED REPOSITORY ROOT WHEN THE BUILD SUPPLIED ONE, so this locator works when
+        // the test output sits outside the checkout - `dotnet test --artifacts-path` - where no ancestor
+        // of the output directory carries the marker below. The walk itself is unchanged and still
+        // verifies that marker, so an absent or stale value simply falls back to the previous start.
+        // See TestRepositoryRoot.
+        DirectoryInfo? directory = new(TestRepositoryRoot.SearchStart);
 
         while (directory is not null)
         {

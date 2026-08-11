@@ -25,6 +25,7 @@
 //  explains at length. Nothing here provisions, names or connects to any other engine.
 // ==================================================================================================
 
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -335,6 +336,255 @@ public sealed class PersistenceTaskCompositionTests : IDisposable
     }
 
     /// <summary>
+    /// ⚠ THE ORACLE'S OWN SQLite FIXTURE, REPLAYED END TO END AGAINST THE REAL PROVIDER - positional
+    /// <c>?</c> placeholders, the leading-<c>@</c> execution mode, five bound values, and a durable row.
+    /// </summary>
+    /// <param name="mode">The autocommit mode under test.</param>
+    /// <remarks>
+    /// <para>
+    /// This is the shape <c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406</c> executes inside a
+    /// ten-iteration loop, and AAP §0.4.3 requires C-07 to preserve it. Until the locator recognised the
+    /// positional form, this exact call reached the provider with its markers unbound and faulted, so the
+    /// legacy's primary SQLite workflow could not be replayed at all - which also blocked the paired
+    /// characterization AAP §0.6.7 requires.
+    /// </para>
+    /// <para>
+    /// It asserts THREE separate repairs at once, deliberately, because they compose on this one call and a
+    /// caller sees them together: the positional binding, the commit signal reaching the caller-side proxy
+    /// on the <c>AC_NATIVE</c> arm (which raises the notification WITHOUT performing a commit, because the
+    /// provider already made the work durable), and the row count surviving the <c>AC_ON</c> arm's commit.
+    /// </para>
+    /// <para>
+    /// Every collaborator is the registered implementation - the production command factory, the pool, the
+    /// engine, a real SQLite file - so a composition that left the worker unbound to its host, or that
+    /// erased the row count in the commit, could not reach the assertions.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(AutoCommitMode.AcOff)]
+    [InlineData(AutoCommitMode.AcOn)]
+    [InlineData(AutoCommitMode.AcNative)]
+    public void AComposedCommandPairReplaysTheOracleFixtureAndReportsBothCommitAndRowCount(
+        AutoCommitMode mode)
+    {
+        using TaskHarness harness = new(this);
+
+        ICommandTaskFactory commands = _provider.GetRequiredService<ICommandTaskFactory>();
+
+        Assert.Equal(RetCode.OK, commands.Create(out CommandTaskComponents? composed));
+        Assert.NotNull(composed);
+
+        try
+        {
+            // The task borrows the SESSION's descriptor, so it shares the session's pooled entry rather
+            // than leasing a second connection over the same file.
+            Assert.Equal(RetCode.OK, composed!.Worker.SetTransData(harness.Session.Descriptor));
+
+            // THE FIXTURE'S STATEMENT, VERBATIM, SELECTOR INCLUDED [w_test_sqlite.srw:L398-L399].
+            Assert.Equal(
+                RetCode.OK,
+                composed.Proxy.SetSql(
+                    "@INSERT INTO COMPANY (NAME,AGE,ADDRESS,SALARY,BIRTH) VALUES (?, ?, ?, ?, ?)"));
+
+            Assert.Equal(RetCode.OK, composed.Proxy.ResetParams());
+            Assert.Equal(RetCode.OK, composed.Proxy.AddParam(string.Empty, "Paul"));
+            Assert.Equal(RetCode.OK, composed.Proxy.AddParam(string.Empty, 32L));
+            Assert.Equal(RetCode.OK, composed.Proxy.AddParam(string.Empty, "California"));
+            Assert.Equal(RetCode.OK, composed.Proxy.AddParam(string.Empty, 20000L));
+            Assert.Equal(RetCode.OK, composed.Proxy.AddParam(string.Empty, "1999-05-08"));
+
+            Assert.Equal(RetCode.OK, composed.Proxy.SetAutoCommit(mode));
+
+            Assert.False(composed.Proxy.IsCommitted());
+
+            long dispatched = composed.Worker.OnDoTask(TestContext.Current.CancellationToken);
+
+            Assert.True(
+                Predicates.IsSucceeded(dispatched),
+                $"The oracle's own fixture statement was refused with {dispatched}.");
+
+            // THE ROW COUNT, WHICH THE COMMIT MUST NOT ERASE. A commit affects no rows, so the INSERT's
+            // count is still the truth about the last statement on both committing arms.
+            Assert.Equal(1L, composed.Worker.AttachedTransaction?.SqlNRows);
+
+            // THE COMMIT SIGNAL. Both committing arms raise the notification - AC_NATIVE inline because the
+            // provider already committed [:L95-L97], AC_ON through the task's commit helper - and the
+            // caller-side proxy can only observe it because the worker is bound to its host, which is what
+            // makes the descending commit-signal walk resolve anything at all.
+            bool expectedCommitted = mode is AutoCommitMode.AcOn or AutoCommitMode.AcNative;
+            Assert.Equal(expectedCommitted, composed.Proxy.IsCommitted());
+        }
+        finally
+        {
+            composed!.Proxy.Dispose();
+            composed.Worker.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// ⚠ A statement carrying placeholders and NO parameters at all is refused with the contract's own
+    /// binding code, not left to fault inside the provider.
+    /// </summary>
+    /// <param name="sql">The statement, in each of the two published placeholder forms.</param>
+    /// <remarks>
+    /// <c>Microsoft.Data.Sqlite</c> refuses such a statement with an <see cref="InvalidOperationException"/>
+    /// before SQLite is asked to step anything - measured directly - and that type used to escape the whole
+    /// task layer as an UNHANDLED fault carrying no defined code. The answer here is the SAME code the
+    /// populated-parameter path already gives for the same condition, an unmatched placeholder
+    /// [<c>n_cst_thread_task_sqlbase.sru:L476-L479</c>], so the two arms agree.
+    /// </remarks>
+    [Theory]
+    [InlineData("INSERT INTO COMPANY (NAME,AGE) VALUES (?, ?)")]
+    [InlineData("INSERT INTO COMPANY (NAME,AGE) VALUES (:name, :age)")]
+    [InlineData("@INSERT INTO COMPANY (NAME,AGE) VALUES (?, ?)")]
+    public void AComposedCommandPairRefusesAStatementWhosePlaceholdersNothingWouldBind(string sql)
+    {
+        using TaskHarness harness = new(this);
+
+        ICommandTaskFactory commands = _provider.GetRequiredService<ICommandTaskFactory>();
+
+        Assert.Equal(RetCode.OK, commands.Create(out CommandTaskComponents? composed));
+        Assert.NotNull(composed);
+
+        try
+        {
+            Assert.Equal(RetCode.OK, composed!.Worker.SetTransData(harness.Session.Descriptor));
+            Assert.Equal(RetCode.OK, composed.Proxy.SetSql(sql));
+
+            // NO parameters, which is precisely what makes the binder skip and the markers survive.
+            Assert.Equal(RetCode.OK, composed.Proxy.ResetParams());
+
+            Assert.Equal(
+                RetCode.E_SQL_BIND_ARG_FAILED,
+                composed.Worker.OnDoTask(TestContext.Current.CancellationToken));
+
+            // AND NOTHING WAS WRITTEN. The refusal happens before the statement is issued.
+            Assert.Equal(0L, CountCompanyRows());
+        }
+        finally
+        {
+            composed!.Proxy.Dispose();
+            composed.Worker.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A statement carrying a question mark INSIDE A QUOTED RUN is not a placeholder, and still runs with no
+    /// parameters at all - the control that proves the refusal above is a placeholder test rather than a
+    /// character test.
+    /// </summary>
+    [Fact]
+    public void AComposedCommandPairStillRunsAStatementWhoseQuestionMarkIsQuoted()
+    {
+        using TaskHarness harness = new(this);
+
+        ICommandTaskFactory commands = _provider.GetRequiredService<ICommandTaskFactory>();
+
+        Assert.Equal(RetCode.OK, commands.Create(out CommandTaskComponents? composed));
+        Assert.NotNull(composed);
+
+        try
+        {
+            Assert.Equal(RetCode.OK, composed!.Worker.SetTransData(harness.Session.Descriptor));
+            Assert.Equal(
+                RetCode.OK,
+                composed.Proxy.SetSql(
+                    "INSERT INTO COMPANY (NAME,AGE) VALUES ('who? me!', 41) -- really?"));
+            Assert.Equal(RetCode.OK, composed.Proxy.ResetParams());
+
+            // AC_ON so the write is COMMITTED and therefore visible to the second connection the row count
+            // is read through - under the default AC_OFF the row would be real but uncommitted, and the
+            // count would say zero for a reason that has nothing to do with the placeholder question.
+            Assert.Equal(RetCode.OK, composed.Proxy.SetAutoCommit(AutoCommitMode.AcOn));
+
+            long dispatched = composed.Worker.OnDoTask(TestContext.Current.CancellationToken);
+
+            Assert.True(
+                Predicates.IsSucceeded(dispatched),
+                $"A quoted question mark was treated as a placeholder and refused with {dispatched}.");
+            Assert.Equal(1L, CountCompanyRows());
+        }
+        finally
+        {
+            composed!.Proxy.Dispose();
+            composed.Worker.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// ⚠ A NON-DML STATEMENT REPORTS ZERO ROWS AFFECTED, NOT THE PROVIDER'S <c>-1</c> SENTINEL.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ADO.NET's <c>ExecuteNonQuery</c> answers <c>-1</c> for a statement that is not DML. That is an
+    /// ADO.NET convention rather than a SQLite or a legacy one: <c>SQLNRows</c> is "the number of rows
+    /// affected" and is never negative in PowerBuilder, so a caller branching on it has no arm for a
+    /// negative value.
+    /// </para>
+    /// <para>
+    /// <b>THIS TEST EXISTS BECAUSE THE TWO FIXES INTERACT.</b> While a commit replaced the whole SQL state
+    /// and zeroed the count, the sentinel was erased along with every legitimate count - so the row-count
+    /// repair EXPOSED it. Both halves are required, and asserting them separately is what stops a future
+    /// change reintroducing either one under cover of the other.
+    /// </para>
+    /// </remarks>
+    /// <param name="mode">The autocommit mode, because the erasure only ever happened on the committing arms.</param>
+    [Theory]
+    [InlineData(AutoCommitMode.AcOff)]
+    [InlineData(AutoCommitMode.AcOn)]
+    [InlineData(AutoCommitMode.AcNative)]
+    public void ANonDmlStatementReportsZeroRowsAffectedRatherThanTheProvidersSentinel(AutoCommitMode mode)
+    {
+        using TaskHarness harness = new(this);
+
+        ICommandTaskFactory commands = _provider.GetRequiredService<ICommandTaskFactory>();
+
+        Assert.Equal(RetCode.OK, commands.Create(out CommandTaskComponents? composed));
+        Assert.NotNull(composed);
+
+        try
+        {
+            Assert.Equal(RetCode.OK, composed!.Worker.SetTransData(harness.Session.Descriptor));
+            Assert.Equal(RetCode.OK, composed.Proxy.SetSql("SELECT COUNT(*) FROM COMPANY"));
+            Assert.Equal(RetCode.OK, composed.Proxy.SetAutoCommit(mode));
+
+            long dispatched = composed.Worker.OnDoTask(TestContext.Current.CancellationToken);
+
+            Assert.True(
+                Predicates.IsSucceeded(dispatched),
+                $"A SELECT through the command verb was refused with {dispatched}.");
+            Assert.Equal(0L, composed.Worker.AttachedTransaction?.SqlNRows);
+        }
+        finally
+        {
+            composed!.Proxy.Dispose();
+            composed.Worker.Dispose();
+        }
+    }
+
+    /// <summary>Counts the rows in the fixture table through a second connection.</summary>
+    /// <returns>The row count.</returns>
+    /// <remarks>
+    /// A SECOND CONNECTION, deliberately: it is what makes a durability claim a claim about the file rather
+    /// than about one connection's uncommitted view.
+    /// </remarks>
+    private long CountCompanyRows()
+    {
+        SqliteConnectionFactory connections = _provider.GetRequiredService<SqliteConnectionFactory>();
+
+        using SqliteConnection reader = connections
+            .CreateOpenConnectionAsync(CancellationToken.None)
+            .AsTask()
+            .GetAwaiter()
+            .GetResult();
+
+        using SqliteCommand count = reader.CreateCommand();
+        count.CommandText = "SELECT COUNT(*) FROM COMPANY";
+
+        return Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// The update factory refuses a session that does not exist, and names the reason.
     /// </summary>
     [Fact]
@@ -495,6 +745,87 @@ public sealed class PersistenceTaskCompositionTests : IDisposable
         Assert.Same(
             _provider.GetRequiredService<TimeProvider>(),
             _provider.GetRequiredService<TimeProvider>());
+    }
+
+    /// <summary>
+    /// A driver failure inside a composed update reaches the CALLER-SIDE latch, so the run reports a
+    /// populated database error rather than a code with nothing behind it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE WORKER FORWARDS ITS <c>ondberror</c> TO <c>#ParentTasking</c></b>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L94-L95</c>], and that reference
+    /// is the caller-side proxy whose latch every wire projection of a driver error reads. The composition
+    /// installs it after the pair is built, because the host exists before the proxy does; leaving it unbound
+    /// made the channel silently dead - a caller was told <c>E_DB_ERROR</c> with no code, no text, no buffer
+    /// and no row for a failure the worker had fully in hand.
+    /// </para>
+    /// <para>
+    /// A COMPOSITION TEST RATHER THAN A UNIT ONE, deliberately: the defect was not in either half of the
+    /// pair but in the wiring between them, so only a task built by the real factory can catch it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ADriverFailureInAComposedUpdateReachesTheCallerSideLatch()
+    {
+        using TaskHarness harness = new(this);
+
+        Assert.Equal(RetCode.OK, harness.Task.SetDataObject(DwSqliteFixture.DataObjectName));
+        Assert.Equal(RetCode.OK, harness.Task.SetMultiTableUpdate(false));
+
+        // NAME carries a NOT NULL constraint, so a new row without one is a real provider failure.
+        Assert.Equal(RetCode.OK, harness.Task.SetUpdateData(NamelessRowChangeset(), 1L));
+
+        UpdateRunResult result = harness.Task.Execute(TestContext.Current.CancellationToken);
+
+        Assert.True(
+            Predicates.IsFailed(result.Code),
+            $"A NOT NULL violation must fail the run; it answered {result.Code}.");
+
+        DbError latched = result.LastDbError!;
+        Assert.NotNull(result.LastDbError);
+
+        // THE PROVIDER'S OWN CODE TRAVELS, so the failure is identifiable rather than merely reported.
+        Assert.NotEqual(0L, latched.Sqldbcode);
+        Assert.NotEmpty(latched.Sqlerrtext);
+
+        // AND THE ROW THE WALK WAS ON, which is what distinguishes a located failure from an unlocated one.
+        Assert.Equal(1L, latched.Row);
+
+        // C-F: the statement never enters the payload on this path, so there is nothing to leak.
+        Assert.Equal(string.Empty, latched.Sqlsyntax);
+
+        // NOTHING WAS WRITTEN, so the refusal did not half-apply.
+        Assert.Equal("0", harness.ScalarText("SELECT COUNT(*) FROM COMPANY"));
+    }
+
+    /// <summary>
+    /// Encodes a changeset carrying one NEW row whose NOT NULL name is absent.
+    /// </summary>
+    /// <returns>The changeset payload a caller would send on the wire.</returns>
+    private CarrierState? NamelessRowChangeset()
+    {
+        DataWindowCarrier source = new(TimeProvider.System);
+
+        source.Processing = DataWindowProcessing.FromDescribe(
+            DataObjectDefinitionRegistry.EvidencedProcessing);
+
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.New);
+
+        // THE NAME IS DELIBERATELY OMITTED - it is the NOT NULL column [w_test_sqlite.srw:L463-L469].
+        _ = source.SetItemValue(row, DwSqliteFixture.AgeColumnNumber, DwBuffer.Primary, 23L);
+        _ = source.SetItemValue(row, DwSqliteFixture.AddressColumnNumber, DwBuffer.Primary, "Norway");
+        _ = source.SetItemValue(row, DwSqliteFixture.SalaryColumnNumber, DwBuffer.Primary, 20000d);
+        _ = source.SetItemValue(row, DwSqliteFixture.BirthColumnNumber, DwBuffer.Primary, "1990-02-02");
+
+        IChangesetPayloadCodec codec = _provider.GetRequiredService<IChangesetPayloadCodec>();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryEncode(source, out CarrierState? state));
+        Assert.NotNull(state);
+
+        return state;
     }
 
     /// <summary>

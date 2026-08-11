@@ -597,7 +597,7 @@ than a later addition. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.1 works through 
 | **Name** | `SECURITY_JWT_SIGNING_KEY` |
 | **Held by** | Security, and no other component |
 | **Kind of material** | An **RSA private key**, not a random symmetric secret. Security signs with `RS256` and publishes an RSA key set, so the two are not interchangeable: a random value has no modulus and no private exponent, cannot be imported as an RSA key, and cannot produce an `RS256` signature |
-| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — this is the shape the template carries, because an environment file has no line continuation so a multi-line PEM block cannot be expressed there. PEM is **also** accepted, for the deployment path where the value arrives from a secret store that can carry newlines: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. That acceptance order is **fixed code, not configuration** — see §4.1.1 |
+| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — this is the shape the template carries, because an environment file has no line continuation so a multi-line PEM block cannot be expressed there. PEM is **also** accepted, for the deployment path where the value arrives from a secret store that can carry newlines: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. That acceptance order is **fixed code**, and the `Security:SigningKeyFormat` leaf naming it is additionally a bound, validated option — a value outside the recognised set is refused at startup. See §4.1.1 |
 | **Supplied by** | Configuration injection from the orchestration secret layer, bound through the options pattern |
 | **Appears in source?** | **No** |
 | **Appears in `appsettings.json` or `appsettings.Development.json`?** | **No** |
@@ -629,7 +629,7 @@ instruction was incompatible with the published contract and is corrected here.*
 | --- | --- |
 | **Generation** | `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key` |
 | **Accepted form** | The key **material itself**, as a value rather than a path. In the template that is the single-line base64-of-DER form, because the Compose dotenv format has no line continuation and a PEM block cannot be written there; a secret store that can carry newlines may instead supply PEM, which Security tries first. An earlier revision of this document described the variable as a path to a mounted PEM file — that is not what the template declares, and the two statements are reconciled here in favour of the template, which is the artifact an operator actually fills in |
-| **Minimum size** | **2048 bits is a recommendation, not an enforced floor — see §4.1.1.** Nothing in the service refuses a shorter key: a 1024-bit key starts the host and mints tokens |
+| **Minimum size** | **2048 bits, enforced — see §4.1.1.** `Security:SigningKeyMinimumSizeBits` is a bound option measured by the options validator *and* again by `SigningKeyProvider` before signing credentials become reachable, so a 1024-bit key is refused at startup by name. Raisable to 3072 or 4096; a configured value below 2048 is itself refused |
 | **Public half** | **Derived, never configured.** Security computes the public JWK from the private key and publishes it under the `kid` in `Security:SigningKeyId`. There is no public-key variable, and there must not be one: two independently configured halves of one key pair is a way to publish material that does not verify what is being signed |
 | **Rotation** | **Not implemented — see §4.1.1.** Replace the configured secret value (or the object in the secret store that supplies it) and restart Security. No code change and no rebuild, and no other service is reconfigured; but every token signed with the previous key stops verifying the moment the host restarts |
 
@@ -639,24 +639,52 @@ This subsection exists because three rows above used to overstate the controls a
 an overstated control is worse than a missing one: it is relied on. What follows was read off the code
 rather than off the settings file.
 
-**The accepted format is fixed code, not a validated setting.** `Tokens/SigningKeyProvider.cs` always
-attempts the same closed sequence — PEM first, both the PKCS#8 and the older PKCS#1 encodings, then
-base64 of the DER encoding — and no configuration alters it, so the accepted set cannot drift. A value
-that is none of those, `openssl rand` output being the case that actually happens, **fails the import and
-the host refuses to start**, with a message that names the variable and never echoes what was configured
-under it. That refusal is real and is worth relying on. What is *not* real is the mechanism an earlier
-revision credited it to: `appsettings.json` carries a `Security:SigningKeyFormat` leaf, but
-`Configuration/SecurityOptions.cs` declares no such property, so **the leaf binds to nothing and changing
-its value changes nothing.** It is a record of the fixed behaviour, not the cause of it.
+> ⚠ **THIS SUBSECTION WAS WRONG ABOUT BOTH SETTINGS AND HAS BEEN CORRECTED.** It stated that
+> `Security:SigningKeyFormat` and `Security:SigningKeyMinimumSizeBits` bind to nothing, that changing
+> either changes nothing, and that **"a 1024-bit RSA key starts the host and mints tokens"**. All three
+> claims are false against the delivered code: both settings are bound, both are validated, and the size
+> floor is additionally enforced a second time inside the signing-key provider. The error ran in the
+> dangerous direction — it described active controls as inert, so a reader would have under-counted this
+> service's protections and read a legitimate startup refusal as a defect. **No behaviour changed in the
+> correction; only the description did.** The same paragraph even named the remediation it needed
+> ("anyone adding a real floor must … correct this subsection, `appsettings.json` and `BUILD.md` §8 in the
+> same change"); the floor was added and that half was missed, and this is it.
 
-**No key-size floor is enforced anywhere.** `Security:SigningKeyMinimumSizeBits` is likewise unbound —
-there is no such property on the options type, no validator reads it, and **a 1024-bit RSA key starts the
-host and mints tokens.** That was measured on the pinned toolchain rather than assumed, and
-`PowerFramework.Security.Tests` asserts it as correct behaviour rather than tolerating it. 2048 bits is
-what an operator **should** supply and this document recommends it, but nothing compels it: treat the
-value as guidance and, where a floor genuinely matters, enforce it in the secret-issuing process outside
-this service. Anyone adding a real floor must add the bound option, the validator and the test together
-and correct this subsection, `appsettings.json` and [`BUILD.md`](BUILD.md) §8 in the same change.
+**The accepted format is a validated setting over a fixed acceptance sequence.**
+`Tokens/SigningKeyProvider.cs` always attempts the same closed sequence — PEM first, both the PKCS#8 and
+the older PKCS#1 encodings, then base64 of the DER encoding — and no configuration reorders or extends it,
+so the accepted set cannot drift. A value that is none of those shapes, `openssl rand` output being the
+case that actually happens, **fails the import and the host refuses to start**, with a message that names
+the variable and never echoes what was configured under it. Separately, `Security:SigningKeyFormat` **is**
+a bound property of `SecurityOptions` and **is** validated: `SecurityOptionsValidator` refuses any value
+outside the recognised set — which has exactly one member, `PemOrPkcs8Base64` — by name at startup. So the
+leaf is not merely a record of the fixed behaviour: a deployment that names a format this service does not
+implement (`Pkcs12` and `Jwk` being the plausible guesses) is told so at startup instead of having its
+expectation silently ignored.
+
+**A 2048-bit key-size floor IS enforced, in two places, deliberately.**
+`Security:SigningKeyMinimumSizeBits` is a bound property of `SecurityOptions`, defaulting to 2048, and:
+
+- `SecurityOptionsValidator` imports the configured material, measures the modulus, and refuses a short
+  key with a **named configuration failure** — this is what produces a readable startup message that
+  quotes the measured and required sizes and never the key; and
+- `Tokens/SigningKeyProvider` calls `RequireSufficientModulus` before signing credentials become reachable
+  at all — this is what makes the guarantee **structural**, so it holds on any construction path that does
+  not run options validation.
+
+**A 1024-bit RSA key therefore does not start this host.** The floor may be raised — 3072 or 4096 — and it
+may **not** be lowered: a configured value below `AbsoluteMinimumSigningKeySizeBits` (2048) is itself
+refused. Both refusals are asserted by `PowerFramework.Security.Tests`.
+
+This floor applies to **this service's own signing identity and to nothing else.** The legacy's
+first-class 1024-bit allowance (`CRYPTO_RSA_BITS_1024`
+[`ws_objects/pfw.shared.pbl.src/enums.sru:L965`]) is reproduced verbatim on the C-02 key-generation
+surface, where the caller supplies the size and parity is the obligation. One surface preserves the legacy;
+the other protects a net-new trust root the legacy never had, which is precisely why a control here is not
+a correction of legacy behaviour (AAP G2, §0.6.6.4). Anyone changing the floor, its default or its absolute
+minimum must change this subsection, `appsettings.json`, [`BUILD.md`](BUILD.md) §8 and
+`orchestration/.env.example` in the same edit — all four stated the *opposite* together once, in the same
+direction.
 
 **Rotation is not implemented, and replacement is a hard cutover.** Security holds exactly **one** signing
 key and publishes exactly **one** JWK under the single `kid` in `Security:SigningKeyId`. There is no key
@@ -1231,11 +1259,12 @@ Stated so that the register's limits are as legible as its findings:
   and the typed clients exist and the listener requests a certificate, but no container installs the
   trust anchor and no Compose manifest mounts it, so no presented client certificate has ever been
   validated. §4.1.1 and §4.3 both record that as a pending implementation with two named options.
-- **It does not claim that the signing key's format or size is validated from configuration, or that
-  key rotation exists.** §4.1.1 states what is actually enforced: a fixed import sequence whose failure
-  refuses startup, **no** key-size floor of any kind, and exactly one published key with no rollover
-  machinery. Two settings leaves in `appsettings.json` name a format and a minimum size and bind to
-  nothing; they are a record of intent, and this document no longer presents either as a control.
+- **It does not claim that key rotation exists.** §4.1.1 states what is actually enforced: a fixed import
+  sequence whose failure refuses startup, a **bound and validated** format setting, a **bound and twice-
+  enforced** 2048-bit size floor — and exactly one published key with **no** rollover machinery. This
+  entry itself once asserted "**no** key-size floor of any kind" and that the two `appsettings.json`
+  leaves "bind to nothing"; both statements were false, and correcting them is why this bullet reads as it
+  now does. The rotation half was and remains true: there is one key, one `kid`, and no overlap window.
 - **It does not claim any user-specified rule governs this work.** None exists (§1.2); the bar applied
   in their place is stated there rather than assumed.
 - **It reproduces no secret value of any kind** — the claim this document opens with, and the one every

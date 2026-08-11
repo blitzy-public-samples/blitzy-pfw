@@ -1112,6 +1112,32 @@ namespace PowerFramework.Persistence.Data
 
                 return DataWindowBufferStore.DataStoreFailure;
             }
+            catch (InvalidOperationException failure)
+            {
+                // THE PROVIDER'S PRE-EXECUTION REFUSAL, WHICH IS NOT A SqliteException.
+                // Microsoft.Data.Sqlite raises this type - not the provider exception above - when a
+                // statement carries a parameter marker for which no value was supplied, because it refuses
+                // before SQLite is asked to step anything. Uncaught, it escaped the whole task layer and
+                // surfaced as an UNHANDLED gRPC fault with no defined code; AAP §0.1.5 requires a defined
+                // error instead. SQLITE_MISUSE is SQLite's own code for "library used incorrectly", which
+                // is exactly what an unsupplied statement parameter is, and it comes from the same
+                // SQLITE_* vocabulary every other code on this channel does.
+                //
+                // C-F: the message may name a parameter, never a value, and no statement text is included.
+                _ = data.Carrier.OnDbError(
+                    RetCode.SQLITE_MISUSE,
+                    failure.Message,
+                    string.Empty,
+                    DwBuffer.Primary,
+                    0L);
+
+                _logger.LogError(
+                    failure,
+                    "A retrieval was refused by the storage provider before reaching the engine, which is "
+                        + "the shape an unsupplied statement parameter takes.");
+
+                return DataWindowBufferStore.DataStoreFailure;
+            }
         }
 
         /// <summary>
@@ -1140,6 +1166,12 @@ namespace PowerFramework.Persistence.Data
                 // for a vetoed retrieval is that no row is delivered. Zero rows, not a failure.
                 return 0L;
             }
+
+            // THE NAMES ARE RECORDED BEFORE THE FIRST ROW LANDS, so every column the codecs later project
+            // can carry the name identifier the contract requires alongside its ordinal
+            // [common.v1.ColumnValue: "BOTH IDENTIFIERS ARE CARRIED, and neither is redundant"]. These are
+            // the SAME names the loop below indexes by, so the pairing cannot drift.
+            data.Carrier.SetColumnNames(columns);
 
             long rows = 0L;
 
@@ -1251,7 +1283,7 @@ namespace PowerFramework.Persistence.Data
                 return family.ToLowerInvariant() switch
                 {
                     "long" or "int" or "integer" or "ulong" or "uint" => reader.GetInt64(ordinal),
-                    "decimal" or "dec" => reader.GetDecimal(ordinal),
+                    "decimal" or "dec" => AtDeclaredScale(reader.GetDecimal(ordinal), declaredType),
                     "real" or "double" or "number" => reader.GetDouble(ordinal),
                     "date" => DateOnly.FromDateTime(reader.GetDateTime(ordinal)),
                     "datetime" => reader.GetDateTime(ordinal),
@@ -1266,6 +1298,89 @@ namespace PowerFramework.Persistence.Data
                 return reader.GetValue(ordinal);
             }
         }
+
+        /// <summary>
+        /// Puts a decimal at the scale its DataWindow definition declares, so the declared scale survives
+        /// onto the wire.
+        /// </summary>
+        /// <param name="value">The value the provider produced.</param>
+        /// <param name="declaredType">The declared type token, for example <c>decimal(2)</c>.</param>
+        /// <returns>
+        /// <paramref name="value"/> rescaled to the declared number of decimal places, or unchanged when
+        /// the token declares no width.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>WHY THIS IS NEEDED AT ALL.</b> The evidenced fixture declares <c>salary decimal(2)</c> over a
+        /// <c>REAL</c> column [<c>dw_sqlite.srd:L13</c> against <c>w_test_sqlite.srw:L467</c>], so the
+        /// provider's <c>REAL</c>-to-<c>decimal</c> conversion answers whatever scale the stored double
+        /// needs - 1500 arrives as a one-place <c>1500.0</c> - and the wire projection then faithfully
+        /// renders that wrong scale. The contract is explicit that this is not acceptable:
+        /// <c>common.v1.DecimalValue</c> requires canonical text in which "TRAILING ZEROES ARE SIGNIFICANT
+        /// AND MUST BE PRESERVED, because they carry the declared scale", naming this very fixture and
+        /// <c>"1500.00"</c> as the required rendering. Two encodings of one number must be byte-identical
+        /// for a golden-master comparison to mean anything, and the declared scale is what makes them so.
+        /// </para>
+        /// <para>
+        /// <b>ROUNDING IS AWAY FROM ZERO, MATCHING POWERBUILDER'S <c>Round</c></b> rather than .NET's
+        /// default banker's rounding - a stored value with more places than the definition declares is
+        /// rounded the way the oracle would round it. Rounding runs BEFORE the rescale so a value that
+        /// needs both gets both, and the two are separate steps because <see cref="decimal.Round(decimal,
+        /// int, MidpointRounding)"/> removes excess places without ADDING absent ones: it is
+        /// <c>decimal</c>'s trailing-zero-preserving arithmetic that supplies the padding, which is why
+        /// the addition of a scaled zero below is not a no-op.
+        /// </para>
+        /// <para>
+        /// A TOKEN WITHOUT A WIDTH - a bare <c>decimal</c> or <c>dec</c> - declares no scale, so there is
+        /// nothing to normalise TO and the provider's value is answered unchanged. Same for a width that is
+        /// not a number, or one outside what <see cref="decimal"/> can represent: a definition this file
+        /// cannot interpret is not grounds for changing the value, and the surrounding member's own
+        /// fallback rule says the same thing about a coercion the provider refuses.
+        /// </para>
+        /// </remarks>
+        private static decimal AtDeclaredScale(decimal value, string declaredType)
+        {
+            int open = declaredType.IndexOf('(', StringComparison.Ordinal);
+
+            if (open < 0)
+            {
+                return value;
+            }
+
+            int close = declaredType.IndexOf(')', open + 1);
+
+            if (close <= open + 1)
+            {
+                return value;
+            }
+
+            if (!int.TryParse(
+                    declaredType.AsSpan(open + 1, close - open - 1).Trim(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out int scale)
+                || scale is < 0 or > 28)
+            {
+                return value;
+            }
+
+            decimal rounded = decimal.Round(value, scale, MidpointRounding.AwayFromZero);
+
+            // THE PAD. Adding a zero that already carries the target scale raises the result's scale to it
+            // without changing its value, which is how decimal's own arithmetic is specified to behave; a
+            // Round alone cannot do this, because it only ever removes places.
+            return rounded + ScaledZero(scale);
+        }
+
+        /// <summary>A zero whose own scale is <paramref name="scale"/> decimal places.</summary>
+        /// <param name="scale">The number of decimal places, 0 to 28.</param>
+        /// <returns>Zero at that scale.</returns>
+        /// <remarks>
+        /// Built from its integer parts rather than parsed from text, so no culture and no format string
+        /// can come between the intent and the value. The scale lives in the fourth word of a
+        /// <see cref="decimal"/>'s representation, which is exactly what this constructor sets.
+        /// </remarks>
+        private static decimal ScaledZero(int scale) => new(0, 0, 0, isNegative: false, (byte)scale);
 
         private static SqliteCommand CreateCommand(
             ISqliteCommandSource commands,

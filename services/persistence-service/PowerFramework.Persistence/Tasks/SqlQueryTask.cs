@@ -759,6 +759,30 @@ internal sealed record PagedStatementOutcome(long ReturnCode, string PagedSql, s
 /// </remarks>
 internal sealed class SqlQueryTask : SqlTaskBase
 {
+    /// <summary>
+    /// Whether the unappliable no-user-prompt workaround has already been reported at warning severity,
+    /// as <c>0</c> for not yet and <c>1</c> for reported.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>STATIC BECAUSE THE CONDITION IS STATIC.</b> Whether that modify can be applied depends on the
+    /// DataWindow runtime this service is hosted on and on nothing about a request, so it is answered once
+    /// for the process rather than once per task instance. A per-instance field would report afresh for
+    /// every query, which is the behaviour being corrected.
+    /// </para>
+    /// <para>
+    /// AN <see cref="int"/> RATHER THAN A <see cref="bool"/>, because
+    /// <see cref="Interlocked.Exchange(ref int, int)"/> is what makes "first one through reports"
+    /// exact under the concurrent retrievals this service serves - two simultaneous queries must produce
+    /// one warning between them, and a read-then-write on a <see cref="bool"/> could produce two.
+    /// </para>
+    /// <para>
+    /// IT IS DIAGNOSTIC STATE AND NOTHING ELSE. No control flow reads it, so it neither introduces
+    /// cross-request coupling nor affects determinism for a characterization comparison.
+    /// </para>
+    /// </remarks>
+    private static int _noUserPromptReported;
+
     // =============================================================================================
     //  LEGACY DIAGNOSTIC TEXTS AND SENTINEL VALUES.
     //  ---------------------------------------------------------------------------------------------
@@ -2717,7 +2741,21 @@ internal sealed class SqlQueryTask : SqlTaskBase
                 // Observability only. The oracle discards this result, so nothing here returns on it -
                 // logging it is the strictly-unobservable half of the decision, and the redactor is
                 // applied because a modify diagnostic can quote the statement it failed on (C-F).
-                _logger.LogWarning(
+                //
+                // ⚠ REPORTED ONCE PER PROCESS AT WARNING, AND AT DEBUG EVERY TIME AFTER.
+                // Whether this modify can be applied is a STATIC PROPERTY OF THE RUNTIME this service is
+                // hosted on, not a property of any one request: it either always succeeds here or always
+                // fails here. Warning on every query therefore repeated one unchanging fact once per
+                // retrieval - six queries produced six identical warnings - which trains an operator to
+                // filter the channel that a real per-request fault would arrive on. The first occurrence
+                // still reports at Warning, because a parity workaround that cannot be applied is worth
+                // an operator's attention exactly once; the rest stay at Debug so the per-call record is
+                // narrowed rather than lost. BEHAVIOUR IS UNCHANGED - the oracle discards this result and
+                // so does the port; only the severity of an observation moves.
+                bool firstOccurrence = Interlocked.Exchange(ref _noUserPromptReported, 1) == 0;
+
+                _logger.Log(
+                    firstOccurrence ? LogLevel.Warning : LogLevel.Debug,
                     "The no-user-prompt workaround could not be applied: {ModifyError}",
                     _redactor.Redact(noUserPrompt.ModifyError));
             }

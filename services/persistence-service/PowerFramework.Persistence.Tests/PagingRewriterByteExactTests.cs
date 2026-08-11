@@ -104,9 +104,9 @@ public sealed class PagingRewriterByteExactTests
                 // clause model joins]. The legacy emits exactly this, so it is pinned rather than
                 // corrected (C-B) - a comma here would be a behavioural change.
                 "SELECT ID, NAME FROM COMPANY INNER JOIN (SELECT TOP 10 * FROM (SELECT TOP 20 ID,"
-                    + "ROW_NUMBER() OVER (ORDER BY NAME ID) AS pfwPagedSQL_RN FROM COMPANY) "
+                    + "ROW_NUMBER() OVER (ORDER BY NAME,ID) AS pfwPagedSQL_RN FROM COMPANY) "
                     + "pfwPagedSQL_Tbl WHERE pfwPagedSQL_RN BETWEEN 11 AND 20) pfwPagedSQL_OutterTbl "
-                    + "ON pfwPagedSQL_OutterTbl.ID = ID ORDER BY NAME ID"
+                    + "ON pfwPagedSQL_OutterTbl.ID = ID ORDER BY NAME,ID"
             },
             {
                 "SQL Server, no unique-index columns, engine paging, no existing ORDER BY [:L367-L373]",

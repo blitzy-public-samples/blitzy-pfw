@@ -378,6 +378,37 @@ internal sealed class TransactionSession
     internal void MarkClosing() => IsClosing = true;
 
     /// <summary>
+    /// Whether this session's transaction may no longer be operated on, for EITHER of the two reasons.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> when the session is retiring, or when the pool has destroyed the transaction
+    /// it borrowed.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// <b>READ ONLY UNDER <see cref="Gate"/>, exactly as <see cref="IsClosing"/> is</b>, and for the same
+    /// atomicity reason.
+    /// </para>
+    /// <para>
+    /// <b>THE SECOND REASON IS NOT A VARIANT OF THE FIRST, AND MISSING IT WAS OBSERVABLE.</b> A retiring
+    /// session is one this service is handing back. A DESTROYED transaction is one the POOL took away
+    /// underneath a session that is still perfectly live: the pool destroys a broken entry's transaction and
+    /// creates a replacement [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L164-L172</c>],
+    /// which happens the moment ANY caller next leases that descriptor - so a session that merely got
+    /// condemned, and then had a task run against its descriptor, holds a destroyed object while its own
+    /// closing flag is still false. Every operation then threw <see cref="ObjectDisposedException"/> out of
+    /// the service as an unhandled fault with no framework code.
+    /// </para>
+    /// <para>
+    /// Both reasons answer the SAME code, <see cref="RetCode.E_INVALID_TRANSACTION"/>, because from the
+    /// caller's point of view they are the same fact: the handle names a transaction that is no longer
+    /// there. That is the code the legacy answers for a transaction it cannot use
+    /// [<c>n_cst_thread_trans.sru:L113</c>].
+    /// </para>
+    /// </remarks>
+    internal bool IsUnusable => IsClosing || Transaction.IsDestroyed;
+
+    /// <summary>
     /// The opaque wire identity of this session.
     /// </summary>
     internal string SessionId { get; }
@@ -597,6 +628,102 @@ internal sealed class TransactionSessionRegistry
     internal int Count => _sessions.Count;
 
     /// <summary>
+    /// Returns the one gate that serializes access to a borrowed transaction, creating it on first ask.
+    /// </summary>
+    /// <param name="transaction">The borrowed pooled transaction to be excluded on.</param>
+    /// <returns>
+    /// The gate for that transaction. Two callers holding the same transaction instance receive the same
+    /// gate, which is the property every caller of this member depends on.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="transaction"/> is <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// <b>IT EXISTS BECAUSE THE GATE IS NEEDED BEFORE A SESSION EXISTS.</b> Every verb that operates on a
+    /// live session reaches its gate through <see cref="TransactionSession.Gate"/>, but the ACQUISITION
+    /// path - the liveness test and the connect in <c>BeginSession</c> - runs before
+    /// <see cref="Register"/> has minted anything, so it had no way to reach the gate at all. That is
+    /// precisely why it was the one unguarded path: two sessions opened concurrently with equal
+    /// descriptors receive the SAME borrowed transaction from the pool, both saw it unconnected, and both
+    /// connected it - leaving the engine holding one caller's connection and the other's transaction, and
+    /// every command built from that pair failing as not associated with the same connection.
+    /// </para>
+    /// <para>
+    /// SINGLE-SOURCED ON PURPOSE. <see cref="Register"/> now asks this member rather than reaching into
+    /// the table itself, so there is exactly one place a gate is created and no possibility of the
+    /// acquisition path and the registration path disagreeing about which gate belongs to a transaction.
+    /// </para>
+    /// <para>
+    /// <see cref="ConditionalWeakTable{TKey, TValue}.GetValue"/> is atomic, so concurrent first asks
+    /// resolve to one instance - no locking is needed here to make that true.
+    /// </para>
+    /// </remarks>
+    internal TransactionGate GateFor(IPooledTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+
+        return _gates.GetValue(transaction, static _ => new TransactionGate());
+    }
+
+    /// <summary>
+    /// How many LIVE sessions hold the same pooled transaction as <paramref name="session"/>, itself
+    /// included.
+    /// </summary>
+    /// <param name="session">The session whose transaction is being counted.</param>
+    /// <returns>
+    /// One when this session is the sole holder; more when the transaction is shared. Never zero: the
+    /// argument counts itself, so the answer is one even if the registry entry has already been removed.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="session"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS IS ASKABLE AT ALL.</b> The pool keys its entries on WHOLE-DESCRIPTOR VALUE EQUALITY
+    /// and hands every referrer of an entry THE SAME transaction object
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L136-L146</c>, <c>:L158-L172</c>],
+    /// so two sessions opened with equal descriptors share one transaction and one connection. A commit
+    /// or a rollback on either therefore covers both sessions' work - the framework's own worker base
+    /// states as much, which is why its committed notification signals every preceding task
+    /// [<c>n_cst_thread_task_sqlbase.sru:L100-L111</c>]. That is preserved behaviour; what was missing was
+    /// any way for a caller to KNOW it applied to them.
+    /// </para>
+    /// <para>
+    /// <b>REFERENCE EQUALITY, NOT DESCRIPTOR EQUALITY, AND THE DIFFERENCE IS THE WHOLE POINT.</b>
+    /// Descriptor equality is what the pool matches on, but it is not what determines sharing at the
+    /// moment of the question: an entry whose transaction was destroyed and replaced hands a DIFFERENT
+    /// object to later borrowers, so two sessions with equal descriptors can legitimately hold two
+    /// different objects. Counting the objects answers the question the caller is actually asking.
+    /// </para>
+    /// <para>
+    /// <b>A COUNT AND NOT A LIST (C-F).</b> Session identities are opaque and belong to whoever was issued
+    /// them, so enumerating the other holders would hand one caller another caller's handle. The count is
+    /// what the caller needs.
+    /// </para>
+    /// <para>
+    /// O(n) over live sessions, which is bounded by the handle quota, and it is read on the three C-08
+    /// members that report it rather than on every call.
+    /// </para>
+    /// </remarks>
+    internal int CountSharingSessions(TransactionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        int sharing = 0;
+
+        foreach (TransactionSession candidate in _sessions.Values)
+        {
+            if (ReferenceEquals(candidate.Transaction, session.Transaction))
+            {
+                sharing++;
+            }
+        }
+
+        // The argument counts itself even when its own registry entry has already been removed - which is
+        // the state a teardown is in - so the answer is never zero and never understates the population.
+        return sharing == 0 ? 1 : sharing;
+    }
+
+    /// <summary>
     /// Issues a handle for a freshly acquired pool reference and records the session under it.
     /// </summary>
     /// <param name="referenceIndex">The ONE-BASED pool reference index, stored verbatim.</param>
@@ -647,7 +774,11 @@ internal sealed class TransactionSessionRegistry
         // One gate per borrowed transaction, created on first use and shared thereafter. Two sessions
         // opened with equal descriptors reach this line with the SAME transaction instance and so leave
         // it holding the SAME gate - which is the whole point; see TransactionSession.Gate.
-        TransactionGate gate = _gates.GetValue(transaction, static _ => new TransactionGate());
+        //
+        // ASKED FOR RATHER THAN CREATED HERE, so that this path and the acquisition path in BeginSession
+        // cannot disagree about which gate belongs to a transaction - BeginSession must hold that same
+        // gate across its liveness test and its connect, and it runs before this member is reached.
+        TransactionGate gate = GateFor(transaction);
 
         while (true)
         {
@@ -808,7 +939,32 @@ internal sealed class TransactionSessionRegistry
         {
             IPooledTransaction? borrowed = session.Transaction;
             long released = _pool.Release(session.Lease, ref borrowed);
+
+            // ⚠ THE REFERENCE IS DROPPED WHETHER OR NOT THE RELEASE SUCCEEDED, AND THAT ORDERING IS THE
+            // WHOLE POINT. `Release` can legitimately fail - most importantly when the pool has DESTROYED
+            // this session's transaction, which it does to a broken entry the moment any caller next leases
+            // that descriptor [n_cst_thread_trans_pool.sru:L164-L172], and which the release now detects
+            // rather than throwing on. Returning early on that failure left the reference count standing
+            // for ever: the entry could never reach zero, so its connection was never disconnected and the
+            // pool slot was never reclaimed - a leak produced by the very path whose job is to prevent one.
+            //
+            // RemoveRef is safe to run on an entry whose transaction is gone, because it operates on the
+            // ENTRY and the LEASE rather than on the transaction object.
             long removed = _pool.RemoveRef(session.Lease);
+
+            if (released != RetCode.OK)
+            {
+                _logger?.LogWarning(
+                    "Releasing the pooled transaction for a session held by caller {Principal} against pool "
+                    + "lease {PoolLease} answered {ReleaseCode}; the reference was dropped anyway and "
+                    + "RemoveRef answered {RemoveCode}. The usual cause is that the pool had already "
+                    + "destroyed this session's transaction after it was condemned. The session handle value "
+                    + "is deliberately not recorded.",
+                    session.Principal,
+                    session.Lease.Id,
+                    released,
+                    removed);
+            }
 
             return released != RetCode.OK ? released : removed;
         }
@@ -1430,6 +1586,49 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             return RetCode.E_INVALID_ARGUMENT;
         }
 
+        // ==========================================================================================
+        //  THE EXPIRY IS ACCEPTED, INCLUDING A NEGATIVE ONE - AND IT IS NO LONGER SILENT
+        //  ------------------------------------------------------------------------------------------
+        //  A non-positive expiry means "use the default", verbatim from the oracle:
+        //  `_nKeepAliveExpireTime = ...GetDataDouble(...) * 1000` then
+        //  `if _nKeepAliveExpireTime <= 0 then _nKeepAliveExpireTime = KEEPALIVE_EXPIRE`
+        //  [n_cst_thread_trans_pool.sru:L78-L79], with `constant long KEEPALIVE_EXPIRE = 30000` at
+        //  [:L53]. The field's own contract text records both halves. So a NEGATIVE value is NOT an
+        //  out-of-domain value the way an undeclared enumerator is - it is an in-domain value with a
+        //  defined meaning, and refusing it would contradict the oracle, the published field description
+        //  and constraint C-B alike. It is therefore accepted, exactly as it is accepted today.
+        //
+        //  WHAT WAS WRONG WAS THE SILENCE, and there are two separate silences:
+        //    * with keep-alive OFF the whole block below is skipped - the oracle reads the expiry only
+        //      inside `if ...KeepAlive then` [:L76-L83] - so the value a caller sent is not consulted at
+        //      all, and the caller was told nothing;
+        //    * with keep-alive ON a non-positive value is folded to the built-in default, so the number
+        //      the caller sent is not used as a duration, and the caller was told nothing there either.
+        //  Both are now recorded. Neither changes an outcome.
+        //
+        //  C-F: a pool setting is not a credential, so the requested value is safe to state; nothing
+        //  else about the request appears.
+        // ==========================================================================================
+        if (!requested.KeepAlive && requested.KeepAliveExpireSeconds != 0d)
+        {
+            _logger?.LogInformation(
+                "A transaction session requested a keep-alive expiry of {RequestedExpirySeconds} s, but "
+                + "keep-alive is off on this instance, so the expiry is not consulted at all - the legacy "
+                + "reads it only inside its keep-alive branch. The value was accepted and ignored.",
+                requested.KeepAliveExpireSeconds);
+        }
+        else if (requested.KeepAlive && requested.KeepAliveExpireSeconds <= 0d)
+        {
+            _logger?.LogInformation(
+                "A transaction session requested a non-positive keep-alive expiry of "
+                + "{RequestedExpirySeconds} s, which means \"use the default\" and NOT \"expire "
+                + "immediately\" - preserved legacy behaviour. The configured default of "
+                + "{ConfiguredExpiryMilliseconds} ms is in force; the requested number was not used as a "
+                + "duration.",
+                requested.KeepAliveExpireSeconds,
+                _pool.KeepAliveExpireMilliseconds);
+        }
+
         // [:L76-L83] The window and the class name are read INSIDE the keep-alive branch, so with
         // keep-alive off neither is consulted and neither can disagree in behaviour.
         if (requested.KeepAlive)
@@ -1568,7 +1767,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// </para>
     /// </remarks>
     [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
-    public override Task<BeginSessionResponse> BeginSession(
+    public override async Task<BeginSessionResponse> BeginSession(
         BeginSessionRequest request,
         ServerCallContext context)
     {
@@ -1580,12 +1779,12 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         if (request.Descriptor_ is null)
         {
-            return Task.FromResult(new BeginSessionResponse
+            return new BeginSessionResponse
             {
                 Status = TransactionWireCodes.Status(
                     RetCode.E_INVALID_ARGUMENT,
                     "BeginSession requires a transaction descriptor."),
-            });
+            };
         }
 
         TransactionData descriptor = ToDescriptor(request.Descriptor_);
@@ -1608,10 +1807,10 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 descriptor.Database,
                 guard);
 
-            return Task.FromResult(new BeginSessionResponse
+            return new BeginSessionResponse
             {
                 Status = TransactionWireCodes.Status(guard, diagnostic),
-            });
+            };
         }
 
         // [n_cst_thread_task_sqlbase.sru:L165] `_nTransRefIdx = transPool.of_AddRef(_transData)`.
@@ -1624,10 +1823,10 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         // so zero is an error here rather than "the first entry".
         if (!lease.IsValid)
         {
-            return Task.FromResult(new BeginSessionResponse
+            return new BeginSessionResponse
             {
                 Status = TransactionWireCodes.Status(RetCode.E_OUT_OF_BOUND),
-            });
+            };
         }
 
         // [:L168] `rtCode = transPool.of_Get(_nTransRefIdx, ref transObject)`. IsSucceeded is the
@@ -1639,81 +1838,130 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         {
             _ = _pool.RemoveRef(lease);
 
-            return Task.FromResult(new BeginSessionResponse
+            return new BeginSessionResponse
             {
                 // [:L183] the pool's own code is returned. A succeeded-but-null answer cannot arise from
                 // the pool as written, and reporting E_INVALID_OBJECT for it matches the code the pool
                 // uses when it cannot produce a transaction object [n_cst_thread_trans_pool.sru:L174].
                 Status = TransactionWireCodes.Status(
                     Predicates.IsSucceeded(acquired) ? RetCode.E_INVALID_OBJECT : acquired),
-            });
+            };
         }
 
-        // [:L173] `if Not _transObject.of_IsConnected() then` - the liveness check gates the connect, so
-        // a pooled connection that is still live is NOT reconnected.
-        if (!borrowed.IsConnected())
+        // =========================================================================================
+        //  THE LIVENESS TEST AND THE CONNECT RUN UNDER THE TRANSACTION'S OWN GATE
+        //  -----------------------------------------------------------------------------------------
+        //  ⚠ THIS WAS THE ONE UNGUARDED PATH ON THIS CONTRACT, AND IT LOST DATA-SHAPED REQUESTS.
+        //  The pool keys entries on WHOLE-DESCRIPTOR value equality with reference counting, faithful to
+        //  [n_cst_thread_trans_pool.sru], so every session opened with an equal descriptor borrows the
+        //  SAME IPooledTransaction instance. Query, Update, Exec and EndSession all serialize on that
+        //  instance's gate; acquisition did not. Two concurrent BeginSessions therefore both observed the
+        //  transaction as unconnected and both connected it, and because SqliteTransactionEngine.Connect
+        //  tests `_connection is null`, opens, assigns, and only then begins its transaction, the engine
+        //  was left holding ONE caller's connection beside the OTHER caller's transaction. Every command
+        //  built from that pair failed with "The transaction object is not associated with the same
+        //  connection object as this command", surfacing as a 500 on every concurrent retrieval.
+        //
+        //  WHY THE GATE AND NOT A CONNECTION PER SESSION. A connection per session would also remove the
+        //  race, and it would remove the POOLING with it - the reference-counted, descriptor-keyed sharing
+        //  the oracle's pool exists to provide and which the AAP mandates preserving. The oracle had no
+        //  race here because its worker model gave one thread per pool; the gate is that same guarantee
+        //  stated explicitly for a service that genuinely serves concurrent callers.
+        //
+        //  THE TEST MUST BE INSIDE THE GATE, NOT MERELY THE CONNECT. Holding the gate only around the
+        //  connect would still let both callers pass a stale liveness test and connect in turn. Inside
+        //  it, the first caller connects and the second observes a live connection and correctly does
+        //  NOT reconnect - which is exactly [:L173]'s intent, now actually honoured under concurrency.
+        //  There is also no safe optimistic read to hoist out: IsConnected may itself EXECUTE a liveness
+        //  probe against the connection [TransactionPool.cs:L2216], so calling it beside an in-flight
+        //  connect is the same hazard in miniature.
+        //
+        //  ASYNC RATHER THAN A BLOCKING WAIT, so a queued acquisition parks its continuation instead of
+        //  pinning a thread-pool thread while another caller's synchronous open completes.
+        //
+        //  THE WAIT ITSELF DOES NOT HONOUR THE REQUEST TOKEN, AND THAT IS LOAD BEARING.
+        //  A cancellation here is a REFUSAL TO START WORK, never a refusal to hand back work already
+        //  done - so it belongs inside the liveness gate, where the original arm already sits, and NOT
+        //  around the wait. Honouring the token while queueing would refuse a caller whose pooled
+        //  transaction is ALREADY CONNECTED, for which no work would be issued and the cancellation has
+        //  nothing to refuse; that is the exact property
+        //  ACancellationArrivingAfterTheConnectDoesNotUndoTheSession pins, and an earlier draft of this
+        //  fix broke it. The wait is bounded by one liveness test plus one synchronous open - the same
+        //  bounded step the oracle's one-thread-per-pool model serialized implicitly - so nothing here
+        //  can queue indefinitely.
+        // =========================================================================================
+        using (await _sessions.GateFor(borrowed).EnterAsync(CancellationToken.None).ConfigureAwait(false))
         {
-            // =====================================================================================
-            //  THE REQUEST'S CANCELLATION IS OBSERVED HERE, AND NOT INSIDE THE CONNECT
-            //
-            //  This is the one verb on this contract that ISSUES NEW WORK - every other verb either
-            //  completes work already begun (commit), undoes it (rollback), or reads state - so this
-            //  is the one place where a caller who has already gone should stop the service from
-            //  starting something. Observing the token before the call is also the ONLY cancellation
-            //  the connect could honour: Microsoft.Data.Sqlite is a synchronous provider with no
-            //  interrupt, so an open already in flight cannot be abandoned, and a token handed to it
-            //  could change nothing that this arm does not already decide.
-            //
-            //  WHY THE TOKEN IS NOT PASSED TO Connect ITSELF. `IPooledTransaction.Connect` answers
-            //  RetCode.CANCELLED when its own token is signalled, and the test below is IsFailed,
-            //  under which CANCELLED IS NEITHER SUCCEEDED NOR FAILED
-            //  [ws_objects/pfw.shared.pbl.src/isfailed.srf:L11-L13]. That tri-state hole is a
-            //  PRESERVED ORACLE DEFECT (constraint C-B, and see this member's remarks): the oracle
-            //  reaches it only when a before-connect hook vetoes [n_cst_thread_trans.sru:L124], and
-            //  it then registers a session over a transaction that never connected. Routing a REQUEST
-            //  cancellation through that same code would EXTEND the hole to a cause the oracle never
-            //  had, which is not preservation - it is a new defect wearing preservation's clothes.
-            //  Keeping the two causes apart is what this separate arm buys.
-            // =====================================================================================
-            if (context.CancellationToken.IsCancellationRequested)
+            // [:L173] `if Not _transObject.of_IsConnected() then` - the liveness check gates the connect, so
+            // a pooled connection that is still live is NOT reconnected.
+            if (!borrowed.IsConnected())
             {
-                // The reference taken above is released on this path exactly as on every other
-                // failure path, so a cancelled BeginSession pins no pool entry.
-                _ = _pool.RemoveRef(lease);
-
-                return Task.FromResult(new BeginSessionResponse
+                // =====================================================================================
+                //  THE REQUEST'S CANCELLATION IS OBSERVED HERE, AND NOT INSIDE THE CONNECT
+                //
+                //  This is the one verb on this contract that ISSUES NEW WORK - every other verb either
+                //  completes work already begun (commit), undoes it (rollback), or reads state - so this
+                //  is the one place where a caller who has already gone should stop the service from
+                //  starting something. Observing the token before the call is also the ONLY cancellation
+                //  the connect could honour: Microsoft.Data.Sqlite is a synchronous provider with no
+                //  interrupt, so an open already in flight cannot be abandoned, and a token handed to it
+                //  could change nothing that this arm does not already decide.
+                //
+                //  WHY THE TOKEN IS NOT PASSED TO Connect ITSELF. `IPooledTransaction.Connect` answers
+                //  RetCode.CANCELLED when its own token is signalled, and the test below is IsFailed,
+                //  under which CANCELLED IS NEITHER SUCCEEDED NOR FAILED
+                //  [ws_objects/pfw.shared.pbl.src/isfailed.srf:L11-L13]. That tri-state hole is a
+                //  PRESERVED ORACLE DEFECT (constraint C-B, and see this member's remarks): the oracle
+                //  reaches it only when a before-connect hook vetoes [n_cst_thread_trans.sru:L124], and
+                //  it then registers a session over a transaction that never connected. Routing a REQUEST
+                //  cancellation through that same code would EXTEND the hole to a cause the oracle never
+                //  had, which is not preservation - it is a new defect wearing preservation's clothes.
+                //  Keeping the two causes apart is what this separate arm buys.
+                // =====================================================================================
+                if (context.CancellationToken.IsCancellationRequested)
                 {
-                    Status = TransactionWireCodes.Status(RetCode.CANCELLED, CancelledDiagnostic),
-                });
-            }
+                    // The reference taken above is released on this path exactly as on every other
+                    // failure path, so a cancelled BeginSession pins no pool entry.
+                    _ = _pool.RemoveRef(lease);
 
-            // [:L174] IsFailed, deliberately - see the tri-state note in this member's remarks.
-            if (Predicates.IsFailed(borrowed.Connect()))
-            {
-                // [:L175-L176] SQLDBCode and SQLErrText, and nothing else. Captured by the transaction
-                // object's own accessor rather than reassembled here, and projected onto the wire by the
-                // sanctioned mapping, which masks the statement field unconditionally.
-                DbErrorData captured = borrowed.CaptureError();
+                    return new BeginSessionResponse
+                    {
+                        Status = TransactionWireCodes.Status(RetCode.CANCELLED, CancelledDiagnostic),
+                    };
+                }
 
-                _ = _pool.RemoveRef(lease);
-
-                _logger?.LogWarning(
-                    "BeginSession could not connect to {Dbms} on {ServerName}/{Database}; driver code "
-                    + "{SqlDbCode}.",
-                    descriptor.Dbms,
-                    descriptor.ServerName,
-                    descriptor.Database,
-                    captured.SqlDbCode);
-
-                return Task.FromResult(new BeginSessionResponse
+                // [:L174] IsFailed, deliberately - see the tri-state note in this member's remarks.
+                if (Predicates.IsFailed(borrowed.Connect()))
                 {
-                    // [:L177] E_INVALID_TRANSACTION - the acquisition's code, with the driver detail
-                    // beneath it.
-                    Status = TransactionWireCodes.Status(RetCode.E_INVALID_TRANSACTION, in captured),
-                });
+                    // [:L175-L176] SQLDBCode and SQLErrText, and nothing else. Captured by the transaction
+                    // object's own accessor rather than reassembled here, and projected onto the wire by the
+                    // sanctioned mapping, which masks the statement field unconditionally.
+                    DbErrorData captured = borrowed.CaptureError();
+
+                    _ = _pool.RemoveRef(lease);
+
+                    _logger?.LogWarning(
+                        "BeginSession could not connect to {Dbms} on {ServerName}/{Database}; driver code "
+                        + "{SqlDbCode}.",
+                        descriptor.Dbms,
+                        descriptor.ServerName,
+                        descriptor.Database,
+                        captured.SqlDbCode);
+
+                    return new BeginSessionResponse
+                    {
+                        // [:L177] E_INVALID_TRANSACTION - the acquisition's code, with the driver detail
+                        // beneath it.
+                        Status = TransactionWireCodes.Status(RetCode.E_INVALID_TRANSACTION, in captured),
+                    };
+                }
             }
         }
 
+        // THE GATE IS RELEASED BEFORE THE REGISTRY, DELIBERATELY. It exists to make the liveness test and
+        // the connect one atomic step; registration touches only this registry's own concurrent
+        // collections and needs no exclusion on the transaction. Holding it across Register would widen
+        // the exclusion past what it protects and would serialize handle minting for no benefit.
         TransactionSession? session =
             _sessions.Register(lease, in descriptor, borrowed, out string quotaDiagnostic);
 
@@ -1733,10 +1981,10 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 "BeginSession refused a session because a handle ceiling was reached: {Diagnostic}",
                 quotaDiagnostic);
 
-            return Task.FromResult(new BeginSessionResponse
+            return new BeginSessionResponse
             {
                 Status = TransactionWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
-            });
+            };
         }
 
         _logger?.LogDebug(
@@ -1748,12 +1996,12 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             descriptor.ServerName,
             descriptor.Database);
 
-        return Task.FromResult(new BeginSessionResponse
+        return new BeginSessionResponse
         {
             // [:L180] RetCode.OK
             Status = TransactionWireCodes.Status(RetCode.OK),
             Session = new SessionHandle { SessionId = session.SessionId },
-        });
+        };
     }
 
     /// <summary>
@@ -2105,7 +2353,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         using (session.Gate.Enter())
         {
-            closing = session.IsClosing;
+            closing = session.IsUnusable;
 
             if (!closing)
             {
@@ -2176,7 +2424,14 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         return Task.FromResult(new AutoCommitResponse
         {
-            Status = RunAndProject(session, static transaction => transaction.AutoCommitCheckpoint()),
+            // THE SCOPED PROJECTION, because this verb COMMITS or ROLLS BACK and therefore covers shared
+            // work exactly as the two explicit verbs do. The count is discarded rather than published
+            // because this response has no field for it; the warning record is what carries it here.
+            Status = RunSharedScopeAndProject(
+                session,
+                "autocommit checkpoint",
+                static transaction => transaction.AutoCommitCheckpoint(),
+                out _),
         });
     }
 
@@ -2229,9 +2484,19 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         // [:L383] PRESENCE FIRST, THEN THE VALUE. Absent means TRUE.
         bool autoRollback = !request.HasAutoRollback || request.AutoRollback;
 
+        OperationStatus status = RunSharedScopeAndProject(
+            session,
+            "commit",
+            transaction => transaction.Commit(autoRollback),
+            out int sharing);
+
         return Task.FromResult(new CommitResponse
         {
-            Status = RunAndProject(session, transaction => transaction.Commit(autoRollback)),
+            Status = status,
+
+            // The population this commit's work covered - see SessionHandle for what a value above one
+            // means and why the contract reports it rather than choosing isolation for the caller.
+            SharingSessionCount = sharing,
         });
     }
 
@@ -2286,10 +2551,110 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             });
         }
 
+        OperationStatus status = RunSharedScopeAndProject(
+            session,
+            "rollback",
+            static transaction => transaction.Rollback(),
+            out int sharing);
+
         return Task.FromResult(new RollbackResponse
         {
-            Status = RunAndProject(session, static transaction => transaction.Rollback()),
+            Status = status,
+
+            // ⚠ Above one means this rollback discarded OTHER sessions' uncommitted work as well as this
+            // session's - the damaging direction of the sharing. See SessionHandle.
+            SharingSessionCount = sharing,
         });
+    }
+
+    /// <summary>
+    /// Runs a commit-scoped operation under the session's gate, projects its outcome, and reports how many
+    /// live sessions' work the operation covered.
+    /// </summary>
+    /// <param name="session">The session whose transaction and gate to use.</param>
+    /// <param name="verb">The verb, for the log record only.</param>
+    /// <param name="operation">The transaction member to invoke while the gate is held.</param>
+    /// <param name="sharingSessionCount">
+    /// Receives how many live sessions hold this transaction, itself included. One means the operation
+    /// covered only this session's work.
+    /// </param>
+    /// <returns>The projected status.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THE THREE COMMIT-SCOPED VERBS NEED THEIR OWN ENTRY POINT.</b> A commit or a rollback on a
+    /// SHARED pooled transaction applies to the work of every session holding it - the pool keys entries on
+    /// whole-descriptor equality and hands every referrer the same object
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L136-L146</c>, <c>:L158-L172</c>],
+    /// and the framework's own worker base says so outright when it walks the commit signal down over every
+    /// preceding task [<c>n_cst_thread_task_sqlbase.sru:L100-L111</c>]. That semantic is preserved exactly
+    /// (constraint C-B); what this member adds is that it is no longer SILENT. Every other operation on a
+    /// transaction is scoped to the caller that issued it, which is why they keep the plain projection.
+    /// </para>
+    /// <para>
+    /// <b>THE COUNT IS TAKEN INSIDE THE SAME GATE THE OPERATION RAN IN.</b> Read afterwards it would
+    /// describe a population that had already changed, and the number a caller acts on has to be the one
+    /// that was true when the work was committed or discarded.
+    /// </para>
+    /// <para>
+    /// <b>THE COUNT IS REPORTED FOR A REFUSAL TOO.</b> A commit that answered <c>FAILED</c> because
+    /// autocommit was on covered nobody's work, and reporting one for it would say something untrue - so the
+    /// count is the real population either way and the caller reads the outcome from <c>ret_code</c>.
+    /// </para>
+    /// <para>
+    /// C-F: the record names the count and the caller identity, never a session handle - a handle belongs to
+    /// whoever was issued it and naming another holder's would disclose it.
+    /// </para>
+    /// </remarks>
+    private OperationStatus RunSharedScopeAndProject(
+        TransactionSession session,
+        string verb,
+        Func<IPooledTransaction, long> operation,
+        out int sharingSessionCount)
+    {
+        long rtCode;
+        DbErrorData captured;
+        int sharing;
+
+        using (session.Gate.Enter())
+        {
+            if (session.IsUnusable)
+            {
+                sharingSessionCount = _sessions.CountSharingSessions(session);
+
+                return TransactionWireCodes.Status(
+                    RetCode.E_INVALID_TRANSACTION,
+                    UnknownSessionDiagnostic);
+            }
+
+            sharing = _sessions.CountSharingSessions(session);
+
+            rtCode = operation(session.Transaction);
+
+            captured = rtCode == RetCode.E_DB_ERROR
+                ? session.Transaction.CaptureError()
+                : DbErrorData.Empty;
+        }
+
+        sharingSessionCount = sharing;
+
+        if (sharing > 1 && Predicates.IsSucceeded(rtCode))
+        {
+            _logger?.LogWarning(
+                "A {Verb} issued by caller {Principal} against pool lease {PoolLease} covered work "
+                + "belonging to {SharingSessionCount} live sessions sharing one pooled transaction, not "
+                + "only its own. This is preserved legacy behaviour - the pool keys entries on whole "
+                + "descriptor equality, so equal descriptors share one connection - and the count is "
+                + "reported on the response as sharing_session_count. Session handle values are "
+                + "deliberately not recorded.",
+                verb,
+                session.Principal,
+                session.Lease.Id,
+                sharing);
+        }
+
+        return rtCode == RetCode.E_DB_ERROR
+            ? TransactionWireCodes.Status(rtCode, in captured)
+            : TransactionWireCodes.Status(rtCode);
     }
 
     /// <summary>
@@ -2331,7 +2696,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         using (session.Gate.Enter())
         {
-            if (session.IsClosing)
+            if (session.IsUnusable)
             {
                 // THE SESSION IS RETIRING, so its transaction has been or is about to be handed back and no
                 // operation may touch it. Refused with the same code and diagnostic an unknown session
@@ -2413,7 +2778,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         using (session.Gate.Enter())
         {
-            closing = session.IsClosing;
+            closing = session.IsUnusable;
 
             if (!closing)
             {
@@ -2503,7 +2868,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         using (session.Gate.Enter())
         {
-            closing = session.IsClosing;
+            closing = session.IsUnusable;
 
             databaseType = closing ? default : session.Transaction.GetDbType();
         }
@@ -2592,7 +2957,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         using (session.Gate.Enter())
         {
-            if (session.IsClosing)
+            if (session.IsUnusable)
             {
                 // THE CLOSING GUARD. This handler looks like a pure read, but it is not: the broken
                 // reading below calls the CHECK HOOK, which may condemn the transaction here and now
@@ -2644,6 +3009,13 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
                 // [:L100] and its check-hook side effect at [:L531-L535].
                 Broken = transaction.IsBroken(),
+
+                // NOT A LEGACY FIELD, AND THE ONLY MEMBER HERE THAT IS NOT. The pool shares one transaction
+                // between every session whose descriptor compares equal, so a commit or a rollback covers
+                // every holder's work - preserved behaviour a caller previously had no way to detect. Read
+                // inside this gate so it describes the population as it stands. One means sole holder. See
+                // SessionHandle for the mechanism and the consequences.
+                SharingSessionCount = _sessions.CountSharingSessions(session),
             };
         }
 
@@ -2689,7 +3061,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             // RunAndProject: clearing state MUTATES the transaction, so on a session that is retiring it
             // would clear a transaction the pool has already taken back - and, with keep-alive on, one that
             // has already been handed to a different caller.
-            closing = session.IsClosing;
+            closing = session.IsUnusable;
 
             if (!closing)
             {
@@ -2857,6 +3229,21 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         using (session.Gate.Enter())
         {
+            // THE LIVENESS GUARD, WHICH THIS HANDLER HAD NONE OF. It reaches the session's transaction, so
+            // it needs the same test every other transaction-touching handler takes inside the same gate:
+            // a retiring session's transaction has been handed back, and a DESTROYED one was taken away by
+            // the pool underneath a session that is still live - see TransactionSession.IsUnusable. Without
+            // it, the destroyed case threw ObjectDisposedException out of the service as an unhandled fault.
+            if (session.IsUnusable)
+            {
+                return Task.FromResult(new GridSyntaxFromSqlResponse
+                {
+                    Status = TransactionWireCodes.Status(
+                        RetCode.E_INVALID_TRANSACTION,
+                        UnknownSessionDiagnostic),
+                });
+            }
+
             derived = _querySurface.GridSyntaxFromSql(session.Transaction, sql);
         }
 

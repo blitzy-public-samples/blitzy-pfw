@@ -675,13 +675,15 @@ public sealed class CommandServiceTests
     }
 
     /// <summary>
-    /// ⚠ The setter validates NOTHING [<c>:L40-L43</c>]. A proto3 enum is open, so a value outside the
-    /// three enumerators arrives intact - and it is ACCEPTED, because the epilogue treats anything that
-    /// is neither native nor on as <c>AC_OFF</c> and therefore has DEFINED behaviour for it. Adding a
-    /// range check would refuse a call the legacy accepts.
+    /// ⚠ THE WORKER validates NOTHING [<c>:L40-L43</c>] and THE BOUNDARY does. A proto3 enum is open, so a
+    /// value outside the three enumerators arrives intact - and the RPC refuses it with
+    /// <c>E_INVALID_ARGUMENT</c> rather than forwarding it, because an undeclared number is a malformed
+    /// request rather than a legacy input. Folding it into <c>AC_OFF</c> silently, which is what the
+    /// epilogue's else arm would do, means a caller who asked for a commit gets no commit and is told
+    /// nothing. The worker's own tolerance is untouched and is asserted separately below.
     /// </summary>
     [Fact]
-    public async Task SetAutoCommitAcceptsAValueOutsideTheThreeEnumeratorsWithoutValidating()
+    public async Task SetAutoCommitRefusesAValueOutsideTheThreeEnumeratorsAtTheBoundary()
     {
         Harness harness = new();
         TaskHandle handle = await CreateTask(harness);
@@ -690,8 +692,52 @@ public sealed class CommandServiceTests
             new SetCommandAutoCommitRequest { Task = handle, Autocommit = (AutoCommitMode)7 },
             Context);
 
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+        Assert.Contains("AC_NATIVE", response.Status.ErrorText, StringComparison.Ordinal);
+
+        // THE REFUSAL IS ATOMIC: the task keeps the mode it had, so a rejected call leaves no half-applied
+        // state behind for the next execution to pick up.
+        Assert.Equal(AutoCommitMode.AcOff, Resolve(harness, handle).Worker.AutoCommitSetting);
+    }
+
+    /// <summary>
+    /// The three declared modes all pass the boundary's domain test - so the refusal above is a domain
+    /// test and not an accidental narrowing of the contract's own values.
+    /// </summary>
+    /// <param name="mode">The declared mode under test.</param>
+    [Theory]
+    [InlineData(AutoCommitMode.AcOff)]
+    [InlineData(AutoCommitMode.AcOn)]
+    [InlineData(AutoCommitMode.AcNative)]
+    public async Task SetAutoCommitAcceptsEveryDeclaredMode(AutoCommitMode mode)
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        SetCommandAutoCommitResponse response = await harness.Commands.SetAutoCommit(
+            new SetCommandAutoCommitRequest { Task = handle, Autocommit = mode },
+            Context);
+
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
-        Assert.Equal((AutoCommitMode)7, Resolve(harness, handle).Worker.AutoCommitSetting);
+        Assert.Equal(mode, Resolve(harness, handle).Worker.AutoCommitSetting);
+    }
+
+    /// <summary>
+    /// ⚠ THE WORKER's OWN TOLERANCE IS PRESERVED VERBATIM (constraint C-B). Reached directly rather than
+    /// through the RPC - which is the only way to reach it now - this proves the boundary refusal above
+    /// added a guard at the boundary WITHOUT reviving the range check the legacy setter does not have.
+    /// </summary>
+    [Fact]
+    public async Task TheWorkerStillStoresAValueOutsideTheThreeEnumeratorsWithoutValidating()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+        CommandTask task = Resolve(harness, handle);
+
+        Assert.Equal(RetCode.OK, task.Proxy.SetAutoCommit((AutoCommitMode)7));
+        Assert.Equal((AutoCommitMode)7, task.Worker.AutoCommitSetting);
+
+        await Task.CompletedTask;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -944,6 +990,153 @@ public sealed class CommandServiceTests
         Assert.Equal(SqlCommandTask.InvalidSqlMessage, response.Status.ErrorText);
 
         // BEFORE the transaction is acquired, so nothing was executed [:L65 precedes :L70].
+        Assert.Equal(0, harness.Engine.ExecuteCalls);
+    }
+
+    /// <summary>
+    /// ⚠ A PRESENT-BUT-BLANK statement is refused at the BOUNDARY, on both entry points, while the
+    /// worker's emptiness guard stays an emptiness guard.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The oracle tests <c>sql = ""</c> and not blankness [<c>:L45</c>, <c>:L65-L68</c>], so a run of
+    /// spaces passed both guards, reached the provider, and was answered as a SUCCESS THAT DID NOTHING -
+    /// measured against the shipped provider, a whitespace-only command returns a row count of <c>-1</c>
+    /// without raising anything. Refusing it here turns a silent no-op into an actionable answer while
+    /// leaving both preserved guards untouched.
+    /// </para>
+    /// <para>
+    /// The code is <c>E_INVALID_SQL</c> - the contract's own bad-statement code - rather than
+    /// <c>E_INVALID_ARGUMENT</c>, so a blank statement is classified the way an empty one is.
+    /// </para>
+    /// </remarks>
+    /// <param name="blank">The blank statement under test.</param>
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    [InlineData("\r\n")]
+    public async Task SetSqlRefusesAPresentButBlankStatement(string blank)
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        SetCommandSqlResponse response = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = handle, Sql = blank },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
+        Assert.Contains("only of whitespace", response.Status.ErrorText, StringComparison.Ordinal);
+
+        // ATOMIC: nothing was installed, so the task still holds no statement.
+        Assert.Equal(string.Empty, Resolve(harness, handle).Worker.Sql);
+    }
+
+    /// <summary>
+    /// The same refusal on <c>Exec</c>'s optional statement field, so the two entry points cannot disagree
+    /// about one statement - and nothing is executed.
+    /// </summary>
+    [Fact]
+    public async Task ExecRefusesAPresentButBlankStatementAndExecutesNothing()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = "   " },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
+        Assert.Contains("only of whitespace", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Equal(0, harness.Engine.ExecuteCalls);
+    }
+
+    /// <summary>
+    /// ⚠ THE EMPTY STRING IS NOT CAUGHT BY THE BLANK GUARD, and that separation is deliberate: it belongs
+    /// to the worker's own preserved arm, which answers the same code with NO diagnostic at all
+    /// [<c>:L45</c>]. Keeping the two distinguishable is what stops the boundary refusal from swallowing an
+    /// observable legacy difference.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>SPLIT BY BUILD, for the same reason as
+    /// <see cref="SetSqlOnAnEmptyStatementBehavesDifferentlyInTheTwoBuilds"/>.</b> The proxy the RPC
+    /// forwards to carries the oracle's own <c>#IF DEFINED DEBUG</c> assertion
+    /// [<c>n_cst_threading_task_sqlcommand.sru:L36-L38</c>], reproduced verbatim in
+    /// <c>SqlCommandTaskProxy.SetSql</c>, so the empty statement raises <see cref="AssertionFailure"/>
+    /// before the worker is ever reached in a Debug build and only ever reaches the worker's message-free
+    /// refusal in Release. Asserting the Release arm alone made this row pass under the whole-solution
+    /// Release sweep and fail under the documented per-service gate, whose bare <c>dotnet test</c> builds
+    /// Debug - for a difference the port INTENDS rather than a defect.
+    /// </para>
+    /// <para>
+    /// The Release arm below is unchanged, so what this row asserted before it still asserts.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task SetSqlStillAnswersTheWorkersMessageFreeRefusalForTheEmptyStatement()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+#if DEBUG
+        AssertionFailure failure = await Assert.ThrowsAsync<AssertionFailure>(
+            () => harness.Commands.SetSql(
+                new SetCommandSqlRequest { Task = handle, Sql = string.Empty },
+                Context));
+
+        // The oracle's own message text, verbatim - the same one the sibling row above reports.
+        Assert.Contains("Len(sql) <= 0", failure.Message, StringComparison.Ordinal);
+#else
+        SetCommandSqlResponse response = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = handle, Sql = string.Empty },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
+        Assert.Equal(string.Empty, response.Status.ErrorText);
+#endif
+    }
+
+    /// <summary>
+    /// A statement made only of a COMMENT is not blank and is not refused - the control that proves the
+    /// guard tests blankness rather than "looks like it does nothing".
+    /// </summary>
+    [Fact]
+    public async Task SetSqlAcceptsAStatementThatIsOnlyAComment()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        SetCommandSqlResponse response = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = handle, Sql = "-- nothing" },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.Equal("-- nothing", Resolve(harness, handle).Worker.Sql);
+    }
+
+    /// <summary>
+    /// <c>Exec</c> refuses an out-of-domain autocommit override on the same terms the setter RPC does, and
+    /// executes nothing - so a malformed mode cannot reach the epilogue's else arm and be silently read as
+    /// <c>AC_OFF</c>.
+    /// </summary>
+    [Fact]
+    public async Task ExecRefusesAnOutOfDomainAutoCommitOverrideAndExecutesNothing()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "DELETE FROM t",
+                Autocommit = (AutoCommitMode)99,
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+        Assert.Contains("AC_OFF", response.Status.ErrorText, StringComparison.Ordinal);
         Assert.Equal(0, harness.Engine.ExecuteCalls);
     }
 

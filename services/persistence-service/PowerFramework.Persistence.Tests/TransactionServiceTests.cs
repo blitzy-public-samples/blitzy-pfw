@@ -34,6 +34,7 @@
 // ==================================================================================================
 using System.Reflection;
 using Grpc.Core;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Tasks;
@@ -152,10 +153,38 @@ public sealed class TransactionServiceTests
 
         public bool AutoCommit { get; set; }
 
+        /// <summary>
+        /// How many times <see cref="Connect"/> has been entered, counted atomically.
+        /// </summary>
+        /// <remarks>
+        /// INTERLOCKED BECAUSE THE THING UNDER TEST IS CONCURRENT. The acquisition-race test invokes
+        /// <c>BeginSession</c> from several tasks at once, and before the acquisition gate existed those
+        /// tasks genuinely entered this member simultaneously - so a non-atomic increment could lose the
+        /// very second connect the test is looking for and report the defect as fixed.
+        /// </remarks>
+        internal int ConnectCalls => Volatile.Read(ref _connectCalls);
+
+        /// <summary>
+        /// Run on entry to <see cref="Connect"/>, before the handle is assigned.
+        /// </summary>
+        /// <remarks>
+        /// IT EXISTS TO WIDEN THE RACE WINDOW DELIBERATELY. A connect that returns instantly may finish
+        /// before a sibling task has even reached the liveness test, so an unguarded implementation could
+        /// pass by luck. Holding inside the connect makes the overlap certain, which is what turns the
+        /// race test into a reliable one rather than a flaky one.
+        /// </remarks>
+        internal Action? OnConnect { get; set; }
+
+        private int _connectCalls;
+
         public void ApplyConnectionFields(in TransactionData descriptor) => DbmsValue = descriptor.Dbms;
 
         public SqlState Connect(CancellationToken cancellationToken = default)
         {
+            _ = Interlocked.Increment(ref _connectCalls);
+
+            OnConnect?.Invoke();
+
             Handle = 1;
             return ConnectResult;
         }
@@ -223,9 +252,34 @@ public sealed class TransactionServiceTests
         }
     }
 
+    /// <summary>Collects the service's own log records so a case can assert what was RECORDED.</summary>
+    /// <remarks>
+    /// Needed by section 20, where the observable outcome of the behaviour under test is deliberately
+    /// UNCHANGED - a non-positive keep-alive expiry is accepted, as the oracle accepts it - and the whole
+    /// of the fix is that the caller is no longer told nothing. An assertion on the outcome alone could
+    /// not tell the fixed code from the unfixed code.
+    /// </remarks>
+    private sealed class CapturingLogger : ILogger<TransactionService>
+    {
+        internal List<string> Records { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Records.Add($"{logLevel}|{formatter(state, exception)}");
+    }
+
     private sealed class Harness
     {
-        internal Harness(bool keepAlive = false)
+        internal Harness(bool keepAlive = false, CapturingLogger? logger = null)
         {
             Clock = new FakeClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
             Engine = new FakeEngine();
@@ -249,14 +303,19 @@ public sealed class TransactionServiceTests
             UpdateTasks = new UpdateTaskRegistry(Options.Create(options), Clock);
             CommandTasks = new CommandTaskRegistry(Options.Create(options), Clock);
 
+            Log = logger;
+
             Service = new TransactionService(
                 Pool,
                 Registry,
                 QuerySurface,
                 QueryTasks,
                 UpdateTasks,
-                CommandTasks);
+                CommandTasks,
+                logger);
         }
+
+        internal CapturingLogger? Log { get; }
 
         internal FakeClock Clock { get; }
 
@@ -780,6 +839,17 @@ public sealed class TransactionServiceTests
         public long Reset() => RetCode.E_NO_IMPLEMENTATION;
 
         /// <inheritdoc/>
+        /// <remarks>
+        /// False, in keeping with this stub's refuse-everything posture: no source was ever installed on it,
+        /// and claiming one would be the pretence the remarks above rule out.
+        /// </remarks>
+        public bool HasUpdateSource => false;
+
+        /// <inheritdoc/>
+        /// <remarks>Empty, in keeping with this stub's refuse-everything posture.</remarks>
+        public string DataObject => string.Empty;
+
+        /// <inheritdoc/>
         public long ResetUpdatableTables() => RetCode.E_NO_IMPLEMENTATION;
 
         /// <inheritdoc/>
@@ -900,6 +970,36 @@ public sealed class TransactionServiceTests
 
     private static string LocateServiceSource()
     {
+        // ⚠ THIS LOCATOR'S MARKER IS SERVICE RELATIVE, NOT REPOSITORY RELATIVE, WHICH IS WHY IT RESOLVES
+        // DIFFERENTLY FROM ITS SIBLINGS. The walk below joins "PowerFramework.Persistence/Grpc/..." onto
+        // each ancestor, so the directory it is looking for is services/persistence-service - NOT the
+        // repository root. Starting the walk at the root would climb AWAY from the file and never find
+        // it, so the embedded root is used to form the path DIRECTLY rather than as a walk start.
+        //
+        // The upward walk is retained beneath it unchanged, so a run with no embedded root behaves
+        // exactly as it did before: it climbs out of the test output directory and finds the service
+        // directory on the way. That path holds only while the output sits inside the checkout, which is
+        // the whole reason the direct form exists - under an out of tree artifacts path no ancestor of
+        // the output carries the marker at all. See TestRepositoryRoot.
+        if (TestRepositoryRoot.Embedded is { } root)
+        {
+            string direct = Path.Combine(
+                root,
+                "services",
+                "persistence-service",
+                "PowerFramework.Persistence",
+                "Grpc",
+                "TransactionService.cs");
+
+            // TESTED RATHER THAN TRUSTED. If the tree is ever laid out differently the walk below still
+            // gets its chance, so a stale layout assumption here degrades to the original behaviour
+            // instead of failing the test.
+            if (File.Exists(direct))
+            {
+                return direct;
+            }
+        }
+
         DirectoryInfo? probe = new(AppContext.BaseDirectory);
 
         while (probe is not null)
@@ -1636,5 +1736,563 @@ public sealed class TransactionServiceTests
         Assert.Equal(1, harness.Pool.UpperBound);
         Assert.True(harness.Registry.TryResolve(first, out _));
         Assert.True(harness.Registry.TryResolve(second.Session, out _));
+    }
+
+    // ==============================================================================================
+    //  ACQUISITION UNDER CONCURRENCY - THE POOL SHARES ONE TRANSACTION, SO ONE CALLER MAY CONNECT IT
+    // ==============================================================================================
+
+    /// <summary>
+    /// Concurrent sessions over one descriptor connect the shared transaction exactly once, and all of
+    /// them are issued a handle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>⚠ THIS IS THE REGRESSION TEST FOR A DEFECT THAT LOST EVERY CONCURRENT REQUEST.</b> The pool keys
+    /// entries on whole-descriptor value equality with reference counting, so every session opened with an
+    /// equal descriptor borrows the SAME transaction instance. Acquisition was the one path on this
+    /// contract that took no gate, so N concurrent openings all observed that transaction as unconnected
+    /// and all connected it. Because the engine assigns its connection and only then begins its
+    /// transaction, it was left holding one caller's connection beside another's transaction, and every
+    /// command built from that pair failed as not associated with the same connection - five concurrent
+    /// retrievals produced five HTTP 500s over one shared pool lease.
+    /// </para>
+    /// <para>
+    /// THE CONNECT COUNT IS THE ASSERTION THAT MATTERS. Asserting only that every caller got a handle
+    /// would have passed before the fix as well: <c>BeginSession</c> itself answered OK, and the damage
+    /// only surfaced later when a command was built. Counting connects tests the invariant directly -
+    /// <c>[:L173]</c> says a live pooled connection is NOT reconnected, and under concurrency that means
+    /// exactly one connect for one shared transaction.
+    /// </para>
+    /// <para>
+    /// THE OVERLAP IS FORCED RATHER THAN HOPED FOR. Every task waits on one barrier so they arrive
+    /// together, and the first connect holds briefly inside the engine so any sibling that could reach the
+    /// liveness test unguarded certainly does. Without both, an unguarded implementation could serialize
+    /// by chance and the test would prove nothing.
+    /// </para>
+    /// <para>
+    /// KEEP-ALIVE IS ON, which is what makes the pool hand back one entry rather than one per opening -
+    /// the condition under which sharing, and therefore the race, exists at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ConcurrentSessionsOverOneDescriptorConnectTheSharedTransactionExactlyOnce()
+    {
+        const int callers = 8;
+
+        Harness harness = new(keepAlive: true);
+
+        using Barrier gate = new(callers);
+
+        // A SHORT HOLD INSIDE THE CONNECT, so a sibling that is able to race certainly does. It is a
+        // synchronous sleep because the provider this stands in for is synchronous, which is precisely why
+        // the real acquisition needed serializing.
+        harness.Engine.OnConnect = () => Thread.Sleep(40);
+
+        Task<BeginSessionResponse>[] openings = [.. Enumerable.Range(0, callers).Select(_ => Task.Run(
+            async () =>
+            {
+                // ARRIVE TOGETHER. Every task blocks until the last one reaches this line.
+                gate.SignalAndWait(TestContext.Current.CancellationToken);
+
+                return await harness.Service.BeginSession(
+                    new BeginSessionRequest { Descriptor_ = Descriptor() },
+                    new FakeCallContext(CancellationToken.None));
+            },
+            TestContext.Current.CancellationToken))];
+
+        BeginSessionResponse[] responses = await Task.WhenAll(openings);
+
+        // EVERY CALLER IS SERVED. A gate that excluded by refusing would be a different defect.
+        Assert.All(responses, response =>
+        {
+            Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+            Assert.NotNull(response.Session);
+        });
+
+        // THE INVARIANT: one shared transaction is connected once, however many callers arrive at once.
+        Assert.Equal(1, harness.Engine.ConnectCalls);
+
+        // ONE POOL ENTRY, so the sharing that creates the race was genuinely in play.
+        Assert.Equal(1, harness.Pool.UpperBound);
+
+        // EVERY HANDLE IS DISTINCT AND EVERY ONE RESOLVES, so exclusion cost no caller its session.
+        Assert.Equal(
+            callers,
+            responses.Select(response => response.Session.SessionId).Distinct(StringComparer.Ordinal).Count());
+
+        Assert.All(responses, response => Assert.True(harness.Registry.TryResolve(response.Session, out _)));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  18. A TRANSACTION THE POOL DESTROYED UNDERNEATH A LIVE SESSION
+    //
+    //  The state is reachable without any race, and it is the pool that creates it. SetBroken condemns the
+    //  entry's transaction; the next borrow of that same descriptor takes the broken arm
+    //  [n_cst_thread_trans_pool.sru:L164], which sets the entry's transaction to null and DESTROYS the old
+    //  object before creating a replacement. Every session that was already holding the old object is now
+    //  holding a destroyed one - and its handle still resolves, because nothing retired it.
+    //
+    //  The oracle guards this with IsValidObject, which in PowerScript reports FALSE for a DESTROYED
+    //  object as well as for a null reference. The managed null test only covers the second half: a
+    //  disposed object is still a non-null reference. So the port needed the first half stated
+    //  explicitly - IPooledTransaction.IsDestroyed - and every liveness guard needed to consult it.
+    //  Without that, these verbs reached a disposed object and answered an unhandled Internal fault
+    //  instead of a status.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Drives a harness into the destroyed-transaction state and hands back the session left holding it.
+    /// </summary>
+    /// <param name="harness">A keep-alive harness, so two borrows of one descriptor share one entry.</param>
+    /// <returns>
+    /// The stranded session - the one left holding the destroyed transaction - and the replacement
+    /// session whose borrow destroyed it.
+    /// </returns>
+    private static async Task<(SessionHandle Stranded, SessionHandle Replacement)>
+        OpenASessionWhoseTransactionThePoolDestroys(Harness harness)
+    {
+        SessionHandle stranded = await Open(harness);
+
+        Assert.True(harness.Registry.TryResolve(stranded, out TransactionSession? live));
+        IPooledTransaction condemned = live!.Transaction;
+
+        // CONDEMN IT, which is a supported operation on a live session and answers success.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.SetBroken(new SetBrokenRequest { Session = stranded }, null!))
+                .Status.RetCode);
+
+        // AND THEN BORROW THE SAME DESCRIPTOR AGAIN. This is the step that destroys the object above:
+        // the pool's broken arm replaces it rather than handing it out.
+        SessionHandle replacement = await Open(harness);
+
+        Assert.True(harness.Registry.TryResolve(replacement, out TransactionSession? fresh));
+        Assert.NotSame(condemned, fresh!.Transaction);
+
+        // THE PRECONDITION, ASSERTED RATHER THAN ASSUMED: the stranded session still resolves, and the
+        // object it holds is destroyed.
+        Assert.True(harness.Registry.TryResolve(stranded, out TransactionSession? afterwards));
+        Assert.Same(condemned, afterwards!.Transaction);
+        Assert.True(condemned.IsDestroyed);
+        Assert.True(afterwards.IsUnusable);
+
+        return (stranded, replacement);
+    }
+
+    [Fact]
+    public async Task EveryOperationRefusesASessionWhoseTransactionThePoolDestroyed()
+    {
+        Harness harness = new(keepAlive: true);
+        (SessionHandle session, _) = await OpenASessionWhoseTransactionThePoolDestroys(harness);
+
+        (string Verb, WireRetCode Code)[] refusals =
+        [
+            ("IsConnected", (await harness.Service.IsConnected(
+                new IsConnectedRequest { Session = session }, null!)).Status.RetCode),
+            ("GetDatabaseType", (await harness.Service.GetDatabaseType(
+                new GetDatabaseTypeRequest { Session = session }, null!)).Status.RetCode),
+            ("SetAutoCommit", (await harness.Service.SetAutoCommit(
+                new SetTransactionAutoCommitRequest { Session = session, Autocommit = true },
+                null!)).Status.RetCode),
+            ("Commit", (await harness.Service.Commit(
+                new CommitRequest { Session = session }, null!)).Status.RetCode),
+            ("Rollback", (await harness.Service.Rollback(
+                new RollbackRequest { Session = session }, null!)).Status.RetCode),
+            ("ClearState", (await harness.Service.ClearState(
+                new ClearStateRequest { Session = session }, null!)).Status.RetCode),
+            ("GetSessionState", (await harness.Service.GetSessionState(
+                new GetSessionStateRequest { Session = session }, null!)).Status.RetCode),
+            ("AutoCommit", (await harness.Service.AutoCommit(
+                new AutoCommitRequest { Session = session }, null!)).Status.RetCode),
+            ("SetBroken", (await harness.Service.SetBroken(
+                new SetBrokenRequest { Session = session }, null!)).Status.RetCode),
+            ("GridSyntaxFromSql", (await harness.Service.GridSyntaxFromSql(
+                new GridSyntaxFromSqlRequest { Session = session, Sql = "SELECT * FROM COMPANY" },
+                null!)).Status.RetCode),
+        ];
+
+        // TEN VERBS, ONE CODE, AND IT IS THE UNKNOWN-SESSION CODE - the same answer a closing session
+        // gives, because from the caller's point of view both mean the transaction it named is gone.
+        // The tenth is GRID SYNTAX, which had no liveness guard at all: it reached the destroyed object
+        // through the query surface and faulted.
+        Assert.All(
+            refusals,
+            outcome => Assert.Equal(
+                (outcome.Verb, WireRetCode.EInvalidTransaction),
+                (outcome.Verb, outcome.Code)));
+
+        // AND NOTHING WAS ISSUED ON THE WAY TO THOSE REFUSALS. The query surface was never called, so the
+        // grid-syntax refusal happened before the destroyed object was handed to it.
+        Assert.Equal(0, harness.QuerySurface.Calls);
+    }
+
+    /// <summary>
+    /// ⚠ THE ONE DELIBERATE EXCEPTION: reading the DESCRIPTOR back still succeeds, because it never
+    /// touches the transaction.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>GetTransactionData</c> copies out of <c>session.Descriptor</c> - the session's own immutable
+    /// copy of what the caller supplied - and reaches no pooled object at all. Refusing it on a destroyed
+    /// transaction would be a fabrication of exactly the kind the plan forbids: nothing about the copy
+    /// became untrue when the pool replaced the connection behind it, and the descriptor is precisely what
+    /// a caller needs in hand to open a replacement session.
+    /// </para>
+    /// <para>
+    /// It DOES still refuse a CLOSING session, and the asymmetry is deliberate rather than an oversight.
+    /// Closing means the handle itself is being retired, so there is no session left to answer for;
+    /// destroyed means the session is still registered and its descriptor is still exactly what it was.
+    /// The guard on this one verb is therefore <c>IsClosing</c> and not <c>IsUnusable</c>.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ReadingTheDescriptorBackSucceedsEvenOnADestroyedTransaction()
+    {
+        Harness harness = new(keepAlive: true);
+        (SessionHandle session, _) = await OpenASessionWhoseTransactionThePoolDestroys(harness);
+
+        GetTransactionDataResponse read = await harness.Service.GetTransactionData(
+            new GetTransactionDataRequest { Session = session }, null!);
+
+        Assert.Equal(WireRetCode.Ok, read.Status.RetCode);
+        Assert.NotNull(read.Descriptor_);
+        Assert.Equal("SQLite", read.Descriptor_.Dbms);
+
+        // AND THE PASSWORD IS STILL UNREACHABLE ON THIS PATH (constraint C-F): the response carries a
+        // TransactionDescriptorView, a projection that has no logpass FIELD at all rather than an empty
+        // one - so a destroyed transaction cannot become a route to echoing it back even by mistake.
+        Assert.DoesNotContain(
+            "logpass",
+            TransactionDescriptorView.Descriptor.Fields.InFieldNumberOrder().Select(
+                static field => field.Name),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task AnEndSessionOnADestroyedTransactionStillRetiresTheHandleAndDropsTheReference()
+    {
+        Harness harness = new(keepAlive: true);
+
+        (SessionHandle session, SessionHandle replacement) =
+            await OpenASessionWhoseTransactionThePoolDestroys(harness);
+
+        Assert.True(harness.Registry.TryResolve(session, out TransactionSession? live));
+        PoolLease lease = live!.Lease;
+
+        // ⚠ THE CODE IS THE RELEASE'S OWN, AND THE TEARDOWN HAPPENED ANYWAY. E_INVALID_OBJECT is what
+        // the oracle's release answers for a handle that is not a valid object [:L164-L172], so it is
+        // reported rather than papered over with OK - a caller learns the true fact that the transaction
+        // it was holding had already been destroyed. What it must NOT mean is that the session is still
+        // open, which is what the two assertions below pin down and what the response field documents.
+        Assert.Equal(
+            WireRetCode.EInvalidObject,
+            (await harness.Service.EndSession(new EndSessionRequest { Session = session }, null!))
+                .Status.RetCode);
+
+        // THE HANDLE IS GONE.
+        Assert.False(harness.Registry.TryResolve(session, out _));
+
+        // AND A SECOND END SAYS SO PLAINLY, so a caller that read the code above as "still open" and
+        // retried is told the handle names nothing rather than being left to retry for ever.
+        Assert.Equal(
+            WireRetCode.EInvalidTransaction,
+            (await harness.Service.EndSession(new EndSessionRequest { Session = session }, null!))
+                .Status.RetCode);
+
+        // THE ENTRY IS STILL ALIVE, because keep-alive is on and the replacement session is still
+        // borrowing it. Under keep-alive an entry deliberately outlives its last borrower so the next
+        // caller with the same descriptor reuses the connection [n_cst_thread_trans_pool.sru:L215], so
+        // liveness is NOT the thing to read here.
+        Assert.True(harness.Pool.IsLeaseLive(lease));
+
+        // THE REPLACEMENT GIVES ITS SESSION UP TOO, so the entry now has no borrowers at all - IF the
+        // stranded session's reference was really dropped.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.EndSession(new EndSessionRequest { Session = replacement }, null!))
+                .Status.RetCode);
+
+        // ⚠ AND HERE IS THE REFERENCE-DROP ASSERTION, READ THROUGH THE COLLECTOR. A forced collect
+        // overrides the IDLE WINDOW and nothing else - the reference count still has to be zero for an
+        // entry to go [:L215] - so an entry that survives a forced collect is an entry somebody is still
+        // counted as holding. Before the fix the failed release returned early and left this session's
+        // reference standing, so the entry could never reach zero: its connection was never disconnected
+        // and its slot was never reclaimed. A leak produced by the one path whose job is to prevent one.
+        harness.Pool.Collect(force: true);
+
+        Assert.Equal(0, harness.Pool.UpperBound);
+        Assert.False(harness.Pool.IsLeaseLive(lease));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  19. SHARING IS REPORTED RATHER THAN PREVENTED - M-5
+    //
+    //  Two sessions opened with EQUAL descriptors share one pooled transaction (section 15), so one
+    //  session's commit commits the other's uncommitted work as well. That is the oracle's own behaviour -
+    //  the pool keys entries on whole-descriptor equality [n_cst_thread_trans_pool.sru:L136-L146] - and
+    //  constraint C-B forbids changing it. What was missing was any way for a caller to KNOW, so the
+    //  count is now on the response and the operation records a warning when it exceeds one.
+    //
+    //  A COUNT AND NOT A LIST (constraint C-F). A handle belongs to whoever was issued it; naming another
+    //  holder's would disclose it to a caller who was never given it.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task CommitAndRollbackReportHowManySessionsShareTheTransactionTheyActedOn()
+    {
+        Harness harness = new();
+
+        SessionHandle first = await Open(harness);
+        SessionHandle second = await Open(harness);
+
+        // ONE ENTRY, ONE TRANSACTION - the precondition section 15 establishes, restated so this case
+        // stands on its own.
+        Assert.Equal(1, harness.Pool.UpperBound);
+
+        // AUTO-COMMIT OFF, so the commit and the rollback both reach the engine and succeed: the count is
+        // asserted on operations that DID something, which is when it matters.
+        harness.Engine.AutoCommit = false;
+
+        CommitResponse committed = await harness.Service.Commit(
+            new CommitRequest { Session = first }, null!);
+
+        Assert.Equal(WireRetCode.Ok, committed.Status.RetCode);
+        Assert.Equal(2, committed.SharingSessionCount);
+
+        RollbackResponse rolledBack = await harness.Service.Rollback(
+            new RollbackRequest { Session = second }, null!);
+
+        Assert.Equal(WireRetCode.Ok, rolledBack.Status.RetCode);
+        Assert.Equal(2, rolledBack.SharingSessionCount);
+
+        // AND THE STATE REPORT AGREES WITH BOTH, so a caller can read the number before it acts rather
+        // than only afterwards.
+        GetSessionStateResponse state = await harness.Service.GetSessionState(
+            new GetSessionStateRequest { Session = first }, null!);
+
+        Assert.Equal(WireRetCode.Ok, state.Status.RetCode);
+        Assert.Equal(2, state.SharingSessionCount);
+    }
+
+    [Fact]
+    public async Task ASoleHolderIsReportedAsOneAndAnEndedCoHolderStopsCounting()
+    {
+        Harness harness = new();
+
+        SessionHandle first = await Open(harness);
+        SessionHandle second = await Open(harness);
+
+        harness.Engine.AutoCommit = false;
+
+        Assert.Equal(
+            2,
+            (await harness.Service.Commit(new CommitRequest { Session = first }, null!))
+                .SharingSessionCount);
+
+        // THE CO-HOLDER GIVES ITS SESSION UP.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.EndSession(new EndSessionRequest { Session = second }, null!))
+                .Status.RetCode);
+
+        // ONE, NOT TWO. The count is the live population at the moment of the operation, so a session
+        // that has been retired no longer contributes - and ONE is the ordinary, unremarkable case that
+        // raises no warning.
+        Assert.Equal(
+            1,
+            (await harness.Service.Commit(new CommitRequest { Session = first }, null!))
+                .SharingSessionCount);
+    }
+
+    [Fact]
+    public async Task SessionsOnDIFFERENTDescriptorsDoNotCountTowardsOneAnother()
+    {
+        Harness harness = new();
+
+        SessionHandle sqlite = await Open(harness);
+        SessionHandle other = await Open(harness, dbms: "ORACLE");
+
+        // TWO ENTRIES, because the descriptors differ - so neither session shares the other's
+        // transaction and each reports itself as the sole holder.
+        Assert.Equal(2, harness.Pool.UpperBound);
+
+        harness.Engine.AutoCommit = false;
+
+        Assert.Equal(
+            1,
+            (await harness.Service.Commit(new CommitRequest { Session = sqlite }, null!))
+                .SharingSessionCount);
+
+        Assert.Equal(
+            1,
+            (await harness.Service.Commit(new CommitRequest { Session = other }, null!))
+                .SharingSessionCount);
+    }
+
+    [Fact]
+    public async Task TheCountIsByTRANSACTIONIDENTITYSoAReplacedEntryDoesNotCountItsStrandedHolder()
+    {
+        Harness harness = new(keepAlive: true);
+
+        (SessionHandle stranded, SessionHandle replacement) =
+            await OpenASessionWhoseTransactionThePoolDestroys(harness);
+
+        // BOTH SESSIONS ARE LIVE ON ONE ENTRY AND ONE LEASE, and the stranded one is even resolvable -
+        // so a count taken by descriptor equality or by lease would say TWO. It holds a DIFFERENT
+        // transaction object, though, and the count is reference equality on that object, so it says ONE.
+        Assert.True(harness.Registry.TryResolve(stranded, out TransactionSession? strandedSession));
+        Assert.True(harness.Registry.TryResolve(replacement, out TransactionSession? liveSession));
+        Assert.Equal(strandedSession!.Lease, liveSession!.Lease);
+        Assert.NotSame(strandedSession.Transaction, liveSession.Transaction);
+        Assert.Equal(2, harness.Registry.Count);
+
+        harness.Engine.AutoCommit = false;
+
+        Assert.Equal(
+            1,
+            (await harness.Service.Commit(new CommitRequest { Session = replacement }, null!))
+                .SharingSessionCount);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  20. A NON-POSITIVE KEEP-ALIVE EXPIRY IS ACCEPTED, AND NO LONGER SILENTLY - L-5
+    //
+    //  THE REPORTED FINDING ASKED FOR A REFUSAL, AND A REFUSAL WOULD HAVE BEEN WRONG. The oracle reads
+    //  the expiry and then folds anything non-positive to its own default:
+    //      constant long KEEPALIVE_EXPIRE = 30000                        [:L53]
+    //      _nKeepAliveExpireTime = ...GetDataDouble(...) * 1000           [:L78]
+    //      if _nKeepAliveExpireTime <= 0 then _nKeepAliveExpireTime = KEEPALIVE_EXPIRE   [:L79]
+    //  and the contract field says the same in as many words. A negative expiry is therefore an IN-DOMAIN
+    //  value with a DEFINED meaning - "use the default" - not an out-of-domain one like an undeclared
+    //  enumerator. Refusing it would contradict the oracle, the published field text and constraint C-B at
+    //  once. It is accepted, and what was actually wrong - that the caller was told nothing about either
+    //  the fold or the outright non-consultation - is fixed by recording both.
+    // ---------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(-1d)]
+    [InlineData(-30d)]
+    [InlineData(0d)]
+    public async Task ANonPositiveKeepAliveExpiryIsACCEPTEDAndFoldedToTheDefault(double expirySeconds)
+    {
+        CapturingLogger log = new();
+        Harness harness = new(keepAlive: true, logger: log);
+
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest
+            {
+                Descriptor_ = Descriptor(),
+                KeepAlive = new PoolKeepAliveSettings
+                {
+                    KeepAlive = true,
+                    KeepAliveExpireSeconds = expirySeconds,
+                },
+            },
+            Context);
+
+        // ACCEPTED. The session opens, exactly as it does today and exactly as the oracle's own fold
+        // implies it must.
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.NotNull(response.Session);
+
+        // AND THE CONFIGURED DEFAULT IS WHAT IS IN FORCE - 30 s, the oracle's KEEPALIVE_EXPIRE - so the
+        // number the caller sent was genuinely not used as a duration.
+        Assert.Equal(30_000, harness.Pool.KeepAliveExpireMilliseconds);
+
+        // AND THE CALLER IS NO LONGER TOLD NOTHING. Informational, not a warning: nothing went wrong.
+        Assert.Contains(
+            log.Records,
+            record => record.StartsWith("Information|", StringComparison.Ordinal)
+                && record.Contains("non-positive keep-alive expiry", StringComparison.Ordinal)
+                && record.Contains("use the default", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnExpirySENTWITHKEEPALIVEOFFIsRecordedAsNotCONSULTEDATALL()
+    {
+        CapturingLogger log = new();
+
+        // KEEP-ALIVE OFF on the instance, and the request agrees - so the guard's keep-alive branch is
+        // never entered and the expiry is not read for any purpose. The oracle reads it only inside
+        // `if ...KeepAlive then` [:L76-L83], which is precisely why this silence was a separate one.
+        Harness harness = new(keepAlive: false, logger: log);
+
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest
+            {
+                Descriptor_ = Descriptor(),
+                KeepAlive = new PoolKeepAliveSettings
+                {
+                    KeepAlive = false,
+                    KeepAliveExpireSeconds = 45d,
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+
+        Assert.Contains(
+            log.Records,
+            record => record.StartsWith("Information|", StringComparison.Ordinal)
+                && record.Contains("keep-alive is off on this instance", StringComparison.Ordinal)
+                && record.Contains("accepted and ignored", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AKeepAliveDescriptorWhoseEXPIRYMATCHESTheConfiguredOneIsAcceptedSilently()
+    {
+        CapturingLogger log = new();
+        Harness harness = new(keepAlive: true, logger: log);
+
+        // THE POSITIVE, AGREEING CASE: 30 s is the configured default, so nothing is folded and nothing is
+        // ignored - and therefore nothing is recorded. The two records above are about the two anomalies
+        // and must not fire on the ordinary path.
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest
+            {
+                Descriptor_ = Descriptor(),
+                KeepAlive = new PoolKeepAliveSettings
+                {
+                    KeepAlive = true,
+                    KeepAliveExpireSeconds = 30d,
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.NotNull(response.Session);
+        Assert.DoesNotContain(
+            log.Records,
+            record => record.Contains("keep-alive expiry", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task AKeepAliveDescriptorWhosePOSITIVEExpiryDISAGREESIsRefusedWithTheArgumentCode()
+    {
+        Harness harness = new(keepAlive: true);
+
+        // AND THE DISTINCTION THAT MAKES THE ACCEPTANCE ABOVE COHERENT. A POSITIVE expiry is a real
+        // duration request, so one that disagrees with the instance's configured window is refused - the
+        // pool reads its window once at startup exactly as the legacy pool does, so honouring a
+        // per-session duration would be a capability the oracle does not have. A NON-POSITIVE value is not
+        // a duration request at all, which is why it is accepted instead.
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest
+            {
+                Descriptor_ = Descriptor(),
+                KeepAlive = new PoolKeepAliveSettings
+                {
+                    KeepAlive = true,
+                    KeepAliveExpireSeconds = 45d,
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+        Assert.Contains("keep-alive expiry disagrees", response.Status.ErrorText, StringComparison.Ordinal);
+
+        // AND NO SESSION WAS OPENED, so a refusal costs nothing.
+        Assert.Equal(0, harness.Registry.Count);
     }
 }

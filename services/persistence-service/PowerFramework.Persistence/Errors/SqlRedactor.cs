@@ -607,15 +607,37 @@ public sealed class SqlRedactor : ISqlRedactor
     /// </remarks>
     public string Redact([AllowNull] string statement)
     {
-        // The empty result, and the ONLY early return in this method. The declared return type is
-        // non-nullable so a null input can never be echoed back, and the legacy scanner sets the same
-        // convention with `if nLen <= 0 then return ""`
-        // [n_cst_thread_task_sqlbase_ds.sru:L111]. There is deliberately no second early return: the
-        // scan below always runs for every non-empty input, because there is no mode in which this
-        // type hands a statement back unmasked.
+        // The empty result. The declared return type is non-nullable so a null input can never be echoed
+        // back, and the legacy scanner sets the same convention with `if nLen <= 0 then return ""`
+        // [n_cst_thread_task_sqlbase_ds.sru:L111].
         if (string.IsNullOrEmpty(statement))
         {
             return string.Empty;
+        }
+
+        // ==========================================================================================
+        //  THE ONE EXEMPTION, AND IT IS NOT A MODE IN WHICH A STATEMENT IS HANDED BACK UNMASKED
+        //  ------------------------------------------------------------------------------------------
+        //  The scan below masks every numeric literal, which is right for a statement and wrong for one
+        //  particular FRAMEWORK-AUTHORED diagnostic whose only number is the caller's OWN row cap:
+        //  `"超出最大允许的行数(" + String(_nMaxRows) + ")!"`
+        //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L788]. Masking it told a
+        //  caller that it had exceeded a limit and then hid the limit - which is the caller's own
+        //  setting, so nothing was protected and the message was made useless.
+        //
+        //  WHY THE EXEMPTION CANNOT LEAK. It matches the WHOLE input or not at all, and the shape is
+        //  fully determined: the fixed prefix, then one or more ASCII digits, then the fixed suffix.
+        //  There is no position in that shape where anything else can appear - one differing character
+        //  anywhere and the entire input goes through the scan exactly as before - so there is no room
+        //  to smuggle a value through it. Idempotence still holds: an exempt input is returned
+        //  unchanged, so redacting it twice is redacting it once.
+        //
+        //  Applied HERE rather than at the six call sites that redact an error text, because a rule
+        //  spread over six sites is a rule five of them can drift from.
+        // ==========================================================================================
+        if (IsRowCapDiagnostic(statement))
+        {
+            return statement;
         }
 
         StringBuilder masked = new(statement.Length);
@@ -722,6 +744,72 @@ public sealed class SqlRedactor : ISqlRedactor
     // overload takes and returns it, so it is internal for the same reason. Nothing narrows: the wire
     // path is ToDbError, which stays reachable, and the ISqlRedactor string member stays public.
     internal DbErrorData Redact(in DbErrorData error) => error with { SqlSyntax = Redact(error.SqlSyntax) };
+
+    /// <summary>
+    /// The opening of the framework's row-cap diagnostic
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L788</c>].
+    /// </summary>
+    /// <remarks>
+    /// DECLARED HERE RATHER THAN REFERENCED FROM THE TASK THAT EMITS IT, because the dependency runs the
+    /// other way - <c>Tasks/SqlTaskBase.cs</c> uses this type - and inverting it to share a constant would
+    /// be a layer violation for the sake of two literals. The pairing is pinned by a test that asserts
+    /// these two constants equal the emitting task's own, so a change to either side fails the build's
+    /// test run rather than silently un-exempting the message.
+    /// </remarks>
+    internal const string RowCapDiagnosticPrefix = "超出最大允许的行数(";
+
+    /// <summary>
+    /// The closing of the framework's row-cap diagnostic, including its exclamation mark
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L788</c>].
+    /// </summary>
+    internal const string RowCapDiagnosticSuffix = ")!";
+
+    /// <summary>
+    /// Whether the whole input is the framework's row-cap diagnostic and nothing else.
+    /// </summary>
+    /// <param name="text">The candidate, already known to be non-empty.</param>
+    /// <returns><see langword="true"/> when the text is exactly that diagnostic.</returns>
+    /// <remarks>
+    /// <para>
+    /// STRICT ON EVERY AXIS, DELIBERATELY. The comparison is ORDINAL, so no culture can widen it; the
+    /// prefix and suffix must both be present with at least one character between them; every character
+    /// between them must be an ASCII digit tested by range rather than by
+    /// <see cref="char.IsDigit(char)"/>, which would also accept Arabic-Indic, Devanagari and every other
+    /// Unicode decimal digit; and no leading or trailing whitespace is tolerated because the emitting
+    /// site produces none.
+    /// </para>
+    /// <para>
+    /// The digits are NOT parsed into a number. A value too large for any integer type is still just
+    /// digits, and refusing to exempt it on that ground would mask a diagnostic for a reason that has
+    /// nothing to do with disclosure.
+    /// </para>
+    /// </remarks>
+    private static bool IsRowCapDiagnostic(string text)
+    {
+        if (!text.StartsWith(RowCapDiagnosticPrefix, StringComparison.Ordinal)
+            || !text.EndsWith(RowCapDiagnosticSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        int start = RowCapDiagnosticPrefix.Length;
+        int end = text.Length - RowCapDiagnosticSuffix.Length;
+
+        if (end <= start)
+        {
+            return false;
+        }
+
+        for (int index = start; index < end; index++)
+        {
+            if (text[index] is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
 
     // ------------------------------------------------------------------------------------------

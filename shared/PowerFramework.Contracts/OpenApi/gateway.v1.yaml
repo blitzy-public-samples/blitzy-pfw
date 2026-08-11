@@ -790,6 +790,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/SessionIdConstraint'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -904,6 +906,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetEventGateResponse'
+        '400':
+          $ref: '#/components/responses/SessionIdConstraint'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1474,6 +1478,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/SessionIdConstraint'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3153,6 +3159,32 @@ components:
         validation is identifiable rather than merely the HTTP class - `E_INVALID_ARGUMENT` (-3) for
         an argument outside its accepted domain, and the expression engine's own codes for a parse
         failure, which also carries the expression text and the caret position.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    SessionIdConstraint:
+      description: >-
+        The `sessionId` does not satisfy the parameter contract this operation publishes: it was
+        omitted, it is empty, or it is longer than 128 characters. Declared SEPARATELY from
+        `BadRequest` because the three operations that carry it take **no request body at all**, so
+        the shared wording - which is about a body Gateway could not bind - would describe something
+        that cannot happen on them.
+
+
+        All three conditions are answered identically, with `retCode` carrying `E_INVALID_ARGUMENT`
+        (-3), and the value is never echoed back. An omitted parameter and an empty one are two
+        spellings of one mistake and must not be distinguishable: an earlier revision answered the
+        first as `500` with `UNKNOWN`, because the omission was refused by parameter binding before
+        the route ran and the carried status was discarded - a caller was told this service had
+        failed for a request only it could correct.
+
+
+        Whitespace is neither trimmed nor refused. A single space satisfies the declared
+        `minLength: 1`, so Gateway forwards it; the identifier is opaque here and the session it
+        names lives in DataServices, which answers its own defined negative for one it cannot
+        resolve.
       content:
         application/problem+json:
           schema:

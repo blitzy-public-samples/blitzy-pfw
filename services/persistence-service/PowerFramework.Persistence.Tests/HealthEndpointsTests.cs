@@ -377,6 +377,101 @@ public sealed class HealthEndpointsTests
     }
 
     /// <summary>
+    /// The not-ready body carries the storage check's OWN reason, and the remedy with it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE BODY USED TO NAME THE COMPONENT AND NOTHING ELSE</b>, which left an operator reading
+    /// <c>/health</c> with a symptom and no action: "sqlite" is not ready says nothing about whether the
+    /// volume is missing or the migrations simply have not been run, and those two call for opposite
+    /// responses. The seam already distinguished them internally and already recorded the remedy, so the
+    /// only party not told was the one that has to act.
+    /// </para>
+    /// <para>
+    /// Both published values are constants of this codebase - a schema identifier and a documented
+    /// command - so this asserts the disclosure rule too: no filesystem path appears, which is what
+    /// separates a publishable reason from an unpublishable one on an anonymous route.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Not_ready_body_names_the_storage_reason_and_its_remedy()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+
+        // A real, openable, EMPTY database: reachable engine, unprovisioned schema.
+        SqliteConnectionStringBuilder builder = new()
+        {
+            DataSource = Path.Combine(directory.Path, "test.db"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false,
+        };
+
+        await using (SqliteConnection seed = new(builder.ConnectionString))
+        {
+            await seed.OpenAsync(TestContext.Current.CancellationToken);
+        }
+
+        await using PersistenceHost host = PersistenceHost.Create(dataDirectory: directory.Path);
+        using HttpClient client = host.CreateClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            HealthPath,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        using JsonDocument document = JsonDocument.Parse(body);
+
+        string detail = document.RootElement.GetProperty("detail").GetString() ?? string.Empty;
+
+        Assert.Contains("sqlite", detail, StringComparison.Ordinal);
+        Assert.Contains("COMPANY", detail, StringComparison.Ordinal);
+        Assert.Contains("dotnet ef database update", detail, StringComparison.Ordinal);
+
+        // The check entry carries the same reason, so a consumer reading the checks array rather than the
+        // prose gets it too.
+        Assert.Contains("COMPANY", body, StringComparison.Ordinal);
+
+        // AND STILL NO PATH. The reason is publishable BECAUSE it is a vetted constant; the directory this
+        // deployment mounts is not, and asserting its absence is what keeps the two apart.
+        Assert.DoesNotContain(directory.Path, body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A description this codebase did not author is NOT echoed, whatever supplied it.
+    /// </summary>
+    /// <remarks>
+    /// The other half of the same change, and the half that keeps it safe. The projection echoes a check's
+    /// description only when it is exact-matched against the two checks' published sets, so a substituted
+    /// check - or a future registration reusing the name, or a description built from an exception - falls
+    /// back to this file's binary prose. The stub reports the description <c>substituted</c>, which is in
+    /// neither set.
+    /// </remarks>
+    [Fact]
+    public async Task An_unvetted_check_description_is_not_published()
+    {
+        await using PersistenceHost host = PersistenceHost.Create(
+            storage: StubHealthCheck.Reporting(HealthStatus.Unhealthy));
+        using HttpClient client = host.CreateClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            HealthPath,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain("substituted", body, StringComparison.Ordinal);
+        Assert.Contains(
+            "The storage engine did not answer a read-only reachability probe.",
+            body,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A component check that throws is reported as not ready rather than surfacing as a server fault.
     /// </summary>
     /// <remarks>
@@ -777,12 +872,32 @@ public sealed class HealthEndpointsTests
     /// anonymous. That half is asserted by the unusable-location case above.
     /// </para>
     /// <para>
-    /// THE RUNTIME OPEN throws, immediately, WITH THE CONFIGURED PATH IN ITS MESSAGE - because the caller
-    /// is the startup sequence, the fault is structural, and an operator cannot fix a mount they are not
-    /// told about. Fail-fast is the ported posture and softening it into a warning-and-continue would be
+    /// THE RUNTIME OPEN throws, immediately - because the caller is the startup sequence and the fault is
+    /// structural. Fail-fast is the ported posture and softening it into a warning-and-continue would be
     /// a behavioural change dressed as robustness (AAP 0.1.4). This half is what this case pins, and it is
     /// the assertion that would fail if a future change routed the runtime open through the read-only
     /// probe to make a test go green.
+    /// </para>
+    /// <para>
+    /// <b>⚠ WHAT THIS CASE USED TO ASSERT, AND WHY IT NO LONGER DOES.</b> It required the CONFIGURED PATH
+    /// to appear in the thrown message, on the reasoning that an operator cannot fix a mount they are not
+    /// told about. The rest of this estate had already settled that question the other way, and this
+    /// service was internally inconsistent with itself: <c>Program.cs</c>'s internal-trust anchor states
+    /// that "the path is not reproduced here, because a startup record must not publish a container's
+    /// secret mount layout ... the message names the configuration key instead - the same rule
+    /// Configuration/PersistenceOptions.cs applies to its own validation messages", and both sibling
+    /// services say the same of their own mounted paths. Measured on a running host, the old form put the
+    /// path into the startup output FOUR times - the message once and the ATTACHED file-system exception's
+    /// own message the rest - and named the configuration key ZERO times, so the operator was handed the
+    /// value they already knew and not the setting to change. The terminal record simultaneously appended
+    /// "Configured values are deliberately not quoted", which was false in the one record that said it.
+    /// </para>
+    /// <para>
+    /// So the disclosure half of this case is inverted and the FAIL-FAST half is unchanged and
+    /// strengthened: the open still throws, still creates nothing, and now names the key while withholding
+    /// the path. The operator's need is met by the key plus an established failure class - a file occupies
+    /// the path, the parent is missing, the directory is unwritable, or its creation was refused - which is
+    /// more actionable than the single "not writable" sentence the old form emitted for all four.
     /// </para>
     /// </remarks>
     [Fact]
@@ -803,10 +918,51 @@ public sealed class HealthEndpointsTests
         InvalidOperationException fault = await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await storage.OpenAsync(TestContext.Current.CancellationToken));
 
-        // The path IS in the startup diagnostic, deliberately: this channel is the crash log, not an
-        // anonymous response, and the whole point of the message is to name the mount to repair.
-        Assert.Contains(unusable, fault.Message, StringComparison.Ordinal);
-        Assert.Contains("persistence-db", fault.Message, StringComparison.Ordinal);
+        // THE KEY IS NAMED, so the record identifies the setting to change.
+        Assert.Contains(
+            DataDirectoryFault.ConfigurationKey,
+            fault.Message,
+            StringComparison.Ordinal);
+
+        // THE ESTABLISHED FAILURE CLASS IS STATED. A file stands where the parent directory should be, so
+        // the record must say that rather than "not writable" - which would send an operator to check
+        // permissions on a path whose problem is not permissions.
+        Assert.Contains("CONTAINING DIRECTORY", fault.Message, StringComparison.Ordinal);
+
+        // THE CAUSE IS NAMED BY TYPE, so a log pipeline can still group by it. The TYPE NAME ITSELF IS NOT
+        // SPELLED HERE, deliberately: which file-system exception a rooted-path-into-a-file produces is a
+        // platform detail - an earlier form of this row asserted `IOException` and failed against the
+        // derived type this runtime actually raises - and pinning it would make the row about the runtime
+        // rather than about the record. What matters is that SOME type is named and that it is not the
+        // absent-cause placeholder.
+        const string causePreamble = "The file system reported ";
+
+        int causeAt = fault.Message.IndexOf(causePreamble, StringComparison.Ordinal);
+
+        Assert.True(causeAt >= 0, "The record does not name the reported cause at all.");
+
+        string named = fault.Message[(causeAt + causePreamble.Length)..];
+        named = named[..named.IndexOf('.', StringComparison.Ordinal)];
+
+        Assert.EndsWith("Exception", named, StringComparison.Ordinal);
+        Assert.NotEqual("no exception", named);
+
+        // AND THE PATH IS WITHHELD - message and inner exception alike. Asserted as booleans rather than
+        // with Assert.DoesNotContain, because that overload renders both operands and would print the
+        // mount layout at exactly the moment the defect it guards against was present.
+        Assert.False(
+            fault.Message.Contains(unusable, StringComparison.Ordinal),
+            "The thrown message reproduces the configured storage path.");
+        Assert.False(
+            fault.Message.Contains(blocker, StringComparison.Ordinal),
+            "The thrown message reproduces the blocking path.");
+        Assert.False(
+            fault.Message.Contains(directory.Path, StringComparison.Ordinal),
+            "The thrown message reproduces the configured storage directory.");
+
+        // The inner exception is deliberately NOT chained: a file-system exception quotes the path in its
+        // own Message, so chaining one would republish exactly what the sentence withholds.
+        Assert.Null(fault.InnerException);
 
         // And it still created nothing on the way to failing.
         Assert.True(File.Exists(blocker));
@@ -848,8 +1004,12 @@ public sealed class HealthEndpointsTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        // THE REMEDY IS NAMED HERE TOO, because the commonest way to reach this arm is a database file
+        // that does not exist yet: the probe opens READ-ONLY by design and so cannot create it, which is
+        // why an unprovisioned deployment reports unreachable rather than schema-incomplete.
         Assert.Equal(
-            "The storage engine did not answer a read-only reachability probe.",
+            "The storage engine did not answer a read-only reachability probe. The database file may not "
+                + "exist yet: provision it with `dotnet ef database update`.",
             result.Description);
         Assert.Null(result.Exception);
         Assert.Empty(result.Data);
@@ -1497,9 +1657,13 @@ public sealed class HealthEndpointsTests
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Equal(StorageReadiness.SchemaIncomplete, storage.LastReadiness);
 
-        // A DISTINCT description, so an operator is not sent to check a mount that is already correct.
+        // A DISTINCT description, so an operator is not sent to check a mount that is already correct -
+        // and an ACTIONABLE one: it names the missing table and the command that provisions it. Both are
+        // constants of this codebase, not configured values, so publishing them on the anonymous route
+        // discloses nothing while withholding them left the response with no remedy in it at all.
         Assert.Equal(
-            "The storage engine answered but the required schema is not provisioned.",
+            "The storage engine answered but the required COMPANY schema is not provisioned. Apply the "
+            + "migrations with `dotnet ef database update`.",
             result.Description);
 
         // The seam's in-process diagnostic DOES name the table it looked for, which is a constant of this

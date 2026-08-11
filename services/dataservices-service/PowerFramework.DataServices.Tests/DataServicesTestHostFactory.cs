@@ -603,6 +603,19 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     public static string ConfiguredAuthority => UnreachableAuthority;
 
     /// <summary>
+    /// The issuance secret every host this factory boots is configured with.
+    /// </summary>
+    /// <remarks>
+    /// PUBLISHED FOR EXACTLY ONE PURPOSE, WHICH IS TO ASSERT ITS ABSENCE. The constant's own remarks say
+    /// no test asserts against its value, and that remains true of its CONTENT: what
+    /// <c>IssuanceCredentialStartupRecordTests</c> needs it for is the C-F assertion that no startup
+    /// record carries it. An assertion of that kind cannot be written against a value the suite cannot
+    /// name, and the alternative - searching records for anything base64-shaped - would be a weaker claim
+    /// that a passing run could not distinguish from a leak of a differently-shaped secret.
+    /// </remarks>
+    internal static string ConfiguredIssuanceSecret => IssuanceSecret;
+
+    /// <summary>
     /// Extra host configuration applied ON TOP of the deployed settings files, keyed by configuration
     /// path.
     /// </summary>

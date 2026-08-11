@@ -13,6 +13,14 @@
 //    2. THE THREE HOST-BINDING SEAMS. All three returned null, which made eight C-03 operations and the
 //       whole of C-04 unreachable. AAP 0.2.1.3 Correction 3 and AAP 0.3.5 both require a bound headless
 //       host in DataServices, so the refusal was an AAP-compliance failure rather than a documented gap.
+//    3. THE HOST'S OWN DESCRIBE SURFACE, EXERCISED THROUGH THE ENGINE THAT READS IT. A bound host is not
+//       the same as a USABLE one: once the seams above were provisioned, the whole of C-04 still refused
+//       every bind, because two properties the ported engine reads off the host - a column's ordinal and
+//       the positional `#n` address - were the only two the Describe surface did not answer. Every
+//       C-04 case in this suite passed throughout, because each supplies its own host double which does
+//       answer them. That is the shape this section exists to make impossible: a test double that is more
+//       capable than the shipped host cannot catch a shipped host that is less capable than the engine
+//       needs, so the cases below drive the REAL HeadlessDataWindowHost and nothing else.
 //
 //  WHAT IS NOT ASSERTED HERE, AND WHY. No case opens a socket or completes a TLS handshake. Proving that
 //  a client certificate is presented on the wire needs a listener that requests one, which is an
@@ -40,6 +48,12 @@ using Xunit;
 // ambiguous (CS0104). Every other file in this suite names the contract types it needs the same way.
 using EventNotification = PowerFramework.Contracts.DataServices.V1.EventNotification;
 using WireEventResult = PowerFramework.Contracts.DataServices.V1.EventResult;
+
+// THE KERNEL RETURN ALGEBRA, named explicitly for the same reason: PowerFramework.Contracts.Common.V1
+// publishes a generated message ALSO called RetCode, so the bare name is ambiguous in this file. The
+// alias keeps the ported member-access spelling - RetCode.OK, RetCode.E_INVALID_ARGUMENT - which is what
+// the oracle's own `retcode.OK` reads as (AAP 0.4.5.3).
+using RetCode = PowerFramework.Shared.Kernel.RetCode;
 
 namespace PowerFramework.DataServices.Tests;
 
@@ -419,6 +433,215 @@ public sealed class DataWindowCompositionTests
 
         // A malformed expression with no separator at all.
         Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("nodot"));
+    }
+
+    /// <summary>
+    /// Describe answers a column's ONE-BASED ordinal for the <c>ID</c> property.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS ONE PROPERTY IS THE GATE ON THE WHOLE OF C-04.</b> Binding an expression begins by
+    /// resolving the target column's ordinal exactly this way -
+    /// <c>Long(#DataWindow.Describe(colname + ".ID"))</c>
+    /// [<c>n_cst_dwsvc_columnexp.sru:L1541-L1542</c>] - and the oracle reads a zero there as "no such
+    /// column" and refuses the bind. While the property went unanswered, Describe returned the
+    /// invalid-expression sentinel, <c>Long</c> of that is zero, and so EVERY bind against the shipped
+    /// host answered <c>E_INVALID_ARGUMENT</c>: the expansion engine, the calculation chain, macro
+    /// invocation and the trace were all unreachable in the deployed service while every C-04 case in
+    /// this suite passed against a double that answered the property.
+    /// </para>
+    /// <para>
+    /// THE ORDINAL COUNTS COLUMNS ONLY. This definition declares six header text objects BEFORE its first
+    /// column [<c>dw_sqlite.srd:L15-L20</c>], and they consume no column number - so <c>id</c> is 1 rather
+    /// than 7. A non-column answers <c>"0"</c> rather than the sentinel, because the ported readers do
+    /// arithmetic on the value; an object the definition does not declare at all still answers the
+    /// sentinel, so "no column number" and "no such object" stay distinguishable.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void DescribeAnswersTheColumnOrdinalForTheIdPropertyWhichIsWhatEveryBindReads()
+    {
+        DataWindowServiceHost host = new HeadlessDataWindowHostFactory(new DataWindowCatalogue())
+            .Create(DataWindowCatalogue.SqliteFixtureName)!;
+
+        // dw_sqlite.srd:L21-L26 - the six columns in declaration order, and nothing else is numbered.
+        Assert.Equal("1", host.Describe("id.ID"));
+        Assert.Equal("2", host.Describe("name.ID"));
+        Assert.Equal("3", host.Describe("age.ID"));
+        Assert.Equal("4", host.Describe("address.ID"));
+        Assert.Equal("5", host.Describe("salary.ID"));
+        Assert.Equal("6", host.Describe("birth.ID"));
+
+        // PowerBuilder's property names are case insensitive, and the ported readers spell this one both
+        // ways - ".ID" at n_cst_dwsvc_columnexp.sru:L1541 against ".id" elsewhere in the estate.
+        Assert.Equal("5", host.Describe("salary.id"));
+        Assert.Equal("5", host.Describe("SALARY.Id"));
+
+        // A DECLARED NON-COLUMN: zero, which is what dwo.ID already answers for the same object.
+        Assert.Equal("0", host.Describe("salary_t.ID"));
+        Assert.Equal("0", host.Describe("compute_1.ID"));
+
+        // AN UNDECLARED OBJECT: still the sentinel, so absence has not been collapsed into "no ordinal".
+        Assert.Equal(
+            HeadlessDataWindowHost.InvalidExpressionSentinel,
+            host.Describe("no_such_object.ID"));
+
+        // ⚠ THE REGRESSION GUARD. Long("!") is zero and zero is the oracle's own "no such column", so a
+        // host that answered the sentinel here would refuse every bind while looking perfectly healthy.
+        Assert.NotEqual(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("salary.ID"));
+    }
+
+    /// <summary>
+    /// The positional <c>#n</c> form addresses exactly the column its declared name does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE <c>#n</c> FORM IS THE ONLY WAY THE PORTED SERVICE LAYER ADDRESSES A COLUMN BY ORDINAL.</b>
+    /// <c>_of_getdwobject(readonly long colnum)</c> is one line composing <c>"#" + String(colNum)</c> and
+    /// handing it to the by-name resolver [<c>n_cst_dwsvc.sru:L97</c>]; the same convention reappears as
+    /// <c>"#" + String(colNum) + ".Name"</c> [<c>:L666</c>] and across the estate's query task, which reads
+    /// <c>#n.Name</c>, <c>#n.DDDW.Name</c> and <c>#n.DDDW.AutoRetrieve</c>
+    /// [<c>n_cst_thread_task_sqlquery.sru:L117-L119</c>]. A host that answered only declared names reported
+    /// "no such object" for every ordinal-addressed lookup while the name-addressed lookup for the SAME
+    /// column succeeded, so the failure appeared only on the paths that count columns rather than name them.
+    /// </para>
+    /// <para>
+    /// THE ORDINAL IS ONE-BASED AND IS NEVER REBASED (hazard R9), and a value outside <c>1..count</c>
+    /// resolves to nothing rather than clamping. Only digits parse, so the three shapes a careless
+    /// composition produces - a thousands separator, a sign, a decimal point - all resolve to nothing
+    /// rather than to a column.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void PositionalOrdinalAddressingResolvesTheSameObjectAsItsDeclaredName()
+    {
+        DataWindowServiceHost host = new HeadlessDataWindowHostFactory(new DataWindowCatalogue())
+            .Create(DataWindowCatalogue.SqliteFixtureName)!;
+
+        // n_cst_dwsvc.sru:L666 - the exact expression the ported reader composes.
+        Assert.Equal("id", host.Describe("#1.Name"));
+        Assert.Equal("name", host.Describe("#2.Name"));
+        Assert.Equal("salary", host.Describe("#5.Name"));
+        Assert.Equal("birth", host.Describe("#6.Name"));
+
+        // The positional address and the declared name are the SAME object, property for property.
+        Assert.Equal(host.Describe("salary.coltype"), host.Describe("#5.coltype"));
+        Assert.Equal(host.Describe("salary.dbname"), host.Describe("#5.dbname"));
+        Assert.Equal("5", host.Describe("#5.ID"));
+
+        // n_cst_dwsvc.sru:L97 - _of_getdwobject(5) composes "#5" and resolves it through this surface.
+        IDataWindowObject positional = host.GetObjectAttribute("#5");
+
+        Assert.Equal("salary", positional.Name);
+        Assert.Equal(5L, positional.ID);
+        Assert.Equal("decimal(2)", positional.ColType);
+
+        // OUT OF RANGE RESOLVES TO NOTHING. Zero addresses the ROW rather than a column, and seven is past
+        // the last one - neither clamps to a real column, which is what would make an off-by-one silent.
+        Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("#0.Name"));
+        Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("#7.Name"));
+        Assert.Equal(
+            HeadlessDataWindowHost.InvalidExpressionSentinel,
+            host.GetObjectAttribute("#7").ColType);
+
+        // MALFORMED FORMS RESOLVE TO NOTHING RATHER THAN TO COLUMN ONE.
+        Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("#.Name"));
+        Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("#+1.Name"));
+        Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("#1,234.Name"));
+        Assert.Equal(HeadlessDataWindowHost.InvalidExpressionSentinel, host.Describe("#abc.Name"));
+
+        // A DECLARED NAME WINS OVER THE POSITIONAL READING OF THE SAME TEXT, which is PowerBuilder's own
+        // precedence and is why the form is resolved as a NAME COMPOSITION rather than as a number.
+        DataWindowDefinition collides = new("d_collides");
+        _ = collides.AddColumn("first", "long");
+        _ = collides.AddColumn("#1", "char(10)");
+
+        DataWindowCatalogue catalogue = new();
+        catalogue.Register(collides);
+
+        DataWindowServiceHost colliding = new HeadlessDataWindowHostFactory(catalogue)
+            .Create("d_collides")!;
+
+        // "#1" is the SECOND column here, because the definition declares an object actually called that.
+        Assert.Equal("char(10)", colliding.Describe("#1.coltype"));
+        Assert.Equal("2", colliding.Describe("#1.ID"));
+    }
+
+    /// <summary>
+    /// The expression engine binds, expands and calculates over the SHIPPED host rather than a double.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE CASE THAT WOULD HAVE CAUGHT THE LIVE-COMPOSITION GAP.</b> Every other C-04 case in
+    /// this project supplies its own host double, and a double that answers more properties than the
+    /// shipped host cannot detect a shipped host that answers fewer than the engine reads. So this case
+    /// deliberately uses no double at all: the host is the one the composition root registers, over the
+    /// catalogue definition the service actually serves, and the two golden expansion semantics of AAP
+    /// 0.1.3 G4 are re-asserted through it.
+    /// </para>
+    /// <para>
+    /// NO SYNTAX MUTATOR IS SUPPLIED, AND THAT IS THE DEPLOYED SHAPE. Syntax mutation belongs to the
+    /// presentational half of the DataWindow that Phase 1 does not ship (C-D), so the compute-object cache
+    /// is unavailable and calculation takes its documented uncached path
+    /// [<c>ColumnExpressionEngine.ModifySyntax</c>] - a degradation rather than a failure. Asserting the
+    /// calculated value here proves that path end to end.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheExpressionEngineBindsAndCalculatesOverTheShippedHostAndNotOnlyOverADouble()
+    {
+        DataWindowServiceHost host = new HeadlessDataWindowHostFactory(new DataWindowCatalogue())
+            .Create(DataWindowCatalogue.SqliteFixtureName)!;
+
+        HeadlessDataWindowHost rows = Assert.IsType<HeadlessDataWindowHost>(host);
+        _ = rows.AppendRow(DwBuffer.Primary, ItemStatus.NotModified, 1L, "Ada", 36L, "London", 1m);
+
+        ColumnExpressionEngine engine = new();
+        engine.OnInit(host);
+        engine.SetEnabled(true);
+
+        Assert.Equal(RetCode.OK, engine.AddVar("v", 5L));
+
+        // ⚠ A POSITIVE INDEX IS THE ASSERTION. of_addexp answers an INDEX on success and a negative
+        // RetCode on failure [:L1581], and the deployed service answered -3 (E_INVALID_ARGUMENT) here for
+        // every column because the ".ID" probe above could not resolve.
+        int staticIndex = engine.AddExp("salary", "$v + 3");
+        Assert.True(staticIndex > 0, "of_addexp answered " + staticIndex + " rather than an index.");
+
+        int dynamicIndex = engine.AddExp("age", "$$v + 3");
+        Assert.True(dynamicIndex > 0, "of_addexp answered " + dynamicIndex + " rather than an index.");
+
+        // The two indices are DISTINCT, because a column may carry several expressions and each append
+        // takes the next slot.
+        Assert.NotEqual(staticIndex, dynamicIndex);
+
+        // THE STATIC REFERENCE IS GONE FROM THE STORED TEXT, replaced by its bind-time value - which is
+        // the mechanism docs/n_cst_dwsvc_columnexp.md's static-expansion section describes.
+        Assert.Equal("(5) + 3", engine.GetExp(staticIndex));
+        Assert.DoesNotContain("$", engine.GetExp(staticIndex), StringComparison.Ordinal);
+
+        // THE DYNAMIC REFERENCE SURVIVES AS A REFERENCE, so a later assignment can still reach it.
+        Assert.Contains("$$v", engine.GetExp(dynamicIndex), StringComparison.Ordinal);
+
+        // The uncached calculation path runs over the shipped host and writes both columns.
+        Assert.Equal(RetCode.OK, await engine.CalcAsync(1L, TestContext.Current.CancellationToken));
+
+        Assert.Equal(8m, rows.GetItemDecimal(1L, "salary"));
+        Assert.Equal(8m, rows.GetItemDecimal(1L, "age"));
+
+        // Assigning the variable moves the DYNAMIC answer and leaves the STATIC one fixed - the two
+        // golden semantics, re-asserted against the shipped host.
+        Assert.Equal(
+            RetCode.OK,
+            await engine.SetVarAsync("v", 10L, true, TestContext.Current.CancellationToken));
+
+        Assert.Equal(8m, rows.GetItemDecimal(1L, "salary"));
+        Assert.Equal(13m, rows.GetItemDecimal(1L, "age"));
+
+        // An unbindable column is still refused, so the fix widened nothing: a name no column carries
+        // resolves to no ordinal and the bind takes the oracle's own refusal arm.
+        Assert.Equal((int)RetCode.E_INVALID_ARGUMENT, engine.AddExp("no_such_column", "$v"));
+        Assert.Equal((int)RetCode.E_INVALID_ARGUMENT, engine.AddExp("salary_t", "$v"));
     }
 
     /// <summary>

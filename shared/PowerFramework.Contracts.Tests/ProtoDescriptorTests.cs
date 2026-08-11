@@ -910,7 +910,12 @@ public sealed class ProtoDescriptorTests
     /// </remarks>
     private static string? LocateProtoFile(string protoFileName)
     {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        // STARTS AT THE EMBEDDED REPOSITORY ROOT WHEN THE BUILD SUPPLIED ONE, so this locator works when
+        // the test output sits outside the checkout - `dotnet test --artifacts-path` - where no ancestor
+        // of the output directory carries the marker below. The walk itself is unchanged and still
+        // verifies that marker, so an absent or stale value simply falls back to the previous start.
+        // See TestRepositoryRoot.
+        var directory = new DirectoryInfo(TestRepositoryRoot.SearchStart);
 
         while (directory is not null)
         {

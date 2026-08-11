@@ -1468,6 +1468,16 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// <summary>An issuer the host is not configured to trust.</summary>
     private const string ForeignIssuer = "https://issuer.not-security.invalid";
 
+    /// <summary>The lifetime tolerance the composition root assigns on this boundary.</summary>
+    /// <remarks>
+    /// SPELLED HERE, ASSERTED AGAINST THE LIVE OPTIONS. The value is a compile-time constant in
+    /// <c>Program.cs</c> rather than a setting, so there is no configuration source for a test to read it
+    /// back from; restating it is the only way to pin it, and pinning it is the point - the three
+    /// verifying boundaries must agree with each other, and an unpinned constant can be widened in one of
+    /// them without any suite noticing. See docs/ARCHITECTURE.md 9.5 for all four boundaries in one table.
+    /// </remarks>
+    private static readonly TimeSpan GatewayLifetimeTolerance = TimeSpan.FromSeconds(30);
+
     /// <summary>The header name a credential is presented in.</summary>
     private const string AuthorizationHeader = "Authorization";
 
@@ -2873,6 +2883,99 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         Assert.True(options.TokenValidationParameters.ValidateAudience);
         Assert.True(options.TokenValidationParameters.ValidateLifetime);
         Assert.True(options.TokenValidationParameters.ValidateIssuerSigningKey);
+
+        // AND THE TOLERANCE BESIDE THE LIFETIME CHECK, because the line above is only as tight as this
+        // one. The dedicated row below owns the reasoning; it is restated here so that the "every
+        // validation enabled" claim this test makes cannot be true while the lifetime bound it names is
+        // five times looser than it reads.
+        Assert.Equal(GatewayLifetimeTolerance, options.TokenValidationParameters.ClockSkew);
+    }
+
+    /// <summary>
+    /// The lifetime tolerance is explicit, bounded, and not the library's five-minute default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SAYING NOTHING WAS NOT THE SAME AS ALLOWING NOTHING, AND THIS BOUNDARY WAS THE WORST PLACE FOR
+    /// THAT. The composition root once left <see cref="TokenValidationParameters.ClockSkew"/> unassigned,
+    /// which does not mean no tolerance - it means the handler's default of FIVE MINUTES. Security issues
+    /// with a five-minute lifetime, so a token accepted here remained usable for twice as long as it
+    /// claims to be, and the <c>ValidateLifetime = true</c> asserted above was enforcing a bound five
+    /// times looser than it reads.
+    /// </para>
+    /// <para>
+    /// THE INCONSISTENCY MATTERED MORE THAN THE VALUE. Four boundaries validate one issuer's tokens, and
+    /// they disagreed: Security refused an expired token the instant it lapsed, DataServices allowed
+    /// thirty seconds, and Gateway and Persistence inherited five minutes by omission. Gateway is the
+    /// SOLE INGRESS, so the loosest tolerance in the system sat on the one edge facing the untrusted
+    /// network and admitted credentials Security itself would have refused - then forwarded them inward.
+    /// </para>
+    /// <para>
+    /// THE PREMISE IS ASSERTED RATHER THAN RECITED. The row measures the library default on a fresh
+    /// parameters instance instead of asserting "five minutes" as folklore, so if a future runtime
+    /// changed that default this row would report the change rather than silently rest on a stale claim.
+    /// The upper bound is asserted too: a future edit that widened the tolerance towards the token
+    /// lifetime would pass an equality-only assertion after someone updated the constant, whereas the
+    /// bound states the RULE - a tolerance approaching the lifetime is expiry checking switched off under
+    /// another name.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheLifetimeToleranceIsBoundedAndIsNotTheLibraryDefault()
+    {
+        JwtBearerOptions options = host.Services
+            .GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(JwtBearerDefaults.AuthenticationScheme);
+
+        TimeSpan configured = options.TokenValidationParameters.ClockSkew;
+
+        Assert.Equal(GatewayLifetimeTolerance, configured);
+
+        // The default this assignment exists to displace, measured rather than recited.
+        TimeSpan libraryDefault = new TokenValidationParameters().ClockSkew;
+
+        Assert.Equal(TimeSpan.FromMinutes(5), libraryDefault);
+        Assert.NotEqual(libraryDefault, configured);
+        Assert.True(
+            configured < libraryDefault,
+            "The ingress tolerance is not tighter than the library default it was assigned to displace.");
+
+        // Bounded on BOTH sides. Zero would be wrong here - unlike Security, this boundary validates
+        // tokens minted on a DIFFERENT container's clock - and anything approaching the token lifetime
+        // would make the expiry check ceremonial.
+        Assert.True(configured > TimeSpan.Zero, "The ingress allows no clock drift at all.");
+        Assert.True(
+            configured <= TimeSpan.FromMinutes(1),
+            "The ingress lifetime tolerance has been widened beyond one minute.");
+    }
+
+    /// <summary>
+    /// No configuration key can move the lifetime tolerance.
+    /// </summary>
+    /// <remarks>
+    /// A CONFIGURABLE TOLERANCE IS LIFETIME VALIDATION SWITCHED OFF UNDER ANOTHER NAME, because nothing
+    /// would stop a deployment setting it past the token lifetime - at which point the expiry check does
+    /// not expire. The invariant is the same one the four validation switches carry, and it is asserted
+    /// the same way: for a tolerance the safe form is ABSENCE from the bound options, since a numeric
+    /// setting has no "refuse the unsafe value" arm that a boolean's <c>false</c> gives. The verification
+    /// options type is scanned rather than one property name, so a member arriving under any spelling
+    /// trips this row.
+    /// </remarks>
+    [Fact]
+    public void NoConfiguredValueCanMoveTheLifetimeTolerance()
+    {
+        foreach (System.Reflection.PropertyInfo property in
+            typeof(JwtBearerVerificationOptions).GetProperties())
+        {
+            Assert.False(
+                property.PropertyType == typeof(TimeSpan)
+                    || property.PropertyType == typeof(TimeSpan?)
+                    || property.Name.Contains("Skew", StringComparison.OrdinalIgnoreCase)
+                    || property.Name.Contains("Tolerance", StringComparison.OrdinalIgnoreCase),
+                $"{nameof(JwtBearerVerificationOptions)}.{property.Name} looks like a configurable "
+                    + "lifetime tolerance. The skew is compiled in at Program.cs precisely so no "
+                    + "deployment can widen it past the token lifetime.");
+        }
     }
 
     /// <summary>

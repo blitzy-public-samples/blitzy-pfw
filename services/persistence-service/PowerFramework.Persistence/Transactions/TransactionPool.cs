@@ -1460,6 +1460,41 @@ internal interface IPooledTransaction : IDisposable
     long SetBroken();
 
     /// <summary>
+    /// Whether this transaction has been destroyed and can no longer be operated on.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> once the object has been disposed; <see langword="false"/> while it is
+    /// usable.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// <b>THE MANAGED ANALOGUE OF A <c>DESTROY</c>ED POWERBUILDER OBJECT, AND THE REASON IT HAS TO BE
+    /// ASKABLE.</b> The pool destroys a BROKEN entry's transaction and creates a replacement
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L164-L172</c>], which is faithful
+    /// - but a session or a task may still be HOLDING the destroyed one. The legacy's guard for exactly
+    /// that condition is <c>IsValidObject</c>, and PowerScript's <c>IsValidObject</c> DOES report false for
+    /// a destroyed object. Its managed counterpart is a null test, which cannot: a disposed object is still
+    /// a live reference. So every guard ported from an <c>IsValidObject</c> call over a pooled transaction
+    /// loses half of what the original detected unless it also asks this.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE CONSEQUENCE WAS SEVERE RATHER THAN COSMETIC.</b> Without it, an operation on a
+    /// held-but-destroyed transaction threw <see cref="ObjectDisposedException"/> out of the whole service,
+    /// which a caller received as an unhandled fault with no framework code at all - and when the throwing
+    /// operation was the session teardown, the session, its pool reference and its connection leaked
+    /// because the teardown never reached its release.
+    /// </para>
+    /// <para>
+    /// <b>DEFAULTED TO <see langword="false"/> DELIBERATELY.</b> An implementation that does not track
+    /// disposal - every test double, and any future implementation whose lifetime is owned elsewhere -
+    /// reports itself usable, which is the truthful answer for an object that is never destroyed. The
+    /// default keeps the member from being ceremony on seventeen collaborators that have nothing to say
+    /// about it.
+    /// </para>
+    /// </remarks>
+    bool IsDestroyed => false;
+
+    /// <summary>
     /// Clears the five SQL-state values. [<c>:L363-L368</c>]
     /// </summary>
     /// <remarks>
@@ -2004,9 +2039,35 @@ internal sealed class PooledTransaction : IPooledTransaction
             return RetCode.E_INVALID_TRANSACTION;
         }
 
+        // ==========================================================================================
+        //  THE LAST STATEMENT'S ROW COUNT SURVIVES THE COMMIT, AND IT MUST
+        //  ------------------------------------------------------------------------------------------
+        //  `SQLNRows` means "rows affected by the last SQL OPERATION", and a COMMIT affects no rows -
+        //  so it has no row count of its own to publish. The engine's commit answers a fresh state
+        //  whose count is zero (SqlState.Succeeded defaults it), and assigning that state wholesale
+        //  ERASED the count the caller's own INSERT, UPDATE or DELETE had just reported. The effect was
+        //  narrow and severe: under AC_ON - the mode the command task's own epilogue uses, `of_Commit(true)`
+        //  [n_cst_thread_task_sqlcommand.sru:L99] - every ExecResponse.sql_nrows came back 0 while the
+        //  identical statement under AC_OFF reported correctly, so a caller branching on rows-affected
+        //  concluded nothing had changed for a write that was durable on disk.
+        //
+        //  THIS IS THE LEGACY READING, NOT A CONVENIENCE. The oracle's C-07 accessor is the SQLite
+        //  binding's own SQLNRows() [ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru:L26], a separate
+        //  call from its Commit() [:L23-L25], and the underlying change counter is not reset by a commit.
+        //  Nothing in the oracle zeroes the count on the way through a commit, so nothing here may either.
+        //
+        //  CARRIED ON THE FAILING ARM TOO. A commit that fails still affected no rows, so the previous
+        //  statement's count remains the truth about the last statement; the arm below reports the failure
+        //  through SqlCode, which is the member that carries the outcome.
+        //
+        //  THE LIVENESS PROBE IS UNAFFECTED. It judges `bConnected = (SQLNRows > 0)` [:L207] on the state
+        //  ITS OWN probe statement leaves behind, which is a state this method never produces.
+        // ==========================================================================================
+        long rowsBeforeCommit = _state.SqlNRows;
+
         // [:L243-L247]
         _hooks.OnBeforeCommit();
-        _state = _engine.Commit();
+        _state = _engine.Commit() with { SqlNRows = rowsBeforeCommit };
         _hooks.OnAfterCommit();
 
         // [:L249-L254]
@@ -2312,6 +2373,13 @@ internal sealed class PooledTransaction : IPooledTransaction
         _broken = true;
         return RetCode.OK;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The one member that must answer AFTER disposal, so it carries no disposal guard of its own - a
+    /// guard here would throw the very exception the member exists to let callers avoid.
+    /// </remarks>
+    public bool IsDestroyed => _disposed;
 
     /// <inheritdoc/>
     /// <remarks>
@@ -3942,7 +4010,16 @@ internal sealed class TransactionPool : IDisposable
             }
 
             // [:L121] Then the CALLER'S object, not the stored one.
-            if (!Predicates.IsValidObject(handle))
+            //
+            // ⚠ THE DESTROYED TEST IS PART OF THIS GUARD, NOT AN ADDITION TO IT. PowerScript's
+            // `IsValidObject` reports FALSE for an object that has been DESTROYed, and this pool destroys a
+            // broken entry's transaction while a caller may still be holding it [:L164-L172]. The managed
+            // `Predicates.IsValidObject` is a null test and cannot see disposal, so on its own it lets a
+            // destroyed handle through - and the disconnect and clear below then threw
+            // ObjectDisposedException out of the whole service. Asking IsDestroyed as well is what restores
+            // the HALF of the oracle's own guard that the null test cannot express; the answer is the same
+            // code the oracle answers for an invalid object.
+            if (!Predicates.IsValidObject(handle) || handle!.IsDestroyed)
             {
                 return RetCode.E_INVALID_OBJECT;
             }

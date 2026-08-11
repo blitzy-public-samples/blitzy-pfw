@@ -2417,6 +2417,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                     RetrieveChunk chunk = ProjectChunk(
                         response.DataChunk,
                         requested,
+                        request.DatawindowHandle,
                         ++chunkIndex,
                         ref cumulative);
 
@@ -2625,10 +2626,23 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// ABSENCE - never a fourth <c>DwBuffer</c> value, and never <c>Primary</c> as a stand-in, because
     /// <c>Primary</c> is a specific buffer and a consumer is entitled to believe it.
     /// </para>
+    /// <para>
+    /// <b>THE COLUMN NAME IS FILLED IN HERE, AND THIS IS THE ONLY LAYER THAT CAN.</b>
+    /// <c>common.v1.ColumnValue</c> states that both identifiers are carried and that neither is
+    /// redundant - a name survives a column reorder while an ordinal does not, and the status APIs take
+    /// the ordinal - but the upstream carrier is a faithful stand-in for the legacy's positional
+    /// <c>GetChanges</c>/<c>GetFullState</c> blob, which has ordinals and no names in it at all, so
+    /// Persistence emits the ordinal alone and leaves the name empty. The DataWindow DEFINITION is what
+    /// resolves an ordinal to a name, and this service is the layer that holds it (AAP 0.3.4's
+    /// anti-corruption edge); every row therefore reached C-03's consumers with an empty
+    /// <c>column_name</c> until the name was projected here. Persistence's codec is deliberately left
+    /// alone rather than taught about names.
+    /// </para>
     /// </remarks>
-    private static RetrieveChunk ProjectChunk(
+    private RetrieveChunk ProjectChunk(
         global::PowerFramework.Contracts.Persistence.V1.QueryDataChunk dataChunk,
         HashSet<DwBuffer> requested,
+        string dataWindowHandle,
         long chunkIndex,
         ref long cumulative)
     {
@@ -2657,6 +2671,8 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             chunk.Rows.AddRange(segment.Rows);
         }
 
+        NameColumns(chunk.Rows, dataWindowHandle);
+
         chunk.RowCount = chunk.Rows.Count;
 
         cumulative += chunk.RowCount;
@@ -2668,6 +2684,88 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         }
 
         return chunk;
+    }
+
+    /// <summary>
+    /// Fills in the column NAME beside the ordinal every relayed column value already carries.
+    /// </summary>
+    /// <param name="rows">The relayed rows, mutated in place.</param>
+    /// <param name="dataWindowHandle">The caller's own name for the DataWindow.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>ONLY AN EMPTY NAME IS WRITTEN.</b> A name the upstream did in fact supply is left exactly as it
+    /// arrived, because this method resolves an identifier rather than deciding one - and overwriting a
+    /// supplied value would make a producer that names its columns indistinguishable from one that does
+    /// not.
+    /// </para>
+    /// <para>
+    /// AN UNRESOLVABLE HANDLE, AND AN ORDINAL NO COLUMN CARRIES, BOTH LEAVE THE NAME EMPTY. The ordinal is
+    /// the authoritative identifier on this message and it is never touched here, so a row whose name could
+    /// not be resolved is still fully addressable - the same state every row was in before names were
+    /// projected at all. Inventing a name for an ordinal outside the definition would be worse than
+    /// leaving it blank: a consumer would address a column that does not exist.
+    /// </para>
+    /// <para>
+    /// THE ORIGINAL-VALUE SHADOW IS NAMED TOO. <c>updatewhere=1</c> compares originals, so a consumer
+    /// reading the shadow needs the same identifier the current value carries; naming one list and not the
+    /// other would leave the two halves of one row addressed differently.
+    /// </para>
+    /// </remarks>
+    private void NameColumns(IEnumerable<DataWindowRow> rows, string dataWindowHandle)
+    {
+        if (_models.GetOrCreate(dataWindowHandle) is not { } set)
+        {
+            return;
+        }
+
+        foreach (DataWindowRow row in rows)
+        {
+            foreach (ColumnValue column in row.Columns)
+            {
+                NameColumn(column, set.Host);
+            }
+
+            foreach (ColumnValue original in row.OriginalValues)
+            {
+                NameColumn(original, set.Host);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Resolves one column value's name from its ordinal, when it does not already carry one.
+    /// </summary>
+    /// <param name="column">The column value, mutated in place.</param>
+    /// <param name="host">The host whose definition resolves the ordinal.</param>
+    /// <remarks>
+    /// <para>
+    /// THE ORDINAL IS ONE-BASED AND ZERO IS THE ROW ITSELF (R9), so a zero ordinal resolves to no name and
+    /// is skipped rather than rebased.
+    /// </para>
+    /// <para>
+    /// THE LOOKUP IS THE ORACLE'S OWN POSITIONAL PROPERTY EXPRESSION, <c>"#" + n + ".Name"</c>
+    /// [<c>n_cst_dwsvc.sru:L666</c>], read through the host contract rather than through a member invented
+    /// for this projection - so a host that resolves columns positionally at all resolves them here too.
+    /// <c>Describe</c>'s two failure markers are both treated as "not resolved", exactly as every other
+    /// ported reader treats them.
+    /// </para>
+    /// </remarks>
+    private static void NameColumn(ColumnValue column, DataWindowServiceHost host)
+    {
+        if (column.ColumnName.Length != 0 || column.ColumnId < 1L)
+        {
+            return;
+        }
+
+        string resolved = host.Describe(
+            "#" + column.ColumnId.ToString(CultureInfo.InvariantCulture) + ".Name");
+
+        if (resolved.Length != 0
+            && !string.Equals(resolved, "!", StringComparison.Ordinal)
+            && !string.Equals(resolved, "?", StringComparison.Ordinal))
+        {
+            column.ColumnName = resolved;
+        }
     }
 
     // =================================================================================================
@@ -2728,8 +2826,46 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             });
         }
 
+        // ==========================================================================================
+        //  THE HANDLE IS RESOLVED AT OPEN TIME, NOT SEVERAL CALLS LATER.
+        //
+        //  C-03 states that "a session is scoped to one DataWindow" [dataservices.v1.proto -
+        //  OpenValidationSessionRequest.datawindow_handle], because the four state fields are instance
+        //  fields of ONE control in the legacy. A session opened against a handle nothing resolves is
+        //  therefore not a session at all - and answering it 200 meant a caller learned of its typo
+        //  only when a later column-dependent call failed, with a code describing that call rather than
+        //  the mistake. The published unknown-handle negative already exists on this service
+        //  [IDataWindowModelSetProvider.GetOrCreate - "a caller that mistyped a handle must learn
+        //  that"], so this arm reuses it rather than inventing a second answer for one condition.
+        //
+        //  A BLANK HANDLE IS STILL E_INVALID_ARGUMENT AND NOT E_INVALID_HANDLE. Supplying nothing is a
+        //  different mistake from naming something that does not exist, and the model provider refuses
+        //  a blank name for exactly that reason - so the two are separated here rather than collapsed.
+        // ==========================================================================================
+        string dataWindowHandle = request.DatawindowHandle ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(dataWindowHandle))
+        {
+            return Task.FromResult(new OpenValidationSessionResponse
+            {
+                RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
+            });
+        }
+
+        if (_models.GetOrCreate(dataWindowHandle) is null)
+        {
+            _logger?.LogWarning(
+                "A validation session was refused because no DataWindow resolves the requested handle. "
+                    + "The handle is not reproduced here, because it is caller content.");
+
+            return Task.FromResult(new OpenValidationSessionResponse
+            {
+                RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_HANDLE),
+            });
+        }
+
         ValidationSessionOpenResult opened = _sessions.Open(
-            request.DatawindowHandle ?? string.Empty,
+            dataWindowHandle,
             (uint)request.InitialDisabledEventMask);
 
         if (!opened.IsOpened || opened.Session is null)
@@ -3366,6 +3502,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         // request rather than arriving as an upstream decode failure the caller cannot act on.
         if (!TryBuildCarrierState(
                 request.Rows,
+                ResolveProcessingKind(request.DatawindowHandle),
                 out global::PowerFramework.Contracts.Persistence.V1.CarrierState? carrier)
             || carrier is null)
         {
@@ -3461,6 +3598,34 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 Task = scope.Task,
                 UpdateData = carrier,
                 UpdateRows = request.Rows.Count,
+
+                // ==================================================================================
+                //  THE TASK-LEVEL AUTOCOMMIT IS SET, AND WITHOUT IT A SUCCESSFUL UPDATE IS DISCARDED.
+                //
+                //  C-06's task autocommit is the oracle's own epilogue switch -
+                //  `if _bAutoCommit then rtCode = of_Commit(true)` [:L386-L387] - and it is NOT the
+                //  session descriptor's connection-level autocommit, which stays FALSE so the session
+                //  keeps one explicit transaction (see BuildTransactionDescriptor).
+                //
+                //  IT MUST BE SET HERE BECAUSE THE SESSION'S WHOLE LIFETIME IS THIS CALL. The work
+                //  scope opens the session, creates and prepares the task, runs the update, releases
+                //  the task and ends the session - and ending it ROLLS BACK any open transaction, which
+                //  is the correct posture for a disconnect [Data/SqliteTransactionEngine.Disconnect].
+                //  So with the switch unset, C-06 generated and executed the statements, reported the
+                //  row counts it really applied, and then the teardown threw the work away: an update
+                //  that answered `rowsUpdated: 1` while storage still held the old row. That is a
+                //  success that loses data, which is strictly worse than the refusal it replaced.
+                //  Nothing else on the published surface can commit this transaction, because C-08's
+                //  commit names a session handle that never leaves this method.
+                //
+                //  THE FAILURE ARM IS UNCHANGED AND IS WHY THIS IS SAFE. The oracle rolls back on any
+                //  non-OK outcome [:L395] and a commit that itself fails REPLACES the return code
+                //  [:L387], so a caller still learns of a failed commit rather than reading a stale
+                //  success. An optimistic-concurrency mismatch is classified before the success arm, so
+                //  it rolls back and answers Aborted exactly as before - this switch cannot turn a
+                //  conflict into a write.
+                // ==================================================================================
+                Autocommit = true,
             };
 
             upstreamResponse = await _persistence
@@ -3587,11 +3752,34 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
     private static bool TryBuildCarrierState(
         IReadOnlyList<DataWindowRow> rows,
+        long processing,
         out global::PowerFramework.Contracts.Persistence.V1.CarrierState? state)
     {
         state = null;
 
-        global::PowerFramework.Contracts.Persistence.V1.CarrierState projected = new();
+        // ==========================================================================================
+        //  THE PROCESSING KIND TRAVELS WITH THE ROWS, AND OMITTING IT REFUSED EVERY REAL UPDATE.
+        //
+        //  `persistence.v1.CarrierState.processing` is RECONCILED rather than informational: the two
+        //  sides build their carriers from their own transcription of the same DataWindow, so the
+        //  receiving codec refuses a payload whose kind disagrees with its target's and adopts the
+        //  payload's kind only for a target that has none [Buffers/ChangesetCodec.cs -
+        //  TryValidateSegments]. Leaving the field at its default said "unassigned", which DISAGREES
+        //  with every definition that declares a presentation style - the primary fixture declares
+        //  processing=1 [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L3] - so the changeset was rejected
+        //  before a single statement was generated and every non-empty update answered
+        //  E_INVALID_DATA with the legacy diagnostic. Sending the kind this service's own definition
+        //  declares is what makes the two carriers comparable at all.
+        //
+        //  IT IS READ THROUGH Describe RATHER THAN FROM A PARSED FIELD, which is the oracle's own idiom
+        //  at the mirror-image site: `Long(Data.Describe("DataWindow.Processing"))`
+        //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L93]. See
+        //  ResolveProcessingKind for the coercion and for why an unresolvable handle still sends zero.
+        // ==========================================================================================
+        global::PowerFramework.Contracts.Persistence.V1.CarrierState projected = new()
+        {
+            Processing = processing,
+        };
 
         Dictionary<DwBuffer, global::PowerFramework.Contracts.Persistence.V1.CarrierBufferSegment> segments =
             new(CanonicalBufferOrder.Length);
@@ -3624,6 +3812,55 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         state = projected;
 
         return true;
+    }
+
+    /// <summary>
+    /// Reads the carrier processing kind the named DataWindow's own definition declares.
+    /// </summary>
+    /// <param name="dataWindowHandle">The caller's own name for the DataWindow.</param>
+    /// <returns>
+    /// The kind, or zero when the handle resolves to nothing. Zero is
+    /// <c>persistence.v1.CarrierState.processing</c>'s "unassigned" value rather than an invented
+    /// sentinel, and it is the value a receiving carrier with no data object of its own ADOPTS.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>READ THROUGH <c>Describe</c>, WHICH IS THE ORACLE'S OWN IDIOM AT THE MIRROR-IMAGE SITE.</b> The
+    /// legacy reads the kind off the carrier the same way when it decides which transfer style to use -
+    /// <c>Long(Data.Describe("DataWindow.Processing"))</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L93</c>] - and
+    /// <c>Long</c> answers zero for both of <c>Describe</c>'s failure markers because neither is a
+    /// number, so an unreadable property lands in the same arm as an unassigned one. That coercion is
+    /// reproduced here rather than replaced by a parse of a definition field, so this service and
+    /// Persistence read the same property by the same route.
+    /// </para>
+    /// <para>
+    /// <b>AN UNRESOLVABLE HANDLE IS NOT REFUSED HERE.</b> It sends zero and lets the operation continue to
+    /// the upstream, which refuses an update against a DataWindow it cannot resolve on its own authority
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L179-L189</c>]. Refusing at this line instead would move an
+    /// established refusal from the layer that owns the update contract into the layer that merely
+    /// projects it, and would change which code a caller receives for an unknown handle on this
+    /// operation alone.
+    /// </para>
+    /// <para>
+    /// INVARIANT PARSING, because the value is a machine-generated property string rather than user
+    /// input.
+    /// </para>
+    /// </remarks>
+    private long ResolveProcessingKind(string dataWindowHandle)
+    {
+        if (_models.GetOrCreate(dataWindowHandle) is not { } set)
+        {
+            return 0L;
+        }
+
+        return long.TryParse(
+            set.Host.Describe("DataWindow.Processing"),
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out long parsed)
+            ? parsed
+            : 0L;
     }
 
     /// <summary>

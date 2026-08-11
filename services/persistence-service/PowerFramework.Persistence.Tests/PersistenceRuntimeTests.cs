@@ -124,6 +124,188 @@ public sealed class PersistenceRuntimeTests : IDisposable
     // ==============================================================================================
 
     /// <summary>
+    /// ⚠ A CONNECT THAT CANNOT OPEN ITS EXPLICIT TRANSACTION FAILS, rather than reporting success for a
+    /// session that holds no transaction - asserted here through the ONE cause that is reachable, an
+    /// unopenable data source, because the begin itself can no longer be made to fail on purpose.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// With auto-commit OFF a caller is asking for a transaction, and the port opens an explicit one
+    /// because .NET has no implicit transaction the way PowerBuilder does - there the transaction follows
+    /// CONNECT and cannot fail separately, so there is no oracle arm for this and the nearest legacy
+    /// behaviour is a CONNECT that left a non-zero status, which is <c>E_DB_ERROR</c>
+    /// [<c>n_cst_thread_trans.sru:L129-L133</c>].
+    /// </para>
+    /// <para>
+    /// Previously the begin failure was only LOGGED and the connect answered success, so
+    /// <c>BeginSession</c> handed back a session whose first commit refused for a reason the caller could
+    /// not relate to its own request. Now the provider's own failure is the connect's answer, and the
+    /// connection is released rather than left half-open.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE BEGIN ARM IS DEFENCE IN DEPTH RATHER THAN A LIVE PATH.</b> The begin is DEFERRED - see
+    /// the remark on <c>TryBeginTransaction</c>, which explains that an eager <c>BEGIN IMMEDIATE</c> would
+    /// invent a lock conflict PowerBuilder's <c>CONNECT</c> never had. A deferred begin takes no lock, so
+    /// short of a closed connection or a nested transaction, both of which the method guards against, it
+    /// has nothing left to fail on: measured against the shipped provider, a held write slot fails an
+    /// immediate begin and does NOT fail a deferred one. The failure PROPAGATION is therefore asserted
+    /// here through the reachable connect failure - an unopenable data source - which exercises the same
+    /// guarantee: the fault is reported, and the engine is left CLOSED rather than half-open.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AConnectThatCannotBeEstablishedReportsTheFaultAndLeavesNoHandle()
+    {
+        // A DIRECTORY WHERE THE FILE CANNOT BE CREATED. The path names a file inside a file, which the
+        // operating system cannot satisfy, so the open fails for a reason that has nothing to do with
+        // this suite's own database and cannot race with it.
+        string occupied = Path.Combine(_directory, "occupied");
+        File.WriteAllText(occupied, "not a directory");
+
+        PersistenceOptions options = new()
+        {
+            Sqlite = new SqliteOptions
+            {
+                DataDirectory = occupied,
+                DatabaseFileName = "test.db",
+            },
+        };
+
+        SqliteConnectionFactory unopenable = new(
+            Options.Create(options),
+            NullLogger<SqliteConnectionFactory>.Instance,
+            TimeProvider.System);
+
+        using SqliteTransactionEngine engine = CreateEngine(unopenable);
+
+        engine.AutoCommit = false;
+
+        SqlState connected = engine.Connect(TestContext.Current.CancellationToken);
+
+        // THE FAULT IS REPORTED, with the provider's own code beneath it rather than a generic failure.
+        Assert.Equal(-1L, connected.SqlCode);
+        Assert.Equal(RetCode.SQLITE_CANTOPEN, connected.SqlDbCode);
+        Assert.NotEmpty(connected.SqlErrText);
+
+        // AND THE ENGINE IS CLOSED, so nothing downstream can mistake it for a usable session.
+        Assert.Equal(ClosedHandle, engine.DbHandle);
+
+        // A COMMIT ON IT REPORTS THE ABSENT CONNECTION rather than claiming to have committed.
+        Assert.Equal(RetCode.E_INVALID_TRANSACTION, engine.Commit().SqlDbCode);
+    }
+
+    /// <summary>
+    /// AND THE FIDELITY PROPERTY THE DEFERRED BEGIN BUYS: a second auto-commit-OFF session CONNECTS while
+    /// another holds the write slot, and only its WRITE conflicts.
+    /// </summary>
+    /// <remarks>
+    /// This is PowerBuilder's own shape. Its transaction is implicit after <c>CONNECT</c> and takes no
+    /// lock until a statement writes, so two transaction objects on one database both connect and the
+    /// second write is what fails. An eager <c>BEGIN IMMEDIATE</c> would move that failure to connect time
+    /// and invent a refusal the oracle does not have - which, combined with the fix above making a begin
+    /// failure fatal to the connect, would have turned an ordinary second session into a refused one.
+    /// <para>
+    /// IN <b>WAL</b>, WHICH IS THE MODE A PROVISIONED DATABASE IS ACTUALLY IN - the migration tool leaves
+    /// it there. WAL is also what keeps this case honest AND quick: it admits readers alongside the one
+    /// writer and refuses a second writer at once, whereas in DELETE mode the second engine's open read
+    /// would block the first engine's commit for the full busy timeout, which would be asserting the
+    /// journal mode's locking rather than the connect's behaviour.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ASecondAutoCommitOffEngineCONNECTSWhileTheFirstHoldsTheWriteSlot()
+    {
+        SqliteConnectionFactory wal = CreateWalConnectionFactory();
+
+        using SqliteTransactionEngine first = CreateEngine(wal);
+        first.AutoCommit = false;
+
+        Assert.Equal(0L, first.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        // THE FIRST TAKES THE WRITE SLOT by actually writing under its transaction.
+        Assert.Equal(
+            1,
+            first.Execute(
+                "INSERT INTO COMPANY (NAME, AGE, ADDRESS, SALARY, BIRTH) "
+                + "VALUES ('slot-holder', 41, 'x', 1, '1980-01-01')",
+                TestContext.Current.CancellationToken).SqlNRows);
+
+        using SqliteTransactionEngine second = CreateEngine(wal);
+        second.AutoCommit = false;
+
+        // THE SECOND CONNECT SUCCEEDS. This is the assertion that would have broken had the begin stayed
+        // immediate once begin failures became fatal.
+        Assert.Equal(0L, second.Connect(TestContext.Current.CancellationToken).SqlCode);
+        Assert.Equal(SqliteTransactionEngine.ConnectedHandle, second.DbHandle);
+
+        // AND IT CAN READ, because a deferred transaction takes no write lock.
+        Assert.Equal("0", ScalarText(second, "SELECT COUNT(*) FROM COMPANY WHERE NAME = 'slot-holder'"));
+
+        // ITS WRITE IS WHAT CONFLICTS, and the conflict is reported as the provider's own busy fault
+        // rather than as a connect failure.
+        SqlState blocked = second.Execute(
+            "INSERT INTO COMPANY (NAME, AGE, ADDRESS, SALARY, BIRTH) "
+            + "VALUES ('second-writer', 42, 'y', 2, '1981-01-01')",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(-1L, blocked.SqlCode);
+        Assert.Equal(RetCode.SQLITE_BUSY, blocked.SqlDbCode);
+
+        // THE FIRST IS UNAFFECTED and its work commits - with the second's read transaction still open,
+        // which is precisely what WAL allows and DELETE does not.
+        Assert.Equal(0L, first.Commit().SqlCode);
+        Assert.Equal("1", ScalarText(first, "SELECT COUNT(*) FROM COMPANY WHERE NAME = 'slot-holder'"));
+
+        Assert.Equal(0, second.Rollback().SqlCode);
+        Assert.Equal(0, second.Disconnect().SqlCode);
+        Assert.Equal(0, first.Disconnect().SqlCode);
+    }
+
+    /// <summary>
+    /// AND THE INVARIANT THE PAIR ABOVE EXISTS TO PROTECT: with auto-commit OFF, a connect that reports
+    /// SUCCESS has an OPEN explicit transaction - reported by a commit that commits rather than one that
+    /// refuses for want of a transaction.
+    /// </summary>
+    /// <remarks>
+    /// Stated separately, and without any lock, because it is the property callers actually depend on.
+    /// <see cref="SqliteTransactionEngine.Commit"/> discriminates the two states precisely: connected with
+    /// a transaction commits and answers success, while connected WITHOUT one answers
+    /// <c>SQLITE_MISUSE</c> and says so in its text. So this case would have caught the original defect
+    /// from the other side - a connect that logged its begin failure and answered success would reach
+    /// exactly that refusal, on a session the caller believed was transactional.
+    /// </remarks>
+    [Fact]
+    public void AnAutoCommitOffConnectThatSucceedsHasAnOpenTransaction()
+    {
+        using SqliteTransactionEngine engine = CreateEngine();
+
+        engine.AutoCommit = false;
+
+        Assert.Equal(0L, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        SqlState committed = engine.Commit();
+
+        Assert.Equal(0L, committed.SqlCode);
+        Assert.DoesNotContain(
+            SqliteTransactionEngine.NoOpenTransactionText,
+            committed.SqlErrText,
+            StringComparison.Ordinal);
+
+        // AND THE DISCRIMINATOR IS REAL RATHER THAN VACUOUS. Switching auto-commit ON is the one way to
+        // reach "connected, no transaction" on purpose - a commit does NOT reach it, because the engine
+        // re-begins after committing so that the object stays transactional. From that state the same
+        // commit answers the refusal, which is what the two assertions above are asserting the
+        // transactional state is NOT.
+        engine.AutoCommit = true;
+
+        SqlState withoutOne = engine.Commit();
+
+        Assert.Equal(-1L, withoutOne.SqlCode);
+        Assert.Equal(RetCode.SQLITE_MISUSE, withoutOne.SqlDbCode);
+        Assert.Equal(SqliteTransactionEngine.NoOpenTransactionText, withoutOne.SqlErrText);
+    }
+
+    /// <summary>
     /// The engine connects, reports an open handle, executes and unwinds.
     /// </summary>
     [Fact]
@@ -170,6 +352,111 @@ public sealed class PersistenceRuntimeTests : IDisposable
 
         Assert.Equal(0, engine.Disconnect().SqlCode);
         Assert.Equal(ClosedHandle, engine.DbHandle);
+    }
+
+    /// <summary>
+    /// A JOURNAL-MODE DISAGREEMENT NEVER FAILS THE CONNECTION - whichever way the conversion goes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE REGRESSION THIS PINS TOOK THE WHOLE DATA PLANE DOWN.</b> The migration tool leaves a freshly
+    /// provisioned file in WAL and the configured mode is <c>DELETE</c>, so every connect against a
+    /// provisioned database meets a disagreement. Converting out of WAL can answer <c>SQLITE_BUSY</c>, and
+    /// while that failure was allowed to fail the connect, every session answered
+    /// <see cref="RetCode.E_INVALID_TRANSACTION"/> permanently - one anonymous <c>GET /health</c> was
+    /// enough to cause it.
+    /// </para>
+    /// <para>
+    /// <b>WHAT THIS CASE ASSERTS, AND WHY IT DOES NOT ASSERT A REFUSAL.</b> Whether the provider refuses a
+    /// given conversion is not something a test can pin down reliably, and it was measured rather than
+    /// assumed: with the connection-string shape this service actually uses, the conversion out of WAL
+    /// SUCCEEDS immediately even with another connection holding a read mark or the write slot, while with
+    /// an un-pooled string and the same holders it answers "database is locked". Asserting one of those two
+    /// outcomes would be asserting a provider detail, and the guarantee that matters is the same either
+    /// way: <b>the connect succeeds and the connection is usable</b>. So this case connects against a WAL
+    /// file under a DELETE configuration, holds a second connection open for the engine's whole lifetime,
+    /// and asserts exactly that - plus that a write through it lands and commits.
+    /// </para>
+    /// <para>
+    /// The cheap half of the same fix - read the mode first and issue no pragma at all when it already
+    /// matches - is asserted separately by
+    /// <see cref="AConnectAgainstTheConfiguredJournalModeLeavesItAlone"/>.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AJournalModeDisagreementIsNotFatal()
+    {
+        string databasePath = Path.Combine(_directory, "test.db");
+
+        // Into WAL first, on a connection that then STAYS OPEN. Pooling is off so "stays open" is exactly
+        // what it says rather than a property of the provider's pool.
+        using SqliteConnection holder = new($"Data Source={databasePath};Pooling=False");
+        holder.Open();
+
+        using (SqliteCommand toWal = holder.CreateCommand())
+        {
+            toWal.CommandText = "PRAGMA journal_mode = WAL;";
+            Assert.Equal("wal", Convert.ToString(toWal.ExecuteScalar(), CultureInfo.InvariantCulture));
+        }
+
+        // ⚠ AND THE HOLDER TAKES A READ MARK, WHICH IS WHAT ACTUALLY PRODUCES THE REFUSAL. Measured
+        // against the shipped provider: converting OUT of WAL needs exclusive access, so an IDLE open
+        // connection does NOT refuse it - only one holding a read transaction or the write slot does. A
+        // read mark is the right one to use here, because WAL admits a writer alongside readers and the
+        // rest of this case has to be able to write.
+        using SqliteTransaction readMark = holder.BeginTransaction(
+            System.Data.IsolationLevel.Serializable,
+            deferred: true);
+
+        using (SqliteCommand read = holder.CreateCommand())
+        {
+            read.CommandText = "SELECT COUNT(*) FROM COMPANY";
+            _ = read.ExecuteScalar();
+        }
+
+        // The factory this fixture built is configured with the default DELETE, so the engine will try to
+        // convert and will be refused.
+        using SqliteTransactionEngine engine = CreateEngine();
+
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+        Assert.Equal(SqliteTransactionEngine.ConnectedHandle, engine.DbHandle);
+
+        // THE MODE IS ONE OF THE TWO, AND EITHER IS ACCEPTABLE - see the remark. What is NOT acceptable
+        // is a connect that failed, which the two assertions above have already ruled out.
+        Assert.Contains(
+            ScalarText(engine, "PRAGMA journal_mode"),
+            new[] { "wal", "delete" },
+            StringComparer.OrdinalIgnoreCase);
+
+        // And the connection is fully usable in whichever mode the file ended up in.
+        Assert.Equal(
+            1,
+            engine.Execute(
+                "INSERT INTO COMPANY (NAME,AGE) VALUES ('journal-refused', 51)",
+                TestContext.Current.CancellationToken).SqlNRows);
+
+        Assert.Equal(0, engine.Commit().SqlCode);
+        Assert.Equal("1", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE NAME = 'journal-refused'"));
+        Assert.Equal(0, engine.Disconnect().SqlCode);
+    }
+
+    /// <summary>
+    /// A connect against a file already in the configured mode issues no conversion at all.
+    /// </summary>
+    /// <remarks>
+    /// The cheap half of the same fix, and the half that runs on every ordinary connect: the mode in force
+    /// is READ first, and when it already matches, the pragma - the one operation that can fail - is never
+    /// issued. Asserted through the observable outcome, which is that the mode is unchanged and the
+    /// connection works.
+    /// </remarks>
+    [Fact]
+    public void AConnectAgainstTheConfiguredJournalModeLeavesItAlone()
+    {
+        using SqliteTransactionEngine engine = CreateEngine();
+
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+        Assert.Equal("delete", ScalarText(engine, "PRAGMA journal_mode"));
+        Assert.Equal(0, engine.Disconnect().SqlCode);
     }
 
     /// <summary>
@@ -473,6 +760,128 @@ public sealed class PersistenceRuntimeTests : IDisposable
         Assert.Equal(
             "Paul",
             store.Carrier.GetItemOriginalValue(1L, DwSqliteFixture.NameColumnNumber, DwBuffer.Primary));
+    }
+
+    /// <summary>
+    /// ⚠ A RETRIEVED <c>decimal(2)</c> CARRIES TWO DECIMAL PLACES, so the declared scale reaches the wire.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The fixture declares <c>salary decimal(2)</c> over a <c>REAL</c> column [<c>dw_sqlite.srd:L13</c>
+    /// against <c>w_test_sqlite.srw:L467</c>], so the provider's REAL-to-decimal conversion answers whatever
+    /// scale the stored double needs - 20000 arrives as a ONE-place <c>20000.0</c> - and the wire projection
+    /// then faithfully renders that wrong scale. <c>common.v1.DecimalValue</c> is explicit that this is not
+    /// acceptable: trailing zeroes are significant BECAUSE they carry the declared scale, and it names this
+    /// very fixture with <c>"1500.00"</c> as the required rendering. Two encodings of one number have to be
+    /// byte-identical for a golden-master comparison to mean anything.
+    /// </para>
+    /// <para>
+    /// ASSERTED ON <see cref="decimal.Scale"/> AND ON THE RENDERED TEXT, because the scale is the mechanism
+    /// and the text is the observable: a decimal that merely compares equal to 20000.00m would satisfy an
+    /// equality assertion while still rendering "20000".
+    /// </para>
+    /// </remarks>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task ARetrievedDecimalCarriesItsDECLAREDScale()
+    {
+        Seed(
+            ("Paul", 32, "California", 20000d, "1999-05-08"),
+            ("Round", 40, "Texas", 4321.5d, "1985-01-01"),
+            ("Zero", 41, "Utah", 0d, "1986-01-01"),
+            ("Exact", 42, "Ohio", 8250.75d, "1987-01-01"));
+
+        RuntimeHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        ISqlDataStore store = harness.CreateStore(DataObjectDefinitionRegistry.EvidencedDataObject);
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            harness.Runtime.AttachTransaction(store, harness.Pooled));
+
+        Assert.Equal(
+            4L,
+            await harness.DataObjects.RetrieveAsync(store, [], TestContext.Current.CancellationToken));
+
+        (long Row, string Rendered)[] expected =
+        [
+            (1L, "20000.00"),
+            (2L, "4321.50"),
+            (3L, "0.00"),
+            (4L, "8250.75"),
+        ];
+
+        foreach ((long row, string rendered) in expected)
+        {
+            decimal salary = Assert.IsType<decimal>(
+                store.Carrier.GetItemValue(row, DwSqliteFixture.SalaryColumnNumber, DwBuffer.Primary));
+
+            Assert.Equal(2, salary.Scale);
+            Assert.Equal(rendered, salary.ToString(CultureInfo.InvariantCulture));
+
+            // AND THE ORIGINAL SHADOW CARRIES THE SAME SCALE, because the baseline is what the concurrency
+            // predicate compares against - a shadow at a different scale would render differently in a
+            // conflict payload than the current value it is being compared with.
+            decimal original = Assert.IsType<decimal>(
+                store.Carrier.GetItemOriginalValue(
+                    row,
+                    DwSqliteFixture.SalaryColumnNumber,
+                    DwBuffer.Primary));
+
+            Assert.Equal(2, original.Scale);
+            Assert.Equal(rendered, original.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>
+    /// AND A RETRIEVAL RECORDS ITS COLUMN NAMES, so every projected column can carry the NAME identifier
+    /// the contract requires beside its ordinal.
+    /// </summary>
+    /// <remarks>
+    /// <c>common.v1.ColumnValue</c> states that "BOTH IDENTIFIERS ARE CARRIED, and neither is redundant" -
+    /// a name survives a column reorder while an ordinal does not - and marks only <c>item_status</c>
+    /// optional. The codecs had no name to put in the field and left it empty; the carrier now knows them,
+    /// so they do. The one-based pairing is asserted explicitly, because a name-to-ordinal shift is the
+    /// kind of defect that produces a plausible payload in which the two identifiers disagree.
+    /// </remarks>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task ARetrievalRecordsItsColumnNamesInOneBasedOrder()
+    {
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+
+        RuntimeHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        ISqlDataStore store = harness.CreateStore(DataObjectDefinitionRegistry.EvidencedDataObject);
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            harness.Runtime.AttachTransaction(store, harness.Pooled));
+
+        // BEFORE: nothing has told the carrier the names, and "not known" is an empty list rather than a
+        // list of empty strings - the distinction the codecs rely on.
+        Assert.Empty(store.Carrier.ColumnNames);
+        Assert.Equal(string.Empty, store.Carrier.ColumnNameOf(DwSqliteFixture.SalaryColumnNumber));
+
+        Assert.Equal(
+            1L,
+            await harness.DataObjects.RetrieveAsync(store, [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(DwSqliteFixture.ColumnNames, store.Carrier.ColumnNames);
+
+        // ONE-BASED, and the two boundary ordinals answer the empty string: 0 denotes THE ROW ITSELF under
+        // the convention common.v1.ColumnValue.column_id records, and one past the end names no column.
+        Assert.Equal(string.Empty, store.Carrier.ColumnNameOf(0L));
+        Assert.Equal(string.Empty, store.Carrier.ColumnNameOf(DwSqliteFixture.ColumnCount + 1));
+
+        for (int number = 1; number <= DwSqliteFixture.ColumnCount; number++)
+        {
+            Assert.Equal(DwSqliteFixture.ColumnNames[number - 1], store.Carrier.ColumnNameOf(number));
+        }
     }
 
     /// <summary>
@@ -1420,8 +1829,45 @@ public sealed class PersistenceRuntimeTests : IDisposable
     // ==============================================================================================
 
     /// <summary>Builds an engine over this class's temporary database.</summary>
-    private SqliteTransactionEngine CreateEngine() =>
-        new(_connections, NullLogger<SqliteTransactionEngine>.Instance);
+    private SqliteTransactionEngine CreateEngine() => CreateEngine(_connections);
+
+    /// <summary>Builds an engine over a caller-supplied connection factory.</summary>
+    /// <param name="connections">The factory the engine draws its connection from.</param>
+    /// <returns>An unconnected engine.</returns>
+    private static SqliteTransactionEngine CreateEngine(SqliteConnectionFactory connections) =>
+        new(connections, NullLogger<SqliteTransactionEngine>.Instance);
+
+    /// <summary>
+    /// A second factory over the SAME database file, configured for the <c>WAL</c> journal mode.
+    /// </summary>
+    /// <returns>A factory whose connections apply <c>journal=WAL</c>.</returns>
+    /// <remarks>
+    /// WAL is the one mode in the legacy grammar's six [<c>w_test_sqlite.srw:L455</c>] under which a held
+    /// write lock still admits READERS. The connect path reads <c>PRAGMA journal_mode</c> before it opens
+    /// any transaction, so WAL is what separates "the connection could not be established" from "the
+    /// transaction could not be begun" - without it both arms of that distinction fail at the same
+    /// earlier step and neither says anything about the transaction. The mode is persistent in the file
+    /// once set, which is why the holder and the engine under test both draw from THIS factory: a
+    /// connection from the class-level DELETE-mode factory would try to convert the file back.
+    /// </remarks>
+    private SqliteConnectionFactory CreateWalConnectionFactory()
+    {
+        PersistenceOptions options = new()
+        {
+            Sqlite = new SqliteOptions
+            {
+                DataDirectory = _directory,
+                DatabaseFileName = "test.db",
+                Journal = "WAL",
+            },
+        };
+
+        return new SqliteConnectionFactory(
+            Options.Create(options),
+            NullLogger<SqliteConnectionFactory>.Instance,
+            TimeProvider.System);
+    }
+
 
     /// <summary>Reads one scalar as text through an already-connected engine's own connection.</summary>
     /// <param name="engine">The connected engine.</param>

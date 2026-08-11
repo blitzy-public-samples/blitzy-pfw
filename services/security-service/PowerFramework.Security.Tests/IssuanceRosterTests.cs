@@ -37,6 +37,8 @@
 
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 using Microsoft.AspNetCore.Authorization;
@@ -44,6 +46,7 @@ using Microsoft.AspNetCore.Authorization.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 using PowerFramework.Security.Configuration;
@@ -136,6 +139,24 @@ internal static class RosterFixture
     /// <summary>The one entry that resolves <see cref="SecretKey"/> to <see cref="Secret"/>.</summary>
     internal static KeyValuePair<string, string?>[] ConfiguredSecret =>
         [new(SecretKey, Secret)];
+
+    /// <summary>
+    /// Builds a certificate-trust decision over options that configure NO trust anchor.
+    /// </summary>
+    /// <returns>The trust decision.</returns>
+    /// <remarks>
+    /// NO ANCHOR IS CONFIGURED ON PURPOSE, and that is what makes these rows about the SHARED-SECRET
+    /// scheme rather than about certificates: with no anchor every certificate outcome is non-trusted,
+    /// so the certificate arm of the resolver can contribute no identity at all and a row that resolves
+    /// one has resolved it from the header. It is also the deployment posture the topology under test
+    /// actually has - a proxy or a mesh sidecar terminating TLS ahead of this service presents no
+    /// certificate to the application, which is the case the resolver's own remarks name.
+    /// </remarks>
+    internal static ClientCertificateTrust Trust() =>
+        new(
+            Microsoft.Extensions.Options.Options.Create(Options()),
+            TimeProvider.System,
+            NullLogger<ClientCertificateTrust>.Instance);
 
     /// <summary>Runs the validator and returns its failure messages.</summary>
     /// <param name="options">The instance to validate.</param>
@@ -715,7 +736,7 @@ public sealed class BasicCredentialReadingTests
 
         DefaultHttpContext request = Present($"{RosterFixture.Caller}:not-the-secret");
 
-        Assert.Null(TokenEndpoints.ResolvePresentedIdentity(request, registry));
+        Assert.Null(TokenEndpoints.ResolvePresentedIdentity(request, registry, RosterFixture.Trust()));
 
         // With the correct secret the same shape authenticates, so the row above is about the SECRET
         // rather than about the reader failing to see the header at all.
@@ -723,7 +744,8 @@ public sealed class BasicCredentialReadingTests
             RosterFixture.Caller,
             TokenEndpoints.ResolvePresentedIdentity(
                 Present($"{RosterFixture.Caller}:{RosterFixture.Secret}"),
-                registry));
+                registry,
+                RosterFixture.Trust()));
     }
 
     /// <summary>A request presenting neither credential establishes no identity.</summary>
@@ -733,7 +755,120 @@ public sealed class BasicCredentialReadingTests
         IssuanceClientRegistry registry =
             RosterFixture.Registry(RosterFixture.Options(), RosterFixture.ConfiguredSecret);
 
-        Assert.Null(TokenEndpoints.ResolvePresentedIdentity(new DefaultHttpContext(), registry));
+        Assert.Null(TokenEndpoints.ResolvePresentedIdentity(
+            new DefaultHttpContext(),
+            registry,
+            RosterFixture.Trust()));
+    }
+
+    /// <summary>
+    /// The SECRET scheme reaches the operation, which is the property the issuance edge was missing: a
+    /// correct shared secret authenticates even though no client certificate is presented and no caller
+    /// trust anchor is configured at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE DEPLOYMENT `orchestration/.env.example` DESCRIBES, so it is the one that must work
+    /// without a certificate anywhere. A deployment that terminates TLS in a proxy or a mesh sidecar has
+    /// no certificate for this process to read, so the secret scheme is the ONLY one that can reach the
+    /// operation there - and contract C-01 publishes it, this file's 401 sentence advertises it, and
+    /// three `.env.example` secrets are mandatory for it.
+    /// </para>
+    /// <para>
+    /// The trust double deliberately holds NO anchor: passing one would let the row pass for the wrong
+    /// reason. With no anchor the certificate branch can never answer Trusted, so an identity resolved
+    /// here can only have come from the secret.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ACorrectSecretAuthenticatesWithNoCertificateAndNoTrustAnchor()
+    {
+        IssuanceClientRegistry registry =
+            RosterFixture.Registry(RosterFixture.Options(), RosterFixture.ConfiguredSecret);
+
+        ClientCertificateTrust trust = NoCallerCertificateTrust();
+
+        Assert.Equal(
+            ClientCertificateTrustState.NoTrustAnchorConfigured,
+            trust.Evaluate(SelfSignedCallerCertificate()));
+
+        Assert.Equal(
+            RosterFixture.Caller,
+            TokenEndpoints.ResolvePresentedIdentity(
+                Present($"{RosterFixture.Caller}:{RosterFixture.Secret}"),
+                registry,
+                trust));
+    }
+
+    /// <summary>
+    /// An unregistered identity presenting a well-formed secret establishes nothing, so the roster is the
+    /// authority rather than the header.
+    /// </summary>
+    [Fact]
+    public void AnUnregisteredIdentityIsRefusedUnderTheSecretScheme()
+    {
+        IssuanceClientRegistry registry =
+            RosterFixture.Registry(RosterFixture.Options(), RosterFixture.ConfiguredSecret);
+
+        Assert.Null(TokenEndpoints.ResolvePresentedIdentity(
+            Present($"nobody-this-deployment-knows:{RosterFixture.Secret}"),
+            registry,
+            NoCallerCertificateTrust()));
+    }
+
+    /// <summary>
+    /// A presented certificate whose issuer is not established resolves NO identity, so the trust gate is
+    /// inside the resolver rather than alongside it.
+    /// </summary>
+    /// <remarks>
+    /// The certificate below carries the registered caller's own common name, so a resolver that read the
+    /// name before consulting the gate would answer that identity - which is authentication by assertion,
+    /// and the single worst failure this file can have. The gate has no anchor configured, so the
+    /// certificate cannot be trusted however well-formed it is.
+    /// </remarks>
+    [Fact]
+    public void AnUntrustedCertificateResolvesNoIdentityEvenWhenItNamesARegisteredCaller()
+    {
+        IssuanceClientRegistry registry =
+            RosterFixture.Registry(RosterFixture.Options(), RosterFixture.ConfiguredSecret);
+
+        DefaultHttpContext request = new();
+        request.Connection.ClientCertificate = SelfSignedCallerCertificate();
+
+        Assert.Null(TokenEndpoints.ResolvePresentedIdentity(
+            request,
+            registry,
+            NoCallerCertificateTrust()));
+    }
+
+    /// <summary>
+    /// A caller-certificate decision maker with NO configured anchor, which is the state a
+    /// secret-authenticating deployment runs in.
+    /// </summary>
+    /// <returns>The decision maker.</returns>
+    private static ClientCertificateTrust NoCallerCertificateTrust() =>
+        new(
+            Options.Create(new SecurityOptions()),
+            TimeProvider.System,
+            NullLogger<ClientCertificateTrust>.Instance);
+
+    /// <summary>
+    /// A self-signed client certificate carrying the registered caller's common name.
+    /// </summary>
+    /// <returns>The certificate.</returns>
+    private static X509Certificate2 SelfSignedCallerCertificate()
+    {
+        using RSA key = RSA.Create(2048);
+
+        CertificateRequest request = new(
+            $"CN={RosterFixture.Caller}",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+
+        return request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-5),
+            DateTimeOffset.UtcNow.AddMinutes(5));
     }
 
     /// <summary>Builds a request presenting one Basic credential.</summary>

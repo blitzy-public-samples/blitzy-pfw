@@ -153,4 +153,25 @@
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
   </ItemGroup>
 
+
+  <!--
+    REPOSITORY ROOT, EMBEDDED SO THIS PROJECT'S ON DISK LOCATORS DO NOT DEPEND ON WHERE ITS OUTPUT WENT
+    This project reads real files from the source tree, and it finds them by walking up from
+    AppContext.BaseDirectory for a marker. That walk holds only while the output sits inside the
+    checkout, so a test run whose artifacts path option names a directory outside the tree - a supported
+    and entirely valid way to run the suite - left every one of those locators with no ancestor
+    carrying the marker, and they threw for a reason unrelated to the code under test.
+
+    The value comes from the PowerFrameworkRepositoryRoot property in the repository root
+    Directory.Build.props, which resolves it from that file's own location. It is turned into assembly
+    metadata HERE, in each test project, rather than there: a service assembly ships inside a container
+    image and must carry no build machine path, and the root property sheet keeps its documented rule of
+    introducing no project level item. The locators still verify their marker and still keep the walk as
+    the fallback, so an absent or stale value degrades to the previous behaviour rather than misreading
+    a different tree.
+  -->
+  <ItemGroup>
+    <AssemblyMetadata Include="PowerFrameworkRepositoryRoot" Value="$(PowerFrameworkRepositoryRoot)" />
+  </ItemGroup>
+
 </Project>

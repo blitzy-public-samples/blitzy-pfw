@@ -221,21 +221,75 @@ _ = app.Services.GetRequiredService<InternalTlsTrust>();
 X509Certificate2Collection securityClientIdentity =
     app.Services.GetRequiredService<X509Certificate2Collection>();
 
-if (securityClientIdentity.Count == 0)
+// WHICH CREDENTIAL IS ACTUALLY IN FORCE, STATED SO THAT THIS LOG AND `/health` CANNOT DISAGREE.
+//
+// THE DEFECT THIS REPLACES. The condition here used to be `securityClientIdentity.Count == 0`, and the
+// message it emitted announced that the host "cannot obtain a credential" and that readiness reports the
+// bootstrap unavailable. Both halves were wrong for the documented bring-up: `orchestration/.env.example`
+// section 6.3 supplies SECURITY_CLIENT_SECRET_DATASERVICES and leaves BOTH certificate paths deliberately
+// empty, which is a fully supported state - so a correctly configured deployment was warned at startup
+// that it had no credential while `/health` simultaneously reported the credentials check HEALTHY, and
+// while the secret it had been given worked. An operator reading the two together has to decide which of
+// their own service's two statements to believe, and the warning is the one that reads as urgent.
+//
+// AND THE CONDITION WAS UNREACHABLE IN ITS INTENDED MEANING, which is why rewording alone would not have
+// been enough. DataServicesOptionsValidator refuses to start a host whose issuance credential is absent
+// (`!Security.HasIssuanceCredential`) and separately refuses a HALF-configured certificate pair
+// (`MutualTls.DescribeFailures`), so by the time this line runs the host provably holds either a non-blank
+// secret or a complete, loadable pair. The old warning could therefore fire ONLY on the false positive.
+//
+// THE PREDICATE MATCHES READINESS BY CONSTRUCTION RATHER THAN BY COINCIDENCE. `Endpoints/HealthEndpoints`
+// asks whether a credential could ACTUALLY be presented - a pair-aware test, not
+// `HasIssuanceCredential`, which is an OR over "did the operator INTEND a scheme" and is true for a half
+// pair. The two tests below are that same question asked of this host: the secret as configured, and the
+// certificate as RESOLVED, which is stronger than a path test because an unreadable pair has already
+// stopped the host two statements above. Both schemes are alternatives (contract C-01), and configuring
+// both is legal rather than a conflict.
+//
+// NO VALUE AND NO PATH IS RECORDED on either branch. A path names where private key material is mounted
+// and a secret is the credential itself; a startup record is exempt from neither concern (C-F). The
+// SETTING NAMES are what an operator needs in order to act.
+bool presentsIssuanceSecret = !string.IsNullOrWhiteSpace(
+    app.Services.GetRequiredService<IOptions<DataServicesOptions>>().Value.Security.ClientSecret);
+
+bool presentsIssuanceCertificate = securityClientIdentity.Count > 0;
+
+if (!presentsIssuanceSecret && !presentsIssuanceCertificate)
 {
-    app.Logger.LogWarning(
-        "No client identity is configured at '{CertificateKey}' and '{KeyKey}', so this host presents "
-            + "no certificate on the token-issuance edge and cannot obtain a credential. Every "
-            + "authenticated outbound call - the four Persistence contracts and the crypto contract - "
-            + "will fail with a named configuration diagnostic on first use. Readiness reports the "
-            + "bootstrap as unavailable. Neither path is recorded here, because a startup log must not "
-            + "publish where key material is mounted.",
+    // DEFENCE IN DEPTH, NOT A REACHABLE BRANCH THROUGH CONFIGURATION. The validator named above already
+    // refuses this state, so arriving here means a construction path ran that did not execute options
+    // validation - which is structural, and therefore reported at Error rather than Warning. It is kept
+    // for the same reason Security measures its signing-key floor in both the validator and the provider:
+    // a guarantee that rests on one gate is a guarantee only while that gate is in the path.
+    app.Logger.LogError(
+        "This host can present neither issuance credential: '{SecretKey}' is not set and no client "
+            + "certificate resolved from '{CertificateKey}' and '{KeyKey}'. Contract C-01 accepts a "
+            + "shared secret as an HTTP Basic credential or a client certificate, and a request "
+            + "presenting neither can only be refused - so no service token can be obtained and every "
+            + "authenticated outbound call, the four Persistence contracts and the crypto contract, "
+            + "would fail on first use. Readiness reports the credentials check not ready, which agrees "
+            + "with this record. No value and no path is recorded here.",
+        SecurityClientOptions.ClientSecretConfigurationKey,
         $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
             + $":{nameof(SecurityClientOptions.MutualTls)}"
             + $":{nameof(MutualTlsClientOptions.CertificatePath)}",
         $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
             + $":{nameof(SecurityClientOptions.MutualTls)}"
             + $":{nameof(MutualTlsClientOptions.CertificateKeyPath)}");
+}
+else
+{
+    // INFORMATION, ONCE, AT STARTUP. The readiness path deliberately logs this at Trace because the
+    // Compose health condition polls continuously; a host starts once, and which of the two schemes is
+    // in force is the first thing an operator wants to know when the issuance edge answers 401.
+    app.Logger.LogInformation(
+        "The token-issuance credential is configured: presenting an HTTP Basic shared secret = "
+            + "{PresentsSecret}, presenting a client certificate = {PresentsCertificate}. Contract C-01 "
+            + "accepts either, so one is sufficient and both together are legal. Readiness reports the "
+            + "credentials check ready, which agrees with this record. No value and no path is recorded "
+            + "here.",
+        presentsIssuanceSecret,
+        presentsIssuanceCertificate);
 }
 
 // Resolved eagerly so a deadline pair that cannot be constructed - a non-positive duration that slipped
@@ -275,6 +329,14 @@ _ = OutboundCallPolicy.Verify();
 // middleware would have nothing to redirect and would only add a hop that could rewrite an HTTP/2 gRPC
 // call into an HTTP/1.1 one), no response compression and no rate limiter.
 // --------------------------------------------------------------------------------------------------
+// THE PROTECTIVE RESPONSE HEADERS, INSTALLED FIRST SO THEY REACH EVERY RESPONSE. It is registered ahead of
+// the exception handler and of authentication deliberately: it works by registering a response-starting
+// callback rather than by writing headers itself, so being outermost is what lets it cover a problem
+// document the exception handler writes and a bodiless challenge the authentication middleware writes, as
+// well as a handler's own response. It overrides nothing a route set for itself - see the file's own banner
+// for the three directives and the reason for each.
+SecurityResponseHeaders.Use(app);
+
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 

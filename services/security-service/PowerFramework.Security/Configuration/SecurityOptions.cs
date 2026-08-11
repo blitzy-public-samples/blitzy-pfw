@@ -293,9 +293,20 @@ public sealed class SecurityOptions
     /// <para>
     /// This value is what Gateway, DataServices and Persistence each validate the <c>iss</c> claim
     /// against, so changing it invalidates every token in flight and must be treated as a
-    /// coordinated change rather than a local one. Its format is left to the deployment: the
-    /// discovery document's own shape is the concern of the endpoint that publishes it, and a format
-    /// rule invented here could reject an identity a deployment legitimately uses.
+    /// coordinated change rather than a local one.
+    /// </para>
+    /// <para>
+    /// <b>ITS SHAPE IS CONSTRAINED, AND AN EARLIER REVISION OF THIS PARAGRAPH SAID OTHERWISE.</b> That
+    /// revision argued the format was a deployment decision and that a rule invented here could reject
+    /// an identity a deployment legitimately uses. The premise is wrong for this particular value,
+    /// because the format is NOT free: the discovery document's <c>jwks_uri</c> and
+    /// <c>token_endpoint</c> members are COMPOSED from it, so it has to be an absolute address a
+    /// consumer's bearer handler can fetch. <see cref="SecurityOptionsValidator"/> therefore requires
+    /// it to be absolute, http or https, and free of embedded credentials, a query string and a
+    /// fragment - the identical rule every sibling service already applies to every address it binds.
+    /// The consequence of leaving it unchecked was measured: six bogus shapes started the host and
+    /// readiness opened on a service whose discovery document answered 500 while its key set answered
+    /// 200, which breaks the exact mechanism contract C-01 depends on.
     /// </para>
     /// </remarks>
     [Required(AllowEmptyStrings = false)]
@@ -1777,15 +1788,76 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
     /// </para>
     /// </remarks>
      /// <summary>
-    /// Rejection 3: the issuer identity must be present.
+    /// Rejection 3: the issuer identity must be present, and it must be an absolute http or https
+    /// address shaped like an identity rather than like a request.
     /// </summary>
     /// <param name="options">The bound instance.</param>
     /// <param name="failures">The accumulating failure list.</param>
     /// <remarks>
+    /// <para>
     /// Blank includes whitespace-only, because a whitespace issuer would be stamped into the
     /// <c>iss</c> claim and published in the discovery document as though it were an identity. Three
     /// other services validate that claim, so an empty issuer does not fail locally - it fails
     /// everywhere, later, as an authentication error with no obvious cause.
+    /// </para>
+    /// <para>
+    /// <b>AND THE SHAPE IS CHECKED HERE RATHER THAN AT REQUEST TIME, WHICH IS THE CORRECTION.</b> An
+    /// earlier revision checked only for blankness on the reasoning that the format is a deployment
+    /// decision. The consequence was that <c>not-a-uri</c>, <c>javascript:alert(1)</c>,
+    /// <c>file:///etc/passwd</c>, <c>ftp://h/p</c>, a whitespace-padded value and a value carrying a
+    /// query and a fragment ALL STARTED THE HOST - and readiness opened on a service whose OIDC
+    /// discovery document answered 500 while its key set still answered 200. Contract C-01's whole
+    /// mechanism is that a consumer's stock bearer handler self-configures from that document with zero
+    /// bespoke code, so the one artifact every verifier must fetch was the one that broke, and a
+    /// merely MISTYPED but absolute issuer was worse still: the document published cleanly and made
+    /// every issued token unverifiable with no signal anywhere.
+    /// </para>
+    /// <para>
+    /// THE RULE IS THE SIBLING SERVICES' RULE, NOT A NEW ONE. Gateway refuses exactly these shapes on
+    /// every address it binds
+    /// [<c>services/gateway-service/PowerFramework.Gateway/Configuration/GatewayOptions.cs</c>,
+    /// <c>AddressValidation.Check</c>], and this service was the outlier. Each of the four component
+    /// rules earns its place:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>
+    ///   ABSOLUTE, because a relative value cannot be an identity three other services compare a claim
+    ///   against, and because the discovery and key-set addresses are COMPOSED from it - a relative
+    ///   issuer composes to nothing a consumer can fetch.
+    ///   </description></item>
+    ///   <item><description>
+    ///   HTTP OR HTTPS, because the addresses composed from it are fetched over HTTP by a bearer
+    ///   handler. A <c>javascript:</c>, <c>file:</c> or <c>ftp:</c> issuer parses as absolute and
+    ///   composes into a <c>jwks_uri</c> no consumer can retrieve.
+    ///   </description></item>
+    ///   <item><description>
+    ///   NO USERINFO, which is a secrets control rather than tidiness: an issuer carrying
+    ///   <c>user:secret@</c> is stamped into every token's <c>iss</c> claim and published anonymously
+    ///   in the discovery document, so the credential would leave the process in both directions (C-F).
+    ///   </description></item>
+    ///   <item><description>
+    ///   NO QUERY AND NO FRAGMENT, because both are dropped rather than merged when a well-known path
+    ///   is composed onto the issuer, so a deployment that configured either would be wrong with no
+    ///   diagnostic - and a fragment is never transmitted at all.
+    ///   </description></item>
+    /// </list>
+    /// <para>
+    /// A TRAILING OR LEADING SPACE IS REFUSED RATHER THAN TRIMMED. The <c>iss</c> claim is compared
+    /// BYTE-IDENTICALLY by three verifiers, so silently trimming here would make this service mint
+    /// tokens carrying a value the operator did not configure - and the operator would have no way to
+    /// see which of the two spellings was in force.
+    /// </para>
+    /// <para>
+    /// <see cref="Endpoints.JwksEndpoints"/> keeps its own request-time absoluteness guard, and that is
+    /// not redundancy to be removed: it is the guard for a value reaching that endpoint by some path
+    /// this validator did not see, and it is the only place that can answer the contract's error shape
+    /// to an anonymous caller. What changes is that it is now unreachable through configuration.
+    /// </para>
+    /// <para>
+    /// NO MESSAGE ECHOES THE VALUE, for the same reason the userinfo rule exists - a rejected issuer is
+    /// exactly the shape that may carry a credential. The scheme is the one exception, and it is a
+    /// fixed token from a small set that carries nothing.
+    /// </para>
     /// </remarks>
     private static void CheckIssuer(SecurityOptions options, List<string> failures)
     {
@@ -1795,6 +1867,57 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
                 $"Configuration key '{IssuerKey}' is required and must not be blank. It is the " +
                 "'iss' claim of every minted token, the 'issuer' member of the discovery document, " +
                 "and the value the other services validate every token against.");
+
+            return;
+        }
+
+        if (!Uri.TryCreate(options.Issuer, UriKind.Absolute, out Uri? issuer)
+            || !string.Equals(options.Issuer, options.Issuer.Trim(), StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' must be an absolute address with no surrounding " +
+                "whitespace, for example 'https://security-service:5104'. It is composed with the " +
+                "well-known paths to produce the 'jwks_uri' and 'token_endpoint' members of the " +
+                "discovery document, so a relative or padded value produces a document that describes " +
+                "nothing a consumer can fetch. The configured value is deliberately not quoted here, " +
+                "because a rejected address may carry a credential.");
+
+            return;
+        }
+
+        // Uri.Scheme is lower-cased by the parser, so an ordinal comparison is both correct and free of
+        // any culture dependency.
+        if (!string.Equals(issuer.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+            && !string.Equals(issuer.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' must use the http or https scheme; " +
+                $"'{issuer.Scheme}' cannot be fetched by a consumer's bearer handler, so the " +
+                "discovery document composed from it would describe an unreachable key set.");
+
+            return;
+        }
+
+        if (issuer.UserInfo.Length > 0)
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' must not embed credentials in the address. Remove " +
+                "the 'user:password@' portion: this value is stamped into the 'iss' claim of every " +
+                "minted token and published in the anonymous discovery document, so a credential here " +
+                "would leave the process in both directions. The configured value is deliberately not " +
+                "quoted here.");
+
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(issuer.Query) || !string.IsNullOrEmpty(issuer.Fragment))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' is an identity composed with the well-known paths " +
+                "and must carry neither a query string nor a fragment. Both are dropped rather than " +
+                "merged when a path is composed onto it, so a deployment that configured either would " +
+                "have no effect and no diagnostic, and a fragment is never transmitted at all. The " +
+                "configured value is deliberately not quoted here.");
         }
     }
 

@@ -835,6 +835,115 @@ public sealed class QueryServiceLeaseTests
     /// <summary>
     /// The subject, its handle table and its runner, over the production query-task factory.
     /// </summary>
+    // ==============================================================================================
+    //  THE UNIQUE-INDEX COLUMN LIST IS VETTED AT THE SETTER - Md-4
+    //
+    //  The legacy setter is one assignment that always answers success
+    //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L406], so a caller learned nothing
+    //  here and discovered its mistake later as a failed RETRIEVAL on a statement it never saw. Both
+    //  refusals below name a list that could not have produced a statement any engine would run, so no
+    //  correct request is being rejected - and membership stays at the point of use, where the statement it
+    //  would be checked against actually exists.
+    // ==============================================================================================
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("id;DROP TABLE COMPANY")]
+    [InlineData("id-1")]
+    [InlineData(".id")]
+    [InlineData("id.")]
+    [InlineData("a..b")]
+    public async Task AMalformedUniqueIndexColumnIsRefusedAtTheSetter(string bad)
+    {
+        using Fixture fixture = new();
+        TaskHandle handle = await fixture.CreateTaskAsync();
+
+        SetPagedUniqueIndexColumnsResponse response = await fixture.Service.SetPagedUniqueIndexColumns(
+            new SetPagedUniqueIndexColumnsRequest { Task = handle, Columns = { "id", bad } },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+
+        // THE POSITION IS NAMED AND THE VALUE IS NOT (C-F). It is caller-supplied text bound for a SQL
+        // statement, and the position is enough to fix the call.
+        Assert.Contains("position 2 of 2", response.Status.ErrorText, StringComparison.Ordinal);
+
+        // AND THE VALUE ITSELF IS NOT ECHOED. Asserted only for a value with characters of its own to look
+        // for: the empty string is a substring of every string, and a lone space occurs in the prose, so
+        // for those two the assertion would fail on the diagnostic's own wording rather than on a
+        // disclosure. Nothing is lost - neither of them discloses anything to begin with.
+        if (!string.IsNullOrWhiteSpace(bad))
+        {
+            Assert.DoesNotContain(bad, response.Status.ErrorText, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    // COMPARED WITHOUT REGARD TO CASE, because SQL identifiers are.
+    [InlineData("id", "id")]
+    [InlineData("id", "ID")]
+    [InlineData("t.id", "T.Id")]
+    public async Task ARepeATEDUniqueIndexColumnIsRefusedAtTheSetter(string first, string second)
+    {
+        using Fixture fixture = new();
+        TaskHandle handle = await fixture.CreateTaskAsync();
+
+        SetPagedUniqueIndexColumnsResponse response = await fixture.Service.SetPagedUniqueIndexColumns(
+            new SetPagedUniqueIndexColumnsRequest { Task = handle, Columns = { first, second } },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+        Assert.Contains("repeats an earlier element", response.Status.ErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AValidUniqueIndexListAndTheEmptyCLEARAreBothStillAccepted()
+    {
+        using Fixture fixture = new();
+        TaskHandle handle = await fixture.CreateTaskAsync();
+
+        // THE EMPTY LIST IS THE DOCUMENTED CLEAR and must stay acceptable - refusing it would break the
+        // one call a caller makes to undo the setting.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await fixture.Service.SetPagedUniqueIndexColumns(
+                new SetPagedUniqueIndexColumnsRequest { Task = handle },
+                Fixture.Context)).Status.RetCode);
+
+        // AND A QUALIFIED, DISTINCT LIST goes through untouched, so byte-exact statement parity is
+        // unaffected for every request that was already correct.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await fixture.Service.SetPagedUniqueIndexColumns(
+                new SetPagedUniqueIndexColumnsRequest
+                {
+                    Task = handle,
+                    Columns = { "COMPANY.ID", "COMPANY.NAME", "age" },
+                },
+                Fixture.Context)).Status.RetCode);
+    }
+
+    [Fact]
+    public async Task TheRefusalIsDECIDEDBEFORETheTaskIsEvenResolved()
+    {
+        // AN ARGUMENT FAULT IS KNOWABLE WITHOUT THE TASK, so it is answered without one - the same ordering
+        // the command service uses for its own blank-statement and out-of-domain refusals. Asserted with an
+        // UNKNOWN handle: were the order reversed this would answer E_INVALID_HANDLE instead, and a caller
+        // fixing the handle would then meet the argument fault it had not been told about.
+        using Fixture fixture = new();
+
+        SetPagedUniqueIndexColumnsResponse response = await fixture.Service.SetPagedUniqueIndexColumns(
+            new SetPagedUniqueIndexColumnsRequest
+            {
+                Task = new TaskHandle { TaskId = "no-such-task" },
+                Columns = { "id", "id" },
+            },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly Host _host = new();

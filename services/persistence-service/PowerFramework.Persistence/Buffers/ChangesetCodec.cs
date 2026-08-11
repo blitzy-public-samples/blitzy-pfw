@@ -1196,9 +1196,13 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
             projected.Columns.Add(new ColumnValue
             {
-                // POSITIONAL, LIKE THE LEGACY BLOB. `GetChanges` carries ordinals and no names at all,
-                // so column_name is left empty here and column_id is the authoritative identifier -
-                // common.v1.DataWindowRow.columns records the same note for a reader of the contract.
+                // BOTH IDENTIFIERS, WHEN THE CARRIER KNOWS BOTH. The legacy blob carries ordinals and no
+                // names, so the name comes from the carrier's own recorded column order rather than from
+                // the blob - see DataWindowBufferStore.ColumnNames. It is the EMPTY STRING when the
+                // carrier was never told the names, which is a carrier built from a caller-supplied
+                // changeset; a fabricated name would be worse than an absent one. The contract requires
+                // both wherever both are known [common.v1.ColumnValue].
+                ColumnName = source.ColumnNameOf(columnNumber),
                 ColumnId = columnNumber,
                 Value = currentValue,
                 ItemStatus = source.GetItemStatus(rowNumber, columnNumber, dwBuffer),
@@ -1218,6 +1222,7 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
             projected.OriginalValues.Add(new ColumnValue
             {
+                ColumnName = source.ColumnNameOf(columnNumber),
                 ColumnId = columnNumber,
                 Value = originalValue,
             });

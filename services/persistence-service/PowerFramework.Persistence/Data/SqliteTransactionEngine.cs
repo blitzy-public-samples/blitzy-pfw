@@ -434,7 +434,11 @@ namespace PowerFramework.Persistence.Data
                 }
                 else
                 {
-                    BeginTransaction();
+                    // The outcome is deliberately DISCARDED on this re-begin: the caller's own mode
+                    // change has already taken effect, so its answer must stand. An absent transaction
+                    // stays visible to the next commit or rollback, which refuses rather than claiming
+                    // success - see TryBeginTransaction.
+                    _ = TryBeginTransaction(out _);
                 }
             }
         }
@@ -508,7 +512,13 @@ namespace PowerFramework.Persistence.Data
                 // The journal mode is part of the legacy URI grammar and defaults to DELETE
                 // [w_test_sqlite.srw:L452-L455], so it is applied on every connection rather than once
                 // per file - a journal pragma is per-connection for every mode except WAL.
-                Execute(connection, SqliteConnectionFactory.JournalStatementFor(_connections.JournalMode));
+                //
+                // CONDITIONAL AND NON-FATAL. See ApplyJournalMode: the mode is read first and the pragma
+                // is issued only when it differs, and a conversion the engine refuses is recorded rather
+                // than allowed to fail the connect. Issuing it unconditionally and letting SQLITE_BUSY
+                // propagate is what made a WAL-provisioned file plus one concurrent reader - which is the
+                // ordinary state under a health probe - render the entire data plane unavailable.
+                ApplyJournalMode(connection);
 
                 // The integrity check is the grammar's optional third extension. It runs only when
                 // configured, and its verdict is checked rather than discarded: a check that does not
@@ -557,9 +567,19 @@ namespace PowerFramework.Persistence.Data
 
             _connection = connection;
 
-            if (!_autoCommit)
+            if (!_autoCommit && !TryBeginTransaction(out SqlState beginFailure))
             {
-                BeginTransaction();
+                // THE CONNECT FAILS, AND THE CONNECTION IS RELEASED RATHER THAN LEFT HALF-OPEN. A caller
+                // that asked for a non-auto-commit connection asked for a transaction; answering success
+                // without one hands back a session whose first commit refuses for a reason that has
+                // nothing to do with the statement the caller ran. The nearest legacy behaviour is a
+                // CONNECT that left a non-zero status, which is E_DB_ERROR
+                // [n_cst_thread_trans.sru:L129-L133] - the explicit BEGIN is a detail of this port, because
+                // PowerBuilder's transaction is implicit after CONNECT and cannot fail separately.
+                _connection = null;
+                connection.Dispose();
+
+                return beginFailure;
             }
 
             return SqlState.Succeeded(ConnectedRowCount);
@@ -633,7 +653,9 @@ namespace PowerFramework.Persistence.Data
             // A committed transaction object stays usable, so the next statement needs a fresh
             // transaction rather than an implicit one. Without this the object would silently drift into
             // auto-commit behaviour after its first commit.
-            BeginTransaction();
+            // The outcome is deliberately DISCARDED here: the COMMIT succeeded, and that is what this
+            // method answers. See TryBeginTransaction for why the connect path treats it differently.
+            _ = TryBeginTransaction(out _);
 
             return SqlState.Succeeded();
         }
@@ -679,7 +701,8 @@ namespace PowerFramework.Persistence.Data
                 _transaction = null;
             }
 
-            BeginTransaction();
+            // Discarded for the same reason as the commit path's - the ROLLBACK succeeded.
+            _ = TryBeginTransaction(out _);
 
             return SqlState.Succeeded();
         }
@@ -785,11 +808,15 @@ namespace PowerFramework.Persistence.Data
 
                 command.BindTo(statement);
 
-                return SqlState.Succeeded(statement.ExecuteNonQuery());
+                return SqlState.Succeeded(AffectedRows(statement.ExecuteNonQuery()));
             }
             catch (SqliteException failure)
             {
                 return Failed(failure, "statement execution");
+            }
+            catch (InvalidOperationException failure)
+            {
+                return BindFaulted(failure, "statement execution");
             }
         }
 
@@ -854,7 +881,7 @@ namespace PowerFramework.Persistence.Data
                 statement.Parameters.Clear();
                 command.BindTo(statement);
 
-                SqlState state = SqlState.Succeeded(statement.ExecuteNonQuery());
+                SqlState state = SqlState.Succeeded(AffectedRows(statement.ExecuteNonQuery()));
 
                 entry.Stamp = ++_preparedStatementStamp;
                 retained[command.CanonicalText] = entry;
@@ -871,6 +898,15 @@ namespace PowerFramework.Persistence.Data
                 }
 
                 return Failed(failure, "statement execution");
+            }
+            catch (InvalidOperationException failure)
+            {
+                if (!matched)
+                {
+                    statement.Dispose();
+                }
+
+                return BindFaulted(failure, "statement execution");
             }
         }
 
@@ -1069,6 +1105,80 @@ namespace PowerFramework.Persistence.Data
         }
 
         /// <summary>
+        /// Applies the configured journal mode to a freshly opened connection, skipping the pragma when
+        /// the file is already in that mode and tolerating a conversion the engine refuses.
+        /// </summary>
+        /// <param name="connection">The open connection.</param>
+        /// <remarks>
+        /// <para>
+        /// <b>THREE STEPS, AND THE FIRST ONE IS WHY THIS METHOD EXISTS.</b> The mode in force is READ
+        /// first, so the setter is issued only when it genuinely differs - which is never, on the
+        /// overwhelmingly common path where every connection to a file agrees about its journal mode. The
+        /// setter's own answer is then CHECKED, because the pragma returns the mode actually in force and
+        /// therefore reports a refusal by answering the old value rather than by failing. Finally a
+        /// provider fault on the conversion is caught and recorded.
+        /// </para>
+        /// <para>
+        /// <b>WHY A REFUSAL IS NOT FATAL HERE.</b> Converting out of WAL needs an EXCLUSIVE lock, so the
+        /// pragma answers <c>SQLITE_BUSY</c> whenever another connection is open on the file - and a
+        /// service with an anonymous readiness probe and a pooling provider routinely has one. Letting
+        /// that fail the connect made every session on a WAL-provisioned database answer
+        /// <see cref="RetCode.E_INVALID_TRANSACTION"/> permanently, which is a total outage caused by a
+        /// setting no caller can observe: the journal mode changes how the engine journals, not the result
+        /// of any statement. The connection is therefore kept and the shortfall is logged with the
+        /// operator's remedy. An integrity check, by contrast, exists precisely to refuse a damaged file
+        /// and stays fatal - see <see cref="Connect"/>.
+        /// </para>
+        /// </remarks>
+        private void ApplyJournalMode(SqliteConnection connection)
+        {
+            string configured = _connections.JournalMode;
+
+            string inForce = ScalarText(connection, SqliteConnectionFactory.JournalModeProbeStatement);
+
+            if (string.Equals(inForce, configured, StringComparison.OrdinalIgnoreCase))
+            {
+                // Nothing to do, and issuing the pragma anyway is exactly the operation that can fail.
+                return;
+            }
+
+            string resulting;
+
+            try
+            {
+                // The pragma ANSWERS the resulting mode, so the setter is run as a scalar read rather than
+                // as a non-query - that answer is the only way a silent refusal becomes visible.
+                resulting = ScalarText(
+                    connection,
+                    SqliteConnectionFactory.JournalStatementFor(configured));
+            }
+            catch (SqliteException failure)
+            {
+                _logger.LogWarning(
+                    failure,
+                    "The SQLite journal mode stayed {JournalModeInForce} instead of the configured "
+                        + "{ConfiguredJournalMode}. {Explanation}",
+                    inForce,
+                    configured,
+                    SqliteConnectionFactory.JournalModeNotConvertedText);
+
+                return;
+            }
+
+            if (string.Equals(resulting, configured, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _logger.LogWarning(
+                "The SQLite journal mode stayed {JournalModeInForce} instead of the configured "
+                    + "{ConfiguredJournalMode}. {Explanation}",
+                resulting.Length == 0 ? inForce : resulting,
+                configured,
+                SqliteConnectionFactory.JournalModeNotConvertedText);
+        }
+
+        /// <summary>
         /// Runs a statement and returns its first column of its first row as text.
         /// </summary>
         /// <param name="connection">The open connection.</param>
@@ -1083,27 +1193,65 @@ namespace PowerFramework.Persistence.Data
         }
 
         /// <summary>Opens an explicit transaction on the connection, if one is not already open.</summary>
-        private void BeginTransaction()
+        /// <param name="failure">Receives the provider's own fault when the begin could not be issued.</param>
+        /// <returns><see langword="true"/> when a transaction is open on return.</returns>
+        /// <remarks>
+        /// <para>
+        /// <b>DEFERRED, AND THAT IS A FIDELITY DECISION RATHER THAN A TUNING ONE.</b> The provider's
+        /// parameterless <c>BeginTransaction</c> issues <c>BEGIN IMMEDIATE</c> for its default
+        /// <see cref="System.Data.IsolationLevel.Serializable"/> level, which takes SQLite's single WRITE
+        /// LOCK at begin time - so merely CONNECTING a second session would fail with "database is locked"
+        /// while any other session held an open write transaction. PowerBuilder's transaction is implicit
+        /// after <c>CONNECT</c> and takes no lock until a statement writes, so an eager write lock here
+        /// would invent a failure the oracle does not have: two transaction objects on one database can
+        /// both connect, and only the second WRITE conflicts.
+        /// </para>
+        /// <para>
+        /// Measured against the shipped provider in both DELETE and WAL journal modes, with another
+        /// connection holding the write slot: the immediate form fails at BEGIN; the deferred form begins,
+        /// READS normally, and fails at the WRITE - which is the legacy's own shape. The isolation level is
+        /// unchanged, because SQLite takes its read lock at the first read under either form.
+        /// </para>
+        /// </remarks>
+        private bool TryBeginTransaction(out SqlState failure)
         {
+            failure = SqlState.Succeeded();
+
             if (_connection is null || _transaction is not null)
             {
-                return;
+                return true;
             }
 
             try
             {
-                _transaction = _connection.BeginTransaction();
+                _transaction = _connection.BeginTransaction(
+                    System.Data.IsolationLevel.Serializable,
+                    deferred: true);
+
+                return true;
             }
-            catch (SqliteException failure)
+            catch (SqliteException failure_)
             {
                 // Recorded rather than thrown, because every caller of this helper is on a path whose
                 // outcome is already being reported as a SqlState and an exception here would escape
-                // that channel. The absent transaction is then visible to the next commit or rollback,
-                // which refuses with NoOpenTransactionText rather than claiming success.
+                // that channel.
+                //
+                // ⚠ THE OUTCOME IS NOW REPORTED AS WELL AS LOGGED, AND THE TWO CALLERS TREAT IT
+                // DIFFERENTLY ON PURPOSE. On the CONNECT path a caller is asking for a usable
+                // transaction, so a failure there must fail the connect: reporting success for a session
+                // that holds no transaction told the caller it had something it did not have, and the
+                // fault only surfaced later at a commit that refused for a reason the caller could not
+                // relate to its own request. On the RE-BEGIN paths - after a commit, after a rollback -
+                // the caller's own operation has already SUCCEEDED, so its answer must stand; there the
+                // absent transaction stays visible to the NEXT commit or rollback, which refuses with
+                // NoOpenTransactionText rather than claiming success.
                 _logger.LogError(
-                    failure,
-                    "The transaction object could not open an explicit SQLite transaction, so the next "
-                        + "commit or rollback will refuse rather than report success.");
+                    failure_,
+                    "The transaction object could not open an explicit SQLite transaction.");
+
+                failure = Failed(failure_, "begin transaction");
+
+                return false;
             }
         }
 
@@ -1162,6 +1310,33 @@ namespace PowerFramework.Persistence.Data
         }
 
         /// <summary>
+        /// Normalises the provider's affected-row answer onto the legacy <c>SQLNRows</c> domain.
+        /// </summary>
+        /// <param name="reported">Whatever the provider's non-query execution answered.</param>
+        /// <returns>The count, with the provider's negative non-DML sentinel folded to zero.</returns>
+        /// <remarks>
+        /// <para>
+        /// <b>ADO.NET's <c>ExecuteNonQuery</c> ANSWERS <c>-1</c> FOR A STATEMENT THAT IS NOT DML</b> - a
+        /// <c>SELECT</c>, a statement made only of comments, a no-op. That is an ADO.NET convention, not a
+        /// SQLite one and not a legacy one: <c>SQLNRows</c> is "the number of rows affected", it is never
+        /// negative in PowerBuilder, and a caller branching on it has no arm for a negative value.
+        /// Publishing <c>-1</c> would put a provider artefact on a legacy observable.
+        /// </para>
+        /// <para>
+        /// <b>WHY THIS WAS PREVIOUSLY INVISIBLE, WHICH IS THE INTERESTING PART.</b> A commit used to
+        /// replace the whole state and zero the count, so on the <c>AC_ON</c> arm the <c>-1</c> was erased
+        /// along with every legitimate count. Preserving the count across a commit - which is the correct
+        /// behaviour and is asserted separately - exposed the sentinel that erasure had been hiding. Both
+        /// halves are needed: the count must survive the commit, and it must be a count.
+        /// </para>
+        /// <para>
+        /// No legitimate DML answer is affected. A provider reports zero rows affected as <c>0</c>, so the
+        /// only value folded here is the sentinel.
+        /// </para>
+        /// </remarks>
+        private static int AffectedRows(int reported) => reported < 0 ? 0 : reported;
+
+        /// <summary>
         /// Projects a provider fault onto a failed <see cref="SqlState"/>.
         /// </summary>
         /// <param name="failure">The provider fault.</param>
@@ -1186,6 +1361,53 @@ namespace PowerFramework.Persistence.Data
                 code);
 
             return SqlState.Failed(code, failure.Message);
+        }
+
+        /// <summary>
+        /// Projects a provider BIND fault onto a failed <see cref="SqlState"/>.
+        /// </summary>
+        /// <param name="failure">The provider fault.</param>
+        /// <param name="operation">The verb that faulted, for the log record only.</param>
+        /// <returns>
+        /// The failed state, carrying <see cref="RetCode.SQLITE_MISUSE"/> and the provider's message.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>WHY A SECOND PROJECTION EXISTS.</b> <c>Microsoft.Data.Sqlite</c> raises
+        /// <see cref="InvalidOperationException"/> - NOT <see cref="SqliteException"/> - when a statement
+        /// carries a parameter marker for which no value was supplied, because the refusal happens in the
+        /// provider before SQLite is asked to step anything. That exception type was previously uncaught
+        /// on both execution paths, so it escaped the whole task layer and surfaced as an UNHANDLED gRPC
+        /// fault carrying no defined code - the one outcome AAP §0.1.5 forbids, since a contract must be
+        /// "narrowed with a defined error, never widened with a guess".
+        /// </para>
+        /// <para>
+        /// <b>WHY <see cref="RetCode.SQLITE_MISUSE"/> AND NOT A SENTINEL.</b> Twenty-one is SQLite's own
+        /// result code for "library used incorrectly", which is exactly what executing a statement with an
+        /// unsupplied parameter is; it is already declared in the shared kernel's <c>SQLITE_*</c> set, so
+        /// the value is a real code from the same vocabulary every other <c>SqlDbCode</c> on this engine
+        /// comes from rather than a private marker a reader would have to look up.
+        /// </para>
+        /// <para>
+        /// <b>THIS IS THE BACKSTOP, NOT THE FIX.</b> The statement forms C-07 publishes are refused with
+        /// the contract's own binding code BEFORE execution - see
+        /// <c>Tasks/SqlCommandTask.OnDoTask</c>'s unbound-marker guard and
+        /// <c>SqlTaskBase.BindParams</c>'s unmatched-placeholder check. This projection exists so that any
+        /// shape those two do not anticipate still produces a defined status instead of a fault.
+        /// </para>
+        /// </remarks>
+        private SqlState BindFaulted(InvalidOperationException failure, string operation)
+        {
+            // C-F: the exception message may name a parameter, never a value, and the STATEMENT is not
+            // included in this record - the only route a statement text ever takes to a log is the
+            // sanctioned redactor, which the task layer applies.
+            _logger.LogError(
+                failure,
+                "The transaction object's SQLite {Operation} was refused by the provider before reaching "
+                    + "the engine, which is the shape an unsupplied statement parameter takes.",
+                operation);
+
+            return SqlState.Failed(RetCode.SQLITE_MISUSE, failure.Message);
         }
     }
 }

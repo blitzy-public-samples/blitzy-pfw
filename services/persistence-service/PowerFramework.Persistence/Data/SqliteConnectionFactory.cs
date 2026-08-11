@@ -287,6 +287,40 @@ namespace PowerFramework.Persistence.Data
         private const string ReachabilityProbeStatement = "SELECT 1;";
 
         /// <summary>
+        /// Reads the journal mode currently in force WITHOUT setting one.
+        /// </summary>
+        /// <remarks>
+        /// <b>THE PRAGMA IS ONLY IDEMPOTENT WHEN IT IS NOT NEEDED, WHICH IS WHY THE MODE IS READ FIRST.</b>
+        /// Converting <em>out of</em> WAL requires an EXCLUSIVE lock on the file, so
+        /// <c>PRAGMA journal_mode = DELETE</c> against a WAL database answers <c>SQLITE_BUSY</c> while any
+        /// other connection is open - including a pooled one this process opened itself. Asking what the
+        /// mode already is costs one shared-lock read and lets the setter be skipped entirely in the
+        /// overwhelmingly common case where the file is already in the configured mode.
+        /// </remarks>
+        internal const string JournalModeProbeStatement = "PRAGMA journal_mode;";
+
+        /// <summary>
+        /// The operator-facing explanation of a journal-mode conversion the engine would not perform.
+        /// </summary>
+        /// <remarks>
+        /// <b>A REFUSED CONVERSION IS A WARNING AND NOT A FAULT, AND THE DISTINCTION IS THE DIFFERENCE
+        /// BETWEEN A DEGRADED KNOB AND A DEAD SERVICE.</b> The journal mode selects how the engine
+        /// journals - it changes durability and concurrency characteristics, not the result of any
+        /// statement - so a connection that opened in the file's existing mode is fully usable and every
+        /// contract this service publishes behaves identically on it. Refusing to connect instead makes
+        /// the whole data plane unavailable for a setting no caller can observe, which is the outcome the
+        /// fail-fast posture exists to prevent rather than to cause: the AAP's structural-fault rule is
+        /// about faults that leave the service unable to answer, and this is not one.
+        /// </remarks>
+        internal const string JournalModeNotConvertedText =
+            "The configured SQLite journal mode could not be applied because the engine refused the "
+            + "conversion, which happens when another connection is open on the file - converting out "
+            + "of WAL needs exclusive access. The connection is usable in the mode the file is already "
+            + "in and every published contract behaves identically, so this is reported rather than "
+            + "treated as a startup fault. To have the configured mode take effect, provision the file "
+            + "in it or set 'Sqlite:Journal' to the mode the file already carries.";
+
+        /// <summary>
         /// Existence of a table in a named schema, with BOTH the schema and the table name
         /// parameterized.
         /// </summary>
@@ -364,6 +398,25 @@ namespace PowerFramework.Persistence.Data
         /// structural fault, so it is refused at construction rather than detected later.
         /// </remarks>
         private const string ReadOnlyLegacyTreeSegment = "ws_objects";
+
+        /// <summary>
+        /// The refusal raised for a data directory inside the read-only legacy export tree.
+        /// </summary>
+        /// <remarks>
+        /// <b>PUBLISHED AS A CONSTANT SO THE STARTUP GATE CAN RAISE THE SAME REFUSAL BEFORE IT TOUCHES
+        /// THE FILESYSTEM.</b> This type refuses the path at construction, but construction happens after
+        /// the composition root has already probed the directory for writability - and that probe CREATES
+        /// the directory, so the refusal used to arrive one <c>mkdir</c> too late and left a directory
+        /// inside the oracle tree that constraint C-C forbids writing to at all. The text lives here
+        /// because the rule lives here; the gate consumes it rather than restating it, so the two can
+        /// never drift apart.
+        /// </remarks>
+        internal const string ReadOnlyLegacyTreeRefusalText =
+            "'Sqlite:DataDirectory' resolves inside the read-only legacy export tree, whose path "
+            + "contains a '"
+            + ReadOnlyLegacyTreeSegment
+            + "' segment. That tree is the behavioural oracle for parity testing and is never written "
+            + "to. Point the setting at the persistence-db volume mount instead.";
 
         // ------------------------------------------------------------------------------------------
         //  INSTANCE STATE - all of it instance state, none of it static (see the header)
@@ -584,11 +637,7 @@ namespace PowerFramework.Persistence.Data
             // ------------------------------------------------------------------------------------
             if (ResolvesInsideReadOnlyLegacyTree(DataDirectory))
             {
-                throw new InvalidOperationException(
-                    "'Sqlite:DataDirectory' resolves inside the read-only legacy export tree, whose "
-                    + "path contains a '" + ReadOnlyLegacyTreeSegment + "' segment. That tree is the "
-                    + "behavioural oracle for parity testing and is never written to. Point the "
-                    + "setting at the persistence-db volume mount instead.");
+                throw new InvalidOperationException(ReadOnlyLegacyTreeRefusalText);
             }
 
             DatabaseFileName = fileName;
@@ -2129,6 +2178,17 @@ namespace PowerFramework.Persistence.Data
 
                     return failed;
                 }
+
+                if (outcome.Message.Length != 0)
+                {
+                    // A SUCCESS CARRYING A DIAGNOSTIC IS THE JOURNAL-MODE ARM, AND IT IS RECORDED RATHER
+                    // THAN DISCARDED. The connection is usable and the caller is told nothing, so the log
+                    // record is the only place an operator can learn that the configured mode is not the
+                    // mode in force. The text is framework-authored prose with no path and no value in it.
+                    _logger.LogWarning(
+                        "The SQLite database opened with an unapplied configuration setting: {Reason}",
+                        outcome.Message);
+                }
             }
             catch (SqliteException exception)
             {
@@ -2286,11 +2346,21 @@ namespace PowerFramework.Persistence.Data
                     // CONFIGURED open mode, which is the creative one. This is the single place in this
                     // file that composes a connection string with a mode of its own, and it is confined
                     // to this member so no other path can acquire a read-only handle by accident.
+                    // POOLING IS TURNED OFF ON THIS HANDLE, AND THAT IS LOAD BEARING RATHER THAN TIDY.
+                    // Microsoft.Data.Sqlite pools connections, so a pooled handle stays PHYSICALLY OPEN
+                    // on the file after it is disposed. This route is anonymous and is probed
+                    // continuously - the container HEALTHCHECK and Gateway's aggregation both hit it -
+                    // so a retained handle is permanent in practice, and a second connection on the file
+                    // is exactly what makes a journal-mode conversion out of WAL impossible: that
+                    // conversion needs an EXCLUSIVE lock and answers SQLITE_BUSY while any other
+                    // connection is open. A readiness probe must not be able to disable the data plane,
+                    // and a short-lived diagnostic handle gains nothing from pooling in any case.
                     SqliteConnectionStringBuilder builder = new()
                     {
                         DataSource = DatabasePath,
                         Mode = SqliteOpenMode.ReadOnly,
                         DefaultTimeout = GetTimeoutSeconds(),
+                        Pooling = false,
                     };
 
                     opened = new SqliteConnection(builder.ConnectionString);
@@ -2456,24 +2526,49 @@ namespace PowerFramework.Persistence.Data
             SqliteIntegrityCheckMode? check,
             CancellationToken cancellationToken)
         {
-            string? resultingMode = await ExecuteScalarTextAsync(
+            // THE MODE IN FORCE IS READ BEFORE ANY ATTEMPT TO CHANGE IT, for the reason recorded on
+            // JournalModeProbeStatement: the setter is the operation that can fail, and it is not needed
+            // at all when the file already carries the configured mode.
+            string? modeInForce = await ExecuteScalarTextAsync(
                 connection,
-                JournalStatementFor(canonicalJournalMode),
+                JournalModeProbeStatement,
                 cancellationToken).ConfigureAwait(false);
 
-            if (!string.Equals(resultingMode, canonicalJournalMode, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(modeInForce, canonicalJournalMode, StringComparison.OrdinalIgnoreCase))
             {
-                return new ExtensionParameterOutcome(
-                    RetCode.E_DB_ERROR,
-                    RetCode.SQLITE_ERROR,
-                    "The engine would not set journal mode '"
-                    + canonicalJournalMode
-                    + "' and reported '"
-                    + (resultingMode ?? "no value")
-                    + "' instead. The pragma returns the mode actually in force, so this is a "
-                    + "refusal rather than a success - it happens when the requested mode is "
-                    + "incompatible with how the database was opened. Configure 'Sqlite:Journal' to "
-                    + "a mode this database supports.");
+                string? resultingMode;
+
+                try
+                {
+                    resultingMode = await ExecuteScalarTextAsync(
+                        connection,
+                        JournalStatementFor(canonicalJournalMode),
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (SqliteException failure)
+                {
+                    // A CONVERSION THE ENGINE REFUSES IS NOT A FAILED OPEN. Converting out of WAL needs
+                    // exclusive access, so this is what a second open connection produces - see
+                    // JournalModeNotConvertedText for why the connection is kept. Nothing is recorded
+                    // here: this member is static and holds no logger by design, and the outcome it
+                    // returns is what the callers record.
+                    _ = failure;
+
+                    resultingMode = modeInForce;
+                }
+
+                if (!string.Equals(resultingMode, canonicalJournalMode, StringComparison.OrdinalIgnoreCase))
+                {
+                    // REPORTED AS A SUCCESS CARRYING A DIAGNOSTIC, not as a database error. The
+                    // difference is observable and it is the whole point: the previous behaviour failed
+                    // the open, which took the entire data plane down over a journalling knob whenever a
+                    // readiness probe held the file. The text travels so a caller and a log record can
+                    // both state what was and was not applied.
+                    return new ExtensionParameterOutcome(
+                        RetCode.OK,
+                        RetCode.SQLITE_OK,
+                        JournalModeNotConvertedText);
+                }
             }
 
             if (check is null)
@@ -2508,16 +2603,6 @@ namespace PowerFramework.Persistence.Data
         }
 
         /// <summary>
-        /// Creates the configured data directory if it is absent.
-        /// </summary>
-        /// <exception cref="InvalidOperationException">The directory cannot be created.</exception>
-        /// <remarks>
-        /// FAIL FAST. A service that cannot create its only data directory has no storage at all, and
-        /// the framework's posture for a structural fault is to stop rather than to continue degraded
-        /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>]. The most likely cause in a container is
-        /// a mount the image's non-root user cannot write, so the message says so.
-        /// </remarks>
-        /// <summary>
         /// Brings the configured data directory into being if it is absent.
         /// </summary>
         /// <remarks>
@@ -2529,6 +2614,29 @@ namespace PowerFramework.Persistence.Data
         /// </remarks>
         internal void EnsureDataDirectoryExistsForRuntimeConnect() => EnsureDataDirectoryExists();
 
+        /// <summary>
+        /// Creates the configured data directory if it is absent.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The directory cannot be created.</exception>
+        /// <remarks>
+        /// <para>
+        /// FAIL FAST. A service that cannot create its only data directory has no storage at all, and the
+        /// framework's posture for a structural fault is to stop rather than to continue degraded
+        /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>].
+        /// </para>
+        /// <para>
+        /// <b>THE MESSAGE NAMES THE CONFIGURATION KEY AND NOT THE PATH, AND THE CAUSE IS NOT
+        /// ATTACHED.</b> An earlier form quoted the configured directory and attached the file-system
+        /// exception, whose own message quotes the path a second time - so one failure published the mount
+        /// layout repeatedly while naming no setting an operator could change. It also asserted only
+        /// "could not be created", which is the wrong instruction when a file occupies the path or the
+        /// volume was never mounted. <see cref="DataDirectoryFault"/> now establishes which of the four
+        /// classes applies, names <c>Sqlite:DataDirectory</c>, and describes the cause by TYPE alone; the
+        /// exception is deliberately not chained, because chaining it would restore the disclosure the
+        /// message exists to avoid. This is the same rule the internal-trust anchor and the two sibling
+        /// services already apply to their own mounted paths.
+        /// </para>
+        /// </remarks>
         private void EnsureDataDirectoryExists()
         {
             try
@@ -2542,13 +2650,7 @@ namespace PowerFramework.Persistence.Data
                 or ArgumentException)
             {
                 throw new InvalidOperationException(
-                    "The configured SQLite data directory '"
-                    + DataDirectory
-                    + "' does not exist and could not be created, so this service has no storage. It "
-                    + "is expected to be the mount point of the persistence-db volume and it must be "
-                    + "writable by the container image's non-root user. Note that nothing here "
-                    + "removes or replaces existing contents - only a missing directory is created.",
-                    exception);
+                    DataDirectoryFault.Describe(DataDirectory, exception));
             }
         }
 

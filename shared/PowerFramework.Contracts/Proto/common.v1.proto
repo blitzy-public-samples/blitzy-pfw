@@ -838,7 +838,17 @@ message AnyValue {
     bool bool_value = 2;             // legacy boolean
     int64 int64_value = 3;           // legacy long AND integer (widened, Section 1)
     uint64 uint64_value = 4;         // legacy unsignedlong
-    double double_value = 5;         // legacy double/real - genuinely floating point at source
+    // legacy double/real - genuinely floating point at source.
+    //
+    // NOT-A-NUMBER IS REFUSED, AND THE TWO INFINITIES ARE NOT. Persistence answers its own defined
+    // refusal for a NaN in this arm - E_INVALID_DATA with "无效的更新数据!" for an update payload,
+    // E_INVALID_ARGUMENT for a command or query parameter - before any statement is generated, so a
+    // multi-row payload cannot half-apply. The distinction is the storage provider's and was measured:
+    // binding NaN raises a fault rather than a database error, while both infinities bind and store.
+    // A DELIBERATE NARROWING: the legacy has no NaN at all - PowerScript has no literal for it - so
+    // there is no legacy behaviour to preserve, and substituting null or zero would write a value the
+    // caller never sent.
+    double double_value = 5;
     DecimalValue decimal_value = 6;  // legacy dec / decimal(n) - NOT double_value
     DateValue date_value = 7;        // legacy date
     TimeValue time_value = 8;        // legacy time
@@ -871,6 +881,14 @@ message AnyValue {
 // the value matters, as in a plain query result - because a status is not meaningful on every column
 // in every direction.
 message ColumnValue {
+  // THE NAME, AND WHEN IT IS EMPTY. Persistence carries it wherever it knows it: a retrieval records its
+  // column names as it fills the carrier, and an update resolves them anyway when it builds its column
+  // plan, so both the query chunks and an update's conflict rows carry both identifiers. It is the EMPTY
+  // STRING only where the name is genuinely not known - a carrier populated from a caller-supplied
+  // changeset has never been told the names, because the legacy blob carries ordinals and nothing else.
+  // A name is never FABRICATED from the ordinal: an invented identifier would be indistinguishable from a
+  // real one and would not survive the column reorder this field exists to survive, which is worse than
+  // an absent one.
   string column_name = 1;
   // ONE-BASED column ordinal. 0 is reserved by the legacy convention for "the row itself".
   //

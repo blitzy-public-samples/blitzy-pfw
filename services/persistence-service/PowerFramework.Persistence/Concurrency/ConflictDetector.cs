@@ -1184,7 +1184,17 @@ internal sealed record UpdateOutcome
     /// </remarks>
     internal bool TryProjectDbError(out DbError? dbError)
     {
-        if (DbError is null)
+        // AN EMPTY PAYLOAD IS NO PAYLOAD, AND TREATING IT AS ONE HID REAL DIAGNOSTICS. The classifier's
+        // last arm builds its payload from the TRANSACTION's own code and text
+        // [n_cst_thread_task_sqlupdate.sru:L249-L250], and those are 0 and empty whenever the failure was
+        // raised through the CARRIER's database-error channel instead - which is exactly what a constraint
+        // violation on a generated INSERT does. The payload was then non-null and entirely default, and
+        // because a non-null payload wins over the run's latched one at the projection, a fully populated
+        // driver error (code, text, buffer, row) was shadowed by an empty one and the response carried
+        // `db_error: {}`. The presence of the payload IS the signal a consumer reads, so a default-valued
+        // payload must not be published as one; answering false here lets the caller fall back to what the
+        // run actually latched.
+        if (DbError is null || DbError.Value == DbErrorData.Empty)
         {
             dbError = null;
 

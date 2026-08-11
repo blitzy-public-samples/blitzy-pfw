@@ -143,6 +143,7 @@ Applied to the commands in this document:
 12. [Why the build is authored from scratch](#12-why-the-build-is-authored-from-scratch)
 13. [Closing note: what this document claims and does not claim](#13-closing-note-what-this-document-claims-and-does-not-claim)
 14. [Markdown lint policy for this documentation set](#14-markdown-lint-policy-for-this-documentation-set)
+15. [Per-service configuration keys](#15-per-service-configuration-keys)
 
 ---
 
@@ -231,6 +232,32 @@ or CI step defined in this document reads it as an input, writes to it, or requi
   `docs/Sciter交互.md`, `docs/PB多线程绕坑提示.md` and `docs/n_cst_dwsvc_columnexp.md` — are read-only
   reference. They are not edited, translated, re-encoded, renamed or link-rewritten. This document is
   purely additive alongside them.
+
+### 1.6 Deviations from the attached environment's setup instructions
+
+The attached environment's setup instructions are **binding operational constraints** (C-L), so every
+place the delivered build departs from them is enumerated here rather than left for a reader to discover
+by running a command that fails. Five deviations are recorded in the migration plan itself (§0.8.3); two
+more are recorded here, because they are properties of the delivered code that the plan's own register did
+not carry, and both were found by running the instructions verbatim and watching them fail.
+
+| # | What the instructions say | What the delivered system requires | Why |
+| --- | --- | --- | --- |
+| **D6** | Generate each signing key with `openssl rand -base64 32` | An **RSA private key** — see §8.1 for the exact `openssl genpkey` form | Security signs **RS256** and publishes an **RSA-only** JWK set, so symmetric random bytes cannot be imported and cannot be published as an RSA JWK. The instruction produces material the configured algorithm cannot use, and the host **refuses to start** on it. Answering that failure by switching to an HMAC family would publish the signing secret itself to all three verifiers, since the key set is anonymous. **The key is additionally required to be at least 2048 bits** (§8.1) |
+| **D7** | Probe readiness with `curl -sf http://localhost:<port>/health`, and reach the composition root at `http://localhost:5105` | `https://` on every port, and a trusted CA for the local certificate: `curl -sf --cacert <ca> https://localhost:<port>/health`, composition root at `https://localhost:5105` | Every service binds **HTTPS only** — there is no plaintext listener on any port, by design rather than by omission (`ARCHITECTURE.md` §9.4). A plaintext probe therefore fails at the transport layer, before any handler runs, and reports nothing about readiness. §7.1 and §8.2 carry the corrected forms; the container probes use `openssl s_client` for the same reason, and §7.1 explains why a bash `/dev/tcp` write cannot work against a TLS listener |
+
+Everything else in the instructions is honoured without deviation: the per-service build-command shape
+(§5.1, run verbatim), the Compose bring-up shape with its example environment file (§8.1), the anonymous
+health and authenticated ping contract with `401` absent a token (§8.2), the gateway-reports-healthy-only-
+after-its-upstreams gate (§8.2), the 5101–5105 port band with Gateway on 5105 (§8.2), the end-to-end test
+directory and its install-and-run path (§9), and the read-only status of the legacy tree (§1.5).
+
+**Neither deviation is a choice this build made to be different.** Each is a consequence of a requirement
+the instructions and the plan both impose — RS256 with an anonymously published key set, and an
+authenticated transport on every new boundary (C-G) — so honouring the instruction literally would break
+the requirement it exists to serve. That is the test applied to both: a deviation is documented when the
+instruction and the constraint cannot both be satisfied, never merely because another form was more
+convenient.
 
 ---
 
@@ -719,6 +746,48 @@ translation, the capability gate, the reserved routes and token issuance are all
 evidence about a deployed topology — an in-process host performs no TLS handshake, no ALPN negotiation, no
 real gRPC channel setup and no client-certificate exchange (§1.3).
 
+### 5.6 Provisioning the Persistence database — the one runtime step no build performs
+
+Persistence is the only service with storage, and it **does not create its own schema**. The service opens
+the database file, probes it, and reports `/health` as not ready until the `COMPANY` table exists; every
+C-05 through C-08 verb then answers a defined refusal rather than a fabricated success. Applying the
+migration is therefore a deployment step, and this is the command:
+
+```bash
+cd services/persistence-service/PowerFramework.Persistence
+dotnet build -c Release
+dotnet ef database update \
+  --no-build \
+  --configuration Release \
+  -c PowerFrameworkDbContext \
+  --connection "Data Source=<data-directory>/<database-file-name>"
+```
+
+Four things about it are not optional, and each is a property of this repository rather than a preference:
+
+- **`--connection` is mandatory.** `PowerFrameworkDbContextFactory.CreateDbContext` calls `UseSqlite()`
+  with no connection string on purpose — a design-time factory that embedded one would put a storage path
+  in source. Supply the same directory and file name the service is configured with
+  (`Sqlite:DataDirectory` and `Sqlite:DatabaseFileName`).
+- **`--configuration Release` matches `--no-build`.** Without it the tool looks for a Debug assembly that
+  a Release-only build has not produced.
+- **`-c PowerFrameworkDbContext`** names the single context explicitly, so the command does not depend on
+  discovery order.
+- **It is idempotent and non-destructive.** Re-running it reports *"No migrations were applied. The
+  database is already up to date."* and leaves existing rows byte-identical, which is what makes it safe in
+  a start-up script and safe between the paired characterization captures
+  [`PARITY.md`](PARITY.md) requires against one unrecreated volume state.
+
+**The journal mode the migration leaves behind, and why it no longer matters.** EF Core's migration lock
+leaves the file in **WAL** journal mode, which is not the `DELETE` the legacy URI grammar defaults to
+(`Sqlite:Journal`, from `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L452-L455`). Converting *out of*
+WAL requires exclusive access, so with any other connection open on the file — a readiness probe is
+enough — the conversion is impossible. The service therefore reads the mode in force, issues the pragma
+only when it differs, and records a warning instead of failing the connection when the engine refuses the
+conversion: the journal mode changes how the engine journals, not the result of any statement. Configure
+`Sqlite:Journal=WAL` if you want the configured mode and the provisioned mode to agree and the warning to
+disappear.
+
 ---
 
 ## 6. Whole-solution build — a developer convenience
@@ -849,6 +918,11 @@ the remediation posture.
 
 ## 8. Local orchestration
 
+**Looking for a key name?** [§15](#15-per-service-configuration-keys) tabulates every configuration key
+each of the four services actually binds. No two services spell the internal TLS anchor or the client
+identity the same way, and there is no prefix that can be assumed, so consult that table rather than
+inferring a name from a sibling service.
+
 > ### ⚠️ THIS ENTIRE SECTION IS A SPECIFICATION, NOT A RUNBOOK — NOTHING IN IT CAN BE RUN TODAY
 >
 > **`orchestration/docker-compose.yml` does not exist.** All four container definitions do (§7.1), so
@@ -923,20 +997,31 @@ refused at startup. **Persistence has no client pair and no secret**, because it
 key set and calls nothing else there. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling
 rule, and §4.1.1 there for what is and is not enforced about the signing key.
 
-**Two settings leaves look like validation of that key and are not.** Security's `appsettings.json`
-carries `Security:SigningKeyFormat` (`PemOrPkcs8Base64`) and `Security:SigningKeyMinimumSizeBits` (2048),
-and **`Configuration/SecurityOptions.cs` binds neither**: both leaves are inert, and changing either value
-changes nothing. What each records is still true, but it is a record rather than a control:
+**Two settings leaves ARE validation of that key, and this passage used to deny it.** Security's
+`appsettings.json` carries `Security:SigningKeyFormat` (`PemOrPkcs8Base64`) and
+`Security:SigningKeyMinimumSizeBits` (2048), and `Configuration/SecurityOptions.cs` **binds both**.
 
-- **The accepted format is fixed code.** `Tokens/SigningKeyProvider.cs` always attempts the same closed
-  sequence — PEM first, both PKCS#8 and the older PKCS#1, then base64 of the DER encoding — and no
-  configuration alters it. A value that is none of those **does** make the host refuse to start, because
-  the import fails; not because the leaf was consulted.
-- **The 2048-bit figure is operator guidance, not an enforced floor.** No key-size rule is applied
-  anywhere: **a 1024-bit RSA key starts the host and mints tokens**, measured on the pinned toolchain and
-  asserted as correct by `PowerFramework.Security.Tests`. Supply 2048 or more — this document recommends
-  it — but do not cite the setting as a control, and enforce a real minimum in the process that issues
-  the secret if one is required.
+> ⚠ **CORRECTED, AND IT CONTRADICTED THIS DOCUMENT'S OWN §8.3.** An earlier revision of this passage said
+> the two leaves were "inert", that "changing either value changes nothing", and that "**a 1024-bit RSA key
+> starts the host and mints tokens**" — while §8.3 below stated correctly that "**the size is checked
+> too**". A reader had no way to tell which of the two to believe, and the wrong one described an active
+> control as absent, so it would have been read as a gap in this service's protections. **No behaviour
+> changed in the correction; only this passage did.**
+
+- **The accepted format is a validated setting over a fixed acceptance sequence.**
+  `Tokens/SigningKeyProvider.cs` always attempts the same closed sequence — PEM first, both PKCS#8 and the
+  older PKCS#1, then base64 of the DER encoding — and no configuration reorders or extends it, so a value
+  that is none of those shapes makes the host refuse to start because the import fails. Separately,
+  `SecurityOptionsValidator` refuses any `SigningKeyFormat` outside the recognised set — which has exactly
+  one member — by name at startup, so a deployment naming `Pkcs12` or `Jwk` is told so rather than ignored.
+- **The 2048-bit figure is an enforced floor, measured in two places.** `SecurityOptionsValidator` imports
+  the material, measures the modulus and refuses a short key with a named configuration failure quoting the
+  measured and required sizes; and `Tokens/SigningKeyProvider` calls `RequireSufficientModulus` before
+  signing credentials become reachable at all, so the guarantee holds even on a construction path that does
+  not run options validation. **A 1024-bit RSA key does not start the host.** The floor is raisable to 3072
+  or 4096 and is **not** lowerable — a configured value below 2048 is itself refused. It applies to the
+  ISSUER KEY ONLY: the `/v1/crypto` key-generation surface still accepts 1024 bits, preserving the legacy
+  allowance [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`], and the two are held apart by test.
 
 **The signing key is an RSA private key, not random bytes.**
 This is worth stating in a build document because getting it wrong produces a stack that starts and then
@@ -1652,3 +1737,95 @@ on it. A per-file directive cannot reach any of them.
 
 [`docs/PARITY.md`](PARITY.md) carries the same directive; its §11 restates this policy for readers who
 arrive there first.
+
+---
+
+## 15. Per-service configuration keys
+
+**Why this section exists.** Every service reads the same four kinds of setting — the internal TLS trust
+anchor, the identity it presents to Security, the token-signing key, and the SQLite data directory — but
+**no two of them spell those settings the same way**, and there is no single prefix a reader can assume.
+Someone bringing a service up therefore had to read four `Configuration/*Options.cs` files and four
+`appsettings.json` files to discover the key names, and a plausible guess produced a service that started
+and then failed at its first outbound call. The table below is the authoritative list, so the guess is
+never necessary.
+
+**The keys are tabulated, not renamed.** Harmonising them onto one prefix would ripple through four
+`appsettings.json` files, the orchestration manifest, `orchestration/.env.example` and the coherence tests
+in `PowerFramework.Contracts.Tests` that pin each spelling — a change with real regression risk and no
+behavioural benefit. Documenting the actual shapes carries the same information at none of that cost.
+
+`:` is the configuration-path separator. In an environment variable each `:` becomes `__`, so
+`Gateway:InternalTls:TrustedCaPath` is set as `Gateway__InternalTls__TrustedCaPath`.
+
+### 15.1 The four cross-cutting concerns
+
+| Concern | Gateway | DataServices | Persistence | Security |
+| --- | --- | --- | --- | --- |
+| **Internal TLS trust anchor** — the CA bundle used to verify the certificate an upstream presents | `Gateway:InternalTls:TrustedCaPath` | `DataServices:InternalTls:TrustedCaPath` | `InternalTls:TrustedCaPath` — **no service prefix** | *n/a — reaches no upstream* |
+| **Client identity** — the certificate this service presents when it calls Security | `Gateway:MutualTls:CertificatePath`, `Gateway:MutualTls:CertificateKeyPath` | `DataServices:Security:MutualTls:CertificatePath`, `DataServices:Security:MutualTls:CertificateKeyPath` — **nested one level deeper** | *n/a — fetches JWKS anonymously and mints nothing* | *n/a — it is the issuer* |
+| **Token signing key** | *n/a — holds verification material only* | *n/a* | *n/a* | `SECURITY_JWT_SIGNING_KEY` — **a flat key, deliberately not `Security:SigningKey`** |
+| **SQLite data directory** | *n/a* | *n/a — holds no storage provider* | `Sqlite:DataDirectory` | *n/a* |
+
+Three shapes for one concern, and each difference is real rather than a typo in this table:
+
+- **Gateway** prefixes with its own name and puts `MutualTls` directly under that prefix.
+- **DataServices** prefixes with its own name but nests the same settings under a further `Security`
+  sub-section, because that service groups everything about its relationship with Security together.
+- **Persistence** does not prefix at all: `InternalTls` and `Jwt` sit at the configuration root.
+
+**Only Persistence holds a storage provider and only Security holds a signing key.** Those are
+architectural invariants (AAP §0.1.1), not accidents of configuration, which is why the *n/a* cells are
+worth as much as the populated ones: a key supplied where the table says *n/a* is inert, and a deployment
+that supplies one has misunderstood the topology rather than mis-typed a name.
+
+### 15.2 Inbound token validation
+
+The section each service binds its JWT bearer validation from also differs:
+
+| Service | Section |
+| --- | --- |
+| Gateway | `Authentication:Schemes:Bearer` |
+| DataServices | `Authentication:Jwt` |
+| Persistence | `Jwt` — **at the configuration root** |
+| Security | `Authentication:Jwt` |
+
+### 15.3 Security's own additional keys
+
+Security carries the issuance surface, so it binds settings no other service has. All are under the
+`Security:` prefix **except the signing key**, which is flat:
+
+| Key | Purpose |
+| --- | --- |
+| `Security:Issuer` | The `iss` value minted tokens carry |
+| `Security:Audiences` | The audiences issuance will accept a request for |
+| `Security:TokenLifetime`, `Security:SigningAlgorithm` | Lifetime and algorithm of a minted token |
+| `Security:Clients[n]:Subject` | A client permitted to request a token |
+| `Security:Clients[n]:SecretConfigurationKey` | **The NAME of a flat configuration key holding that client's secret** — never the secret itself, so no secret appears in `appsettings.json` |
+| `Security:CallerAuthorizations[n]:Caller`, `:Audience`, `:Scopes[m]` | Which caller may obtain which audience with which scopes |
+| `Security:MutualTls:ClientCaPath` | Trust anchor for a caller presenting a certificate to `POST /v1/tokens` |
+| `Security:MutualTls:Identity` | The identity attributed to a verified caller certificate |
+| `Security:ClientCertificateAuthorityPath` | Trust anchor for client certificates at the Kestrel layer |
+| `Security:ClientCertificateRevocationMode` | Revocation checking mode for those certificates |
+| `Security:KeyStore:PermittedKeyRefs[n]` | The opaque `keyRef` values `C-02` will resolve — callers pass a reference, never key material |
+| `SECURITY_JWT_SIGNING_KEY` | **The only signing secret in the entire system.** Flat and fixed: do not rewrite it as `Security__SigningKey` or add such an alias. `orchestration/.env.example` records why, and that it takes the base64 of a PKCS#8 DER RSA private key rather than random bytes |
+
+### 15.4 Hosting keys, identical across all four
+
+These are ASP.NET Core's own and are spelled the same everywhere:
+
+| Key | Purpose |
+| --- | --- |
+| `Kestrel:Endpoints:*` | Listener addresses and protocols — the 5101/5102/5104/5105 allocation |
+| `Kestrel:Certificates:Default:Path`, `:KeyPath` | The server certificate each service presents |
+| `Logging:LogLevel:*` | Log level filters |
+| `AllowedHosts` | Host filtering |
+
+### 15.5 Verifying this table
+
+It was produced from the running estate rather than by reading the options types alone: each key above is
+one a service actually binds, confirmed by bringing all four up over HTTPS with mutual TLS supplying only
+these keys and observing `/health` answer `200` on 5101, 5102, 5104 and 5105 with no configuration
+refusal. If a key is added or respelled, `PowerFramework.Contracts.Tests` carries the coherence tests that
+pin the spellings — `ServiceConfigurationCoherenceTests` and `OperationalTopologyCoherenceTests` — and
+they, not this table, are what fail first.

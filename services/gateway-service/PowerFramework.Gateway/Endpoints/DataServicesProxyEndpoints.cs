@@ -479,6 +479,45 @@ public static class DataServicesProxyEndpoints
         + "that a member a caller sent is never silently lost. The parser's own diagnostic is "
         + "deliberately withheld because it quotes the offending body, which is caller content.";
 
+    /// <summary>
+    /// The largest session identifier this projection forwards, taken from the contract's own declaration.
+    /// </summary>
+    /// <remarks>
+    /// TRANSCRIBED FROM <c>components.parameters.SessionIdQuery.schema.maxLength</c> and its path sibling,
+    /// both of which declare 128. It is a bound the CONTRACT publishes rather than one chosen here, which
+    /// is why it is enforced at all: a declared constraint nothing applies is a promise a consumer cannot
+    /// rely on.
+    /// </remarks>
+    private const int MaximumSessionIdLength = 128;
+
+    /// <summary>The detail for a session identifier the caller omitted entirely.</summary>
+    /// <remarks>
+    /// IT SAYS THE PARAMETER IS REQUIRED AND NAMES IT, because the parameter name is the contract's own and
+    /// not caller content. No caller VALUE appears in any of these three details.
+    /// </remarks>
+    private const string AbsentSessionIdDetail =
+        "This operation requires a sessionId and none was supplied. The published parameter declares it as "
+        + "required, so an omitted identifier is a client error rather than a fault of this service; it is "
+        + "answered identically to an empty one, because omitting a value and supplying an empty one are "
+        + "two spellings of the same mistake.";
+
+    /// <summary>The detail for an empty session identifier.</summary>
+    private const string EmptySessionIdDetail =
+        "The sessionId supplied is empty. The published parameter declares a minimum length of one, so an "
+        + "empty identifier cannot name a session. It is answered identically to an omitted one.";
+
+    /// <summary>The detail for a session identifier longer than the contract permits.</summary>
+    /// <remarks>
+    /// THE BOUND IS REPORTED AND THE VALUE IS NOT. A caller needs to know the limit it exceeded in order to
+    /// correct its request; echoing the identifier back would put caller content in a problem body for no
+    /// benefit, since the caller already has it.
+    /// </remarks>
+    private const string OverLongSessionIdDetail =
+        "The sessionId supplied is longer than the published parameter permits, which is 128 characters. "
+        + "It is refused here rather than forwarded, because an upstream asked about an identifier it "
+        + "cannot resolve answers that no such session exists - which would tell the caller the session is "
+        + "gone rather than that its request violated a declared bound.";
+
     /// <summary>The detail for an upstream <c>InvalidArgument</c>.</summary>
     private const string InvalidArgumentDetail =
         "DataServices rejected an argument. The retCode member carries the legacy return code for the "
@@ -601,6 +640,20 @@ public static class DataServicesProxyEndpoints
         "The projected gRPC method returned InvalidArgument, or the request failed Gateway's own binding. "
         + "retCode carries the originating legacy return code so the specific validation is identifiable "
         + "rather than merely the HTTP class.";
+
+    /// <summary>
+    /// The contract's <c>400</c> description for the three operations whose only argument is a session
+    /// identifier.
+    /// </summary>
+    /// <remarks>
+    /// These operations take no request body, so their <c>400</c> is entirely about the identifier: it is
+    /// omitted, it is empty, or it exceeds the published maximum length. All three are answered identically
+    /// with <c>E_INVALID_ARGUMENT</c>, and none echoes the value back.
+    /// </remarks>
+    private const string SessionIdConstraintDescription =
+        "The sessionId does not satisfy the parameter contract this operation publishes: it was omitted, it "
+        + "is empty, or it is longer than 128 characters. This operation takes no request body, so its 400 "
+        + "can arise no other way. retCode carries E_INVALID_ARGUMENT and the value is not echoed back.";
 
     /// <summary>
     /// The contract's <c>400</c> description for the five operations on which a cross-session foreign
@@ -883,7 +936,7 @@ public static class DataServicesProxyEndpoints
                 "Releases the session opened above. The 404 this operation declares is the projection of an "
                 + "upstream NotFound and is never synthesized from a response field - see adjudication A5 "
                 + "in this file's header.",
-                BadRequest: BadRequestDeclaration.None),
+                BadRequest: BadRequestDeclaration.SessionIdConstraint),
             HttpMethods.Delete,
             static sessionId => new CloseValidationSessionRequest { SessionId = sessionId },
             static (client, request, cancellationToken) =>
@@ -920,7 +973,7 @@ public static class DataServicesProxyEndpoints
                 + "EVALUATION [se_cst_dw.sru:L109-L111], so a caller that disables item change to stop a "
                 + "validation cascade also silently stops every computed column from recalculating. That is "
                 + "legacy behaviour, reproduced rather than corrected.",
-                BadRequest: BadRequestDeclaration.None,
+                BadRequest: BadRequestDeclaration.SessionIdConstraint,
                 SuccessDescription:
                 "The current event gate. The bitmask and its decomposed bits are carried exactly as the "
                 + "protobuf message names them, so the legacy EID_* identifiers are part of the published "
@@ -1105,7 +1158,7 @@ public static class DataServicesProxyEndpoints
                 "Releases the session opened above, and with it every cross-DataWindow handle scoped to it. "
                 + "The 404 is the projection of an upstream NotFound and is never synthesized from a "
                 + "response field.",
-                BadRequest: BadRequestDeclaration.None),
+                BadRequest: BadRequestDeclaration.SessionIdConstraint),
             HttpMethods.Delete,
             static sessionId => new CloseExpressionSessionRequest { SessionId = sessionId },
             static (client, request, cancellationToken) =>
@@ -1367,7 +1420,14 @@ public static class DataServicesProxyEndpoints
                 + "would have delivered, each retaining its sequencing token and its declared ordering "
                 + "discipline."),
             static (client, request, cancellationToken) =>
-                client.StreamExpressionEventsAsync(request, cancellationToken));
+                client.StreamExpressionEventsAsync(request, cancellationToken),
+
+            // ⚠ THE ONE OPERATION THAT OPTS IN, AND THE ONLY ONE THAT MAY. Its upstream is a
+            // subscription that ends only when the client goes away, so a request/response projection of
+            // it has to decide when the collection is complete; the retrieval above must NOT opt in,
+            // because it terminates itself with a final-marked chunk and a window would truncate a
+            // legitimate result.
+            collectWithinWindow: true);
     }
 
 
@@ -1435,11 +1495,23 @@ public static class DataServicesProxyEndpoints
     /// live because a stateless request boundary has nowhere to put them.
     /// </para>
     /// <para>
-    /// The parameter is non-nullable, so a request omitting it is rejected by PARAMETER BINDING before the
-    /// route runs. That rejection is deliberately not a declared response of the operation, for exactly
-    /// the reason the contract gives for not declaring the cross-cutting <c>401</c> on every operation: a
-    /// declared response set describes what the ROUTE produces, and neither authentication nor binding is
-    /// something the route evaluates.
+    /// <b>⚠ THE PARAMETER IS NULLABLE, AND THE CORRECTION MATTERS MORE THAN IT LOOKS.</b> It used to be
+    /// non-nullable, which made an OMITTED query parameter a PARAMETER-BINDING refusal raised before the
+    /// route ran - a <c>BadHttpRequestException</c> that escaped into the host's exception handler and
+    /// reached the caller as <c>500</c> with <c>UNKNOWN</c>, while the same request with an EMPTY value
+    /// answered <c>400</c> with <c>E_INVALID_ARGUMENT</c>. Two spellings of one mistake, answered as a
+    /// server fault and a client error respectively, and the server-fault answer is the wrong one: nothing
+    /// failed here except the caller's request. Binding it nullable moves the decision into the route,
+    /// where the operation's own declared parameter contract can be applied and one answer produced for
+    /// every violation of it.
+    /// </para>
+    /// <para>
+    /// SO THE <c>400</c> IS NOW A DECLARED RESPONSE OF THESE OPERATIONS, in the authored contract and in
+    /// the generated document alike. It has to be: the operation declares <c>required</c>,
+    /// <c>minLength</c> and <c>maxLength</c> on the parameter, and a declared constraint with no declared
+    /// response for violating it is a promise a generated client cannot branch on. The earlier note that a
+    /// binding refusal "is not something the route evaluates" was true of the old shape and is exactly what
+    /// changed - the route evaluates it now.
     /// </para>
     /// </remarks>
     private static void MapSessionScoped<TRequest, TResponse>(
@@ -1454,8 +1526,8 @@ public static class DataServicesProxyEndpoints
         RouteHandlerBuilder route = group.MapMethods(
             operation.Route,
             [httpMethod],
-            (HttpContext httpContext, string sessionId) =>
-                ProjectSessionScopedAsync(httpContext, buildRequest(sessionId), invoke));
+            (HttpContext httpContext, string? sessionId) =>
+                ProjectSessionScopedAsync(httpContext, sessionId, buildRequest, invoke));
 
         route.Produces<ProtoPayload>(StatusCodes.Status200OK, MediaTypeNames.Application.Json);
 
@@ -1490,7 +1562,8 @@ public static class DataServicesProxyEndpoints
     private static void MapServerStream<TRequest, TResponse>(
         RouteGroupBuilder group,
         ProjectedOperation operation,
-        Func<DataServicesClient, TRequest, CancellationToken, IAsyncEnumerable<TResponse>> invoke)
+        Func<DataServicesClient, TRequest, CancellationToken, IAsyncEnumerable<TResponse>> invoke,
+        bool collectWithinWindow = false)
         where TRequest : class, IMessage, new()
         where TResponse : class, IMessage, new()
     {
@@ -1499,7 +1572,7 @@ public static class DataServicesProxyEndpoints
         // Typed as Func for the reason recorded on the unary helper: a bare one-parameter lambda would bind
         // to the RequestDelegate overload, which discards the projected body.
         Func<HttpContext, Task<IResult>> handler =
-            httpContext => ProjectServerStreamAsync(httpContext, invoke);
+            httpContext => ProjectServerStreamAsync(httpContext, invoke, collectWithinWindow);
 
         RouteHandlerBuilder route = group.MapPost(streaming.Route, handler);
 
@@ -1651,19 +1724,97 @@ public static class DataServicesProxyEndpoints
     /// <typeparam name="TRequest">The protobuf request message.</typeparam>
     /// <typeparam name="TResponse">The protobuf response message.</typeparam>
     /// <param name="httpContext">The current request.</param>
-    /// <param name="request">The request built from the identifier, and from nothing else.</param>
+    /// <param name="sessionId">
+    /// The identifier as it arrived, or <see langword="null"/> when the caller omitted it entirely.
+    /// </param>
+    /// <param name="buildRequest">Builds the upstream request from the identifier, once it is accepted.</param>
     /// <param name="invoke">The typed-client member being projected.</param>
     /// <returns>The projected result.</returns>
+    /// <remarks>
+    /// THE PARAMETER CONTRACT IS APPLIED BEFORE THE REQUEST IS BUILT, so an identifier the operation
+    /// declares as unacceptable never becomes an upstream call. That is not merely tidier: forwarding one
+    /// meant the answer to a caller's own mistake was whatever the upstream happened to say about a handle
+    /// it could not resolve - a <c>404</c> for an identifier 129 characters long, which tells the caller the
+    /// session does not exist rather than that its request violated a bound the contract publishes.
+    /// </remarks>
     private static Task<IResult> ProjectSessionScopedAsync<TRequest, TResponse>(
         HttpContext httpContext,
-        TRequest request,
+        string? sessionId,
+        Func<string, TRequest> buildRequest,
         Func<DataServicesClient, TRequest, CancellationToken, Task<TResponse>> invoke)
         where TRequest : class, IMessage, new()
         where TResponse : class, IMessage, new()
         => ProjectAsync(httpContext, async (client, cancellationToken) =>
-            Render(
+        {
+            if (!TryAcceptSessionId(sessionId, out StatusProjection rejection))
+            {
+                return RejectRequest(httpContext, rejection);
+            }
+
+            return Render(
                 httpContext,
-                await invoke(client, request, cancellationToken).ConfigureAwait(false)));
+                await invoke(client, buildRequest(sessionId!), cancellationToken).ConfigureAwait(false));
+        });
+
+    /// <summary>
+    /// Applies the session-identifier parameter contract the operation itself declares.
+    /// </summary>
+    /// <param name="sessionId">The identifier as it arrived, or <see langword="null"/> when omitted.</param>
+    /// <param name="rejection">The refusal to answer with, when the identifier is not acceptable.</param>
+    /// <returns><see langword="true"/> when the identifier satisfies every declared constraint.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>EXACTLY THE THREE CONSTRAINTS THE CONTRACT DECLARES, AND NOT ONE MORE.</b>
+    /// <c>components.parameters.SessionIdQuery</c> and its path sibling both declare
+    /// <c>required: true</c>, <c>minLength: 1</c> and <c>maxLength: 128</c>
+    /// [<c>gateway.v1.yaml</c>], so absence, emptiness and an over-long value are refused here and
+    /// everything else is forwarded.
+    /// </para>
+    /// <para>
+    /// <b>WHITESPACE IS NOT TRIMMED AND NOT REFUSED, WHICH IS DELIBERATE AND IS THE ONE LINE HERE THAT
+    /// LOOKS LIKE AN OMISSION.</b> A single space satisfies <c>minLength: 1</c>, so refusing it would be
+    /// this gateway enforcing a constraint the contract does not publish - and trimming it would be this
+    /// gateway REPAIRING a caller value, which changes which session the request names. The identifier is
+    /// opaque to Gateway: the session it names lives inside DataServices, which owns the decision about
+    /// whether such a session exists and answers its own defined negative. Inventing a stricter rule here
+    /// would make the published parameter schema a description of something other than the deployed
+    /// behaviour.
+    /// </para>
+    /// <para>
+    /// LENGTH IS COUNTED IN UTF-16 CODE UNITS, which is what <c>maxLength</c> in a JSON Schema means for a
+    /// string and what the framework's own <c>String.Length</c> reports. A surrogate pair therefore counts
+    /// as two, consistently with the document a consumer validates against.
+    /// </para>
+    /// </remarks>
+    private static bool TryAcceptSessionId(
+        string? sessionId,
+        out StatusProjection rejection)
+    {
+        if (sessionId is null)
+        {
+            rejection = BindingRejection(AbsentSessionIdDetail);
+
+            return false;
+        }
+
+        if (sessionId.Length == 0)
+        {
+            rejection = BindingRejection(EmptySessionIdDetail);
+
+            return false;
+        }
+
+        if (sessionId.Length > MaximumSessionIdLength)
+        {
+            rejection = BindingRejection(OverLongSessionIdDetail);
+
+            return false;
+        }
+
+        rejection = default;
+
+        return true;
+    }
 
     /// <summary>
     /// Binds the body, consumes the projected server stream in arrival order, and renders it as an ordered
@@ -1676,7 +1827,8 @@ public static class DataServicesProxyEndpoints
     /// <returns>The projected result.</returns>
     private static Task<IResult> ProjectServerStreamAsync<TRequest, TResponse>(
         HttpContext httpContext,
-        Func<DataServicesClient, TRequest, CancellationToken, IAsyncEnumerable<TResponse>> invoke)
+        Func<DataServicesClient, TRequest, CancellationToken, IAsyncEnumerable<TResponse>> invoke,
+        bool collectWithinWindow)
         where TRequest : class, IMessage, new()
         where TResponse : class, IMessage, new()
         => ProjectAsync(httpContext, async (client, cancellationToken) =>
@@ -1706,14 +1858,26 @@ public static class DataServicesProxyEndpoints
             //  hand the trade reverts to the documented one: the headers go out and a LATER fault
             //  ends the body unterminated.
             // ==================================================================================
+            RestProjectionOptions projection = httpContext.RequestServices
+                .GetRequiredService<IOptions<GatewayOptions>>()
+                .Value
+                .RestProjection;
+
+            // ==================================================================================
+            //  THE COLLECTION WINDOW IS SUPPLIED ONLY WHERE THE UPSTREAM STREAM NEVER ENDS.
+            //
+            //  The expression event stream is a SUBSCRIPTION - the upstream ends it when the client
+            //  goes away and not before - so on an idle session the first element never arrives, the
+            //  outbound pipeline's per-attempt timeout fired instead, and the caller received 500
+            //  with E_INTERNAL_ERROR after ten seconds for a session that was simply quiet. Nothing
+            //  had failed. Every other projected stream terminates itself, so passing null leaves
+            //  those on exactly the behaviour they had.
+            // ==================================================================================
             return await StreamedSequenceResult<TResponse>
                 .PrefetchAsync(
                     invoke(client, request, cancellationToken),
-                    httpContext.RequestServices
-                        .GetRequiredService<IOptions<GatewayOptions>>()
-                        .Value
-                        .RestProjection
-                        .MaxStreamedElements,
+                    projection.MaxStreamedElements,
+                    collectWithinWindow ? projection.StreamCollectionWindow : null,
                     cancellationToken)
                 .ConfigureAwait(false);
         });
@@ -2031,7 +2195,9 @@ public static class DataServicesProxyEndpoints
     internal sealed class StreamedSequenceResult<TResponse>(
         IAsyncEnumerator<TResponse> elements,
         bool hasFirstElement,
-        int maximumElements) : IResult
+        int maximumElements,
+        CancellationTokenSource? collectionWindow = null,
+        CancellationToken callerToken = default) : IResult
         where TResponse : class, IMessage, new()
     {
         private static readonly byte[] ArrayOpen = "["u8.ToArray();
@@ -2073,11 +2239,27 @@ public static class DataServicesProxyEndpoints
         internal static async Task<IResult> PrefetchAsync(
             IAsyncEnumerable<TResponse> elements,
             int maximumElements,
+            TimeSpan? collectionWindow,
             CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(elements);
 
-            IAsyncEnumerator<TResponse> enumerator = elements.GetAsyncEnumerator(cancellationToken);
+            // ==========================================================================================
+            //  THE WINDOW IS A LINKED SOURCE RATHER THAN A TIMEOUT AROUND THE AWAIT, and the difference
+            //  is that the enumerator is created WITH the linked token - so expiry cancels the gRPC call
+            //  itself and releases it, instead of abandoning an await while the call stays open.
+            // ==========================================================================================
+            CancellationTokenSource? window = null;
+            CancellationToken enumerationToken = cancellationToken;
+
+            if (collectionWindow is { } budget)
+            {
+                window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                window.CancelAfter(budget);
+                enumerationToken = window.Token;
+            }
+
+            IAsyncEnumerator<TResponse> enumerator = elements.GetAsyncEnumerator(enumerationToken);
 
             bool hasFirst;
 
@@ -2085,14 +2267,116 @@ public static class DataServicesProxyEndpoints
             {
                 hasFirst = await enumerator.MoveNextAsync().ConfigureAwait(false);
             }
+            catch (Exception failure) when (IsWindowExpiry(failure, window, cancellationToken))
+            {
+                // ======================================================================================
+                //  AN EXPIRED WINDOW IS AN EMPTY COLLECTION, NOT A FAULT.
+                //
+                //  The caller asked for the records available now and there were none, which is a
+                //  complete answer to the question the operation asks - and it is the answer the
+                //  streaming response type already knows how to express, so nothing here invents a
+                //  second success shape. The real enumerator is disposed first because it holds the
+                //  upstream call, and it is disposed defensively: disposing an enumerator whose token
+                //  was just cancelled is exactly the situation in which a dispose can itself fault, and
+                //  a fault there would replace a legitimate empty answer with a 500.
+                // ======================================================================================
+                await DisposeQuietlyAsync(enumerator).ConfigureAwait(false);
+
+                window?.Dispose();
+
+                return new StreamedSequenceResult<TResponse>(
+                    NoElements().GetAsyncEnumerator(CancellationToken.None),
+                    hasFirstElement: false,
+                    maximumElements);
+            }
             catch
             {
                 await enumerator.DisposeAsync().ConfigureAwait(false);
 
+                window?.Dispose();
+
                 throw;
             }
 
-            return new StreamedSequenceResult<TResponse>(enumerator, hasFirst, maximumElements);
+            // OWNERSHIP OF THE WINDOW PASSES TO THE RESULT, which disposes it on every path out of
+            // ExecuteAsync - the window still bounds the REST of the collection, not merely its first
+            // element, because a subscription can produce one record and then go quiet again.
+            return new StreamedSequenceResult<TResponse>(
+                enumerator,
+                hasFirst,
+                maximumElements,
+                window,
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// Decides whether a failure is the collection window expiring rather than a real fault.
+        /// </summary>
+        /// <param name="failure">The failure raised while enumerating.</param>
+        /// <param name="window">The linked source the window cancels, or <see langword="null"/>.</param>
+        /// <param name="callerToken">The caller's own cancellation.</param>
+        /// <returns><see langword="true"/> when the window, and nothing else, ended the enumeration.</returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THE CALLER'S OWN ABORT MUST NOT BE SWALLOWED, which is what the second condition is for.</b>
+        /// The window source is LINKED to the caller's token, so a caller that hangs up cancels it too -
+        /// and treating that as a completed collection would answer 200 to a request nobody is waiting for
+        /// while hiding the abort from the shared failure path. Testing the caller's token first is what
+        /// keeps the two apart.
+        /// </para>
+        /// <para>
+        /// BOTH FAILURE SHAPES ARE ACCEPTED because the gRPC client raises either one depending on where
+        /// the cancellation lands: an <see cref="OperationCanceledException"/> from the await itself, or an
+        /// <see cref="RpcException"/> carrying <see cref="StatusCode.Cancelled"/> from the call. A test on
+        /// the token state alone would be simpler and wrong, because it would also swallow an unrelated
+        /// fault that happened to arrive after expiry.
+        /// </para>
+        /// </remarks>
+        private static bool IsWindowExpiry(
+            Exception failure,
+            CancellationTokenSource? window,
+            CancellationToken callerToken) =>
+            window is not null
+            && window.IsCancellationRequested
+            && !callerToken.IsCancellationRequested
+            && (failure is OperationCanceledException
+                || failure is RpcException { StatusCode: StatusCode.Cancelled });
+
+        /// <summary>Disposes an enumerator whose cancellation has already been requested.</summary>
+        /// <param name="enumerator">The enumerator to release.</param>
+        /// <returns>A task that completes once the release has been attempted.</returns>
+        /// <remarks>
+        /// A FAULT HERE IS SWALLOWED AND THAT IS THE POINT: the collection has already been decided, the
+        /// upstream call is already cancelled, and letting a dispose failure propagate would turn a
+        /// legitimate empty answer into a server fault. Nothing is lost, because there is nothing left to
+        /// read from an enumerator that is being abandoned.
+        /// </remarks>
+        private static async ValueTask DisposeQuietlyAsync(IAsyncEnumerator<TResponse> enumerator)
+        {
+            try
+            {
+                await enumerator.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (RpcException)
+            {
+            }
+        }
+
+        /// <summary>An enumerable that yields nothing, for a window that expired before the first element.</summary>
+        /// <returns>An empty sequence.</returns>
+        /// <remarks>
+        /// A REAL ENUMERATOR RATHER THAN A NULL ONE, so the result type keeps exactly one shape and its
+        /// disposal path stays unconditional. The cost is one allocation on a path that answers an empty
+        /// collection.
+        /// </remarks>
+        private static async IAsyncEnumerable<TResponse> NoElements()
+        {
+            await Task.CompletedTask.ConfigureAwait(false);
+
+            yield break;
         }
 
         /// <inheritdoc/>
@@ -2104,8 +2388,10 @@ public static class DataServicesProxyEndpoints
 
             // OWNED FROM HERE, AND RELEASED ON EVERY PATH - the ordinary end, the bound refusal, a
             // mid-stream upstream fault and the caller's abort alike. A gRPC call enumerator holds the
-            // call, so an undisposed one holds the upstream open after this response has ended.
+            // call, so an undisposed one holds the upstream open after this response has ended. The
+            // collection window's linked source is owned on exactly the same terms.
             await using IAsyncEnumerator<TResponse> owned = elements;
+            using CancellationTokenSource? ownedWindow = collectionWindow;
 
             httpContext.Response.StatusCode = StatusCodes.Status200OK;
             httpContext.Response.ContentType = MediaTypeNames.Application.Json;
@@ -2156,7 +2442,24 @@ public static class DataServicesProxyEndpoints
 
                 written++;
 
-                available = await elements.MoveNextAsync().ConfigureAwait(false);
+                try
+                {
+                    available = await elements.MoveNextAsync().ConfigureAwait(false);
+                }
+                catch (Exception failure)
+                    when (IsWindowExpiry(failure, collectionWindow, callerToken))
+                {
+                    // ==============================================================================
+                    //  THE WINDOW ENDING A COLLECTION MID-WAY CLOSES THE ARRAY CLEANLY, and the
+                    //  contrast with the bound above is deliberate rather than inconsistent. Exceeding
+                    //  the element bound is a TRUNCATION the caller must be able to detect, so that
+                    //  path abandons the document without its closing bracket. An expired window is a
+                    //  COMPLETE answer - the caller asked for the records available now and this is
+                    //  all of them - so the document is well formed and the response is an ordinary
+                    //  200. Abandoning it here would tell a caller its complete answer was corrupt.
+                    // ==============================================================================
+                    available = false;
+                }
             }
 
             await writer.WriteAsync(ArrayClose, cancellationToken).ConfigureAwait(false);
@@ -2671,9 +2974,18 @@ public static class DataServicesProxyEndpoints
 
         Describe(
             StatusCodes.Status400BadRequest,
-            operation.BadRequest == BadRequestDeclaration.CrossSessionReferenceBlocked
-                ? CrossSessionReferenceBlockedDescription
-                : BadRequestDescription);
+            operation.BadRequest switch
+            {
+                BadRequestDeclaration.CrossSessionReferenceBlocked =>
+                    CrossSessionReferenceBlockedDescription,
+
+                // NAMED SEPARATELY BECAUSE THESE THREE OPERATIONS TAKE NO REQUEST BODY, so the shared
+                // wording - which is about a body this gateway could not bind - would describe something
+                // that cannot happen on them.
+                BadRequestDeclaration.SessionIdConstraint => SessionIdConstraintDescription,
+
+                _ => BadRequestDescription,
+            });
 
         Describe(StatusCodes.Status401Unauthorized, UnauthorizedDescription);
         Describe(StatusCodes.Status403Forbidden, ForbiddenDescription);
@@ -2821,10 +3133,30 @@ public static class DataServicesProxyEndpoints
         Standard,
 
         /// <summary>
-        /// The operation declares no <c>400</c> at all. The two close operations and the event-gate read
-        /// take no request body, so there is nothing for Gateway's own binding to reject.
+        /// The operation declares no <c>400</c> at all.
         /// </summary>
+        /// <remarks>
+        /// NO MEMBER CARRIES THIS TODAY, and it is retained rather than deleted because it is the correct
+        /// declaration for a future operation that takes neither a body nor a parameter with declared
+        /// constraints. It used to be carried by the two close operations and the event-gate read, on the
+        /// reasoning that an operation with no request body has nothing for Gateway's own binding to
+        /// reject - which overlooked their session-identifier PARAMETER, whose declared
+        /// <c>required</c>/<c>minLength</c>/<c>maxLength</c> constraints Gateway does evaluate. See
+        /// <see cref="SessionIdConstraint"/>.
+        /// </remarks>
         None,
+
+        /// <summary>
+        /// The operation declares the <c>400</c> raised by its own session-identifier parameter contract:
+        /// an omitted, empty or over-long identifier.
+        /// </summary>
+        /// <remarks>
+        /// DISTINCT FROM <see cref="Standard"/> BECAUSE THE REASON IS DIFFERENT AND THE PROSE SHOULD SAY
+        /// SO. These three operations take no request body at all, so their <c>400</c> can only ever be
+        /// about the identifier - and a consumer reading "a body this gateway could not bind" on an
+        /// operation with no body would be reading a description of something that cannot happen.
+        /// </remarks>
+        SessionIdConstraint,
 
         /// <summary>
         /// The operation declares the <c>400</c> whose distinctive reason is a cross-DataWindow variable
@@ -3101,7 +3433,19 @@ public static class DataServicesProxyEndpoints
 
                 RetCode.E_ACCESS_DENIED => (StatusCodes.Status403Forbidden, InBandAccessDeniedDetail),
 
-                RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND =>
+                // ⚠ E_INVALID_DATA JOINS THE ARGUMENT-REJECTION ARM, and it belongs there rather than in
+                // the default. It is what the update path answers when the carrier it was handed cannot be
+                // applied [n_cst_thread_task_sqlupdate.sru, the legacy diagnostic 无效的更新数据!] - the
+                // caller's PAYLOAD is at fault, which is the definition of a 400. Falling to the default
+                // answered 500, telling a caller that this gateway had failed and inviting it to retry an
+                // identical request that can never succeed.
+                RetCode.E_INVALID_DATA =>
+                    (StatusCodes.Status400BadRequest, InBandInvalidDataDetail),
+
+                // ⚠ E_NOT_EXISTS JOINS THE NOT-FOUND FAMILY for the same reason its two siblings are
+                // already in it: the request named something the upstream could not find. A 500 here
+                // reported a fault where the honest answer is that the named thing is not there.
+                RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND or RetCode.E_NOT_EXISTS =>
                     (StatusCodes.Status404NotFound, InBandNotFoundDetail),
 
                 RetCode.E_RETRY => (StatusCodes.Status409Conflict, InBandRetryDetail),
@@ -3115,6 +3459,22 @@ public static class DataServicesProxyEndpoints
 
                 RetCode.E_DB_ERROR or RetCode.E_INVALID_TRANSACTION =>
                     (StatusCodes.Status502BadGateway, InBandDataPathDetail),
+
+                // ⚠ THE GENERIC LEGACY FAILURE IS AN UPSTREAM FAILURE, NOT A GATEWAY ONE.
+                //
+                // FAILED = -1 [retcode.sru] is the oracle's unspecific failure and the upstream really
+                // answers it - so it is a RECOGNISED outcome, and letting it fall to the default was the
+                // one arm where the default's own reasoning did not hold: the default is 500 because an
+                // UNRECOGNISED code is a contract this projection has not been taught, which is a fault on
+                // this side of the boundary. A code this projection recognises, reported by a service that
+                // answered normally, is the opposite situation. 502 is the declared status whose meaning is
+                // "the service behind me failed", and it is what sends an operator to the right service.
+                //
+                // 422 WOULD HAVE BEEN THE INTUITIVE CHOICE AND IS FORBIDDEN. The status surface of this
+                // document is closed to the set docs/CONTRACTS.md 12.1 sanctions plus 502 and 503, and the
+                // contracts suite asserts that 422 appears nowhere; adding one would be this projection
+                // overriding its own specification.
+                RetCode.FAILED => (StatusCodes.Status502BadGateway, InBandGenericFailureDetail),
 
                 _ => (StatusCodes.Status500InternalServerError, InBandUnclassifiedDetail),
             };
@@ -3145,6 +3505,28 @@ public static class DataServicesProxyEndpoints
     /// <summary>Fallback prose for an unknown handle or missing object reported in band.</summary>
     private const string InBandNotFoundDetail =
         "The upstream operation could not resolve the handle or object named in the request.";
+
+    /// <summary>Fallback prose for a payload the upstream could not apply, reported in band.</summary>
+    /// <remarks>
+    /// 400 rather than 500: the request's own DATA is what the upstream rejected, so the caller can correct
+    /// it. The upstream's own diagnostic replaces this prose whenever it supplied one, which on the update
+    /// path is the legacy sentence itself.
+    /// </remarks>
+    private const string InBandInvalidDataDetail =
+        "The upstream operation refused the data carried in the request. On the update path this is the "
+        + "buffered carrier failing validation before any statement is generated, so nothing was applied "
+        + "and re-sending the same payload will be refused again.";
+
+    /// <summary>Fallback prose for the oracle's unspecific failure reported in band.</summary>
+    /// <remarks>
+    /// 502 rather than 500, for the reason recorded on the arm: the service BEHIND this gateway reported a
+    /// failure, and this gateway did not fail. The distinction decides which service an operator
+    /// investigates.
+    /// </remarks>
+    private const string InBandGenericFailureDetail =
+        "The upstream operation reported the legacy unspecific failure. It answered normally and reported "
+        + "that it could not complete the request; this gateway relayed that answer unchanged and carries "
+        + "the originating return code on the retCode member.";
 
     /// <summary>Fallback prose for a retryable conflict reported in band.</summary>
     /// <remarks>

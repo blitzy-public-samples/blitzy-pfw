@@ -863,6 +863,14 @@ RequireInvariantTokenValidation(app.Configuration, inboundAuthenticationSection)
 // the body of a refusal still carries no caller-supplied text - the framework's own message names the
 // parameter and its type and never a value, and this service's error classifier derives the return code
 // from the status alone.
+// THE PROTECTIVE RESPONSE HEADERS, INSTALLED FIRST SO THEY REACH EVERY RESPONSE. It is registered ahead of
+// the exception handler and of authentication deliberately: it works by registering a response-starting
+// callback rather than by writing headers itself, so being outermost is what lets it cover a problem
+// document the exception handler writes and a bodiless challenge the authentication middleware writes, as
+// well as a handler's own response. It overrides nothing a route set for itself - see the file's own banner
+// for the three directives and the reason for each.
+SecurityResponseHeaders.Use(app);
+
 app.UseExceptionHandler(new ExceptionHandlerOptions
 {
     StatusCodeSelector = static exception => exception is BadHttpRequestException malformed

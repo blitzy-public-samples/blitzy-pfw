@@ -55,6 +55,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Persistence.Errors;
+using PowerFramework.Persistence.Tasks;
 using Xunit;
 
 namespace PowerFramework.Persistence.Tests;
@@ -1109,6 +1110,97 @@ public sealed class SqlRedactorTests
         }
 
         return count;
+    }
+
+
+    // ==============================================================================================
+    //  THE ROW-CAP DIAGNOSTIC IS THE ONE EXEMPTION - L-10
+    //
+    //  The scanner masks every numeric literal, which is right for a statement and wrong for the one
+    //  framework-authored diagnostic whose only number is the CALLER'S OWN row cap:
+    //  `"超出最大允许的行数(" + String(_nMaxRows) + ")!"`
+    //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L788]. Masking it told a caller
+    //  it had exceeded a limit and then hid the limit it had itself set, so nothing was protected and the
+    //  message was useless. The exemption matches the WHOLE input or not at all, which is what makes it
+    //  incapable of carrying anything else through.
+    // ==============================================================================================
+
+    [Theory]
+    [InlineData("超出最大允许的行数(7)!")]
+    [InlineData("超出最大允许的行数(0)!")]
+    [InlineData("超出最大允许的行数(1000)!")]
+    [InlineData("超出最大允许的行数(99999999999999999999999999999999)!")]
+    public void TheRowCapDiagnosticSurvivesRedactionUnchanged(string diagnostic)
+    {
+        Assert.Equal(diagnostic, SqlRedactor.Instance.Redact(diagnostic));
+
+        // AND IT IS STILL IDEMPOTENT, which is the property every consumer of this seam relies on.
+        Assert.Equal(diagnostic, SqlRedactor.Instance.Redact(SqlRedactor.Instance.Redact(diagnostic)));
+    }
+
+    [Theory]
+    // ONE DIFFERING CHARACTER ANYWHERE and the whole input goes through the scanner as before. Every row
+    // below carries a value the scanner MUST mask, so a masked result is proof the exemption declined.
+    [InlineData("超出最大允许的行数(7)! AND SALARY = 20000")]
+    [InlineData("SELECT 1 超出最大允许的行数(7)!")]
+    [InlineData(" 超出最大允许的行数(7)!")]
+    [InlineData("超出最大允许的行数(7)!!")]
+    [InlineData("超出最大允许的行数(7)")]
+    [InlineData("超出最大允许的行数('secret')!")]
+    [InlineData("超出最大允许的行数(7)!; DROP TABLE COMPANY WHERE ID = 1")]
+    public void AnInputThatMERELYCONTAINSTheDiagnosticIsStillRedacted(string text)
+    {
+        string redacted = SqlRedactor.Instance.Redact(text);
+
+        // THE PLACEHOLDER IS PRESENT, so the scanner ran over this input rather than the exemption
+        // returning it whole - and the value it masked is gone.
+        Assert.Contains("<redacted>", redacted, StringComparison.Ordinal);
+        Assert.NotEqual(text, redacted);
+    }
+
+    [Theory]
+    // THE EXEMPTION DECLINES ON THESE TOO, and each is returned unchanged for the DIFFERENT reason that
+    // the scanner finds nothing maskable in it: an empty parenthesis carries no digits at all, `7a` is an
+    // identifier rather than a number under the scanner's own guard, and a FULL-WIDTH digit is a Unicode
+    // decimal that is not an ASCII one - which is exactly why the exemption tests a character RANGE and
+    // does not call char.IsDigit. Asserted so that the equality is recorded as understood rather than
+    // left looking like the exemption fired.
+    [InlineData("超出最大允许的行数()!")]
+    [InlineData("超出最大允许的行数(7a)!")]
+    [InlineData("超出最大允许的行数(\uff17)!")]
+    public void ANEARMISSWithNothingMaskableIsUnchangedForTheOtherReason(string text)
+    {
+        Assert.Equal(text, SqlRedactor.Instance.Redact(text));
+
+        // AND THE PROOF THAT THE EXEMPTION DID NOT FIRE: appending a maskable value to the same text is
+        // masked, which an exempt input never would be.
+        string extended = text + " AND SALARY = 20000";
+
+        Assert.Contains("<redacted>", SqlRedactor.Instance.Redact(extended), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The exemption's two constants are the SAME text the task that emits the diagnostic uses.
+    /// </summary>
+    /// <remarks>
+    /// They are declared twice on purpose: the dependency runs from <c>Tasks</c> to <c>Errors</c>, so the
+    /// redactor cannot reference the task's constants without inverting a layer for the sake of two
+    /// literals. This case is what keeps the two copies in step - a change to either side fails here
+    /// rather than silently un-exempting the message at runtime.
+    /// </remarks>
+    [Fact]
+    public void TheExemptionsConstantsMatchTheEmittingTasksOwn()
+    {
+        Assert.Equal(SqlQueryTask.MaxRowsExceededPrefix, SqlRedactor.RowCapDiagnosticPrefix);
+        Assert.Equal(SqlQueryTask.MaxRowsExceededSuffix, SqlRedactor.RowCapDiagnosticSuffix);
+
+        // AND THE COMPOSED MESSAGE THE TASK WOULD EMIT is exempt, built the way the task builds it rather
+        // than copied as a literal - so the pairing is asserted end to end.
+        string composed = SqlQueryTask.MaxRowsExceededPrefix
+            + 7.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + SqlQueryTask.MaxRowsExceededSuffix;
+
+        Assert.Equal(composed, SqlRedactor.Instance.Redact(composed));
     }
 
     /// <summary>

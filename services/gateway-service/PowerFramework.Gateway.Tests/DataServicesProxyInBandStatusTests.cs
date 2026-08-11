@@ -72,6 +72,21 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
     [InlineData(RetCode.E_NO_IMPLEMENTATION, StatusCodes.Status501NotImplemented)]
     [InlineData(RetCode.E_DB_ERROR, StatusCodes.Status502BadGateway)]
     [InlineData(RetCode.E_INVALID_TRANSACTION, StatusCodes.Status502BadGateway)]
+
+    // ⚠ THE THREE ROWS THAT USED TO FALL TO THE DEFAULT, each with a natural declared status the map
+    // simply had not been taught. While they were unclassified this boundary answered 500 for all three,
+    // which told a caller that Gateway had failed for outcomes an upstream reported perfectly normally.
+    //
+    //   E_INVALID_DATA is what the update path answers when the carrier it was handed cannot be applied
+    //     [n_cst_thread_task_sqlupdate.sru], so the caller's PAYLOAD is at fault: 400.
+    //   E_NOT_EXISTS names something the upstream could not find, exactly as its two siblings above do: 404.
+    //   FAILED is the oracle's unspecific failure [retcode.sru:L311] and is RECOGNISED - so the default's
+    //     own reasoning ("a code this projection has not been taught is a fault on THIS side") does not
+    //     apply to it. 502 is the declared status meaning the service behind this gateway failed, and it is
+    //     what sends an operator to the right service. 422 is forbidden - the status surface is closed.
+    [InlineData(RetCode.E_INVALID_DATA, StatusCodes.Status400BadRequest)]
+    [InlineData(RetCode.E_NOT_EXISTS, StatusCodes.Status404NotFound)]
+    [InlineData(RetCode.FAILED, StatusCodes.Status502BadGateway)]
     public void AFailingInBandOutcomeProjectsOntoItsPublishedStatus(long retCode, int expected)
     {
         PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection failure = AssertProjects(Failing(retCode));

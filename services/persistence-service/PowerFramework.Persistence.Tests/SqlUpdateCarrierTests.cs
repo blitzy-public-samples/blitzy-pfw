@@ -268,6 +268,104 @@ public sealed class SqlUpdateCarrierTests
     }
 
     /// <summary>
+    /// A modification script naming a column this carrier does not hold is REFUSED with the oracle's own
+    /// invalid-column diagnostic, and nothing from that script is installed.
+    /// </summary>
+    /// <remarks>
+    /// <b>PowerBuilder'S Modify PARSES AGAINST THE LOADED DATAWINDOW</b>, which is why
+    /// <c>_of_updateprepare</c> has no test of its own for an updatable column name: <c>&lt;name&gt;.Update
+    /// = 'yes'</c> for a column the DataWindow does not declare is refused BY MODIFY, and the caller then
+    /// takes its <c>if sErr &lt;&gt; ""</c> arm
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L145-L148</c>]. Installing
+    /// script lines into a plain dictionary accepted any name at all, so a descriptor naming a column that
+    /// does not exist reported success and the generated statement simply omitted it - a silent misdirection
+    /// rather than a refusal.
+    /// </remarks>
+    [Fact]
+    public void AModificationScriptNamingAnUnknownColumnIsRefused()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Grace Hopper", 45, "Arlington", 7100m, "1906-12-09");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow();
+
+        // THE SUCCESS TEST IS INVERTED: empty means accepted, non-empty is the driver's error text.
+        string refusal = carrier.TargetModifier.Modify("no_such_column.Update=yes");
+
+        Assert.Equal(UpdateWhereBuilder.InvalidColumnNameMessage + "no_such_column", refusal);
+
+        // NOTHING WAS INSTALLED by the refused script - the unknown column still resolves to no column
+        // identifier at all, which is the answer that drives the caller's own invalid-column arm.
+        Assert.Equal(
+            0,
+            carrier.TargetMetadata.GetColumnId("no_such_column" + SqlUpdateCarrier.IdSuffix));
+
+        // A REAL COLUMN, BY NAME AND BY ORDINAL, IS STILL ACCEPTED - both addressing forms are the
+        // carrier's own and each is used by a different caller.
+        Assert.Equal(string.Empty, carrier.TargetModifier.Modify("salary.Update=yes"));
+        Assert.Equal(string.Empty, carrier.TargetModifier.Modify("#5.Key=no"));
+
+        // AND SO IS EVERY TABLE-LEVEL PROPERTY, which names no column at all.
+        Assert.Equal(
+            string.Empty,
+            carrier.TargetModifier.Modify(SqlUpdateCarrier.UpdateTableProperty + "='COMPANY'"));
+
+        // AN ORDINAL OUTSIDE THE MODEL IS AS UNRESOLVABLE AS AN UNKNOWN NAME, and so is a property with
+        // no object at all.
+        Assert.Equal(
+            UpdateWhereBuilder.InvalidColumnNameMessage + "#7",
+            carrier.TargetModifier.Modify("#7.Update=yes"));
+        Assert.Equal(
+            UpdateWhereBuilder.InvalidColumnNameMessage + "#0",
+            carrier.TargetModifier.Modify("#0.Update=yes"));
+        Assert.Equal(
+            UpdateWhereBuilder.InvalidColumnNameMessage + "Update",
+            carrier.TargetModifier.Modify("Update=yes"));
+    }
+
+    /// <summary>
+    /// A provider fault names the buffer and the row the walk was on, so the payload identifies the
+    /// offending row rather than reporting the default pair.
+    /// </summary>
+    /// <remarks>
+    /// PowerBuilder's <c>dberror</c> event carries the buffer and the row as two of its five arguments
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L85</c>], and the caller-side
+    /// proxy's row translation reads the row specifically
+    /// [<c>n_cst_threading_task_sqlupdate.sru:L315</c>]. Reporting <c>Primary</c>/<c>0</c> unconditionally
+    /// would be indistinguishable from "not known".
+    /// </remarks>
+    [Fact]
+    public void AProviderFaultNamesTheBufferAndRowTheWalkWasOn()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Alan Turing", 41, "Wilmslow", 75000m, "1912-06-23");
+        fixture.Seed("Grace Hopper", 45, "Arlington", 7100m, "1906-12-09");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow(expectedRows: 2L);
+
+        // THE SECOND ROW IS THE ONE THAT FAILS, so a hardcoded row one could not pass this case.
+        _ = carrier.Store.Carrier.SetItemValue(2, 2, DwBuffer.Primary, null);
+        _ = carrier.Store.Carrier.SetItemStatus(2, 2, DwBuffer.Primary, ItemStatus.DataModified);
+        _ = carrier.Store.Carrier.SetItemStatus(
+            2,
+            ItemStatusMachine.RowStatusColumn,
+            DwBuffer.Primary,
+            ItemStatus.DataModified);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreFailure,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        (long Code, string Text, string Syntax, DwBuffer Buffer, long Row) error =
+            Assert.NotNull(fixture.LastDbError);
+
+        Assert.Equal(DwBuffer.Primary, error.Buffer);
+        Assert.Equal(2L, error.Row);
+    }
+
+    /// <summary>
     /// Modifies one column of row one and marks both the column and the row modified, exactly as an
     /// arriving changeset marks them.
     /// </summary>
@@ -444,7 +542,7 @@ public sealed class SqlUpdateCarrierTests
         /// evidenced table installed exactly as the update-prepare path installs it.
         /// </summary>
         /// <returns>A carrier ready to be updated through.</returns>
-        internal ISqlUpdateCarrier AdaptWithRetrievedRow()
+        internal ISqlUpdateCarrier AdaptWithRetrievedRow(long expectedRows = 1L)
         {
             ISqlDataStore store = new SqlDataObjectStore(_carrier, _runtime);
             store.DataObject = Data.DataObjectDefinitionCatalogue.EvidencedDataObject;
@@ -482,9 +580,10 @@ public sealed class SqlUpdateCarrierTests
             Assert.Equal(string.Empty, carrier.TargetModifier.Modify(string.Join('\n', script)));
 
             // The retrieval fills the carrier and baselines it, so every column now reports an ORIGINAL
-            // value - which is what the update predicate is built from.
+            // value - which is what the update predicate is built from. The count is asserted rather than
+            // discarded so that a case which seeds more than one row says so.
             Assert.Equal(
-                1L,
+                expectedRows,
                 _runtime
                     .RetrieveAsync(store, [], CancellationToken.None)
                     .AsTask()

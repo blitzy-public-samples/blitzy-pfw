@@ -1282,6 +1282,12 @@ internal struct SqlPlaceholder
     /// The placeholder's length INCLUDING the prefix character, computed as
     /// <c>nPos - pos</c> where <c>nPos</c> is the terminating delimiter's offset [<c>:L436, :L448</c>].
     /// </summary>
+    /// <remarks>
+    /// <b>C-07's POSITIONAL FORM SETS THIS AT EMISSION INSTEAD OF AT CLOSURE.</b> A question-mark
+    /// placeholder has no name and no terminating delimiter to measure against - the marker IS the whole
+    /// placeholder - so it is emitted already complete with a length of one and is never opened. Everything
+    /// downstream reads this member identically for both forms, which is what lets one binder serve both.
+    /// </remarks>
     internal long Length;
 
     /// <summary>Whether a parameter has already been substituted here [<c>:L459, :L466</c>].</summary>
@@ -1371,6 +1377,54 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// placeholder terminate the moment another colon is seen.
     /// </remarks>
     private const string ArgPrefix = ":";
+
+    /// <summary>
+    /// C-07's SECOND placeholder form - the positional question mark.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS CHARACTER IS NOT IN THIS OBJECT'S ORACLE, AND IT IS IN C-07's.</b> The scan this file
+    /// ports treats <c>?</c> as a WORD DELIMITER ONLY - it appears in the delimiter list at
+    /// <c>n_cst_thread_task_sqlbase.sru:L424</c> and the arm that opens a placeholder tests
+    /// <c>if sWord = ARG_PREFIX</c> [<c>:L440</c>], so a bare question mark closes whatever was open and
+    /// opens nothing. That is faithful to THIS object, whose whole parameter surface is named
+    /// (<c>of_addparam(name, value)</c> [<c>:L67</c>]).
+    /// </para>
+    /// <para>
+    /// <b>C-07 IS THE UNION OF TWO COMMAND SURFACES, AND THE SECOND ONE IS POSITIONAL.</b> The other
+    /// half is the SQLite binding's own <c>Exec</c>, overloaded from zero to eleven ANONYMOUS arguments
+    /// [<c>ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru:L32-L43</c>], and the legacy's primary
+    /// SQLite fixture calls it with question marks - <c>"@INSERT INTO COMPANY (NAME,AGE,ADDRESS,SALARY,
+    /// BIRTH) VALUES (?, ?, ?, ?, ?)"</c> with five values, inside a ten-iteration loop
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406</c>] - and again at <c>:L313</c> for
+    /// an update. AAP §0.4.3 states C-07 "preserves positional <c>?</c> binding" and
+    /// <c>persistence.v1.proto</c> records that "positional <c>?</c> substitution consumes the order".
+    /// Supporting only the colon form left the oracle's own fixture unreplayable, which also blocks the
+    /// paired characterization AAP §0.6.7 requires.
+    /// </para>
+    /// <para>
+    /// <b>WHY IT NEEDED NO NEW MATCHING RULE.</b> A question mark carries NO NAME, and the substitution
+    /// loop already matches "any unreplaced placeholder" for a parameter whose name is empty and stops
+    /// after exactly one [<c>:L460</c>, <c>:L471-L472</c>] - which is precisely positional consumption in
+    /// order. So the locator emits a question mark as an ALREADY-COMPLETE placeholder with an empty name,
+    /// and every rule after it - the mixed-form refusal, the per-parameter bound name, the two offset
+    /// tracks, the unmatched-placeholder check - applies unchanged. A NAMED parameter can never match one,
+    /// because its name is non-empty and the comparison is ordinal.
+    /// </para>
+    /// </remarks>
+    private const char PositionalArgMarker = '?';
+
+    /// <summary>
+    /// The length of a positional placeholder, in characters: the marker and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// Named rather than written as <c>1</c> at the emission site because
+    /// <see cref="SqlPlaceholder.Length"/> is the value BOTH splice tracks subtract from and shift by, so
+    /// the number is load-bearing arithmetic rather than a magic constant: the colon form's length is
+    /// computed from its terminating delimiter [<c>:L436</c>], and the positional form's is the marker's
+    /// own width because the marker IS the whole placeholder.
+    /// </remarks>
+    private const long PositionalArgMarkerLength = 1L;
 
     /// <summary>
     /// The per-thread key the datastore cache lives under -
@@ -3147,6 +3201,38 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         //         simply match nothing, and only an unmatched PLACEHOLDER is an error [:L477-L479].
         int argCount = OneBasedIndex.UpperBound(placeholders);
 
+        // ==========================================================================================
+        //  THE TOLERANCE IS PRESERVED, AND IT IS NO LONGER SILENT
+        //  ------------------------------------------------------------------------------------------
+        //  The guard above stays commented out, because the oracle's author commented it out and
+        //  constraint C-B forbids reviving a decision the legacy made. It is also LOAD-BEARING here and
+        //  not merely tolerated: the DataWindow-argument path names every parameter from
+        //  `DataWindow.Table.Arguments` and requires the ARGUMENT count to match the PARAMETER count
+        //  exactly [:L412], while the statement itself is free to reference only some of those arguments -
+        //  so a retrieval whose DataWindow declares three arguments and whose SQL mentions two is a
+        //  legitimate shape that an active guard would refuse.
+        //
+        //  WHAT IS FIXED IS THE SILENCE, NOT THE OUTCOME. A caller that supplies more parameters than the
+        //  statement has placeholders had no way to learn that the surplus matched nothing: the answer was
+        //  a plain success. The condition is now recorded, so the mismatch is diagnosable from the service
+        //  log while the accepted outcome is exactly what it was.
+        //
+        //  C-F: COUNTS ONLY. No parameter value, no parameter name and no statement text appears in this
+        //  record - a surplus parameter's VALUE is precisely the kind of live data the redaction policy
+        //  exists to keep out of logs, and the counts are sufficient to identify the mismatch.
+        // ==========================================================================================
+        if (argCount < count && _logger.IsEnabled(LogLevel.Warning))
+        {
+            _logger.LogWarning(
+                "SQL parameter binding received {ParameterCount} parameters for a statement carrying "
+                    + "{PlaceholderCount} placeholders. The {SurplusCount} surplus parameters match "
+                    + "nothing and are ignored, which is preserved legacy behaviour "
+                    + "[n_cst_thread_task_sqlbase.sru:L454, commented out in the oracle].",
+                count,
+                argCount,
+                count - argCount);
+        }
+
         // [:L456-L475] substitute.
         for (int paramIndex = OneBasedIndex.FirstIndex; paramIndex <= count; paramIndex++)
         {
@@ -3313,6 +3399,14 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// own membership in the delimiter set load-bearing.
     /// </para>
     /// <para>
+    /// <b>IT COLLECTS BOTH OF C-07's PLACEHOLDER FORMS.</b> The colon form is the oracle's, opened and
+    /// then closed by the next delimiter. The positional question mark is emitted ALREADY COMPLETE with an
+    /// empty name and a length of one, because it has neither a name nor a terminator - see
+    /// <see cref="PositionalArgMarker"/> for why that form belongs to C-07 at all and why it needed no new
+    /// matching rule. The two interleave freely and appear in statement order, which is what positional
+    /// consumption depends on.
+    /// </para>
+    /// <para>
     /// <b>The final flush at <c>:L447-L450</c> uses <c>nPos</c> AFTER the loop, which PowerScript leaves
     /// at <c>Len(sql) + 1</c></b> - one past the end. That is what gives a placeholder ending at the
     /// statement's last character its correct length, and it is reproduced here explicitly with the same
@@ -3378,6 +3472,39 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
                 placeholders.Add(new SqlPlaceholder { Name = string.Empty, Position = position });
                 openIndex = OneBasedIndex.UpperBound(placeholders);
             }
+
+            // ==========================================================================================
+            //  C-07's POSITIONAL FORM - ADDED HERE, AND ADDED AS A COMPLETE PLACEHOLDER
+            //  ------------------------------------------------------------------------------------------
+            //  See PositionalArgMarker for why this arm exists at all: C-07 is the union of the
+            //  transaction object's named command surface (this file's oracle) and the SQLite binding's
+            //  ANONYMOUS one [n_sqlite.sru:L32-L43], and the legacy's own primary fixture uses the
+            //  anonymous form [w_test_sqlite.srw:L396-L406].
+            //
+            //  IT IS EMITTED COMPLETE RATHER THAN OPENED, and that is the whole trick. A colon placeholder
+            //  is OPEN when it is seen and only the NEXT delimiter tells it where it ends and what it is
+            //  called; a question mark has no name and ends where it begins, so opening it would make the
+            //  next delimiter overwrite its length with the distance to that delimiter and give it a name
+            //  taken from the intervening text. Emitting it complete - empty name, its own position, width
+            //  one, unreplaced - leaves `openIndex` at zero, so the close arm above never touches it.
+            //
+            //  THE QUOTE TEST IS THE COLON ARM'S, FOR THE SAME REASON [:L441]. Inside a quoted run the
+            //  character is ordinary text - `VALUES ('what?')` carries no placeholder - and the run state
+            //  is already tracked above because the marker is a delimiter in the oracle's own list [:L424].
+            //
+            //  AFTER THE CLOSE ARM, NOT BEFORE IT. `":a?"` must close `:a` first and then emit the
+            //  positional one, so the two appear in the order they occur in the statement - which is the
+            //  order positional consumption depends on.
+            // ==========================================================================================
+            else if (word == PositionalArgMarker && !quoteUnclosed)
+            {
+                placeholders.Add(new SqlPlaceholder
+                {
+                    Name = string.Empty,
+                    Position = position,
+                    Length = PositionalArgMarkerLength,
+                });
+            }
         }
 
         // [:L447-L450] the final flush. `position` is now Len(sql) + 1, exactly as PowerScript leaves
@@ -3390,6 +3517,196 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         // [:L451]
         return !quoteUnclosed;
     }
+
+    /// <summary>
+    /// Whether a statement carries a placeholder that NOTHING will bind - the pre-execution diagnostic
+    /// for a statement submitted with no parameters at all.
+    /// </summary>
+    /// <param name="sql">
+    /// The statement, with any leading execution-mode selector ALREADY REMOVED - see the remarks.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the statement carries one of the two placeholder forms C-07 publishes,
+    /// outside every quoted run and every comment.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="sql"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS IS NOT <see cref="BindParams(string, long, string, out SqlBoundStatement)"/>'s OWN
+    /// SCAN.</b> That scan is the oracle's, character for character, and it runs only when parameters
+    /// exist - the oracle's collection guard is <c>if nCount = 0 then return RetCode.FAILED</c>
+    /// [<c>n_cst_thread_task_sqlbase.sru:L400-L401</c>] and the caller gates on
+    /// <c>if of_HasParams()</c> [<c>n_cst_thread_task_sqlcommand.sru:L81</c>]. So a statement carrying
+    /// placeholders and NO parameters was never scanned, never rewritten, and went to the provider with
+    /// its markers intact - where <c>Microsoft.Data.Sqlite</c> refuses it with an
+    /// <see cref="InvalidOperationException"/> that used to escape as an UNHANDLED fault. This method is
+    /// what lets that population be refused with the contract's own binding code instead, which is the
+    /// SAME code the populated-collection path already answers for the same condition (an unmatched
+    /// placeholder [<c>:L476-L479</c>]) - so the fix removes an inconsistency rather than adding a rule.
+    /// </para>
+    /// <para>
+    /// <b>IT IS DELIBERATELY MORE LITERATE ABOUT SQL THAN THE ORACLE'S SCAN, AND ONLY BECAUSE IT MUST BE
+    /// SAFER.</b> The oracle's scan tracks quoted runs and nothing else, which is fine there: it only
+    /// ever decides where to SUBSTITUTE a value the caller supplied. This method decides whether to
+    /// REFUSE, so a false positive would reject a statement the provider accepts. It therefore skips
+    /// single-quoted strings, double-quoted and backtick-quoted and bracket-quoted identifiers, <c>--</c>
+    /// line comments and <c>/* */</c> block comments - the constructs in which SQLite's tokenizer does not
+    /// see a parameter either.
+    /// </para>
+    /// <para>
+    /// <b>IT RECOGNISES EXACTLY THE TWO FORMS THE CONTRACT PUBLISHES, AND NOT SQLite's OTHER THREE.</b>
+    /// <c>?</c> and <c>:name</c> are C-07's [<c>persistence.v1.proto</c>, <c>n_sqlite.sru:L32-L43</c>].
+    /// SQLite additionally accepts <c>@name</c> and <c>$name</c>, and those are deliberately NOT matched
+    /// here: <c>@</c> in particular would misfire on a doubled execution-mode selector, whose documented
+    /// behaviour is that "a doubled selector is NOT an escape sequence, and the survivor reaches the
+    /// provider and fails there". Those forms still fail with a DEFINED status rather than a fault,
+    /// through <c>Data/SqliteTransactionEngine</c>'s bind-fault projection - they simply fail at the
+    /// provider, exactly as documented, instead of being pre-refused here.
+    /// </para>
+    /// <para>
+    /// <b>THE SELECTOR MUST ALREADY BE GONE.</b> The caller strips a leading execution-mode selector
+    /// before this runs, so that a statement that legitimately begins with one is not read as though the
+    /// selector were part of its grammar.
+    /// </para>
+    /// </remarks>
+    protected static bool ContainsUnboundStatementParameterMarker(string sql)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+
+        for (int index = 0; index < sql.Length; index++)
+        {
+            char current = sql[index];
+
+            switch (current)
+            {
+                // The three runs SQLite closes with the character that opened them, and inside which a
+                // doubled delimiter is an escaped literal rather than a terminator.
+                case '\'':
+                case '"':
+                case '`':
+                    index = SkipDelimitedRun(sql, index, current, doubledEscape: true);
+                    continue;
+
+                // A bracket-quoted identifier closes with the OTHER bracket and has no doubling rule.
+                case '[':
+                    index = SkipDelimitedRun(sql, index, ']', doubledEscape: false);
+                    continue;
+
+                // `--` to end of line. The guard is what stops a lone minus - an arithmetic operator -
+                // being read as the start of a comment.
+                case '-' when index + 1 < sql.Length && sql[index + 1] == '-':
+                    index = SkipLineComment(sql, index);
+                    continue;
+
+                // `/* ... */`, likewise guarded so a division operator is not mistaken for an opener.
+                case '/' when index + 1 < sql.Length && sql[index + 1] == '*':
+                    index = SkipBlockComment(sql, index);
+                    continue;
+
+                // The anonymous form. A bare marker IS a parameter in SQLite - nothing needs to follow it.
+                case PositionalArgMarker:
+                    return true;
+
+                // The named form. A NAME MUST FOLLOW: a colon with nothing name-shaped after it is not a
+                // parameter to SQLite, and refusing on it would misfire on punctuation.
+                case ':' when index + 1 < sql.Length && IsParameterNameCharacter(sql[index + 1]):
+                    return true;
+
+                default:
+                    continue;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Advances past a delimited run, returning the index of its last character.
+    /// </summary>
+    /// <param name="sql">The statement being scanned.</param>
+    /// <param name="openIndex">The index of the opening delimiter.</param>
+    /// <param name="closer">The character that closes the run.</param>
+    /// <param name="doubledEscape">
+    /// Whether a doubled closing delimiter is an escaped literal that keeps the run open.
+    /// </param>
+    /// <returns>
+    /// The index of the closing delimiter, or the last index of the statement when the run is never
+    /// closed.
+    /// </returns>
+    /// <remarks>
+    /// <b>AN UNTERMINATED RUN SWALLOWS THE REMAINDER, WHICH IS THE SAFE DIRECTION HERE.</b> The statement
+    /// is malformed either way, and treating the rest as quoted means this method answers "no unbound
+    /// marker" and lets the provider report the real syntax error - rather than answering "unbound marker"
+    /// and reporting a binding failure for a statement whose actual fault is an unclosed quote.
+    /// </remarks>
+    private static int SkipDelimitedRun(string sql, int openIndex, char closer, bool doubledEscape)
+    {
+        for (int index = openIndex + 1; index < sql.Length; index++)
+        {
+            if (sql[index] != closer)
+            {
+                continue;
+            }
+
+            if (doubledEscape && index + 1 < sql.Length && sql[index + 1] == closer)
+            {
+                // Consume both halves of the escaped delimiter and stay inside the run. The loop's own
+                // increment supplies the second character's advance.
+                index++;
+
+                continue;
+            }
+
+            return index;
+        }
+
+        return sql.Length - 1;
+    }
+
+    /// <summary>
+    /// Advances past a <c>--</c> line comment, returning the index of its last character.
+    /// </summary>
+    /// <param name="sql">The statement being scanned.</param>
+    /// <param name="openIndex">The index of the first minus.</param>
+    /// <returns>
+    /// The index of the terminating line break, or the last index of the statement when the comment runs
+    /// to the end.
+    /// </returns>
+    private static int SkipLineComment(string sql, int openIndex)
+    {
+        int terminator = sql.AsSpan(openIndex).IndexOfAny('\n', '\r');
+
+        return terminator < 0 ? sql.Length - 1 : openIndex + terminator;
+    }
+
+    /// <summary>
+    /// Advances past a <c>/* */</c> block comment, returning the index of its last character.
+    /// </summary>
+    /// <param name="sql">The statement being scanned.</param>
+    /// <param name="openIndex">The index of the solidus that opens it.</param>
+    /// <returns>
+    /// The index of the terminator's second character, or the last index of the statement when the
+    /// comment is never closed - which SQLite also tolerates by treating it as running to the end.
+    /// </returns>
+    private static int SkipBlockComment(string sql, int openIndex)
+    {
+        int terminator = sql.IndexOf("*/", openIndex + 2, StringComparison.Ordinal);
+
+        return terminator < 0 ? sql.Length - 1 : terminator + 1;
+    }
+
+    /// <summary>
+    /// Whether a character may appear in a SQLite parameter name.
+    /// </summary>
+    /// <param name="candidate">The character to test.</param>
+    /// <returns><see langword="true"/> for an ASCII letter, an ASCII digit or an underscore.</returns>
+    /// <remarks>
+    /// SQLite's tokenizer accepts the identifier alphabet after a named-parameter introducer. Only the
+    /// FIRST character after the introducer is tested by the caller, which is all that is needed to tell a
+    /// parameter from punctuation.
+    /// </remarks>
+    private static bool IsParameterNameCharacter(char candidate) =>
+        char.IsAsciiLetterOrDigit(candidate) || candidate == '_';
 
     /// <summary>
     /// Finalises the placeholder that is currently open - the shared body of

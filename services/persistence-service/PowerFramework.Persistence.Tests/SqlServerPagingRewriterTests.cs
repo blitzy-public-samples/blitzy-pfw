@@ -224,7 +224,7 @@ public sealed class SqlServerPagingRewriterTests
     /// oracle lowers the order-by at <c>[:L327]</c>, uses the lowered copy ONLY for the containment
     /// test at <c>[:L334]</c>, and then RE-READS the clause at <c>[:L342]</c> without lowering it. A
     /// port that reuses the lowered variable emits <c>ORDER BY name id</c> where the legacy emits
-    /// <c>ORDER BY NAME id</c> - subtly wrong SQL that still looks plausible and that no
+    /// <c>ORDER BY NAME,id</c> - subtly wrong SQL that still looks plausible and that no
     /// case-insensitive assertion would notice. With a lower-case order-by the two spellings are
     /// identical and the defect is invisible, so the case difference is the whole point of this
     /// input.
@@ -504,9 +504,9 @@ public sealed class SqlServerPagingRewriterTests
                 // `NAME` KEEPS ITS CASE. The lowered copy taken at [:L327] is used only by the
                 // containment test at [:L334]; the value that reaches the emitted text is the
                 // re-read at [:L342], which is NOT lowered.
-                "SELECT id, name FROM COMPANY INNER JOIN (SELECT id FROM COMPANY ORDER BY NAME id "
+                "SELECT id, name FROM COMPANY INNER JOIN (SELECT id FROM COMPANY ORDER BY NAME,id "
                     + "OFFSET 10 ROWS FETCH NEXT 10 ROWS ONLY) pfwPagedSQL_OutterTbl ON "
-                    + "pfwPagedSQL_OutterTbl.id = id ORDER BY NAME id"
+                    + "pfwPagedSQL_OutterTbl.id = id ORDER BY NAME,id"
             },
             {
                 "ARM 1 [:L343-L350] order-by already names the column, so nothing is appended [:L334]",
@@ -556,9 +556,9 @@ public sealed class SqlServerPagingRewriterTests
                 // `NAME id`, not `name id`. A port that reused the lowered copy from [:L327] fails
                 // exactly here and nowhere else in this suite.
                 "SELECT id, name FROM COMPANY INNER JOIN (SELECT TOP 10 * FROM (SELECT TOP 20 id,"
-                    + "ROW_NUMBER() OVER (ORDER BY NAME id) AS pfwPagedSQL_RN FROM COMPANY) "
+                    + "ROW_NUMBER() OVER (ORDER BY NAME,id) AS pfwPagedSQL_RN FROM COMPANY) "
                     + "pfwPagedSQL_Tbl WHERE pfwPagedSQL_RN BETWEEN 11 AND 20) "
-                    + "pfwPagedSQL_OutterTbl ON pfwPagedSQL_OutterTbl.id = id ORDER BY NAME id"
+                    + "pfwPagedSQL_OutterTbl ON pfwPagedSQL_OutterTbl.id = id ORDER BY NAME,id"
             },
 
             // --- ARM 3 : unique-index columns ABSENT, page-native TRUE [:L366-L373] ------------
@@ -914,14 +914,16 @@ public sealed class SqlServerPagingRewriterTests
                 [KeyColumn],
                 lowerCasedOrderBy);
 
-        // SQL_MS_APPEND IS THE STYLE THE ORACLE USES AT [:L341], and an append joins with exactly one
-        // space. Named from the shared kernel's catalogue rather than spelled as `2`.
+        // SQL_MS_APPEND IS THE STYLE THE ORACLE USES AT [:L341], and an append to a COMMA-LIST clause
+        // joins with a comma: the unique-column fragment the oracle builds carries no leading comma
+        // [:L335-L338], so a space would emit `ORDER BY NAME id` - SQL no dialect accepts. Named from the
+        // shared kernel's catalogue rather than spelled as `2`.
         Assert.True(statement.ModifyOrder(Enums.SQL_MS_APPEND, fragments.OrderBy));
 
         string reRead = statement.GetOrder();                                 // [:L342]
 
-        Assert.Equal("NAME id", reRead, StringComparer.Ordinal);
-        Assert.NotEqual("name id", reRead, StringComparer.Ordinal);
+        Assert.Equal("NAME,id", reRead, StringComparer.Ordinal);
+        Assert.NotEqual("name,id", reRead, StringComparer.Ordinal);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -959,7 +961,7 @@ public sealed class SqlServerPagingRewriterTests
         Assert.Equal(originalColumns, statement.GetColumn(), StringComparer.Ordinal);
         // NOT RESTORED, because never modified - it is still the prologue's appended value.
         Assert.Equal(appendedOrderBy, statement.GetOrder(), StringComparer.Ordinal);
-        Assert.Equal("NAME id", statement.GetOrder(), StringComparer.Ordinal);
+        Assert.Equal("NAME,id", statement.GetOrder(), StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -1015,11 +1017,11 @@ public sealed class SqlServerPagingRewriterTests
         string armTwo = Generated(MixedCaseOrderedSelect, false, [KeyColumn]);
 
         Assert.Contains(
-            "FROM COMPANY ORDER BY NAME id OFFSET ",
+            "FROM COMPANY ORDER BY NAME,id OFFSET ",
             armOne,
             StringComparison.Ordinal);
         Assert.DoesNotContain("FROM COMPANY ORDER BY", armTwo, StringComparison.Ordinal);
-        Assert.Contains("OVER (ORDER BY NAME id)", armTwo, StringComparison.Ordinal);
+        Assert.Contains("OVER (ORDER BY NAME,id)", armTwo, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1617,9 +1619,9 @@ public sealed class SqlServerPagingRewriterTests
     {
         SelectStatementModel statement = Parsed(MixedCaseOrderedSelect);
 
-        // APPEND joins with one space [:L341].
+        // APPEND joins a comma-list clause with a comma [:L341, :L337].
         Assert.True(statement.ModifyOrder(Enums.SQL_MS_APPEND, KeyColumn));
-        Assert.Equal("NAME id", statement.GetOrder(), StringComparer.Ordinal);
+        Assert.Equal("NAME,id", statement.GetOrder(), StringComparer.Ordinal);
 
         // REPLACE with empty text REMOVES the clause [:L353, :L377].
         Assert.True(statement.ModifyOrder(Enums.SQL_MS_REPLACE, string.Empty));

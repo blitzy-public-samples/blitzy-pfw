@@ -326,6 +326,43 @@ message TaskHandle {
 // across instances. An unknown or already-ended session is
 // common.v1.RetCode.Value.E_INVALID_TRANSACTION, matching the code the legacy returns when it is
 // asked to act on a transaction it cannot use [n_cst_thread_trans.sru:L113].
+//
+// ============ ⚠ A SESSION IS NOT A PRIVATE TRANSACTION. READ THIS BEFORE COMMITTING. =============
+// TWO SESSIONS OPENED WITH EQUAL DESCRIPTORS SHARE ONE TRANSACTION AND ONE CONNECTION, so a Commit or
+// a Rollback on EITHER handle applies to the work BOTH have done. This is preserved legacy behaviour
+// and it is stated here because a handle-per-caller shape naturally suggests isolation that does not
+// exist.
+//
+// WHY IT IS THIS WAY, WITH THE MECHANISM: the pool is REFERENCE COUNTED and keys its entries on
+// WHOLE-DESCRIPTOR VALUE EQUALITY - it scans for an entry whose descriptor equals the requested one and
+// appends a new entry only when nothing matches
+// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L136-L146] - and then hands every
+// referrer of an entry THE SAME transaction object [:L158-L172]. The framework's own worker-side base
+// states the consequence outright: a commit on one connection commits the work of every task that
+// already ran against it, which is why its committed notification walks DOWN from the current task
+// index and signals every preceding task [n_cst_thread_task_sqlbase.sru:L100-L111].
+//
+// THREE PRACTICAL CONSEQUENCES A CALLER MUST PLAN FOR:
+//   1. A COMMIT IS NOT SCOPED TO YOUR HANDLE. Your commit makes another session's uncommitted writes
+//      durable, and its commit makes yours durable.
+//   2. A ROLLBACK IS NOT SCOPED EITHER, AND THIS IS THE DAMAGING DIRECTION. Another session's rollback
+//      discards your uncommitted work, and it answers OK while doing so.
+//   3. THE SHARING IS OBSERVABLE, NOT SILENT. GetSessionState, CommitResponse and RollbackResponse all
+//      report sharing_session_count - how many live sessions hold this transaction. A value of 1 means
+//      your session is the sole holder and the two consequences above cannot arise; a value above 1
+//      means they can, and the server also records a warning on every commit and rollback that covered
+//      shared work.
+//
+// HOW TO GET ISOLATION IF YOU NEED IT: make the descriptors DIFFER, since equality is what pools them.
+// Whether that is desirable is a separate question - a second connection to the same SQLite file
+// contends for its write lock, so two isolated sessions writing concurrently will meet the provider's
+// busy behaviour instead. That trade is the caller's to make, which is why the contract reports the
+// sharing rather than choosing for them.
+//
+// THIS IS DOCUMENTATION OF EXISTING BEHAVIOUR, NOT A CHANGE TO IT (C-B). Nothing about the pooling,
+// the reference counting or either verb's semantics differs from the legacy; what was missing was the
+// statement of it and any way for a caller to detect it.
+// ==========================================================================================
 message SessionHandle {
   string session_id = 1;
 }
@@ -1000,6 +1037,22 @@ message SetPagedUniqueIndexColumnsRequest {
   // CLEARING IS ALWAYS VALID. An empty LIST is the documented clear and is not an empty IDENTIFIER; it
   // is the elements that are validated, so a list of zero elements passes and a list containing "" does
   // not.
+  //
+  // WHERE THE TWO ENTRY POINTS DIFFER, AND IT IS A MATTER OF WHEN RATHER THAN WHAT. On THIS call the
+  // lexical rule is applied AT THE SETTER, before the task handle is even resolved and before the
+  // exclusive lease is taken - an argument fault is knowable without a task, so a caller learns about it
+  // from the call that supplied the value rather than from a later retrieval on a statement it never saw.
+  // MEMBERSHIP is not checkable here and is not checked here: whether an identifier names a column of the
+  // statement can only be decided against the statement, and the select text may be set after this call
+  // or replaced. Membership therefore remains at the point of use, exactly as described on
+  // QuerySpec.paged_unique_index_columns, and the two rules together are still one trust boundary rather
+  // than two.
+  //
+  // A REPEATED ELEMENT IS ALSO REFUSED, compared without regard to case because SQL identifiers are. The
+  // paging arm appends each element once per occurrence [:L331, :L333, :L336], so a repeat would appear
+  // twice in the inner select list and make the join predicate that references it ambiguous - the
+  // statement was already unexecutable, so no correct output is being rejected. The diagnostic names the
+  // POSITION in the list and never the value, for the reason stated above.
   repeated string columns = 2;
 }
 
@@ -1430,6 +1483,29 @@ message PrepareUpdateRequest {
   //
   // WITH THE FLAG ON, AN EMPTY ARRAY IS AN ERROR: E_INVALID_ARGUMENT with the message
   // "没有设置可更新表!" [:L359-L363]. With the flag off, an empty array is ordinary.
+  //
+  // ONE ADMISSION RULE THIS BOUNDARY ADDS, BECAUSE THE INERTNESS ABOVE IS SAFE IN PROCESS AND NOT
+  // ACROSS A NETWORK. With the flag OFF, a descriptor that names a DIFFERENT update table from the one
+  // the governing data object's definition declares is REFUSED with E_INVALID_ARGUMENT, and nothing in
+  // the request is applied. In process the caller could see which datastore it had loaded, so it knew
+  // where the write would land; a remote caller cannot - it would name table X, be told OK, and have
+  // the write reach the table the definition declares, reported as a success with nothing in the
+  // response to reveal the redirection.
+  //
+  // THE REFUSAL IS SCOPED TO THAT MISDIRECTION AND NOTHING ELSE, so no working caller changes:
+  //   * a descriptor that AGREES with the definition is admitted - still inert, but inert and agreeing
+  //     redirects no write, and it is the shape a caller that derives its descriptor FROM the
+  //     definition necessarily sends. The comparison is case-insensitive, because a table name is an
+  //     identifier;
+  //   * a descriptor declaring a SUBSET of the definition's columns is admitted: only which columns are
+  //     updatable, keyed or identity differs, and the definition's own answer there governs anyway. What
+  //     is NOT admitted is a column name the definition does not DECLARE AT ALL - that is refused with
+  //     E_INTERNAL_ERROR and "无效的列名:" plus the name, which is the same answer the flag-ON path gives
+  //     [:L118-L122], arriving one call earlier so the two paths agree;
+  //   * a data object that resolves to no definition, or to a retrieve-only one, is not compared -
+  //     neither can misdirect a write, because the update fails for want of an update table;
+  //   * a request whose source is sql_syntax is not compared - its update table comes from the syntax,
+  //     which this boundary does not parse, so a refusal would be a guess.
   bool multi_table_update = 3;
 
   // of_setdataobject [:L50, :L259-L263]. Names the carrier's source object. Clears sql_syntax, as in
@@ -1441,6 +1517,17 @@ message PrepareUpdateRequest {
   // of_setsqlsyntax [:L52, :L270-L274]. A complete syntax string; clears data_object. A Create
   // failure is common.v1.RetCode.Value.E_INVALID_SQL [:L316-L320].
   optional string sql_syntax = 5;
+
+  // BOTH SOURCE FIELDS ARE PRESENCE-GATED, SO AN UNSTATED SOURCE SURVIVES from an earlier prepare on
+  // the same task - which is what makes "source first, descriptors second" the one incremental order
+  // that works, since sending the array REPLACES it wholesale.
+  //
+  // AND A PREPARE THAT WOULD LEAVE THE TASK HOLDING NEITHER SOURCE IS REFUSED, with the very code and
+  // message its own Update would have answered: E_INVALID_DATAOBJECT and "无效的数据源对象!"
+  // [:L326-L330]. This RPC is the ONLY place either source can be set - Update carries the payload and
+  // nothing else, and Reset only clears - so such a task has exactly one reachable future, and
+  // answering OK here would report a configuration as accepted when nothing about it can ever succeed.
+  // The run-time arm is untouched: a caller that skips this call entirely still meets it there.
 }
 
 message PrepareUpdateResponse {
@@ -1806,6 +1893,22 @@ message ResetCommandTaskResponse {
 message SetCommandAutoCommitRequest {
   TaskHandle task = 1;
   // of_setautocommit [:L28, :L40-L43]. THREE-VALUED. See the asymmetry note on the service below.
+  //
+  // ============ A VALUE OUTSIDE THE THREE ENUMERATORS IS REFUSED AT THIS BOUNDARY =================
+  // Answers common.v1.RetCode.Value.E_INVALID_ARGUMENT, and the task keeps the mode it had.
+  //
+  // WHY, GIVEN THE WORKER VALIDATES NOTHING. The legacy setter has no domain check [:L40-L43] and the
+  // epilogue's dispatch treats every unrecognised value as the AC_OFF arm - "ANY OTHER VALUE, which is
+  // to say AC_OFF" [:L107-L109]. Both are preserved underneath this refusal, and AC_OFF stays reachable
+  // by asking for it. But a proto3 enum is OPEN, so a number outside the declared set travels intact and
+  // arrives here as a value THIS CONTRACT does not define - which is a malformed request rather than a
+  // legacy input. Folding it silently into AC_OFF means a caller who believed they asked for a commit
+  // gets no commit and is told nothing.
+  //
+  // THE DOMAIN IS EXHAUSTIVE BY CONSTRUCTION, which is what makes the test unambiguous: the enum's own
+  // note above records that no synthetic sentinel is needed here because AC_OFF already occupies zero,
+  // so there is no reserved "unspecified" value an undeclared number could be mistaken for.
+  // ==========================================================================================
   AutoCommitMode autocommit = 2;
 }
 
@@ -1835,6 +1938,16 @@ message SetCommandSqlRequest {
   // it VERBATIM, selector included, so a task whose statement was installed here and then executed
   // several times stays in the same mode on every execution; the mode is derived from the stored text at
   // execution rather than latched at installation, which is what stops the two disagreeing.
+  //
+  // ============ A PRESENT-BUT-BLANK STATEMENT IS REFUSED AT THIS BOUNDARY =========================
+  // A statement consisting only of whitespace answers common.v1.RetCode.Value.E_INVALID_SQL with a
+  // diagnostic naming the reason, and nothing is installed - so the refusal is atomic and the task still
+  // holds whatever it held. The EMPTY string is deliberately NOT caught here: it belongs to the worker's
+  // own preserved arm, which answers the same code with NO diagnostic [:L45], and keeping the two
+  // distinguishable is what stops this refusal swallowing an observable legacy difference.
+  //
+  // See ExecRequest.sql for the full reasoning and the measured provider behaviour that motivates it.
+  // ==========================================================================================
   string sql = 2;
 }
 
@@ -1884,10 +1997,80 @@ message ExecRequest {
   // MULTI-STATEMENT BATCH EXECUTION is likewise carried in this one string: the legacy submits a batch
   // as a single command and rolls it back as a unit on failure, which is what makes the autocommit
   // mode above meaningful on a batch rather than only on a single statement.
+  //
+  // ============ A PRESENT-BUT-BLANK STATEMENT IS REFUSED. AN ABSENT ONE IS NOT. ==================
+  // A statement consisting only of whitespace answers
+  // common.v1.RetCode.Value.E_INVALID_SQL with a diagnostic naming the reason, and nothing is executed.
+  //
+  // WHY, GIVEN THE LEGACY ACCEPTS IT. Both preserved guards test EMPTINESS rather than blankness
+  // [:L45, :L65-L68], so a run of spaces passed both, reached the storage engine and was answered as a
+  // SUCCESS THAT DID NOTHING - measured against the shipped provider, a whitespace-only command reports
+  // a row count of -1 and raises nothing at all. That is not a legacy behaviour worth preserving on a
+  // published boundary: it is a caller being told their statement succeeded when it never ran. The
+  // refusal narrows the boundary with a defined error rather than widening it with a guess (AAP 0.1.5),
+  // and both worker guards are untouched underneath it.
+  //
+  // THE THREE CASES STAY DISTINGUISHABLE, WHICH IS THE POINT:
+  //   * FIELD ABSENT       - the task's own statement stands, and the worker's second guard applies to
+  //                          whatever it holds. This is how a caller who never called SetCommandSql
+  //                          reaches that guard.
+  //   * FIELD SET TO ""    - E_INVALID_SQL with NO diagnostic, which is the legacy setter's own arm.
+  //   * FIELD SET TO "   " - E_INVALID_SQL WITH a diagnostic, because the refusal is the boundary's own.
+  //
+  // ONLY PURE WHITESPACE. A statement of comments - "-- nothing" - is not blank, is not refused, and
+  // reaches the provider exactly as before.
+  // ==========================================================================================
   optional string sql = 2;
 
   // Positional parameters, bound before execution. A binding failure is
   // common.v1.RetCode.Value.E_SQL_BIND_ARG_FAILED [:L82-L85], which is -32 [retcode.sru:L75].
+  //
+  // ============ THE TWO PLACEHOLDER FORMS, AND WHICH PARAMETERS MATCH WHICH ======================
+  // C-07 IS THE UNION OF TWO LEGACY COMMAND SURFACES, so it carries two placeholder grammars:
+  //   * `?`      - ANONYMOUS AND POSITIONAL, from the SQLite binding's own Exec, which is overloaded
+  //                from zero to eleven unnamed arguments [n_sqlite.sru:L32-L43]. The legacy's primary
+  //                SQLite fixture uses exactly this form, with the leading-`@` selector and five values
+  //                [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406], and again for an update
+  //                at [:L313].
+  //   * `:name`  - NAMED, from the transaction object's task layer [n_cst_thread_task_sqlbase.sru:L396].
+  //
+  // A PARAMETER WITH AN EMPTY NAME IS POSITIONAL and fills the NEXT unfilled placeholder of EITHER form,
+  // then stops [:L460, :L471-L472]. A parameter WITH a name fills every `:name` placeholder that shares
+  // it and can NEVER fill a `?`, because a question mark carries no name and the comparison is ordinal.
+  // ORDER IS THEREFORE THE CONTRACT for the anonymous form: the first value fills whichever placeholder
+  // appears first in the statement text.
+  //
+  // MIXING NAMED AND POSITIONAL PARAMETERS IN ONE CALL is refused with
+  // common.v1.RetCode.Value.E_INVALID_ARGUMENT [:L407], and that is the legacy's own guard: the list is
+  // either wholly named or wholly positional.
+  //
+  // A QUESTION MARK INSIDE A QUOTED RUN IS ORDINARY TEXT and is not a placeholder [:L441], so
+  // `VALUES ('what?')` needs no parameter and runs unchanged.
+  // ==========================================================================================
+  //
+  // ============ A PLACEHOLDER NOTHING WILL BIND IS REFUSED BEFORE EXECUTION ======================
+  // Sending NO parameters for a statement that carries `?` or `:name` answers
+  // common.v1.RetCode.Value.E_SQL_BIND_ARG_FAILED with the legacy's own Chinese diagnostic, and nothing
+  // is executed. This is the SAME code the populated case already answers for the same condition - an
+  // unmatched placeholder [:L476-L479] - so the two arms agree rather than a third behaviour existing.
+  // Without it the statement went to the storage provider with its markers intact, where the provider
+  // refuses it in a way that carries no framework code at all.
+  //
+  // SQLite ADDITIONALLY ACCEPTS `@name` AND `$name`, and those are NOT this contract's forms: they are
+  // neither pre-refused nor bound, and a statement using them with no parameters fails at the provider
+  // with a defined database error. The distinction matters for one specific reason - matching `@` would
+  // misfire on a DOUBLED execution-mode selector, whose documented behaviour above is that the survivor
+  // "reaches the provider and fails there".
+  // ==========================================================================================
+  //
+  // ============ MORE PARAMETERS THAN PLACEHOLDERS IS ACCEPTED, DELIBERATELY ======================
+  // The surplus parameters match nothing and are IGNORED, and the statement runs. That is the legacy's
+  // own decision: the guard that would have refused it is written out and COMMENTED OUT in the oracle
+  // [:L454], so reviving it here would refuse a call the legacy accepts (C-B). It is also load-bearing
+  // on the retrieval path, where a DataWindow's argument list must match the parameter count exactly
+  // [:L412] while the statement is free to reference only some of those arguments.
+  // The condition is RECORDED in the service log - counts only, never values - so the mismatch is
+  // diagnosable, but it is not an error and does not change the outcome.
   //
   // ============ THE ELEVEN-ARGUMENT CEILING IS A LANGUAGE LIMIT, NOT A SEMANTIC ONE =============
   // THIS FIELD HAS NO ARITY CAP, DELIBERATELY. The legacy surface is overloaded from zero arguments up
@@ -1908,6 +2091,10 @@ message ExecRequest {
   repeated PositionalParameter parameters = 3;
 
   // Optional autocommit override for this call; unset uses the task's setting. THREE-VALUED.
+  //
+  // A VALUE OUTSIDE THE THREE ENUMERATORS IS REFUSED with
+  // common.v1.RetCode.Value.E_INVALID_ARGUMENT and nothing is executed - see the note on
+  // SetCommandAutoCommitRequest.autocommit for why the boundary refuses what the worker tolerates.
   optional AutoCommitMode autocommit = 4;
 }
 
@@ -1929,6 +2116,31 @@ message ExecResponse {
   // ==========================================================================================
 
   // Rows affected. Legacy SQLNRows.
+  //
+  // ============ IT SURVIVES A COMMIT, ON EVERY AUTOCOMMIT MODE ====================================
+  // A COMMIT AFFECTS NO ROWS, so it publishes no row count of its own and must not erase the one the
+  // statement reported. That matters specifically on the AC_ON arm, where the epilogue performs an
+  // explicit commit after the statement [:L99] - a caller sending the same UPDATE under AC_ON and under
+  // AC_OFF reads the same count from both, and a caller branching on rows-affected under auto-commit is
+  // therefore reading the statement's outcome rather than the commit's.
+  //
+  // THIS IS THE LEGACY READING, NOT A CONVENIENCE. The accessor is the SQLite binding's own SQLNRows()
+  // [n_sqlite.sru:L26], a separate call from its Commit() [:L23-L25], and the underlying change counter
+  // is not reset by a commit - confirmed by direct measurement against the shipped provider, where
+  // `changes()` still answers the DML's count after an explicit COMMIT.
+  //
+  // A FAILED COMMIT PRESERVES IT TOO: the commit still affected no rows, so the previous statement's
+  // count remains the truth about the last statement, and the failure is carried by sql_code and
+  // status.ret_code - the members that carry outcomes.
+  //
+  // ============ IT IS NOT THE RESULT OF A SELECT, AND C-07 IS NOT A READ PATH ======================
+  // AFFECTED rows, never SELECTED rows. A SELECT sent through Exec affects nothing, so it answers ZERO -
+  // it does not answer the number of rows the SELECT matched, and it never answers the VALUE of a scalar
+  // SELECT such as `SELECT COUNT(*)`. Reading a count out of this field is reading the wrong contract:
+  // retrieval belongs to C-05 QueryService, whose stream carries rows and a row count of its own. This is
+  // spelled out because the mistake produces a plausible-looking zero rather than an error, so nothing
+  // about the response tells a consumer it asked the wrong service.
+  // ==========================================================================================
   int64 sql_nrows = 2;
 
   // The runtime's statement status. Legacy SQLCode. 0 is success.
@@ -2504,6 +2716,21 @@ message EndSessionResponse {
   // at zero references the entry is parked when keep-alive is on and destroyed otherwise
   // [n_cst_thread_trans_pool.sru:L94-L114]. So a successful EndSession does not imply a closed socket,
   // and a caller must not infer one.
+  //
+  // A NON-OK ret_code HERE DOES NOT MEAN THE SESSION IS STILL OPEN, AND MUST NOT BE RETRIED AS THOUGH
+  // IT WERE. The end is unconditional: the handle is retired and this session's pool reference is
+  // dropped before this status is produced. Two codes are reachable and neither leaves the session
+  // open:
+  //   * E_INVALID_OBJECT - the pool had already DESTROYED this session's transaction, which it does to
+  //     a condemned entry the moment any caller next leases the same descriptor
+  //     [n_cst_thread_trans_pool.sru:L164-L172]. The release therefore found nothing valid to release
+  //     and reports the oracle's own code for that, but the teardown still completed. Reporting OK
+  //     instead would hide a real anomaly - something destroyed the transaction underneath a live
+  //     session - so the true code is reported and the teardown guarantee is stated here.
+  //   * E_INVALID_TRANSACTION - the handle named nothing. Either it was never issued by this instance,
+  //     or it was already retired by an earlier end.
+  // A caller that treats any non-OK end as "still open" and retries receives E_INVALID_TRANSACTION on
+  // the second attempt, so no caller can be left retrying indefinitely.
   OperationStatus status = 1;
 }
 
@@ -2515,6 +2742,14 @@ message GetTransactionDataResponse {
   // of_gettransdata, BOTH overloads [:L92, :L93]. The legacy's second overload returns FAILED when it
   // produced diagnostic text [:L405, :L408], so the two outcomes are distinguishable here through
   // ret_code and error_text rather than by inspecting the descriptor.
+  //
+  // THE ONE VERB THAT STILL SUCCEEDS ON A SESSION WHOSE TRANSACTION THE POOL DESTROYED. Every other
+  // session-scoped verb refuses that state with E_INVALID_TRANSACTION, because every other one reaches
+  // the pooled transaction. This one copies out of the session's own immutable record of what the
+  // caller supplied and reaches no pooled object at all, so nothing about the answer became untrue when
+  // the pool replaced the connection behind it - and the descriptor is exactly what a caller needs in
+  // hand to open a replacement session. It DOES still refuse a session that is being retired, because
+  // then there is no session left to answer for.
   OperationStatus status = 1;
 
   // THE VIEW, NOT THE DESCRIPTOR - no password field exists on this type. This is the structural half
@@ -2595,8 +2830,29 @@ message CommitResponse {
   // ON FAILURE THE ROLLBACK IS CONDITIONAL on the auto-rollback argument [:L249-L254], performing it at [:L251], and the outcome
   // is E_DB_ERROR either way. The before- and after-commit events fire around the statement
   // [:L243, :L247].
+  //
+  // ⚠ THE COMMIT IS NOT SCOPED TO THIS SESSION'S OWN WORK when the transaction is shared - see
+  // SessionHandle, and read sharing_session_count below to find out whether it was.
+  //
+  // THE ROW COUNT OF THE LAST STATEMENT SURVIVES THIS COMMIT. A commit affects no rows, so it publishes
+  // none of its own and must not erase the count the preceding statement reported - see
+  // ExecResponse.sql_nrows for the full reasoning and the measurement behind it.
   // ==========================================================================================
   OperationStatus status = 1;
+
+  // How many LIVE sessions currently hold this session's transaction, including this one.
+  //
+  // ONE means this session is the sole holder, so a commit or a rollback here affects nothing but this
+  // session's own work. A value ABOVE ONE means the transaction is SHARED - see SessionHandle for the
+  // pooling mechanism that produces it and for what a caller must plan for. The count is a point-in-time
+  // reading taken inside the same gate the operation ran in, so it describes exactly the population the
+  // operation covered.
+  //
+  // IT IS A COUNT AND NOT A LIST. Session identities are not disclosed across sessions: a handle is
+  // opaque and belongs to whoever was issued it, so naming the other holders would leak one caller's
+  // handle to another (C-F). The count is what a caller needs in order to know whether the shared-scope
+  // consequences apply.
+  int32 sharing_session_count = 2;
 }
 
 message RollbackRequest {
@@ -2616,8 +2872,26 @@ message RollbackResponse {
   // status values, performs the rollback, and RESTORES THEM afterwards [:L163-L183], with the rollback itself at [:L174] between the before and after events at [:L172] and [:L182], so a rollback
   // does not erase the error that caused it. An implementation that lets the rollback overwrite the
   // status would leave a caller unable to see why it rolled back at all.
+  //
+  // ⚠⚠ THE ROLLBACK IS NOT SCOPED TO THIS SESSION'S OWN WORK when the transaction is shared, and this is
+  // the DAMAGING direction of that sharing: it discards every holder's uncommitted writes and answers OK.
+  // See SessionHandle, and read sharing_session_count below to find out whether it did.
   // ==========================================================================================
   OperationStatus status = 1;
+
+  // How many LIVE sessions currently hold this session's transaction, including this one.
+  //
+  // ONE means this session is the sole holder, so a commit or a rollback here affects nothing but this
+  // session's own work. A value ABOVE ONE means the transaction is SHARED - see SessionHandle for the
+  // pooling mechanism that produces it and for what a caller must plan for. The count is a point-in-time
+  // reading taken inside the same gate the operation ran in, so it describes exactly the population the
+  // operation covered.
+  //
+  // IT IS A COUNT AND NOT A LIST. Session identities are not disclosed across sessions: a handle is
+  // opaque and belongs to whoever was issued it, so naming the other holders would leak one caller's
+  // handle to another (C-F). The count is what a caller needs in order to know whether the shared-scope
+  // consequences apply.
+  int32 sharing_session_count = 2;
 }
 
 message IsConnectedRequest {
@@ -2695,6 +2969,20 @@ message GetSessionStateResponse {
   // of_isbroken [:L100]. A broken session is permanently unusable: connect, commit and rollback all
   // reject it with E_INVALID_TRANSACTION [:L113, :L241, :L186].
   bool broken = 9;
+
+  // How many LIVE sessions currently hold this session's transaction, including this one.
+  //
+  // ONE means this session is the sole holder, so a commit or a rollback here affects nothing but this
+  // session's own work. A value ABOVE ONE means the transaction is SHARED - see SessionHandle for the
+  // pooling mechanism that produces it and for what a caller must plan for. The count is a point-in-time
+  // reading taken inside the same gate the operation ran in, so it describes exactly the population the
+  // operation covered.
+  //
+  // IT IS A COUNT AND NOT A LIST. Session identities are not disclosed across sessions: a handle is
+  // opaque and belongs to whoever was issued it, so naming the other holders would leak one caller's
+  // handle to another (C-F). The count is what a caller needs in order to know whether the shared-scope
+  // consequences apply.
+  int32 sharing_session_count = 10;
 }
 
 message ClearStateRequest {

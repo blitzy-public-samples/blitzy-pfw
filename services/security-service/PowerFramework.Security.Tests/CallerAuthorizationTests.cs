@@ -1474,7 +1474,41 @@ public sealed class ShippedCallerAuthorizationMatrixTests
 
         Assert.Equal(["persistence.read", "persistence.write"], rows[1].Scopes);
 
-        Assert.Equal(["security.crypto"], rows[2].Scopes);
+        // `ping` SITS BESIDE `security.crypto` ON THIS ROW BECAUSE OTHERWISE THIS SERVICE'S OWN
+        // AUTHENTICATED PROBE CANNOT SUCCEED UNDER THE CONFIGURATION IT SHIPS WITH. Endpoints/
+        // PingEndpoints.cs requires the `ping` scope for audience `powerframework-security`, and this is
+        // the only shipped row addressing that audience - so with the scope absent the route answered
+        // either a mint refusal or a 403 for every issuable combination. The scope is on the row for the
+        // caller that ALREADY declares `ping` in its Clients entry and ALREADY addresses this audience,
+        // so no row was added and the count above is unchanged.
+        Assert.Equal(["security.crypto", "ping"], rows[2].Scopes);
+    }
+
+    /// <summary>
+    /// This service's own authenticated probe is reachable: some shipped row grants the exact
+    /// (audience, scope) pair <c>Endpoints/PingEndpoints.cs</c> requires.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// STATED AS A PROPERTY RATHER THAN AS A LITERAL, so it keeps holding if the grant is ever moved to a
+    /// different caller. The failure it guards against is the one that was actually shipped: a route that
+    /// declares a requirement no issuable token can satisfy. Nothing refuses that at startup - the matrix
+    /// is individually valid and the route is individually valid - so the only place it can be caught is
+    /// a row that asks the two questions together.
+    /// </para>
+    /// <para>
+    /// The scope name is written out rather than imported: <c>SecurityScopes.Ping</c> is the wire value
+    /// and this row is a second independent statement of it, which is what makes a rename detectable
+    /// instead of self-consistent.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void SomeShippedRowMakesThisServicesOwnPingRouteReachable()
+    {
+        Assert.Contains(
+            Shipped(),
+            row => string.Equals(row.Audience, "powerframework-security", StringComparison.Ordinal)
+                && row.Scopes.Contains("ping", StringComparer.Ordinal));
     }
 
     /// <summary>Every shipped row names an audience the shipped roster carries.</summary>

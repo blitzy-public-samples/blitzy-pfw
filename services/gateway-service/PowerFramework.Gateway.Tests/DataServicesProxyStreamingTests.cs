@@ -252,6 +252,7 @@ public sealed class DataServicesProxyStreamingTests
             .PrefetchAsync(
                 Produce(50, () => pulled++, TestContext.Current.CancellationToken),
                 maximumElements: 10,
+                collectionWindow: null,
                 TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => result.ExecuteAsync(context));
@@ -292,6 +293,7 @@ public sealed class DataServicesProxyStreamingTests
             DataServicesProxyEndpoints.StreamedSequenceResult<RetrieveChunk>.PrefetchAsync(
                 Fault(upstream, afterElements: 0, TestContext.Current.CancellationToken),
                 maximumElements: 10,
+                collectionWindow: null,
                 TestContext.Current.CancellationToken));
 
         Assert.Same(upstream, observed);
@@ -319,6 +321,7 @@ public sealed class DataServicesProxyStreamingTests
                     TestContext.Current.CancellationToken,
                     () => disposed = true),
                 maximumElements: 10,
+                collectionWindow: null,
                 TestContext.Current.CancellationToken));
 
         Assert.True(disposed, "A faulted prefetch must not leave the upstream enumerator undisposed.");
@@ -349,6 +352,7 @@ public sealed class DataServicesProxyStreamingTests
                     afterElements: 2,
                     TestContext.Current.CancellationToken),
                 maximumElements: 10,
+                collectionWindow: null,
                 TestContext.Current.CancellationToken);
 
         _ = await Assert.ThrowsAsync<RpcException>(() => result.ExecuteAsync(context));
@@ -518,6 +522,7 @@ public sealed class DataServicesProxyStreamingTests
             .PrefetchAsync(
                 Produce(elements, () => pulled++, TestContext.Current.CancellationToken),
                 maximumElements,
+                collectionWindow: null,
                 TestContext.Current.CancellationToken);
 
         await result.ExecuteAsync(context);

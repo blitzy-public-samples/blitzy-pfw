@@ -219,7 +219,7 @@ public sealed class HeadlessDataWindowHost : DataWindowServiceHost
     {
         ArgumentNullException.ThrowIfNull(dwoName);
 
-        return _objects.TryGetValue(dwoName, out HeadlessDataWindowObject? known)
+        return TryResolveObject(dwoName, out HeadlessDataWindowObject? known)
             ? known
             : new HeadlessDataWindowObject(
                 new DataWindowObjectDefinition(
@@ -228,6 +228,67 @@ public sealed class HeadlessDataWindowHost : DataWindowServiceHost
                 columnNumber: 0L,
                 host: this,
                 recognised: false);
+    }
+
+    /// <summary>
+    /// Resolves an object by its declared name or by PowerBuilder's POSITIONAL <c>#n</c> form.
+    /// </summary>
+    /// <param name="dwoName">The object name, either declared or <c>#</c> followed by a column ordinal.</param>
+    /// <param name="resolved">The object when one matches; otherwise <see langword="null"/>.</param>
+    /// <returns><see langword="true"/> when this definition declares the object named.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE <c>#n</c> FORM IS NOT A CONVENIENCE - IT IS THE ONLY WAY THE PORTED SERVICE LAYER ADDRESSES A
+    /// COLUMN BY ORDINAL.</b> <c>_of_getdwobject(readonly long colnum)</c> is a one-line body composing
+    /// <c>"#" + String(colNum)</c> and handing it to the by-name resolver [<c>n_cst_dwsvc.sru:L97</c>], and
+    /// the same convention reappears as <c>"#" + String(colNum) + ".Name"</c> [<c>:L666</c>] and across the
+    /// estate's query task, which reads <c>#n.Name</c>, <c>#n.DDDW.Name</c> and
+    /// <c>#n.DDDW.AutoRetrieve</c> [<c>n_cst_thread_task_sqlquery.sru:L117-L119</c>]. A host that answered
+    /// only declared names therefore reported "no such object" for EVERY ordinal-addressed lookup, while a
+    /// name-addressed lookup for the same column succeeded - so the failure appeared only on the paths that
+    /// count columns rather than name them.
+    /// </para>
+    /// <para>
+    /// THE DECLARED NAME IS TRIED FIRST, WHICH MATTERS FOR A DEFINITION THAT DECLARES AN OBJECT ACTUALLY
+    /// CALLED <c>#3</c>. PowerBuilder resolves the literal name in that case, and the oracle's own comment
+    /// records the same precedence - reimplementing the positional form as a numeric lookup instead of a
+    /// name composition "would diverge from the oracle for every name that happens to collide with the
+    /// <c>#n</c> form" [DataWindowServiceHost.GetDataWindowObject].
+    /// </para>
+    /// <para>
+    /// THE ORDINAL IS ONE-BASED AND IS NOT REBASED (R9): <c>#1</c> is the first column, and a value outside
+    /// <c>1..count</c> resolves to nothing rather than clamping. Parsed invariantly and only as digits, so
+    /// <c>#1,234</c>, <c>#+1</c> and <c>#1.5</c> all resolve to nothing rather than to a column.
+    /// </para>
+    /// </remarks>
+    private bool TryResolveObject(
+        string dwoName,
+        [NotNullWhen(true)] out HeadlessDataWindowObject? resolved)
+    {
+        if (_objects.TryGetValue(dwoName, out resolved))
+        {
+            return true;
+        }
+
+        if (dwoName.Length > 1
+            && dwoName[0] == '#'
+            && long.TryParse(
+                dwoName.AsSpan(1),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out long ordinal))
+        {
+            IReadOnlyList<DataWindowObjectDefinition> columns = _definition.Columns();
+
+            if (ordinal >= FirstColumn && ordinal <= columns.Count)
+            {
+                return _objects.TryGetValue(columns[(int)(ordinal - 1)].Name, out resolved);
+            }
+        }
+
+        resolved = null;
+
+        return false;
     }
 
     /// <inheritdoc/>
@@ -283,10 +344,44 @@ public sealed class HeadlessDataWindowHost : DataWindowServiceHost
             return InvalidExpressionSentinel;
         }
 
-        if (_objects.TryGetValue(property[..separator], out HeadlessDataWindowObject? target)
-            && target.Definition.TryDescribe(property[(separator + 1)..], out string value))
+        if (TryResolveObject(property[..separator], out HeadlessDataWindowObject? target))
         {
-            return value;
+            string requested = property[(separator + 1)..];
+
+            // ======================================================================================
+            //  THE OBJECT IDENTIFIER IS ANSWERED HERE AND NOT BY THE DEFINITION, BECAUSE THE
+            //  DEFINITION DOES NOT KNOW IT.
+            //
+            //  A column's ordinal is a property of the object's POSITION AMONG the definition's
+            //  columns rather than of the object itself, so `DataWindowObjectDefinition` cannot report
+            //  it - only the wrapper built against this host carries the number
+            //  [see HeadlessDataWindowObject.ID, assigned from NumberOfDeclared].
+            //
+            //  ⚠ IT IS LOAD BEARING FOR THE WHOLE OF C-04 AND NOT A COMPLETENESS DETAIL. Binding an
+            //  expression starts by resolving the target column's ordinal exactly this way -
+            //  `Long(#DataWindow.Describe(colname + ".ID"))` [n_cst_dwsvc_columnexp.sru:L1541-L1542] -
+            //  and the oracle reads a zero there as "no such column" and refuses the bind. Leaving the
+            //  property unanswered made this surface report the invalid-expression sentinel for every
+            //  column, which coerces to zero, so EVERY of_addexp answered E_INVALID_ARGUMENT and the
+            //  expansion engine, the calculation chain, macro invocation and the trace were all
+            //  unreachable through a live host while remaining fully exercisable against a test double
+            //  that supplied the property.
+            //
+            //  A NON-COLUMN ANSWERS "0" RATHER THAN THE SENTINEL, which is the wrapper's own
+            //  convention and PowerBuilder's: a text object has no column number, and the ported sites
+            //  do arithmetic on the value rather than testing it for a marker. An UNRECOGNISED object
+            //  name never reaches here at all - the lookup above fails and the sentinel below is
+            //  returned - so absence and "no column number" stay distinguishable.
+            // ======================================================================================
+            if (string.Equals(requested, "id", StringComparison.OrdinalIgnoreCase))
+            {
+                return target.ColumnNumber.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (target.Definition.TryDescribe(requested, out string value))
+            {
+                return value;
+            }
         }
 
         // Unknown object, or a property this object does not recognise. Every group-band probe lands
@@ -1403,6 +1498,18 @@ public sealed class HeadlessDataWindowHost : DataWindowServiceHost
     {
         /// <summary>The object's definition.</summary>
         internal DataWindowObjectDefinition Definition { get; } = definition;
+
+        /// <summary>
+        /// This object's ONE-BASED column ordinal, or zero when it is not a column.
+        /// </summary>
+        /// <remarks>
+        /// TYPED, UNLIKE <see cref="ID"/>, and that is the whole reason both members exist. The
+        /// interface member reproduces the legacy's untyped <c>any</c> so that the twelve
+        /// <c>Long(dwo.ID)</c> call sites keep performing their own conversion; this member is what the
+        /// host's own <c>Describe</c> reads to answer the <c>ID</c> property, where boxing and
+        /// re-unboxing a value the host already has would be pointless indirection.
+        /// </remarks>
+        internal long ColumnNumber => columnNumber;
 
         /// <inheritdoc/>
         /// <remarks>

@@ -848,6 +848,7 @@ public sealed class TokenIssuanceTests
             CreateConnection(certificate),
             factory.Services.GetRequiredService<TokenIssuer>(),
             factory.Services.GetRequiredService<ClientCertificateTrust>(),
+            factory.Services.GetRequiredService<IssuanceClientRegistry>(),
             factory.Services.GetRequiredService<ILoggerFactory>());
 
         Ok<TokenIssuanceResponse> issued = Assert.IsType<Ok<TokenIssuanceResponse>>(outcome);
@@ -907,6 +908,7 @@ public sealed class TokenIssuanceTests
             CreateConnection(certificate: null),
             factory.Services.GetRequiredService<TokenIssuer>(),
             factory.Services.GetRequiredService<ClientCertificateTrust>(),
+            factory.Services.GetRequiredService<IssuanceClientRegistry>(),
             factory.Services.GetRequiredService<ILoggerFactory>());
 
         ProblemHttpResult problem = Assert.IsType<ProblemHttpResult>(outcome);
@@ -968,6 +970,232 @@ public sealed class TokenIssuanceTests
         Assert.DoesNotContain("access_token", payload, StringComparison.Ordinal);
     }
 
+    // ==============================================================================================
+    //  AREA E2 - THE PUBLISHED clientCredential SCHEME, WHICH WAS DECLARED AND UNREACHABLE
+    //
+    //  security.v1.yaml declares clientCredential - HTTP Basic - FIRST among this operation's accepted
+    //  credentials, the roster implements it in full (fixed-time comparison against a per-instance decoy
+    //  on the no-match path), this file's own reader parses it to RFC 7617, and the route's authorization
+    //  predicate accepts it. The handler nevertheless read the CERTIFICATE directly and never called the
+    //  two-scheme resolver, so `trust.Evaluate(null)` refused a correct Basic credential before its header
+    //  was ever looked at: the declared primary scheme was dead code behind a certificate-only gate.
+    //
+    //  MEASURED CONSEQUENCE, NOT A THEORETICAL ONE. Every deployment topology WITHOUT caller certificates
+    //  - a reverse proxy or a mesh sidecar terminating TLS ahead of this service, which is exactly the case
+    //  the resolver's own remarks name - could not obtain a single token from the sole issuer, while the
+    //  service reported healthy throughout. These rows are what make that unrepeatable.
+    // ==============================================================================================
+
+    /// <summary>
+    /// A roster credential presented over HTTP Basic issues a token with no certificate at all.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// NO CERTIFICATE IS SUPPLIED, AND THAT IS THE WHOLE ASSERTION. The connection reports none, so a
+    /// handler that reached for one would refuse - and this row would fail with the unauthorized problem
+    /// instead of a token.
+    /// </para>
+    /// <para>
+    /// THE SUBJECT IS THE ROSTER SUBJECT, unforgeably. The identity the handler reconciles the claimed
+    /// subject against is the one the ROSTER carries for the authenticated client, so a caller can only
+    /// ever obtain a token whose subject is its own - the same property the certificate scheme has, by the
+    /// same reconciliation.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ARosterCredentialPresentedOverBasicIssuesATokenWithNoCertificateAsync()
+    {
+        await using SecurityAppFactory factory = new();
+
+        SecurityOptions options = factory.ResolveSecurityOptions();
+        SecurityClientOptions client = options.Clients[0];
+
+        // READ BACK FROM THE HOST rather than restated, so this row asserts against the roster the
+        // composition root actually bound.
+        string audience = client.Audiences[0];
+        string scope = client.Scopes[0];
+
+        IResult outcome = TokenEndpoints.IssueToken(
+            IssuanceFixture.Body(subject: client.Subject, audience: audience, scopes: [scope]),
+            PresentBasic(client.Subject!, SecurityAppFactory.RosterSecret, certificate: null),
+            factory.Services.GetRequiredService<TokenIssuer>(),
+            factory.Services.GetRequiredService<ClientCertificateTrust>(),
+            factory.Services.GetRequiredService<IssuanceClientRegistry>(),
+            factory.Services.GetRequiredService<ILoggerFactory>());
+
+        Ok<TokenIssuanceResponse> issued = Assert.IsType<Ok<TokenIssuanceResponse>>(outcome);
+
+        Assert.NotNull(issued.Value);
+        Assert.NotEmpty(issued.Value.AccessToken);
+
+        JsonWebToken parsed = new(issued.Value.AccessToken);
+
+        Assert.Equal(client.Subject, ReadClaim(parsed, "sub"));
+        Assert.Equal(audience, Assert.Single(parsed.Audiences));
+        Assert.Equal(scope, ReadClaim(parsed, "scope"));
+    }
+
+    /// <summary>
+    /// Every way of failing the credential scheme answers one indistinguishable refusal.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// INDISTINGUISHABILITY IS THE SECURITY PROPERTY, AND IT IS ASSERTED BETWEEN THE CASES RATHER THAN
+    /// AGAINST A LITERAL. A wrong secret, an unregistered client, a garbled header and no credential at
+    /// all must produce the same status, the same title, the same detail and the same return code -
+    /// otherwise the issuance edge is an oracle for enumerating this deployment's client roster, which an
+    /// unauthenticated party must not be able to do. Comparing the responses to EACH OTHER is what makes a
+    /// future change that distinguishes any one of them fail here.
+    /// </remarks>
+    [Fact]
+    public async Task EveryCredentialFailureAnswersOneIndistinguishableRefusalAsync()
+    {
+        await using SecurityAppFactory factory = new();
+
+        SecurityClientOptions client = factory.ResolveSecurityOptions().Clients[0];
+
+        TokenIssuanceRequestBody body = IssuanceFixture.Body(
+            subject: client.Subject,
+            audience: client.Audiences[0],
+            scopes: [client.Scopes[0]]);
+
+        HttpContext[] refused =
+        [
+            // A registered client, a wrong secret.
+            PresentBasic(client.Subject!, "not-the-configured-secret", certificate: null),
+
+            // An unregistered client, presenting the real secret of another.
+            PresentBasic("a-client-this-deployment-never-registered", SecurityAppFactory.RosterSecret, certificate: null),
+
+            // A header naming the scheme whose payload is not base64 at all.
+            PresentRawAuthorization("Basic not-base64-%%%"),
+
+            // A header naming the scheme whose decoded payload carries no colon.
+            PresentRawAuthorization(
+                "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("no-colon-at-all"))),
+
+            // No credential under either scheme.
+            CreateConnection(certificate: null),
+        ];
+
+        List<ProblemHttpResult> answers = [];
+
+        foreach (HttpContext context in refused)
+        {
+            answers.Add(
+                Assert.IsType<ProblemHttpResult>(
+                    TokenEndpoints.IssueToken(
+                        body,
+                        context,
+                        factory.Services.GetRequiredService<TokenIssuer>(),
+                        factory.Services.GetRequiredService<ClientCertificateTrust>(),
+                        factory.Services.GetRequiredService<IssuanceClientRegistry>(),
+                        factory.Services.GetRequiredService<ILoggerFactory>())));
+        }
+
+        ProblemHttpResult first = answers[0];
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, first.StatusCode);
+        Assert.Equal(MediaTypeNames.Application.ProblemJson, first.ContentType);
+
+        foreach (ProblemHttpResult answer in answers)
+        {
+            Assert.Equal(first.StatusCode, answer.StatusCode);
+            Assert.Equal(first.ProblemDetails.Title, answer.ProblemDetails.Title);
+            Assert.Equal(first.ProblemDetails.Detail, answer.ProblemDetails.Detail);
+            Assert.Equal(
+                first.ProblemDetails.Extensions[ProblemResults.RetCodeExtensionMember],
+                answer.ProblemDetails.Extensions[ProblemResults.RetCodeExtensionMember]);
+        }
+    }
+
+    /// <summary>
+    /// A Basic assertion is answered on its own terms and is never re-authenticated as the certificate.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE IDENTITY-SUBSTITUTION GUARD, and it is the reason the schemes are ordered rather than tried
+    /// until one works. A caller that presented a WRONG secret must be refused even when a perfectly
+    /// trusted certificate sits on the same connection - otherwise a deployment could not tell from the
+    /// outside which credential had actually been honoured, and a garbled header would silently become an
+    /// identity the caller never asserted.
+    /// </para>
+    /// <para>
+    /// THE MIRROR CASE IS ASSERTED IN THE SAME ROW: the identical certificate, with NO Authorization
+    /// header, still issues. So the refusal above is about the header rather than about the certificate
+    /// path having been broken by wiring the second scheme in.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ABasicAssertionIsNeverReAuthenticatedAsTheCertificateIdentityAsync()
+    {
+        await using SecurityAppFactory factory = new();
+
+        SecurityClientOptions client = factory.ResolveSecurityOptions().Clients[0];
+
+        TokenIssuanceRequestBody body = IssuanceFixture.Body(
+            subject: client.Subject,
+            audience: client.Audiences[0],
+            scopes: [client.Scopes[0]]);
+
+        using X509Certificate2 trusted = IssuanceFixture.CreateCallerCertificate(client.Subject!);
+
+        // A WRONG secret, alongside a certificate that WOULD have authenticated on its own.
+        IResult substituted = TokenEndpoints.IssueToken(
+            body,
+            PresentBasic(client.Subject!, "not-the-configured-secret", trusted),
+            factory.Services.GetRequiredService<TokenIssuer>(),
+            factory.Services.GetRequiredService<ClientCertificateTrust>(),
+            factory.Services.GetRequiredService<IssuanceClientRegistry>(),
+            factory.Services.GetRequiredService<ILoggerFactory>());
+
+        ProblemHttpResult problem = Assert.IsType<ProblemHttpResult>(substituted);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, problem.StatusCode);
+
+        // THE SAME CERTIFICATE, NO HEADER: still issues, so the certificate path is intact.
+        IResult byCertificate = TokenEndpoints.IssueToken(
+            body,
+            CreateConnection(trusted),
+            factory.Services.GetRequiredService<TokenIssuer>(),
+            factory.Services.GetRequiredService<ClientCertificateTrust>(),
+            factory.Services.GetRequiredService<IssuanceClientRegistry>(),
+            factory.Services.GetRequiredService<ILoggerFactory>());
+
+        _ = Assert.IsType<Ok<TokenIssuanceResponse>>(byCertificate);
+    }
+
+    /// <summary>Builds a request context presenting one Basic credential, and optionally a certificate.</summary>
+    /// <param name="clientId">The user-id half of the credential.</param>
+    /// <param name="secret">The password half.</param>
+    /// <param name="certificate">A certificate to place on the connection, or none.</param>
+    /// <returns>The context to hand to the operation.</returns>
+    private static HttpContext PresentBasic(
+        string clientId,
+        string secret,
+        X509Certificate2? certificate)
+    {
+        HttpContext context = CreateConnection(certificate);
+
+        context.Request.Headers.Authorization = "Basic "
+            + Convert.ToBase64String(Encoding.UTF8.GetBytes(clientId + ":" + secret));
+
+        return context;
+    }
+
+    /// <summary>Builds a request context carrying one verbatim Authorization header and no certificate.</summary>
+    /// <param name="header">The header value, exactly as a caller would send it.</param>
+    /// <returns>The context to hand to the operation.</returns>
+    private static HttpContext PresentRawAuthorization(string header)
+    {
+        HttpContext context = CreateConnection(certificate: null);
+
+        context.Request.Headers.Authorization = header;
+
+        return context;
+    }
 
     // ==============================================================================================
     //  AREA F - FAIL-FAST STARTUP. One enumerated refusal per case, and no fallback of any kind.

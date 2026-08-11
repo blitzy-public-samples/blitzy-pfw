@@ -1549,6 +1549,43 @@ through rather than terminating it. Where the `clientCredential` scheme is in us
 arise, because the credential travels in a header the operation reads itself; that is a further reason the
 contract publishes both.
 
+### 9.5 Token lifetime tolerance: all four boundaries, in one place
+
+`ValidateLifetime = true` is assigned literally on all four services (§9.2), but a lifetime check is only
+as tight as the tolerance beside it. `TokenValidationParameters.ClockSkew` **defaults to five minutes** in
+the bearer handler, so a boundary that says nothing about it is not enforcing "no tolerance" — it is
+silently extending every token's usable life by five minutes. Security issues with a five-minute lifetime,
+which means the default is as long as the lifetime it qualifies: a token accepted under it is usable for
+twice as long as it claims to be.
+
+This is stated here, once, because the value is a **per-boundary constant in four different files** and
+the only way to see that they agree is to compare them. They did not always agree:
+
+| Boundary | Tolerance | Assigned at | Why this value |
+| --- | --- | --- | --- |
+| Security | **0 s** | `PowerFramework.Security/Program.cs` | It validates only tokens **it minted itself**, moments earlier, on the same host from the same clock. There is no second clock for a tolerance to accommodate, so any tolerance here is pure relaxation |
+| Gateway | **30 s** | `PowerFramework.Gateway/Program.cs` | Absorbs ordinary clock drift between containers on one host — the topology the frozen environment describes — and no more |
+| DataServices | **30 s** | `PowerFramework.DataServices/Program.cs` | As Gateway |
+| Persistence | **30 s** | `PowerFramework.Persistence/Program.cs` | As Gateway |
+
+Three properties of that table are deliberate and are the reason it exists:
+
+- **The three verifiers agree exactly.** Before these values were made explicit, Gateway and Persistence
+  assigned nothing and therefore inherited five minutes, while DataServices used thirty seconds and
+  Security used zero — four validators of **one issuer's** tokens, each with a different answer, so
+  whether an expired credential was accepted depended only on which service it happened to reach.
+- **The worst case was the ingress.** Gateway is the sole edge an external client can reach (§3.2), so
+  the loosest tolerance in the system sat on the one boundary facing the untrusted network, and a token
+  Security itself would have refused was admitted there and then forwarded inward.
+- **Security's zero is not an inconsistency and is not copied.** It is the issuer; the asymmetry follows
+  from what each boundary validates rather than from a difference of opinion about clocks.
+
+**Every value is a compile-time constant, not a setting**, for the same reason the four validation flags
+are literals: a configurable tolerance is lifetime validation switched off by another name, since nothing
+would stop a deployment setting it beyond the token lifetime — at which point the expiry check does not
+expire. Security mints with a truncated whole-second timestamp, so no sub-second allowance is required on
+any boundary.
+
 ---
 
 ## 10. Orchestration
@@ -1595,17 +1632,29 @@ and without `wget`** but it **does** carry `openssl` (the .NET TLS stack depends
 every container health probe: a probe that assumes `curl` without installing it can never succeed, the
 `service_healthy` condition of §10.1 can never be satisfied, and the readiness gate silently never opens.
 
-**The four definitions solve that in three different ways, chosen per listener rather than uniformly**, and
-the difference is the listener's transport:
+**The four definitions solve that in two ways — three work with what the image already has, one installs a
+tool** — and the deciding fact is the same for all four: **every listener terminates TLS**, so no probe can
+be a plaintext socket write.
 
-| Definition | Probe mechanism | Why that one |
-| --- | --- | --- |
-| `gateway-service` | `bash` with `/dev/tcp` socket redirection plus `printf`, reading the status line | The 5105 ingress is **plaintext**, so a raw socket write is a complete HTTP/1.1 request. Nothing is installed |
-| `dataservices-service` | `openssl s_client` piped a hand-written request | The 5102 listener is **TLS-terminated**, and `/dev/tcp` cannot perform a handshake — a probe built that way would fail permanently. `openssl` is already present in the base image, so again nothing is installed |
-| `security-service` | `openssl s_client`, likewise from the base image alone | The 5104 listener is TLS too. An earlier revision installed `curl` here with an unpinnable apt version; using the `openssl` already present adds no package and no layer |
-| `persistence-service` | `curl`, **installed** in the runtime stage in a single layer with the apt lists removed | The 5101 listener is TLS, and this is the one definition that accepts an install rather than working around it |
+| Definition | Probe mechanism | Installs anything? | Why that one |
+| --- | --- | --- | --- |
+| `gateway-service` | `openssl s_client` piped a hand-written request, matching the status line | **No** | The 5105 ingress is **TLS-terminated**, so a `/dev/tcp` socket redirection writes plaintext bytes into a TLS endpoint, never produces a status line, and fails **permanently** — leaving the `service_healthy` chain closed for ever. `openssl`, `bash` and `printf` are already in the image |
+| `dataservices-service` | `openssl s_client` piped a hand-written request | **No** | The 5102 listener is TLS-terminated, for the same reason and with the same consequence |
+| `security-service` | `openssl s_client`, likewise from the base image alone | **No** | The 5104 listener is TLS too. An earlier revision installed `curl` here with an unpinnable apt version; using the `openssl` already present adds no package and no layer |
+| `persistence-service` | `curl --cacert` | **Yes** — `curl` only, in one layer with the apt lists removed, before the `USER` switch | The 5101 listener is TLS, and this is the one definition that accepts an install rather than working around it |
 
-[`BUILD.md`](BUILD.md) §7.1 carries the same table and the toolchain detail.
+Every one of the four **verifies the presented chain against the mounted anchor**; none passes `-k`,
+`--insecure` or `-noverify`, because a probe that skips verification reports healthy for a listener the rest
+of the stack cannot talk to.
+
+> ⚠ **CORRECTED — this subsection previously described the Gateway probe as a `/dev/tcp` socket write and
+> called the 5105 ingress "plaintext".** Neither is true: `services/gateway-service/Dockerfile` uses
+> `openssl s_client`, and its own comments explain why a raw socket cannot work against a TLS listener. The
+> error mattered beyond this table, because "the ingress is plaintext" is the premise behind every
+> documented `http://localhost:5105` probe — see [`BUILD.md`](BUILD.md) §1.6 **D7**, which enumerates the
+> https-only transport as a deviation from the attached environment's instructions and carries the corrected
+> `curl --cacert https://…` forms. [`BUILD.md`](BUILD.md) §7.1 already carried this table correctly and was
+> the model for the version above.
 
 ### 10.4 Rejected alternative — .NET Aspire's Docker Compose publishing
 

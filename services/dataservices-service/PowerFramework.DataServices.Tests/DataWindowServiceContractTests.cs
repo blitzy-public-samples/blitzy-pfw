@@ -538,6 +538,17 @@ internal sealed class C03ChainFactory : IDataWindowEventChainFactory
 {
     internal const string Column = "age";
 
+    /// <summary>
+    /// A handle the MODEL provider serves but this factory refuses.
+    /// </summary>
+    /// <remarks>
+    /// IT HAS TO BE DISTINCT FROM THE MODEL PROVIDER'S OWN SENTINEL, because the two refusals belong to
+    /// different arms and the service now resolves the handle when the SESSION is opened - so a handle no
+    /// model resolves never reaches the chain factory at all. Sharing one sentinel made the chain arm
+    /// unreachable the moment open-time validation existed.
+    /// </remarks>
+    internal const string UnboundHandle = "dw-no-chain";
+
     internal FakeEventChain? Created { get; private set; }
 
     public DataWindowEventChain? Create(
@@ -548,7 +559,8 @@ internal sealed class C03ChainFactory : IDataWindowEventChainFactory
     {
         ArgumentNullException.ThrowIfNull(responder);
 
-        if (string.Equals(dataWindowHandle, "no-such-dw", StringComparison.Ordinal))
+        if (string.Equals(dataWindowHandle, "no-such-dw", StringComparison.Ordinal)
+            || string.Equals(dataWindowHandle, UnboundHandle, StringComparison.Ordinal))
         {
             return null;
         }
@@ -3825,15 +3837,49 @@ public sealed class DataWindowServiceContractTests
                 fixture.Context)).RetCode);
     }
 
+    /// <summary>
+    /// A handle nothing resolves is refused when the SESSION IS OPENED, not several calls later.
+    /// </summary>
+    /// <remarks>
+    /// C-03 states that a session is scoped to one DataWindow, so a session against a handle no DataWindow
+    /// resolves is not a session. Answering it <c>Ok</c> - which this service used to do for any string at
+    /// all - meant a caller learned of its typo only when a later column-dependent call failed, under a code
+    /// describing THAT call. A BLANK handle is a different mistake and keeps its own code.
+    /// </remarks>
+    [Fact]
+    public async Task AHandleNoDataWindowResolvesIsRefusedWhenTheSessionIsOpened()
+    {
+        C03Fixture fixture = new();
+
+        Assert.Equal(
+            WireRetCode.EInvalidHandle,
+            (await fixture.Service.OpenValidationSession(
+                new OpenValidationSessionRequest { DatawindowHandle = "no-such-dw" },
+                fixture.Context)).RetCode);
+
+        Assert.Equal(
+            WireRetCode.EInvalidArgument,
+            (await fixture.Service.OpenValidationSession(
+                new OpenValidationSessionRequest { DatawindowHandle = "   " },
+                fixture.Context)).RetCode);
+
+        Assert.Equal(
+            WireRetCode.EInvalidArgument,
+            (await fixture.Service.OpenValidationSession(
+                new OpenValidationSessionRequest(),
+                fixture.Context)).RetCode);
+    }
+
     [Fact]
     public async Task AHandleNoChainCanBeBoundToEndsTheStreamWithFailedPrecondition()
     {
         C03Fixture fixture = new();
 
-        // The registry issues a session for any handle; the CHAIN factory is what refuses this one, which
-        // is the second of BindConversation's two fail-fast arms.
+        // A handle the MODEL provider serves and the CHAIN factory refuses, which is the second of
+        // BindConversation's two fail-fast arms. The open-time handle check above is the first, so this
+        // handle has to be one that passes it - the two arms are now reachable independently.
         OpenValidationSessionResponse opened = await fixture.Service.OpenValidationSession(
-            new OpenValidationSessionRequest { DatawindowHandle = "no-such-dw" },
+            new OpenValidationSessionRequest { DatawindowHandle = C03ChainFactory.UnboundHandle },
             fixture.Context);
 
         Assert.Equal(WireRetCode.Ok, opened.RetCode);
@@ -4011,6 +4057,246 @@ public sealed class DataWindowServiceContractTests
                 State = new PersistenceCarrierState { Segments = { segment } },
             },
         };
+    }
+
+    // =============================================================================================
+    //  7. THE LIVE CARRIER - what actually crosses the Persistence edge, over the SHIPPED host
+    //
+    //  EVERY OTHER CASE IN THIS FILE DRIVES C03ModelSetProvider, WHOSE HOST IS A DOUBLE. That is the
+    //  right default: this suite characterises the transport, and a double keeps the assertions about
+    //  ordering, alphabets and lifecycle free of a DataWindow definition's detail. But three fields of
+    //  the outbound carrier are derived from the host's OWN definition rather than from the caller's
+    //  request, and for those a double asserts nothing about the deployed service - a host that answers
+    //  a property the shipped host does not answer produces a carrier the shipped service cannot
+    //  produce. All three were wrong in the deployed service while this file was entirely green:
+    //
+    //    processing    left unset, so it said "unassigned", which DISAGREES with the fixture's declared
+    //                  kind - and the receiving codec refuses a carrier whose kind disagrees with its
+    //                  target's, so EVERY non-empty update was refused with E_INVALID_DATA before a
+    //                  single statement was generated.
+    //    autocommit    left unset, so the session's teardown rolled back work that had already been
+    //                  applied and counted: an update answering rowsUpdated:1 while storage still held
+    //                  the old row. A success that loses data, which is worse than the refusal above.
+    //    column_name   left empty on every relayed row, because the upstream carrier is positional like
+    //                  the legacy blob and only THIS layer holds the definition that resolves an
+    //                  ordinal to a name.
+    //
+    //  So these cases compose the service over the REAL HeadlessDataWindowModelSetProvider, exactly as
+    //  the composition root does, and assert the carrier that reaches the scripted upstream.
+    // =============================================================================================
+
+    /// <summary>
+    /// The outbound update carrier declares the processing kind the served definition declares.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>persistence.v1.CarrierState.processing</c> IS RECONCILED RATHER THAN INFORMATIONAL.</b> Both
+    /// sides build a carrier from their own transcription of the same DataWindow, so the receiving codec
+    /// refuses a payload whose kind disagrees with its target's and adopts the payload's kind only for a
+    /// target that has none [<c>Buffers/ChangesetCodec.cs - TryValidateSegments</c>]. The primary fixture
+    /// declares <c>processing=1</c> [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L3</c>], so an unset
+    /// field is not a harmless default here - it is a disagreement, and it refused every real update.
+    /// </para>
+    /// <para>
+    /// AN UNRESOLVABLE HANDLE STILL SENDS ZERO AND STILL REACHES THE UPSTREAM, asserted below. Refusing
+    /// at this layer would move an established refusal out of the layer that owns the update contract
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L179-L189</c>] and change which code a caller receives for an
+    /// unknown handle on this operation alone.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task UpdateSendsTheProcessingKindTheServedDefinitionDeclares()
+    {
+        C03Fixture fixture = new(BuildLiveModelSetProvider());
+
+        WireUpdateRequest request = new()
+        {
+            DatawindowHandle = DataWindowCatalogue.SqliteFixtureName,
+        };
+
+        request.Rows.Add(new DataWindowRow
+        {
+            Buffer = DwBuffer.Primary,
+            Row = 1L,
+            ItemStatus = ItemStatus.DataModified,
+        });
+
+        WireUpdateResponse response = await fixture.Service.Update(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, response.RetCode);
+
+        PersistenceUpdateRequest sent = fixture.Persistence.LastUpdate!;
+
+        // ⚠ THE REGRESSION GUARD. dw_sqlite.srd:L3 declares processing=1, and zero here is the value the
+        // receiving codec reads as "unassigned" - which it refuses against a target that has a kind.
+        Assert.Equal(1L, sent.UpdateData.Processing);
+        Assert.NotEqual(0L, sent.UpdateData.Processing);
+
+        // An unresolved handle sends zero AND still reaches the upstream, which keeps the refusal where
+        // the update contract owns it.
+        C03Fixture unresolved = new(BuildLiveModelSetProvider());
+
+        WireUpdateRequest missing = new() { DatawindowHandle = "d_never_transcribed" };
+        missing.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        _ = await unresolved.Service.Update(missing, unresolved.Context);
+
+        Assert.Equal(1, unresolved.Persistence.UpdateCalls);
+        Assert.Equal(0L, unresolved.Persistence.LastUpdate!.UpdateData.Processing);
+    }
+
+    /// <summary>
+    /// The outbound update request sets the TASK-LEVEL autocommit, without which applied work is lost.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS C-06'S TASK EPILOGUE SWITCH</b> - <c>if _bAutoCommit then rtCode = of_Commit(true)</c>
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L386-L387</c>] - and it is NOT the session descriptor's
+    /// connection-level autocommit, which stays FALSE so the session keeps one explicit transaction. Both
+    /// are asserted here together, because it is the PAIR that is correct: an explicit transaction that
+    /// nothing commits is discarded by the session teardown, and a connection-level autocommit would
+    /// remove the transaction the conflict check needs to roll back.
+    /// </para>
+    /// <para>
+    /// WHY IT HAS TO BE SET ON THIS REQUEST. The session's whole lifetime is this one call - the work
+    /// scope opens it, runs the update and ends it - and ending it rolls back any open transaction, which
+    /// is the correct posture for a disconnect. C-08's commit names a session handle that never leaves the
+    /// method, so nothing else on the published surface could commit it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task UpdateSetsTheTaskAutocommitAndLeavesTheSessionTransactionExplicit()
+    {
+        C03Fixture fixture = new(BuildLiveModelSetProvider());
+
+        WireUpdateRequest request = new()
+        {
+            DatawindowHandle = DataWindowCatalogue.SqliteFixtureName,
+        };
+
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        _ = await fixture.Service.Update(request, fixture.Context);
+
+        // ⚠ THE REGRESSION GUARD. Unset, C-06 applied and counted the rows and the teardown threw them
+        // away - a success that loses data.
+        Assert.True(fixture.Persistence.LastUpdate!.Autocommit);
+
+        // AND THE SESSION STAYS EXPLICITLY TRANSACTED, which is the other half of the pair.
+        BeginSessionRequest begun = Assert.Single(fixture.Persistence.TransactionStub.BeginRequests);
+
+        // `Descriptor_` with the trailing underscore is the GENERATED spelling: the field is named
+        // `descriptor` and protobuf's own static `Descriptor` property already owns the plain name, so the
+        // generator disambiguates. Named as generated rather than renamed in the proto, because the field
+        // name is part of the published contract.
+        Assert.False(begun.Descriptor_.Autocommit);
+    }
+
+    /// <summary>
+    /// Every relayed column value carries its NAME beside the ordinal the upstream supplied.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>common.v1.ColumnValue</c> DECLARES BOTH IDENTIFIERS AND NEITHER IS REDUNDANT</b> - a name
+    /// survives a column reorder and the status APIs take the ordinal - but the upstream carrier is a
+    /// faithful stand-in for the legacy's positional <c>GetChanges</c>/<c>GetFullState</c> blob, which has
+    /// ordinals and no names in it at all. The DataWindow DEFINITION is what resolves one to the other and
+    /// this service is the layer that holds it, so this is the only place the name can be filled in.
+    /// </para>
+    /// <para>
+    /// A SUPPLIED NAME IS LEFT ALONE, and an ordinal no column carries stays nameless rather than being
+    /// given an invented name - both asserted, because inventing one would let a consumer address a column
+    /// that does not exist.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task RelayedColumnValuesCarryTheirNameBesideTheirOrdinal()
+    {
+        C03Fixture fixture = new(BuildLiveModelSetProvider());
+
+        DataWindowRow row = new() { Buffer = DwBuffer.Primary, Row = 1L };
+
+        // AS PERSISTENCE EMITS THEM: an ordinal and no name.
+        row.Columns.Add(new ColumnValue { ColumnId = 2L });
+        row.Columns.Add(new ColumnValue { ColumnId = 5L });
+
+        // A name the upstream DID supply, which must survive untouched.
+        row.Columns.Add(new ColumnValue { ColumnId = 3L, ColumnName = "supplied_by_upstream" });
+
+        // Zero addresses the ROW rather than a column, and 99 is past the last one.
+        row.Columns.Add(new ColumnValue { ColumnId = 0L });
+        row.Columns.Add(new ColumnValue { ColumnId = 99L });
+
+        // The original-value shadow is named too, because updatewhere=1 compares originals and a consumer
+        // reading the shadow needs the same identifier the current value carries.
+        row.OriginalValues.Add(new ColumnValue { ColumnId = 5L });
+
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            DataChunk = new PersistenceQueryDataChunk
+            {
+                ChunkIndex = 1L,
+                State = new PersistenceCarrierState
+                {
+                    Segments =
+                    {
+                        new PersistenceCarrierBufferSegment
+                        {
+                            Buffer = DwBuffer.Primary,
+                            Rows = { row },
+                        },
+                    },
+                },
+            },
+        });
+
+        C03StreamWriter<RetrieveChunk> writer = new();
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = DataWindowCatalogue.SqliteFixtureName },
+            writer,
+            fixture.Context);
+
+        DataWindowRow relayed = Assert.Single(writer.Written[0].Rows);
+
+        // ⚠ THE REGRESSION GUARD. dw_sqlite.srd:L21-L26 - ordinal 2 is name, ordinal 5 is salary.
+        Assert.Equal("name", relayed.Columns[0].ColumnName);
+        Assert.Equal("salary", relayed.Columns[1].ColumnName);
+
+        // The supplied name is resolved, not decided: it survives exactly as it arrived.
+        Assert.Equal("supplied_by_upstream", relayed.Columns[2].ColumnName);
+
+        // Unresolvable ordinals stay nameless, and their ordinal is untouched so they remain addressable.
+        Assert.Equal(string.Empty, relayed.Columns[3].ColumnName);
+        Assert.Equal(0L, relayed.Columns[3].ColumnId);
+        Assert.Equal(string.Empty, relayed.Columns[4].ColumnName);
+        Assert.Equal(99L, relayed.Columns[4].ColumnId);
+
+        Assert.Equal("salary", Assert.Single(relayed.OriginalValues).ColumnName);
+    }
+
+    /// <summary>
+    /// Builds the model-set provider the composition root registers, over the shipped catalogue.
+    /// </summary>
+    /// <returns>The provider.</returns>
+    /// <remarks>
+    /// COMPOSED FROM THE REAL COLLABORATORS RATHER THAN A DOUBLE, which is the whole point of section 7:
+    /// the pinyin matcher is the shipped BLOCKED one (AAP 0.6.5), the page resolver is built from the
+    /// preserved option defaults, and the host factory reads the same <see cref="DataWindowCatalogue"/> the
+    /// deployed service serves.
+    /// </remarks>
+    private static HeadlessDataWindowModelSetProvider BuildLiveModelSetProvider()
+    {
+        DataServicesOptions configured = new();
+
+        return new HeadlessDataWindowModelSetProvider(
+            new HeadlessDataWindowHostFactory(new DataWindowCatalogue()),
+            Options.Create(configured),
+            new I18n(),
+            PinyinFirstLetterMatcher.Blocked,
+            ExpressionPageResolverFactory.Create(
+                configured.ColumnExpression.PageResolution,
+                configured.ColumnExpression.PageRowsPerPage));
     }
 
     private static EventChainRequest Notify(string sessionId, long sequence) => new()

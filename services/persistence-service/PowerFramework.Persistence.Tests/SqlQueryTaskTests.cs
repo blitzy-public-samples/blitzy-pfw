@@ -35,6 +35,7 @@
 
 using System.Globalization;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -1698,7 +1699,8 @@ public sealed class SqlQueryTaskTests
             bool isCancelled = false,
             bool hasReceiver = true,
             bool needsCreatedObject = false,
-            QueryOptions? query = null)
+            QueryOptions? query = null,
+            ILogger<SqlQueryTask>? logger = null)
         {
             Proxy = new RecordingTaskProxy();
 
@@ -1745,7 +1747,7 @@ public sealed class SqlQueryTaskTests
                 StoreFactory,
                 HookActivator,
                 FixedClock.Instance,
-                NullLogger<SqlQueryTask>.Instance,
+                logger ?? NullLogger<SqlQueryTask>.Instance,
                 TransactionSurface,
                 Runtime,
                 [new SqlServerPagingRewriter(), new OraclePagingRewriter()],
@@ -1939,6 +1941,21 @@ public sealed class SqlQueryTaskTests
         /// <summary>Answer for every modify, or <see langword="null"/> to apply it.</summary>
         internal string? ModifyFailure { get; set; }
 
+        /// <summary>
+        /// The one modification script that should fail, or <see langword="null"/> for none.
+        /// </summary>
+        /// <remarks>
+        /// SCOPED, UNLIKE <see cref="ModifyFailure"/>, AND THAT IS THE POINT. The retrieval issues several
+        /// modifications and CAPTURES the result of some of them, so failing all of them would abandon the
+        /// retrieval before the site under test was reached. Failing exactly one reproduces the real
+        /// condition - one parity workaround this runtime will not accept - while every other modification
+        /// behaves normally.
+        /// </remarks>
+        internal string? ScopedModifyFailureScript { get; set; }
+
+        /// <summary>The error text returned for <see cref="ScopedModifyFailureScript"/>.</summary>
+        internal string ScopedModifyFailure { get; set; } = "the runtime refused the modification";
+
         internal long SortResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
 
         internal long FilterResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
@@ -1985,6 +2002,12 @@ public sealed class SqlQueryTaskTests
             if (ModifyFailure is not null)
             {
                 return ModifyFailure;
+            }
+
+            if (ScopedModifyFailureScript is not null
+                && string.Equals(modificationScript, ScopedModifyFailureScript, StringComparison.Ordinal))
+            {
+                return ScopedModifyFailure;
             }
 
             int separator = modificationScript.IndexOf('=', StringComparison.Ordinal);
@@ -2517,4 +2540,126 @@ public sealed class SqlQueryTaskTests
         /// <summary>The framework's own release date, so the value is recognisable in a failure dump.</summary>
         public override DateTimeOffset GetUtcNow() => new(2022, 4, 14, 0, 0, 0, TimeSpan.Zero);
     }
+
+    // ==============================================================================================
+    //  THE UNAPPLIABLE PARITY WORKAROUND IS AN OBSERVATION ABOUT THE RUNTIME, NOT ABOUT A REQUEST
+    // ==============================================================================================
+
+    /// <summary>
+    /// A no-user-prompt workaround this runtime will not accept is reported at warning severity at most
+    /// once for the process, and is still recorded on every retrieval that meets it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>⚠ THE DEFECT WAS A CHANNEL BEING FLOODED WITH ONE UNCHANGING FACT.</b> Whether that modification
+    /// can be applied depends on the DataWindow runtime this service is hosted on and on nothing about a
+    /// request - it either always succeeds or always fails - yet it was reported at warning severity on
+    /// EVERY query, so six retrievals produced six identical warnings. An operator who learns to filter
+    /// this message loses the channel a real per-request fault arrives on, which is why it is worth
+    /// correcting even though nothing observable changes.
+    /// </para>
+    /// <para>
+    /// BEHAVIOUR IS UNCHANGED AND THAT IS ASSERTED. The retrieval still SUCCEEDS with the modification
+    /// refused, because the oracle discards this result at
+    /// <c>[n_cst_thread_task_sqlquery.sru:L675]</c> - unlike the one at <c>:L664</c> which it captures - so
+    /// a port that failed here would be STRICTER than the legacy. The count of records is also asserted, so
+    /// the demotion cannot become a deletion: the observation must still be made every time, just quietly.
+    /// </para>
+    /// <para>
+    /// <b>THE ASSERTION IS ORDER-INDEPENDENT, BECAUSE THE FLAG IS PROCESS-WIDE.</b> Another test in this
+    /// assembly may already have consumed the single warning, so this asserts AT MOST one warning across
+    /// two retrievals rather than exactly one. That still discriminates precisely: before the fix each
+    /// retrieval warned, so two retrievals gave two warnings and the bound is exceeded however the suite
+    /// is ordered. Asserting "exactly one" would have made the test depend on being run first.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheUnappliableNoUserPromptWorkaroundIsReportedOnceForTheProcess()
+    {
+        LevelRecordingLogger logger = new();
+
+        for (int retrieval = 0; retrieval < 2; retrieval++)
+        {
+            using Harness harness = new(logger: logger);
+
+            // EXACTLY THE ONE MODIFICATION THE WORKAROUND ISSUES, spelled from the codec's own constant so
+            // a change to the script cannot leave this test silently exercising nothing.
+            harness.Store.ScopedModifyFailureScript = FullStateCodec.NoUserPromptModifyString;
+            harness.Store.RetrieveRows = 1L;
+            _ = harness.Task.SetSql(SomeSelect);
+
+            long result = await harness.Task
+                .ExecuteAsync(harness.Sink, TestContext.Current.CancellationToken);
+
+            // THE RETRIEVAL SUCCEEDS ANYWAY. The oracle discards this modify's result and so does the port.
+            Assert.Equal(RetCode.OK, result);
+        }
+
+        (int total, int warnings) = logger.CountMatching("no-user-prompt workaround could not be applied");
+
+        // STILL OBSERVED EVERY TIME: the demotion narrowed the severity, it did not drop the record.
+        Assert.Equal(2, total);
+
+        // AT MOST ONE OF THEM IS A WARNING. Before the fix this was 2.
+        Assert.True(
+            warnings <= 1,
+            $"The unappliable workaround produced {warnings} warnings across two retrievals, but it "
+                + "describes one unchanging property of the runtime and must reach warning severity at "
+                + "most once for the process.");
+    }
+
+    /// <summary>
+    /// A logger that keeps each record's severity beside its text, which is what the demotion is about.
+    /// </summary>
+    /// <remarks>
+    /// LOCAL TO THIS FILE AND MINIMAL. The sibling recording loggers in this suite keep the rendered text
+    /// but not the level, and the level is the entire subject here - a logger that dropped it could not
+    /// tell a corrected implementation from the defective one.
+    /// </remarks>
+    private sealed class LevelRecordingLogger : ILogger<SqlQueryTask>
+    {
+        private readonly List<(LogLevel Level, string Text)> _records = [];
+
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// ALWAYS ENABLED, including at <see cref="LogLevel.Debug"/>. A default filter would discard the
+        /// demoted records and the test would then be unable to prove they are still made.
+        /// </remarks>
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        /// <inheritdoc/>
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            lock (_records)
+            {
+                _records.Add((logLevel, formatter(state, exception)));
+            }
+        }
+
+        /// <summary>Counts records containing a fragment, in total and at warning severity or above.</summary>
+        /// <param name="fragment">The text to look for.</param>
+        /// <returns>The total count and the count at warning severity or above.</returns>
+        internal (int Total, int Warnings) CountMatching(string fragment)
+        {
+            lock (_records)
+            {
+                (LogLevel Level, string Text)[] matching = [.. _records
+                    .Where(record => record.Text.Contains(fragment, StringComparison.Ordinal))];
+
+                return (matching.Length, matching.Count(record => record.Level >= LogLevel.Warning));
+            }
+        }
+    }
+
 }

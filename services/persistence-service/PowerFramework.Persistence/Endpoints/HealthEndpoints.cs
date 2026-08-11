@@ -806,11 +806,15 @@ public static class HealthEndpoints
     /// registration, which this file cannot enforce; a closed vocabulary declared here is.
     /// </para>
     /// <para>
-    /// The storage and runtime entries are recognised BY NAME rather than by position or by index, and
-    /// their own descriptions are still not echoed: only the status is read, and the prose is chosen from
-    /// the constants above. That keeps the enforcement structural even for the one check this file registers
-    /// itself, and it means a test that substitutes the storage verdict under the same name is reported
-    /// through exactly the same path as the real one.
+    /// The storage and runtime entries are recognised BY NAME rather than by position or by index, and a
+    /// description they supply is echoed <b>only when it is one of the fixed strings declared above</b> -
+    /// see <see cref="SelectPublishableDescription"/>. That membership test, and not the author of the
+    /// registration, is what keeps the disclosure rule structural: an arbitrary description, including one
+    /// a substituted check invented, falls back to the binary prose and is never published. Reading a
+    /// recognised one matters because the binary prose cannot distinguish an engine that never answered
+    /// from one that answered without a schema, and those two call for opposite actions - checking the
+    /// mount versus running the migrations. Withholding the distinction left this response with a symptom
+    /// and no remedy in it.
     /// </para>
     /// <para>
     /// Every other check is folded into ONE entry rather than reported individually, because the COUNT
@@ -833,6 +837,12 @@ public static class HealthEndpoints
         HealthStatus? runtime = null;
         HealthStatus? othersWorst = null;
 
+        // Captured beside the two owned statuses and filtered on the way out, never on the way in - see
+        // SelectPublishableDescription. Only these two names have a description read at all; the
+        // aggregated bucket's descriptions are not even collected.
+        string? storageDescription = null;
+        string? runtimeDescription = null;
+
         foreach (KeyValuePair<string, HealthReportEntry> entry in report.Entries)
         {
             // The shared framework keys its registry case-insensitively, so the recognition test is
@@ -846,6 +856,8 @@ public static class HealthEndpoints
                     ? known
                     : entry.Value.Status;
 
+                storageDescription = entry.Value.Description;
+
                 continue;
             }
 
@@ -854,6 +866,8 @@ public static class HealthEndpoints
                 runtime = runtime is HealthStatus bound && bound < entry.Value.Status
                     ? bound
                     : entry.Value.Status;
+
+                runtimeDescription = entry.Value.Description;
 
                 continue;
             }
@@ -868,9 +882,11 @@ public static class HealthEndpoints
             projected.Add(
                 new ServiceHealthCheck(SqliteCheckName, ToWireStatus(storageStatus))
                 {
-                    Description = storageStatus == HealthStatus.Healthy
-                        ? SqliteHealthyDescription
-                        : SqliteNotReadyDescription,
+                    Description = SelectPublishableDescription(
+                        storageDescription,
+                        storageStatus == HealthStatus.Healthy
+                            ? SqliteHealthyDescription
+                            : SqliteNotReadyDescription),
                 });
         }
 
@@ -879,9 +895,11 @@ public static class HealthEndpoints
             projected.Add(
                 new ServiceHealthCheck(RuntimeCheckName, ToWireStatus(runtimeStatus))
                 {
-                    Description = runtimeStatus == HealthStatus.Healthy
-                        ? RuntimeBoundDescription
-                        : RuntimeUnboundDescription,
+                    Description = SelectPublishableDescription(
+                        runtimeDescription,
+                        runtimeStatus == HealthStatus.Healthy
+                            ? RuntimeBoundDescription
+                            : RuntimeUnboundDescription),
                 });
         }
 
@@ -1025,11 +1043,27 @@ public static class HealthEndpoints
 
         List<string> notReady = [];
 
+        // THE REASON TRAVELS BESIDE THE NAME, because the name alone is not actionable: "sqlite" tells an
+        // operator which component is not ready and nothing about why or what to do, while the check's own
+        // FIXED PROSE already distinguishes an unprovisioned schema from an unreachable engine, a probe
+        // that timed out and a probe that faulted - and, for the schema case, states the remedy. Every one
+        // of those descriptions is authored in this file as a constant: none carries a path, a
+        // configuration value, a provider message, a statement or a count (constraint C-F), which is
+        // exactly why they are safe to publish on this anonymous route.
+        List<string> reasons = [];
+
         foreach (ServiceHealthCheck check in checks)
         {
-            if (!string.Equals(check.Status, StatusHealthy, StringComparison.Ordinal))
+            if (string.Equals(check.Status, StatusHealthy, StringComparison.Ordinal))
             {
-                notReady.Add(check.Name);
+                continue;
+            }
+
+            notReady.Add(check.Name);
+
+            if (!string.IsNullOrEmpty(check.Description))
+            {
+                reasons.Add(check.Name + ": " + check.Description);
             }
         }
 
@@ -1040,7 +1074,8 @@ public static class HealthEndpoints
         string detail = notReady.Count == 0
             ? "The Persistence service is not ready (" + wireStatus + ")."
             : "The Persistence service is not ready (" + wireStatus + "). Readiness check(s) not "
-              + "reporting " + StatusHealthy + ": " + string.Join(", ", notReady) + ".";
+              + "reporting " + StatusHealthy + ": " + string.Join(", ", notReady) + "."
+              + (reasons.Count == 0 ? string.Empty : " " + string.Join(" ", reasons));
 
         return TypedResults.Problem(
             detail: detail,
@@ -1051,6 +1086,48 @@ public static class HealthEndpoints
                 [ServiceStatusExtensionMember] = wireStatus,
                 [RetCodeExtensionMember] = RetCode.E_RETRY,
             });
+    }
+
+    /// <summary>
+    /// Answers the description to publish for one of the two entries this service registers itself:
+    /// the supplied one when it is a vetted string, and the binary fallback otherwise.
+    /// </summary>
+    /// <param name="supplied">The description the report entry carried. May be absent.</param>
+    /// <param name="fallback">The prose this file chooses from the status alone.</param>
+    /// <returns>A string that is always one this codebase authored.</returns>
+    /// <remarks>
+    /// <b>AN ALLOW-LIST AND NOT A SANITISER, WHICH IS THE ONLY VERSION OF THIS THAT IS SAFE.</b> The test
+    /// is exact ordinal membership in the two checks' published sets, so nothing that is not one of those
+    /// seven strings can be published no matter what produced it - a substituted check, a future
+    /// registration reusing the name, or a description built from an exception. That is what lets the
+    /// response carry the distinction between an unreachable engine and an unprovisioned schema, which the
+    /// status alone cannot express, without weakening the disclosure rule this file's projection exists to
+    /// enforce (constraint C-F).
+    /// </remarks>
+    private static string SelectPublishableDescription(string? supplied, string fallback)
+    {
+        if (string.IsNullOrEmpty(supplied))
+        {
+            return fallback;
+        }
+
+        foreach (string vetted in SqliteReachabilityHealthCheck.PublishableDescriptions)
+        {
+            if (string.Equals(supplied, vetted, StringComparison.Ordinal))
+            {
+                return supplied;
+            }
+        }
+
+        foreach (string vetted in RuntimeSeamHealthCheck.PublishableDescriptions)
+        {
+            if (string.Equals(supplied, vetted, StringComparison.Ordinal))
+            {
+                return supplied;
+            }
+        }
+
+        return fallback;
     }
 
     /// <summary>
@@ -1143,20 +1220,41 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
         "The storage engine answered a read-only reachability probe.";
 
     /// <summary>Fixed prose for an engine that answered negatively.</summary>
+    /// <remarks>
+    /// IT NAMES THE SAME REMEDY AS THE SCHEMA-INCOMPLETE ARM, because the commonest way to reach this one
+    /// is a database file that does not exist yet: the readiness probe opens READ-ONLY by design, so it
+    /// cannot create the file the way an ordinary connection would, and an unprovisioned deployment
+    /// therefore reports unreachable rather than schema-incomplete. The provisioning command creates the
+    /// file AND the schema, so it is the operator's next step in either case. Naming it costs nothing and
+    /// its absence was the whole of the operability gap: an operator reading only "did not answer" has no
+    /// way to tell a missing file from a broken engine, and the first is by far the likelier.
+    /// </remarks>
     private const string StorageUnreachableDescription =
-        "The storage engine did not answer a read-only reachability probe.";
+        "The storage engine did not answer a read-only reachability probe. The database file may not exist "
+        + "yet: provision it with `dotnet ef database update`.";
 
     /// <summary>
     /// Fixed prose for an engine that answered but whose schema has not been provisioned.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// DISTINCT FROM UNREACHABLE BECAUSE IT CALLS FOR A DIFFERENT ACTION, and telling an operator to
-    /// check the mount when the mount is fine is worse than saying nothing. It names no table, no path
-    /// and no provider detail - the schema check's own diagnostic, which does name the table it looked
-    /// for, stays on the seam's in-process members where an authenticated reader can get it.
+    /// check the mount when the mount is fine is worse than saying nothing.
+    /// </para>
+    /// <para>
+    /// <b>IT NAMES THE MISSING TABLE AND THE REMEDY, AND NEITHER IS SENSITIVE.</b> The table name is a
+    /// schema identifier fixed by the migration this service ships - it is in the source, in the
+    /// migration and in the contract - and the remedy is a documented command with no argument of its
+    /// own. Withholding them made this response actionless: the seam's own probe already distinguishes
+    /// an unprovisioned schema from an unreachable engine and already records exactly this remedy
+    /// internally, so an operator reading <c>/health</c> was the only party not told what to do. What
+    /// still never appears here is a PATH, a connection string, a provider message or a statement -
+    /// those are the values constraint C-F keeps off an anonymous route.
+    /// </para>
     /// </remarks>
     private const string StorageSchemaIncompleteDescription =
-        "The storage engine answered but the required schema is not provisioned.";
+        "The storage engine answered but the required COMPANY schema is not provisioned. Apply the "
+        + "migrations with `dotnet ef database update`.";
 
     /// <summary>Fixed prose for a probe that exceeded its own budget.</summary>
     private const string StorageProbeTimedOutDescription =
@@ -1168,6 +1266,30 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
     /// </summary>
     private const string StorageProbeFailedDescription =
         "The storage reachability probe could not be completed.";
+
+    /// <summary>
+    /// Every description this check can produce, published so the endpoint can echo one and only one of
+    /// them.
+    /// </summary>
+    /// <remarks>
+    /// <b>A MEMBERSHIP TEST IS WHAT MAKES ECHOING A DESCRIPTION SAFE.</b> The endpoint's rule is that
+    /// nothing a registration supplied crosses the anonymous boundary; the rule it actually needs is that
+    /// nothing UNVETTED crosses it. This list is the vetted set - five fixed strings, each authored in
+    /// this file, none carrying a path, a configured value, a provider message, a statement or a count -
+    /// so an entry whose description is in it is this check's own prose by construction, and anything else
+    /// (including a description a substituted check invented) falls back to the endpoint's binary prose.
+    /// The alternative, re-deriving a description from the status alone, cannot express the difference
+    /// between an unreachable engine and an unprovisioned schema, which are the two states an operator
+    /// must act on differently.
+    /// </remarks>
+    internal static readonly string[] PublishableDescriptions =
+    [
+        StorageReachableDescription,
+        StorageUnreachableDescription,
+        StorageSchemaIncompleteDescription,
+        StorageProbeTimedOutDescription,
+        StorageProbeFailedDescription,
+    ];
 
     /// <summary>
     /// The budget for one reachability probe.
@@ -1473,6 +1595,21 @@ internal sealed class RuntimeSeamHealthCheck : IHealthCheck
     private const string RuntimeUnboundDescription =
         "A runtime seam the retrieval, update, command and transaction contracts depend on is not bound, "
         + "so calls on the affected contract cannot be served.";
+
+    /// <summary>
+    /// Every description this check can produce, published for the endpoint's membership test.
+    /// </summary>
+    /// <remarks>
+    /// The same vetting rule as the storage check's list - see
+    /// <see cref="SqliteReachabilityHealthCheck.PublishableDescriptions"/>. Both of these strings say
+    /// which CONTRACTS are affected and nothing about which seam or which registration, so the pair is
+    /// publishable on an anonymous route while an arbitrary description is not.
+    /// </remarks>
+    internal static readonly string[] PublishableDescriptions =
+    [
+        RuntimeBoundDescription,
+        RuntimeUnboundDescription,
+    ];
 
     /// <summary>
     /// The seven seam types, in contract order, paired with the contract each belongs to.

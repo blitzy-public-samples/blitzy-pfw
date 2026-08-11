@@ -152,9 +152,41 @@ builder.Services
     // Post-configure runs AFTER Bind and BEFORE the start-time validation below, so the validator sees
     // the material the deployment actually supplied. Applied the other way round, a deployment that
     // supplied the secret correctly would be refused at startup for presenting nothing.
-    .PostConfigure(options => options.SecurityClientSecret =
-        builder.Configuration[GatewayOptions.SecurityClientSecretConfigurationKey]
-        ?? string.Empty)
+    //
+    // GUARDED ON PRESENCE, WHICH IS THE OTHER HALF AND WAS MISSING. An earlier form assigned
+    // unconditionally with `?? string.Empty`, so an ABSENT flat key did not leave the property alone -
+    // it OVERWROTE whatever binding had put there with empty. `Gateway:SecurityClientSecret` is a
+    // bindable leaf (the environment provider folds `Gateway__SecurityClientSecret` onto it), so a
+    // deployment could supply the credential by that route, watch the binder accept it, and be refused at
+    // startup for presenting nothing - with a message naming the flat key it had deliberately not used.
+    // A silently discarded input is worse than a rejected one: there is nothing to read that says the
+    // value was dropped.
+    //
+    // THE SEMANTICS ARE NOW THE SIBLINGS' SEMANTICS RATHER THAN A THIRD SET. Security's signing-key step
+    // states the rule normatively - "when the key is ABSENT this step assigns nothing at all, so material
+    // that reached the options instance through another legitimate ingress survives rather than being
+    // overwritten with nothing" - and DataServices' ApplyIssuanceSecret is the same shape. Gateway was
+    // the outlier, which meant one idea had three different behaviours across three services.
+    //
+    // PRECEDENCE IS EXPLICIT: the flat key WINS WHEN PRESENT. It is the documented route, it is the name
+    // Security's issuance roster and orchestration/.env.example declare for this caller, and a deployment
+    // that sets both has stated its intent through the channel both sides of the edge agree on. Blank and
+    // whitespace count as absent, because neither can authenticate and accepting one would produce a 401
+    // whose cause is invisible.
+    //
+    // NEITHER VALUE IS EVER LOGGED HERE. This step writes one property and returns; C-F's committed-file
+    // prohibition is unaffected and is enforced separately by the estate-wide configuration coherence
+    // test, which forbids a credential-named leaf in any settings file.
+    .PostConfigure(options =>
+    {
+        string? configured =
+            builder.Configuration[GatewayOptions.SecurityClientSecretConfigurationKey];
+
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            options.SecurityClientSecret = configured;
+        }
+    })
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
@@ -297,6 +329,35 @@ builder.Services
         parameters.ValidateAudience = true;
         parameters.ValidateLifetime = true;
         parameters.ValidateIssuerSigningKey = true;
+
+        // CLOCK SKEW IS BOUNDED AND NOT CONFIGURABLE, AND ITS ABSENCE HERE WAS THE WORST PLACE IN THE
+        // SYSTEM FOR IT.
+        //
+        // Leaving this unassigned does not mean "no tolerance" - it means the library's default of FIVE
+        // MINUTES, which silently extends every token's usable life by that much. Security issues with a
+        // five-minute lifetime, so the default made a token accepted here usable for twice as long as it
+        // claims to be, and `ValidateLifetime = true` two lines above was enforcing a bound five times
+        // looser than the one it appears to enforce.
+        //
+        // THE INCONSISTENCY WAS THE FINDING RATHER THAN THE VALUE. Four boundaries validate tokens from
+        // one issuer and, before this assignment, all four disagreed: Security refused an expired token
+        // at the instant it lapsed (`TimeSpan.Zero`, correct for a service validating only what it just
+        // minted on its own clock), DataServices allowed thirty seconds, and Gateway and Persistence
+        // inherited five minutes by saying nothing. GATEWAY IS THE SOLE INGRESS - the only boundary an
+        // external client can reach - so the loosest tolerance in the system sat on the one edge facing
+        // the untrusted network, and a token Security itself would refuse was still admitted here and
+        // then forwarded inward. That is the same expired credential being accepted or refused depending
+        // only on which door it arrives at.
+        //
+        // THIRTY SECONDS, MATCHING DataServices AND Persistence VERBATIM. It absorbs ordinary clock
+        // drift between containers on one host - the topology the frozen environment describes - without
+        // meaningfully widening the window, and Security mints with a truncated whole-second timestamp
+        // so no sub-second allowance is required either. The value is a CONSTANT for the same reason the
+        // four checks above are: a configurable tolerance is lifetime validation switched off by another
+        // name, since nothing would stop a deployment setting it past the token lifetime, at which point
+        // the expiry check does not expire. docs/ARCHITECTURE.md states all four boundaries in one
+        // place, so the next reader compares them without opening four files.
+        parameters.ClockSkew = TimeSpan.FromSeconds(30);
 
         // The issuer list is optional: with none configured the handler validates against the issuer
         // the authority's own metadata declares, which is the ordinary arrangement. An explicit list
@@ -735,6 +796,14 @@ _ = app.Services.GetRequiredService<OutboundDeadlines>();
 // hardest to diagnose. Touching it now turns a contract-versus-classification mismatch into a refusal to
 // start.
 _ = OutboundCallPolicy.Verify();
+
+// THE PROTECTIVE RESPONSE HEADERS, INSTALLED FIRST SO THEY REACH EVERY RESPONSE. It is registered ahead of
+// the exception handler and of authentication deliberately: it works by registering a response-starting
+// callback rather than by writing headers itself, so being outermost is what lets it cover a problem
+// document the exception handler writes and a bodiless challenge the authentication middleware writes, as
+// well as a handler's own response. It overrides nothing a route set for itself - see the file's own banner
+// for the three directives and the reason for each.
+SecurityResponseHeaders.Use(app);
 
 app.UseExceptionHandler();
 

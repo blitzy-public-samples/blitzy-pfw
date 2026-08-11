@@ -1438,6 +1438,264 @@ public sealed class SqlTaskBaseTests
         Assert.Equal("12", sql);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    //  C-07's SECOND PLACEHOLDER FORM - THE POSITIONAL QUESTION MARK
+    //  --------------------------------------------------------------------------------------------
+    //  C-07 is the UNION of two legacy command surfaces: the transaction object's named one, which is
+    //  the rest of this region, and the SQLite binding's ANONYMOUS one
+    //  [ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru:L32-L43]. AAP 0.4.3 states the verb
+    //  "preserves positional `?` binding" and the protocol definition records that "positional `?`
+    //  substitution consumes the order". The oracle's own primary SQLite fixture uses that form
+    //  [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L406], so without it that workflow cannot
+    //  be replayed at all - which also blocks the paired characterization AAP 0.6.7 requires.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void BindParams_SubstitutesThePositionalQuestionMarkForm_TheOracleFixtureShape()
+    {
+        // THE LEGACY FIXTURE, VALUE FOR VALUE [w_test_sqlite.srw:L398-L399]. The leading `@` selector is
+        // the command task's to strip, so the statement reaches the binder without it.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, "Paul");
+        harness.Task.AddParam(string.Empty, 32L);
+        harness.Task.AddParam(string.Empty, "California");
+        harness.Task.AddParam(string.Empty, 20000L);
+        harness.Task.AddParam(string.Empty, "1999-05-08");
+
+        string sql = "INSERT INTO COMPANY (NAME,AGE,ADDRESS,SALARY,BIRTH) VALUES (?, ?, ?, ?, ?)";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal(
+            "INSERT INTO COMPANY (NAME,AGE,ADDRESS,SALARY,BIRTH) "
+                + "VALUES ('Paul', 32, 'California', 20000, '1999-05-08')",
+            sql);
+    }
+
+    [Fact]
+    public void BindParams_SubstitutesThePositionalQuestionMarkForm_TheOracleUpdateShape()
+    {
+        // The second shape the oracle uses [w_test_sqlite.srw:L313] - one marker, at the very end of the
+        // statement, which is the position the final-flush arithmetic would get wrong if the marker were
+        // opened rather than emitted complete.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, "Paul");
+
+        string sql = "UPDATE COMPANY SET SALARY = SALARY + 100 WHERE NAME = ?";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal("UPDATE COMPANY SET SALARY = SALARY + 100 WHERE NAME = 'Paul'", sql);
+    }
+
+    [Fact]
+    public void BindParams_DualForm_RewritesEachQuestionMarkToItsOwnProviderPlaceholder()
+    {
+        // The two forms diverge exactly as they do for the colon form: the observable text carries the
+        // rendered literals a preview hook and a characterization recording compare against, and the
+        // parameterized text carries `@pN` so the literal never reaches the provider as statement text.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, "Alice");
+        harness.Task.AddParam(string.Empty, 30L);
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "SELECT * FROM COMPANY WHERE name = ? AND age > ?",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        Assert.Equal("SELECT * FROM COMPANY WHERE name = 'Alice' AND age > 30", bound.ObservableText);
+        Assert.Equal("SELECT * FROM COMPANY WHERE name = @p1 AND age > @p2", bound.ParameterizedText);
+        Assert.Equal(2, bound.Parameters.Count);
+        Assert.Equal("@p1", bound.Parameters[0].Name);
+        Assert.Equal("Alice", bound.Parameters[0].Value);
+        Assert.Equal("@p2", bound.Parameters[1].Name);
+        Assert.Equal(30L, bound.Parameters[1].Value);
+    }
+
+    [Fact]
+    public void BindParams_ConsumesTheTwoPlaceholderFormsInStatementORDER()
+    {
+        // ORDER, NOT FORM. A positional parameter matches ANY unreplaced placeholder [:L460], so the
+        // first value fills whichever placeholder comes FIRST in the statement whether that is a colon
+        // form or a question mark. This is the property "positional `?` substitution consumes the order"
+        // names, and it is why the locator must emit the two forms interleaved in statement order.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, 1L);
+        harness.Task.AddParam(string.Empty, 2L);
+        harness.Task.AddParam(string.Empty, 3L);
+
+        string sql = "SELECT * FROM T WHERE a = ? AND b = :b AND c = ?";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal("SELECT * FROM T WHERE a = 1 AND b = 2 AND c = 3", sql);
+    }
+
+    [Fact]
+    public void BindParams_TreatsTwoAdjacentQuestionMarksAsTwoPlaceholders()
+    {
+        // The marker is emitted COMPLETE, so an adjacent pair cannot collapse into one placeholder the
+        // way `:a:b` would if the prefix were not itself a delimiter.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, 1L);
+        harness.Task.AddParam(string.Empty, 2L);
+
+        string sql = "??";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal("12", sql);
+    }
+
+    [Fact]
+    public void BindParams_ClosesAnOpenColonPlaceholderBeforeEmittingAQuestionMark()
+    {
+        // ORDERING INSIDE THE LOOP. `:a?` must close `:a` first - taking its length from the marker's own
+        // offset - and only then emit the positional one. If the arms were reversed the colon form's
+        // length would be measured against the wrong delimiter.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, 1L);
+        harness.Task.AddParam(string.Empty, 2L);
+
+        string sql = ":a?";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal("12", sql);
+    }
+
+    [Fact]
+    public void BindParams_NeverTreatsAQuestionMarkInsideAQuotedRunAsAPlaceholder()
+    {
+        // The quote test is the colon arm's, for the same reason [:L441] - and it is load-bearing here
+        // because the shipped provider accepts `'what?'` verbatim, so treating it as a placeholder would
+        // corrupt a statement that works.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, 1L);
+
+        string sql = "INSERT INTO T (A,B) VALUES (?, 'what?')";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal("INSERT INTO T (A,B) VALUES (1, 'what?')", sql);
+    }
+
+    [Fact]
+    public void BindParams_WithFewerParametersThanQuestionMarks_ReportsOutOfBound()
+    {
+        // The same unmatched-placeholder arm the colon form reaches [:L477-L479], which the command task
+        // reports as E_SQL_BIND_ARG_FAILED - the code the contract publishes for a binding failure.
+        using Harness harness = new();
+        harness.Task.AddParam(string.Empty, 1L);
+
+        string sql = "INSERT INTO T (A,B) VALUES (?, ?)";
+
+        Assert.Equal(
+            RetCode.E_OUT_OF_BOUND,
+            harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+    }
+
+    [Fact]
+    public void BindParams_WithANamedParameter_CannotMatchAQuestionMark()
+    {
+        // A NAMED parameter's name is non-empty and the comparison is ordinal [:L460], so it can never
+        // match the empty name a positional placeholder carries. The marker therefore stays unmatched and
+        // the whole bind is refused rather than the value landing in the wrong slot.
+        using Harness harness = new();
+        harness.Task.AddParam("a", 1L);
+
+        string sql = "SELECT * FROM T WHERE a = :a AND b = ?";
+
+        Assert.Equal(
+            RetCode.E_OUT_OF_BOUND,
+            harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  THE PRE-EXECUTION DETECTOR FOR A STATEMENT WITH PLACEHOLDERS AND NO PARAMETERS AT ALL
+    //  --------------------------------------------------------------------------------------------
+    //  The binder is gated on the parameter collection being non-empty, so this population was never
+    //  scanned and reached the provider with its markers intact - where Microsoft.Data.Sqlite refuses it
+    //  with an InvalidOperationException that escaped as an UNHANDLED fault. The detector is what lets
+    //  it be refused with the contract's own binding code instead, and it is deliberately more
+    //  SQL-literate than the oracle's scan because a false positive here would reject a statement the
+    //  provider accepts.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Statements that DO carry a marker nothing would bind.
+    /// </summary>
+    /// <param name="sql">The statement.</param>
+    [Theory]
+    [InlineData("INSERT INTO T (A,B) VALUES (?, ?)")]
+    [InlineData("UPDATE COMPANY SET SALARY = SALARY + 100 WHERE NAME = ?")]
+    [InlineData("SELECT * FROM T WHERE a = :a")]
+    [InlineData("SELECT * FROM T WHERE a = :a1")]
+    [InlineData("SELECT * FROM T WHERE a = :_a")]
+    [InlineData("SELECT * FROM T WHERE b = 'safe?' AND a = ?")]
+    [InlineData("SELECT * FROM T -- trailing\n WHERE a = ?")]
+    public void ContainsUnboundStatementParameterMarker_FindsTheTwoPublishedForms(string sql) =>
+        Assert.True(TestSqlTask.CallContainsUnboundStatementParameterMarker(sql));
+
+    /// <summary>
+    /// Statements that carry NO marker, including every construct in which the provider does not see one.
+    /// </summary>
+    /// <param name="sql">The statement.</param>
+    [Theory]
+    [InlineData("")]
+    [InlineData("SELECT 1")]
+    [InlineData("DELETE FROM COMPANY")]
+    [InlineData("INSERT INTO T (A,B) VALUES (1, 'what?')")]
+    [InlineData("INSERT INTO T (A,B) VALUES (1, 'it''s a ? really')")]
+    [InlineData("SELECT \"odd?column\" FROM T")]
+    [InlineData("SELECT `odd?column` FROM T")]
+    [InlineData("SELECT [odd?column] FROM T")]
+    [InlineData("SELECT 1 -- why?")]
+    [InlineData("SELECT 1 /* why? */ FROM T")]
+    [InlineData("SELECT 1 /* unterminated? ")]
+    [InlineData("SELECT 'unterminated? ")]
+    [InlineData("SELECT 4 - 1 FROM T")]
+    [InlineData("SELECT 4 / 2 FROM T")]
+    [InlineData("SELECT a FROM T WHERE b = 1: ")]
+    public void ContainsUnboundStatementParameterMarker_FindsNothingWhereTheProviderSeesNothing(
+        string sql) =>
+        Assert.False(TestSqlTask.CallContainsUnboundStatementParameterMarker(sql));
+
+    [Theory]
+    [InlineData("INSERT INTO T (A,B) VALUES (@p1, @p2)")]
+    [InlineData("INSERT INTO T (A,B) VALUES ($a, $b)")]
+    public void ContainsUnboundStatementParameterMarker_LeavesSQLitesOtherTwoFormsToTheProvider(
+        string sql)
+    {
+        // DELIBERATE, AND DOCUMENTED ON THE DETECTOR. `@name` and `$name` are SQLite parameter forms but
+        // not forms C-07 publishes, and matching `@` would misfire on a DOUBLED execution-mode selector
+        // whose documented behaviour is that the survivor "reaches the provider and fails there". Both
+        // still produce a DEFINED status rather than a fault, through the engine's bind-fault projection.
+        Assert.False(TestSqlTask.CallContainsUnboundStatementParameterMarker(sql));
+    }
+
+    [Fact]
+    public void BindParams_LogsTheSurplusItStillTolerates()
+    {
+        // THE OUTCOME IS UNCHANGED (C-B): the guard at [:L454] stays commented out, and it is load-bearing
+        // because a DataWindow may declare more arguments than its statement references [:L412]. What
+        // changed is that the mismatch is no longer SILENT - and the record carries COUNTS ONLY, because a
+        // surplus parameter's value is exactly the live data constraint C-F keeps out of logs.
+        using Harness harness = new();
+        harness.Task.AddParam("id", 7L);
+        harness.Task.AddParam("surplus", "s3cret-value");
+
+        string sql = "SELECT * FROM COMPANY WHERE id = :id";
+
+        Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
+        Assert.Equal("SELECT * FROM COMPANY WHERE id = 7", sql);
+
+        string record = Assert.Single(
+            harness.Log.Records,
+            entry => entry.Contains("surplus parameters match nothing", StringComparison.Ordinal));
+
+        Assert.Contains("2 parameters", record, StringComparison.Ordinal);
+        Assert.Contains("1 placeholders", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3cret-value", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("COMPANY", record, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ParseDataWindowArguments_SplitsPairsAndSkipsMalformedOnesSilently()
     {
@@ -2028,6 +2286,20 @@ public sealed class SqlTaskBaseTests
 
         internal ISqlRetrievalHook? CallResolveRetrievalHook(string? hookClassName) =>
             ResolveRetrievalHook(hookClassName);
+
+        /// <summary>
+        /// Reaches the pre-execution detector, which is <see langword="static"/> and needs no instance.
+        /// </summary>
+        /// <param name="sql">The statement to scan.</param>
+        /// <returns>Whatever the production member returns.</returns>
+        /// <remarks>
+        /// Declared on this harness rather than tested through a task because the member is static and
+        /// pure: a statement in, a verdict out, with no host, no pool and no provider involved. That is
+        /// exactly the property that makes its false-positive matrix cheap to assert exhaustively, which
+        /// matters because a false positive REFUSES a statement the provider would have run.
+        /// </remarks>
+        internal static bool CallContainsUnboundStatementParameterMarker(string sql) =>
+            ContainsUnboundStatementParameterMarker(sql);
 
         internal long CallBindParams(ref string sql, long dbType) => BindParams(ref sql, dbType);
 

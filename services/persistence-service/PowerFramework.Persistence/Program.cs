@@ -196,6 +196,14 @@ app.Services.ValidatePersistenceStructuralPreconditions();
 //  to a status by PersistenceStatusInterceptor and converted to trailers by the hosting layer long before
 //  they could reach an exception handler. Nothing else is added: no CORS, no rate limiting, no compression.
 // --------------------------------------------------------------------------------------------------
+// THE PROTECTIVE RESPONSE HEADERS, INSTALLED FIRST SO THEY REACH EVERY RESPONSE. It is registered ahead of
+// the exception handler and of authentication deliberately: it works by registering a response-starting
+// callback rather than by writing headers itself, so being outermost is what lets it cover a problem
+// document the exception handler writes and a bodiless challenge the authentication middleware writes, as
+// well as a handler's own response. It overrides nothing a route set for itself - see the file's own banner
+// for the three directives and the reason for each.
+SecurityResponseHeaders.Use(app);
+
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 
@@ -472,6 +480,34 @@ internal static class PersistenceServiceCollectionExtensions
                 bearer.TokenValidationParameters.ValidateAudience = true;
                 bearer.TokenValidationParameters.ValidateLifetime = true;
                 bearer.TokenValidationParameters.ValidateIssuerSigningKey = true;
+
+                // CLOCK SKEW IS BOUNDED AND NOT CONFIGURABLE, AND SAYING NOTHING WAS NOT THE SAME AS
+                // ALLOWING NOTHING.
+                //
+                // Left unassigned this property is the library's default of FIVE MINUTES, so every token
+                // reaching this service stayed usable for five minutes past its own `exp` and the
+                // `ValidateLifetime = true` immediately above enforced a bound five times looser than it
+                // appears to. Security issues with a five-minute lifetime, which made the tolerance as
+                // long as the lifetime it qualifies.
+                //
+                // THE FOUR BOUNDARIES NOW AGREE, WHICH IS THE POINT. Before this assignment each of the
+                // four validators of one issuer's tokens used a different tolerance - zero at Security,
+                // thirty seconds at DataServices, and five minutes at Gateway and here, both by
+                // omission - so whether an expired credential was accepted depended only on which
+                // service it reached. This service is the innermost one, the only holder of a storage
+                // provider, and it was among the two most permissive.
+                //
+                // THIRTY SECONDS, MATCHING DataServices AND Gateway VERBATIM: enough to absorb ordinary
+                // clock drift between containers on one host, which is the topology the frozen
+                // environment describes, and no more. Security mints with a truncated whole-second
+                // timestamp, so no sub-second allowance is needed. It is a CONSTANT rather than a
+                // JwtOptions member for exactly the reason the four checks above are literals - a
+                // deployment able to widen the tolerance past the token lifetime has turned expiry
+                // checking off without turning any switch off. Security's own `TimeSpan.Zero` is
+                // deliberately NOT copied: it validates only tokens it minted itself, moments earlier,
+                // from the same clock, so it has no second clock to accommodate. docs/ARCHITECTURE.md
+                // records all four values in one place.
+                bearer.TokenValidationParameters.ClockSkew = TimeSpan.FromSeconds(30);
             });
 
         // THE KEY-SET BACKCHANNEL'S TRUST DECISION, APPLIED IN A SECOND CONFIGURATION PASS BECAUSE THE
@@ -1479,6 +1515,31 @@ internal static class PersistenceStartupGate
         // own argument handling below rather than slipping through.
         string directory = (options.Sqlite.DataDirectory ?? string.Empty).Trim();
 
+        // ------------------------------------------------------------------------------------------
+        //  🔴 THE READ-ONLY LEGACY TREE IS REFUSED BEFORE ANY FILESYSTEM MUTATION, AND THE ORDER IS
+        //  THE WHOLE POINT OF THIS BLOCK.
+        //
+        //  SqliteConnectionFactory refuses this path in its constructor too, but that constructor runs
+        //  in ValidateRuntimeGraph BELOW - after the writability probe here has already called
+        //  Directory.CreateDirectory. The service therefore used to CREATE a directory inside
+        //  ws_objects/** and only then refuse to start, which writes into the behavioural oracle that
+        //  constraint C-C states is never an edit target: the very next characterization capture would
+        //  read whatever landed there as legacy source. Startup was correctly refused; the mutation
+        //  that preceded it was the defect.
+        //
+        //  The path is resolved to an absolute one first, exactly as the factory resolves it, because
+        //  the segment test is defined on an absolute path - a relative setting would otherwise slip
+        //  past a check the factory later applies to its resolved form. The predicate and the refusal
+        //  text are BOTH consumed from the factory rather than restated, so the rule has one home.
+        // ------------------------------------------------------------------------------------------
+        if (directory.Length != 0
+            && SqliteConnectionFactory.ResolvesInsideReadOnlyLegacyTree(ResolveOrEmpty(directory)))
+        {
+            Terminate(logger, SqliteConnectionFactory.ReadOnlyLegacyTreeRefusalText);
+
+            return;
+        }
+
         string probe = Path.Combine(
             directory,
             $".powerframework-persistence-writability-probe-{Guid.NewGuid():n}");
@@ -1494,24 +1555,63 @@ internal static class PersistenceStartupGate
             or NotSupportedException
             or ArgumentException)
         {
-            // The path is named because an operator needs it to fix the mount, and a directory path is
-            // not a credential. The underlying error is attached as the exception rather than
-            // interpolated, so a log pipeline keeps its type and its errno.
-            Terminate(
-                logger,
-                $"The configured storage directory '{directory}' is not writable by this process, so "
-                + "no database could be opened, created or updated there. The container image runs as "
-                + "a NON-ROOT user, so the usual cause is a mounted volume owned by another user; "
-                + "correct the volume's ownership or permissions and restart. This is a structural "
-                + "fault rather than a transient one, so the process is terminating instead of "
-                + "starting and failing every request.",
-                error);
+            // THE DESCRIPTION IS BUILT BY DataDirectoryFault AND THE CAUSE IS NOT ATTACHED, both
+            // deliberately, and both are corrections.
+            //
+            // An earlier form interpolated the configured path into the message on the reasoning that an
+            // operator needs it and that a directory path is not a credential, and attached the file
+            // system's own exception so a log pipeline kept its type and errno. Measured on a running
+            // host, the two together put the PATH into the startup output FOUR times and the
+            // CONFIGURATION KEY zero times: the operator was handed the value they already knew and not
+            // the setting they had to change, and the terminal record simultaneously asserted that
+            // "Configured values are deliberately not quoted" - which was false in the one record that
+            // said it.
+            //
+            // The cause cannot simply be attached with a redacted message either: IOException and
+            // UnauthorizedAccessException from the file APIs quote the path in their OWN Message, so
+            // attaching one republishes what the sentence withholds. It is therefore described BY TYPE
+            // ALONE inside the description - the same rule Gateway's system-error handler applies to a
+            // fault it cannot safely render - and no exception is passed to Terminate.
+            //
+            // The single "not writable" sentence is gone too: DataDirectoryFault establishes WHICH of the
+            // four ways this can fail actually happened, because "check the permissions" is the wrong
+            // instruction for a path occupied by a file or a volume that was never mounted.
+            Terminate(logger, DataDirectoryFault.Describe(directory, error));
 
             return;
         }
         finally
         {
             TryDeleteProbe(probe);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a configured directory to an absolute path, answering the empty string when the value
+    /// is not a path this host can resolve at all.
+    /// </summary>
+    /// <param name="directory">The configured value, already trimmed.</param>
+    /// <returns>The absolute form, or the empty string when it cannot be resolved.</returns>
+    /// <remarks>
+    /// A VALUE THIS HOST CANNOT RESOLVE IS NOT REPORTED HERE. The legacy-tree test above needs an
+    /// absolute path and nothing else, and the empty answer simply declines that test - the writability
+    /// probe immediately below is the arm that reports a malformed path, with the operator-facing
+    /// message and the underlying error attached. Reporting it twice, in two shapes, would give one
+    /// misconfiguration two different diagnostics depending on which check happened to run first.
+    /// </remarks>
+    private static string ResolveOrEmpty(string directory)
+    {
+        try
+        {
+            return Path.GetFullPath(directory);
+        }
+        catch (Exception error) when (error is ArgumentException
+            or NotSupportedException
+            or PathTooLongException
+            or IOException
+            or System.Security.SecurityException)
+        {
+            return string.Empty;
         }
     }
 
@@ -1548,11 +1648,29 @@ internal static class PersistenceStartupGate
     /// <param name="cause">The underlying failure, when there is one.</param>
     /// <exception cref="InvalidOperationException">Always thrown.</exception>
     /// <remarks>
+    /// <para>
     /// LOGGED AND THEN THROWN, IN THAT ORDER, because the log record is the artifact an operator reads
     /// and it must exist even if the terminating exception is reported differently by whatever hosts
-    /// the process. NO REJECTED VALUE IS EVER QUOTED except a directory path, which is not a
-    /// credential: a message that echoed a token authority, a connection string or a password would
-    /// put in the log exactly what constraint C-F exists to keep out of it.
+    /// the process.
+    /// </para>
+    /// <para>
+    /// <b>NO REJECTED VALUE IS EVER QUOTED - WITHOUT EXCEPTION, AND THAT IS A CONTRACT ON THE CALLER.</b>
+    /// The emitted record appends the sentence "Configured values are deliberately not quoted", and this
+    /// method cannot inspect <paramref name="reason"/> to make that true - so every caller must supply a
+    /// value-free reason, or the record asserts something false about itself. An earlier form of these
+    /// remarks carved out "except a directory path, which is not a credential", and the one caller that
+    /// relied on the carve-out produced exactly that contradiction: a record quoting a configured path
+    /// and then declaring that configured values are not quoted. The carve-out is gone; the storage
+    /// directory's description is built by <see cref="Data.DataDirectoryFault"/>, which names the
+    /// configuration key instead. A message echoing a token authority, a connection string, a mounted
+    /// path or a password would put in the log exactly what constraint C-F exists to keep out of it.
+    /// </para>
+    /// <para>
+    /// <paramref name="cause"/> IS FOR A CAUSE WHOSE OWN MESSAGE IS SAFE TO PUBLISH. The runtime-graph
+    /// gate passes one because the exception names the service TYPE that could not be produced, which is
+    /// exactly what its reader needs. A file-system exception is the opposite case - its message quotes
+    /// the path it failed on - so that caller passes none and names the type inside its reason instead.
+    /// </para>
     /// </remarks>
     [DoesNotReturn]
     private static void Terminate(ILogger logger, string reason, Exception? cause = null)
@@ -2104,7 +2222,53 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
     public int TaskIndex => SoleTaskIndex;
 
     /// <inheritdoc/>
-    public ISqlTaskProxy? ParentTasking { get; }
+    /// <remarks>
+    /// <para>
+    /// SETTABLE, AND FOR THE SAME REASON <see cref="Worker"/> IS. The legacy substrate's
+    /// <c>#ParentTasking</c> is the caller-side tasking object, and the worker forwards its
+    /// <c>ondberror</c> event to it [<c>n_cst_thread_task_sqlbase.sru:L94-L95</c>]. Composing the pair in
+    /// C# closes a cycle the constructors cannot: the worker takes the host, and the proxy is built before
+    /// the worker so that the worker can publish into it - so the host exists before the proxy does and
+    /// the reference has to be installed afterwards.
+    /// </para>
+    /// <para>
+    /// WITHOUT THE INSTALLATION THE DATABASE-ERROR CHANNEL IS SILENTLY DEAD, which is what it was: the
+    /// factories passed <see langword="null"/>, the base's validity test then skipped the forward, and the
+    /// caller-side latch every wire projection reads stayed cleared. A caller saw <c>E_DB_ERROR</c> with no
+    /// payload at all - the code, the driver text, the offending buffer and the offending row all lost -
+    /// even though the worker had them in hand. The proxy's own row-translation override
+    /// [<c>n_cst_threading_task_sqlupdate.sru:L310-L342</c>] was unreachable for the same reason.
+    /// </para>
+    /// <para>
+    /// REBINDING IS REFUSED rather than silently accepted, exactly as it is for the worker: a host serving
+    /// two proxies would latch one task's driver error onto another task's caller.
+    /// </para>
+    /// </remarks>
+    public ISqlTaskProxy? ParentTasking { get; private set; }
+
+    /// <summary>Binds the caller-side proxy this host's worker reports its database errors to.</summary>
+    /// <param name="parentTasking">The caller-side proxy composed against this host's worker.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="parentTasking"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// A proxy is already bound. See the remarks on <see cref="ParentTasking"/>.
+    /// </exception>
+    internal void BindParentTasking(ISqlTaskProxy parentTasking)
+    {
+        ArgumentNullException.ThrowIfNull(parentTasking);
+
+        if (ParentTasking is not null)
+        {
+            throw new InvalidOperationException(
+                "This task host already reports to a caller-side proxy. A host serves exactly one proxy "
+                + "pair, and rebinding it would latch one task's database error onto another task's "
+                + "caller - a misattribution no caller could detect, because the payload's shape is "
+                + "identical either way.");
+        }
+
+        ParentTasking = parentTasking;
+    }
 
     /// <summary>Binds the single worker task this host serves.</summary>
     /// <param name="task">The worker task composed against this host.</param>
@@ -2814,6 +2978,32 @@ internal sealed class UpdateTaskFactory : IUpdateTaskFactory
 
         proxyHost.Worker = worker;
 
+        // THE HOST MUST OWN THE TASK, NOT MERELY SERVE IT - the same obligation the retrieval factory
+        // discharges at QueryTaskFactory.Create, and the omission of it here was observable. The
+        // inherited commit-signal walk counts DOWN from the host's task index and sets the commit signal
+        // of every task the host RESOLVES [n_cst_thread_task_sqlbase.sru:L100-L111]; an unbound host
+        // answers E_OUT_OF_BOUND for every position [PersistenceSqlTaskHost.GetTask], so the walk found
+        // nothing, no signal was ever set, and the caller-side `IsCommitted()` could not become true
+        // however the transaction actually ended. Bound here because the cycle cannot be closed in either
+        // constructor: the worker takes the host, so the host cannot take the worker.
+        workerHost.BindTask(worker);
+
+        // `#ParentTasking` ON THE WORKER'S OWN SUBSTRATE, AND WITHOUT THIS LINE THE DATABASE-ERROR
+        // CHANNEL IS DEAD. The worker packs its five ondberror scalars into a payload and forwards it to
+        // `#ParentTasking` [n_cst_thread_task_sqlbase.sru:L94-L95]; that reference is the caller-side
+        // proxy, and it is the proxy's latch that every wire projection of a driver error reads. Left
+        // unbound, the base's validity test skipped the forward and a caller was told E_DB_ERROR with an
+        // EMPTY payload - no code, no text, no buffer, no row - for a failure the worker had fully in hand.
+        // Installed here rather than at construction because the proxy is built before the worker (the
+        // worker publishes into it) while the host is built before both, so the cycle can only close here -
+        // the same reason the worker reference above is assigned rather than passed.
+        //
+        // THE SECOND CHANNEL IS NOT A SUBSTITUTE FOR THIS ONE. The fault collector below receives the
+        // update task's own framework-error raises, which is a different event with a different payload;
+        // it never carries the offending buffer or row, and the proxy's row-translation override
+        // [n_cst_threading_task_sqlupdate.sru:L310-L342] is reachable only through this reference.
+        workerHost.BindParentTasking(proxy);
+
         // THE ORACLE'S ONE LIVE `#Running` GUARD, AND WITHOUT THIS LINE IT READS FALSE FOR EVER. Every
         // other guard written against `#Running` in n_cst_thread_task_sqlbase is COMMENTED OUT in the
         // oracle and carried across inert, but the two in n_cst_thread_task_sqlupdate are live [:L60] -
@@ -2998,12 +3188,28 @@ internal sealed class CommandTaskFactory : ICommandTaskFactory
             _timeProvider,
             _loggerFactory.CreateLogger<SqlCommandTask>());
 
+        // THE HOST MUST OWN THE TASK, NOT MERELY SERVE IT - see the identical note in
+        // UpdateTaskFactory.TryCreate and the original at QueryTaskFactory.Create. Without this line the
+        // commit-signal walk [n_cst_thread_task_sqlbase.sru:L100-L111] resolves nothing, so the AC_NATIVE
+        // arm's direct OnCommitted() raise - the one place in the command path that signals a commit
+        // WITHOUT performing one, because the provider already made the work durable - set no signal at
+        // all and ExecResponse.committed reported false for a write that was durable on disk.
+        workerHost.BindTask(worker);
+
         PersistenceSqlTaskProxyHost proxyHost = new(WorkerClassName) { Worker = worker };
 
         SqlCommandTaskProxy proxy = new(
             proxyHost,
             _loggerFactory.CreateLogger<SqlCommandTaskProxy>(),
             _timeProvider);
+
+        // `#ParentTasking`, for the same reason and with the same consequence as the update pair - see the
+        // long note at UpdateTaskFactory.TryCreate. This path reads the caller-side latch too
+        // [Grpc/CommandService.cs, `task.Proxy.GetLastDbErrorData()`] and decides from its emptiness whether
+        // to publish a driver payload at all, so leaving the reference unbound meant a failing command could
+        // never carry one: the response's error text fell back to the transaction's own message and the
+        // structured payload the contract declares was permanently absent.
+        workerHost.BindParentTasking(proxy);
 
         // The same ordering obligation as the update pair - see UpdateTaskFactory.TryCreate.
         long initialized = proxy.Initialize();
@@ -3179,6 +3385,17 @@ internal sealed class UpdateTaskSurface : IUpdateTaskSurface
 
     /// <inheritdoc/>
     public long SetAutoCommit(bool autoCommit) => _proxy.SetAutoCommit(autoCommit);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Read from the WORKER, which is where the two source fields live [<c>:L38-L39</c>] and where the
+    /// shaping branch reads them [<c>:L316-L331</c>]. The proxy holds no copy, deliberately: one field with
+    /// two homes is a field that can disagree with itself.
+    /// </remarks>
+    public bool HasUpdateSource => _worker.DataObject.Length != 0 || _worker.SqlSyntax.Length != 0;
+
+    /// <inheritdoc/>
+    public string DataObject => _worker.DataObject;
 
     /// <inheritdoc/>
     /// <remarks>

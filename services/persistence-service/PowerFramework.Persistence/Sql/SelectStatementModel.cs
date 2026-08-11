@@ -235,6 +235,22 @@ internal sealed class SelectStatementModel
     private const int ClauseKindCount = 6;
 
     /// <summary>
+    /// The separator an append or prepend uses on a clause whose body is a comma-separated list.
+    /// </summary>
+    /// <remarks>
+    /// NO TRAILING SPACE, deliberately: the legacy builds its own unique-column list with a bare comma
+    /// [<c>n_cst_thread_task_sqlquery.sru:L337</c>], so adding one here would make the separator between
+    /// the first two entries of a composed list differ from the separator between all the others - and
+    /// parity for these statements is byte-exact.
+    /// </remarks>
+    private const string ListConnective = ",";
+
+    /// <summary>
+    /// The separator an append or prepend uses on a clause whose body is not a list.
+    /// </summary>
+    private const string FragmentConnective = " ";
+
+    /// <summary>
     /// Upper-case canonical introducer per <see cref="ClauseKind"/>, indexed by its numeric value.
     /// </summary>
     /// <remarks>
@@ -1582,10 +1598,32 @@ internal sealed class SelectStatementModel
     /// would turn <c>:L341</c> into a failure.
     /// </para>
     /// <para>
-    /// <b>Combining separator.</b> Append and prepend join the new fragment to the existing text with
-    /// a single space; when the clause is absent or its text is empty both reduce to setting the new
-    /// text with no separator at all. The single space is the reasonable reading of an unobservable
-    /// native detail - it is the minimum that keeps two SQL fragments lexically apart.
+    /// <b>Combining separator - PER CLAUSE KIND, AND THAT IS MEASURED RATHER THAN CHOSEN.</b> Append
+    /// and prepend join the new fragment to the existing text with a COMMA for the three clause kinds
+    /// whose body is a comma-separated list - the select list, <c>GROUP BY</c> and <c>ORDER BY</c> -
+    /// and with a single SPACE for the three whose body is not: the <c>FROM</c> body, <c>WHERE</c> and
+    /// <c>HAVING</c>. When the clause is absent or its text is empty, both reduce to setting the new
+    /// text with no separator at all.
+    /// </para>
+    /// <para>
+    /// THE EVIDENCE IS TWO CALLS IN ONE FUNCTION, and it settles the question that a single separator
+    /// cannot answer. <c>n_cst_thread_task_sqlquery.sru:L341</c> appends
+    /// <c>sUniqueColumnsOrderBy</c> to the ORDER BY clause, and the loop that builds that string at
+    /// <c>:L335-L338</c> joins its own entries with a comma and emits NO LEADING comma - so a
+    /// space-joining native would produce <c>ORDER BY AGE ID</c>, which no SQL dialect accepts, and
+    /// the paging arms that depend on it could never have worked. Thirteen lines later
+    /// <c>:L350</c> appends <c>INNER JOIN (...)</c> to the TABLE clause, where a comma would produce
+    /// <c>FROM COMPANY , INNER JOIN (...)</c> - equally invalid. Both are the same native entry point
+    /// with the same style constant, so the native MUST be clause-kind aware. The separator was
+    /// previously a single space for all six kinds, which is why the append at <c>:L341</c> emitted an
+    /// invalid ORDER BY list.
+    /// </para>
+    /// <para>
+    /// A COMMA CARRIES NO TRAILING SPACE, which matters because parity here is byte-exact: the legacy
+    /// unique-column list is itself built with a bare <c>","</c> between entries [<c>:L337</c>], so a
+    /// comma-plus-space would make the separator between the FIRST two entries differ from the one
+    /// between the rest. The space kinds keep a single space for the same reason they always did - it
+    /// is the minimum that keeps two SQL fragments lexically apart.
     /// </para>
     /// </remarks>
     private bool ModifyClause(int selectIndex, long ms, string newValue, ClauseKind kind)
@@ -1632,7 +1670,7 @@ internal sealed class SelectStatementModel
                     return true;
                 }
 
-                slot.Text = existing.Length == 0 ? value : existing + " " + value;
+                slot.Text = existing.Length == 0 ? value : existing + ConnectiveFor(kind) + value;
                 slot.Present = true;
                 block.Modified = true;
                 return true;
@@ -1643,7 +1681,7 @@ internal sealed class SelectStatementModel
                     return true;
                 }
 
-                slot.Text = existing.Length == 0 ? value : value + " " + existing;
+                slot.Text = existing.Length == 0 ? value : value + ConnectiveFor(kind) + existing;
                 slot.Present = true;
                 block.Modified = true;
                 return true;
@@ -1655,6 +1693,24 @@ internal sealed class SelectStatementModel
                 return false;
         }
     }
+
+    /// <summary>
+    /// The text an append or a prepend joins two fragments of one clause with.
+    /// </summary>
+    /// <param name="kind">The clause kind.</param>
+    /// <returns>A comma for a comma-list clause, a single space otherwise.</returns>
+    /// <remarks>
+    /// SPELLED AS A SWITCH OVER EVERY MEMBER rather than as a set membership test, so that adding a
+    /// seventh clause kind is a compile-time decision about its separator instead of a silent default.
+    /// The three comma-list kinds are the select list, <c>GROUP BY</c> and <c>ORDER BY</c>; see
+    /// <see cref="ModifyClause"/>'s remarks for the two call sites in the legacy that measure this.
+    /// </remarks>
+    private static string ConnectiveFor(ClauseKind kind) => kind switch
+    {
+        ClauseKind.Column or ClauseKind.Group or ClauseKind.Order => ListConnective,
+        ClauseKind.Table or ClauseKind.Where or ClauseKind.Having => FragmentConnective,
+        _ => FragmentConnective,
+    };
 
     // ==========================================================================================
     //  Presence tests - n_sql.sru:L14-L25

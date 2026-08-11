@@ -488,6 +488,75 @@ public sealed record SystemErrorReport
 }
 
 /// <summary>
+/// How many fields a system error's payload actually carried, and how many of the seven legacy error
+/// fields the decode was consequently able to populate.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>THIS TYPE EXISTS BECAUSE THE LEGACY DECODE IS LOSSY BY DESIGN AND THE LOSS WAS PREVIOUSLY
+/// SILENT.</b> Two legacy behaviours combine to discard fields, and both are reproduced verbatim
+/// rather than corrected (C-B):
+/// </para>
+/// <list type="number">
+///   <item>
+///     <description>
+///     The legacy split helper appends its final field ONLY when that field is non-empty
+///     [<c>ws_objects/pfw.pbl.src/pfw.sra:L64-L66</c>], so a payload whose last field is empty
+///     splits into one field fewer than it was written with.
+///     </description>
+///   </item>
+///   <item>
+///     <description>
+///     The arity test is EXACT equality against seven, never at-least-seven
+///     [<c>ws_objects/pfw.pbl.src/pfw.sra:L119</c>], so any other count populates the number and the
+///     text alone and leaves the window-or-menu, object, object-event, line-number and call-stack
+///     fields at their pre-decode values.
+///     </description>
+///   </item>
+/// </list>
+/// <para>
+/// Together those two mean a payload written with seven fields whose call-stack field happens to be
+/// EMPTY splits into six, fails the arity test, and loses four diagnostic fields - and the legacy
+/// loses them in exactly the same way, which is why the decode may not be changed. What the legacy has
+/// no equivalent of is an operator channel: it renders one dialog and halts. So the loss is made
+/// VISIBLE here instead of being repaired, on the channel that is net-new, and an operator reading a
+/// terminal fault can tell a genuinely shallow payload from a seven-field one that lost its tail.
+/// </para>
+/// <para>
+/// Every member is an integer or a boolean. Nothing derived from payload CONTENT appears on this type,
+/// so it can be published on any channel, including the allowlisted one (C-F).
+/// </para>
+/// </remarks>
+public readonly record struct SystemErrorPayloadShape
+{
+    /// <summary>
+    /// Whether the pre-decode object member matched the legacy assert sentinel, which is the only
+    /// condition under which any decoding is attempted at all
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L114</c>].
+    /// </summary>
+    public bool SentinelMatched { get; init; }
+
+    /// <summary>
+    /// The number of fields the payload split into, counted exactly as the legacy helper counts them
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L68</c>] - so a trailing empty field is already absent from
+    /// this number. Zero when the sentinel did not match, because nothing is split in that case.
+    /// </summary>
+    public int FieldCount { get; init; }
+
+    /// <summary>
+    /// How many of the seven legacy error fields the decode populated: seven for a complete payload,
+    /// two for any other decodable count, and zero when the sentinel did not match.
+    /// </summary>
+    /// <remarks>
+    /// A value of two against a <see cref="FieldCount"/> of six is the diagnosis this type exists to
+    /// surface: four fields were discarded, and whether they were discarded because the payload was
+    /// genuinely shallow or because its call-stack field was empty is a question only the producer can
+    /// answer - but an operator can now see that it happened.
+    /// </remarks>
+    public int DecodedFieldCount { get; init; }
+}
+
+/// <summary>
 /// Reproduces the legacy framework's system-error protocol
 /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>] at an HTTP boundary, and doubles as the host's
 /// unhandled-exception path.
@@ -650,6 +719,30 @@ public sealed class SystemErrorHandler : IExceptionHandler
         "An internal error occurred while handling the request. The diagnostic detail is recorded on "
         + "the server's operator channel and is deliberately not disclosed in this response.";
 
+    /// <summary>
+    /// The problem title for a fault the CALLER's request caused, carrying its own client status.
+    /// </summary>
+    /// <remarks>
+    /// SEPARATE FROM <see cref="ProblemTitle"/> BECAUSE THAT ONE IS A STATEMENT ABOUT THIS SERVICE.
+    /// "Internal Server Error" on a 400 tells a caller to look for an outage when the answer is in its own
+    /// request, and a title that disagrees with the status is a defect a consumer cannot work around.
+    /// </remarks>
+    private const string ClientErrorProblemTitle = "Bad Request";
+
+    /// <summary>
+    /// The problem detail for a request this service could not accept. Fixed prose, naming nothing.
+    /// </summary>
+    /// <remarks>
+    /// THE FRAMEWORK'S OWN MESSAGE IS DELIBERATELY NOT USED. It names the parameter it could not bind and
+    /// its type, which is shaped by the caller's request, and this file's whole redaction commitment is
+    /// that no caller-derived text reaches the body (C-F, C-G). A caller that omitted a required parameter
+    /// already knows what it sent; what it needs from this response is the classification.
+    /// </remarks>
+    private const string ClientErrorProblemDetail =
+        "The request could not be accepted as this operation declares it. A required parameter is absent, "
+        + "or a value supplied cannot be bound to the shape the operation publishes. No part of the "
+        + "request is echoed here; the published contract states what the operation accepts.";
+
     /// <summary>The media type the published contract uses for every error body.</summary>
     private const string ProblemJsonContentType = "application/problem+json";
 
@@ -673,12 +766,23 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// handed, so an operator searching for it must be able to match it without knowing which of the
     /// two record forms was written (DECISION 7).
     /// </remarks>
+    /// <remarks>
+    /// <para>
+    /// <c>PayloadFieldCount</c> and <c>PayloadDecodedFieldCount</c> are the F11 observation: the legacy
+    /// decode discards fields silently in two documented ways, and this pair is what makes the
+    /// discarding visible without altering it. A pair reading <c>6</c> and <c>2</c> says four fields
+    /// were dropped; <c>7</c> and <c>7</c> says none were. Both are integers derived from the payload's
+    /// SHAPE and never from its content, so neither can carry upstream text (C-F). See
+    /// <see cref="SystemErrorPayloadShape"/> for why the decode itself is not changed.
+    /// </para>
+    /// </remarks>
     private const string AssertionFailureLogMessage =
         "{ReportTitle} ({Severity}): a decoded assertion failure reached the unhandled path, so the "
         + "framework halt path runs and the host is asked to shut down. TraceId={TraceId} "
-        + "Number={ErrorNumber} WireRetCode={WireRetCode} Text={ErrorText} WindowMenu={WindowMenu} "
-        + "ErrorObject={ErrorObject} ObjectEvent={ObjectEvent} Line={ErrorLine} "
-        + "LegacyStackTrace={LegacyStackTrace} Report={Report}";
+        + "Number={ErrorNumber} WireRetCode={WireRetCode} PayloadFieldCount={PayloadFieldCount} "
+        + "PayloadDecodedFieldCount={PayloadDecodedFieldCount} Text={ErrorText} "
+        + "WindowMenu={WindowMenu} ErrorObject={ErrorObject} ObjectEvent={ObjectEvent} "
+        + "Line={ErrorLine} LegacyStackTrace={LegacyStackTrace} Report={Report}";
 
     /// <summary>
     /// The operator-channel record for an ordinary, non-terminal request fault - the ALLOWLISTED
@@ -979,6 +1083,67 @@ public sealed class SystemErrorHandler : IExceptionHandler
         return decoded;
     }
 
+    /// <summary>
+    /// Reports how many fields a pre-decode record's payload carried and how many of the seven legacy
+    /// error fields <see cref="Decode(SystemErrorInfo?)"/> will therefore populate, WITHOUT decoding
+    /// anything and without reading any field's content.
+    /// </summary>
+    /// <param name="error">
+    /// The PRE-DECODE record - the one whose object member still carries the sentinel. Passing a
+    /// post-decode record answers about the wrong input, because a complete decode OVERWRITES the
+    /// sentinel [<c>ws_objects/pfw.pbl.src/pfw.sra:L121</c>]. <see langword="null"/> is treated as an
+    /// empty record.
+    /// </param>
+    /// <returns>The shape, whose every member is an integer or a boolean.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE THREE ARITY CONDITIONS ARE THE DECODE'S OWN, EXPRESSED ONCE MORE RATHER THAN GUESSED. The
+    /// sentinel test, the at-least-two test and the exactly-seven test are read from the same three
+    /// constants the decode reads, so the two cannot drift: if the decode's arity branches change, this
+    /// changes with them.
+    /// </para>
+    /// <para>
+    /// This is a separate method rather than an out-parameter on the decode because the decode's
+    /// signature is the legacy protocol's own shape and every existing caller and test is written
+    /// against it. Nothing about the decode changes; an observation about it is added beside it.
+    /// </para>
+    /// </remarks>
+    public static SystemErrorPayloadShape DescribePayloadShape(SystemErrorInfo? error)
+    {
+        SystemErrorInfo source = error ?? new SystemErrorInfo();
+
+        // [ws_objects/pfw.pbl.src/pfw.sra:L114] Nothing is split unless the sentinel matches, so a
+        // non-assert system error has no payload shape to report rather than a shape of zero fields.
+        if (!string.Equals(source.Object, AssertErrorObject, StringComparison.Ordinal))
+        {
+            return new SystemErrorPayloadShape
+            {
+                SentinelMatched = false,
+                FieldCount = 0,
+                DecodedFieldCount = 0,
+            };
+        }
+
+        int fieldCount = SplitPayload(source.Text).Count;
+
+        // [ws_objects/pfw.pbl.src/pfw.sra:L116,L119] The two arity gates, in the decode's own order.
+        // Seven fields populate all seven; at least two populate exactly the number and the text; and
+        // fewer than two populate none.
+        int decodedFieldCount = fieldCount switch
+        {
+            CompleteFieldCount => CompleteFieldCount,
+            >= MinimumDecodableFieldCount => MinimumDecodableFieldCount,
+            _ => 0,
+        };
+
+        return new SystemErrorPayloadShape
+        {
+            SentinelMatched = true,
+            FieldCount = fieldCount,
+            DecodedFieldCount = decodedFieldCount,
+        };
+    }
+
     // ------------------------------------------------------------------------------------------
     //  6.3  THE PURE FORMATTER. No host, deterministic, and byte-exact against the legacy.
     // ------------------------------------------------------------------------------------------
@@ -1071,6 +1236,57 @@ public sealed class SystemErrorHandler : IExceptionHandler
     }
 
     /// <summary>
+    /// Chooses the HTTP status the caller channel answers with.
+    /// </summary>
+    /// <param name="exception">The fault that escaped the pipeline.</param>
+    /// <param name="structuralFault">Whether the fault is a decoded assertion failure.</param>
+    /// <returns>
+    /// The client status the framework attached to a request it could not accept, or
+    /// <c>500</c> in every other case.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="exception"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A REQUEST THIS SERVICE COULD NOT ACCEPT IS THE CALLER'S ERROR, AND THE FRAMEWORK ALREADY SAID
+    /// SO.</b> Minimal-API parameter binding raises <see cref="BadHttpRequestException"/> carrying the
+    /// status it intended - <c>400</c> for an absent required parameter or a value it cannot convert - and
+    /// discarding that status answered <c>500</c> with the catalogue's unknown code, telling a caller that
+    /// this service had failed when nothing here had.
+    /// </para>
+    /// <para>
+    /// TWO NARROWING CONDITIONS, EACH LOAD BEARING. A structural fault is this service's own and is
+    /// terminal (DECISION 5), so nothing carried on an exception may reclassify it. And only a status in
+    /// the client range is honoured: a carried <c>5xx</c> is already a server fault, and a value outside
+    /// the range is not a classification this handler can act on, so the test is a range check rather than
+    /// trust in whatever integer arrives.
+    /// </para>
+    /// <para>
+    /// <see langword="internal"/> so the sibling test project can drive every arm directly, which is what
+    /// makes the reclassification provable without producing a real binding failure through a host.
+    /// </para>
+    /// </remarks>
+    internal static int ResolveResponseStatus(Exception exception, bool structuralFault)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        // A STRUCTURAL FAULT IS ALWAYS THIS SERVICE'S OWN AND IS ALWAYS TERMINAL (DECISION 5), so nothing
+        // a framework exception carries may reclassify it.
+        if (structuralFault)
+        {
+            return StatusCodes.Status500InternalServerError;
+        }
+
+        // ONLY A 4XX IS HONOURED. A carried 5xx is already a server fault and would change nothing, and a
+        // carried value outside the client range is not a classification this handler can act on - so the
+        // range test is what keeps the arm narrow rather than trusting whatever integer arrives.
+        return exception is BadHttpRequestException malformed
+            && malformed.StatusCode >= StatusCodes.Status400BadRequest
+            && malformed.StatusCode < StatusCodes.Status500InternalServerError
+            ? malformed.StatusCode
+            : StatusCodes.Status500InternalServerError;
+    }
+
+    /// <summary>
     /// Chooses the return code the caller channel carries (DECISION 3).
     /// </summary>
     /// <param name="error">The decoded record, or <see langword="null"/>.</param>
@@ -1079,8 +1295,8 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// decode OVERWRITES the sentinel [<c>ws_objects/pfw.pbl.src/pfw.sra:L121</c>].
     /// </param>
     /// <returns>
-    /// The decoded number when it is a member of the published closed value set, and the
-    /// catalogue's unknown value in every other case.
+    /// The decoded number when it is a member of the published closed value set AND the kernel's own
+    /// failure predicate accepts it, and the catalogue's unknown value in every other case.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -1093,6 +1309,31 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// numeric result code is not a legacy return code, and a code that happened to be zero would
     /// otherwise report SUCCESS on a failed request.
     /// </para>
+    /// <para>
+    /// <b>AND THE ASSERT PATH IS HELD TO THE SAME RULE, WHICH IS THE POINT OF THE SECOND CHECK.</b>
+    /// Membership of the published set is NOT the same question as "is this a failure". The legacy
+    /// algebra is tri-state and has a documented hole that this system preserves verbatim:
+    /// <c>PREVENT</c> is 1 and <c>IsSucceeded</c> tests greater-than-or-equal-to zero, so a
+    /// prevention reads as a SUCCESS [<c>ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13</c>,
+    /// <c>retcode.sru:L42</c>], and <c>CANCELLED</c> is excluded from <c>IsFailed</c>, so a
+    /// cancellation is NEITHER [<c>ws_objects/pfw.shared.pbl.src/isfailed.srf:L11-L13</c>]. The
+    /// payload's first field is attacker-shaped rather than trustworthy - it is whatever text arrived
+    /// on the wire, and <see cref="ParseLegacyLong"/> maps anything unparseable to ZERO, which is
+    /// <c>OK</c> - so without this check a fault fatal enough to terminate the process could publish
+    /// <c>retCode</c> 0 or 1 in a 500 body and a machine consumer applying the project's own
+    /// <c>IsSucceeded</c> would read the crash as a success.
+    /// </para>
+    /// <para>
+    /// THE KERNEL PREDICATE IS CONSUMED RATHER THAN THE COMPARISON RE-DERIVED, and it is the same
+    /// guard the four service composition roots already apply to a framework-generated failure status
+    /// (<c>ClassifyFailure</c> in each <c>Program.cs</c>). Two paths produce the <c>retCode</c> member
+    /// of an error body - that one and this one - so they answer the question the same way or the
+    /// published contract has two meanings. Nothing observable about the LEGACY protocol changes: the
+    /// decode is untouched, the operator report is untouched, the decoded number still reaches the
+    /// operator channel unmodified, and the process still terminates. Only the value published in a
+    /// net-new HTTP body - which the legacy has no analogue for at all, having no listener - is
+    /// narrowed to a code that cannot be misread.
+    /// </para>
     /// </remarks>
     public static long ResolveRetCode(SystemErrorInfo? error, bool decodedFromAssertPayload)
     {
@@ -1101,7 +1342,9 @@ public sealed class SystemErrorHandler : IExceptionHandler
             return RetCode.UNKNOWN;
         }
 
-        return IsPublishedRetCode(error.Number) ? error.Number : RetCode.UNKNOWN;
+        long candidate = IsPublishedRetCode(error.Number) ? error.Number : RetCode.UNKNOWN;
+
+        return Predicates.IsFailed(candidate) ? candidate : RetCode.UNKNOWN;
     }
 
     /// <summary>
@@ -1111,11 +1354,22 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// <param name="value">The candidate value.</param>
     /// <returns><see langword="true"/> when the value is published.</returns>
     /// <remarks>
+    /// <para>
     /// The membership test is written against the catalogue's own named constants rather than
     /// against literals, so it cannot drift from them. The failure band is contiguous and gap-free
     /// from the first failure code down to the retry code, which is why one range test covers it,
     /// and the cancelled value sits inside that band. Nothing here declares a constant; it only
     /// consumes them.
+    /// </para>
+    /// <para>
+    /// <b>THIS DELIBERATELY ADMITS <c>OK</c>, <c>PREVENT</c> AND <c>CANCELLED</c>, AND IT IS NOT THE
+    /// PLACE THAT DECIDES WHETHER A CODE MAY APPEAR IN AN ERROR BODY.</b> The published contract
+    /// declares all three, and narrowing the set here would make this method answer a question it is
+    /// not asked - "is this value published" is a schema question, and "is this value a failure" is an
+    /// algebra question. The second question is answered exactly once, by the kernel predicate in
+    /// <see cref="ResolveRetCode(SystemErrorInfo?, bool)"/>, so a future reader looking for the reason
+    /// a fatal fault cannot publish a success code finds one guard rather than two overlapping ones.
+    /// </para>
     /// </remarks>
     private static bool IsPublishedRetCode(long value)
     {
@@ -1508,7 +1762,37 @@ public sealed class SystemErrorHandler : IExceptionHandler
         // (C-B, DECISION 5). Which of its members reach a log record is a separate question, decided
         // by DECISION 2.
         SystemErrorReport report = Format(decoded);
-        long wireRetCode = ResolveRetCode(decoded, structuralFault);
+
+        // ==========================================================================================
+        //  ⚠ A FAULT THAT CARRIES ITS OWN CLIENT STATUS KEEPS IT, INSTEAD OF BECOMING A 500.
+        //
+        //  The framework raises BadHttpRequestException for a request IT could not accept - a required
+        //  query parameter that is absent, a route value that will not convert, a body over the
+        //  configured size - and that exception carries the status the framework intended. This handler
+        //  discarded it and answered 500 with UNKNOWN, so a caller that omitted a query parameter was
+        //  told THIS SERVICE had failed. Measured: GET /v1/datawindow/event-gate with no sessionId
+        //  answered 500 / -4000, while the same route with an EMPTY sessionId answered 400 / -3 - two
+        //  spellings of one mistake, one of them blamed on the wrong party.
+        //
+        //  IT IS A DEFENCE IN DEPTH RATHER THAN THE PRIMARY FIX. The projection now binds that
+        //  parameter nullable and applies the operation's own declared parameter contract, so the
+        //  measured case no longer reaches this handler at all. This arm is what makes every OTHER
+        //  binding refusal - present and future, on any route - answer the caller's own status instead
+        //  of a server fault.
+        //
+        //  NOT FOR A STRUCTURAL FAULT, AND ONLY FOR A 4XX. A structural fault is terminal and is always
+        //  reported as this service's own (DECISION 5), and a carried 5xx is already a server fault, so
+        //  neither can be reclassified by a value the framework put on an exception.
+        // ==========================================================================================
+        int responseStatus = ResolveResponseStatus(exception, structuralFault);
+
+        long wireRetCode = responseStatus == StatusCodes.Status500InternalServerError
+            ? ResolveRetCode(decoded, structuralFault)
+
+            // THE CALLER'S OWN ARGUMENT IS WHAT FAILED, so the code is the one the projection answers
+            // for exactly the same condition - which is what makes an absent parameter and an empty one
+            // indistinguishable to a caller, as two spellings of one mistake should be.
+            : RetCode.E_INVALID_ARGUMENT;
 
         // The single correlation identifier, resolved BEFORE anything is written and then passed to
         // every site that needs it, so the value the caller is handed is provably the value in the
@@ -1577,6 +1861,11 @@ public sealed class SystemErrorHandler : IExceptionHandler
             // upstream field known to carry interpolated literal statement text is redacted or
             // parameter-separated by the service that owns it - this file never reads, echoes or
             // reconstructs it.
+            // THE SHAPE IS DESCRIBED FROM THE PRE-DECODE RECORD, NOT THE DECODED ONE, because a
+            // complete decode overwrites the sentinel it discriminated on
+            // [ws_objects/pfw.pbl.src/pfw.sra:L121] and the shape would then read as "not an assert".
+            SystemErrorPayloadShape payloadShape = DescribePayloadShape(raised);
+
             _logger.LogCritical(
                 exception,
                 AssertionFailureLogMessage,
@@ -1585,6 +1874,8 @@ public sealed class SystemErrorHandler : IExceptionHandler
                 correlationId,
                 decoded.Number,
                 wireRetCode,
+                payloadShape.FieldCount,
+                payloadShape.DecodedFieldCount,
                 decoded.Text,
                 decoded.WindowMenu,
                 decoded.Object,
@@ -1604,14 +1895,22 @@ public sealed class SystemErrorHandler : IExceptionHandler
             // receive, the two numeric codes, the exception TYPE chain, and the fault site as a
             // declaring-type name, a member name and a source line, all three of which name this
             // system's own code.
-            _logger.LogError(
+            // THE LEVEL FOLLOWS THE CLASSIFICATION, and it has to: a service whose error rate tracks how
+            // often callers send malformed requests cannot be monitored, which is the same reasoning the
+            // cancellation arm above already applies. A client error is recorded at warning, a server
+            // fault at error, and the STATUS is now the one the caller actually receives rather than a
+            // hardcoded 500 that could disagree with the response.
+            _logger.Log(
+                responseStatus >= StatusCodes.Status500InternalServerError
+                    ? LogLevel.Error
+                    : LogLevel.Warning,
                 RequestFaultLogMessage,
                 report.Title,
                 report.Severity,
                 correlationId,
                 httpContext.Request.Method,
                 DescribeRoute(httpContext),
-                StatusCodes.Status500InternalServerError,
+                responseStatus,
                 decoded.Number,
                 wireRetCode,
                 DescribeExceptionTypes(exception),
@@ -1637,6 +1936,7 @@ public sealed class SystemErrorHandler : IExceptionHandler
         {
             handled = await WriteRedactedProblemAsync(
                     httpContext,
+                    responseStatus,
                     wireRetCode,
                     correlationId,
                     cancellationToken)
@@ -1711,6 +2011,7 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// </remarks>
     private async ValueTask<bool> WriteRedactedProblemAsync(
         HttpContext httpContext,
+        int responseStatus,
         long wireRetCode,
         string correlationId,
         CancellationToken cancellationToken)
@@ -1741,14 +2042,23 @@ public sealed class SystemErrorHandler : IExceptionHandler
             return false;
         }
 
-        httpContext.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        httpContext.Response.StatusCode = responseStatus;
+
+        bool serverFault = responseStatus >= StatusCodes.Status500InternalServerError;
 
         ProblemDetails problem = new()
         {
             Type = ProblemType,
-            Title = ProblemTitle,
-            Status = StatusCodes.Status500InternalServerError,
-            Detail = ProblemDetail,
+
+            // THE TITLE AND THE DETAIL FOLLOW THE STATUS, because the server-fault prose is a statement
+            // about this service and would be a false one on a client error: telling a caller that "an
+            // internal error occurred" for a request IT composed wrongly sends it to look for an outage.
+            // The client-error prose names no value and echoes nothing - in particular not the framework
+            // exception's own message, which names the parameter it could not bind and is therefore
+            // shaped by caller content (C-F).
+            Title = serverFault ? ProblemTitle : ClientErrorProblemTitle,
+            Status = responseStatus,
+            Detail = serverFault ? ProblemDetail : ClientErrorProblemDetail,
 
             // The caller's own request path. It discloses nothing the caller did not send.
             Instance = httpContext.Request.Path.HasValue ? httpContext.Request.Path.Value : null,

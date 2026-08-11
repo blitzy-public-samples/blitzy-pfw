@@ -166,6 +166,20 @@ namespace PowerFramework.Persistence.Tasks
         /// <summary>The describe result a property with no value carries.</summary>
         internal const string UnsetDescribeResult = "";
 
+        /// <summary>
+        /// The prefix every table-level describe and modify property carries.
+        /// </summary>
+        /// <remarks>
+        /// THE DISCRIMINATOR BETWEEN A TABLE-LEVEL AND A COLUMN-SCOPED PROPERTY. PowerBuilder's
+        /// vocabulary puts everything that is not addressed to a named object under
+        /// <c>DataWindow.</c> - <c>DataWindow.Table.UpdateTable</c>, <c>DataWindow.Table.UpdateWhere</c>,
+        /// <c>DataWindow.Table.UpdateKeyinPlace</c> and <c>DataWindow.Column.Count</c> are the four this
+        /// service composes - so a property that does NOT carry it is addressed to a column and its stem
+        /// must resolve. Held as a constant because two members test against it and a literal in either
+        /// would let them drift apart.
+        /// </remarks>
+        internal const string DataWindowPropertyPrefix = "DataWindow.";
+
         /// <summary>The suffix of the per-column update flag property.</summary>
         internal const string UpdateSuffix = ".Update";
 
@@ -469,6 +483,14 @@ namespace PowerFramework.Persistence.Tasks
 
             UpdateColumnPlan plan = BuildPlan();
 
+            // THE CARRIER LEARNS ITS COLUMN NAMES HERE TOO, once per update rather than per row. The
+            // retrieve path records them as it fills; an update carrier is filled from a payload the caller
+            // supplied, so this is the first point at which the names are resolved - and it is resolved
+            // anyway, for the plan. Recording it lets anything projected back out of this carrier - most
+            // importantly a conflict detail's rows - carry the NAME identifier alongside the ordinal, which
+            // is what common.v1.ColumnValue requires wherever both are known.
+            _store.Carrier.SetColumnNames(plan.ColumnNames);
+
             if (plan.UpdatableColumns.Count == 0)
             {
                 _logger.LogError(
@@ -505,6 +527,19 @@ namespace PowerFramework.Persistence.Tasks
             // walk there is no longer any record of which row it was.
             List<(DwBuffer Buffer, long Row)> unmatched = [];
 
+            // THE ROW THE WALK IS ON, HELD OUTSIDE THE TRY SO THE FAILURE ARM CAN NAME IT. PowerBuilder's
+            // dberror event carries the offending buffer and row as two of its five arguments
+            // [n_cst_thread_task_sqlbase.sru:L85], and the caller-side proxy's row translation reads the
+            // row specifically [n_cst_threading_task_sqlupdate.sru:L315]. The catch below sits outside every
+            // loop, so without these two the arm could only report the default pair - and a constraint
+            // violation would then answer "buffer Primary, row 0" no matter which row actually failed,
+            // which is indistinguishable from "not known" and is what a consumer must not be handed.
+            //
+            // THE DEFAULT PAIR IS STILL Primary/0, for the failure that happens before any row is visited -
+            // an engine fault raised while preparing rather than while applying. That is genuinely "no row".
+            DwBuffer failingBuffer = DwBuffer.Primary;
+            long failingRow = 0L;
+
             try
             {
                 // DELETES FIRST. See the remarks: a key change under updatekeyinplace=no is a delete
@@ -519,6 +554,11 @@ namespace PowerFramework.Persistence.Tasks
                 // drop the commonest delete there is.
                 foreach (long row in RowsOf(DwBuffer.Delete))
                 {
+                    // RECORDED BEFORE THE STATEMENT RUNS, so the failure arm names the row that failed
+                    // rather than the row before it.
+                    failingBuffer = DwBuffer.Delete;
+                    failingRow = row;
+
                     long removed = ApplyDelete(commands, table, plan, DwBuffer.Delete, row);
 
                     if (removed == 0L)
@@ -545,6 +585,10 @@ namespace PowerFramework.Persistence.Tasks
                     // which is a way for a caller to lose a row silently.
                     foreach (long row in RowsOf(buffer))
                     {
+                        // See the note on the two locals: recorded before anything is applied.
+                        failingBuffer = buffer;
+                        failingRow = row;
+
                         ItemStatus status = _store.Carrier.GetItemStatus(
                             row,
                             ItemStatusMachine.RowStatusColumn,
@@ -631,8 +675,8 @@ namespace PowerFramework.Persistence.Tasks
                         failure.SqliteExtendedErrorCode),
                     failure.Message,
                     string.Empty,
-                    DwBuffer.Primary,
-                    0L);
+                    failingBuffer,
+                    failingRow);
 
                 _logger.LogError(failure, "An update failed inside the storage engine.");
 
@@ -827,6 +871,36 @@ namespace PowerFramework.Persistence.Tasks
                 string property = line[..separator].Trim();
                 string value = line[(separator + 1)..].Trim();
 
+                // THE PROPERTY MUST NAME SOMETHING THIS CARRIER HAS. PowerBuilder's Modify parses the
+                // script against the loaded DataWindow's own object model and answers a non-empty error
+                // for a property whose object does not exist, which is why the oracle's step 2 has no
+                // test of its own for an updatable column name: `<name>.Update = 'yes'` for a column the
+                // DataWindow does not declare is refused BY MODIFY, and `_of_updateprepare` then takes
+                // its `if sErr <> ""` arm [n_cst_thread_task_sqlupdate.sru:L145-L148]. Installing the
+                // property into a plain dictionary instead accepted any name at all, so a descriptor
+                // naming a column that does not exist reported success and the generated statement simply
+                // omitted the column - a silent misdirection rather than the refusal the oracle produces.
+                //
+                // THE OBJECT IS THE STEM, NOT THE WHOLE PROPERTY: a column-scoped property is
+                // `<column>.<attribute>` or `#<ordinal>.<attribute>`, and PowerBuilder accepts both
+                // addressing forms - the update script addresses columns by name while the identity
+                // round trip addresses them by ordinal. A table-level property is `DataWindow.<...>` and
+                // is not column-scoped at all, so it is passed through untouched: those are the update
+                // table, the update-where mode, the key-in-place setting and the column count, none of
+                // which names a column.
+                //
+                // THE ORACLE'S OWN FAILURE TEXT IS REUSED rather than a second shape being invented,
+                // exactly as BuildModificationString's script-safety guard does: the refusal reaching the
+                // caller is `无效的列名:<name>` with E_INTERNAL_ERROR, which is the arm and the wording an
+                // unresolvable key column already produces [:L119-L122]. PowerBuilder's own driver wording
+                // for a rejected Modify line is a runtime string that exists nowhere in the read-only
+                // legacy tree, so it cannot be reproduced verbatim; what IS observable, and what the
+                // caller acts on, is that the answer is non-empty and carries the offending name.
+                if (!IsInstallableProperty(property, out string unresolvedColumn))
+                {
+                    return UpdateWhereBuilder.InvalidColumnNameMessage + unresolvedColumn;
+                }
+
                 // EITHER QUOTE CHARACTER, because the two composers do not agree and neither is wrong.
                 // UpdateWhereBuilder emits the oracle's own form - `DataWindow.Table.UpdateTable =
                 // 'COMPANY'` with SINGLE quotes [n_cst_thread_task_sqlupdate.sru:L143] - while the
@@ -974,6 +1048,111 @@ namespace PowerFramework.Persistence.Tasks
         /// <param name="property">The property name.</param>
         /// <param name="suffix">The suffix to remove.</param>
         /// <returns>The column name, or the empty string when the suffix was absent.</returns>
+        /// <summary>
+        /// Decides whether a modification-script property names an object this carrier holds.
+        /// </summary>
+        /// <param name="property">The property name, already trimmed.</param>
+        /// <param name="unresolvedColumn">
+        /// The column stem that could not be resolved, for the refusal's diagnostic. Empty when the
+        /// property is installable.
+        /// </param>
+        /// <returns>
+        /// <see langword="true"/> when the property may be installed; <see langword="false"/> when the
+        /// caller must refuse the whole script.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// TABLE-LEVEL PROPERTIES ARE ALWAYS INSTALLABLE. Every one of them begins with
+        /// <c>DataWindow.</c> - the update table, the update-where mode, the key-in-place setting and the
+        /// column count - and none of them names a column, so there is nothing here to resolve. The test
+        /// is on the prefix rather than on an enumeration of the four names because a caller may install
+        /// a table-level property this service does not itself compose, and PowerBuilder would accept it.
+        /// </para>
+        /// <para>
+        /// A COLUMN-SCOPED PROPERTY SPLITS AT ITS LAST DOT, so <c>salary.Update</c> resolves the stem
+        /// <c>salary</c> and <c>#5.Identity</c> resolves the stem <c>#5</c>. Splitting at the FIRST dot
+        /// would mis-parse nothing today but would break the moment an attribute name contained one, and
+        /// PowerBuilder's own vocabulary has such attributes elsewhere.
+        /// </para>
+        /// <para>
+        /// A PROPERTY WITH NO DOT AT ALL IS REFUSED. There is no such property in PowerBuilder's
+        /// vocabulary for this carrier: every describe and modify target is either
+        /// <c>DataWindow.&lt;...&gt;</c> or <c>&lt;object&gt;.&lt;attribute&gt;</c>. Refusing it here is
+        /// what keeps a malformed name from being installed and then silently answering a later describe.
+        /// </para>
+        /// <para>
+        /// THE ORDINAL FORM IS RANGE-CHECKED against the column count, so <c>#0</c> and an ordinal past
+        /// the last column are refused exactly as an unknown name is. R9: the ordinal is ONE-BASED in the
+        /// describe vocabulary, so the valid range is 1 through the column count inclusive and is never
+        /// rebased.
+        /// </para>
+        /// </remarks>
+        private bool IsInstallableProperty(string property, out string unresolvedColumn)
+        {
+            unresolvedColumn = string.Empty;
+
+            if (property.StartsWith(DataWindowPropertyPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            int lastDot = property.LastIndexOf('.');
+
+            if (lastDot <= 0)
+            {
+                unresolvedColumn = property;
+
+                return false;
+            }
+
+            string stem = property[..lastDot].Trim();
+
+            if (ResolvesToColumn(stem))
+            {
+                return true;
+            }
+
+            unresolvedColumn = stem;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Resolves a column stem against the installed column model, by name or by ordinal.
+        /// </summary>
+        /// <param name="stem">The stem, either a column name or <c>#&lt;ordinal&gt;</c>.</param>
+        /// <returns><see langword="true"/> when the stem names a column of this carrier.</returns>
+        private bool ResolvesToColumn(string stem)
+        {
+            if (stem.Length == 0)
+            {
+                return false;
+            }
+
+            string[] columns = ColumnModel();
+
+            if (stem.StartsWith(UpdateWhereBuilder.ColumnOrdinalPrefix, StringComparison.Ordinal))
+            {
+                return int.TryParse(
+                        stem[UpdateWhereBuilder.ColumnOrdinalPrefix.Length..],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out int ordinal)
+                    && ordinal >= 1
+                    && ordinal <= columns.Length;
+            }
+
+            foreach (string column in columns)
+            {
+                if (string.Equals(column, stem, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static string TrimSuffix(string property, string suffix) =>
             property.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
                 ? property[..^suffix.Length].Trim()
@@ -1939,6 +2118,37 @@ namespace PowerFramework.Persistence.Tasks
             IReadOnlyList<UpdateColumn> KeyColumns,
             IReadOnlyList<UpdateColumn> WhereClauseColumns)
         {
+            /// <summary>
+            /// Every column's NAME positioned by its one-based number, for
+            /// <c>DataWindowBufferStore.SetColumnNames</c>.
+            /// </summary>
+            /// <remarks>
+            /// POSITIONED BY <see cref="UpdateColumn.Number"/> RATHER THAN BY ENUMERATION ORDER, even though
+            /// <see cref="AllColumns"/> is documented as being in one-based order. The two agree today; if a
+            /// gap ever appeared, indexing by position would shift every name after it by one and hand
+            /// consumers a payload in which the name and the ordinal on the same column disagreed - which is
+            /// worse than an absent name, and is precisely the one-based translation hazard this port keeps
+            /// naming. A number outside the model is skipped rather than trusted.
+            /// </remarks>
+            internal IReadOnlyList<string> ColumnNames
+            {
+                get
+                {
+                    string[] names = new string[AllColumns.Count];
+                    Array.Fill(names, string.Empty);
+
+                    foreach (UpdateColumn column in AllColumns)
+                    {
+                        if (column.Number >= 1 && column.Number <= names.Length)
+                        {
+                            names[column.Number - 1] = column.Name;
+                        }
+                    }
+
+                    return names;
+                }
+            }
+
             /// <summary>
             /// The columns the conflict payload reports: every KEY column and every column marked for the
             /// concurrency predicate, in one-based model order, with no duplicate.

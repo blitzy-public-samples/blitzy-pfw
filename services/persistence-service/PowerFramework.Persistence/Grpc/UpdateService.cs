@@ -131,6 +131,7 @@ using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Runtime;
 
@@ -651,6 +652,42 @@ internal interface IUpdateTaskSurface : IDisposable
     /// place for it to disagree.
     /// </remarks>
     long SetUpdateData(CarrierState? updateData, long updateRows);
+
+    /// <summary>
+    /// Whether the task currently holds one of the two mutually exclusive update sources - a data object
+    /// name or a SQL syntax string.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> when either source is installed; <see langword="false"/> when the task holds
+    /// neither and would therefore take the oracle's <c>E_INVALID_DATAOBJECT</c> arm [<c>:L326-L330</c>] if
+    /// it ran.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// AN OBSERVATION, NOT A SETTER, AND IT EXISTS FOR THE PREPARE BOUNDARY. The two sources are set only
+    /// through <see cref="SetDataObject"/> and <see cref="SetSqlSyntax"/>, each of which clears the other
+    /// [<c>:L260</c>, <c>:L271</c>], so "holds neither" is a state the task can legitimately be in and the
+    /// only way to leave it is another prepare. Exposing it lets that boundary answer the code the run
+    /// WOULD answer instead of a success the caller cannot act on.
+    /// </para>
+    /// <para>
+    /// NO BUSY GUARD, because it reads state rather than changing it - the same shape as the oracle's own
+    /// caller-side accessors, none of which guards a read.
+    /// </para>
+    /// </remarks>
+    bool HasUpdateSource { get; }
+
+    /// <summary>
+    /// The data-object name the task currently holds, or the empty string when it holds none.
+    /// </summary>
+    /// <remarks>
+    /// AN OBSERVATION FOR THE PREPARE BOUNDARY'S DESCRIPTOR CHECK. A descriptor sent while the multi-table
+    /// switch is off is never applied [<c>:L365</c> against <c>:L371</c>], so the definition this name
+    /// resolves to is what actually governs the update - and comparing the two is the only way the boundary
+    /// can tell an agreeing descriptor from one that names a different table entirely. Empty is ordinary: a
+    /// task may hold a SQL syntax instead, or nothing yet.
+    /// </remarks>
+    string DataObject { get; }
 
     /// <summary>
     /// Sets whether the epilogue commits on success - <c>of_setautocommit</c> [<c>:L49</c>,
@@ -1370,8 +1407,31 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         "Another prepare, update or reset is in flight for this update task, so the request was refused. "
         + "Retry once it has completed.";
 
+    /// <summary>
+    /// The diagnostic for a request whose descriptor names a different update table from the one the data
+    /// object's own definition declares, while multi-table update is off.
+    /// </summary>
+    /// <remarks>
+    /// IT NAMES THE REMEDY AND QUOTES NOTHING. The refusal exists because that combination can never take
+    /// effect and would otherwise be reported as a success while the update reached a different table
+    /// entirely; the message therefore has to tell a caller which of the two things it meant, and it does
+    /// so without echoing a table name, a column name or a value (constraint C-F) - the caller knows both
+    /// names already, and a log record must not carry either.
+    /// </remarks>
+    internal const string DescriptorsWithoutMultiTableDiagnostic =
+        "A descriptor in this request names a different update table from the one the data object's own "
+        + "definition declares, while multi_table_update is false. In that mode the descriptor array is "
+        + "never applied - the data object's definition governs the update table, the key columns and the "
+        + "identity column - so the write would have reached the table the descriptor did NOT name and been "
+        + "reported as a success. Set multi_table_update to true to have the descriptors applied, send a "
+        + "descriptor that agrees with the definition, or send no descriptors at all.";
+
     private readonly IUpdateTaskFactory _factory;
     private readonly UpdateTaskRegistry _tasks;
+
+    /// <summary>The definition registry a descriptor's update table is compared against.</summary>
+    private readonly DataObjectDefinitionCatalogue _definitions;
+
     private readonly ILogger<UpdateService>? _logger;
 
     /// <summary>
@@ -1398,10 +1458,17 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     public UpdateService(
         IUpdateTaskFactory factory,
         UpdateTaskRegistry tasks,
+        DataObjectDefinitionCatalogue definitions,
         ILogger<UpdateService>? logger = null)
     {
         _factory = factory ?? throw new ArgumentNullException(nameof(factory));
         _tasks = tasks ?? throw new ArgumentNullException(nameof(tasks));
+
+        // REQUIRED RATHER THAN OPTIONAL, because it is what the prepare boundary compares a descriptor's
+        // update table against. An optional dependency here would let the misdirection check silently
+        // disappear on a container that did not happen to register the catalogue - a safety check that
+        // no-ops on misconfiguration is worse than one that fails to start.
+        _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
         _logger = logger;
     }
 
@@ -1485,6 +1552,188 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         if (entry.EndOperation())
         {
             entry.DisposeTask();
+        }
+    }
+
+    /// <summary>
+    /// Decides whether a descriptor sent with the multi-table switch off - and therefore never applied -
+    /// contradicts the definition that WILL govern the update, and composes the refusal when it does.
+    /// </summary>
+    /// <param name="request">The prepare request.</param>
+    /// <param name="entry">The task the request addresses.</param>
+    /// <param name="refusal">
+    /// Receives the status to answer. Undefined when this method answers <see langword="false"/>.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the request must be refused; <see langword="false"/> when every
+    /// descriptor agrees with the definition, or when no comparison is possible.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// TWO CONTRADICTIONS ARE REFUSED, EACH WITH THE CODE ITS OWN PATH ALREADY USES:
+    /// </para>
+    /// <para>
+    /// (1) A DIFFERENT UPDATE TABLE - <c>E_INVALID_ARGUMENT</c>. This is the misdirection: the write lands
+    /// in the table the definition declares while the caller named another, and the response says success.
+    /// The comparison is case-insensitive, because a table name is an identifier and SQLite compares
+    /// identifiers without regard to case - treating <c>company</c> and <c>COMPANY</c> as different tables
+    /// would refuse a descriptor that names the very table the definition declares. Ordinal-ignore-case
+    /// rather than culture-aware, because an identifier's identity must not depend on the host's culture.
+    /// </para>
+    /// <para>
+    /// (2) A COLUMN NAME THE DEFINITION DOES NOT DECLARE - <c>E_INTERNAL_ERROR</c> with 无效的列名: and the
+    /// name, which is the oracle's own arm and wording for a column name that will not resolve
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L118-L122</c>]. It is the SAME answer this descriptor would get
+    /// with the switch ON, arriving one call earlier - so the two paths agree rather than one accepting what
+    /// the other refuses. Only EXISTENCE is checked, never the update, key or identity FLAGS: a caller may
+    /// legitimately declare a subset, and with the switch off the definition's own flags govern anyway.
+    /// </para>
+    /// <para>
+    /// THE GOVERNING DATA OBJECT IS THE REQUEST'S OWN WHEN IT NAMES ONE, and otherwise the one the task
+    /// already holds - because the two source setters are presence-gated, so an unstated source survives
+    /// from an earlier prepare and is what the update will actually run against.
+    /// </para>
+    /// <para>
+    /// A REQUEST NAMING A SQL SYNTAX IS NEVER COMPARED. The syntax setter clears the data object
+    /// [<c>:L271</c>], so whatever the task held is about to stop governing, and both the update table and
+    /// the column model then come from the syntax - which this boundary does not parse. Comparing against a
+    /// name that is about to be cleared would refuse a request for a reason that no longer applies to it.
+    /// </para>
+    /// <para>
+    /// AN UNRESOLVABLE DEFINITION IS NEVER COMPARED EITHER, and a retrieve-only one is exempt from the TABLE
+    /// test specifically. That is a deliberate limit rather than an oversight: neither can misdirect a write,
+    /// because an update against either fails for want of an update table before any statement reaches the
+    /// storage engine. Refusing them here would narrow the contract without protecting anything.
+    /// </para>
+    /// </remarks>
+    private bool TryRefuseInertDescriptor(
+        PrepareUpdateRequest request,
+        UpdateTaskEntry entry,
+        out OperationStatus refusal)
+    {
+        refusal = null!;
+
+        if (request.HasSqlSyntax)
+        {
+            return false;
+        }
+
+        string dataObject = request.HasDataObject ? request.DataObject : entry.Task.DataObject;
+
+        if (dataObject.Length == 0
+            || !_definitions.TryResolve(dataObject, out DataObjectDefinitionEntry? definition)
+            || !_definitions.TryResolveUpdateSettings(dataObject, out DataObjectUpdateSettings? settings))
+        {
+            return false;
+        }
+
+        foreach (TableUpdateContract table in request.Tables)
+        {
+            if (settings.Table.Length != 0
+                && !string.Equals(table.Name, settings.Table, StringComparison.OrdinalIgnoreCase))
+            {
+                // THE LOG NAMES NEITHER TABLE (constraint C-F). A caller knows both names already, so the
+                // record carries only the fact and the count.
+                _logger?.LogWarning(
+                    "PrepareUpdate refused {TableCount} update-table descriptor(s) on task {TaskId}: "
+                    + "multi-table update is off, so the descriptor array is never applied and the data "
+                    + "object's own definition governs - and a descriptor names a different update table "
+                    + "from the one that definition declares. No table name, column name or value is "
+                    + "recorded.",
+                    request.Tables.Count,
+                    entry.TaskId);
+
+                refusal = UpdateWireCodes.Status(
+                    RetCode.E_INVALID_ARGUMENT,
+                    DescriptorsWithoutMultiTableDiagnostic);
+
+                return true;
+            }
+
+            if (!TryFindUndeclaredColumn(table, definition, out string undeclared))
+            {
+                continue;
+            }
+
+            // THE COLUMN NAME IS NOT LOGGED EITHER, for the same reason the table name is not: the caller
+            // sent it and gets it back in the response, and a log record is read by someone who did not.
+            _logger?.LogWarning(
+                "PrepareUpdate refused an update-table descriptor on task {TaskId}: it names a column the "
+                + "governing data object's definition does not declare. No table name, column name or "
+                + "value is recorded.",
+                entry.TaskId);
+
+            refusal = UpdateWireCodes.Status(
+                RetCode.E_INTERNAL_ERROR,
+                UpdateWhereBuilder.InvalidColumnNameMessage + undeclared);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Finds the first column name a descriptor declares that its definition does not.
+    /// </summary>
+    /// <param name="table">The descriptor.</param>
+    /// <param name="definition">The governing definition and its declared columns.</param>
+    /// <param name="undeclared">Receives the offending name, or the empty string when every name resolves.</param>
+    /// <returns><see langword="true"/> when a name does not resolve.</returns>
+    /// <remarks>
+    /// THE ORACLE'S OWN VISIT ORDER - updatable columns, then key columns, then the identity column
+    /// [<c>:L111-L129</c>] - so the name reported is the one the oracle would have failed on first. An EMPTY
+    /// identity column is legal and is not a name at all [<c>:L127-L129</c>], so it is skipped rather than
+    /// refused; an empty entry in either ARRAY is refused, because the oracle's script grammar cannot carry
+    /// one and its own guard already rejects it.
+    /// </remarks>
+    private static bool TryFindUndeclaredColumn(
+        TableUpdateContract table,
+        DataObjectDefinitionEntry definition,
+        out string undeclared)
+    {
+        foreach (string column in table.Updatablecolumns)
+        {
+            if (!Declares(definition, column))
+            {
+                undeclared = column;
+
+                return true;
+            }
+        }
+
+        foreach (string column in table.Keycolumns)
+        {
+            if (!Declares(definition, column))
+            {
+                undeclared = column;
+
+                return true;
+            }
+        }
+
+        if (table.Identitycolumn.Length != 0 && !Declares(definition, table.Identitycolumn))
+        {
+            undeclared = table.Identitycolumn;
+
+            return true;
+        }
+
+        undeclared = string.Empty;
+
+        return false;
+
+        static bool Declares(DataObjectDefinitionEntry definition, string column)
+        {
+            foreach (DeclaredDataObjectColumn declared in definition.Columns)
+            {
+                if (string.Equals(declared.Name, column, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 
@@ -2025,6 +2274,107 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                     Status = UpdateWireCodes.Status(
                         RetCode.E_INVALID_ARGUMENT,
                         UpdateWhereBuilder.NoUpdatableTableMessage),
+                });
+            }
+
+            // ==========================================================================================
+            //  🔴 THE MIRROR OF THE ARM ABOVE, AND THE ONE THAT CLOSES A SILENT-MISDIRECTION HAZARD.
+            //
+            //  WITH THE SWITCH OFF THE DESCRIPTOR ARRAY IS NEVER APPLIED. That is the oracle's own shape,
+            //  not a shortfall: _of_UpdatePrepare has exactly ONE caller, at
+            //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L365], inside the
+            //  multi-table branch, and the single-table branch calls the update directly [:L371] and lets
+            //  the carrier's own compiled definition govern the update table, the key columns and the
+            //  identity column. The behaviour is preserved and is documented on the contract field
+            //  [persistence.v1.proto, multi_table_update].
+            //
+            //  WHAT DOES NOT SURVIVE THE MOVE TO A NETWORK BOUNDARY IS ACCEPTING SUCH A REQUEST SILENTLY.
+            //  In process the caller could see the datastore it had loaded and therefore knew which table
+            //  the update would reach. A remote caller cannot: it sends a descriptor naming table X,
+            //  receives RetCode.OK, and the subsequent Update writes to whatever table the data object
+            //  declares - reporting success. That is a write the caller believes went somewhere else, with
+            //  nothing in the response to reveal it. And it is unconditionally dead weight rather than a
+            //  timing question: THIS RPC IS THE ONLY PLACE THE SWITCH CAN BE SET, and it REPLACES the array
+            //  wholesale [:L67], so a descriptor sent with the switch off can never be applied by any later
+            //  call either.
+            //
+            //  SO THE MISDIRECTION IS REFUSED AND NOTHING ELSE IS. The refusal is scoped to the descriptor
+            //  that NAMES A DIFFERENT TABLE from the one the request's own data object declares, because
+            //  that - and only that - is the case where the write lands somewhere the caller did not ask
+            //  for. A descriptor that AGREES with the definition is admitted exactly as before: it is still
+            //  inert, but inert and agreeing is not a misdirection, and it is the shape a caller that
+            //  derives its descriptor FROM the definition necessarily sends. That shape is not
+            //  hypothetical - it is what this system's own DataServices consumer sends on every update, and
+            //  refusing it would break the only cross-service update path in the estate while protecting
+            //  nobody.
+            //
+            //  WHAT IS DELIBERATELY NOT REFUSED, so the narrowing stays the minimum that closes the hazard:
+            //    * a descriptor whose COLUMN sets differ from the definition's. The write still lands in the
+            //      table the caller named; only which columns are updatable, keyed or identity differs, and
+            //      the definition's own answer there is the legacy's. On the multi-table path those names
+            //      ARE resolved and an unknown one is refused with 无效的列名: by the preparer itself.
+            //    * a data object that resolves to no definition, or to a retrieve-only one. Neither can
+            //      misdirect a write: the update fails on its own for want of an update table.
+            //    * a request whose source is a SQL SYNTAX rather than a data object. Its update table comes
+            //      from the syntax, which this boundary does not parse, so there is nothing to compare
+            //      against and a refusal would be a guess.
+            //
+            //  E_INVALID_ARGUMENT is the code the sibling arm above already uses for a descriptor array that
+            //  cannot be honoured, and the diagnostic quotes NEITHER table name (constraint C-F): a caller
+            //  knows both already, and a log record must not carry either.
+            // ==========================================================================================
+            if (!request.MultiTableUpdate
+                && request.Tables.Count > 0
+                && TryRefuseInertDescriptor(request, entry, out OperationStatus descriptorRefusal))
+            {
+                return Task.FromResult(new PrepareUpdateResponse { Status = descriptorRefusal });
+            }
+
+            // ==========================================================================================
+            //  🔴 A PREPARE THAT WOULD LEAVE THE TASK WITH NO SOURCE IS A SUCCESS THE CALLER CANNOT ACT ON.
+            //
+            //  The two sources are mutually exclusive and each setter clears the other [:L260, :L271], and
+            //  THIS RPC IS THE ONLY PLACE EITHER CAN BE SET - Update carries the payload and nothing else,
+            //  and Reset only clears. So a task holding neither has exactly one reachable future: its Update
+            //  takes the oracle's own no-source arm and answers E_INVALID_DATAOBJECT with 无效的数据源对象!
+            //  [:L326-L330]. Answering OK here and that code one call later tells the caller its
+            //  configuration was accepted when nothing about it can ever succeed - which is precisely the
+            //  "success it cannot act on" this arm removes.
+            //
+            //  THE CODE THE RUN WOULD ANSWER IS ANSWERED HERE, VERBATIM - the same constant and the same
+            //  diagnostic, consumed from the task type that owns them rather than retyped, because a
+            //  transposed character in a CJK literal is invisible in review and fails every parity
+            //  comparison. This is the legacy's own habit of guarding one condition on both sides, which the
+            //  two arms above already follow, and the run-time arm is untouched: a caller that skips this
+            //  call entirely still meets it there.
+            //
+            //  AHEAD OF THE CLEAR, SO THE REFUSAL CHANGES NOTHING - the same atomicity the two arms above
+            //  have. A refusal that had already replaced the descriptor array would leave the task in a state
+            //  the caller did not ask for and cannot see.
+            //
+            //  WHAT IS NOT REFUSED, AND WHY NO WORKING SEQUENCE CAN BREAK. The test is on the state this
+            //  request would LEAVE, not on the request's fields alone: a prepare that names no source is
+            //  admitted whenever the task already holds one, because both setters are presence-gated and an
+            //  unstated source survives. That covers the descriptors-only prepare a multi-table caller sends
+            //  after naming its source - the only incremental order that can work anyway, since this call
+            //  REPLACES the descriptor array wholesale [:L67] and so a source-only prepare sent afterwards
+            //  would discard the descriptors.
+            // ==========================================================================================
+            if (!request.HasDataObject && !request.HasSqlSyntax && !entry.Task.HasUpdateSource)
+            {
+                _logger?.LogWarning(
+                    "PrepareUpdate refused on task {TaskId}: the request names neither a data object nor a "
+                    + "SQL syntax and the task holds neither, so no update could ever run against it. "
+                    + "Nothing was cleared and no descriptor was recorded.",
+                    entry.TaskId);
+
+                return Task.FromResult(new PrepareUpdateResponse
+                {
+                    Status = UpdateWireCodes.Status(
+                        RetCode.E_INVALID_DATAOBJECT,
+                        // Qualified rather than imported: this file deliberately holds no using for the
+                        // task namespace, so that nothing in Grpc/ reaches a worker type by accident.
+                        Tasks.SqlUpdateTask.InvalidDataObjectMessage),
                 });
             }
 

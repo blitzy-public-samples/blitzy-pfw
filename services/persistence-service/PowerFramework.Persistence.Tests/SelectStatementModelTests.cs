@@ -1297,12 +1297,13 @@ public sealed class SelectStatementModelTests
     /// emitted statement reflects the change byte for byte.
     /// </summary>
     /// <remarks>
-    /// TIER 2 for the SEPARATOR. The single space is the reasonable reading of an unobservable native
-    /// detail - it is the minimum that keeps two SQL fragments lexically apart. The ORDER of the join
-    /// is the part that must not be got backwards: append puts the new fragment after the existing
-    /// text and prepend puts it before, and both readings produce valid SQL from the fragments the
-    /// legacy passes, so only an explicit assertion distinguishes them. The append case is the shape
-    /// the production code actually builds at <c>n_cst_thread_task_sqlquery.sru:L341</c>.
+    /// THE SEPARATOR IS PER CLAUSE KIND, and this case owns the WHERE kind, whose fragments join with a
+    /// single space - the minimum that keeps two SQL fragments lexically apart. The comma-list kinds are
+    /// owned by <see cref="AnAppendJoinsAListClauseWithACommaAndAFragmentClauseWithASpace"/>, which
+    /// carries the oracle evidence for the distinction. The ORDER of the join is the part that must not be
+    /// got backwards: append puts the new fragment after the existing text and prepend puts it before, and
+    /// both readings produce valid SQL from the fragments the legacy passes, so only an explicit assertion
+    /// distinguishes them.
     /// </remarks>
     /// <param name="style">The modify style.</param>
     /// <param name="fragment">The clause fragment.</param>
@@ -1318,6 +1319,70 @@ public sealed class SelectStatementModelTests
 
         Assert.True(model.ModifyWhere(style, fragment));
         AssertByteExact(expected, model.GetSql(), $"Style {style} must transform the clause exactly.");
+    }
+
+    /// <summary>
+    /// An append or a prepend joins a COMMA-LIST clause with a comma and a FRAGMENT clause with a space.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>MEASURED FROM TWO CALLS THIRTEEN LINES APART IN ONE FUNCTION, WHICH IS WHAT SETTLES IT.</b>
+    /// <c>n_cst_thread_task_sqlquery.sru:L341</c> appends the unique-column list to the ORDER BY, and the
+    /// loop that builds that string at <c>:L335-L338</c> joins its own entries with a bare comma and emits
+    /// NO LEADING comma - so a space-joining native would produce <c>ORDER BY AGE ID</c>, which no dialect
+    /// accepts, and the two paging arms that depend on it could never have worked. <c>:L350</c> appends
+    /// <c>INNER JOIN (...)</c> to the TABLE clause, where a comma would produce
+    /// <c>FROM COMPANY , INNER JOIN (...)</c> - equally invalid. Same entry point, same style constant,
+    /// so the native is clause-kind aware.
+    /// </para>
+    /// <para>
+    /// THE COMMA CARRIES NO TRAILING SPACE, because the legacy's own list is built with a bare comma: a
+    /// comma-plus-space would make the separator between the first two entries of a composed list differ
+    /// from the separator between all the others, and parity here is byte-exact.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnAppendJoinsAListClauseWithACommaAndAFragmentClauseWithASpace()
+    {
+        // THE THREE COMMA-LIST KINDS: the select list, GROUP BY and ORDER BY.
+        SelectStatementModel order = Parsed("SELECT a FROM t ORDER BY AGE");
+        Assert.True(order.ModifyOrder(Enums.SQL_MS_APPEND, "ID"));
+        Assert.Equal("AGE,ID", order.GetOrder(), StringComparer.Ordinal);
+        AssertByteExact("SELECT a FROM t ORDER BY AGE,ID", order.GetSql(), "The ORDER BY list stays a list.");
+
+        SelectStatementModel group = Parsed("SELECT a FROM t GROUP BY a");
+        Assert.True(group.ModifyGroup(Enums.SQL_MS_APPEND, "b"));
+        Assert.Equal("a,b", group.GetGroup(), StringComparer.Ordinal);
+
+        SelectStatementModel columns = Parsed("SELECT a FROM t");
+        Assert.True(columns.ModifyColumn(Enums.SQL_MS_APPEND, "b"));
+        Assert.Equal("a,b", columns.GetColumn(), StringComparer.Ordinal);
+
+        // THE THREE FRAGMENT KINDS: the FROM body, WHERE and HAVING.
+        SelectStatementModel table = Parsed("SELECT a FROM COMPANY");
+        Assert.True(table.ModifyTable(Enums.SQL_MS_APPEND, "INNER JOIN (SELECT id FROM COMPANY) x ON x.id = id"));
+        Assert.Equal(
+            "COMPANY INNER JOIN (SELECT id FROM COMPANY) x ON x.id = id",
+            table.GetTable(),
+            StringComparer.Ordinal);
+
+        SelectStatementModel where = Parsed("SELECT a FROM t WHERE x=1");
+        Assert.True(where.ModifyWhere(Enums.SQL_MS_APPEND, "AND y=2"));
+        Assert.Equal("x=1 AND y=2", where.GetWhere(), StringComparer.Ordinal);
+
+        SelectStatementModel having = Parsed("SELECT a FROM t GROUP BY a HAVING COUNT(*)>1");
+        Assert.True(having.ModifyHaving(Enums.SQL_MS_APPEND, "AND SUM(b)>2"));
+        Assert.Equal("COUNT(*)>1 AND SUM(b)>2", having.GetHaving(), StringComparer.Ordinal);
+
+        // PREPEND USES THE SAME CONNECTIVE, on the same side of the existing text as before.
+        SelectStatementModel prepended = Parsed("SELECT a FROM t ORDER BY AGE");
+        Assert.True(prepended.ModifyOrder(Enums.SQL_MS_PREPEND, "ID"));
+        Assert.Equal("ID,AGE", prepended.GetOrder(), StringComparer.Ordinal);
+
+        // AN APPEND ONTO AN ABSENT CLAUSE STILL CARRIES NO SEPARATOR AT ALL.
+        SelectStatementModel absent = Parsed("SELECT a FROM t");
+        Assert.True(absent.ModifyOrder(Enums.SQL_MS_APPEND, "ID"));
+        Assert.Equal("ID", absent.GetOrder(), StringComparer.Ordinal);
     }
 
     /// <summary>

@@ -362,10 +362,29 @@ public sealed class GatewayOptions : IValidatableObject
 
     /// <summary>
     /// The password half of the HTTP Basic credential Gateway presents to Security's issuance
-    /// operation. Empty in source, empty in every settings file, and supplied only through
-    /// <see cref="SecurityClientSecretConfigurationKey"/>.
+    /// operation. Empty in source, empty in every settings file, and supplied through
+    /// <see cref="SecurityClientSecretConfigurationKey"/>, which takes precedence over any value that
+    /// reached this property by binding.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>PRECEDENCE, STATED BECAUSE THIS PROPERTY HAS TWO POSSIBLE INGRESSES AND ONE OF THEM USED TO BE
+    /// SILENTLY DISCARDED.</b> The flat key above is the DOCUMENTED route and wins whenever it is set.
+    /// This property is nonetheless a bindable leaf of the <c>Gateway</c> section - the environment
+    /// provider folds <c>Gateway__SecurityClientSecret</c> onto it - and the composition root's
+    /// post-configure step once assigned the flat key UNCONDITIONALLY, so an unset flat key overwrote a
+    /// bound value with empty. A deployment supplying the credential that way was then refused at startup
+    /// for presenting nothing, with a message naming a key it had deliberately not used. The step is now
+    /// guarded on presence, matching Security's signing-key step and DataServices'
+    /// <c>ApplyIssuanceSecret</c>: an absent flat key assigns nothing, so a value from another legitimate
+    /// ingress survives.
+    /// </para>
+    /// <para>
+    /// NONE OF THAT WEAKENS CONSTRAINT C-F. "Empty in every settings file" remains a rule about COMMITTED
+    /// FILES and is enforced independently by the estate-wide configuration coherence test, which forbids
+    /// a credential-named leaf in any of them. Binding from an environment variable is not a committed
+    /// file.
+    /// </para>
     /// <para>
     /// THE USER-ID HALF IS DELIBERATELY NOT CONFIGURABLE. It is the subject the outbound request
     /// already claims - <c>powerframework-gateway</c>, declared once in
@@ -649,6 +668,23 @@ public sealed class GatewayOptions : IValidatableObject
             foreach (ValidationResult result in outbound.Validate(
                 $"{SectionName}:{nameof(Outbound)}",
                 nameof(Outbound)))
+            {
+                yield return result;
+            }
+        }
+
+        // THE COLLECTION WINDOW IS CHECKED HERE FOR THE SAME REASON THE OUTBOUND BOUNDS ARE: its
+        // correctness is a RELATIONSHIP to another duration, which no attribute can express. A window at
+        // or beyond the per-attempt outbound timeout cannot fire first, so the pipeline's timeout wins and
+        // an idle subscription is once again answered as a server fault - the exact defect the window
+        // exists to remove, silently reintroduced by a plausible-looking setting.
+        RestProjectionOptions? restProjection = RestProjection;
+
+        if (restProjection is not null)
+        {
+            foreach (ValidationResult result in restProjection.Validate(
+                $"{SectionName}:{nameof(RestProjection)}",
+                nameof(RestProjection)))
             {
                 yield return result;
             }
@@ -1528,4 +1564,88 @@ public sealed class RestProjectionOptions
     /// </remarks>
     [Range(1, int.MaxValue)]
     public int MaxStreamedElements { get; set; } = 10_000;
+
+    /// <summary>
+    /// The shipped collection window for a projected stream that never ends on its own.
+    /// </summary>
+    /// <remarks>
+    /// COMFORTABLY INSIDE THE PER-ATTEMPT OUTBOUND BUDGET, which is the whole point of the value. The
+    /// resilience package's per-attempt timeout is ten seconds and is what fired before this window
+    /// existed, so anything close to it would reproduce the defect; two seconds answers an idle stream
+    /// promptly while leaving a wide margin.
+    /// </remarks>
+    public static readonly TimeSpan DefaultStreamCollectionWindow = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The exclusive upper bound on <see cref="StreamCollectionWindow"/>.
+    /// </summary>
+    /// <remarks>
+    /// THE RESILIENCE PACKAGE'S OWN PER-ATTEMPT TIMEOUT, and the reason the bound exists rather than being
+    /// left to judgement: a window at or beyond it cannot fire first, so the outbound pipeline's timeout
+    /// wins and the projection is back to answering a server fault for an idle stream. Refusing that value
+    /// at startup is the fail-fast posture this service applies to every structural fault.
+    /// </remarks>
+    internal static readonly TimeSpan MaximumStreamCollectionWindow =
+        GatewayOptions.OutboundCallOptions.MinimumRequestTimeout;
+
+    /// <summary>
+    /// How long the projection collects from a stream that never completes on its own, before answering
+    /// with what it has. Defaults to <see cref="DefaultStreamCollectionWindow"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS APPLIES TO ONE OPERATION AND NOT TO STREAMS IN GENERAL.</b> The expression event stream is a
+    /// SUBSCRIPTION: the upstream ends it only when the client goes away, so a request/response projection
+    /// of it has to decide for itself when the collection is complete. Every other projected stream
+    /// terminates itself - a retrieval ends with its final-marked chunk - and applying a window to one of
+    /// those would truncate a legitimate result, so the window is opt-in per operation rather than a
+    /// property of streaming.
+    /// </para>
+    /// <para>
+    /// A WINDOW THAT EXPIRES IS A COMPLETE ANSWER RATHER THAN A TRUNCATION. The caller asked for the
+    /// records available now, so the collected sequence - empty included - is exactly what the operation
+    /// means, and the response is a well-formed 200. That is the opposite of exceeding
+    /// <see cref="MaxStreamedElements"/>, which abandons the document precisely so the caller can tell it
+    /// did not receive everything.
+    /// </para>
+    /// <para>
+    /// It is a completeness rule and not a performance claim - no performance objective is asserted
+    /// anywhere in this refactor (AAP 0.8.5).
+    /// </para>
+    /// </remarks>
+    public TimeSpan StreamCollectionWindow { get; set; } = DefaultStreamCollectionWindow;
+
+    /// <summary>
+    /// Checks the one setting on this type whose correctness is a relationship rather than a range.
+    /// </summary>
+    /// <param name="configurationKeyPrefix">The configuration path this group binds from.</param>
+    /// <param name="memberName">The member name reported on a failure.</param>
+    /// <returns>The failures, or an empty sequence when the group is coherent.</returns>
+    /// <remarks>
+    /// BOTH BOUNDS ARE NAMED IN THE MESSAGE, and the key is named too, because an operator reading a
+    /// refusal to start needs the setting to change rather than a description of a category of fault.
+    /// </remarks>
+    internal IEnumerable<ValidationResult> Validate(string configurationKeyPrefix, string memberName)
+    {
+        if (StreamCollectionWindow <= TimeSpan.Zero)
+        {
+            yield return new ValidationResult(
+                $"'{configurationKeyPrefix}:{nameof(StreamCollectionWindow)}' is "
+                    + $"{StreamCollectionWindow}, which collects nothing at all: a projected subscription "
+                    + "would answer an empty collection for every request, including one with records "
+                    + "waiting. It must be greater than zero.",
+                [memberName]);
+        }
+        else if (StreamCollectionWindow >= MaximumStreamCollectionWindow)
+        {
+            yield return new ValidationResult(
+                $"'{configurationKeyPrefix}:{nameof(StreamCollectionWindow)}' is "
+                    + $"{StreamCollectionWindow}, which is not below the "
+                    + $"{MaximumStreamCollectionWindow} per-attempt outbound timeout. A window that "
+                    + "cannot fire first leaves the outbound pipeline's timeout to end an idle "
+                    + "subscription, which reaches the caller as a server fault rather than as the empty "
+                    + "collection the operation means.",
+                [memberName]);
+        }
+    }
 }

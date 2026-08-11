@@ -666,13 +666,23 @@ public static class TokenEndpoints
     /// deliberately - see the remarks.
     /// </param>
     /// <param name="httpContext">
-    /// The current request context, read for ONE thing: the client certificate the transport
-    /// established the caller's identity with. No header, no claim, no cookie and no other feature of
-    /// it is read.
+    /// The current request context, read for exactly TWO things, one per accepted credential scheme:
+    /// the <c>Authorization</c> header, and the client certificate the transport accepted. No claim, no
+    /// cookie and no other feature of it is read.
     /// </param>
     /// <param name="issuer">
     /// The sole minter. This handler hands it a well-formed request and projects its result; it
     /// constructs no claim and computes no signature.
+    /// </param>
+    /// <param name="trust">
+    /// The decision that establishes whether a presented client certificate is trusted. Consulted
+    /// BEFORE any identity is read from a certificate, and not consulted at all when the caller asserted
+    /// an identity under the shared-secret scheme.
+    /// </param>
+    /// <param name="clients">
+    /// The issuance roster a presented shared secret is authenticated against. Required because the
+    /// published contract declares <c>clientCredential</c> - HTTP Basic - as an accepted scheme, and the
+    /// roster is the only thing that knows a configured secret.
     /// </param>
     /// <param name="loggerFactory">
     /// The logger factory a refusal is recorded through, and the source of this file's own success
@@ -682,8 +692,9 @@ public static class TokenEndpoints
     /// The issued token, or a problem response carrying the legacy return code for the condition.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="httpContext"/>, <paramref name="issuer"/> or <paramref name="loggerFactory"/>
-    /// is <see langword="null"/>, which can only mean the composition root is miswired.
+    /// <paramref name="httpContext"/>, <paramref name="issuer"/>, <paramref name="trust"/>,
+    /// <paramref name="clients"/> or <paramref name="loggerFactory"/> is <see langword="null"/>, which
+    /// can only mean the composition root is miswired.
     /// </exception>
     /// <remarks>
     /// <para>
@@ -730,11 +741,13 @@ public static class TokenEndpoints
         HttpContext httpContext,
         [FromServices] TokenIssuer issuer,
         [FromServices] ClientCertificateTrust trust,
+        [FromServices] IssuanceClientRegistry clients,
         [FromServices] ILoggerFactory loggerFactory)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(issuer);
         ArgumentNullException.ThrowIfNull(trust);
+        ArgumentNullException.ThrowIfNull(clients);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         // ------------------------------------------------------------------------------------------
@@ -781,15 +794,27 @@ public static class TokenEndpoints
         //    established - and since the name IS the caller identity, that is the whole authentication
         //    of this operation. All THREE non-trusted outcomes answer the same sentence for the same
         //    reason the two conditions above do: the response is not a probe.
+        //
+        //    ⚠ BOTH SCHEMES ARE RESOLVED THROUGH ONE METHOD, AND THAT IS THE FIX RATHER THAN A TIDY-UP.
+        //    An earlier revision of this handler read the client certificate INLINE and never called
+        //    the resolver, so the shared-secret half of contract C-01 was unreachable: the published
+        //    document declared a `clientCredential` scheme, this file's own 401 sentence advertised it,
+        //    Gateway's options validator called it "the documented bring-up path", and
+        //    `orchestration/.env.example` made three secrets MANDATORY for it - while every request
+        //    presenting one was refused. Worse, Gateway's and DataServices' readiness checks are
+        //    satisfied by the secret alone, so both reported `credentials: Healthy` and Gateway's
+        //    aggregate opened the whole orchestration's dependency gate onto a stack in which no
+        //    service could obtain a token. Routing the decision through ResolvePresentedIdentity is
+        //    what makes the declared scheme, the advertised scheme and the enforced scheme one thing.
+        //
+        //    NOTHING IS WEAKENED BY ROUTING THROUGH IT. The certificate arm still evaluates trust before
+        //    reading a name, because the resolver now takes the trust decision itself and applies it -
+        //    which additionally makes it impossible for any future caller of the resolver to read an
+        //    identity out of a certificate whose issuer was never established. Every failure under
+        //    either scheme lands on the SAME sentence below, so the two schemes are not distinguishable
+        //    from the outside.
         // ------------------------------------------------------------------------------------------
-        X509Certificate2? presented = httpContext.Connection.ClientCertificate;
-
-        if (trust.Evaluate(presented) != ClientCertificateTrustState.Trusted)
-        {
-            return Unauthenticated(loggerFactory);
-        }
-
-        string? callerIdentity = ResolveCallerIdentity(presented);
+        string? callerIdentity = ResolvePresentedIdentity(httpContext, clients, trust);
 
         if (callerIdentity is null)
         {
@@ -970,12 +995,26 @@ public static class TokenEndpoints
     /// and the client certificate the transport accepted.
     /// </param>
     /// <param name="clients">The issuance roster a presented shared secret is authenticated against.</param>
+    /// <param name="trust">
+    /// The decision maker for a presented client certificate. Consulted BEFORE any certificate identity
+    /// is read, and not consulted at all when the request asserts an identity under the secret scheme,
+    /// because a caller behind a TLS-terminating proxy has no certificate for this process to judge.
+    /// </param>
     /// <returns>
     /// The authenticated caller identity, or <see langword="null"/> when the request presents no usable
-    /// credential under either scheme.
+    /// credential under either scheme - which includes a certificate that is not trusted.
     /// </returns>
-    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
     /// <remarks>
+    /// <para>
+    /// THE TRUST DECISION IS A PARAMETER RATHER THAN THE CALLER'S RESPONSIBILITY, and that is the
+    /// correction. When the operation read the certificate inline and this method was never called, the
+    /// trust gate and the identity projection sat in one place and the secret scheme sat in another that
+    /// nothing reached. Taking the decision maker here means BOTH schemes are resolved by one method,
+    /// the certificate path cannot be reached without the gate, and there is no second arrangement of
+    /// these three steps for a future edit to get wrong. The gate is applied on the certificate branch
+    /// ONLY, which is the branch it governs.
+    /// </para>
     /// <para>
     /// THE SHARED-SECRET SCHEME IS TRIED FIRST, AND THE ORDER IS LOAD BEARING RATHER THAN ARBITRARY. A
     /// caller that took the trouble to send an <c>Authorization</c> header is asserting an identity
@@ -1011,13 +1050,23 @@ public static class TokenEndpoints
     /// compared ordinally against the claimed subject immediately afterwards, and it becomes the token's
     /// subject claim if the two agree.
     /// </para>
+    /// <para>
+    /// THE TRUST DECISION IS A REQUIRED ARGUMENT RATHER THAN THE CALLER'S RESPONSIBILITY, and that is
+    /// deliberate: the certificate's common name IS the caller identity, so a resolver that returned one
+    /// without the issuer having been established would be authentication by assertion. Taking the
+    /// decision here means no caller of this method can skip it, and it is applied ONLY on the
+    /// certificate arm - a caller that asserted a shared secret is answered on that assertion, and its
+    /// request neither requires nor is refused by the state of any certificate on the connection.
+    /// </para>
     /// </remarks>
     internal static string? ResolvePresentedIdentity(
         HttpContext httpContext,
-        IssuanceClientRegistry clients)
+        IssuanceClientRegistry clients,
+        ClientCertificateTrust trust)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(clients);
+        ArgumentNullException.ThrowIfNull(trust);
 
         if (TryReadBasicCredential(httpContext, out string? clientId, out string? secret))
         {
@@ -1026,7 +1075,17 @@ public static class TokenEndpoints
             return clients.Authenticate(clientId, secret)?.Subject;
         }
 
-        return ResolveCallerIdentity(httpContext.Connection.ClientCertificate);
+        X509Certificate2? presented = httpContext.Connection.ClientCertificate;
+
+        // TRUST BEFORE IDENTITY. An untrusted certificate, an absent one and one with no configured
+        // authority all answer "no identity", which is what makes the operation's single 401 sentence
+        // non-probing: none of the three conditions is distinguishable from the outside.
+        if (trust.Evaluate(presented) != ClientCertificateTrustState.Trusted)
+        {
+            return null;
+        }
+
+        return ResolveCallerIdentity(presented);
     }
 
     /// <summary>

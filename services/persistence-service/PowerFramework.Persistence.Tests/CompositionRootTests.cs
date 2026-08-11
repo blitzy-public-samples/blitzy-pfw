@@ -969,11 +969,25 @@ public sealed class CompositionRootTests
     /// A storage directory that cannot be created terminates startup instead of degrading past it.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The directory's parent is a FILE, which cannot be created into by any user, so this proves the
     /// probe without depending on the identity the suite happens to run as. In deployment the same arm
     /// is reached by a mounted volume owned by another user, which the image's non-root user cannot
     /// write - a fault that passes both an existence check and a permission-bit check, which is exactly
     /// why the gate probes with a real write.
+    /// </para>
+    /// <para>
+    /// <b>THE DIAGNOSTIC IS ASSERTED AS WELL AS THE TERMINATION, AND THE ASSERTION CHANGED.</b> This case
+    /// used to require the single sentence "not writable by this process", which the gate emitted for every
+    /// one of the four ways this can fail - including this one, where the problem is not permissions at all
+    /// but a file standing where the parent directory should be. It also required nothing about the
+    /// CONFIGURATION KEY, which the record omitted entirely while quoting the configured PATH, and the
+    /// attached file-system exception republished that path in its own message. Measured on a running host
+    /// the path appeared four times and the key none. The record now names the key, states the established
+    /// failure class, describes the cause by type, and withholds the path - the rule
+    /// <c>Program.cs</c>'s internal-trust anchor and both sibling services already applied to their own
+    /// mounted paths.
+    /// </para>
     /// </remarks>
     [Fact]
     public void AnUnwritableStorageDirectoryTerminatesStartup()
@@ -981,19 +995,82 @@ public sealed class CompositionRootTests
         string blocker = Path.Combine(Path.GetTempPath(), $"pfw-blocker-{Guid.NewGuid():n}");
         File.WriteAllText(blocker, string.Empty);
 
+        string configured = Path.Combine(blocker, "nested");
+
         try
         {
-            using ServiceProvider provider = BuildGateProvider(Path.Combine(blocker, "nested"));
+            using ServiceProvider provider = BuildGateProvider(configured);
 
             InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
                 provider.ValidatePersistenceStructuralPreconditions);
 
-            Assert.Contains("not writable by this process", failure.Message, StringComparison.Ordinal);
+            // The key an operator changes.
+            Assert.Contains(
+                DataDirectoryFault.ConfigurationKey,
+                failure.Message,
+                StringComparison.Ordinal);
+
+            // The established class: the containing directory is a file, so it is not "not writable".
+            Assert.Contains("CONTAINING DIRECTORY", failure.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "cannot write inside it",
+                failure.Message,
+                StringComparison.Ordinal);
+
+            // The mount layout is withheld, asserted as booleans so a failure cannot print it.
+            Assert.False(
+                failure.Message.Contains(configured, StringComparison.Ordinal),
+                "The terminal message reproduces the configured storage path.");
+            Assert.False(
+                failure.Message.Contains(blocker, StringComparison.Ordinal),
+                "The terminal message reproduces the blocking path.");
+
+            // No chained file-system exception, because its own message quotes the path.
+            Assert.Null(failure.InnerException);
         }
         finally
         {
             File.Delete(blocker);
         }
+    }
+
+    /// <summary>
+    /// A storage directory inside the read-only legacy tree is refused BEFORE it is created.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE REFUSAL WAS NEVER IN DOUBT; THE ORDER WAS.</b> The connection factory refuses this path in
+    /// its constructor, but that constructor is resolved by the runtime-graph gate, which runs AFTER the
+    /// storage gate's writability probe - and that probe calls <c>Directory.CreateDirectory</c>. So the
+    /// service used to CREATE a directory inside <c>ws_objects/**</c> and only then refuse to start,
+    /// writing into the behavioural oracle that constraint C-C states is never an edit target: the very
+    /// next characterization capture would read whatever landed there as legacy source.
+    /// </para>
+    /// <para>
+    /// The assertion that matters is therefore the second one. The path used here is a real one inside
+    /// this repository's own legacy tree, resolved from the test assembly's location rather than
+    /// hard-coded, so the case exercises the same segment test a deployment would.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AStorageDirectoryInsideTheReadOnlyLegacyTreeIsRefusedWithoutCreatingIt()
+    {
+        // The repository root, walked up from the test assembly: <repo>/services/persistence-service/
+        // PowerFramework.Persistence.Tests/bin/<config>/<tfm>/
+        string root = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".."));
+
+        string forbidden = Path.Combine(root, "ws_objects", $"pfw-gate-refused-{Guid.NewGuid():n}");
+
+        using ServiceProvider provider = BuildGateProvider(forbidden);
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
+            provider.ValidatePersistenceStructuralPreconditions);
+
+        Assert.Contains("read-only legacy export tree", failure.Message, StringComparison.Ordinal);
+
+        // NOT CREATED. This is the whole case: a refusal that arrives one mkdir too late is not a refusal.
+        Assert.False(Directory.Exists(forbidden));
     }
 
     /// <summary>

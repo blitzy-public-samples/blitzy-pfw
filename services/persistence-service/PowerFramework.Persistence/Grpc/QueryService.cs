@@ -158,6 +158,7 @@ using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql;
+using PowerFramework.Persistence.Sql.Paging;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
 
@@ -2785,6 +2786,14 @@ internal sealed class QueryService : GeneratedQueryServiceBase
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(context);
 
+        if (!TryAcceptUniqueIndexColumns([.. request.Columns], out string? refusal))
+        {
+            return Task.FromResult(new SetPagedUniqueIndexColumnsResponse
+            {
+                Status = QueryWireCodes.Status(RetCode.E_INVALID_ARGUMENT, refusal),
+            });
+        }
+
         return Task.FromResult(new SetPagedUniqueIndexColumnsResponse
         {
             Status = MutateWithStatus(
@@ -2792,6 +2801,93 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                 task => QuerySettingOutcome.From(
                     task.SetPagedUniqueIndexColumns([.. request.Columns]))),
         });
+    }
+
+    /// <summary>
+    /// Whether a unique-index column list can be accepted onto a task at all.
+    /// </summary>
+    /// <param name="columns">The list as it arrived on the wire.</param>
+    /// <param name="refusal">Receives the diagnostic when the list is refused.</param>
+    /// <returns><see langword="true"/> when the list is acceptable.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A DELIBERATE NARROWING OF THE ORACLE, AND ONE THAT CANNOT REFUSE A REQUEST THAT WOULD HAVE
+    /// WORKED.</b> The legacy setter is a single assignment that always answers success
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L406</c>], so a caller learned
+    /// nothing here and discovered its mistake later, as a failed RETRIEVAL, on a statement it never saw.
+    /// Both refusals below name a list that is incapable of producing a statement any engine would run:
+    /// </para>
+    /// <para>
+    /// A BLANK OR MALFORMED IDENTIFIER is already refused at the point of use by
+    /// <see cref="PagedUniqueIndexColumnValidator"/>, which vets every element before the rewriter splices
+    /// it unquoted into the select list, the join predicate and the ORDER BY [<c>:L331, :L333, :L336</c>].
+    /// So this is the SAME lexical rule brought forward to the call that supplied the value, not a second
+    /// and possibly divergent one - the check is literally that type's own
+    /// <see cref="PagedUniqueIndexColumnValidator.IsLexicallyValid"/>.
+    /// </para>
+    /// <para>
+    /// A DUPLICATE is refused because the rewriter appends each element once per occurrence, so a repeated
+    /// identifier appears twice in the inner select list and makes the join predicate that references it
+    /// ambiguous. There is no correct output being rejected: the statement was already unexecutable.
+    /// </para>
+    /// <para>
+    /// <b>MEMBERSHIP IS NOT CHECKED HERE, AND THAT IS NOT AN OMISSION.</b> Whether an identifier names a
+    /// column of the statement can only be decided against the statement, and no statement is in hand at
+    /// setter time - the select text may be set afterwards, or replaced. Membership therefore stays where it
+    /// is enforceable, at the point of use, which is also where the alias resolution lives. This member
+    /// refuses exactly what is refusable without a statement and no more.
+    /// </para>
+    /// <para>
+    /// C-F: the rejected identifier is NOT quoted back. It is caller-supplied text destined for a SQL
+    /// statement, and the diagnostic names the POSITION instead, which is enough to fix the call.
+    /// </para>
+    /// </remarks>
+    private static bool TryAcceptUniqueIndexColumns(
+        IReadOnlyList<string> columns,
+        out string? refusal)
+    {
+        refusal = null;
+
+        // An EMPTY list is the documented CLEAR and is always acceptable.
+        if (columns.Count == 0)
+        {
+            return true;
+        }
+
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = 0; index < columns.Count; index++)
+        {
+            // Widened to string? deliberately: a deserialized wire message can carry a null element
+            // despite the non-nullable type argument - the same allowance the validator makes.
+            string? candidate = columns[index];
+
+            if (!PagedUniqueIndexColumnValidator.IsLexicallyValid(candidate))
+            {
+                refusal =
+                    $"The unique-index column at position {index + 1} of {columns.Count} is not a usable "
+                    + "SQL identifier, so no paged statement could be generated from this list. Each "
+                    + "element must be a plain identifier, optionally qualified with periods, and the "
+                    + "value itself is not quoted back here because it is caller-supplied text bound for a "
+                    + "SQL statement. Supply an empty list to clear the setting.";
+
+                return false;
+            }
+
+            if (!seen.Add(candidate!))
+            {
+                refusal =
+                    $"The unique-index column at position {index + 1} of {columns.Count} repeats an "
+                    + "earlier element of the same list. The paged statement appends each element once per "
+                    + "occurrence, so a repeated identifier would appear twice in the inner select list "
+                    + "and make the join predicate that references it ambiguous. Compared without regard "
+                    + "to case, because SQL identifiers are.";
+
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // ----------------------------------------------------------------------------------------------

@@ -72,6 +72,48 @@ public sealed class ChangesetCodecReceiveTests
         return state;
     }
 
+    /// <summary>
+    /// A not-a-number double is refused at the decode seam, and the two infinities are not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE DISTINCTION IS THE PROVIDER'S AND WAS MEASURED, NOT ASSUMED.</b> Binding
+    /// <c>double.NaN</c> raises <c>InvalidOperationException("Cannot store 'NaN' values.")</c> - a fault
+    /// rather than a database error, so it passes straight through the update walk's provider-error arm and
+    /// escapes the RPC as an unhandled <c>Internal</c> with no diagnostic - while both infinities bind and
+    /// store normally.
+    /// </para>
+    /// <para>
+    /// Refusing it here converts that into each caller's own defined refusal before a single statement is
+    /// generated, which is also what keeps a multi-row payload from half-applying. A CONTRACT NARROWING,
+    /// taken deliberately: the legacy has no NaN at all - PowerScript has no literal for it - so there is no
+    /// legacy behaviour to preserve, and substituting null or zero would write a value the caller never
+    /// sent.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ANotANumberDoubleIsRefusedAndTheInfinitiesAreNot()
+    {
+        Assert.False(CarrierValue.TryFromWire(new AnyValue { DoubleValue = double.NaN }, out object? refused));
+        Assert.Null(refused);
+
+        Assert.True(
+            CarrierValue.TryFromWire(
+                new AnyValue { DoubleValue = double.PositiveInfinity },
+                out object? positive));
+        Assert.Equal(double.PositiveInfinity, Assert.IsType<double>(positive));
+
+        Assert.True(
+            CarrierValue.TryFromWire(
+                new AnyValue { DoubleValue = double.NegativeInfinity },
+                out object? negative));
+        Assert.Equal(double.NegativeInfinity, Assert.IsType<double>(negative));
+
+        // AN ORDINARY DOUBLE IS UNTOUCHED, so the guard cannot have narrowed the arm itself.
+        Assert.True(CarrierValue.TryFromWire(new AnyValue { DoubleValue = 4321.5 }, out object? ordinary));
+        Assert.Equal(4321.5, Assert.IsType<double>(ordinary));
+    }
+
     [Fact]
     public void FirstChunkClearsTheTargetAndLaterChunksAccumulateOntoIt()
     {

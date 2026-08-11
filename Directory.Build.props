@@ -202,6 +202,45 @@
   </PropertyGroup>
 
   <!--
+    REPOSITORY ROOT, FOR TEST PROJECTS TO EMBED
+    The absolute path of the directory holding this file, which is by definition the repository root:
+    this property sheet sits at the root and MSBuildThisFileDirectory is resolved from its own
+    location, so the value cannot drift from the thing it names. It carries a trailing directory
+    separator, as MSBuildThisFileDirectory always does.
+
+    WHY IT EXISTS. Twelve locators across the five test projects find their on disk inputs - the
+    published contract documents, the proto files, the orchestration manifest, the localization
+    resource and the legacy oracle under ws_objects - by walking UP from AppContext.BaseDirectory
+    looking for a marker such as PowerFramework.slnx. That walk holds only while the test output sits
+    inside the tree. Under the SDK artifacts layout, which a run directed at an artifacts path selects
+    with a directory outside the checkout, no ancestor of the output directory holds the marker and
+    every one of those locators throws - so a portable, entirely valid way of running the suite failed
+    for a reason that had nothing to do with the code under test. Publishing the root as build time
+    metadata gives each locator an anchor that does not depend on where the output landed.
+
+    IT IS ONLY A PROPERTY HERE, AND DELIBERATELY SO. Nothing in this file emits it into any assembly.
+    Each TEST project opts in explicitly with a single AssemblyMetadata item in its own project file,
+    which keeps two properties true that matter more than the brevity of doing it once here:
+
+      * NO SHIPPED ASSEMBLY CARRIES A BUILD MACHINE PATH. The four service assemblies are the
+        artifacts inside the container images, and an absolute path from the machine that built them
+        is both meaningless at runtime and a small disclosure. Emitting this from here would put it in
+        all twenty assemblies; opting in per test project puts it in exactly the ten that use it.
+      * THIS FILE KEEPS ITS "NO PROJECT LEVEL ItemGroup" RULE, recorded in the deliberately not set
+        section below. That rule exists so no build input can be introduced globally, and an
+        AssemblyMetadata item - harmless as it is - would be the first exception to it and would make
+        the rule read as advisory. One property here, one item per consuming project, no exception.
+
+    IT IS AN ANCHOR AND NOT A REPLACEMENT. Every locator still verifies its marker and still keeps its
+    walk as the fallback, so a test run in an environment where this metadata is absent behaves exactly
+    as it did before, and a stale value cannot cause a locator to silently read the wrong tree - it
+    fails its marker check and the walk takes over.
+  -->
+  <PropertyGroup>
+    <PowerFrameworkRepositoryRoot>$(MSBuildThisFileDirectory)</PowerFrameworkRepositoryRoot>
+  </PropertyGroup>
+
+  <!--
     DETERMINISM
     Deterministic compilation means identical inputs produce byte identical output, which is what
     makes a locally built assembly comparable with the one CI produces. ContinuousIntegrationBuild
@@ -322,6 +361,12 @@
         file is scoped inside the assertion target below, is evaluated only while that target runs,
         contributes nothing to any compilation, and names no path at all: it filters a list MSBuild
         itself produced.
+
+        This rule is why PowerFrameworkRepositoryRoot above is published as a PROPERTY here and turned
+        into an AssemblyMetadata item by each consuming test project rather than by this file. That
+        item would have been harmless, which is precisely the argument a future exception would make
+        too; keeping the rule absolute costs one line per test project and keeps every service
+        assembly free of a build machine path.
   -->
 
   <!--

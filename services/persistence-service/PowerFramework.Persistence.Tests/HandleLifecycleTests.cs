@@ -39,6 +39,7 @@ using System.Threading.Tasks;
 using Grpc.Core;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Tasks;
@@ -598,7 +599,7 @@ public sealed class HandleCeilingWireTests
     {
         LifecycleHarness harness = new(maxTotal: 1, maxPerPrincipal: 1);
         RecordingUpdateFactory factory = new();
-        UpdateService service = new(factory, harness.Updates);
+        UpdateService service = new(factory, harness.Updates, new DataObjectDefinitionCatalogue());
 
         TransactionSession session = harness.RegisterSession();
 
@@ -749,6 +750,17 @@ internal sealed class StubUpdateSurface(Func<int>? poolUpperBoundAtDispose = nul
 
     /// <inheritdoc/>
     public long Reset() => RetCode.OK;
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// True, because these cases are about a handle's lifetime rather than about a prepare's admission: a
+    /// surface that claimed no source would make every prepare in them refuse for an unrelated reason.
+    /// </remarks>
+    public bool HasUpdateSource => true;
+
+    /// <inheritdoc/>
+    /// <remarks>Empty, because these cases install no data object and assert nothing about one.</remarks>
+    public string DataObject => string.Empty;
 
     /// <inheritdoc/>
     public long ResetUpdatableTables() => RetCode.OK;
