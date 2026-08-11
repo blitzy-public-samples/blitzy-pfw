@@ -127,12 +127,23 @@
 //
 //  ============================ BIDIRECTIONAL KEY PARITY, CHECKED KEY BY KEY ======================
 //  appsettings.json is the declared source of truth for the key shape, and the two files agree
-//  exactly. Nineteen option leaves, nineteen members:
+//  exactly. Eighteen option leaves, eighteen members:
 //
 //    Jwt:Authority                             -> JwtOptions.Authority
+//    Jwt:MetadataAddress                       -> read directly in Program.cs, not bound here
 //    Jwt:Audience                              -> JwtOptions.Audience
-//    Jwt:JwksPath                              -> JwtOptions.JwksPath
 //    Jwt:RequireHttpsMetadata                  -> JwtOptions.RequireHttpsMetadata
+//
+//  THERE IS NO Jwt:JwksPath LEAF, AND ITS ABSENCE IS THE DECISION. An earlier revision declared,
+//  documented and validated one as though this service composed its own key-set address beneath the
+//  authority. It never did: AddPersistenceAuthentication configures the stock bearer handler, and that
+//  handler resolves the key set by fetching the authority's discovery document and following its
+//  published `jwks_uri`. Nothing read the leaf, so an operator who overrode it changed nothing while
+//  believing a key-set address had moved - which is strictly worse than having no setting at all,
+//  because the documented key inventory was then false. ONE authoritative metadata flow is advertised
+//  and it is the live one: standard discovery beneath Jwt:Authority, with Jwt:MetadataAddress as the
+//  single override for a deployment that republishes the discovery document elsewhere. DO NOT
+//  REINSTATE THE LEAF unless a code path is added that genuinely reads it.
 //    Sqlite:DataDirectory                      -> SqliteOptions.DataDirectory
 //    Sqlite:DatabaseFileName                   -> SqliteOptions.DatabaseFileName
 //    Sqlite:Mode                               -> SqliteOptions.Mode
@@ -175,6 +186,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Microsoft.Extensions.Options;
+using PowerFramework.Persistence.Concurrency;
 
 namespace PowerFramework.Persistence.Configuration;
 
@@ -231,6 +243,268 @@ public sealed class PersistenceOptions
     /// Inbound bearer-token VERIFICATION settings. Bound from the top-level <c>Jwt</c> section.
     /// </summary>
     public JwtOptions Jwt { get; set; } = new();
+
+    /// <summary>
+    /// The trust anchor this service verifies Security's certificate against when it fetches the
+    /// published key set. Bound from the top-level <c>InternalTls</c> section.
+    /// </summary>
+    /// <remarks>
+    /// WHY THIS SERVICE NEEDS ONE AT ALL, SINCE IT CALLS NOBODY. It has exactly one outbound channel and
+    /// it is the most consequential one in the system: the stock bearer handler's backchannel to
+    /// Security's discovery document and published key set, which is what decides WHICH KEYS SIGN A
+    /// VALID TOKEN. Security terminates TLS with a certificate issued by the local authority
+    /// <c>docs/ARCHITECTURE.md</c> §9.3.1 generates, and that authority is in no container's
+    /// operating-system trust store - so left on platform default trust the handler cannot fetch the key
+    /// set, and every inbound token is refused for want of a key rather than on its merits. Setting the
+    /// anchor NARROWS trust to it; nothing here relaxes validation.
+    /// </remarks>
+    public InternalTlsTrustOptions InternalTls { get; set; } = new();
+
+    /// <summary>
+    /// The bounds on server-held work handles: how many may exist, per caller and in total, and how long
+    /// an untouched one survives. Bound from the top-level <c>Handles</c> section.
+    /// </summary>
+    /// <remarks>
+    /// WHY THIS SECTION EXISTS AT ALL - IT IS THE COST OF THE BOUNDARY, NOT A FEATURE. In process a task
+    /// and a transaction were held by REFERENCE, so an abandoned one was collected the moment its last
+    /// reference went out of scope and the legacy needed no bound of any kind. Across a boundary a caller
+    /// holds a NAME, and the object behind it is pinned by the server's own table until a release arrives -
+    /// so a caller that crashes, times out or simply forgets leaves a live transaction, an open connection
+    /// and, for a command or update task, a worker task alive for the life of the PROCESS. These four
+    /// values are what make that failure mode bounded instead of terminal, and every one of them is a
+    /// property of the boundary rather than of any legacy behaviour (constraints C-A, C-B).
+    /// </remarks>
+    public HandleLifecycleOptions Handles { get; set; } = new();
+
+    /// <summary>
+    /// The data-object definitions this service can resolve by name. Bound from the top-level
+    /// <c>DataObjects</c> section.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY A DEFINITION IS CONFIGURATION AND NOT CODE. The legacy assigns a name and the PowerBuilder
+    /// runtime loads the compiled DataWindow out of the target's library list -
+    /// <c>ds.DataObject = dataObject</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L558</c>]. There is no managed
+    /// equivalent: the <c>.srd</c> objects live in the read-only legacy tree and no .NET runtime can load
+    /// one. So the resolution becomes an injected collaborator, and the material it resolves FROM is a
+    /// deployment fact - which is exactly what an options section is for.
+    /// </para>
+    /// <para>
+    /// A CALLER MAY ALSO SUPPLY A DEFINITION OUTRIGHT, and the published contract anticipates that:
+    /// <c>QuerySpec</c> carries <c>data_object</c>, <c>sql_syntax</c>, <c>sql</c>, <c>filter</c> and
+    /// <c>sort</c> side by side [<c>persistence.v1.proto</c>]. This section serves the first of those -
+    /// the named case - and nothing here constrains the others.
+    /// </para>
+    /// <para>
+    /// EMPTY IS LEGAL AND MEANS "NO NAMED DEFINITION RESOLVES". A deployment whose callers always supply
+    /// a statement needs no entry, and the runtime then answers the interface's own documented negative
+    /// for every name. It is not a validation failure, because refusing to start over an unused
+    /// capability would be worse than serving the callers that do not need it.
+    /// </para>
+    /// </remarks>
+    public IList<DataObjectOptions> DataObjects { get; } = [];
+}
+
+/// <summary>
+/// One data-object definition: the six describe-able properties of a legacy DataWindow object, plus the
+/// name it is resolved by.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THE MEMBER SET IS THE ORACLE'S, NOT A CONVENIENT SUBSET. It mirrors the record the task layer
+/// consumes field for field - statement, sort, filter, processing, arguments and units - because each is
+/// a property the legacy reads back through <c>Describe</c> and each one has a consumer: the statement is
+/// the retrieval, sort and filter are applied through the store, processing selects the changeset or
+/// full-state transfer path, arguments drive the retrieval-argument matching, and units is the probe the
+/// query task uses to detect a data object that did not load
+/// [<c>n_cst_thread_task_sqlquery.sru:L554-L557</c>].
+/// </para>
+/// <para>
+/// NO CREDENTIAL, NO PATH AND NO CONNECTION DETAIL APPEARS HERE (constraint C-F). A definition names a
+/// statement and its shape; where that statement runs is <c>Sqlite</c>'s business and nothing else's.
+/// </para>
+/// </remarks>
+public sealed class DataObjectOptions
+{
+    /// <summary>
+    /// The name callers resolve this definition by. Required.
+    /// </summary>
+    /// <remarks>
+    /// Matched ORDINALLY by the catalogue, because a data-object name is an opaque identifier a caller
+    /// sends on the wire: folding case would let two distinct names collide on some hosts and not others.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The retrieval statement - the value <c>GetSQLSelect()</c> answers. Required.
+    /// </summary>
+    /// <remarks>
+    /// A definition with no statement could retrieve nothing while appearing to resolve, which is the one
+    /// shape worth refusing outright: the caller would receive a successful zero-row retrieval and have
+    /// no way to tell it from an empty table.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string SqlSelect { get; set; } = string.Empty;
+
+    /// <summary>The sort expression, or empty for none.</summary>
+    public string Sort { get; set; } = string.Empty;
+
+    /// <summary>The filter expression, or empty for none.</summary>
+    public string Filter { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The value <c>Describe("DataWindow.Processing")</c> answers.
+    /// </summary>
+    /// <remarks>
+    /// It selects the cross-thread transfer path: the sole evidenced fixture declares <c>processing=1</c>
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L3</c>], which takes the CHANGESET path, so 1 is the
+    /// default here rather than a neutral zero.
+    /// </remarks>
+    public string Processing { get; set; } = "1";
+
+    /// <summary>
+    /// The retrieval arguments as <c>name{tab}type</c> pairs, or empty when the definition takes none.
+    /// </summary>
+    /// <remarks>
+    /// The grammar is the oracle's and is parsed by the task layer's own parser, so nothing here
+    /// re-specifies it. The evidenced fixture takes no arguments, so empty is the default.
+    /// </remarks>
+    public string Arguments { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The value <c>Describe("DataWindow.Units")</c> answers. Must not be empty.
+    /// </summary>
+    /// <remarks>
+    /// LOAD BEARING, AND THE REASON IT IS VALIDATED. The query task treats an EMPTY units answer as proof
+    /// the data object did not resolve [<c>n_cst_thread_task_sqlquery.sru:L554-L557</c>], so a definition
+    /// that resolved successfully while publishing an empty units value would be reported as unresolved by
+    /// the very next line of the task that asked for it.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Units { get; set; } = "1";
+
+    /// <summary>
+    /// The table the update path writes to - <c>Describe("DataWindow.Table.UpdateTable")</c>. Empty when
+    /// the definition is retrieve-only.
+    /// </summary>
+    /// <remarks>
+    /// The sole evidenced fixture declares <c>update="COMPANY"</c>
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>]. EMPTY IS LEGAL AND MEANS RETRIEVE-ONLY:
+    /// the update path refuses a definition with no update table, which is the same refusal the oracle
+    /// issues [<c>n_cst_thread_task_sqlupdate.sru:L188-L192</c>], and a great many definitions are only
+    /// ever retrieved from.
+    /// </remarks>
+    public string UpdateTable { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The optimistic-concurrency mode - <c>Describe("DataWindow.Table.UpdateWhere")</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>0</c> compares the key columns only, <c>1</c> the key columns PLUS the original value of every
+    /// updateable column, and <c>2</c> the key columns plus the original value of every column the caller
+    /// actually changed.
+    /// </para>
+    /// <para>
+    /// ONE IS THE DEFAULT BECAUSE IT IS WHAT THE EVIDENCE DECLARES: the fixture reads
+    /// <c>updatewhere=1</c> [<c>dw_sqlite.srd:L14</c>], and all six of its columns are marked
+    /// <c>updatewhereclause=yes</c> [<c>:L8-L14</c>], so the check spans all six originals. Defaulting to
+    /// zero would silently weaken the concurrency check of every definition that did not restate it.
+    /// </para>
+    /// </remarks>
+    [Range(0, 2)]
+    public long UpdateWhere { get; set; } = 1L;
+
+    /// <summary>
+    /// Whether a key-column change is applied in place - <c>Describe("DataWindow.Table.UpdateKeyinPlace")</c>.
+    /// </summary>
+    /// <remarks>
+    /// FALSE IS THE DEFAULT, MATCHING <c>updatekeyinplace=no</c> [<c>dw_sqlite.srd:L14</c>]. With it
+    /// false, a key change becomes a delete plus an insert rather than an in-place update - and it is the
+    /// exact trigger for the workaround the oracle documents against itself at
+    /// <c>n_cst_thread_task_sqlupdate.sru:L151-L167</c>, which the fixture therefore exercises rather
+    /// than leaving as a rare branch.
+    /// </remarks>
+    public bool UpdateKeyInPlace { get; set; }
+
+    /// <summary>
+    /// The definition's columns, in DataWindow column order. Position one in this list is column number
+    /// one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THE COLUMNS ARE DECLARED RATHER THAN DISCOVERED. The whole <c>Concurrency/</c> layer is written
+    /// against a describe surface - <c>DataWindow.Column.Count</c>, <c>&lt;name&gt;.Id</c>,
+    /// <c>#n.Identity</c>, <c>#n.DBName</c> - and every one of those is a property of the DataWindow
+    /// DEFINITION, not of the statement's result set. Declaring them is what lets the update contract be
+    /// re-derived, validated and refused without a database, which is the property the per-service
+    /// coverage gate depends on.
+    /// </para>
+    /// <para>
+    /// EMPTY IS LEGAL. A retrieve-only definition needs no column declaration at all; the update path is
+    /// the only consumer, and it refuses a definition that names an update table with no columns rather
+    /// than generating a statement with an empty column list.
+    /// </para>
+    /// </remarks>
+    public IList<DataObjectColumnOptions> Columns { get; } = [];
+}
+
+/// <summary>
+/// One column of a data-object definition: its name, its database name, and the four update attributes
+/// the legacy <c>.srd</c> declares per column.
+/// </summary>
+/// <remarks>
+/// THE FOUR ATTRIBUTES ARE THE ORACLE'S OWN, spelled as the fixture spells them
+/// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>]: <c>update</c>, <c>key</c>,
+/// <c>identity</c> and <c>updatewhereclause</c>. They are separate booleans rather than a flags
+/// enumeration because the modification script the update path applies at run time sets each one
+/// independently, by name, one line at a time [<c>n_cst_thread_task_sqlupdate.sru:L103-L129</c>].
+/// </remarks>
+public sealed class DataObjectColumnOptions
+{
+    /// <summary>The column's DataWindow name - the name <c>&lt;name&gt;.Id</c> resolves. Required.</summary>
+    [Required(AllowEmptyStrings = false)]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The column's database name - the value <c>Describe("#n.DBName")</c> answers. Defaults to
+    /// <see cref="Name"/> when left empty.
+    /// </summary>
+    /// <remarks>
+    /// The fixture answers a plain unqualified <c>id</c> here [<c>dw_sqlite.srd:L8</c>], which is exactly
+    /// why the identity resolver's table-prefix arm fails on it and its fallback arm is the measured path.
+    /// Left empty this defaults to the DataWindow name, which is the ordinary case.
+    /// </remarks>
+    public string DbName { get; set; } = string.Empty;
+
+    /// <summary>Whether the column participates in generated INSERT and UPDATE statements.</summary>
+    public bool Update { get; set; }
+
+    /// <summary>Whether the column is part of the update key.</summary>
+    public bool Key { get; set; }
+
+    /// <summary>
+    /// Whether the column is the table's identity column, whose value the database assigns.
+    /// </summary>
+    /// <remarks>
+    /// An identity column is EXCLUDED from a generated INSERT's column list - the database assigns it -
+    /// and its assigned value is read back by the identity round trip
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L215-L247</c>].
+    /// </remarks>
+    public bool Identity { get; set; }
+
+    /// <summary>
+    /// Whether the column's ORIGINAL value may appear in a generated statement's where clause.
+    /// </summary>
+    /// <remarks>
+    /// TRUE BY DEFAULT, matching every column of the sole evidenced fixture
+    /// [<c>dw_sqlite.srd:L8-L14</c>]. It gates participation in the concurrency predicate: a column
+    /// marked <see langword="false"/> is excluded from the where clause even under the key-and-updateable
+    /// mode, which WEAKENS the check - so the default is the safe value rather than the neutral one.
+    /// </remarks>
+    public bool UpdateWhereClause { get; set; } = true;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -601,6 +875,46 @@ public sealed class TransactionPoolOptions
     public string TransactionClassName { get; set; } = string.Empty;
 
     /// <summary>
+    /// How often the idle sweep runs, in seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS A LIFECYCLE SETTING, NOT A PERFORMANCE ONE, and the distinction matters because no
+    /// performance objective may be asserted anywhere in this refactor. The legacy subscribes its pool to
+    /// the framework's idle notification inside the keep-alive branch
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L80</c>], so a retained
+    /// transaction is collected once it has been idle for its expiry window. Without a periodic sweep on
+    /// this side nothing ever fires that collection and a retained connection is held for the life of the
+    /// process - a resource leak rather than a slow service.
+    /// </para>
+    /// <para>
+    /// A NON-POSITIVE VALUE DISABLES THE SWEEP, which is the honest way to express "no sweeper" rather
+    /// than a sentinel interval. Keep-alive being off disables it too, on the pool's own gate, so the
+    /// sweep can never collect an entry the legacy would have retained.
+    /// </para>
+    /// </remarks>
+    public double IdleSweepIntervalSeconds { get; set; } = DefaultIdleSweepIntervalSeconds;
+
+    /// <summary>
+    /// The shipped sweep interval in seconds.
+    /// </summary>
+    /// <remarks>
+    /// Chosen as a fraction of the smallest expiry window a deployment is likely to configure, so an entry
+    /// is collected within a bounded multiple of its own idle window rather than at an interval unrelated
+    /// to it. It carries no latency or throughput claim.
+    /// </remarks>
+    public const double DefaultIdleSweepIntervalSeconds = 15.0;
+
+    /// <summary>
+    /// The sweep interval as a <see cref="TimeSpan"/>, or <see langword="null"/> when disabled.
+    /// </summary>
+    /// <returns>The interval, or <see langword="null"/>.</returns>
+    public TimeSpan? ResolveIdleSweepInterval() =>
+        IdleSweepIntervalSeconds > 0.0
+            ? TimeSpan.FromSeconds(IdleSweepIntervalSeconds)
+            : null;
+
+    /// <summary>
     /// Converts <see cref="KeepAliveExpireSeconds"/> into the idle lifetime in milliseconds that the
     /// pool compares against, applying the legacy non-positive fallback.
     /// </summary>
@@ -888,11 +1202,18 @@ public sealed class QueryOptions
 /// properties is configurable, which is why neither appears as a member here.
 /// </para>
 /// <para>
-/// Two further settings that Program.cs reads off this same section are deliberately not modelled here:
-/// an explicit metadata address, and the four individual token-validation toggles. They are absent from
-/// both settings files and are read directly with safe defaults, so a deployment can tighten them but
-/// never silently loosen them by omission - and modelling them would put two binders over one key,
-/// which is the same reason the listening endpoint is not modelled either.
+/// One further setting that Program.cs reads off this same section is deliberately not modelled here:
+/// an explicit metadata address. It is absent from both settings files and is read directly, and
+/// modelling it would put two binders over one key, which is the same reason the listening endpoint is
+/// not modelled either.
+/// </para>
+/// <para>
+/// THE FOUR TOKEN-VALIDATION SWITCHES ARE MODELLED, AND THEY ARE MODELLED SO THEY CAN BE REFUSED. They
+/// used to be read directly with a safe default, which meant a deployment could turn one OFF and the
+/// host would start healthy with a weakened boundary. Each of the four removes an entire class of
+/// forgery, so none is a deployment choice; Program.cs now assigns all four unconditionally and the
+/// validator refuses a configured <see langword="false"/>. They remain visible here rather than being
+/// deleted so that a deployment can still be audited for them by reading its settings file.
 /// </para>
 /// </remarks>
 public sealed class JwtOptions
@@ -935,32 +1256,13 @@ public sealed class JwtOptions
             + "on a boundary that must be authenticated from the outset.")]
     public string Audience { get; set; } = string.Empty;
 
-    /// <summary>
-    /// The path, RELATIVE to <see cref="Authority"/>, at which the Security service publishes its key
-    /// set. Required; defaults to <c>/.well-known/jwks.json</c>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The default is the standard well-known location, spelled exactly. A typo here does not fail
-    /// loudly - it produces a key-set address that resolves to nothing, and every token validation in
-    /// the service then fails for a reason that looks nothing like a configuration mistake. So the
-    /// spelling is part of the contract, and the validator additionally refuses a value that is not
-    /// rooted, because a value without a leading slash composes against the authority as a sibling
-    /// rather than as a path.
-    /// </para>
-    /// <para>
-    /// Relative rather than absolute on purpose: this service composes its key-set address from the
-    /// authority plus this path, so the two values move together and a change of authority cannot leave
-    /// a stale absolute key-set URL behind.
-    /// </para>
-    /// </remarks>
-    [Required(
-        AllowEmptyStrings = false,
-        ErrorMessage =
-            "must carry the path, relative to Jwt:Authority, at which the Security service publishes "
-            + "its key set. The standard value is /.well-known/jwks.json; a wrong path breaks every "
-            + "token validation in this service without producing a configuration error.")]
-    public string JwksPath { get; set; } = "/.well-known/jwks.json";
+    // THERE IS DELIBERATELY NO JwksPath MEMBER HERE. See the key-parity block in this file's header
+    // for the full reasoning: this service does not compose a key-set address at all. The stock bearer
+    // handler configured by AddPersistenceAuthentication fetches the discovery document beneath
+    // Authority and follows its published `jwks_uri`, so a key-set setting on this type would be bound,
+    // documented and validated while governing nothing. Jwt:MetadataAddress is the one override that is
+    // genuinely live, and it is read directly from configuration at the registration site because it
+    // shapes the handler rather than this service's own behaviour.
 
     /// <summary>
     /// Whether discovery metadata must be retrieved over a transport-secured connection. Defaults to
@@ -974,6 +1276,250 @@ public sealed class JwtOptions
     /// substituting the identity of every caller.
     /// </remarks>
     public bool RequireHttpsMetadata { get; set; } = true;
+
+    /// <summary>
+    /// Whether an inbound credential's issuer is checked. Invariantly <see langword="true"/>; a
+    /// configured <see langword="false"/> is refused at startup.
+    /// </summary>
+    /// <remarks>
+    /// <para id="invariant">
+    /// THIS SWITCH AND THE THREE BELOW ARE BOUND SO THEY CAN BE AUDITED, NOT SO THEY CAN BE TURNED OFF.
+    /// Each removes a whole class of forgery when enabled: without issuer validation a credential from
+    /// any issuer is accepted, so Security stops being the sole authority this boundary trusts; without
+    /// audience validation a credential minted for another service is replayable here, which is what the
+    /// one-audience-per-token rule of contract C-01 exists to prevent; without lifetime validation
+    /// Security's short lifetimes bound nothing and a leaked credential is permanent; without
+    /// signing-key validation the signature is not verified at all and any well-formed token is
+    /// accepted. A host that starts with one of them off is an unauthenticated boundary wearing the
+    /// shape of an authenticated one, which constraint C-G forbids. Program.cs therefore assigns all
+    /// four literally, and <see cref="PersistenceOptionsValidator"/> refuses a configured
+    /// <see langword="false"/> rather than ignoring it in silence - silence being the worse of the two,
+    /// because an operator would believe the setting took effect.
+    /// </para>
+    /// </remarks>
+    public bool ValidateIssuer { get; set; } = true;
+
+    /// <summary>
+    /// Whether an inbound credential's audience is checked against <see cref="Audience"/>. Invariantly
+    /// <see langword="true"/>; a configured <see langword="false"/> is refused at startup.
+    /// </summary>
+    public bool ValidateAudience { get; set; } = true;
+
+    /// <summary>
+    /// Whether an inbound credential's validity window is enforced. Invariantly <see langword="true"/>;
+    /// a configured <see langword="false"/> is refused at startup.
+    /// </summary>
+    public bool ValidateLifetime { get; set; } = true;
+
+    /// <summary>
+    /// Whether an inbound credential's signature is verified against the authority's published
+    /// material. Invariantly <see langword="true"/>; a configured <see langword="false"/> is refused at
+    /// startup.
+    /// </summary>
+    /// <remarks>
+    /// A switch, not a value. It selects whether verification happens; it carries nothing used to
+    /// perform it, which arrives from the authority at runtime. This is the only member in this type
+    /// whose name contains the word "key", and the distinction is recorded so that a search for that
+    /// word lands on an explanation rather than on a suspicion.
+    /// </remarks>
+    public bool ValidateIssuerSigningKey { get; set; } = true;
+
+    /// <summary>
+    /// The caller identities permitted to reach this service's four contracts. Bound from
+    /// <c>Jwt:PermittedCallers</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AUTHENTICATION IS NOT AUTHORIZATION, AND THIS IS THE SUBJECT HALF OF THE DIFFERENCE. Every contract
+    /// used to be protected by "an authenticated user" and nothing more, so any holder of any token minted
+    /// for this audience could call all four - including a caller with no business here at all. The AAP
+    /// fixes the call graph as layered and acyclic: nothing but DataServices calls Persistence. This roster
+    /// is that statement made enforceable, and the scope half is enforced alongside it, because either
+    /// alone leaves a hole (CWE-862, CWE-863).
+    /// </para>
+    /// <para>
+    /// COMPARED ORDINALLY against the token's subject claim, matching how the issuer compares an identity
+    /// everywhere else. The subject is read from <c>sub</c> or, when the bearer handler maps inbound claims,
+    /// from the framework's name-identifier claim type - whichever is present.
+    /// </para>
+    /// <para>
+    /// AN EMPTY ROSTER REFUSES EVERY CALLER, and validation requires at least one entry so that state is
+    /// unreachable through configuration. That is deliberate: reading an empty list as "permit everyone"
+    /// would be a fail-open default, which is the exact shape of the defect this setting closes.
+    /// </para>
+    /// <para>
+    /// IDENTITIES ONLY. There is no member here that could hold a certificate, a key or a secret - the
+    /// token's signature establishes that the subject is genuine, and this only records which subjects are
+    /// welcome.
+    /// </para>
+    /// <para>
+    /// EMPTY BY DEFAULT, AND THE SETTINGS FILE SUPPLIES THE VALUE - which is not a stylistic choice. The
+    /// configuration binder POPULATES an existing collection rather than replacing it, so a non-empty
+    /// default would ACCUMULATE with whatever a deployment declares: an operator narrowing the roster to
+    /// one identity would silently still permit the built-in one as well. An empty default plus a required
+    /// minimum length makes the declared value the whole value, and makes a deployment that forgets it fail
+    /// to start rather than run on an invisible built-in permission.
+    /// </para>
+    /// </remarks>
+    [MinLength(1)]
+    public IList<string> PermittedCallers { get; } = [];
+}
+
+
+// --------------------------------------------------------------------------------------------------
+// GROUP 5 OF 5 - THE INTERNAL TRUST ANCHOR, WHICH IS A PATH AND NEVER MATERIAL
+// --------------------------------------------------------------------------------------------------
+
+/// <summary>
+/// The trust anchor internal TLS is verified against. Bound from the top-level <c>InternalTls</c>
+/// section. One path, and nothing else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A ROOT CERTIFICATE IS PUBLIC MATERIAL, SO THE PATH IS NOT ABOUT CONFIDENTIALITY. It is that the
+/// anchor is a DEPLOYMENT artefact - one local authority per environment, rotated on its own schedule,
+/// mounted read-only from the orchestration layer. Embedding one in a settings file would pin every
+/// environment to a single authority and make rotation a code change.
+/// </para>
+/// <para>
+/// ONE MEMBER, AND NO KEY PATH. Verifying a chain needs only the public root. A trust anchor with a
+/// private key beside it would mean this service could ISSUE certificates for the internal topology,
+/// which is a capability the sole-issuer topology forbids it (constraint C-G).
+/// </para>
+/// </remarks>
+public sealed class InternalTlsTrustOptions
+{
+    /// <summary>
+    /// Path to the PEM-encoded certificate authority bundle Security's certificate is verified against.
+    /// Empty means platform default trust.
+    /// </summary>
+    /// <remarks>
+    /// The file may carry one certificate or a concatenated chain of them; every certificate it carries
+    /// becomes an acceptable root for internal traffic, and nothing else does.
+    /// </remarks>
+    public string TrustedCaPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this deployment narrows internal trust to a mounted anchor.
+    /// </summary>
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(TrustedCaPath);
+}
+
+/// <summary>
+/// The bounds on server-held work handles: the per-caller and total ceilings on live handles, how long an
+/// untouched handle survives, and how often abandoned ones are looked for.
+/// </summary>
+/// <remarks>
+/// <para>
+/// EVERY MEMBER IS A PROPERTY OF THE BOUNDARY AND NONE PORTS A LEGACY SETTING (constraints C-B, C-K). The
+/// legacy has no analogue to look up, because it had no handles: a caller held a task and a transaction by
+/// reference, and an abandoned one was collected when the reference left scope. There is therefore no
+/// oracle value to preserve here, which is precisely why each default below is justified in its own
+/// remarks rather than cited to a locator - a citation would be a fabrication.
+/// </para>
+/// <para>
+/// THE CEILINGS ARE REFUSALS, NOT EVICTIONS. Reaching one refuses the CREATION of a new handle with
+/// <see cref="RetCode.E_BUSY"/>; it never takes a handle away from the caller that already holds one.
+/// Evicting a live handle to admit a new one would let one caller destroy another's in-flight work, which
+/// is a worse failure than refusing the newcomer - and <c>E_BUSY</c> is a code the legacy already uses for
+/// "not now", so no new value enters a consumer's branch set.
+/// </para>
+/// <para>
+/// THE EXPIRY IS A SWEEP, NOT A TIMER PER HANDLE. One periodic pass costs one clock read and one pass over
+/// four tables; a timer per handle would allocate one per create and fire on the thread pool at a moment
+/// nothing correlates with. The sweep interval is therefore the RESOLUTION of the expiry rather than a
+/// second policy: a handle survives its idle window plus up to one interval.
+/// </para>
+/// </remarks>
+public sealed class HandleLifecycleOptions
+{
+    /// <summary>The ceiling on live handles in one registry when nothing is configured.</summary>
+    /// <remarks>
+    /// FIVE HUNDRED AND TWELVE, chosen as a bound that no legitimate deployment of this topology reaches
+    /// and every runaway does. Only DataServices calls this service (the call graph is layered and
+    /// acyclic), and it acquires one session and one task per operation and releases both - so the live
+    /// count tracks CONCURRENT operations, not cumulative ones. A number this size is therefore
+    /// unreachable by correct use and reached quickly by a caller that never releases, which is exactly
+    /// the discrimination a ceiling exists to make.
+    /// </remarks>
+    public const int DefaultMaxTotalPerRegistry = 512;
+
+    /// <summary>The ceiling on live handles held by one caller identity when nothing is configured.</summary>
+    /// <remarks>
+    /// A QUARTER OF THE TOTAL, so that one runaway caller cannot consume the whole registry and starve the
+    /// others. With a single legitimate caller today this ceiling is the operative one and the total is the
+    /// backstop; the ordering is deliberate, because the per-caller refusal names the caller at fault
+    /// whereas a total refusal names only the service.
+    /// </remarks>
+    public const int DefaultMaxPerPrincipal = 128;
+
+    /// <summary>The idle lifetime of an untouched handle when nothing is configured, in seconds.</summary>
+    /// <remarks>
+    /// NINE HUNDRED SECONDS - fifteen minutes - which is far longer than any operation this contract
+    /// declares can legitimately take and far shorter than the process lifetime an abandoned handle would
+    /// otherwise get. It is deliberately generous: reclaiming a handle a caller still intends to use is a
+    /// worse fault than holding an abandoned one for a quarter of an hour, and the reclaim path
+    /// additionally refuses to touch a retrieval that is provably in flight.
+    /// </remarks>
+    public const int DefaultIdleExpirySeconds = 900;
+
+    /// <summary>How often abandoned handles are looked for when nothing is configured, in seconds.</summary>
+    /// <remarks>
+    /// SIXTY SECONDS, which makes the reclaim's resolution one minute against a fifteen-minute window -
+    /// coarse enough that the sweep is free and fine enough that the window means what it says.
+    /// </remarks>
+    public const int DefaultSweepIntervalSeconds = 60;
+
+    /// <summary>
+    /// The maximum number of live handles one registry may hold. Defaults to
+    /// <see cref="DefaultMaxTotalPerRegistry"/>.
+    /// </summary>
+    /// <remarks>
+    /// PER REGISTRY RATHER THAN ACROSS ALL FOUR, because the four hold different things at different
+    /// costs and one shared counter would let a flood of query tasks refuse a session that a correct
+    /// caller needs. The four registries are the transaction sessions, the query tasks, the update tasks
+    /// and the command tasks.
+    /// </remarks>
+    [Range(1, int.MaxValue, ErrorMessage = "must be at least 1.")]
+    public int MaxTotalPerRegistry { get; set; } = DefaultMaxTotalPerRegistry;
+
+    /// <summary>
+    /// The maximum number of live handles in one registry attributable to a single caller identity.
+    /// Defaults to <see cref="DefaultMaxPerPrincipal"/>.
+    /// </summary>
+    /// <remarks>
+    /// THE IDENTITY IS THE TOKEN'S SUBJECT, and every inbound call carries one because every contract on
+    /// this service requires an authenticated principal. A call that somehow reaches a registry with no
+    /// identity is attributed to a single reserved bucket rather than exempted, so an unattributed flood
+    /// is bounded too.
+    /// </remarks>
+    [Range(1, int.MaxValue, ErrorMessage = "must be at least 1.")]
+    public int MaxPerPrincipal { get; set; } = DefaultMaxPerPrincipal;
+
+    /// <summary>
+    /// How long a handle survives without being named by any call, in SECONDS. Defaults to
+    /// <see cref="DefaultIdleExpirySeconds"/>.
+    /// </summary>
+    /// <remarks>
+    /// THE CLOCK BEHIND IT IS THE INJECTED <see cref="TimeProvider"/> AND NOTHING ELSE, so a
+    /// characterization run and a unit test both drive expiry deterministically. Every handle's activity
+    /// stamp is refreshed each time a call resolves it, so a handle in active use is never near expiry.
+    /// </remarks>
+    [Range(1, int.MaxValue, ErrorMessage = "must be at least 1 second.")]
+    public int IdleExpirySeconds { get; set; } = DefaultIdleExpirySeconds;
+
+    /// <summary>
+    /// How often the reclaim pass runs, in SECONDS. Defaults to
+    /// <see cref="DefaultSweepIntervalSeconds"/>.
+    /// </summary>
+    [Range(1, int.MaxValue, ErrorMessage = "must be at least 1 second.")]
+    public int SweepIntervalSeconds { get; set; } = DefaultSweepIntervalSeconds;
+
+    /// <summary>The idle lifetime as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan IdleExpiry => TimeSpan.FromSeconds(IdleExpirySeconds);
+
+    /// <summary>The sweep interval as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan SweepInterval => TimeSpan.FromSeconds(SweepIntervalSeconds);
 }
 
 
@@ -1095,19 +1641,334 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
             // all, so both values are legal for each and a rule here would be an addition.
         }
 
-        // --- Jwt: presence of all three strings, plus the key-set path's shape ----------------------
+        // --- Jwt: presence of both required strings -------------------------------------------------
         path = string.Concat(prefix, "Jwt");
         if (EnsureSectionBound(options.Jwt, path, failures))
         {
             AppendAnnotationFailures(options.Jwt, path, failures);
-            AppendJwksPathFailure(options.Jwt.JwksPath, path, failures);
+            AppendDisabledValidationFailures(options.Jwt, path, failures);
 
             // RequireHttpsMetadata is unvalidated by design: false is a legal value that a developer's
             // loopback run legitimately needs, and the defence against it reaching a deployed stack is
-            // that it defaults to true and a settings file is reviewed, not that startup refuses it.
+            // that it defaults to true and a settings file is reviewed, not that startup refuses it. The
+            // four switches above are a different case entirely and are refused rather than reviewed -
+            // each removes a class of forgery, and unlike metadata transport there is no topology in
+            // which turning one off is legitimate.
         }
 
+        // --- Handles: four positive numbers, plus one relationship between two of them ---------------
+        path = string.Concat(prefix, "Handles");
+        if (EnsureSectionBound(options.Handles, path, failures))
+        {
+            AppendAnnotationFailures(options.Handles, path, failures);
+            AppendHandleCeilingFailure(options.Handles, path, failures);
+        }
+
+        // --- DataObjects: each entry complete, and no name declared twice -------------------------
+        AppendDataObjectFailures(options.DataObjects, string.Concat(prefix, "DataObjects"), failures);
+
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+    }
+
+    /// <summary>
+    /// Appends a failure when the per-caller ceiling exceeds the total ceiling.
+    /// </summary>
+    /// <param name="handles">The bound handle-lifecycle settings.</param>
+    /// <param name="configurationPath">The section's configuration path, for the message.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// A PER-CALLER CEILING ABOVE THE TOTAL IS UNREACHABLE, AND AN UNREACHABLE LIMIT IS WORSE THAN NO
+    /// LIMIT: an operator reading the settings would believe a per-caller bound applied when the total
+    /// would always refuse first, so the per-caller refusal - the one that names the caller at fault -
+    /// could never be produced. The two annotations above already refuse a non-positive value in either
+    /// member; this is the one rule that is about the PAIR rather than about either number alone.
+    /// </remarks>
+    private static void AppendHandleCeilingFailure(
+        HandleLifecycleOptions handles,
+        string configurationPath,
+        List<string> failures)
+    {
+        if (handles.MaxPerPrincipal > handles.MaxTotalPerRegistry)
+        {
+            failures.Add(string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}:MaxPerPrincipal must not exceed {0}:MaxTotalPerRegistry, because a per-caller "
+                + "ceiling above the total can never be the limit that refuses and an operator would "
+                + "believe it applied.",
+                configurationPath));
+        }
+    }
+
+    /// <summary>
+    /// Appends a failure per malformed or duplicated data-object definition.
+    /// </summary>
+    /// <param name="definitions">The declared definitions.</param>
+    /// <param name="configurationPath">The section's configuration path, for the messages.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// <para>
+    /// AN EMPTY SECTION IS NOT A FAILURE. A deployment whose callers always supply a statement outright
+    /// needs no named definition, and refusing to start over an unused capability would be worse than
+    /// serving the callers that do not need it. What IS refused is a definition that would resolve and
+    /// then misbehave: one with no name, one with no statement, one publishing an empty units value - which
+    /// the query task reads as proof the object did not load - and a name declared twice, where which
+    /// entry won would be an implementation detail deciding what a caller retrieved.
+    /// </para>
+    /// <para>
+    /// The duplicate check folds case even though resolution is ORDINAL, deliberately: two entries
+    /// differing only by case are almost certainly a typo rather than two definitions, and the one a
+    /// caller reached would then depend on exactly how it spelled the name. Refusing is the answer that
+    /// cannot be got wrong.
+    /// </para>
+    /// </remarks>
+    private static void AppendDataObjectFailures(
+        IList<DataObjectOptions> definitions,
+        string configurationPath,
+        List<string> failures)
+    {
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = 0; index < definitions.Count; index++)
+        {
+            DataObjectOptions? definition = definitions[index];
+            string entryPath = string.Concat(
+                configurationPath,
+                ":",
+                index.ToString(CultureInfo.InvariantCulture));
+
+            if (definition is null)
+            {
+                failures.Add(
+                    $"Configuration key '{entryPath}' bound to null. A definition entry declared as an "
+                    + "explicit null cannot be inspected, so it would resolve nothing while occupying a "
+                    + "position in the list. Remove the entry or complete it.");
+
+                continue;
+            }
+
+            AppendAnnotationFailures(definition, entryPath, failures);
+
+            if (string.IsNullOrWhiteSpace(definition.Name))
+            {
+                // The annotation above already named it; nothing further can be said about an entry with
+                // no identity, and a duplicate check on a blank name would report a second, misleading
+                // failure for the same mistake.
+                continue;
+            }
+
+            if (!seen.Add(definition.Name.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{entryPath}:{nameof(DataObjectOptions.Name)}' repeats a "
+                    + "data-object name an earlier entry already declares, ignoring case. One of the two "
+                    + "would be unreachable and which one took effect would be an implementation detail "
+                    + "deciding what a caller retrieved, so the section is refused rather than merged. "
+                    + "The name is deliberately not echoed here.");
+            }
+
+            AppendDataObjectColumnFailures(definition, entryPath, failures);
+        }
+    }
+
+    /// <summary>
+    /// Appends one failure per structural defect in a definition's column list and update settings.
+    /// </summary>
+    /// <param name="definition">The bound definition.</param>
+    /// <param name="entryPath">The definition's configuration path, for the messages.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// <para>
+    /// EVERY RULE HERE GUARDS A STATEMENT THE UPDATE PATH WOULD OTHERWISE GENERATE WRONG, and each is
+    /// refused at startup rather than at the first update because the consequence of each is a statement
+    /// that runs successfully against the wrong rows. A duplicated column name makes
+    /// <c>&lt;name&gt;.Id</c> ambiguous, so which ordinal a where clause carried would be an
+    /// implementation detail. Two identity columns make the identity round trip's first-wins fallback
+    /// decide silently which one a caller is told about. An update table with no columns generates a
+    /// statement with an empty column list. And an update table with no key column, under any concurrency
+    /// mode, generates an UPDATE whose where clause matches EVERY row of the table.
+    /// </para>
+    /// <para>
+    /// A RETRIEVE-ONLY DEFINITION IS FULLY LEGAL and reaches none of these rules: with no update table
+    /// declared, the three update-shape rules are skipped and only the per-column rules - which guard the
+    /// describe surface generally - apply. No message echoes a column name or a table name.
+    /// </para>
+    /// </remarks>
+    private static void AppendDataObjectColumnFailures(
+        DataObjectOptions definition,
+        string entryPath,
+        List<string> failures)
+    {
+        string columnsPath = string.Concat(entryPath, ":", nameof(DataObjectOptions.Columns));
+        HashSet<string> seenColumns = new(StringComparer.OrdinalIgnoreCase);
+        int identityColumns = 0;
+        int keyColumns = 0;
+
+        for (int index = 0; index < definition.Columns.Count; index++)
+        {
+            DataObjectColumnOptions? column = definition.Columns[index];
+            string columnPath = string.Concat(
+                columnsPath,
+                ":",
+                index.ToString(CultureInfo.InvariantCulture));
+
+            if (column is null)
+            {
+                failures.Add(
+                    $"Configuration key '{columnPath}' bound to null. A column declared as an explicit "
+                    + "null still occupies a DataWindow column ordinal, so every column after it would "
+                    + "be numbered one higher than the definition says. Remove the entry or complete it.");
+
+                continue;
+            }
+
+            AppendAnnotationFailures(column, columnPath, failures);
+
+            if (string.IsNullOrWhiteSpace(column.Name))
+            {
+                continue;
+            }
+
+            if (!seenColumns.Add(column.Name.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{columnPath}:{nameof(DataObjectColumnOptions.Name)}' repeats a "
+                    + "column name an earlier column already declares, ignoring case. The update path "
+                    + "resolves a column's ordinal from its name, so a repeated name would make which "
+                    + "ordinal a where clause carried an implementation detail. The name is deliberately "
+                    + "not echoed here.");
+            }
+
+            if (column.Identity)
+            {
+                identityColumns++;
+            }
+
+            if (column.Key)
+            {
+                keyColumns++;
+            }
+        }
+
+        if (identityColumns > 1)
+        {
+            failures.Add(
+                $"Configuration key '{columnsPath}' declares {identityColumns.ToString(CultureInfo.InvariantCulture)} "
+                + "identity columns. A table has at most one, and the identity round trip resolves the "
+                + "column with a FIRST-WINS fallback - so a second one would silently decide which value "
+                + "a caller is told the database assigned. Mark exactly one column, or none.");
+        }
+
+        if (definition.UpdateTable.Trim().Length == 0)
+        {
+            // Retrieve-only, which is the ordinary case. The three shape rules below are about a
+            // statement that will never be generated.
+            return;
+        }
+
+        if (seenColumns.Count == 0)
+        {
+            failures.Add(
+                $"Configuration key '{entryPath}:{nameof(DataObjectOptions.UpdateTable)}' names an update "
+                + $"table while '{columnsPath}' declares no usable column. The update path builds INSERT, "
+                + "UPDATE and DELETE statements from the column list, so it would have nothing to write "
+                + "and nothing to match on. Declare the columns, or clear the update table to make the "
+                + "definition retrieve-only.");
+        }
+        else if (keyColumns == 0)
+        {
+            failures.Add(
+                $"Configuration key '{columnsPath}' declares no key column while "
+                + $"'{entryPath}:{nameof(DataObjectOptions.UpdateTable)}' names an update table. Every "
+                + "concurrency mode builds its where clause from the key columns first, so with none an "
+                + "UPDATE or DELETE would match every row of the table rather than one. Mark at least one "
+                + "column as the key.");
+        }
+
+        if (definition.UpdateWhere != UpdateWhereBuilder.KeyAndUpdatableColumnsMode)
+        {
+            failures.Add(
+                $"Configuration key '{entryPath}:{nameof(DataObjectOptions.UpdateWhere)}' declares mode "
+                + $"{definition.UpdateWhere.ToString(CultureInfo.InvariantCulture)} on a definition that "
+                + "names an update table. The key-and-updateable-columns mode - value "
+                + $"{UpdateWhereBuilder.KeyAndUpdatableColumnsMode.ToString(CultureInfo.InvariantCulture)} "
+                + "- is the only one whose comparison semantics the legacy tree evidences anywhere, so no "
+                + "other mode is modelled and the update path refuses one rather than generating a weaker "
+                + "where clause. This is refused at startup rather than at the first update because the "
+                + "difference between the modes is WHICH ROWS a statement matches, and a weaker check "
+                + "succeeds silently. A retrieve-only definition may declare any mode, because none of it "
+                + "is read.");
+        }
+    }
+
+    /// <summary>
+    /// Appends one failure per token-validation switch a deployment has turned off.
+    /// </summary>
+    /// <param name="jwt">The bound inbound-token group.</param>
+    /// <param name="configurationPath">The group's configuration path, for the message.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// <para>
+    /// REFUSED RATHER THAN REVIEWED, AND THAT IS THE DIFFERENCE FROM EVERY OTHER BOOLEAN IN THIS FILE.
+    /// The transaction-pool and query booleans are legal across their whole domain because their legacy
+    /// setters applied no guard, and metadata transport has a legitimate loopback case. These four have
+    /// neither property: each removes an entire class of forgery, and there is no topology in which
+    /// turning one off is a legitimate deployment choice. Program.cs assigns all four literally, so a
+    /// configured <see langword="false"/> would take no effect - and a setting silently ignored is worse
+    /// than one honoured, because an operator would believe it applied. Refusing to start states plainly
+    /// that the value is neither honoured nor honourable.
+    /// </para>
+    /// <para>
+    /// Each message names the exact key and what the switch protects, so the remedy is a one-line edit
+    /// rather than an investigation. No message quotes any configured value other than the boolean
+    /// itself.
+    /// </para>
+    /// </remarks>
+    private static void AppendDisabledValidationFailures(
+        JwtOptions jwt,
+        string configurationPath,
+        List<string> failures)
+    {
+        Append(
+            jwt.ValidateIssuer,
+            nameof(JwtOptions.ValidateIssuer),
+            "a credential minted by any issuer whatsoever would be accepted, so Security would no "
+                + "longer be the sole authority this boundary trusts");
+
+        Append(
+            jwt.ValidateAudience,
+            nameof(JwtOptions.ValidateAudience),
+            "a credential minted for a different service would be replayable here, which is precisely "
+                + "what the one-audience-per-token rule of contract C-01 exists to prevent");
+
+        Append(
+            jwt.ValidateLifetime,
+            nameof(JwtOptions.ValidateLifetime),
+            "an expired credential would be accepted indefinitely, so the short lifetimes Security "
+                + "mints would bound nothing");
+
+        Append(
+            jwt.ValidateIssuerSigningKey,
+            nameof(JwtOptions.ValidateIssuerSigningKey),
+            "the signature would not be verified at all, so any well-formed token would be accepted");
+
+        void Append(bool enabled, string member, string consequence)
+        {
+            if (enabled)
+            {
+                return;
+            }
+
+            failures.Add(string.Concat(
+                configurationPath,
+                ":",
+                member,
+                " is false. This switch is invariant and cannot be turned off: with it disabled, ",
+                consequence,
+                ". The bearer handler is configured with it enabled regardless of this value, so the "
+                    + "setting would not take effect - and a setting that is silently ignored is worse "
+                    + "than one that is honoured, which is why the host refuses to start instead. Remove "
+                    + "the key or set it to true."));
+        }
     }
 
     /// <summary>
@@ -1288,37 +2149,4 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
             ((int)check.Value).ToString(CultureInfo.InvariantCulture),
             "."));
     }
-
-    /// <summary>
-    /// Appends a failure when the key-set path is present but is not rooted.
-    /// </summary>
-    /// <param name="jwksPath">The configured key-set path.</param>
-    /// <param name="configurationPath">The Jwt group's configuration path, for the message.</param>
-    /// <param name="failures">The failure list to append to.</param>
-    /// <remarks>
-    /// The value is composed RELATIVE to the configured authority, so a path without a leading slash
-    /// resolves against the authority's last segment rather than against its root, and the resulting
-    /// address quietly points somewhere no key set is published. Every token validation then fails for
-    /// a reason that looks nothing like a configuration mistake, which is precisely why this is a
-    /// startup failure rather than a runtime surprise. A blank value is left to the group's
-    /// <c>[Required]</c> annotation, which has already reported it.
-    /// </remarks>
-    private static void AppendJwksPathFailure(
-        string jwksPath,
-        string configurationPath,
-        List<string> failures)
-    {
-        if (string.IsNullOrWhiteSpace(jwksPath) || jwksPath.StartsWith('/'))
-        {
-            return;
-        }
-
-        failures.Add(string.Concat(
-            configurationPath,
-            ":JwksPath must begin with \"/\", because it is composed relative to Jwt:Authority. The ",
-            "standard value is /.well-known/jwks.json. Supplied: \"",
-            jwksPath,
-            "\"."));
-    }
 }
-

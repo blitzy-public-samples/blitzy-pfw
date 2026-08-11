@@ -25,7 +25,7 @@
 //       "Locale": "en",
 //       "CapabilityFlags": 3847,
 //       "Upstreams": {                              <-- UpstreamAddresses, nested
-//         "DataServices": "https://localhost:5102",   <-- https, because h2 needs ALPN
+//         "DataServices": "https://localhost:5112",  <-- the gRPC endpoint, not the REST one
 //         "Security":     "https://localhost:5104"
 //       }
 //     }
@@ -44,30 +44,41 @@
 //
 //     "Authentication": { "Schemes": { "Bearer": {  <-- appsettings.Development.json ONLY
 //       "Authority":    "https://localhost:5104",
-//       "ValidIssuers": [ "https://localhost:5104" ]
+//       "ValidIssuers": [ "https://localhost:5104" ],
+//       "RequireHttpsMetadata": true
 //     } } }
 //
-//   ONLY THE HOST CHANGES THERE, AND RequireHttpsMetadata IS NOT OVERRIDDEN. Security's listener is
-//   TLS in every environment - its issuance path authenticates the caller with a client certificate,
-//   which cannot be presented on a plaintext listener at all, and the key set fetched beneath this
-//   authority is the system's trust bootstrap - so the loopback form is https and the base file's
-//   RequireHttpsMetadata of true stays inherited. A false there would relax nothing that needs
-//   relaxing: the setting only PERMITS a plaintext metadata address, it does not make one exist.
+//   THE OVERLAY CARRIES THE AUTHORITY IT EXISTS FOR AND CARRIES NO RELAXATION AT ALL. Security binds
+//   ONE TLS LISTENER in every environment, for the reason recorded on the scheme note below, so the
+//   loopback authority is https and RequireHttpsMetadata stays true beside it - the pair is coherent in
+//   both files and the validator has nothing to refuse. What the overlay changes is the HOST and only
+//   the host. The base file keeps the strict value and declares no authority at all, so a deployment
+//   that configures nothing fails to start naming the missing authority rather than inheriting either a
+//   relaxation or a guessed address.
 //
 //   So an environment that configures nothing gets the strict shape and fails to start naming the
 //   missing authority, instead of inheriting a relaxation it never asked for. The binding contract is
 //   unchanged either way: the same keys, the same spellings, the same path.
 //
-//   THE SCHEME IS https EVEN ON LOOPBACK, AND THAT IS A CORRECTION WORTH KNOWING ABOUT. An earlier
-//   revision put a plain-HTTP loopback authority here together with a RequireHttpsMetadata relaxation
-//   to permit it. Security's listener is TLS in development as well as deployed, and functionally so:
-//   `POST /v1/tokens` authenticates its caller with a CLIENT CERTIFICATE, which cannot be requested or
-//   presented on a plaintext listener at all, so on plain http no service in the system - this one
-//   included - could obtain a first token. RequireHttpsMetadata therefore stays true in every
-//   environment and appears in the base file only. A developer's Security instance presents a
-//   SELF-SIGNED certificate, trusted through the host trust store; the relaxation this system grants
-//   is an untrusted issuer, never cleartext, and there is no setting anywhere in Gateway that turns
-//   certificate validation off.
+//   THE SCHEME IS https, AND ON THE ISSUANCE EDGE THE TRANSPORT IS PART OF THE SECURITY ARGUMENT.
+//   Every request Gateway sends to Security on this edge carries a caller credential, and every response
+//   carries either a bearer token or the key set the whole estate trusts. On cleartext all three are
+//   observable and the key set is substitutable by anyone on path, which is CWE-319 on the one edge where
+//   it costs the most. AAP 0.1.4 settles the reading: the requirement cannot mean "no new surface" -
+//   decomposition creates the system's first-ever ingress - it means every newly created surface is
+//   authenticated from the outset, and an authenticated surface whose channel is readable authenticates
+//   nothing an observer cannot replay. The certificate and key come from the deployment's secret layer
+//   exactly as the signing key does; none is committed here (constraint C-F). AAP 0.6.6.3 is about
+//   CALLER IDENTITY rather than about the channel: mutual TLS is the documented FALLBACK "for any pair
+//   where a token issuer is inappropriate, adding certificate and key
+//   path settings for that pair only", not the transport of the estate. What authenticates the issuance
+//   edge instead is the CLIENT CREDENTIAL Gateway presents, which Security checks against its own
+//   roster; a client certificate is still honoured wherever a deployment terminates TLS and presents
+//   one. What plaintext WOULD have cost is stated rather than glossed, because it is the reason none is
+//   declared: on a readable channel the published key set is substitutable and a bearer token replayable
+//   by anyone on path. That exposure is closed here rather than accepted, and every address nonetheless
+//   remains an environment override rather than a compiled-in decision, so a deployment can move a host
+//   without editing code.
 //
 //   The JWT settings live under the stock "Authentication:Schemes:Bearer" path because that is the
 //   path the framework's own JWT bearer handler binds itself, which is precisely the "zero bespoke
@@ -294,12 +305,20 @@ public sealed class GatewayOptions : IValidatableObject
     /// <remarks>
     /// <para>
     /// WHY THIS EXISTS AT ALL, WHICH IS A FUNCTIONAL REASON AND NOT A HARDENING PREFERENCE.
-    /// <c>POST /v1/tokens</c> on the Security service is protected by <c>mutualTls</c> and by nothing
-    /// else, because <b>a caller cannot present a bearer token in order to obtain its first bearer
-    /// token</b>. Gateway is one of the two services that request tokens, so without a client
-    /// certificate to present it cannot obtain one, and every authenticated call it would make is
-    /// unreachable. The contract has required this since it was authored; this group is what makes it
-    /// configurable.
+    /// <c>POST /v1/tokens</c> on the Security service cannot be protected by a bearer token, because
+    /// <b>a caller cannot present a bearer token in order to obtain its first bearer token</b>. It
+    /// therefore publishes TWO schemes as a disjunction - an HTTP Basic client credential and this
+    /// client certificate - and a caller satisfies it by presenting either. Gateway is one of the two
+    /// services that request tokens, so a deployment presenting NEITHER obtains no token at all and
+    /// every authenticated call it would make is unreachable; <see cref="Validate(ValidationContext)"/>
+    /// refuses that deployment rather than letting it start and fail on first use.
+    /// </para>
+    /// <para>
+    /// THIS GROUP IS THE SECOND SCHEME, AND IT IS GENUINELY REACHABLE RATHER THAN MERELY DECLARED. When
+    /// it is configured the composition root loads the pair and attaches it to the typed client's
+    /// primary handler, so a deployment that prefers certificates to a shared secret has a working
+    /// path. <see cref="SecurityClientSecret"/> is the first scheme and is the one the documented
+    /// bring-up uses.
     /// </para>
     /// <para>
     /// PATHS, NOT MATERIAL, AND THAT IS ENFORCED BY THE MEMBER SET RATHER THAN BY A CONVENTION. There
@@ -316,6 +335,139 @@ public sealed class GatewayOptions : IValidatableObject
     /// </para>
     /// </remarks>
     public MutualTlsClientOptions MutualTls { get; set; } = new();
+
+    /// <summary>
+    /// The name of the FLAT configuration key carrying the client credential Gateway presents on the
+    /// token-issuance edge. The name is declared here; the material never is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// FLAT RATHER THAN SECTION-BOUND, AND THAT IS FORCED RATHER THAN CHOSEN. The environment-variable
+    /// configuration provider maps only a double underscore onto the section separator, so a value
+    /// arriving as <c>SECURITY_CLIENT_SECRET_GATEWAY</c> cannot land on a property inside
+    /// <c>Gateway:</c> by binding. It is applied to the bound options by an explicit post-configure
+    /// step in the composition root, which runs between binding and start-time validation so the
+    /// validator sees the material the deployment actually supplied.
+    /// </para>
+    /// <para>
+    /// AND IT KEEPS THE SECRET OUT OF EVERY SETTINGS FILE (constraint C-F). A section-bound spelling
+    /// would need a key in <c>appsettings.json</c> for an operator to discover it, and a credential-named
+    /// leaf in a committed file is the defect the whole configuration layer exists to avoid - the estate
+    /// forbids one by name in
+    /// <c>shared/PowerFramework.Contracts.Tests/ServiceConfigurationCoherenceTests.cs</c>. The name
+    /// below is documented in <c>orchestration/.env.example</c> beside the two sibling callers.
+    /// </para>
+    /// </remarks>
+    public const string SecurityClientSecretConfigurationKey = "SECURITY_CLIENT_SECRET_GATEWAY";
+
+    /// <summary>
+    /// The password half of the HTTP Basic credential Gateway presents to Security's issuance
+    /// operation. Empty in source, empty in every settings file, and supplied only through
+    /// <see cref="SecurityClientSecretConfigurationKey"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE USER-ID HALF IS DELIBERATELY NOT CONFIGURABLE. It is the subject the outbound request
+    /// already claims - <c>powerframework-gateway</c>, declared once in
+    /// <c>Clients/DataServicesClient.cs</c> - and the issuance edge reconciles the claimed subject
+    /// against the identity the presented credential establishes, refusing a mismatch with <c>403</c>.
+    /// A second setting for the same identity could therefore only ever disagree with the first and be
+    /// refused, so there is one spelling and the credential is built from it.
+    /// </para>
+    /// <para>
+    /// EMPTY IS A LEGITIMATE VALUE ON ITS OWN, AND IS NOT ONE WHEN <see cref="MutualTls"/> IS ALSO
+    /// UNSET. The two schemes are alternatives, so a deployment supplies whichever it operates; the
+    /// validator refuses only the state in which it can present neither. That refusal is a startup
+    /// failure rather than a warning, matching the fail-fast posture the legacy application object sets
+    /// by ending a structural fault in termination [ws_objects/pfw.pbl.src/pfw.sra:L111-L144].
+    /// </para>
+    /// <para>
+    /// NEVER LOGGED, NEVER ECHOED, AND NEVER PART OF A DIAGNOSTIC. The validation message below names
+    /// the two configuration keys and quotes neither value; the client reads this property at the
+    /// moment of use, holds it in no field of its own, and includes it in no exception message. A
+    /// failure to authenticate is reported by Security as a status, and repeating the secret into a
+    /// diagnostic would put it in an operator's log.
+    /// </para>
+    /// </remarks>
+    public string SecurityClientSecret { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this deployment can present something on the token-issuance edge - a Basic credential, a
+    /// client certificate, or both.
+    /// </summary>
+    /// <remarks>
+    /// Computed, so it binds nothing and cannot be set by configuration. It is the single expression of
+    /// "this deployment can obtain a token", read by the validator and by the diagnostics that describe
+    /// the outbound posture, so the disjunction is stated once rather than re-derived at each use.
+    /// </remarks>
+    public bool HasIssuanceCredential =>
+        !string.IsNullOrWhiteSpace(SecurityClientSecret) || (MutualTls?.IsConfigured ?? false);
+
+    // NO FURTHER PROPERTY BELONGS ON THIS TYPE, AND EACH ABSENCE IS A DECISION
+    //
+    //   * No connection string, and no storage, SQLite or EF Core setting. Exactly one service in
+    //     this system holds a storage provider and it is not this one, so a storage setting here
+
+    /// <summary>
+    /// The trust anchor Gateway verifies its two internal upstreams' server certificates against,
+    /// bound from <c>Gateway:InternalTls</c>. A path - never material.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS EXISTS, AND WHY ITS ABSENCE WAS A DEFECT RATHER THAN A POSTURE. Security and
+    /// DataServices both terminate TLS, and in every topology this system documents their certificates
+    /// are issued by a LOCAL certificate authority mounted from the orchestration secret layer - the
+    /// generation recipe in <c>docs/ARCHITECTURE.md</c> §9.3.1 creates exactly such a CA. That CA is
+    /// in no container's operating-system trust store, so a client left on platform default trust
+    /// rejects every certificate the documented topology presents: the token-issuance channel, the two
+    /// gRPC channels, the key-set backchannel and the readiness probes all fail to connect. Declaring
+    /// the anchor and verifying against it is what makes the documented topology reachable.
+    /// </para>
+    /// <para>
+    /// IT NARROWS TRUST RATHER THAN RELAXING IT, WHICH IS THE PROPERTY THAT MATTERS. When this path is
+    /// set, the chain policy built from it uses <c>X509ChainTrustMode.CustomRootTrust</c>, so the ONLY
+    /// acceptable root is the mounted anchor and the machine's several hundred public roots stop being
+    /// acceptable for internal traffic. Name validation, validity dates and chain building are all
+    /// still performed by the platform. There is no validation callback, no
+    /// <c>ServerCertificateCustomValidationCallback</c>, no
+    /// <c>DangerousAcceptAnyServerCertificate</c> and no environment-conditional bypass anywhere in
+    /// this service (constraint C-G).
+    /// </para>
+    /// <para>
+    /// OPTIONAL, AND THE UNSET STATE IS PLATFORM DEFAULT TRUST. A deployment whose internal
+    /// certificates are issued by a publicly trusted authority, or whose containers install the anchor
+    /// into their own trust store, leaves this empty and the platform decides. Unset is therefore a
+    /// legitimate configuration rather than a missing one; a set-but-unreadable path is a structural
+    /// fault and refuses to start.
+    /// </para>
+    /// </remarks>
+    public InternalTlsTrustOptions InternalTls { get; set; } = new();
+
+    /// <summary>
+    /// The bounds Gateway places on the calls it makes outward, bound from <c>Gateway:Outbound</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS BELONGS ON A CONFIGURATION SURFACE AT ALL, given that AAP 0.8.5 forbids asserting any
+    /// performance objective. Neither value here is a latency target and neither is a service-level
+    /// promise. Both are CORRECTNESS bounds: they say when Gateway stops waiting, and therefore when
+    /// the upstream is told it may stop working and release what it is holding. Without them an
+    /// upstream keeps a server-held session or task alive for a caller that has already gone - a
+    /// half-open connection is exactly that case - and the resource is only reclaimed by the
+    /// upstream's own idle sweep, long after the request it belonged to ended.
+    /// </para>
+    /// <para>
+    /// THEY ARE OPERATOR-VISIBLE BECAUSE THE CORRECT VALUE IS A PROPERTY OF THE DEPLOYMENT, not of
+    /// this code. The stream bound in particular must not exceed the upstream's own session lifetime,
+    /// and that lifetime is configured in the upstream, so only the operator can see both numbers at
+    /// once.
+    /// </para>
+    /// </remarks>
+    public OutboundCallOptions Outbound { get; set; } = new();
+
+    /// Bounds on the REST projection of the upstream DataWindow and column-expression contracts.
+    /// </summary>
+    public RestProjectionOptions RestProjection { get; set; } = new();
 
     // NO FURTHER PROPERTY BELONGS ON THIS TYPE, AND EACH ABSENCE IS A DECISION
     //
@@ -468,6 +620,72 @@ public sealed class GatewayOptions : IValidatableObject
                 yield return result;
             }
         }
+
+        // The internal trust anchor is a single OPTIONAL path, so the only thing to check is that a
+        // value which is present is usable as a path at all. Whether the file exists and parses is
+        // decided when it is loaded at startup, because that is where the failure can carry the
+        // loader's own diagnosis rather than a second, weaker copy of it.
+        InternalTlsTrustOptions? internalTls = InternalTls;
+
+        if (internalTls is not null)
+        {
+            foreach (ValidationResult result in internalTls.Validate(
+                $"{SectionName}:{nameof(InternalTls)}",
+                nameof(InternalTls)))
+            {
+                yield return result;
+            }
+        }
+
+        // The outbound bounds are two durations whose relationship to each other and to the resilience
+        // pipeline is what makes them correct, and no attribute can express that. A misconfigured
+        // deadline does not fail loudly at the point of use - it either expires before the upstream can
+        // answer, so every call reports a deadline failure, or it is so long that it bounds nothing -
+        // which is exactly the class of fault that belongs in a refusal to start.
+        OutboundCallOptions? outbound = Outbound;
+
+        if (outbound is not null)
+        {
+            foreach (ValidationResult result in outbound.Validate(
+                $"{SectionName}:{nameof(Outbound)}",
+                nameof(Outbound)))
+            {
+                yield return result;
+            }
+        }
+
+        // AND THE ONE STATE IN WHICH GATEWAY CANNOT OBTAIN A TOKEN AT ALL: neither scheme configured.
+        //
+        // This is a structural fault rather than a reduced capability. Gateway requests a token before
+        // every call it makes to DataServices, so a deployment that can present nothing on the issuance
+        // edge has already lost every authenticated call it would make - the readiness probe would
+        // report healthy and the first proxied request would fail with what looks like an upstream
+        // problem. Refusing at startup names the cause once, in the place an operator is already
+        // reading, and matches the posture the legacy application object sets by ending a structural
+        // fault in termination rather than a warning [ws_objects/pfw.pbl.src/pfw.sra:L111-L144].
+        //
+        // BOTH KEYS ARE NAMED AND NEITHER VALUE IS QUOTED. A message that echoed the material it was
+        // complaining about would put a credential in a startup log, which is the failure this whole
+        // indirection exists to prevent (C-F).
+        //
+        // THIS ARM IS LAST, AND THAT ORDERING IS DELIBERATE RATHER THAN INCIDENTAL. The two arms above
+        // that end in `yield break` - a missing upstream group and a missing probe group - are reporting
+        // that the section an operator was supposed to write does not exist at all, and an absent
+        // section cannot also be usefully told that its credential is absent. Placing the issuance
+        // refusal after them keeps a wholly unconfigured deployment reporting the single root cause
+        // rather than two facts that both reduce to "nothing was configured".
+        if (!HasIssuanceCredential)
+        {
+            yield return new ValidationResult(
+                "This deployment can present nothing on Security's token-issuance edge, so it can "
+                    + "obtain no service token and every authenticated call it would make is "
+                    + "unreachable. Supply EITHER the client credential in "
+                    + $"'{SecurityClientSecretConfigurationKey}' - the documented bring-up path, see "
+                    + "orchestration/.env.example - OR the client certificate pair in "
+                    + $"'{SectionName}:{nameof(MutualTls)}'. The two are alternatives and either alone "
+                    + "is sufficient; no value is reproduced here.",
+                [nameof(SecurityClientSecret), nameof(MutualTls)]);
+        }
     }
 
     /// <summary>
@@ -515,29 +733,40 @@ public sealed class GatewayOptions : IValidatableObject
         /// invented here.
         /// </para>
         /// <para>
-        /// THE SCHEME IS THE LOAD-BEARING HALF OF THIS VALUE, NOT THE PORT. DataServices serves the
-        /// C-03 and C-04 gRPC contracts, which REQUIRE HTTP/2, and the anonymous <c>/health</c> plus
-        /// <c>/v1/ping</c>, which the readiness gate probes with HTTP/1.1 (C-L). A <b>cleartext</b>
-        /// Kestrel endpoint cannot carry both: configured for both versions without TLS it disables
-        /// HTTP/2 outright and says so at startup, and configured for <c>Http2</c> alone it answers an
-        /// HTTP/1.1 <c>GET</c> with <c>400</c>. With TLS the ambiguity does not arise, because ALPN
-        /// selects the version per connection - so DataServices declares ONE endpoint,
-        /// <c>https://+:5102</c> with <c>Protocols</c> <c>Http1AndHttp2</c>, and this address names it.
+        /// THE PORT IS THE LOAD-BEARING HALF OF THIS VALUE. DataServices serves the C-03 and C-04 gRPC
+        /// contracts, which REQUIRE HTTP/2, and the anonymous <c>/health</c> plus <c>/v1/ping</c>, which
+        /// the readiness gate probes with HTTP/1.1 (C-L). DataServices gives each version its own TLS
+        /// endpoint - <c>https://+:5102</c> HTTP/1.1 for the REST surface and <c>https://+:5112</c>
+        /// HTTP/2 prior knowledge for the gRPC contracts - and THIS address, being the call edge, names
+        /// the second. One version per endpoint is a misaddressing guard: a listener that accepts only
+        /// what it is for cannot be reached by the wrong client and answer anyway.
         /// </para>
         /// <para>
-        /// A cleartext <c>http://…:5102</c> here therefore fails every RPC on this edge with the
-        /// HTTP/2 error <c>HTTP_1_1_REQUIRED</c> before the request reaches a method, which surfaces as
-        /// a transport fault naming no operation. An earlier revision of this file answered the same
-        /// constraint with a second, undeclared h2c port outside the fixed 5101-5105 band; that band is
-        /// the one the attached environment fixes and the reserved 5103 DesignSystem slot is the only
-        /// spare in it, so the parallel band was withdrawn in favour of TLS on the assigned port. This
-        /// value and <see cref="GatewayOptions.HealthProbes"/>'s DataServices entry consequently name
-        /// the SAME listener; they stay separate members because one is a call edge and the other is an
-        /// observation, which is a topology distinction rather than an addressing one.
+        /// Naming 5102 here therefore fails every RPC on this edge during transport negotiation, before
+        /// the request reaches a method, which surfaces as a transport fault naming no operation - a
+        /// clean, immediate failure, which is the point of the split rather than a cost of it. Merging
+        /// both versions onto one TLS endpoint with ALPN negotiating between them is a supported
+        /// arrangement and needs no code change; it is not the shipped default because a misdirected
+        /// gRPC caller would then get a <c>404</c> from the REST surface instead. One measurement is
+        /// worth recording because it rules the CLEARTEXT variant out on functional grounds too: a
+        /// cleartext endpoint configured for both versions disables HTTP/2 outright and logs that it
+        /// has, and configured for <c>Http2</c> alone answers an HTTP/1.1 <c>GET</c> with <c>400</c>.
+        /// The band the environment fixes is the band it DOCUMENTS - health and ping on 5101-5105 - and
+        /// it documents no gRPC address at all, so 5112 moves nothing it fixes and leaves the reserved
+        /// 5103 DesignSystem slot untouched (C-D). This value and <see cref="GatewayOptions.HealthProbes"/>'s DataServices entry
+        /// consequently name DIFFERENT endpoints of the same service, which is why they were already
+        /// separate members: one is a call edge and the other an observation.
+        /// </para>
+        /// <para>
+        /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
+        /// this section supplies its own address; a deployment that forgets to gets THIS value. A
+        /// cleartext default therefore fails silently in the one case where nobody is looking - which is
+        /// the whole shape of CWE-319 - and every request on this edge carries a bearer token. The shipped
+        /// <c>appsettings.json</c> names the same scheme, so the two cannot disagree.
         /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
-        public string DataServices { get; set; } = "https://localhost:5102";
+        public string DataServices { get; set; } = "https://localhost:5112";
 
         /// <summary>
         /// The Security service's REST address. Defaults to the local topology's port 5104.
@@ -545,21 +774,35 @@ public sealed class GatewayOptions : IValidatableObject
         /// <remarks>
         /// REST is the transport on this edge so that token issuance and key publication use ordinary
         /// HTTP semantics, which is what lets a stock bearer handler fetch the published key material
-        /// with no bespoke code. HTTP semantics, not the plain-http scheme: the default here is https,
-        /// and appsettings.Development.json overrides it to http for the loopback bring-up only.
-        /// Overridden per environment through <c>Gateway__Upstreams__Security</c>. This address
-        /// identifies the service; it never carries credentials of any kind.
+        /// with no bespoke code. Overridden per environment through
+        /// <c>Gateway__Upstreams__Security</c>. This address identifies the service; it never carries
+        /// credentials of any kind.
         /// </remarks>
         /// <remarks>
         /// <para>
-        /// THE SCHEME IS <c>https</c> AND THAT IS NOT INTERCHANGEABLE WITH <c>http</c> HERE. Security
-        /// is this system's trust bootstrap: it is the sole token issuer, its token endpoint
-        /// authenticates callers with a client certificate - which cannot be presented on a plaintext
-        /// listener at all - and the key set every other service verifies against is fetched from it.
-        /// A plaintext address on this edge means an on-path attacker can substitute the published keys
-        /// and have all three verifying services accept tokens the attacker signed, while behaving
-        /// exactly as designed. See <c>OpenApi/security.v1.yaml</c>'s <c>servers</c> block, which
-        /// records the same decision on the publishing side.
+        /// THE SCHEME IS <c>https</c> BECAUSE IT IS THE SCHEME SECURITY BINDS (C-L). Security's shipped
+        /// listener is <c>https://+:5104</c>, and its token endpoint identifies its caller from a
+        /// presented client certificate - which cannot be requested, presented or validated on a
+        /// cleartext listener at all, so a plaintext Security could not issue a single token. The
+        /// environment's plaintext probe command fixes the readiness probe's SHAPE, not the transport
+        /// beneath it. Security is REST-only, so it needs no second endpoint - the protocol-version
+        /// split DataServices and Persistence carry does not arise here.
+        /// </para>
+        /// <para>
+        /// WHAT PLAINTEXT WOULD HAVE COST ON THIS EDGE, WHICH IS WHY NONE IS DECLARED. Security is this
+        /// system's trust bootstrap: on a channel an on-path attacker can rewrite, a substituted key set
+        /// makes all three verifying services accept tokens the attacker signed while behaving exactly
+        /// as designed. That is CWE-319 on the one edge where it costs the most, so the exposure is
+        /// closed rather than accepted; the member nonetheless stays an environment override so a
+        /// deployment can move the HOST without touching code. See <c>OpenApi/security.v1.yaml</c>'s
+        /// <c>servers</c> block, which records the same decision on the publishing side.
+        /// </para>
+        /// <para>
+        /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
+        /// this section supplies its own address; a deployment that forgets to gets THIS value. A
+        /// cleartext default therefore fails silently in the one case where nobody is looking - which is
+        /// the whole shape of CWE-319 - and every request on this edge carries a bearer token. The shipped
+        /// <c>appsettings.json</c> names the same scheme, so the two cannot disagree.
         /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
@@ -580,16 +823,18 @@ public sealed class GatewayOptions : IValidatableObject
     /// system rather than in a comment on a shared group.
     /// </para>
     /// <para>
-    /// THE PORTS ARE THE ASSIGNED PORTS, BECAUSE EACH SERVICE HAS EXACTLY ONE LISTENER. A readiness
+    /// THE PORTS ARE THE PORTS THE ENVIRONMENT DOCUMENTS, WHICH ARE THE HTTP/1.1 ONES. A readiness
     /// probe is an HTTP/1.1 <c>GET</c>, and Persistence on 5101, DataServices on 5102 and Security on
-    /// 5104 each serve it on the same TLS endpoint that carries their contract traffic - ALPN selects
-    /// HTTP/1.1 for the probe and HTTP/2 for gRPC on the one connection-by-connection basis.
+    /// 5104 each answer it there. Persistence and DataServices additionally bind a SECOND TLS
+    /// endpoint - 5111 and 5112 - carrying HTTP/2 for their gRPC contracts, one protocol version per
+    /// endpoint. A probe must never name those: an HTTP/1.1
+    /// <c>GET</c> against an HTTP/2-only endpoint answers <c>400</c>, so the readiness verdict would be
+    /// permanently negative and the gate that holds Gateway behind its upstreams would never open.
     /// </para>
     /// <para>
-    /// All three default to the local topology over https for the same reason the upstream addresses
-    /// do: a missing override must not silently downgrade a probe onto a channel an attacker can
-    /// rewrite, since a forged readiness verdict opens the dependency gate early. The loopback
-    /// plain-http topology is an override in appsettings.Development.json.
+    /// All three default to the local topology on the scheme those listeners actually bind. A default
+    /// naming a scheme nobody binds is the failure this group must not have, because a probe that
+    /// cannot connect reports the upstream down and holds the gate closed for a reason no log explains.
     /// </para>
     /// </remarks>
     public sealed class HealthProbeAddresses
@@ -610,6 +855,13 @@ public sealed class GatewayOptions : IValidatableObject
         /// client that reads it. Either change would put SQL generation one hop from the ingress while
         /// looking like configuration rather than the design breach it is.
         /// </para>
+        /// <para>
+        /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
+        /// this section supplies its own address; a deployment that forgets to gets THIS value. A
+        /// cleartext default therefore fails silently in the one case where nobody is looking - which is
+        /// the whole shape of CWE-319 - and every request on this edge carries a bearer token. The shipped
+        /// <c>appsettings.json</c> names the same scheme, so the two cannot disagree.
+        /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
         public string Persistence { get; set; } = "https://localhost:5101";
@@ -618,11 +870,20 @@ public sealed class GatewayOptions : IValidatableObject
         /// The DataServices service's REST base address, probed for readiness. Port 5102.
         /// </summary>
         /// <remarks>
-        /// The same listener <see cref="UpstreamAddresses.DataServices"/> names, and deliberately a
-        /// separate member rather than a shared one: this address authorises exactly one anonymous
-        /// <c>GET /health</c> for the C-10 aggregate, while that one carries the C-03 and C-04 call
-        /// edge. Collapsing the two would make an observation indistinguishable from an invocation in
-        /// configuration, which is the distinction the two groups exist to keep.
+        /// A DIFFERENT endpoint of the same service from the one
+        /// <see cref="UpstreamAddresses.DataServices"/> names, and that is why the two were already
+        /// separate members: this address authorises exactly one anonymous <c>GET /health</c> for the
+        /// C-10 aggregate on the HTTP/1.1 endpoint 5102, while that one carries the C-03 and C-04 call
+        /// edge on the HTTP/2 endpoint 5112. Collapsing them would make an observation
+        /// indistinguishable from an invocation in configuration - and would now also point one of the
+        /// two at a listener that cannot answer it.
+        /// <para>
+        /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
+        /// this section supplies its own address; a deployment that forgets to gets THIS value. A
+        /// cleartext default therefore fails silently in the one case where nobody is looking - which is
+        /// the whole shape of CWE-319 - and every request on this edge carries a bearer token. The shipped
+        /// <c>appsettings.json</c> names the same scheme, so the two cannot disagree.
+        /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
         public string DataServices { get; set; } = "https://localhost:5102";
@@ -635,6 +896,13 @@ public sealed class GatewayOptions : IValidatableObject
         /// deliberately rather than aliased: the two express different permissions and a deployment
         /// that terminated the probe somewhere else - at a sidecar, say - must be able to say so
         /// without also redirecting token issuance.
+        /// <para>
+        /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
+        /// this section supplies its own address; a deployment that forgets to gets THIS value. A
+        /// cleartext default therefore fails silently in the one case where nobody is looking - which is
+        /// the whole shape of CWE-319 - and every request on this edge carries a bearer token. The shipped
+        /// <c>appsettings.json</c> names the same scheme, so the two cannot disagree.
+        /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
         public string Security { get; set; } = "https://localhost:5104";
@@ -707,6 +975,200 @@ public sealed class GatewayOptions : IValidatableObject
                     + "half of this pair is unusable rather than merely weaker. Neither path is quoted "
                     + "here, because a startup log must not record where key material is mounted.",
                 [memberName]);
+        }
+    }
+
+    /// <summary>
+    /// The trust anchor internal TLS is verified against, bound from <c>Gateway:InternalTls</c>. One
+    /// path, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A CA CERTIFICATE IS PUBLIC MATERIAL, WHICH IS WHY THIS GROUP CARRIES A PATH ANYWAY. Nothing
+    /// about a root certificate is secret - it is the thing a server hands out - so the reason for a
+    /// path here is not confidentiality. It is that the anchor is a DEPLOYMENT artefact: one local CA
+    /// per environment, rotated on its own schedule, mounted read-only from the orchestration layer.
+    /// Embedding one in a settings file would pin every environment to one authority and make rotation
+    /// a code change. There is deliberately no member for certificate material, so none can be placed
+    /// in configuration, a log record or a characterization recording.
+    /// </para>
+    /// <para>
+    /// ONE MEMBER, NOT TWO. Unlike <see cref="MutualTlsClientOptions"/> there is no key path, because
+    /// verifying a chain needs only the public root. A trust anchor with a private key beside it would
+    /// mean this service could ISSUE certificates for the internal topology, which is a capability it
+    /// must not have.
+    /// </para>
+    /// </remarks>
+    public sealed class InternalTlsTrustOptions
+    {
+        /// <summary>
+        /// Path to the PEM-encoded certificate authority bundle internal server certificates are
+        /// verified against. Empty means platform default trust.
+        /// </summary>
+        /// <remarks>
+        /// The file may contain one certificate or a concatenated chain of them; every certificate it
+        /// carries becomes an acceptable root for internal traffic and nothing else does.
+        /// </remarks>
+        public string TrustedCaPath { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Whether this deployment narrows internal trust to a mounted anchor.
+        /// </summary>
+        public bool IsConfigured => !string.IsNullOrWhiteSpace(TrustedCaPath);
+
+        /// <summary>
+        /// Checks that a supplied anchor path is at least shaped like a path.
+        /// </summary>
+        /// <param name="configurationKeyPrefix">
+        /// The configuration path of this group, quoted into the message so an operator can find the
+        /// offending key without reading source.
+        /// </param>
+        /// <param name="memberName">The property name on the parent to attribute a failure to.</param>
+        /// <returns>One result per problem found, or an empty sequence when the group is usable.</returns>
+        /// <remarks>
+        /// The path is not echoed. A trust anchor is public material, but the MOUNT LAYOUT of a
+        /// container's secret volume is not something a startup record should publish, and the
+        /// configuration key alone is enough for an operator to find the setting.
+        /// </remarks>
+        internal IEnumerable<ValidationResult> Validate(string configurationKeyPrefix, string memberName)
+        {
+            if (TrustedCaPath.Length == 0 || !string.IsNullOrWhiteSpace(TrustedCaPath))
+            {
+                yield break;
+            }
+
+            yield return new ValidationResult(
+                $"'{configurationKeyPrefix}:{nameof(TrustedCaPath)}' is set to whitespace, which is "
+                    + "neither a path nor the empty value that means platform default trust. Set a "
+                    + "path to the PEM certificate authority bundle internal server certificates are "
+                    + "issued by, or remove the key entirely. The value is not quoted here, because a "
+                    + "startup record must not publish a container's secret mount layout.",
+                [memberName]);
+        }
+    }
+
+    /// <summary>
+    /// The bounds Gateway places on its outbound calls, bound from <c>Gateway:Outbound</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EXACTLY TWO MEMBERS, AND THE SHAPE OF THE PAIR IS THE POINT. A unary call is bounded by the
+    /// moment the caller gives up on it; a stream is bounded by the moment the upstream would have
+    /// reclaimed what the stream is reading from. Those are different quantities with different
+    /// derivations, so one value could not serve both without either cutting streams off or leaving
+    /// unary calls effectively unbounded.
+    /// </para>
+    /// <para>
+    /// NEITHER IS A RETRY SETTING, AND THAT ABSENCE IS DELIBERATE. Which operations may be retried is
+    /// a property of the CONTRACTS - whether replaying a call leaves a second server-held session
+    /// behind, whether a clause setter appends twice - and not a property a deployment gets to choose.
+    /// It is therefore classified in code, from the contract descriptors, in
+    /// <c>Clients/OutboundCallPolicy.cs</c>, where a contract change breaks the build rather than
+    /// silently changing an operator's retry posture. What a deployment does get to choose is how many
+    /// attempts and how long to spend, which is what <see cref="RequestTimeout"/> bounds.
+    /// </para>
+    /// </remarks>
+    public sealed class OutboundCallOptions
+    {
+        /// <summary>
+        /// The shipped total bound on a unary call.
+        /// </summary>
+        /// <remarks>
+        /// This is the documented default of the resilience package's own total request timeout, made
+        /// explicit here so that the deadline sent to the upstream and the budget the local pipeline
+        /// spends are the same number rather than two numbers that happen to agree.
+        /// </remarks>
+        public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// The shipped total bound on a streaming call.
+        /// </summary>
+        /// <remarks>
+        /// DERIVED FROM THE UPSTREAM RATHER THAN CHOSEN. Every stream Gateway opens belongs to a
+        /// DataServices session - a validation session or an expression session - and DataServices
+        /// reclaims an idle session after <c>DataServices:SessionLifetime:*:IdleTimeout</c>, whose
+        /// shipped value is five minutes. A stream still open past that point is holding a session
+        /// that the upstream's own policy would already have released, so this is the bound at which
+        /// continuing to wait stops being meaningful.
+        /// </remarks>
+        public static readonly TimeSpan DefaultStreamDeadline = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// The lower bound on <see cref="RequestTimeout"/>.
+        /// </summary>
+        /// <remarks>
+        /// This is the resilience package's documented default PER-ATTEMPT timeout, and the package's
+        /// own options validator requires the total to be at least the per-attempt value. A smaller
+        /// total is therefore not a tighter policy but an unstartable one, so it is refused here with
+        /// a message naming the key rather than left to surface as a framework validation error
+        /// against a generated handler name.
+        /// </remarks>
+        internal static readonly TimeSpan MinimumRequestTimeout = TimeSpan.FromSeconds(10);
+
+        /// <summary>
+        /// How long Gateway waits for a unary upstream call in total, across every attempt the
+        /// resilience pipeline makes. Defaults to <see cref="DefaultRequestTimeout"/>.
+        /// </summary>
+        /// <remarks>
+        /// THIS VALUE IS USED TWICE, WHICH IS WHY THERE IS ONLY ONE OF IT. It configures the outbound
+        /// resilience pipeline's total request timeout, and it is the gRPC deadline attached to every
+        /// unary call. A gRPC deadline is enforced by the client as a TOTAL bound across the retries
+        /// the pipeline performs beneath it, so a deadline shorter than the pipeline's budget would
+        /// cancel the call while the pipeline was still retrying, and a longer one would leave the
+        /// upstream working after the caller had stopped waiting. Deriving both from one setting makes
+        /// disagreement impossible rather than unlikely.
+        /// </remarks>
+        public TimeSpan RequestTimeout { get; set; } = DefaultRequestTimeout;
+
+        /// <summary>
+        /// How long Gateway holds a streaming upstream call open before abandoning it. Defaults to
+        /// <see cref="DefaultStreamDeadline"/>.
+        /// </summary>
+        /// <remarks>
+        /// MUST NOT EXCEED THE UPSTREAM'S SESSION IDLE LIFETIME. Past that point the upstream may have
+        /// reclaimed the session the stream reads from, so waiting longer cannot produce a result and
+        /// only delays the caller's error. It is a separate setting from
+        /// <see cref="RequestTimeout"/> because a stream that runs for minutes is correct behaviour
+        /// while a unary call that does so is not.
+        /// </remarks>
+        public TimeSpan StreamDeadline { get; set; } = DefaultStreamDeadline;
+
+        /// <summary>
+        /// Checks the two bounds and the relationship between them.
+        /// </summary>
+        /// <param name="configurationKeyPrefix">
+        /// The configuration path of this group, quoted into each message so an operator can find the
+        /// offending key without reading source.
+        /// </param>
+        /// <param name="memberName">The property name on the parent to attribute a failure to.</param>
+        /// <returns>One result per problem found, or an empty sequence when the group is usable.</returns>
+        internal IEnumerable<ValidationResult> Validate(
+            string configurationKeyPrefix,
+            string memberName)
+        {
+            if (RequestTimeout < MinimumRequestTimeout)
+            {
+                yield return new ValidationResult(
+                    $"'{configurationKeyPrefix}:{nameof(RequestTimeout)}' is "
+                        + $"{RequestTimeout}, which is below the {MinimumRequestTimeout} minimum. The "
+                        + "resilience pipeline's per-attempt timeout is that value, and a total budget "
+                        + "smaller than one attempt cannot be satisfied - the pipeline itself refuses "
+                        + "the configuration, and every outbound call would report a deadline failure "
+                        + "before the upstream could answer.",
+                    [memberName]);
+            }
+
+            if (StreamDeadline < RequestTimeout)
+            {
+                yield return new ValidationResult(
+                    $"'{configurationKeyPrefix}:{nameof(StreamDeadline)}' is {StreamDeadline}, which "
+                        + $"is shorter than '{configurationKeyPrefix}:{nameof(RequestTimeout)}' "
+                        + $"({RequestTimeout}). A stream is a long-lived call and is bounded by the "
+                        + "upstream's session lifetime rather than by a single request's budget, so a "
+                        + "stream bound below the unary bound would abandon event chains and retrieval "
+                        + "streams sooner than the ordinary calls beside them.",
+                    [memberName]);
+            }
         }
     }
 }
@@ -990,7 +1452,7 @@ internal static class AddressValidation
         {
             return new ValidationResult(
                 $"'{configurationKey}' must be an absolute URI, for example "
-                    + "'http://service-host:5102'. The configured value is not quoted here because a "
+                    + "'https://service-host:5102'. The configured value is not quoted here because a "
                     + "rejected address may carry a credential.",
                 [memberName]);
         }
@@ -1036,4 +1498,31 @@ internal static class AddressValidation
 
         return null;
     }
+}
+
+/// <summary>
+/// Bounds on the REST projection of the two upstream gRPC contracts.
+/// </summary>
+/// <remarks>
+/// <b>A RESOURCE BOUND, NOT A PERFORMANCE SETTING</b> - the distinction matters because no performance
+/// objective may be asserted anywhere in this refactor (AAP 0.8.5). The projection forwards a
+/// server-streaming upstream method as one JSON array, and this gateway is the process every request in
+/// the system passes through, so an unbounded upstream response is an unbounded amount of work at the one
+/// place that cannot afford it. Exceeding the bound abandons the document WITHOUT its closing bracket, so
+/// a caller detects an incomplete answer rather than receiving a truncated array that reads as complete.
+/// </remarks>
+public sealed class RestProjectionOptions
+{
+    /// <summary>
+    /// The largest number of elements the projection will forward for one streamed response.
+    /// </summary>
+    /// <remarks>
+    /// Generous rather than tight: a legitimate chunked retrieval produces one element per CHUNK rather
+    /// than per row, so a realistic result is nowhere near this and the bound is a backstop against a
+    /// runaway upstream. The range starts at one because a bound of zero would refuse every streamed
+    /// response including an empty one, which reads as a total outage; refusing that at startup is the
+    /// fail-fast posture this service applies to every structural fault.
+    /// </remarks>
+    [Range(1, int.MaxValue)]
+    public int MaxStreamedElements { get; set; } = 10_000;
 }

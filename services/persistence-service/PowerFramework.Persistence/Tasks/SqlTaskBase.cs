@@ -509,7 +509,7 @@ internal sealed record DataObjectDefinition(
 /// <para>
 /// <b>Why retrieval lives here too.</b> <c>_of_RetrieveWithParams</c> owns argument MATCHING
 /// [<c>:L597-L705</c>] but the final call is <c>Data.Retrieve(...)</c> on the DataWindow itself. That
-/// division is preserved exactly: <see cref="SqlTaskBase.RetrieveWithParams"/> does the matching and
+/// division is preserved exactly: <see cref="SqlTaskBase.RetrieveWithParamsAsync"/> does the matching and
 /// this member does the executing, so the matching rules stay unit-testable against a runtime that
 /// touches no database (constraint C-H).
 /// </para>
@@ -541,16 +541,29 @@ internal interface IDataObjectRuntime
     /// <param name="data">The store whose definition and carrier the retrieval fills.</param>
     /// <param name="parameters">
     /// The matched retrieval arguments in ONE-BASED legacy order, already resolved by
-    /// <see cref="SqlTaskBase.RetrieveWithParams"/>. Passed as a single list, which is the whole
+    /// <see cref="SqlTaskBase.RetrieveWithParamsAsync"/>. Passed as a single list, which is the whole
     /// reason the legacy's 20-arm unrolled <c>choose case</c> and its dynamic-invocation fallback have
     /// nothing to port (constraint C-D).
+    /// </param>
+    /// <param name="cancellationToken">
+    /// The request's token. <b>THE RETRIEVAL IS THE ONE PROVIDER CALL IN THIS SERVICE THAT IS GENUINELY
+    /// ASYNCHRONOUS, AND THAT IS WHY THIS MEMBER IS THE ONE THAT TAKES A TOKEN AND AWAITS.</b> Its whole
+    /// call chain above it - the query task's own retrieval body, the runner, and the streaming handler -
+    /// is already asynchronous, so nothing had to be restructured to reach it: the only thing missing was
+    /// that the last step ignored the caller. The oracle's equivalent poll is <c>of_IsCancelled()</c>,
+    /// which its retrieval body checks either side of the call
+    /// [<c>n_cst_thread_task_sqlquery.sru:L740, :L785</c>]; a token observed inside the retrieval is
+    /// strictly more responsive than a poll that can only fire once the retrieval has returned.
     /// </param>
     /// <returns>
     /// The retrieved row count, or a negative value on failure - the DataWindow convention, NOT the
     /// return-code algebra. The query task tests it as <c>nRowCnt &lt; 0</c>
     /// [<c>n_cst_thread_task_sqlquery.sru:L777</c>].
     /// </returns>
-    long Retrieve(ISqlDataStore data, IReadOnlyList<object?> parameters);
+    ValueTask<long> RetrieveAsync(
+        ISqlDataStore data,
+        IReadOnlyList<object?> parameters,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -674,11 +687,14 @@ internal interface ISqlDataStore
 
     /// <summary>
     /// Executes the retrieval with already-matched arguments, delegating to
-    /// <see cref="IDataObjectRuntime.Retrieve"/>.
+    /// <see cref="IDataObjectRuntime.RetrieveAsync"/>.
     /// </summary>
     /// <param name="parameters">The matched arguments in one-based legacy order.</param>
+    /// <param name="cancellationToken">The request's token, observed by the runtime.</param>
     /// <returns>The row count, or a negative value on failure.</returns>
-    long Retrieve(IReadOnlyList<object?> parameters);
+    ValueTask<long> RetrieveAsync(
+        IReadOnlyList<object?> parameters,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -799,6 +815,46 @@ internal sealed class SqlDataObjectStore : ISqlDataStore
         }
     }
 
+    /// <summary>
+    /// Installs a definition that was DERIVED from a syntax string rather than resolved from a name.
+    /// </summary>
+    /// <param name="definition">The derived definition.</param>
+    /// <remarks>
+    /// <para>
+    /// THE SECOND OF PowerBuilder's TWO WAYS TO GIVE A DataStore A DATA OBJECT. One is
+    /// <c>ds.DataObject = name</c>, which loads a compiled object from the library list and is the
+    /// <see cref="DataObject"/> setter above. The other is <c>ds.Create(syntax, ref error)</c>
+    /// [<c>n_cst_thread_task_sqlquery.sru:L619</c>], which builds one from a syntax string at run time -
+    /// and it is the path contract C-05 uses whenever a caller supplies a statement instead of naming a
+    /// data object, which is the ordinary case.
+    /// </para>
+    /// <para>
+    /// WHY THIS IS A METHOD ON THE STORE RATHER THAN A CATALOGUE ENTRY. A derived definition belongs to
+    /// ONE request: it exists because that request supplied a statement, and it is meaningless to any
+    /// other. Registering it in the shared catalogue under a generated name would work and was
+    /// considered, and it is worse in two ways that matter - the catalogue would grow for the lifetime of
+    /// the process with one entry per distinct statement, and a name a caller never chose would become
+    /// resolvable by anyone who guessed it. Holding it here means it is collected with the store.
+    /// </para>
+    /// <para>
+    /// The five assignments are exactly the <see cref="DataObject"/> setter's success arm, less the name
+    /// lookup. Keeping them identical is deliberate: a store built either way must describe identically,
+    /// or the query task's <c>DataWindow.Units</c> probe
+    /// [<c>n_cst_thread_task_sqlquery.sru:L554-L557</c>] would answer differently for the two paths.
+    /// </para>
+    /// </remarks>
+    internal void InstallDerivedDefinition(DataObjectDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+
+        _dataObject = definition.DataObject;
+        _definition = definition;
+        _sqlSelect = definition.SqlSelect;
+        _sort = definition.Sort;
+        _filter = definition.Filter;
+        Carrier.Processing = DataWindowProcessing.FromDescribe(definition.Processing);
+    }
+
     /// <inheritdoc/>
     public string GetSqlSelect() => _sqlSelect;
 
@@ -914,10 +970,13 @@ internal sealed class SqlDataObjectStore : ISqlDataStore
     }
 
     /// <inheritdoc/>
-    public long Retrieve(IReadOnlyList<object?> parameters)
+    public ValueTask<long> RetrieveAsync(
+        IReadOnlyList<object?> parameters,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(parameters);
-        return _runtime.Retrieve(this, parameters);
+
+        return _runtime.RetrieveAsync(this, parameters, cancellationToken);
     }
 }
 
@@ -1061,6 +1120,29 @@ internal interface ISqlRetrievalHookActivator
     /// outcome as a hook that declines.
     /// </returns>
     bool TryCreate(string? className, [NotNullWhen(true)] out ISqlRetrievalHook? hook);
+
+    /// <summary>
+    /// Whether <paramref name="className"/> names a SANCTIONED hook.
+    /// </summary>
+    /// <param name="className">The class name to test.</param>
+    /// <returns>
+    /// <see langword="true"/> only when the name is non-blank and has been registered.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE ADMISSION TEST, AND IT EXISTS SO A REFUSAL CAN HAPPEN AT THE SETTER.</b> The
+    /// activator is the allowlist, so it is the only component that can answer whether a caller-supplied
+    /// name is sanctioned. Without this member the setter had no way to ask, so an unsanctioned name was
+    /// stored, silently ignored at retrieval, and the retrieval then ran with NO hook - which reads to
+    /// the caller as "your hook ran and did nothing" rather than "your hook was rejected".
+    /// </para>
+    /// <para>
+    /// A blank name answers <see langword="false"/> here while remaining perfectly legal at the setter:
+    /// blank means "no hook" [<c>n_cst_thread_task_sqlquery.sru:L516</c>], which is the ordinary case and
+    /// not a name at all. Callers must therefore test blankness before consulting this member.
+    /// </para>
+    /// </remarks>
+    bool IsRegistered(string? className);
 }
 
 /// <summary>
@@ -1113,7 +1195,8 @@ internal sealed class SqlRetrievalHookActivator : ISqlRetrievalHookActivator
     /// </summary>
     /// <param name="className">The class name to test.</param>
     /// <returns><see langword="true"/> when the name is registered.</returns>
-    internal bool IsRegistered(string? className) =>
+    /// <inheritdoc/>
+    public bool IsRegistered(string? className) =>
         !string.IsNullOrWhiteSpace(className) && _registrations.ContainsKey(className);
 
     /// <inheritdoc/>
@@ -1373,8 +1456,22 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// </summary>
     private readonly List<SqlTaskParameter> _sqlParams = [];
 
-    /// <summary>Mirrors <c>int _nTransRefIdx</c> [<c>:L49</c>]; zero means "no reference held".</summary>
-    private int _transactionRefIndex;
+    /// <summary>
+    /// Mirrors <c>int _nTransRefIdx</c> [<c>:L49</c>]; an invalid handle means "no reference held".
+    /// </summary>
+    /// <remarks>
+    /// <b>A STABLE POOL LEASE RATHER THAN THE ONE-BASED POSITION, AND THE REASON IS DECOMPOSITION.</b> The
+    /// legacy field IS the position, and the legacy pool renumbers every later position when an entry is
+    /// removed [<c>n_cst_thread_trans_pool.sru:L114</c>] - a preserved defect the pool's positional API
+    /// still reproduces byte for byte. It was unreachable in the legacy because a task released and zeroed
+    /// its index in the same breath [<c>:L123</c>], so it never carried a stale one. A server-held task,
+    /// however, is created by one request and retrieved, paged and destroyed by later ones, so an
+    /// UNRELATED holder's release now renumbers this task's reference and would silently repoint it at
+    /// somebody else's transaction. The lease is monotonic and never reused, so an outlived reference
+    /// resolves NOTHING instead of resolving a stranger. Every guard below keeps its shape: the legacy's
+    /// <c>&gt; 0</c> becomes <c>IsValid</c> and its <c>= 0</c> becomes <see cref="PoolLease.None"/>.
+    /// </remarks>
+    private PoolLease _transactionLease;
 
     /// <summary>
     /// Mirrors <c>n_cst_thread_trans _transObject</c> [<c>:L50</c>]. Nullable because the legacy
@@ -1572,12 +1669,21 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         // the complete generated statement including interpolated literal values whenever the
         // connection disabled bind variables. The legacy logger performs no redaction at all; adding
         // it changes no observable statement, only what leaves the process in a log record.
+        //
+        // THE PROVIDER'S ERROR TEXT GOES THROUGH THE SAME REDACTOR, and it used to go through nothing at
+        // all. It reads like a diagnostic rather than a statement, which is exactly why it was trusted -
+        // but a provider composes that text FROM the statement it was executing, so it habitually quotes
+        // the offending fragment back: a constraint violation names the value that violated it, a type
+        // mismatch names the value that would not convert, and a syntax error echoes the surrounding
+        // text. Those are the interpolated literals arriving by a second route, so the same rule applies.
+        // Masking is content-preserving for the diagnostic itself - the code, the constraint name and the
+        // column name are not literals and survive - so nothing an operator needs is lost.
         _logger.LogError(
             "Database error {SqlDbCode} in buffer {Buffer} at row {Row}: {SqlErrText}. Statement: {SqlSyntax}",
             error.SqlDbCode,
             error.Buffer,
             error.Row,
-            error.SqlErrText,
+            SqlRedactor.Instance.Redact(error.SqlErrText),
             SqlRedactor.Instance.Redact(error.SqlSyntax));
 
         // [:L97] `return 3` - preserved verbatim. See DbErrorEventResult for why it is not a RetCode.
@@ -1646,10 +1752,10 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         // [:L121-L125] a descriptor change invalidates any transaction already borrowed for the old
         // one: drop the pool reference, zero the index, and NULL THE TRANSACTION REFERENCE.
         // The null is hazard 2 [docs/PB多线程绕坑提示.md:L5] and is deterministic, not a collector hint.
-        if (_transactionRefIndex > 0)
+        if (_transactionLease.IsValid)
         {
-            GetTransactionPool().RemoveRef(_transactionRefIndex);
-            _transactionRefIndex = 0;
+            GetTransactionPool().RemoveRef(_transactionLease);
+            _transactionLease = PoolLease.None;
             _transactionObject = null;
         }
 
@@ -1819,13 +1925,13 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         }
 
         // [:L139] note FAILED here rather than a more specific code - preserved as the oracle has it.
-        if (_transactionRefIndex <= 0)
+        if (!_transactionLease.IsValid)
         {
             return RetCode.FAILED;
         }
 
         // [:L141]
-        _transactionPool.Release(_transactionRefIndex, ref transaction);
+        _transactionPool.Release(_transactionLease, ref transaction);
 
         // [:L143] hazard 2 again: the reference is cleared deterministically.
         _transactionObject = null;
@@ -1863,7 +1969,7 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         TransactionPool transactionPool = GetTransactionPool();
 
         // [:L153]
-        if (_transactionRefIndex > 0 && Predicates.IsValidObject(_transactionObject))
+        if (_transactionLease.IsValid && Predicates.IsValidObject(_transactionObject))
         {
             // [:L154]
             if (!_transactionObject!.IsBroken())
@@ -1878,18 +1984,18 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
             }
 
             // [:L160-L161]
-            transactionPool.RemoveRef(_transactionRefIndex);
-            _transactionRefIndex = 0;
+            transactionPool.RemoveRef(_transactionLease);
+            _transactionLease = PoolLease.None;
         }
 
         // [:L164-L166]
-        if (_transactionRefIndex <= 0)
+        if (!_transactionLease.IsValid)
         {
-            _transactionRefIndex = transactionPool.AddRef(_transactionData);
+            _transactionLease = transactionPool.AddRefLease(_transactionData);
         }
 
         // [:L168]
-        long rtCode = transactionPool.Get(_transactionRefIndex, out IPooledTransaction? borrowed);
+        long rtCode = transactionPool.Get(_transactionLease, out IPooledTransaction? borrowed);
 
         // [:L169] IsSucceeded, not `= RetCode.OK`: the tri-state algebra is preserved everywhere.
         if (Predicates.IsSucceeded(rtCode))
@@ -2824,6 +2930,26 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         " \t\n\r'\"+-*/\\%><=(){}[],.:;?!&#|");
 
     /// <summary>
+    /// The prefix every generated bound-parameter name carries, giving <c>@p1</c>, <c>@p2</c> and so on.
+    /// ONE BASED, matching every other bound-parameter name in this service and the one-based ordinals the
+    /// legacy counts retrieval arguments and DataWindow columns with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>NOT AN ORACLE VALUE - it names something the oracle does not have.</b> The legacy interpolates
+    /// literals and binds nothing, so it has no placeholder vocabulary at all. These names appear ONLY in
+    /// the executable form of a bound statement and never in the observable one, so they cannot reach a
+    /// SQL-preview hook, a database-error payload or a characterization recording.
+    /// </para>
+    /// <para>
+    /// <c>@</c> rather than <c>$</c> or <c>:</c> because it is the form every provider this service
+    /// targets accepts, and because <c>:</c> is the oracle's OWN placeholder prefix - reusing it would
+    /// make a generated name indistinguishable from a caller's unsubstituted placeholder.
+    /// </para>
+    /// </remarks>
+    private const string BoundParameterPrefix = "@p";
+
+    /// <summary>
     /// Substitutes every named placeholder in a statement with its parameter's literal - the port of
     /// <c>_of_sqlbindparams</c> [<c>n_cst_thread_task_sqlbase.sru:L371-L482</c>].
     /// </summary>
@@ -2881,8 +3007,67 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// </remarks>
     protected long BindParams(ref string sql, long dbType, string dwArgString)
     {
+        long code = BindParams(sql, dbType, dwArgString, out SqlBoundStatement statement);
+
+        // Written back UNCONDITIONALLY, including on a failure arm, because the oracle rewrites its
+        // `ref string` progressively - once per substitution [:L464] - and a caller that inspected the
+        // statement after a mid-loop refusal would see the partial rewrite. Preserved rather than tidied
+        // (C-B); every current caller discards the statement on failure.
+        sql = statement.ObservableText;
+
+        return code;
+    }
+
+    /// <summary>
+    /// Substitutes every named placeholder and emits BOTH the observable statement and a parameterized
+    /// one - the same port as <see cref="BindParams(ref string, long, string)"/>, carrying two forms.
+    /// </summary>
+    /// <param name="sql">The statement to bind.</param>
+    /// <param name="dbType">The dialect, forwarded to <see cref="ParamToString"/>.</param>
+    /// <param name="dwArgString">
+    /// The DataWindow argument list, used to NAME otherwise positional parameters [<c>:L410-L416</c>].
+    /// </param>
+    /// <param name="statement">
+    /// The bound statement: the observable text the oracle would have produced, the parameterized text
+    /// with a placeholder per parameter, and the parameter values in placeholder order.
+    /// </param>
+    /// <returns>Exactly the codes <see cref="BindParams(ref string, long, string)"/> returns.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY TWO FORMS AND NOT ONE.</b> The oracle interpolates rendered literals into the statement
+    /// text, and it does so because PowerBuilder was configured not to bind - a
+    /// <c>DisableBind=1</c> connection parameter means the runtime uses no bind variables
+    /// [<c>n_cst_thread_task_sqlbase.sru:L128-L129</c>]. That interpolation is the mechanical root of the
+    /// injection exposure. It is ALSO observable: the interpolated text is what a SQL-preview hook sees,
+    /// what a database-error payload's statement field carries, and what a characterization recording
+    /// compares. So neither form can be dropped - one is the behaviour, the other is the safe execution
+    /// path - and this method produces both from ONE pass so they cannot disagree.
+    /// </para>
+    /// <para>
+    /// <b>ONE PLACEHOLDER PER PARAMETER, NOT PER OCCURRENCE.</b> A named parameter fills every
+    /// placeholder sharing its name [<c>:L460, :L472</c>], and the parameterized form reproduces that by
+    /// reusing the same placeholder name at each occurrence with a single bound value - which is exactly
+    /// what a named parameter means to the provider. A positional parameter fills one placeholder and
+    /// therefore contributes one occurrence.
+    /// </para>
+    /// <para>
+    /// <b>The two texts are spliced with INDEPENDENT offset tracks.</b> A rendered literal and a
+    /// placeholder name almost never have the same length, so the shift applied to later positions
+    /// [<c>:L467-L470</c>] differs between the two forms. Sharing one track would corrupt whichever form
+    /// it was not computed for, so each carries its own - which is the only structural difference between
+    /// this method and the oracle's single-form loop.
+    /// </para>
+    /// </remarks>
+    protected long BindParams(
+        string sql,
+        long dbType,
+        string dwArgString,
+        out SqlBoundStatement statement)
+    {
         ArgumentNullException.ThrowIfNull(sql);
         ArgumentNullException.ThrowIfNull(dwArgString);
+
+        statement = SqlBoundStatement.Unbound(sql);
 
         // [:L398] `sqlParams = _sqlParams` - a PowerBuilder array assignment, and therefore a COPY. It
         // has to be one: the names below are rewritten from the DataWindow argument list and the task's
@@ -2939,12 +3124,21 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
             }
         }
 
-        // [:L418-L451] locate the placeholders.
+        // [:L418-L451] locate the placeholders. ONE scan, and the positions it produces seed BOTH
+        // offset tracks below - so the two forms can never disagree about where a placeholder was.
         if (!TryLocatePlaceholders(sql, out List<SqlPlaceholder> placeholders))
         {
             // [:L451] `if bQtUnclose then return RetCode.E_INVALID_ARGUMENT`
             return RetCode.E_INVALID_ARGUMENT;
         }
+
+        // The observable form the oracle produces, and the executable form beside it. The executable one
+        // starts as the same text and diverges only where a placeholder is replaced - by a rendered
+        // literal in one, by a provider placeholder name in the other.
+        string observable = sql;
+        string bound = sql;
+        List<SqlPlaceholder> boundPlaceholders = [.. placeholders];
+        List<SqlBoundParameter> boundParameters = [];
 
         // [:L453] `nArgCnt = UpperBound(sqlArgs)`
         // [:L454] `//if nArgCnt < nCount then return RetCode.E_OUT_OF_BOUND` - COMMENTED OUT in the
@@ -2958,6 +3152,11 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         {
             SqlTaskParameter parameter = sqlParams[paramIndex - OneBasedIndex.FirstIndex];
             bool isPositional = parameter.Name.Length == 0;
+
+            // Per PARAMETER, not per occurrence: the name is minted on first use and the value carried
+            // once, so a named parameter filling three placeholders yields ONE bound value.
+            string? boundName = null;
+            bool boundValueCarried = false;
 
             for (int argIndex = OneBasedIndex.FirstIndex; argIndex <= argCount; argIndex++)
             {
@@ -2981,27 +3180,71 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
                 if (replacement is null)
                 {
                     // THE ONE NARROWING - see the remarks. The oracle would splice a null here and
-                    // nullify the whole statement while still answering success.
+                    // nullify the whole statement while still answering success. The partial rewrite is
+                    // published so a caller inspecting the statement sees what the oracle would have.
+                    statement = new SqlBoundStatement(observable, bound, boundParameters);
+
                     return RetCode.E_SQL_BIND_ARG_FAILED;
+                }
+
+                // ONE bound name per PARAMETER: a named parameter reuses it at every occurrence, which is
+                // exactly what a named provider parameter means, so the value is carried once.
+                // ONE-BASED, AND THE OFF-BY-ONE HERE WOULD BE SILENT. The name minted here has to be
+                // the name SqlCommandText.BindTo binds, because the bound statement is carried to the
+                // engine through that type and the engine binds POSITIONALLY - it re-derives each
+                // parameter's name from its ordinal rather than reading the name recorded here. A
+                // zero-based name would still produce a statement that LOOKS right and a parameter
+                // collection that LOOKS right, and every execution would then fail on an unbound
+                // placeholder. Sql/SqlUpdateCarrier's generated statements use the same convention,
+                // so there is exactly one placeholder spelling in this service.
+                boundName ??= string.Concat(
+                    BoundParameterPrefix,
+                    (boundParameters.Count + 1).ToString(CultureInfo.InvariantCulture));
+
+                if (!boundValueCarried)
+                {
+                    boundParameters.Add(new SqlBoundParameter(boundName, parameter.Value));
+                    boundValueCarried = true;
                 }
 
                 // [:L464] `sql = Left(sql, pos - 1) + sReplace + Mid(sql, pos + length)`.
                 // Positions are ONE-BASED PowerBuilder string offsets, converted here and only here.
                 int spliceStart = (int)placeholder.Position - OneBasedIndex.FirstIndex;
                 int spliceEnd = spliceStart + (int)placeholder.Length;
-                sql = string.Concat(sql.AsSpan(0, spliceStart), replacement, sql.AsSpan(spliceEnd));
+                observable = string.Concat(
+                    observable.AsSpan(0, spliceStart),
+                    replacement,
+                    observable.AsSpan(spliceEnd));
+
+                // The same splice on the executable form, against ITS OWN position track, because a
+                // placeholder name and a rendered literal have different lengths.
+                SqlPlaceholder boundPlaceholder = boundPlaceholders[argIndex - OneBasedIndex.FirstIndex];
+                int boundStart = (int)boundPlaceholder.Position - OneBasedIndex.FirstIndex;
+                int boundEnd = boundStart + (int)boundPlaceholder.Length;
+                bound = string.Concat(
+                    bound.AsSpan(0, boundStart),
+                    boundName,
+                    bound.AsSpan(boundEnd));
 
                 // [:L466]
                 placeholder.Replaced = true;
                 placeholders[argIndex - OneBasedIndex.FirstIndex] = placeholder;
 
+                boundPlaceholder.Replaced = true;
+                boundPlaceholders[argIndex - OneBasedIndex.FirstIndex] = boundPlaceholder;
+
                 // [:L467-L470] shift every LATER placeholder by the length difference.
                 long offset = replacement.Length - placeholder.Length;
+                long boundOffset = boundName.Length - boundPlaceholder.Length;
                 for (int laterIndex = argIndex + 1; laterIndex <= argCount; laterIndex++)
                 {
                     SqlPlaceholder later = placeholders[laterIndex - OneBasedIndex.FirstIndex];
                     later.Position += offset;
                     placeholders[laterIndex - OneBasedIndex.FirstIndex] = later;
+
+                    SqlPlaceholder laterBound = boundPlaceholders[laterIndex - OneBasedIndex.FirstIndex];
+                    laterBound.Position += boundOffset;
+                    boundPlaceholders[laterIndex - OneBasedIndex.FirstIndex] = laterBound;
                 }
 
                 // [:L471-L472] a positional parameter fills exactly one placeholder and stops; a named
@@ -3012,6 +3255,10 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
                 }
             }
         }
+
+        // Published before the final check, so an unmatched-placeholder refusal still carries the
+        // progressive rewrite the oracle would have left behind.
+        statement = new SqlBoundStatement(observable, bound, boundParameters);
 
         // [:L476-L479] every placeholder must have been substituted.
         for (int argIndex = OneBasedIndex.FirstIndex; argIndex <= argCount; argIndex++)
@@ -3034,6 +3281,16 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// <param name="dbType">The dialect.</param>
     /// <returns>Whatever the three-argument overload returns.</returns>
     protected long BindParams(ref string sql, long dbType) => BindParams(ref sql, dbType, string.Empty);
+
+    /// <summary>
+    /// The three-argument dual-form overload - an empty DataWindow argument list, both statement forms.
+    /// </summary>
+    /// <param name="sql">The statement to bind.</param>
+    /// <param name="dbType">The dialect.</param>
+    /// <param name="statement">The bound statement, in both forms.</param>
+    /// <returns>Whatever the four-argument overload returns.</returns>
+    protected long BindParams(string sql, long dbType, out SqlBoundStatement statement) =>
+        BindParams(sql, dbType, string.Empty, out statement);
 
     /// <summary>
     /// Locates every placeholder in a statement - the port of the scan at
@@ -3294,7 +3551,9 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// regression, because the legacy's own dynamic fallback exceeded them too.
     /// </para>
     /// </remarks>
-    protected long RetrieveWithParams(ISqlDataStore data)
+    protected ValueTask<long> RetrieveWithParamsAsync(
+        ISqlDataStore data,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(data);
 
@@ -3384,8 +3643,10 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         //  simply not compared, exactly as here.
         // -----------------------------------------------------------------------------------------
 
-        // [:L649-L702] collapsed to one variadic call - see the remarks.
-        return data.Retrieve(matched);
+        // [:L649-L702] collapsed to one variadic call - see the remarks. The argument MATCHING above is
+        // synchronous and stays that way; only the call itself awaits, which keeps this method's whole
+        // parity surface - the matching rules - testable against a runtime that touches no database (C-H).
+        return data.RetrieveAsync(matched, cancellationToken);
     }
 
     #endregion
@@ -3696,6 +3957,32 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     }
 
     /// <summary>
+    /// Whether a hook class name is ADMISSIBLE - blank, or naming a sanctioned hook.
+    /// </summary>
+    /// <param name="hookClassName">The caller-supplied name.</param>
+    /// <returns>
+    /// <see langword="true"/> when the name is blank, meaning "no hook", or names a registered hook.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SETTER'S GUARD, AND THE REASON IT IS AT THE SETTER RATHER THAN AT RETRIEVAL.</b> A hook
+    /// class name is caller-controlled input, and the activator is an allowlist, so an unregistered name
+    /// can never produce a hook. Storing it anyway and discovering that at retrieval time means the
+    /// retrieval RUNS - with no hook, and reporting success - so a caller who asked for a hook is told
+    /// its request succeeded while the behaviour it asked for silently did not happen. Refusing at the
+    /// setter turns that into an argument error the caller can act on, at the point it can still act.
+    /// </para>
+    /// <para>
+    /// <b>BLANK IS ADMISSIBLE AND MUST STAY SO (C-B).</b> The oracle's own guard is
+    /// <c>if _sHookClass &lt;&gt; "" then</c> [<c>n_cst_thread_task_sqlquery.sru:L516</c>] - a blank name
+    /// means "no hook", which is the ordinary case, and refusing it would reject every caller that simply
+    /// does not want one.
+    /// </para>
+    /// </remarks>
+    protected bool IsAdmissibleHookClass(string? hookClassName) =>
+        string.IsNullOrWhiteSpace(hookClassName) || _hookActivator.IsRegistered(hookClassName);
+
+    /// <summary>
     /// Whether a hook result means "NOT HANDLED - run the default retrieval".
     /// </summary>
     /// <param name="hookResult">
@@ -3811,10 +4098,10 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         _host.OnUninit();
 
         // [:L715-L719]
-        if (_transactionRefIndex > 0)
+        if (_transactionLease.IsValid)
         {
-            GetTransactionPool().RemoveRef(_transactionRefIndex);
-            _transactionRefIndex = 0;
+            GetTransactionPool().RemoveRef(_transactionLease);
+            _transactionLease = PoolLease.None;
 
             // [:L718] `SetNull(_transObject)` - hazard 2, deterministic.
             _transactionObject = null;
@@ -3827,6 +4114,48 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
             _committedSignal = null;
         }
     }
+
+    /// <summary>
+    /// The composition root's entry point into <see cref="OnPrepare"/> - the port of the substrate
+    /// DISPATCHING <c>onprepare</c> before it runs the task body.
+    /// </summary>
+    /// <returns><see cref="OnPrepare"/>'s answer, which is the substrate's continue convention.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists at all.</b> <see cref="OnPrepare"/> is <see langword="protected"/> because the
+    /// oracle declares it as an EVENT, and an event is raised by the substrate rather than called by a
+    /// peer. This service has no PowerBuilder substrate, so the composition root is the substrate, and
+    /// this is the seam it raises the event through. Without it the hook is unreachable and the commit
+    /// signal is never re-armed between dispatches - which is precisely the defect this member fixes.
+    /// </para>
+    /// <para>
+    /// <b>Per DISPATCH, not per task.</b> The oracle's prepare event fires once for every run of the
+    /// task body, and its body resets the commit signal [<c>:L725-L727</c>] so that an
+    /// <see cref="SqlTaskProxyBase.IsCommitted"/> reading cannot survive from one dispatch into the
+    /// next. A caller therefore raises this immediately BEFORE each execution, never once per lifetime.
+    /// </para>
+    /// </remarks>
+    internal long RunPrepare() => OnPrepare();
+
+    /// <summary>
+    /// The composition root's entry point into <see cref="OnUninit"/> - the port of the substrate
+    /// DISPATCHING <c>onuninit</c> as the worker session tears down.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Per TASK LIFETIME, not per dispatch - and the asymmetry with <see cref="RunPrepare"/> is
+    /// deliberate.</b> The oracle's uninit event releases the pooled transaction reference and CLOSES
+    /// the commit handle [<c>:L716-L722</c>]. Raising it between dispatches would destroy the signal the
+    /// next dispatch needs, so it belongs on the teardown path only. <see cref="Dispose(bool)"/> routes
+    /// through it, which is what makes the hook unconditional: every disposal path - a clean release, a
+    /// session end, or a faulted run unwinding through a <see langword="finally"/> - reaches it.
+    /// </para>
+    /// <para>
+    /// Idempotent by construction: the pooled reference is guarded on a positive index and the commit
+    /// signal on a non-null reference, so a second raise is a no-op rather than a double release.
+    /// </para>
+    /// </remarks>
+    internal void RunUninit() => OnUninit();
 
     /// <summary>
     /// The error hook - the port of <c>event onerror</c>
@@ -3898,9 +4227,17 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// </param>
     /// <remarks>
     /// <para>
-    /// The pool reference is dropped and the transaction reference nulled here as well as in
-    /// <see cref="OnUninit"/>, for the reason hazard 2 gives: a reference that outlives the task is the
-    /// failure mode, and a task discarded on an exception path never reached uninit. The transaction
+    /// <b>Disposal RAISES <see cref="OnUninit"/> rather than re-implementing it.</b> The two once
+    /// carried the same three actions side by side, which left the hook itself unreachable on every
+    /// path that only disposed the task - so a derived override never ran, and neither did
+    /// <c>_host.OnUninit()</c>. Routing through the hook makes teardown unconditional: a clean release,
+    /// a session end, and a faulted run unwinding through a <see langword="finally"/> all reach the same
+    /// single teardown, in the oracle's order. The hook is idempotent, so an explicit
+    /// <see cref="RunUninit"/> followed by disposal releases once.
+    /// </para>
+    /// <para>
+    /// The reason teardown must happen here at all is hazard 2's: a reference that outlives the task is
+    /// the failure mode, and a task discarded on an exception path never reached uninit. The transaction
     /// itself is NOT disposed - it belongs to the pool, and this task only ever borrowed it.
     /// </para>
     /// <para>
@@ -3919,17 +4256,15 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
 
         if (disposing)
         {
-            if (_transactionRefIndex > 0)
-            {
-                _transactionPool.RemoveRef(_transactionRefIndex);
-                _transactionRefIndex = 0;
-            }
-
-            // Hazard 2 again: cleared, never left for the collector.
-            _transactionObject = null;
-
-            _committedSignal?.Dispose();
-            _committedSignal = null;
+            // THROUGH THE HOOK, NOT ALONGSIDE IT, and the difference is the whole point of this arm.
+            // Hand-rolling the three actions here reaches `_host.OnUninit()` on NEITHER path and reaches
+            // a derived override on neither either - so a task that was disposed rather than explicitly
+            // torn down skipped every observer of its own teardown while still releasing its resources,
+            // which is the kind of omission nothing downstream can detect. The hook releases the pooled
+            // reference on a valid lease, clears the transaction reference rather than leaving it for the
+            // collector (hazard 2 [docs/PB多线程绕坑提示.md:L5]), and closes the commit signal - and every
+            // one of those is guarded, so raising it twice absorbs the repeat instead of double-releasing.
+            OnUninit();
         }
 
         _disposed = true;

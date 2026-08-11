@@ -250,6 +250,22 @@ enum OrderingDiscipline {
   ORDERING_DISCIPLINE_SYNCHRONOUS = 1;
   // Pattern (a). A monotonic token a consumer MAY use to detect and reorder out-of-order delivery,
   // because these events carry no cross-event state.
+  //
+  //
+  // WHAT THE SERVER DOES WITH IT ON `EventChain`, STATED SO A CLIENT NEED NOT GUESS. On that stream
+  // DataServices is itself the consumer, and it ENFORCES the order rather than repairing it. A token
+  // ABOVE the ordering mark is admitted even when it is not the immediate successor, because a gap is
+  // legitimate here: the sequence space is shared with the outbound direction, so the numbers the
+  // server consumed are numbers the client never sends. A token AT OR BELOW the mark - a reversal or
+  // a duplicate - is refused FAILED_PRECONDITION. The server does NOT buffer and re-sort.
+  //
+  // AND THE REASON IT DOES NOT IS WORTH RECORDING, because "MAY reorder" invites the opposite guess.
+  // One dispatch consumes several tokens from the shared space (the chain's outcome report and the
+  // result write each take one), so the number a client must send next is one past the highest token
+  // it has SEEN on the stream - which means it cannot know its second token without reading the
+  // first response, and therefore cannot pipeline. Since one gRPC stream delivers a sender's messages
+  // in order, a displaced arrival is not a transport artifact at all: it is a sender defect, and the
+  // predecessor a buffer would wait for does not exist. A defined error is the honest answer.
   ORDERING_DISCIPLINE_SEQUENCED = 2;
 }
 

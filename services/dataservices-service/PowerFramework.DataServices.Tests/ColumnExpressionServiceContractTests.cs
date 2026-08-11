@@ -209,9 +209,17 @@ public sealed class ColumnExpressionServiceContractTests
         ExpressionSessionRegistry Sessions,
         ColumnExpressionEventRelay Relay);
 
-    private static Harness NewHarness()
+    private static Harness NewHarness() => NewHarness(new DataServicesOptions());
+
+    /// <summary>Builds a harness over explicit options.</summary>
+    /// <param name="options">The options the service and the session registry both read.</param>
+    /// <returns>The harness.</returns>
+    /// <remarks>
+    /// An overload rather than a parameter with a default, so every existing call site keeps asserting
+    /// against the SHIPPED options and only a suite that needs a different value says so.
+    /// </remarks>
+    private static Harness NewHarness(DataServicesOptions options)
     {
-        DataServicesOptions options = new();
         ExpressionTraceBroker trace = new();
         ExpressionSessionRegistry sessions = new(
             Options.Create(options),
@@ -934,6 +942,107 @@ public sealed class ColumnExpressionServiceContractTests
         answers.Complete();
         await channel;
         Assert.Equal(0, h.Macro.AttachedCount);
+    }
+
+    /// <summary>
+    /// An unserviced macro invocation is bounded by the configured backstop rather than held forever.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE BOUND USED TO BE ABSENT, and its absence was argued for: passing no invocation timeout was
+    /// documented as refusing to invent a duration, with the per-call cancellation token named as the
+    /// bound instead. The reasoning was sound and the conclusion was not, because at the time NO CALLER
+    /// SET A DEADLINE - so the "bound" was the caller's own cancellation and nothing else, and a client
+    /// that attached a channel and then never answered on it held the session, its engines and the
+    /// calculating call open for as long as the transport stayed up.
+    /// </para>
+    /// <para>
+    /// THIS DRIVES THE REAL PATH rather than asserting the value was passed. The channel is attached, so
+    /// the invocation is dispatched for real; the handler deliberately does not answer; and the
+    /// calculation is expected to come back rather than hang. A backstop of null - the state this
+    /// replaces - hangs here until the suite's own cancellation fires, so the assertion is on the
+    /// difference the fix makes and not on a spelling.
+    /// </para>
+    /// <para>
+    /// The configured value is a few tens of milliseconds because a wall-clock wait is what the
+    /// invocation actually measures. It is set on the OPTION rather than on the session lifetime beside
+    /// it, which is the reason the two are separate keys: shortening the backstop for a test must not
+    /// also make the session itself expire mid-test.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task InvokeMethodChannel_BoundsAnUnservicedInvocationByTheConfiguredBackstop()
+    {
+        DataServicesOptions options = new();
+        options.ColumnExpression.MacroInvocationTimeout = TimeSpan.FromMilliseconds(50);
+
+        Harness h = NewHarness(options);
+        (string session, IReadOnlyList<string> handles) = await OpenAsync(h.Service, "dwA");
+        string dw = handles[0];
+        await EnableAsync(h.Service, session, dw);
+
+        C04StreamReader<InvokeMethodResponse> answers = new();
+        List<InvokeMethodRequest> asked = [];
+
+        // THE HANDLER THAT NEVER ANSWERS. It records the invocation and returns, so the request reaches
+        // the client and no response ever comes back - which is exactly the shape of a client that
+        // attached the channel and then stopped servicing it.
+        C04StreamWriter<InvokeMethodRequest> requests = new(request =>
+        {
+            asked.Add(request);
+
+            return Task.CompletedTask;
+        });
+
+        using CancellationTokenSource channelLife = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        Metadata headers = new()
+        {
+            { ColumnExpressionChannelHeaders.SessionId, session },
+            { ColumnExpressionChannelHeaders.DataWindowHandle, dw },
+        };
+
+        Task channel = h.Service.InvokeMethodChannel(
+            answers, requests, new C04CallContext(headers, channelLife.Token));
+
+        await WaitUntilAsync(() => h.Macro.AttachedCount == 1);
+
+        C04CallContext ctx = new();
+
+        AddExpressionResponse added = await h.Service.AddExpression(
+            new AddExpressionRequest
+            {
+                SessionId = session,
+                DatawindowHandle = dw,
+                ColumnName = "n1",
+                Exp = "$FormatPrice(21)",
+            },
+            ctx);
+
+        Assert.Equal(WireRetCode.Ok, added.RetCode);
+
+        // THE CALCULATION RETURNS, AND THE WAIT IS BOUNDED SO THAT A REGRESSION FAILS RATHER THAN HANGS.
+        // Removing the backstop makes this await forever; wrapping it turns that into a prompt, legible
+        // TimeoutException instead of a suite that stops making progress. The bound is two orders of
+        // magnitude above the configured backstop, so it cannot be mistaken for the thing under test.
+        CalcResponse calc = await CalcRowAsync(h.Service, session, dw, 1L, ctx)
+            .WaitAsync(TimeSpan.FromSeconds(5), Ct);
+
+        _ = Assert.Single(asked);
+
+        // The invocation was dispatched and abandoned, so the column does NOT hold the macro result.
+        // Asserting the absence of the value rather than a particular status is deliberate, and the
+        // status observed here says why: the calculation reports success, because an elapsed backstop is
+        // a DEFINED OUTCOME for the invocation and not a failure of the calculation that contained it.
+        // What must never happen is a fabricated value standing in for a macro nobody answered, and that
+        // is the property this pins.
+        FakeDataWindowHost host = h.Hosts.Created[0];
+
+        Assert.NotEqual(42m, host.GetItemDecimal(1L, "n1"));
+        Assert.Equal(WireRetCode.Ok, calc.RetCode);
+
+        answers.Complete();
+        await channel;
     }
 
     [Fact]

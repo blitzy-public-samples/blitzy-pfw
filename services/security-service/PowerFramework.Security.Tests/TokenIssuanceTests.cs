@@ -184,6 +184,34 @@ public sealed class TokenIssuanceTests
         new(2024, 1, 2, 3, 4, 5, TimeSpan.Zero);
 
     /// <summary>
+    /// The registered caller these rows mint as: the one roster entry granted EVERY audience the
+    /// deployment serves.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// CHOSEN FOR ITS GRANT BREADTH, WHICH IS WHAT KEEPS THESE ROWS ABOUT WHAT THEY WERE ALWAYS ABOUT.
+    /// The issuer applies two gates - the deployment-wide audience roster, then the caller's own entry -
+    /// so a row that mints for an arbitrary audience needs a subject permitted all of them. This entry
+    /// grants all four, so rows that iterate <c>Security:Audiences</c> or take its first element keep
+    /// asserting determinism, key agreement and rendering rather than accidentally asserting the
+    /// permission model. Rows that DO assert the permission model name their own subject.
+    /// </para>
+    /// <para>
+    /// Declared in the Development settings overlay as the end-to-end suite's identity, which is the
+    /// environment a test host runs under.
+    /// </para>
+    /// </remarks>
+    private const string RosteredCaller = "pfw-e2e-suite";
+
+    /// <summary>A scope <see cref="RosteredCaller"/> is granted.</summary>
+    /// <remarks>
+    /// An issuance request must name at least one scope and the roster must grant every scope named, so
+    /// this is a granted one rather than an arbitrary token. It is also the scope this service's
+    /// authenticated probe requires, so a token minted with it is usable as well as issuable.
+    /// </remarks>
+    private const string GrantedScope = "ping";
+
+    /// <summary>
     /// A scope set whose members are ordinary, distinct and free of white space, so the granted value
     /// can be reconstructed by joining them.
     /// </summary>
@@ -192,13 +220,38 @@ public sealed class TokenIssuanceTests
     /// and a repeated member, so these rows exercise the accepted shape rather than the refused ones -
     /// which the sibling request-validation suite owns.
     /// </remarks>
-    public static TheoryData<string, string[]> ClaimMatrix =>
+    public static TheoryData<string, string, string[]> ClaimMatrix =>
         new()
         {
-            { "powerframework-gateway", ["datawindow.read"] },
-            { "powerframework-dataservices", ["datawindow.read", "datawindow.write"] },
-            { "powerframework-persistence", ["persistence.query", "persistence.update"] },
-            { "a-caller-that-is-not-an-audience", ["datawindow.read"] },
+            // The gateway, asking for the DataServices audience with the two scopes its client requests
+            // [services/gateway-service/PowerFramework.Gateway/Clients/DataServicesClient.cs:L1286-L1289].
+            {
+                "powerframework-gateway",
+                "powerframework-dataservices",
+                ["dataservices.datawindow", "dataservices.columnexpression"]
+            },
+
+            // DataServices, asking for the Persistence audience with the two scopes its client requests
+            // [services/dataservices-service/PowerFramework.DataServices/Clients/PersistenceClient.cs:L438-L441].
+            {
+                "powerframework-dataservices",
+                "powerframework-persistence",
+                ["persistence.read", "persistence.write"]
+            },
+
+            // DataServices again, this time against Security itself - the one cross-service call that
+            // needs a cryptographic scope
+            // [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L1976].
+            {
+                "powerframework-dataservices",
+                "powerframework-security",
+                ["security.crypto"]
+            },
+
+            // A SUBJECT THAT IS NOT ITSELF AN AUDIENCE, which is the property this row exists for: a
+            // caller identity and an audience identity are different namespaces, and nothing requires a
+            // caller to be addressable. The suite identity is exactly such a caller.
+            { RosteredCaller, "powerframework-gateway", ["capabilities", "datawindow"] },
         };
 
     /// <summary>
@@ -293,13 +346,18 @@ public sealed class TokenIssuanceTests
     [MemberData(nameof(ClaimMatrix))]
     public async Task MintedTokenCarriesTheRequestedIdentityAudienceAndScopesAsync(
         string subject,
+        string audience,
         string[] scopes)
     {
         ArgumentNullException.ThrowIfNull(scopes);
 
         await using SecurityAppFactory factory = new();
 
-        string audience = factory.ResolveSecurityOptions().Audiences[0];
+        // THE AUDIENCE IS A ROW PARAMETER RATHER THAN THE ROSTER'S FIRST ENTRY, because the issuer now
+        // applies a per-caller gate as well as the deployment-wide one: each row names an audience its
+        // own subject is granted, which is what keeps the row asserting the CLAIMS rather than the
+        // permission model. That the deployment serves it at all is asserted here, once, for every row.
+        Assert.Contains(audience, factory.ResolveSecurityOptions().Audiences);
 
         IssuedToken token = factory.IssueToken(subject, audience, scopes);
         JsonWebToken parsed = new(token.AccessToken);
@@ -466,13 +524,20 @@ public sealed class TokenIssuanceTests
 
         string audience = factory.ResolveSecurityOptions().Audiences[0];
 
-        IssuedToken first = factory.IssueToken("powerframework-gateway", audience, ["datawindow.read"]);
-        IssuedToken second = factory.IssueToken("powerframework-gateway", audience, ["datawindow.read"]);
+        IssuedToken first = factory.IssueToken(RosteredCaller, audience, [GrantedScope]);
+        IssuedToken second = factory.IssueToken(RosteredCaller, audience, [GrantedScope]);
 
         Assert.Equal(first.IssuedAt, second.IssuedAt);
         Assert.Equal(first.ExpiresAt, second.ExpiresAt);
         Assert.Equal(first.ExpiresInSeconds, second.ExpiresInSeconds);
-        Assert.Equal(first.AccessToken, second.AccessToken);
+
+        // COMPARED BY FINGERPRINT, NOT BY VALUE (C-F). Byte-identity is exactly the claim being made and
+        // it survives the digest intact; what does not survive is the disclosure. Passing two live tokens
+        // to Assert.Equal would render both into the failure message, and from there into the CI log and
+        // the test report - see SensitiveValueAssertions.cs for the full reasoning.
+        Assert.Equal(
+            SensitiveValueAssertions.Fingerprint(first.AccessToken),
+            SensitiveValueAssertions.Fingerprint(second.AccessToken));
     }
 
     /// <summary>
@@ -511,7 +576,13 @@ public sealed class TokenIssuanceTests
         Assert.Equal(before.IssuedAt + advance, after.IssuedAt);
         Assert.Equal(before.ExpiresAt + advance, after.ExpiresAt);
         Assert.Equal(before.ExpiresInSeconds, after.ExpiresInSeconds);
-        Assert.NotEqual(before.AccessToken, after.AccessToken);
+
+        // DISTINCTNESS BY FINGERPRINT, for the same reason the determinism row above compares digests:
+        // Assert.NotEqual renders the shared value when the two DO agree, which is precisely the failure
+        // case here, so the defect and the disclosure would arrive together.
+        Assert.NotEqual(
+            SensitiveValueAssertions.Fingerprint(before.AccessToken),
+            SensitiveValueAssertions.Fingerprint(after.AccessToken));
     }
 
 
@@ -548,7 +619,7 @@ public sealed class TokenIssuanceTests
 
         TokenIssuanceResult result = factory.Services
             .GetRequiredService<TokenIssuer>()
-            .Issue(new TokenIssuanceRequest("powerframework-gateway", audience, ["datawindow.read"]));
+            .Issue(new TokenIssuanceRequest(RosteredCaller, audience, [GrantedScope]));
 
         Assert.Equal(TokenIssuanceOutcome.AudienceNotPermitted, result.Outcome);
         Assert.Null(result.Token);
@@ -583,9 +654,9 @@ public sealed class TokenIssuanceTests
         foreach (string audience in options.Audiences)
         {
             IssuedToken token = factory.IssueToken(
-                "powerframework-gateway",
+                RosteredCaller,
                 audience,
-                ["datawindow.read"]);
+                [GrantedScope]);
 
             Assert.Equal(audience, Assert.Single(new JsonWebToken(token.AccessToken).Audiences));
         }
@@ -628,7 +699,7 @@ public sealed class TokenIssuanceTests
         SecurityOptions options = factory.ResolveSecurityOptions();
         string audience = options.Audiences[0];
 
-        IssuedToken token = factory.IssueToken("powerframework-gateway", audience, ["datawindow.read"]);
+        IssuedToken token = factory.IssueToken(RosteredCaller, audience, [GrantedScope]);
 
         PublishedKeyMaterial published = await ReadPublishedKeyAsync(factory, options.JwksPath);
 
@@ -658,8 +729,8 @@ public sealed class TokenIssuanceTests
             });
 
         Assert.True(result.IsValid, result.Exception?.Message);
-        Assert.Equal("powerframework-gateway", result.ClaimsIdentity.FindFirst("sub")?.Value);
-        Assert.Equal("datawindow.read", result.ClaimsIdentity.FindFirst("scope")?.Value);
+        Assert.Equal(RosteredCaller, result.ClaimsIdentity.FindFirst("sub")?.Value);
+        Assert.Equal(GrantedScope, result.ClaimsIdentity.FindFirst("scope")?.Value);
     }
 
     /// <summary>
@@ -735,21 +806,44 @@ public sealed class TokenIssuanceTests
     [Fact]
     public async Task IssuanceResponseCarriesThePublishedMembersAsync()
     {
-        await using SecurityAppFactory factory = new();
-
-        SecurityOptions options = factory.ResolveSecurityOptions();
-        string audience = options.Audiences[0];
-
         // The claimed subject must be the identity the certificate establishes: the handler reconciles
         // the two ordinally, and a mismatch is a refusal rather than an issuance.
         const string caller = "powerframework-gateway";
+        const string scope = "datawindow.read";
+
+        // THE ISSUER'S PERMISSION MATRIX IS ON THE PATH, so this row declares the one grant it needs. The
+        // shipped settings file grants each caller only the audiences it actually calls and only the scopes
+        // it actually uses - deliberately, because an unused permission is still a permission - so a row
+        // that mints for a different pairing declares that pairing rather than relying on a broad roster.
+        // Everything else about the host stays exactly as the composition root configured it.
+        await using SecurityAppFactory factory = new()
+        {
+            ShapeOptions = options =>
+            {
+                options.Callers.Clear();
+
+                SecurityCallerOptions permitted = new() { Identity = caller };
+                SecurityCallerGrantOptions grant = new() { Audience = options.Audiences[0] };
+
+                grant.Scopes.Add(scope);
+                permitted.Grants.Add(grant);
+                options.Callers.Add(permitted);
+            },
+        };
+
+        SecurityOptions options = factory.ResolveSecurityOptions();
+
+        // READ BACK FROM THE HOST rather than restated, so the audience the row asks for is by
+        // construction the one the grant above was written against.
+        string audience = options.Audiences[0];
 
         using X509Certificate2 certificate = IssuanceFixture.CreateCallerCertificate(caller);
 
         IResult outcome = TokenEndpoints.IssueToken(
-            IssuanceFixture.Body(subject: caller, audience: audience, scopes: ["datawindow.read"]),
+            IssuanceFixture.Body(subject: caller, audience: audience, scopes: [scope]),
             CreateConnection(certificate),
             factory.Services.GetRequiredService<TokenIssuer>(),
+            factory.Services.GetRequiredService<ClientCertificateTrust>(),
             factory.Services.GetRequiredService<ILoggerFactory>());
 
         Ok<TokenIssuanceResponse> issued = Assert.IsType<Ok<TokenIssuanceResponse>>(outcome);
@@ -760,7 +854,7 @@ public sealed class TokenIssuanceTests
 
         Assert.Equal("Bearer", body.TokenType);
         Assert.NotEmpty(body.AccessToken);
-        Assert.Equal("datawindow.read", body.Scope);
+        Assert.Equal(scope, body.Scope);
         Assert.Equal((long)options.TokenLifetime.TotalSeconds, body.ExpiresIn);
 
         JsonWebToken parsed = new(body.AccessToken);
@@ -808,6 +902,7 @@ public sealed class TokenIssuanceTests
             request: null,
             CreateConnection(certificate: null),
             factory.Services.GetRequiredService<TokenIssuer>(),
+            factory.Services.GetRequiredService<ClientCertificateTrust>(),
             factory.Services.GetRequiredService<ILoggerFactory>());
 
         ProblemHttpResult problem = Assert.IsType<ProblemHttpResult>(outcome);
@@ -1148,7 +1243,7 @@ public sealed class TokenIssuanceTests
         Assert.False(string.IsNullOrEmpty(condition));
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => new TokenIssuanceRequest("powerframework-gateway", "powerframework-gateway", scopes));
+            () => new TokenIssuanceRequest(RosteredCaller, RosteredCaller, scopes));
 
         Assert.Equal("scopes", failure.ParamName);
     }
@@ -1179,16 +1274,44 @@ public sealed class TokenIssuanceTests
         SecurityOptions options = factory.ResolveSecurityOptions();
 
         IssuedToken token = factory.IssueToken(
-            "powerframework-gateway",
+            RosteredCaller,
             options.Audiences[0],
-            ["datawindow.read"]);
+            [GrantedScope]);
 
         string rendered = token.ToString();
 
-        Assert.Contains(token.KeyId, rendered, StringComparison.Ordinal);
-        Assert.DoesNotContain(token.AccessToken, rendered, StringComparison.Ordinal);
-        Assert.DoesNotContain(token.GrantedScope, rendered, StringComparison.Ordinal);
-        Assert.DoesNotContain("powerframework-gateway", rendered, StringComparison.Ordinal);
+        // EVERY ASSERTION BELOW IS EVALUATED BEFORE IT IS MADE (C-F). This row's haystack is the rendering
+        // whose safety is the subject: if any of the three guards trips, `rendered` contains the very
+        // material being guarded, so an overload that printed the haystack would publish the credential at
+        // exactly the moment the defect appeared. The booleans carry the whole diagnostic - which guard
+        // tripped is the useful fact, and the value adds nothing to it.
+        bool carriesTheCredential = SensitiveValueAssertions.Carries(rendered, token.AccessToken);
+        bool carriesTheGrantedScope = SensitiveValueAssertions.Carries(rendered, token.GrantedScope);
+        bool carriesTheSubject = SensitiveValueAssertions.Carries(rendered, "powerframework-gateway");
+
+        // The key identifier is published anonymously in the JWKS, so it is the one member that MUST be
+        // present and the one whose absence is safe to describe. The rendering is still not shown, because
+        // the reason this assertion would fail is that the rendering changed - and the changed rendering is
+        // the thing that might now carry a credential.
+        bool carriesTheKeyIdentifier = SensitiveValueAssertions.Carries(rendered, token.KeyId);
+
+        Assert.True(
+            carriesTheKeyIdentifier,
+            "The rendering of IssuedToken no longer carries the key identifier, so it has stopped being "
+                + "useful as a diagnostic. The rendering itself is deliberately not reproduced here.");
+
+        Assert.False(
+            carriesTheCredential,
+            "The rendering of IssuedToken carried the access token. That is a live credential reaching "
+                + "every log record, diagnostic and debugger view that formats this object.");
+
+        Assert.False(
+            carriesTheGrantedScope,
+            "The rendering of IssuedToken carried the granted scope, which is caller-supplied.");
+
+        Assert.False(
+            carriesTheSubject,
+            "The rendering of IssuedToken carried the requested subject, which is caller-supplied.");
     }
 
     /// <summary>
@@ -1227,11 +1350,23 @@ public sealed class TokenIssuanceTests
         InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
             () => TokenIssuer.VerifyCredential(credentials, keyId));
 
-        Assert.Contains("asymmetric", failure.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            Base64UrlEncoder.Encode(secret),
-            failure.Message,
+        // The encoded form is what would appear if the guard echoed the credential, so it is computed once
+        // and then used ONLY as a needle and as a redaction input - never as an assertion operand (C-F).
+        string encodedSecret = Base64UrlEncoder.Encode(secret);
+
+        bool messageEchoesTheSecret =
+            SensitiveValueAssertions.Carries(failure.Message, encodedSecret);
+
+        Assert.Contains(
+            "asymmetric",
+            SensitiveValueAssertions.Redact(failure.Message, encodedSecret),
             StringComparison.Ordinal);
+
+        Assert.False(
+            messageEchoesTheSecret,
+            "The minter's refusal echoed the shared secret it was handed. A startup or minting fault "
+                + "reaches the operator log, so the message may name the key type and may not reproduce "
+                + "the key material.");
     }
 
     /// <summary>
@@ -1473,6 +1608,7 @@ public sealed class TokenIssuanceTests
             () => new TokenIssuer(
                 keys,
                 Options.Create(broken),
+                factory.Services.GetRequiredService<IssuanceClientRegistry>(),
                 factory.Clock,
                 NullLogger<TokenIssuer>.Instance));
 
@@ -1486,6 +1622,32 @@ public sealed class TokenIssuanceTests
     // ==============================================================================================
     //  HELPERS. Nothing here asserts a deployment fact; every value is read from the booted host.
     // ==============================================================================================
+
+    /// <summary>
+    /// Reads one issuance-roster entry out of the booted host's own registry.
+    /// </summary>
+    /// <param name="factory">The booted host.</param>
+    /// <param name="subject">The registered subject to read.</param>
+    /// <returns>The entry.</returns>
+    /// <remarks>
+    /// READ FROM THE HOST RATHER THAN RESTATED, which is the same discipline every other helper in this
+    /// file follows. The audiences and scopes a caller may ask for are a deployment fact declared in the
+    /// settings file; a row that spelled them here would be a second copy able to drift from the first,
+    /// and it would pass while the deployment was wrong.
+    /// </remarks>
+    private static RegisteredIssuanceClient ResolveRegisteredClient(
+        SecurityAppFactory factory,
+        string subject)
+    {
+        IssuanceClientRegistry registry =
+            factory.Services.GetRequiredService<IssuanceClientRegistry>();
+
+        Assert.True(
+            registry.TryResolveSubject(subject, out RegisteredIssuanceClient? registered),
+            $"The booted host's issuance roster registers no subject '{subject}'.");
+
+        return registered;
+    }
 
     /// <summary>
     /// Reads one textual claim from a parsed token by the name the published contract uses.

@@ -101,14 +101,18 @@
 // ==================================================================================================
 
 using System.Globalization;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
+using Polly;
+using PowerFramework.Gateway.Authorization;
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.Gateway.Clients;
 using PowerFramework.Gateway.Composition;
@@ -137,6 +141,20 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Services
     .AddOptions<GatewayOptions>()
     .Bind(builder.Configuration.GetSection(GatewayOptions.SectionName))
+
+    // THE ONE VALUE BINDING CANNOT REACH, APPLIED BETWEEN BINDING AND VALIDATION - AND THAT ORDER IS
+    // THE ONLY ORDER THAT WORKS. The client credential Gateway presents on the token-issuance edge
+    // arrives as a FLAT environment variable, because the environment-variable provider maps only a
+    // double underscore onto the section separator and therefore cannot land a value named
+    // SECURITY_CLIENT_SECRET_GATEWAY on a property inside 'Gateway:'. Flat is also what keeps the
+    // credential out of every committed settings file (C-F).
+    //
+    // Post-configure runs AFTER Bind and BEFORE the start-time validation below, so the validator sees
+    // the material the deployment actually supplied. Applied the other way round, a deployment that
+    // supplied the secret correctly would be refused at startup for presenting nothing.
+    .PostConfigure(options => options.SecurityClientSecret =
+        builder.Configuration[GatewayOptions.SecurityClientSecretConfigurationKey]
+        ?? string.Empty)
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
@@ -249,9 +267,25 @@ builder.Services
 
 builder.Services
     .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
-    .Configure<IOptions<JwtBearerVerificationOptions>>(static (bearer, verification) =>
+    .Configure<IOptions<JwtBearerVerificationOptions>, InternalTlsTrust>(
+        static (bearer, verification, trust) =>
     {
         JwtBearerVerificationOptions configured = verification.Value;
+
+        // THE KEY-SET BACKCHANNEL IS AN INTERNAL CHANNEL TOO, AND IT IS THE MOST CONSEQUENTIAL ONE.
+        // The handler fetches Security's discovery document and published key set over its own
+        // HttpClient, which is built from this handler rather than from any registration above - so an
+        // anchor applied everywhere else and not here would leave the one channel that decides WHICH
+        // KEYS SIGN A VALID TOKEN unable to connect. It is supplied only when an anchor is configured,
+        // so an unset anchor leaves the handler's own default backchannel untouched.
+        if (trust.IsPinned)
+        {
+            SocketsHttpHandler backchannel = new();
+
+            trust.Apply(backchannel);
+
+            bearer.BackchannelHttpHandler = backchannel;
+        }
 
         bearer.Authority = configured.Authority;
         bearer.RequireHttpsMetadata = configured.RequireHttpsMetadata;
@@ -283,14 +317,102 @@ builder.Services
 // a declaration a closed door rather than an open one. The two deliberate exceptions below opt out
 // in the one place a reader looks for them.
 //
+// AN AUTHENTICATED CALLER IS THE WHOLE REQUIREMENT HERE, AND UNLIKE THE OTHER THREE SERVICES THAT IS
+// NOT AN OVERSIGHT. DataServices, Persistence and Security each require an operation-specific scope
+// AND a permitted caller identity on top of authentication, because each of them is an INTERNAL
+// receiver whose complete set of callers is enumerated in Security's issuance grant matrix. Gateway is
+// the INGRESS: nothing inside the system calls it, so it has no internal caller roster to check
+// against, and its callers are external clients that no internal matrix describes.
+//
+// The authoritative wire document settles what that means, and it is authoritative for anything on the
+// wire. shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml applies `bearerAuth` with an EMPTY
+// scope array to every operation and states, under that scheme's own Scope heading, that every
+// operation requires the scheme except the anonymous health probe - it declares no per-operation scope
+// anywhere. It then attributes the 403 response to "The projected gRPC method returned
+// PermissionDenied": Gateway's forbidden answer is a RELAY of the downstream refusal, which is exactly
+// where the scope decision is made and enforced. Inventing a Gateway-side scope name would therefore
+// be a change to the published contract rather than a hardening of it, and it would fabricate an
+// external-client scope vocabulary the Agent Action Plan does not define.
+//
+// Two properties do the containment work instead, and neither depends on a scope here. Audience
+// validation above accepts only tokens minted for THIS service, so a token obtained for DataServices,
+// Persistence or Security is refused at this boundary with a 401 rather than reaching a projection.
+// And Security's grant matrix pre-grants NO caller the gateway audience at all - the shipped roster
+// carries exactly the internal call graph - so a service identity cannot mint itself an ingress token.
+// An external client is a deployment fact: its certificate identity and its grant are added to
+// Security:Callers by the deployment that has one, which is recorded in that settings file.
+//
 // Expressed through AddAuthorizationBuilder rather than AddAuthorization(options => ...) because the
 // ASP.NET Core analyzers direct the builder form for exactly this shape (ASP0025); the registration
 // and the resulting policy are identical, so this is a spelling decision and not a behavioural one.
+//
+// AND THREE NAMED SCOPE POLICIES, BECAUSE A FALLBACK POLICY IS NOT AN ENTITLEMENT CHECK. Every
+// protected route used to require only that the caller be AUTHENTICATED, which every token this system
+// mints for Gateway's audience is - so one token reached /v1/ping, /v1/capabilities and all
+// thirty-nine /v1/datawindow operations alike. The issuance roster states least privilege per calling
+// identity and, until these policies existed, no surface in this service enforced it and the 403 the
+// contract declares was unreachable.
+//
+// EACH POLICY NAME AND ITS REQUIRED SCOPE ARE DECLARED BY THE ROUTE THAT NEEDS THEM. This file reads
+// those constants, so a route and its requirement keep ONE spelling. The direction matters: a route
+// requiring a policy nobody registered fails closed and loudly on the first request, while a policy
+// registered under a name no route requires enforces nothing at all and is the half that looks correct
+// in review.
+//
+// THE FOUR RESERVED /v1/{design,documents,integration,scripting} FAMILIES DELIBERATELY KEEP THE
+// PARAMETERLESS FORM (decision D5, Endpoints/DeferredCapabilityEndpoints.cs). Requiring a capability
+// scope for a route that reaches no capability would invent an entitlement for a service this phase
+// must not implement even in metadata (constraint C-D), and the roster grants no such scope to anyone.
+// Authenticated-only is exactly the posture those routes need: the reserved roster is not anonymously
+// enumerable, and every caller who is authenticated receives the same 501.
+//
+// EVERY POLICY REQUIRES AN AUTHENTICATED PRINCIPAL AS WELL AS THE SCOPE, so each is correct in
+// isolation rather than correct by virtue of the fallback above.
+// THE SCOPE HANDLER AND ITS PER-SCOPE POLICIES, REGISTERED FROM Authorization/ScopeAuthorization.cs.
+// Two independent remediations of the same finding arrived at this composition root: a declarative
+// requirement plus handler, and the three inline assertion policies below that the endpoints name. Both
+// read the same `scope` claim with the same ordinal, space-delimited semantics, so they agree by
+// construction; the requirement form is registered because ScopeAuthorizationTests drives it directly,
+// and the named form is registered because the endpoints reference `<Endpoint>.ScopePolicyName`.
+builder.Services.AddScopeAuthorization();
+
 builder.Services
     .AddAuthorizationBuilder()
     .SetFallbackPolicy(new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
-        .Build());
+        .Build())
+    .AddPolicy(
+        PingEndpoints.ScopePolicyName,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(static context =>
+                GrantsScope(context.User, PingEndpoints.RequiredScope)))
+    .AddPolicy(
+        CapabilityEndpoints.ScopePolicyName,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(static context =>
+                GrantsScope(context.User, CapabilityEndpoints.RequiredScope)))
+    .AddPolicy(
+        DataServicesProxyEndpoints.ScopePolicyName,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(static context =>
+                GrantsScope(context.User, DataServicesProxyEndpoints.RequiredScope)));
+
+// AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK ABOVE ONLY DELIVERS THE FIRST. This service's
+// published contract declares a 403 on thirty-nine operations whose shared description says the token is
+// valid but does not carry the scope the operation requires, "deliberately distinguished from 401 so a
+// caller can tell a missing credential from an insufficient one". Until these policies existed nothing
+// here read the scope claim, so every authenticated route was reachable by any token addressed to this
+// service and the published 403 was unreachable - at the one boundary in the whole system that external
+// clients can reach.
+//
+// The vocabulary, the reason the ingress names capabilities while every internal service namespaces its
+// scopes by service, the reason the framework's own claim requirement cannot express the check (the claim
+// is ONE value carrying a SPACE-DELIMITED set), and the two surfaces that deliberately carry NO scope
+// requirement are all recorded in Authorization/ScopeAuthorization.cs.
+builder.Services.AddScopeAuthorization();
 
 // --------------------------------------------------------------------------------------------------
 // 6. THE TWO TYPED CLIENTS - EXACTLY TWO, AND THESE TWO
@@ -317,8 +439,45 @@ builder.Services
 builder.Services.AddSingleton(static serviceProvider => LoadMutualTlsClientIdentity(
     serviceProvider.GetRequiredService<IOptions<GatewayOptions>>().Value.MutualTls));
 
+// THE TRUST HALF OF THE SAME STORY, AND IT IS THE HALF THAT WAS MISSING. The client identity above
+// says which certificate Gateway PRESENTS; this says which authority Gateway ACCEPTS. Both upstreams
+// terminate TLS with certificates issued by the local authority docs/ARCHITECTURE.md 9.3.1 generates,
+// and that authority is in no container's OS trust store - so without this every outbound channel
+// rejects the certificate the documented topology presents. Registered as a singleton for the same
+// reason as the identity: the handler factories recycle handlers on a schedule, and the anchor must be
+// read once rather than per rotation.
+builder.Services.AddSingleton(static serviceProvider => new InternalTlsTrust(
+    serviceProvider.GetRequiredService<IOptions<GatewayOptions>>().Value.InternalTls));
+
+// THE OUTBOUND DEADLINES, DERIVED ONCE FROM THE SAME SETTING THE PIPELINES BELOW ARE CONFIGURED FROM.
+// A gRPC call carrying no deadline lets the upstream keep working - and keep the session or task behind
+// that work alive - for as long as the transport looks open, which includes every case where the caller
+// has already gone and the transport has not noticed. Registering the pair here rather than letting each
+// client invent one is what makes the deadline the composition root's policy, which is precisely where
+// DataServicesClient's own remark said such a policy belongs. A singleton because it holds two durations
+// and a clock and nothing else.
+builder.Services.AddSingleton(static serviceProvider =>
+{
+    GatewayOptions.OutboundCallOptions outbound =
+        serviceProvider.GetRequiredService<IOptions<GatewayOptions>>().Value.Outbound;
+
+    return new OutboundDeadlines(
+        outbound.RequestTimeout,
+        outbound.StreamDeadline,
+        serviceProvider.GetRequiredService<TimeProvider>());
+});
+
+// A NAMED CLIENT RATHER THAN A TYPED ONE, AND THE LIFETIME IS THE WHOLE REASON. The generic overload
+// registers the client type TRANSIENT, so every resolve produced a fresh client with a fresh credential
+// store - which meant the "reuse a held token until it lapses" path was never reached twice in a running
+// host and Gateway asked Security to mint a token for every request that needed one. Naming the client
+// leaves this registration owning the address, the trust anchor, the client identity and the resilience
+// pipeline, while the scoped registration below owns the object's lifetime so that one request reaches
+// one client. The name is an explicit constant rather than the factory's derived type name, because a
+// resolution under an unregistered name silently yields a default-configured client with none of the
+// above - the same class of fault that left the health probe on platform trust.
 builder.Services
-    .AddHttpClient<SecurityClient>(static (serviceProvider, httpClient) =>
+    .AddHttpClient(SecurityClient.HttpClientName, static (serviceProvider, httpClient) =>
     {
         GatewayOptions options = serviceProvider.GetRequiredService<IOptions<GatewayOptions>>().Value;
 
@@ -326,13 +485,17 @@ builder.Services
     })
     .ConfigurePrimaryHttpMessageHandler(static serviceProvider =>
     {
-        // NOTHING ABOUT SERVER-CERTIFICATE VALIDATION IS TOUCHED HERE, IN ANY ENVIRONMENT. The
-        // handler keeps the platform's default trust decision: a forged Security service would be a
-        // forged token issuer for the whole system, so trust is an orchestration concern - the CA a
-        // deployment mounts - and never a validation callback in code. There is no
-        // RemoteCertificateValidationCallback, no ServerCertificateCustomValidationCallback and no
-        // environment-conditional relaxation anywhere in this file (constraint C-G).
+        // SERVER-CERTIFICATE VALIDATION IS NARROWED HERE, NEVER RELAXED, AND NEVER BY A CALLBACK. A
+        // forged Security service would be a forged token issuer for the whole system, so this handler
+        // pins the acceptable root to the anchor the deployment mounts and rejects every other root for
+        // internal traffic. Chain building, name validation and validity dates remain the platform's.
+        // There is no RemoteCertificateValidationCallback, no
+        // ServerCertificateCustomValidationCallback, no DangerousAcceptAnyServerCertificate and no
+        // environment-conditional relaxation anywhere in this file (constraint C-G). With no anchor
+        // configured the platform's default trust decision stands unmodified.
         SocketsHttpHandler handler = new();
+
+        serviceProvider.GetRequiredService<InternalTlsTrust>().Apply(handler);
 
         X509Certificate2Collection identity =
             serviceProvider.GetRequiredService<X509Certificate2Collection>();
@@ -363,10 +526,54 @@ builder.Services
     .AddTypedClient<SecurityClient>(static (httpClient, serviceProvider) => new SecurityClient(
         httpClient,
         serviceProvider.GetRequiredService<ILogger<SecurityClient>>(),
-        serviceProvider.GetRequiredService<TimeProvider>()))
-    .AddStandardResilienceHandler();
+        serviceProvider.GetRequiredService<TimeProvider>(),
+        serviceProvider.GetRequiredService<IOptions<GatewayOptions>>(),
+        serviceProvider.GetRequiredService<ServiceTokenCache>()))
+    .AddStandardResilienceHandler()
+    // SECURITY IS THE ONE EDGE WITH A GENUINE READ/WRITE SPLIT TO MAKE, because it is reached over REST
+    // and its methods are therefore distinguishable: the verification-material fetch is a GET and is
+    // safely retryable, while token issuance is a POST and is not replayed. A transport failure does not
+    // reveal whether the server processed the request, and "minting a second token is probably harmless"
+    // is not a basis for replaying a credential-issuing call whose outcome is unknown.
+    //
+    // THAT SPLIT IS MADE INSIDE THE ONE PREDICATE RATHER THAN BY A SECOND, VERB-ONLY GATE, and the
+    // difference is not stylistic. `Retry.DisableForUnsafeHttpMethods()` REPLACES `Retry.ShouldHandle`
+    // with a wrapper of its own, so registering it after ConfigureOutboundResilience would leave every
+    // pipeline carrying the wrapper instead of the policy - and on the two gRPC channels, where gRPC
+    // transports every call as a POST, that wrapper is an all-or-nothing disable that additionally loses
+    // the gRPC-status reading the policy exists for. OutboundCallPolicy.IsReplaySafe therefore admits on
+    // the RFC 9110 safe methods as well as on the classified operation paths, which reproduces the verb
+    // gate's decision exactly on this REST channel and reproduces nothing at all on the gRPC channels,
+    // where it is unreachable.
+    .Configure(ConfigureOutboundResilience);
 
-builder.Services.AddTransient<IServiceTokenProvider>(static serviceProvider =>
+// THE CREDENTIAL STORE IS A SINGLETON, AND NAMING IT HERE IS WHAT MAKES THE CACHING REAL. The store holds
+// no connection and no handler - only short-lived tokens keyed by audience and scope - so unlike the
+// client itself it is safe to keep for the life of the process, and it has to be kept for that long or
+// the reuse path is never reached twice.
+builder.Services.AddSingleton<ServiceTokenCache>();
+
+// THE CLIENT IS SCOPED, which is what makes one request reach one client and one credential rather than
+// re-minting per resolve. Scoped rather than singleton because the HttpClient the factory hands it is
+// meant to be short lived and its handler is recycled on a schedule; scoped rather than transient because
+// the request is the unit the credential is used within, and it matches DataServicesClient's own lifetime
+// below so the client that obtains the token and the client that uses it belong to the same request.
+//
+// THE CONSTRUCTOR IS NAMED RATHER THAN ACTIVATED, AND IT HAS TO BE. SecurityClient publishes two public
+// constructors - one taking the clock and one defaulting it - so that it resolves whether or not a
+// TimeProvider has been registered. Handing the activator an HttpClient makes both constructors equally
+// good matches and it then demands exactly one, so an activated resolve throws "Multiple constructors
+// accepting all given argument types have been found" on the first token request. Naming the constructor
+// removes the ambiguity, and names the widest one so the determinism seam and the shared credential store
+// are genuinely engaged rather than silently defaulted.
+builder.Services.AddScoped(static serviceProvider => new SecurityClient(
+    serviceProvider.GetRequiredService<IHttpClientFactory>().CreateClient(SecurityClient.HttpClientName),
+    serviceProvider.GetRequiredService<ILogger<SecurityClient>>(),
+    serviceProvider.GetRequiredService<TimeProvider>(),
+    serviceProvider.GetRequiredService<IOptions<GatewayOptions>>(),
+    serviceProvider.GetRequiredService<ServiceTokenCache>()));
+
+builder.Services.AddScoped<IServiceTokenProvider>(static serviceProvider =>
     serviceProvider.GetRequiredService<SecurityClient>());
 
 builder.Services
@@ -376,7 +583,9 @@ builder.Services
 
         grpcOptions.Address = new Uri(options.Upstreams.DataServices, UriKind.Absolute);
     })
-    .AddStandardResilienceHandler();
+    .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler)
+    .AddStandardResilienceHandler()
+    .Configure(ConfigureOutboundResilience);
 
 builder.Services
     .AddGrpcClient<ColumnExpressionService.ColumnExpressionServiceClient>(
@@ -387,9 +596,21 @@ builder.Services
 
             grpcOptions.Address = new Uri(options.Upstreams.DataServices, UriKind.Absolute);
         })
-    .AddStandardResilienceHandler();
+    .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler)
+    .AddStandardResilienceHandler()
+    .Configure(ConfigureOutboundResilience);
 
 builder.Services.AddScoped<DataServicesClient>();
+
+// THE READINESS-PROBE CHANNEL, REGISTERED RATHER THAN IMPLIED. Endpoints/HealthEndpoints.cs asks the
+// factory for a client under this name; an unregistered name yields a default-configured client, which
+// is how the probe silently ended up on platform default trust while the two functional channels above
+// were being discussed. Registering it by name puts the probe on the same anchor as everything else,
+// which matters because a probe that cannot complete a handshake reports Unreachable and Gateway then
+// never opens its own readiness gate.
+builder.Services
+    .AddHttpClient(HealthEndpoints.ProbeHttpClientName)
+    .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler);
 
 // --------------------------------------------------------------------------------------------------
 // 7. THE PUBLISHED SURFACE AND THE FAULT PATH
@@ -408,7 +629,39 @@ builder.Services.AddScoped<DataServicesClient>();
 // structural fault, the HALT CLOSE that ends it.
 // --------------------------------------------------------------------------------------------------
 builder.Services.AddHealthChecks();
-builder.Services.AddProblemDetails();
+
+// THE CUSTOMIZATION IS WHAT MAKES A FRAMEWORK-GENERATED BODY A CONTRACT-SHAPED ONE. The problem
+// responses this service writes itself - the proxy projection's, the readiness endpoint's, the system
+// error handler's - carry `retCode` because the code that writes them sets it. The bodies the FRAMEWORK
+// writes carry none: the bearer challenge, the authorization refusal, the unmatched route and the
+// rejected method are all produced beneath any of this service's own code, and gateway.v1.yaml declares
+// that every 4xx and every 5xx response uses the one problem shape so that a consumer writes one error
+// handler. Filling the member here is what makes that true of all of them rather than of the subset this
+// codebase happens to write by hand.
+//
+// ONLY `retCode` IS FILLED, AND `traceId` IS DELIBERATELY LEFT TO THE FRAMEWORK. The problem-details
+// writer supplies the correlation identifier itself, from the ambient activity and falling back to the
+// request identifier, for every body it writes - hand-written and framework-generated alike. Stamping it
+// here as well was measured to change nothing: removing the stamp left every assertion about the member
+// passing, because the writer had already put it there. Code whose removal is undetectable is not
+// defence in depth, it is a second implementation of a rule with no way to tell which one is in force.
+//
+// The guard on `retCode` is not an optimization. A response this service composed itself has already
+// resolved its own originating return code - the projection forwards the UPSTREAM's code, which is more
+// specific than anything derivable from a status - so overwriting it would replace a precise value with a
+// derived one.
+builder.Services.AddProblemDetails(static options =>
+    options.CustomizeProblemDetails = static context =>
+    {
+        if (context.ProblemDetails.Extensions.ContainsKey(ProblemContractMembers.RetCode))
+        {
+            return;
+        }
+
+        int status = context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode;
+
+        context.ProblemDetails.Extensions[ProblemContractMembers.RetCode] = ClassifyFailure(status);
+    });
 
 // The generated document's PATHS are produced from the endpoints the five files below map, and they
 // already match the authoritative contract exactly. Its IDENTITY is not: the generator names a
@@ -458,13 +711,59 @@ _ = app.Services.GetRequiredService<I18n>();
 // bring-up posture that presents no client certificate.
 _ = app.Services.GetRequiredService<X509Certificate2Collection>();
 
+// Resolved eagerly for exactly the same reason as the client identity above, and it is the other half
+// of the same fault. A configured-but-unreadable trust anchor means this deployment intended to pin
+// internal trust and cannot, so every outbound channel it opens will refuse the certificate it is
+// handed - discovering that at startup is a failure to launch, whereas discovering it at the first
+// token request is an outage that looks like an upstream problem. An UNSET anchor resolves to platform
+// default trust and is not a fault.
+_ = app.Services.GetRequiredService<InternalTlsTrust>();
+
+// Resolved eagerly so that a deadline pair which cannot be constructed - a non-positive duration that
+// slipped past validation - is a failure to launch rather than an exception on the first outbound call.
+_ = app.Services.GetRequiredService<OutboundDeadlines>();
+
+// FORCED HERE FOR THE SAME REASON, and this one matters more than it looks. The retry classification is
+// built from the contract descriptors in a static initializer, so a method name that no longer resolves
+// would otherwise throw at the first outbound FAILURE - the one moment when a second, unrelated fault is
+// hardest to diagnose. Touching it now turns a contract-versus-classification mismatch into a refusal to
+// start.
+_ = OutboundCallPolicy.Verify();
+
 app.UseExceptionHandler();
+
+// STATUS-CODE PAGES, AND THE REASON IS CONTRACT FIDELITY RATHER THAN HARDENING. Without it the framework
+// answers a bare status with NO BODY on every path that never reaches this service's own code: the bearer
+// challenge, the authorization refusal, an unmatched route and a rejected method. gateway.v1.yaml declares
+// reusable Unauthorized, Forbidden and NotFound responses whose bodies are ProblemDetails, and the routes
+// themselves declare ProducesProblem for 401, 403 and 404 - so a bodyless response is a published promise
+// this service was not keeping. This middleware writes the missing body through the problem-details
+// service configured above, which is why the members that customization fills reach these responses too.
+//
+// It is the narrow exception to the no-unrequested-middleware rule (constraint C-B): the requirement that
+// creates it is the published contract, and nothing else is added here - no CORS, no rate limiting, no
+// compression, no output caching. It is ordered with UseExceptionHandler and BEFORE authentication for the
+// reason both diagnostics middlewares share: each works by observing what the middlewares beneath it
+// produced, and the response they most need to observe is the challenge the authentication middleware
+// writes.
+app.UseStatusCodePages();
+
 app.UseAuthentication();
 app.UseAuthorization();
 
-// The published contract document, anonymous because a description of the surface is not part of the
-// surface it describes and every operation in it still states its own security requirement.
-app.MapOpenApi().AllowAnonymous();
+// The published contract document, AUTHENTICATED like every other route that has not been granted an
+// explicit exemption. It used to be anonymous on the argument that a description of a surface is not part
+// of the surface, and that argument does not survive the AAP: the anonymous exceptions are enumerated and
+// this is not among them - `/health` on all four services (C-10), and Security's key set and discovery
+// document (C-01), and nothing else. The circularity worry it was defending against is not real either. A
+// consumer learns how to authenticate from the AUTHORED contract at
+// shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml, which is a file in the repository and needs no
+// credential to read; this route serves a GENERATED projection of that same document, so putting it behind
+// the boundary withholds nothing a consumer needs in order to obtain a credential. Security - the token
+// issuer itself, where the circularity argument would be strongest of all - already publishes its document
+// behind its own boundary, and this brings Gateway into line with it. No AllowAnonymous call: the fallback
+// policy from section 5 applies, so an anonymous request is answered 401 (constraint C-G).
+app.MapOpenApi();
 
 // One call per endpoint file. The route patterns, the metadata and the authorization requirements all
 // live in those files, next to the contract they implement.
@@ -490,6 +789,61 @@ app.MapDataServicesProxyEndpoints();
 app.MapDeferredCapabilityEndpoints();
 
 app.Run();
+
+/// <summary>
+/// Classifies a framework-generated failure status as a legacy return code, so that a body this
+/// service did not compose still carries the member the published contract declares.
+/// </summary>
+/// <param name="statusCode">The status the framework is answering with.</param>
+/// <returns>
+/// The legacy code for that status, and <see cref="RetCode.UNKNOWN"/> for anything unclassifiable.
+/// </returns>
+/// <remarks>
+/// <para>
+/// EVERY ARM IS WRITTEN OUT RATHER THAN DERIVED FROM A TRUTHINESS TEST. The codes are taken from the
+/// published contract's own response catalogue: a malformed request is <c>E_INVALID_ARGUMENT</c>, a
+/// refused caller is <c>E_ACCESS_DENIED</c> whether the refusal was authentication or authorization, an
+/// unmatched route is <c>E_OBJECT_NOT_FOUND</c>, a rejected method is <c>E_NO_SUPPORT</c>, and a reserved
+/// extension point is <c>E_NO_IMPLEMENTATION</c> - the same value
+/// <c>Endpoints/DeferredCapabilityEndpoints.cs</c> writes by hand, so the two agree.
+/// </para>
+/// <para>
+/// THE REFUSAL AND THE FORBIDDEN CASE SHARE ONE CODE, AND THAT ASYMMETRY IS PRESERVED RATHER THAN PAPERED
+/// OVER. The legacy algebra declares exactly one access code and draws no distinction between "no
+/// credential" and "credential without permission". The HTTP statuses stay distinct, so a caller can still
+/// tell the two apart; the code simply does not gain a member the oracle never declared.
+/// </para>
+/// <para>
+/// THE GUARD IS THE POINT OF THE FINAL CHECK. The algebra is tri-state and has a documented hole:
+/// <c>PREVENT</c> is 1 and <c>IsSucceeded</c> tests greater-than-or-equal-to zero, so a prevention reads
+/// as a SUCCESS [<c>ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13</c>, <c>retcode.sru:L42</c>],
+/// and <c>CANCELLED</c> is excluded from <c>IsFailed</c>, so a cancellation is NEITHER
+/// [<c>isfailed.srf:L11-L13</c>]. An error body must never carry a code from either class, and the kernel
+/// predicate is CONSUMED to enforce that rather than the comparison being re-derived here. Every arm below
+/// already satisfies it; the check exists so a future edit introducing one that did not would degrade to
+/// <c>UNKNOWN</c> instead of publishing a failure a consumer's own predicate would read as a success.
+/// </para>
+/// </remarks>
+static long ClassifyFailure(int statusCode)
+{
+    long classified = statusCode switch
+    {
+        StatusCodes.Status400BadRequest => RetCode.E_INVALID_ARGUMENT,
+        StatusCodes.Status401Unauthorized => RetCode.E_ACCESS_DENIED,
+        StatusCodes.Status403Forbidden => RetCode.E_ACCESS_DENIED,
+        StatusCodes.Status404NotFound => RetCode.E_OBJECT_NOT_FOUND,
+        StatusCodes.Status405MethodNotAllowed => RetCode.E_NO_SUPPORT,
+        StatusCodes.Status408RequestTimeout => RetCode.E_TIME_OUT,
+        StatusCodes.Status415UnsupportedMediaType => RetCode.E_INVALID_TYPE,
+        StatusCodes.Status501NotImplemented => RetCode.E_NO_IMPLEMENTATION,
+        StatusCodes.Status503ServiceUnavailable => RetCode.E_BUSY,
+        StatusCodes.Status504GatewayTimeout => RetCode.E_TIME_OUT,
+        >= StatusCodes.Status500InternalServerError => RetCode.E_INTERNAL_ERROR,
+        _ => RetCode.UNKNOWN,
+    };
+
+    return Predicates.IsFailed(classified) ? classified : RetCode.UNKNOWN;
+}
 
 /// <summary>
 /// Selects the localization provider for a locale token, reproducing the three-way selection at
@@ -566,6 +920,145 @@ static II18nProvider CreateLocaleProvider(string locale) => locale switch
 /// every container in this refactor.
 /// </para>
 /// </remarks>
+/// <summary>
+/// Builds the primary handler for an outbound internal channel - the two gRPC clients and the
+/// readiness-probe client - with internal trust applied.
+/// </summary>
+/// <param name="serviceProvider">The provider the shared trust anchor is resolved from.</param>
+/// <returns>A handler that verifies its peer against the mounted anchor when one is configured.</returns>
+/// <remarks>
+/// <para>
+/// ONE FACTORY FOR THREE CHANNELS, so all three demonstrably share the same trust decision. Three
+/// lambdas would let one drift during a later edit, and a channel that quietly kept platform default
+/// trust is exactly the defect this replaces - the readiness probe had no registered client at all and
+/// so was silently using a default-configured one.
+/// </para>
+/// <para>
+/// <c>EnableMultipleHttp2Connections</c> is set explicitly because supplying a primary handler replaces
+/// the one the gRPC client factory would otherwise build, and that one sets this property. Leaving it
+/// at its default would silently cap concurrent streams per connection at the peer's advertised limit
+/// and queue calls behind it - a behavioural change to the transport that has nothing to do with trust.
+/// </para>
+/// <para>
+/// The Security typed client does NOT come through here, and that is deliberate: it needs the client
+/// certificate as well as the anchor, so its handler is built at its own registration where both halves
+/// are in view.
+/// </para>
+/// </remarks>
+static HttpMessageHandler CreateInternalChannelHandler(IServiceProvider serviceProvider)
+{
+    ArgumentNullException.ThrowIfNull(serviceProvider);
+
+    SocketsHttpHandler handler = new() { EnableMultipleHttp2Connections = true };
+
+    serviceProvider.GetRequiredService<InternalTlsTrust>().Apply(handler);
+
+    return handler;
+}
+
+/// <summary>
+/// Applies Gateway's outbound resilience policy to one client's standard pipeline.
+/// </summary>
+/// <param name="resilience">The pipeline's options, mutated in place.</param>
+/// <param name="serviceProvider">The provider the outbound bounds are read from.</param>
+/// <remarks>
+/// <para>
+/// ONE FUNCTION FOR ALL THREE OUTBOUND CLIENTS, so the token channel and the two gRPC channels cannot
+/// drift into three different postures. Before this existed, all three called
+/// <c>AddStandardResilienceHandler()</c> with no configuration at all, which meant a stock HTTP retry
+/// policy sat on top of gRPC channels it could not read and REST calls it should not replay.
+/// </para>
+/// <para>
+/// WHAT EACH LINE FIXES, in the order they appear:
+/// </para>
+/// <list type="number">
+/// <item>
+/// The TOTAL REQUEST TIMEOUT is taken from the same setting that produces the gRPC deadline, so the
+/// local budget and the bound the upstream is told about are one number. Left at its default, the two
+/// were independent and a change to either would have silently desynchronised them.
+/// </item>
+/// <item>
+/// The BACKOFF TYPE and JITTER are set explicitly rather than inherited. Both happen to match the
+/// package's defaults today, and that is exactly why they are written down: "bounded backoff with
+/// jitter" is a requirement of this policy, and a requirement that holds only because a dependency's
+/// default happens to satisfy it is not actually being enforced.
+/// </item>
+/// <item>
+/// The RETRY PREDICATE is replaced, which is the substantive change. The stock predicate reads the HTTP
+/// status, and a gRPC call the server refused carries HTTP 200 - so it never retried a server-declared
+/// Unavailable, while it happily replayed a transport fault on an update, a session open or a
+/// transaction commit. The replacement decides from the operation first and the gRPC status second.
+/// </item>
+/// <item>
+/// The CIRCUIT-BREAKER PREDICATE is replaced for the first half of the same reason: an upstream that
+/// answers Unavailable to every call is unhealthy, and a breaker that cannot see the status never
+/// notices. It deliberately does NOT count the deliberate refusals - admission limits, concurrency
+/// conflicts, authorization decisions - because those are correct answers and breaking on them would
+/// deny the reads that were still working.
+/// </item>
+/// </list>
+/// <para>
+/// RETRY COUNT AND CIRCUIT-BREAKER THRESHOLDS ARE LEFT AT THE PACKAGE'S DEFAULTS, and that is a
+/// decision rather than an oversight. Choosing values for them would be asserting a availability or
+/// latency posture this repository publishes nothing to derive from (AAP 0.8.5), whereas every value
+/// this function does set has a stated correctness derivation.
+/// </para>
+/// </remarks>
+static void ConfigureOutboundResilience(
+    HttpStandardResilienceOptions resilience,
+    IServiceProvider serviceProvider)
+{
+    ArgumentNullException.ThrowIfNull(resilience);
+    ArgumentNullException.ThrowIfNull(serviceProvider);
+
+    GatewayOptions.OutboundCallOptions outbound = serviceProvider
+        .GetRequiredService<IOptions<GatewayOptions>>()
+        .Value
+        .Outbound;
+
+    resilience.TotalRequestTimeout.Timeout = outbound.RequestTimeout;
+
+    resilience.Retry.BackoffType = DelayBackoffType.Exponential;
+    resilience.Retry.UseJitter = true;
+    resilience.Retry.ShouldHandle = OutboundCallPolicy.ShouldRetryAsync;
+
+    resilience.CircuitBreaker.ShouldHandle = OutboundCallPolicy.ShouldBreakAsync;
+}
+
+/// <summary>
+/// Whether the principal's <c>scope</c> claim set contains the named scope.
+/// </summary>
+/// <param name="user">The authenticated principal.</param>
+/// <param name="required">The scope the operation requires.</param>
+/// <returns><see langword="true"/> when the scope is granted.</returns>
+/// <remarks>
+/// EXACT, ORDINAL AND SPACE-DELIMITED, matching <c>Authorization/ScopeAuthorization.cs</c>'s handler
+/// clause for clause: the claim is read under its bare wire spelling because inbound claim mapping is
+/// off, entries are compared ordinally with no prefix match and no wildcard, and empty entries are
+/// skipped so a doubled or trailing delimiter behaves like a well-formed value. Stated here as well as
+/// in the handler because the two forms must not be able to disagree about what "granted" means.
+/// </remarks>
+static bool GrantsScope(ClaimsPrincipal user, string required)
+{
+    ArgumentNullException.ThrowIfNull(user);
+    ArgumentNullException.ThrowIfNull(required);
+
+    foreach (Claim claim in user.FindAll("scope"))
+    {
+        foreach (string granted in claim.Value.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (string.Equals(granted, required, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 static X509Certificate2Collection LoadMutualTlsClientIdentity(
     GatewayOptions.MutualTlsClientOptions mutualTls)
 {
@@ -603,6 +1096,19 @@ static X509Certificate2Collection LoadMutualTlsClientIdentity(
         or UnauthorizedAccessException
         or ArgumentException)
     {
+        // ⚠ THE ORIGINAL EXCEPTION IS DELIBERATELY NOT ATTACHED, AND OMITTING IT IS THE WHOLE POINT.
+        // The message below names no path - but an InnerException would, because every one of the four
+        // caught types puts the file name in its own Message: IOException and
+        // UnauthorizedAccessException are constructed from the path by the runtime, and
+        // CryptographicException can carry it too. Startup logging renders an exception CHAIN, not just
+        // the outermost message, so attaching the cause would publish where a private key is mounted in
+        // the one log record an operator is most likely to paste somewhere (constraint C-F). Redacting
+        // the outer message while wrapping the inner one is not redaction at all.
+        //
+        // THE TYPE NAME IS RETAINED BECAUSE IT IS DIAGNOSTIC AND CARRIES NO PATH. It is what separates
+        // the three failure modes an operator would otherwise have to guess between: a missing or
+        // unreadable file, a file that is not PEM, and a key the platform will not accept. That is
+        // enough to act on, and it is all that can be published safely.
         throw new InvalidOperationException(
             "The client certificate named by "
                 + $"'{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}' could not be "
@@ -610,10 +1116,179 @@ static X509Certificate2Collection LoadMutualTlsClientIdentity(
                 + "host will not start. Check that both files exist, that the process can read them, "
                 + "and that each is PEM encoded - the certificate in "
                 + $"'{nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath)}' and its private "
-                + $"key in '{nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath)}'. "
-                + "Neither path is reproduced here, because a startup log is the wrong place to "
-                + "publish where a private key is mounted.",
-            failure);
+                + $"key in '{nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath)}'. The "
+                + $"underlying failure was a {failure.GetType().Name}. Neither path is reproduced here, "
+                + "and the underlying exception is deliberately not attached, because a startup log is "
+                + "the wrong place to publish where a private key is mounted.");
+    }
+}
+
+/// <summary>
+/// The extension-member names the published problem body declares.
+/// </summary>
+/// <remarks>
+/// SPELLED ONCE HERE BECAUSE THE COMPOSITION ROOT AND THE ENDPOINT FILES BOTH WRITE THEM, and the
+/// customization above exists precisely to fill the member an endpoint file did not. Two independent
+/// spellings would let a rename go half-applied, at which point a body would carry both the old member and
+/// the new one and a consumer would read whichever it happened to look for
+/// [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml ProblemDetails].
+/// </remarks>
+internal static class ProblemContractMembers
+{
+    /// <summary>The legacy return code carried by every problem body.</summary>
+    internal const string RetCode = "retCode";
+}
+
+/// <summary>
+/// The trust anchor every outbound internal channel verifies its peer against, loaded once from the
+/// path <c>Gateway:InternalTls:TrustedCaPath</c> names.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHAT THIS FIXES, STATED PLAINLY. Security and DataServices both terminate TLS with certificates
+/// issued by the LOCAL certificate authority the generation recipe in <c>docs/ARCHITECTURE.md</c>
+/// §9.3.1 creates, and that authority is in no container's operating-system trust store. Left on
+/// platform default trust, every outbound channel this service opens - token issuance, the two gRPC
+/// channels, the bearer handler's key-set backchannel and the readiness probes - rejects the
+/// certificate it is presented and the documented topology cannot connect at all.
+/// </para>
+/// <para>
+/// IT NARROWS TRUST; IT DOES NOT RELAX IT. The policy built here sets
+/// <see cref="X509ChainTrustMode.CustomRootTrust"/>, so the mounted anchor becomes the ONLY acceptable
+/// root for internal traffic and the machine's public roots stop being acceptable for it. Chain
+/// building, name validation and validity dates are still performed by the platform, unchanged. There
+/// is no <c>RemoteCertificateValidationCallback</c>, no
+/// <c>ServerCertificateCustomValidationCallback</c>, no <c>DangerousAcceptAnyServerCertificate</c> and
+/// no environment-conditional bypass anywhere in this service (constraint C-G).
+/// </para>
+/// <para>
+/// REVOCATION IS NOT CHECKED, AND THAT IS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN A RELAXATION. A
+/// local authority generated by two <c>openssl</c> invocations publishes no certificate revocation
+/// list and runs no responder, so an online check has nothing to ask and an offline check has nothing
+/// to read; requesting one would make every internal handshake wait for a lookup that must fail. The
+/// certificates it issues are short-lived by the recipe's own <c>-days 30</c>, which is the control
+/// that substitutes for revocation here. A deployment whose authority does publish revocation
+/// information leaves this path unset and uses platform trust, where the platform's own default
+/// revocation behaviour applies.
+/// </para>
+/// <para>
+/// LOADED ONCE AND SHARED. The handler factories recycle their primary handlers on a schedule, so
+/// reading the anchor inside a factory would re-read the file on every rotation. It is loaded here as
+/// a singleton, which is also what lets the eager resolve after <c>Build()</c> turn an unreadable
+/// anchor into a startup failure rather than a first-request one.
+/// </para>
+/// </remarks>
+internal sealed class InternalTlsTrust
+{
+    private readonly X509Certificate2Collection _anchors;
+
+    /// <summary>
+    /// Loads the anchor bundle, or records that this deployment uses platform default trust.
+    /// </summary>
+    /// <param name="options">The validated <c>Gateway:InternalTls</c> group. A path, never material.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A path is configured but the bundle cannot be read or does not parse. Structural, and therefore
+    /// fatal: a deployment that meant to pin internal trust and cannot has already lost every
+    /// authenticated call it would make.
+    /// </exception>
+    /// <remarks>
+    /// The path is NOT echoed into the failure message. A trust anchor is public material, but a
+    /// container's secret mount layout is not something a startup record should publish, so the message
+    /// names the configuration key exactly as
+    /// <c>Configuration/GatewayOptions.cs</c> and <c>LoadMutualTlsClientIdentity</c> do.
+    /// </remarks>
+    public InternalTlsTrust(GatewayOptions.InternalTlsTrustOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (!options.IsConfigured)
+        {
+            _anchors = [];
+
+            return;
+        }
+
+        try
+        {
+            X509Certificate2Collection loaded = [];
+
+            loaded.ImportFromPemFile(options.TrustedCaPath.Trim());
+
+            if (loaded.Count == 0)
+            {
+                throw new CryptographicException(
+                    "The file carried no PEM-encoded certificate.");
+            }
+
+            _anchors = loaded;
+        }
+        catch (Exception failure) when (failure
+            is CryptographicException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                "The internal trust anchor named by "
+                    + $"'{GatewayOptions.SectionName}:{nameof(GatewayOptions.InternalTls)}:"
+                    + $"{nameof(GatewayOptions.InternalTlsTrustOptions.TrustedCaPath)}' could not be "
+                    + "loaded, so this deployment cannot verify its upstreams' certificates and the "
+                    + "host will not start. Check that the file exists, that the process can read it, "
+                    + "and that it is a PEM-encoded certificate or chain of them. The path is not "
+                    + "reproduced here, because a startup record must not publish a container's secret "
+                    + "mount layout.",
+                failure);
+        }
+    }
+
+    /// <summary>
+    /// Whether internal trust is pinned to a mounted anchor rather than left to the platform.
+    /// </summary>
+    public bool IsPinned => _anchors.Count > 0;
+
+    /// <summary>
+    /// Applies the pinned anchor to one outbound handler, or leaves platform trust in place.
+    /// </summary>
+    /// <param name="handler">The handler about to be used for internal traffic.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="handler"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// A FRESH POLICY PER HANDLER, DELIBERATELY. <see cref="X509ChainPolicy"/> is not documented as
+    /// thread-safe and a handler may be used concurrently, so each handler receives its own instance
+    /// built over the SAME shared anchor collection - one file read, one policy per consumer.
+    /// </remarks>
+    public void Apply(SocketsHttpHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+
+        if (!IsPinned)
+        {
+            return;
+        }
+
+        handler.SslOptions.CertificateChainPolicy = CreateChainPolicy();
+    }
+
+    /// <summary>
+    /// Builds the chain policy internal peers are verified against.
+    /// </summary>
+    /// <returns>A policy trusting the mounted anchor and nothing else.</returns>
+    /// <remarks>
+    /// <see cref="X509ChainPolicy.CustomTrustStore"/> is only consulted under
+    /// <see cref="X509ChainTrustMode.CustomRootTrust"/>, so the two are set together and neither is
+    /// meaningful without the other.
+    /// </remarks>
+    private X509ChainPolicy CreateChainPolicy()
+    {
+        X509ChainPolicy policy = new()
+        {
+            TrustMode = X509ChainTrustMode.CustomRootTrust,
+            RevocationMode = X509RevocationMode.NoCheck,
+        };
+
+        policy.CustomTrustStore.AddRange(_anchors);
+
+        return policy;
     }
 }
 

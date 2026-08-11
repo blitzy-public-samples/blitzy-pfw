@@ -135,7 +135,7 @@
  *   it fall out of scope.
  * - **C-F — no secret in source.** No key, certificate, password, pre-minted
  *   token or encoded credential run appears anywhere in this file. Tokens come
- *   only from `acquireServiceToken`, and NO TOKEN, `Authorization` HEADER OR
+ *   only from `requireServiceToken`, and NO TOKEN, `Authorization` HEADER OR
  *   RESPONSE BODY IS EVER RENDERED into an assertion message, because a message
  *   reaches the console and the CI log and both are retained. The leakage guard in
  *   step 4 reports the NAME of the pattern it matched and never the text that
@@ -196,7 +196,6 @@ import {
   MARKED_COLUMNS,
   SALARY_COMPARISON_TOLERANCE,
   STALE_ORIGINAL_SENTINEL,
-  acquireServiceToken,
   asStaleUpdate,
   asUpdate,
   bearerHeaders,
@@ -212,6 +211,13 @@ import {
   type CompanyRowUpdate,
   type ServiceToken,
 } from '../fixtures';
+
+import {
+  assertTokenIssuanceProvisioned,
+  requireServiceToken,
+} from '../fixtures/token-issuance';
+
+import { probeStackAvailability } from '../fixtures/live-stack';
 
 /* ------------------------------------------------------------------------- *
  * THE ROUTE TABLE — ONE OF THIS FILE'S TWO EDIT POINTS FOR WIRE SHAPE
@@ -1429,6 +1435,52 @@ function requireConflictBodyText(): string {
 }
 
 test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrite (C-06 over C-09)', () => {
+  // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
+  //
+  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
+  // nothing else, on every topology including the local bring-up, so with no
+  // identity provisioned every authenticated assertion below is unrunnable. The
+  // hook fails this group's SETUP in a full acceptance run rather than letting
+  // fifteen token calls fail one at a time with transport errors that never say
+  // why; a run that has explicitly declared itself partial passes straight
+  // through here and its token-dependent tests skip themselves instead, with the
+  // reason stated. The whole policy lives in `fixtures/token-issuance.ts` — this
+  // line only applies it.
+  test.beforeAll(assertTokenIssuanceProvisioned);
+
+  // ---------------------------------------------------------------------------
+  // MISSING-STACK BEHAVIOUR, MADE UNIFORM AND EXPLICIT ACROSS ALL SIX SPECS
+  //
+  // This suite drives real HTTP against a running four-service stack, so three
+  // outcomes have to stay distinguishable: the contract holds (pass), the
+  // contract is violated (fail), and the stack is not up at all (neither).
+  // Without an explicit third state the last one arrives as a wall of transport
+  // errors that read exactly like the second - a false accusation against
+  // services that are merely absent - and the tempting remedy is to soften the
+  // assertions until they tolerate an unreachable host, which converts a real
+  // violation into a silent pass and destroys the suite's whole value.
+  //
+  // The probe is memoised per worker, so this costs one request per worker and
+  // not one per test.
+  //
+  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
+  // than a title match: several specs mix pure-fixture assertions in with HTTP
+  // ones, those assertions are exactly the part that still holds with nothing
+  // running, and skipping them would throw away the only coverage available
+  // before a bring-up. A tag is declarative and machine-read; a title substring
+  // would silently start skipping the moment someone reworded a test name, and
+  // two stack-free tests in this suite never carried the wording at all.
+  // ---------------------------------------------------------------------------
+  test.beforeEach(async ({}, testInfo) => {
+    if (testInfo.tags.includes('@no-stack')) {
+      return;
+    }
+
+    const availability = await probeStackAvailability();
+
+    test.skip(!availability.reachable, availability.reason);
+  });
+
   // TWO FLAGS, AND BOTH ARE LOAD-BEARING.
   //
   // `mode: 'serial'` because this is one multi-step MUTATION SEQUENCE over shared
@@ -1452,7 +1504,7 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
   test('step 1 — a known starting row is created through the public workflow', async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     // CREATED THROUGH THE PUBLIC WORKFLOW, NEVER SEEDED. Storage is never touched
     // directly and the volume is never reset, reseeded, dropped or recreated: the
@@ -1489,11 +1541,26 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
       ).toBe(true);
     }
 
+    // REQUIRED, NOT CONDITIONAL — a contract distinction rather than a strictness
+    // preference. The canonical protobuf JSON mapping omits a field only when it
+    // holds its type's DEFAULT, so the single omission this projection may
+    // legitimately produce for an int64 is zero. Exactly one row was submitted, so
+    // the only correct value is 1 and 1 is not omissible. An absent member means
+    // either that nothing was inserted despite the success status, or that the
+    // projection dropped a count the caller needs — and this file needs it more
+    // than most, because every later step addresses the row this step created.
     const inserted: number | undefined = readInt64(body, RESPONSE_KEYS.rowsInserted);
 
-    if (inserted !== undefined) {
-      expect(inserted, 'exactly one row was submitted for insert').toBe(1);
-    }
+    expect(
+      inserted,
+      'the response must report the inserted-row count. One row was submitted, ' +
+        'so the count is non-zero and cannot be a permissible protobuf-default ' +
+        'omission: its absence means either that nothing was inserted despite ' +
+        'the success status, or that the projection dropped a count the caller ' +
+        'needs in order to know what was applied.',
+    ).toBeDefined();
+
+    expect(inserted, 'exactly one row was submitted for insert').toBe(1);
 
     // THE IDENTITY ROUND-TRIP. The engine assigns the key, so the caller learns it
     // from the response rather than choosing it — which is the whole reason the
@@ -1643,7 +1710,7 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
   test('step 2 — a legitimate update applies, which makes the captured snapshot stale', async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
     const baseline: CompanyRow = requireCreatedSnapshot();
 
     // `asUpdate` produces the {current, original} PAIR the contract needs, with the
@@ -1691,11 +1758,24 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
       ).toBe(true);
     }
 
+    // REQUIRED, NOT CONDITIONAL, for the reason recorded on the inserted-row count
+    // in step 1 — and it matters most precisely here. This step exists to make the
+    // captured snapshot STALE, so a count of zero, or an absent count standing for
+    // zero, would mean the row was never moved and the conflict step that follows
+    // would be asserting against a row that had not changed. A conditional guard
+    // would have let that pass as a green workflow proving nothing.
     const updatedCount: number | undefined = readInt64(body, RESPONSE_KEYS.rowsUpdated);
 
-    if (updatedCount !== undefined) {
-      expect(updatedCount, 'exactly one row was submitted for update').toBe(1);
-    }
+    expect(
+      updatedCount,
+      'the response must report the updated-row count. One row was submitted, so ' +
+        'the count is non-zero and cannot be a permissible protobuf-default ' +
+        'omission: its absence means the update matched no row while still ' +
+        'reporting success, which would leave the following conflict step ' +
+        'measuring a row nothing had moved.',
+    ).toBeDefined();
+
+    expect(updatedCount, 'exactly one row was submitted for update').toBe(1);
 
     // Re-read and confirm. A read-back is what distinguishes an update that was
     // APPLIED from one that was merely accepted — and it is what establishes the
@@ -1763,7 +1843,7 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
   test(`step 3 — a stale-original update is refused with HTTP ${CONFLICT_STATUS}`, async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     // THE STALE ORIGINALS COME FROM THE FIXTURE, NEVER FROM HERE. `asStaleUpdate` is
     // the one place in this suite where a stale original set may be constructed, and
@@ -2176,7 +2256,7 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
     // THE ASSERTION THE WHOLE FILE EXISTS FOR, in its positive and negative forms.
     // A rejection that still wrote something would be the worst of both worlds: the
     // caller is told to retry while the data has already been changed underneath it.
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
     const baseline: CompanyRow = requireAppliedSnapshot();
 
     const rows: readonly unknown[] = await retrieveRows(request, token);
@@ -2266,7 +2346,7 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
     // DIFFERENT payload, whereas a runner retry would re-run the same assertion
     // against the same conditions and could convert a real failure into a pass. The
     // second remains forbidden, and is pinned off for this describe block.
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
     const previous: CompanyRow = requireAppliedSnapshot();
 
     // Re-read FIRST. Re-sending the same payload would produce the same conflict,

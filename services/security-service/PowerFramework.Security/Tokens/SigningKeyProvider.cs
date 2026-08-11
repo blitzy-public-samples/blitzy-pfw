@@ -212,6 +212,7 @@
 
 using System.Buffers.Text;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 
@@ -487,22 +488,32 @@ public sealed class SigningKeyProvider : IDisposable
     /// validation can then be refused here. Both shapes genuinely occur: the legacy key generator's
     /// armoured output is an OPTIONAL fourth argument
     /// [<c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20</c>], and the single-line base64 form is
-    /// the only shape an environment file can carry because that format has no line continuation.
+    /// the only shape an environment file can carry because that format has no line continuation. The
+    /// modulus floor below mirrors the validator's in the same way and reads the same setting, so the
+    /// two cannot disagree about a given key either.
     /// </para>
     /// <para>
-    /// NO KEY-SIZE CHECK IS PERFORMED, and the omission is a preserved legacy allowance rather than
-    /// an oversight: 1024-bit RSA is a first-class legal size in the oracle's own catalogue
-    /// [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>]. A size the minting library refuses is
-    /// that library's report to make when it makes it.
+    /// A KEY-SIZE CHECK *IS* PERFORMED, IMMEDIATELY AFTER THE IMPORT, and an earlier revision of this
+    /// paragraph said the opposite - that no check was performed because 1024-bit RSA is a first-class
+    /// legal size in the oracle's own catalogue [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>].
+    /// That allowance is real but belongs to a DIFFERENT SURFACE: <c>Crypto/RsaProvider.GenRSAKey</c>,
+    /// where a caller names the size and byte-for-byte parity is the obligation, still accepts 1024 bits
+    /// and is untouched. The key imported here is this service's OWN signing identity, which is net-new
+    /// - the legacy framework has no token issuer - so there is no legacy behaviour on it to preserve,
+    /// and applying another surface's allowance to the system's trust root would import a weakness
+    /// rather than preserve a behaviour. The floor is configured by
+    /// <c>Security:SigningKeyMinimumSizeBits</c>, defaults to 2048, and cannot be configured below that.
     /// </para>
     /// <para>
     /// NO CLEAN-UP ARM WRAPS THE STEPS AFTER THE IMPORT, and that is reasoned rather than overlooked.
-    /// Everything after it - exporting the public parameters, encoding two public members, and pairing
-    /// the key with its algorithm - operates on a key that has just imported successfully and cannot
-    /// fail for a configuration reason. Were one of them to fail anyway, this constructor throws, so
-    /// the host refuses to start and the process ends; there is no arm in which a leaked key handle
-    /// outlives the failure, because there is no arm in which anything outlives it. Wrapping them
-    /// would add a recovery path that only an already-terminating process could ever reach.
+    /// The one step after the import that CAN fail for a configuration reason is the modulus floor, and
+    /// it disposes the key itself before throwing. Everything after that - exporting the public
+    /// parameters, encoding two public members, and pairing the key with its algorithm - operates on a
+    /// key that has just imported successfully and cannot fail for a configuration reason. Were one of
+    /// them to fail anyway, this constructor throws, so the host refuses to start and the process ends;
+    /// there is no arm in which a leaked key handle outlives the failure, because there is no arm in
+    /// which anything outlives it. Wrapping them would add a recovery path that only an
+    /// already-terminating process could ever reach.
     /// </para>
     /// </remarks>
     public SigningKeyProvider(IOptions<SecurityOptions> options)
@@ -519,6 +530,27 @@ public sealed class SigningKeyProvider : IDisposable
         string material = RequireSigningMaterial(security.SigningKey);
 
         _privateKey = ImportPrivateKey(material);
+
+        // --------------------------------------------------------------------------------------------
+        // THE MODULUS FLOOR, ENFORCED BEFORE ANY CREDENTIAL EXISTS
+        //
+        // Placed HERE - after the import and before the SigningCredentials below - because that is the
+        // only position at which the guarantee is structural rather than procedural: from this line on,
+        // no construction path can reach a credential built over a key shorter than the configured
+        // floor, whatever the caller did or did not validate first.
+        //
+        // SecurityOptionsValidator applies the same floor and is not made redundant by this: it is what
+        // turns the fault into a named configuration failure an operator can act on, whereas this is
+        // what makes the guarantee hold even for a construction path that never ran options validation
+        // - which the service tests exercise directly.
+        //
+        // THE FLOOR IS THIS SERVICE'S OWN SIGNING IDENTITY AND NOTHING ELSE. Crypto/RsaProvider's
+        // GenRSAKey deliberately enforces no minimum and still accepts 1024 bits, preserving the legacy
+        // allowance [ws_objects/pfw.shared.pbl.src/enums.sru:L965]; that surface is untouched here and a
+        // test pins the two apart. The key measured on this line has no legacy analogue at all, because
+        // the legacy framework has no token issuer.
+        // --------------------------------------------------------------------------------------------
+        RequireSufficientModulus(_privateKey, security.SigningKeyMinimumSizeBits);
 
         // THE FALSE IS LOAD BEARING. Exporting WITHOUT the private parameters is what makes both
         // public projections below structurally incapable of carrying a private component: they are
@@ -745,6 +777,47 @@ public sealed class SigningKeyProvider : IDisposable
     /// the wrong kind of thing. Collapsing them into one message would send an operator to the wrong
     /// place. Nothing here inspects, measures, trims or copies the value.
     /// </remarks>
+    /// <summary>
+    /// Refuses an imported signing key whose RSA modulus is shorter than the configured floor.
+    /// </summary>
+    /// <param name="key">The imported private key.</param>
+    /// <param name="minimumSizeBits">The configured floor, in bits.</param>
+    /// <exception cref="InvalidOperationException">
+    /// The modulus is shorter than <paramref name="minimumSizeBits"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE KEY IS DISPOSED BEFORE THE THROW, matching how the import path releases a public-only key
+    /// before reporting it: the instance holds private material, the construction that would have owned
+    /// it is not going to complete, and nothing else has a reference through which to dispose it. The
+    /// caller field has already been assigned, so it is left holding a disposed key - which is exactly
+    /// the state every member of this type already guards against, and the process is terminating in any
+    /// case because a failing constructor here refuses the host.
+    /// </para>
+    /// <para>
+    /// THE MESSAGE STATES THE MEASURED SIZE. A modulus length is not a secret - this service publishes
+    /// it in the key set it serves anonymously - and without it an operator cannot distinguish a wrong
+    /// key from a wrong generation command. No byte of the key appears.
+    /// </para>
+    /// </remarks>
+    private static void RequireSufficientModulus(RSA key, int minimumSizeBits)
+    {
+        int keySizeBits = key.KeySize;
+
+        if (keySizeBits >= minimumSizeBits)
+        {
+            return;
+        }
+
+        key.Dispose();
+
+        throw new InvalidOperationException(string.Format(
+            CultureInfo.InvariantCulture,
+            SecurityOptionsValidator.SigningKeyTooShortMessageFormat,
+            keySizeBits,
+            minimumSizeBits));
+    }
+
     private static string RequireSigningMaterial(string? material)
     {
         if (string.IsNullOrWhiteSpace(material))

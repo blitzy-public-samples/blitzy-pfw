@@ -112,6 +112,7 @@ using System.Net.Http.Headers;
 using System.Net.Mime;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
@@ -130,6 +131,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
+using PowerFramework.Gateway.Authorization;
 using PowerFramework.Gateway.Clients;
 using PowerFramework.Gateway.Composition;
 using PowerFramework.Gateway.Configuration;
@@ -790,6 +792,42 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
     /// <summary>The scheme name a bearer credential is presented under.</summary>
     public const string BearerScheme = "Bearer";
 
+    /// <summary>
+    /// The scope set a credential from <see cref="IssueValidToken"/> carries: every scope Gateway's
+    /// protected routes require, spelled from the routes themselves.
+    /// </summary>
+    /// <remarks>
+    /// Composed from the route constants rather than written out, so a route that changes its required
+    /// scope changes what this fixture mints and cannot leave the suite passing against a stale spelling.
+    /// The set matches the grant Security's issuance roster hands the operator identity, which is what
+    /// makes a token minted here equivalent to one a real deployment would obtain.
+    /// </remarks>
+    /// <remarks>
+    /// A LIST RATHER THAN A PRE-JOINED STRING, so it is the same shape <c>Mint</c>'s scope parameter takes.
+    /// One shape means the join happens in exactly one place - inside <c>Mint</c>, where the wire form is
+    /// decided - and a caller cannot pass a set that was joined with the wrong separator. It is also what
+    /// keeps ABSENCE expressible: a nullable list distinguishes "no scope claim at all" from "a claim
+    /// carrying nothing", and a pre-joined string cannot.
+    /// </remarks>
+    public static readonly IReadOnlyList<string> GrantedScopes =
+    [
+        PingEndpoints.RequiredScope,
+        CapabilityEndpoints.RequiredScope,
+        DataServicesProxyEndpoints.RequiredScope,
+    ];
+
+    /// <summary>
+    /// The client credential the host presents on Security's token-issuance edge. Present so the host can
+    /// START: the composition root refuses a deployment that could present neither accepted scheme.
+    /// </summary>
+    /// <remarks>
+    /// A fixture value and not a real one. Nothing in this suite leaves the process, so it is never
+    /// presented to anything; it exists because a deployment with no issuance credential is a
+    /// configuration this service deliberately refuses, and a test host must be a configuration it
+    /// accepts.
+    /// </remarks>
+    private const string IssuanceSecret = "gateway-tests-issuance-credential";
+
     /// <summary>The signature algorithm named in the header of every minted credential.</summary>
     private const string HeaderAlgorithm = "HS256";
 
@@ -1044,16 +1082,62 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
 
     /// <summary>Mints a credential the host must accept.</summary>
     /// <returns>The compact serialization.</returns>
-    public string IssueValidToken() => Mint(_trustedKey, ExpectedAudience, ExpectedIssuer, AcceptedLifetime);
+    public string IssueValidToken() =>
+        Mint(_trustedKey, ExpectedAudience, ExpectedIssuer, AcceptedLifetime, GrantedScopes);
+
+    /// <summary>
+    /// Issues an otherwise valid credential carrying EXACTLY the given scope set, which is how an
+    /// ENTITLEMENT refusal is exercised separately from an authentication one.
+    /// </summary>
+    /// <param name="scopes">
+    /// The scopes to stamp, or <see langword="null"/> to omit the claim ENTIRELY.
+    /// </param>
+    /// <returns>A compact-serialized token.</returns>
+    /// <remarks>
+    /// <para>
+    /// EVERYTHING ELSE ABOUT THE TOKEN IS VALID - the trusted key, the accepted audience, the expected
+    /// issuer and a live window - so a refusal obtained with it is attributable to the scope set and to
+    /// nothing else. That is what separates a scope row from the credential rows beside it, which vary the
+    /// key, the audience, the issuer or the window instead.
+    /// </para>
+    /// <para>
+    /// <b>THREE DISTINCT INPUTS, AND ALL THREE HAVE TO BE MINTABLE.</b> Passing <see langword="null"/>
+    /// omits the claim altogether - the shape a caller granted nothing would present. Passing an EMPTY set
+    /// mints the claim carrying nothing, which is a DIFFERENT credential and is refused for a different
+    /// reason. Passing a set mints exactly that set. A row that could only express two of the three would
+    /// leave the third unproven, and a gate that accepted the absent claim while refusing the empty one
+    /// would look correct against the two it was tested with.
+    /// </para>
+    /// </remarks>
+    public string IssueTokenWithScopes(IReadOnlyList<string>? scopes) =>
+        Mint(_trustedKey, ExpectedAudience, ExpectedIssuer, AcceptedLifetime, scopes);
+
+    /// <summary>
+    /// Issues an otherwise valid credential whose scope claim carries EXACTLY the given text, unjoined and
+    /// untrimmed.
+    /// </summary>
+    /// <param name="claim">The literal claim value, or <see langword="null"/> to omit the claim.</param>
+    /// <returns>A compact-serialized token.</returns>
+    /// <remarks>
+    /// <b>SEPARATE FROM THE SET-BASED FORM BECAUSE THE SUBJECT IS DIFFERENT, NOT AS A CONVENIENCE.</b>
+    /// <see cref="IssueTokenWithScopes"/> takes a SET and composes the wire form itself, which is right for
+    /// every row asking whether an entitlement is honoured. The rows that ask how the handler SPLITS a claim
+    /// need the opposite: a claim value no set could produce - runs of several spaces, leading and trailing
+    /// padding, or whitespace alone - because a joined set is single-spaced and trimmed by construction and
+    /// so cannot express any of them. Two differently named members keep both askable and keep neither
+    /// silently coerced into the other.
+    /// </remarks>
+    public string IssueTokenWithRawScopeClaim(string? claim) =>
+        MintCore(_trustedKey, ExpectedAudience, ExpectedIssuer, AcceptedLifetime, claim);
 
     /// <summary>Mints an otherwise-valid credential whose lifetime has already lapsed.</summary>
     /// <returns>The compact serialization.</returns>
-    public string IssueExpiredToken() => Mint(_trustedKey, ExpectedAudience, ExpectedIssuer, -ExpiredBy);
+    public string IssueExpiredToken() => Mint(_trustedKey, ExpectedAudience, ExpectedIssuer, -ExpiredBy, GrantedScopes);
 
     /// <summary>Mints an otherwise-valid credential signed with a key the host does not trust.</summary>
     /// <returns>The compact serialization.</returns>
     public string IssueTokenSignedWithAnUntrustedKey()
-        => Mint(_untrustedKey, ExpectedAudience, ExpectedIssuer, AcceptedLifetime);
+        => Mint(_untrustedKey, ExpectedAudience, ExpectedIssuer, AcceptedLifetime, GrantedScopes);
 
     /// <summary>Mints an otherwise-valid credential intended for a different audience.</summary>
     /// <param name="audience">The audience to claim.</param>
@@ -1067,7 +1151,7 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
     {
         ArgumentNullException.ThrowIfNull(audience);
 
-        return Mint(_trustedKey, audience, ExpectedIssuer, AcceptedLifetime);
+        return Mint(_trustedKey, audience, ExpectedIssuer, AcceptedLifetime, GrantedScopes);
     }
 
     /// <summary>Mints an otherwise-valid credential claiming a different issuer.</summary>
@@ -1078,7 +1162,7 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
     {
         ArgumentNullException.ThrowIfNull(issuer);
 
-        return Mint(_trustedKey, ExpectedAudience, issuer, AcceptedLifetime);
+        return Mint(_trustedKey, ExpectedAudience, issuer, AcceptedLifetime, GrantedScopes);
     }
 
     /// <summary>
@@ -1118,6 +1202,14 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
         builder.UseSetting(
             $"{JwtBearerVerificationOptions.SectionName}:{nameof(JwtBearerVerificationOptions.Authority)}",
             ExpectedIssuer);
+
+        // THE ISSUANCE CREDENTIAL, SO THE HOST CAN START AT ALL - and through the production resolution
+        // path rather than a test-only door. A FLAT key, not a sectioned one: the environment-variable
+        // provider maps only a double underscore onto the ':' separator, so this name is a top-level
+        // configuration key rather than a path into `Gateway`, which is exactly why the composition root
+        // reads it with an explicit post-configure step instead of binding it. UseSetting writes into the
+        // same host configuration that step reads.
+        builder.UseSetting(GatewayOptions.SecurityClientSecretConfigurationKey, IssuanceSecret);
 
         foreach (KeyValuePair<string, string?> setting in AdditionalSettings)
         {
@@ -1221,7 +1313,42 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
     /// by the writer instead of by hand.
     /// </para>
     /// </remarks>
-    private static string Mint(byte[] key, string audience, string issuer, TimeSpan lifetime)
+    private static string Mint(
+        byte[] key,
+        string audience,
+        string issuer,
+        TimeSpan lifetime,
+        IReadOnlyList<string>? scopes = null) =>
+        MintCore(
+            key,
+            audience,
+            issuer,
+            lifetime,
+
+            // THE JOIN HAPPENS HERE AND NOWHERE ELSE, so the wire form of a scope SET is decided in one
+            // place. Null is carried through as null rather than becoming an empty string, because the core
+            // distinguishes an absent claim from an empty one and collapsing them here would remove that
+            // distinction before the core could express it.
+            scopes is null ? null : string.Join(' ', scopes));
+
+    /// <summary>
+    /// Mints a compact-serialized token whose scope claim is the supplied text, or which carries no scope
+    /// claim at all.
+    /// </summary>
+    /// <param name="key">The signing key.</param>
+    /// <param name="audience">The audience to claim.</param>
+    /// <param name="issuer">The issuer to claim.</param>
+    /// <param name="lifetime">The lifetime; negative mints an already-lapsed credential.</param>
+    /// <param name="scopeClaim">
+    /// The literal scope-claim value, or <see langword="null"/> to omit the member entirely.
+    /// </param>
+    /// <returns>The compact serialization.</returns>
+    private static string MintCore(
+        byte[] key,
+        string audience,
+        string issuer,
+        TimeSpan lifetime,
+        string? scopeClaim)
     {
         DateTimeOffset now = TimeProvider.System.GetUtcNow();
         DateTimeOffset expires = now + lifetime;
@@ -1241,9 +1368,29 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
             writer.WriteString("iss", issuer);
             writer.WriteString("aud", audience);
             writer.WriteString("sub", TokenSubject);
+
             writer.WriteNumber("iat", issuedAt.ToUnixTimeSeconds());
             writer.WriteNumber("nbf", issuedAt.ToUnixTimeSeconds());
             writer.WriteNumber("exp", expires.ToUnixTimeSeconds());
+
+            // ONE CLAIM CARRYING A SPACE-DELIMITED SET, which is the form Security's issuer produces and
+            // therefore the only form this service's scope handler has to be able to read. Emitting one
+            // claim per scope would let a row pass against a handler that could not read a real token.
+            //
+            // OMITTED ENTIRELY WHEN NULL, rather than written as an empty string. A token with no scope
+            // claim at all is the shape a caller granted nothing would present, and it is a different input
+            // from one carrying an empty claim - both must be refused, so both must be mintable. Written
+            // ONCE, on exactly one arm: a second unconditional write would emit the member twice, and a
+            // reader taking the first occurrence would never see the absence this arm exists to express.
+            //
+            // EVERY ROW STATES ITS OWN SET, and the convenience default lives on the fixture rather than
+            // here: GrantedScopes carries every ingress scope the service declares, so a row whose subject
+            // is something other than authorization - a status projection, a capability read, a stream
+            // lifetime - names it and is not silently refused at the scope gate.
+            if (scopeClaim is not null)
+            {
+                writer.WriteString("scope", scopeClaim);
+            }
         });
 
         string signingInput = string.Concat(
@@ -1329,6 +1476,24 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
 
     /// <summary>The challenge parameter the handler reports a rejected credential with.</summary>
     private const string InvalidTokenChallengeParameter = "error=\"invalid_token\"";
+
+    /// <summary>The stand-in written in place of a sensitive value before a message is rendered.</summary>
+    /// <remarks>
+    /// <para>
+    /// CONSTRAINT C-F APPLIED TO THIS SUITE'S OWN FAILURE OUTPUT. Several rows here assert that a fault
+    /// message names a configuration key and does NOT name the value behind it - a mounted certificate or
+    /// private-key path. The absence half is asserted as a boolean, because
+    /// <c>Assert.DoesNotContain</c> renders both its operands and would therefore publish the path at
+    /// exactly the moment the defect it guards against was present. The presence half still wants to show
+    /// the message, so the message is redacted with this marker first: the failure stays diagnosable and
+    /// the path cannot ride along.
+    /// </para>
+    /// <para>
+    /// Fixed-length regardless of what it replaced, so a redacted rendering discloses neither the value nor
+    /// its length, and conspicuous enough that a reader of a failure message cannot mistake it for content.
+    /// </para>
+    /// </remarks>
+    private const string RedactionMarker = "[REDACTED]";
 
     /// <summary>The problem-details extension member every error body in this contract carries.</summary>
     private const string RetCodeMember = "retCode";
@@ -1463,6 +1628,310 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
             { "GET", "/.well-known/jwks.json" },
             { "GET", "/.well-known/openid-configuration" },
         };
+
+    /// <summary>
+    /// Every protected route family that requires a SCOPE beyond authentication, with the scope it
+    /// requires and a method it declares.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The scopes are read from the endpoint files that declare them rather than written out, so a route
+    /// that changes its requirement changes this matrix with it. The four reserved extension points are
+    /// deliberately ABSENT: decision D5 makes them authenticated-only, because requiring a capability
+    /// scope for a route that reaches no capability would invent an entitlement for a service this phase
+    /// must not implement (constraint C-D). Their posture is asserted separately below.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<string, string, string> ScopedIngressBoundaries =>
+        new()
+        {
+            { "GET", PingRoute, PingEndpoints.RequiredScope },
+            { "GET", CapabilitiesRoute, CapabilityEndpoints.RequiredScope },
+            { "POST", "/v1/datawindow/retrieve", DataServicesProxyEndpoints.RequiredScope },
+            { "POST", "/v1/datawindow/update", DataServicesProxyEndpoints.RequiredScope },
+            { "GET", "/v1/datawindow/event-gate", DataServicesProxyEndpoints.RequiredScope },
+            { "POST", "/v1/datawindow/expression/calc", DataServicesProxyEndpoints.RequiredScope },
+        };
+
+    // --------------------------------------------------------------------------------------------------
+    //  3.0  ENTITLEMENT, WHICH IS A DIFFERENT QUESTION FROM AUTHENTICATION
+    //
+    //  Every test in section 3 below proves the boundary is AUTHENTICATED. None of them proved anything
+    //  about what an authenticated caller is ENTITLED to, and until the named scope policies existed the
+    //  answer was "everything": one token minted for Gateway's audience reached the probe, the capability
+    //  projection and all thirty-nine projected DataWindow operations alike, whatever its caller had
+    //  actually been granted. The issuance roster stated least privilege per caller and no surface here
+    //  enforced it, so the 403 the contract declares was unreachable.
+    // --------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A fully valid credential carrying NO scope claim is authenticated and then REFUSED with 403.
+    /// </summary>
+    /// <param name="method">The method to send.</param>
+    /// <param name="route">The route to send it to.</param>
+    /// <param name="requiredScope">The scope the route requires - unused here, and that is the point.</param>
+    /// <remarks>
+    /// The credential differs from the accepted one in exactly one respect: the scope claim is absent.
+    /// Signature, issuer, audience and lifetime are all the accepted ones, so a 403 here cannot be an
+    /// authentication failure wearing a different status.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ScopedIngressBoundaries))]
+    public async Task AnUnscopedCredentialIsAuthenticatedAndThenRefused(
+        string method,
+        string route,
+        string requiredScope)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(requiredScope));
+
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(new HttpMethod(method), new Uri(route, UriKind.Relative));
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(GatewayTestHostFixture.BearerScheme, host.IssueTokenWithScopes(null));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        // AND NOT CHALLENGED. A 403 carries no WWW-Authenticate header, because the credential was
+        // accepted: re-presenting it, or presenting a better-formed one, would not change the answer.
+        // Answering 401 here would tell the caller to authenticate again, which is the wrong remedy.
+        Assert.DoesNotContain(ChallengeHeader, response.Headers.Select(static header => header.Key));
+    }
+
+    /// <summary>
+    /// A credential carrying a scope the route does not require is refused too - the scopes are distinct
+    /// per capability rather than one interchangeable "authenticated" grant.
+    /// </summary>
+    /// <param name="method">The method to send.</param>
+    /// <param name="route">The route to send it to.</param>
+    /// <param name="requiredScope">The scope the route requires, which this credential will NOT carry.</param>
+    /// <remarks>
+    /// This is the test that would fail if all three policies were accidentally registered against the
+    /// same scope, which the unscoped case above cannot detect. The substitute scope is drawn from the
+    /// same matrix, so it is a scope this system genuinely grants somewhere - a credential carrying an
+    /// invented name would prove less.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ScopedIngressBoundaries))]
+    public async Task ACredentialCarryingOnlyAnotherRoutesScopeIsRefused(
+        string method,
+        string route,
+        string requiredScope)
+    {
+        string[] otherScopes =
+        [
+            .. new[]
+            {
+                PingEndpoints.RequiredScope,
+                CapabilityEndpoints.RequiredScope,
+                DataServicesProxyEndpoints.RequiredScope,
+            }.Where(scope => !string.Equals(scope, requiredScope, StringComparison.Ordinal)),
+        ];
+
+        Assert.NotEmpty(otherScopes);
+
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(new HttpMethod(method), new Uri(route, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithScopes(otherScopes));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    /// <summary>
+    /// A credential carrying the required scope is NOT refused, so the policy admits as well as denies.
+    /// </summary>
+    /// <param name="method">The method to send.</param>
+    /// <param name="route">The route to send it to.</param>
+    /// <param name="requiredScope">The scope the route requires.</param>
+    /// <remarks>
+    /// Asserted as "not 401 and not 403" rather than as a success status, because what happens after
+    /// authorization differs per route in this fixture - the probe answers, and a projected DataWindow
+    /// operation reaches an upstream that is deliberately unreachable. The property under test is that
+    /// authorization stopped refusing, and a test that demanded 200 would be asserting the upstream
+    /// substitution instead.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ScopedIngressBoundaries))]
+    public async Task ACredentialCarryingTheRequiredScopePassesAuthorization(
+        string method,
+        string route,
+        string requiredScope)
+    {
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(new HttpMethod(method), new Uri(route, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithScopes([requiredScope]));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.NotEqual(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    /// <summary>
+    /// A malformed scope claim grants nothing, and a scope that merely CONTAINS the required one grants
+    /// nothing either.
+    /// </summary>
+    /// <param name="scopes">The scope claim value to mint.</param>
+    /// <remarks>
+    /// The prefix cases are the ones a containment test would wrongly admit, which is why the claim is
+    /// compared as whole delimiter-separated tokens. Ordinal and case-sensitive, so a differently-cased
+    /// spelling is a different scope rather than the same one.
+    /// </remarks>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("pingx")]
+    [InlineData("ping.readonly")]
+    [InlineData("superping")]
+    [InlineData("PING")]
+    [InlineData("Ping")]
+    public async Task AScopeThatMerelyResemblesTheRequiredOneGrantsNothing(string scopes)
+    {
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(HttpMethod.Get, new Uri(PingRoute, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithRawScopeClaim(scopes));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    /// <summary>
+    /// A scope claim carrying several scopes grants each of them, including at the ends of the list and
+    /// around the malformed separators a real claim can contain.
+    /// </summary>
+    /// <param name="scopes">The scope claim value to mint.</param>
+    [Theory]
+    [InlineData("ping capabilities datawindow")]
+    [InlineData("datawindow capabilities ping")]
+    [InlineData("  ping   capabilities  ")]
+    [InlineData("something.else ping")]
+    public async Task AMultiValuedScopeClaimGrantsEveryTokenItCarries(string scopes)
+    {
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(HttpMethod.Get, new Uri(PingRoute, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithRawScopeClaim(scopes));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    /// <summary>
+    /// The four reserved extension points require authentication and NOTHING FURTHER, so an unscoped
+    /// credential still receives the reserved answer.
+    /// </summary>
+    /// <param name="route">The reserved route.</param>
+    /// <param name="deferredService">The deferred service it names.</param>
+    /// <remarks>
+    /// DECISION D5, AND CONSTRAINT C-D. Requiring a capability scope here would invent an entitlement for
+    /// a capability that does not exist in this phase, and the issuance roster grants no such scope to
+    /// anyone - so every caller would receive 403 and the reserved answer would become unreachable, which
+    /// would make the reserved surface illegible for exactly the readers it exists for. Authenticated-only
+    /// is the whole requirement: the roster is not anonymously enumerable, and every authenticated caller
+    /// gets the same 501.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ReservedRouteFamilies))]
+    public async Task AReservedRouteAnswersWithoutRequiringAnyCapabilityScope(
+        string route,
+        string deferredService)
+    {
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(HttpMethod.Get, new Uri(route, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithScopes(null));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+
+        string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        Assert.Contains(deferredService, body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The anonymous readiness probe is unaffected by the scope policies, and no scope is required to
+    /// reach it.
+    /// </summary>
+    [Fact]
+    public async Task TheAnonymousProbeRequiresNoScope()
+    {
+        using HttpClient client = host.CreateAnonymousClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri(ReadinessRoute, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        // Answered rather than refused. Unready, because nothing is listening upstream - which is a
+        // readiness verdict and not an authorization one.
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    /// <summary>
+    /// Each protected route's policy name is composed from the scope it requires, so the two cannot be
+    /// registered against different spellings.
+    /// </summary>
+    /// <remarks>
+    /// The composition root registers policies BY THESE NAMES. A policy registered under a name no route
+    /// requires would enforce nothing while looking correct in review, and the tests above would still
+    /// pass if the route and the registration had drifted apart only in the name - so the relationship
+    /// itself is asserted here.
+    /// </remarks>
+    [Fact]
+    public void EveryScopePolicyNameIsComposedFromTheScopeItRequires()
+    {
+        Assert.Equal("gateway:scope:" + PingEndpoints.RequiredScope, PingEndpoints.ScopePolicyName);
+        Assert.Equal(
+            "gateway:scope:" + CapabilityEndpoints.RequiredScope,
+            CapabilityEndpoints.ScopePolicyName);
+        Assert.Equal(
+            "gateway:scope:" + DataServicesProxyEndpoints.RequiredScope,
+            DataServicesProxyEndpoints.ScopePolicyName);
+
+        // THREE DISTINCT SCOPES, NOT ONE REUSED. Three routes sharing a scope would be a single
+        // entitlement wearing three names, which is what the parameterless form already was.
+        Assert.Equal(
+            3,
+            new HashSet<string>(
+                [
+                    PingEndpoints.RequiredScope,
+                    CapabilityEndpoints.RequiredScope,
+                    DataServicesProxyEndpoints.RequiredScope,
+                ],
+                StringComparer.Ordinal).Count);
+    }
 
     // --------------------------------------------------------------------------------------------------
     //  3.1  THE FIXTURE'S OWN PREREQUISITE, WHICH IS ALSO AN ASSERTION
@@ -1781,40 +2250,134 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
 
         string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+        string challenge = ReadChallenge(response);
 
-        Assert.DoesNotContain(credential, body, StringComparison.Ordinal);
-        Assert.DoesNotContain(credential, ReadChallenge(response), StringComparison.Ordinal);
+        // EVALUATED BEFORE ASSERTED (C-F). Every kind this theory presents is a REAL signed credential from
+        // the fixture's own key material, and Assert.DoesNotContain renders both its operands - so an
+        // overload taking the credential would publish it into the CI log at exactly the moment the echo
+        // defect was present. Which channel echoed it is the whole diagnostic; the value adds nothing.
+        bool bodyEchoesTheCredential = body.Contains(credential, StringComparison.Ordinal);
+        bool challengeEchoesTheCredential = challenge.Contains(credential, StringComparison.Ordinal);
+
+        Assert.False(
+            bodyEchoesTheCredential,
+            "The refusal body echoed the presented credential. The value is deliberately not reproduced "
+                + "here; the kind that produced it is named by this row's theory data.");
+
+        Assert.False(
+            challengeEchoesTheCredential,
+            "The WWW-Authenticate challenge echoed the presented credential. The challenge header is as "
+                + "public as the body, so this is the same disclosure by another route.");
     }
 
     /// <summary>
-    /// The refusal on the authenticated probe carries no body, because the challenge is framework code.
+    /// The refusal carries the contract's problem body, including both extension members, even though the
+    /// challenge itself is framework code.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// OBSERVED BEHAVIOUR, ASSERTED AS OBSERVED (constraint C-K). <c>Endpoints/PingEndpoints.cs</c> states
-    /// that the framework evaluates the authorisation policy and issues the challenge, so the refusal is
-    /// produced by framework code rather than by hand-rolled header inspection - and a framework challenge
-    /// writes a status and a challenge header without a body. Registering problem details makes Gateway's
-    /// OWN error paths answer <c>application/problem+json</c>, which they do and which the readiness and
-    /// fault assertions below verify; it does not put a body on a challenge.
+    /// THIS ASSERTION USED TO SAY THE OPPOSITE, AND THE OPPOSITE WAS THE DEFECT. It asserted an EMPTY body
+    /// on the reasoning that a framework challenge writes no body and that adding status-code pages "to
+    /// satisfy a test" would change the shipped service. Both halves were wrong. The published contract is
+    /// authoritative over the framework default, and it declares a reusable <c>Unauthorized</c> response
+    /// whose body is <c>ProblemDetails</c> [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml] while
+    /// the routes themselves declare <c>ProducesProblem</c> for 401 - so the bodyless refusal was a
+    /// published promise the service was not keeping, and a test that asserted the gap froze it.
     /// </para>
     /// <para>
-    /// This is recorded rather than papered over, and it is deliberately NOT "fixed" from a test: the
-    /// contract describes the problem body Gateway returns where GATEWAY writes one, and adding a
-    /// status-code page middleware to satisfy a test would change the shipped service's behaviour on every
-    /// status code it answers. The divergence between the described body and the framework challenge is a
-    /// known, documented gap; inventing a body here to make an assertion prettier would hide it.
+    /// BOTH EXTENSION MEMBERS ARE ASSERTED, because the middleware alone would produce a body without them.
+    /// <c>retCode</c> comes from the composition root's problem-details customization, which classifies a
+    /// framework status into the legacy vocabulary; <c>traceId</c> comes from the same place and is what the
+    /// contract calls load-bearing - it is the only member through which a caller can reach anything the
+    /// redacted body withholds. A body carrying neither would satisfy the media type and still be useless.
+    /// </para>
+    /// <para>
+    /// The refusal still discloses nothing: <c>NoRefusalEverEchoesThePresentedCredential</c> above reads the
+    /// body as well as the challenge header, so it now covers this body too rather than a vacuous empty
+    /// string.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task TheRefusalCarriesNoBodyBecauseTheChallengeIsFrameworkCode()
+    public async Task TheRefusalCarriesTheContractsProblemBody()
     {
         using HttpClient client = host.CreateAnonymousClient();
 
         using HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, PingRoute, credential: null);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        Assert.Empty(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(
+            MediaTypeNames.Application.ProblemJson,
+            response.Content.Headers.ContentType?.MediaType);
+
+        using JsonDocument body = await ReadJsonAsync(response);
+
+        // The RFC 9457 member, which is the HTTP status as an integer and not a status word.
+        Assert.Equal(
+            (int)HttpStatusCode.Unauthorized,
+            body.RootElement.GetProperty("status").GetInt32());
+
+        // Asserted through the published symbol rather than as a bare integer: the value is a preserved
+        // legacy identifier, and the legacy algebra draws no distinction between "no credential" and
+        // "credential without permission" - one access code covers both, and that asymmetry is preserved.
+        Assert.Equal(RetCode.E_ACCESS_DENIED, body.RootElement.GetProperty(RetCodeMember).GetInt64());
+
+        string? correlationId = body.RootElement.GetProperty("traceId").GetString();
+
+        Assert.False(string.IsNullOrEmpty(correlationId));
+
+        // The challenge header is still written, because the body is additive rather than a replacement:
+        // a client that authenticates by reading the challenge is unaffected.
+        Assert.Contains(
+            GatewayTestHostFixture.BearerScheme,
+            ReadChallenge(response),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An unmatched route and a rejected method carry the same problem shape as the refusal.
+    /// </summary>
+    /// <param name="route">The route to request.</param>
+    /// <param name="method">The method to request it with.</param>
+    /// <param name="expected">The status the framework answers.</param>
+    /// <param name="expectedRetCode">The legacy code the contract's vocabulary assigns to it.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// THE OTHER TWO FRAMEWORK-GENERATED STATUSES, ASSERTED BECAUSE THEY ARE PRODUCED BY DIFFERENT
+    /// MIDDLEWARE THAN THE CHALLENGE. A 401 comes from authorization, a 405 from routing's method
+    /// constraint, and a 404 from routing finding no candidate at all - three separate producers, none of
+    /// them this service's own code, and the contract declares one body for all of them. A fix verified on
+    /// the challenge alone would leave the other two bodyless.
+    ///
+    /// Each expectation is stated as the published symbol rather than an integer, for the same reason the
+    /// refusal's is.
+    /// </remarks>
+    [Theory]
+    [InlineData("/v1/no-such-route", "GET", HttpStatusCode.NotFound, RetCode.E_OBJECT_NOT_FOUND)]
+    [InlineData(PingRoute, "DELETE", HttpStatusCode.MethodNotAllowed, RetCode.E_NO_SUPPORT)]
+    public async Task EveryFrameworkGeneratedStatusCarriesTheContractsProblemBody(
+        string route,
+        string method,
+        HttpStatusCode expected,
+        long expectedRetCode)
+    {
+        using HttpClient client = host.CreateAnonymousClient();
+
+        using HttpResponseMessage response = await SendAsync(
+            client,
+            new HttpMethod(method),
+            route,
+            BuildAuthorizationHeaderValue("valid"));
+
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Equal(
+            MediaTypeNames.Application.ProblemJson,
+            response.Content.Headers.ContentType?.MediaType);
+
+        using JsonDocument body = await ReadJsonAsync(response);
+
+        Assert.Equal((int)expected, body.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal(expectedRetCode, body.RootElement.GetProperty(RetCodeMember).GetInt64());
+        Assert.False(string.IsNullOrEmpty(body.RootElement.GetProperty("traceId").GetString()));
     }
 
     // --------------------------------------------------------------------------------------------------
@@ -2055,27 +2618,52 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
-    /// The published contract document is anonymous, and it declares the bearer scheme its operations
-    /// require.
+    /// The published contract document REQUIRES a credential, and to a caller that presents one it
+    /// declares the bearer scheme its operations require.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A description of the surface is not part of the surface it describes, so the document is anonymous -
-    /// and every operation in it still states its own security requirement, which is the property asserted
-    /// here. The document is where a consumer learns HOW to authenticate before it has anything to
-    /// authenticate with, so publishing it behind the boundary would be circular.
+    /// THE DOCUMENT IS NOT ONE OF THIS SERVICE'S ANONYMOUS ROUTES, and the refutation comes first so the
+    /// assertions below cannot pass for the wrong reason. The AAP ENUMERATES the anonymous exceptions -
+    /// <c>/health</c> on all four services (C-10) and Security's key set and discovery document (C-01) -
+    /// and the contract document is not among them, so it is answered 401 to an anonymous caller by the
+    /// default-deny fallback policy exactly like every other non-exempt route. Nothing a consumer needs
+    /// in order to obtain a credential is withheld by that: the AUTHORED contract at
+    /// <c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml</c> is a file in the repository, and
+    /// this route serves a generated projection of it.
     /// </para>
     /// <para>
-    /// The generated document is checked against the two facts C-G depends on: the scheme is published as
+    /// THERE IS NO CIRCULARITY, because no consumer in this estate learns how to authenticate from the
+    /// RUNNING ingress. The authored specification under <c>shared/PowerFramework.Contracts/OpenApi/</c> is
+    /// the artifact a consumer is handed, and it is distributed with the consumer; the generated document
+    /// is a projection of the deployed routing table, useful for confirming what a particular deployment
+    /// exposes. And constraint C-G does not leave the exceptions to judgement - it ENUMERATES them, as
+    /// readiness plus the sole issuer's key-set and discovery documents, which a stock bearer handler must
+    /// fetch before it holds a credential. A contract description is none of those. What tips it from
+    /// defensible to wrong is what the document contains at THIS boundary: every route, every parameter
+    /// and every upstream the one externally reachable service reaches, which is the map of the estate.
+    /// </para>
+    /// <para>
+    /// Both halves are asserted. Anonymously the document is challenged, which is the C-G property. With a
+    /// credential it is served, which is what keeps the first half from passing against a document that
+    /// had simply stopped being served at all - and it carries the two facts C-G depends on: the scheme is
     /// HTTP bearer authentication with credentials formatted as a JWT, and the two halves of C-10 declare
-    /// opposite postures - the authenticated probe names the scheme, the readiness probe declares an EMPTY
-    /// requirement list, which is how the specification spells "no authentication required".
+    /// opposite postures, the authenticated probe naming the scheme while the readiness probe declares an
+    /// EMPTY requirement list, which is how the specification spells "no authentication required".
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task ThePublishedDocumentIsAnonymousAndDeclaresTheBearerScheme()
+    public async Task ThePublishedDocumentIsProtectedAndDeclaresTheBearerScheme()
     {
-        using HttpClient client = host.CreateAnonymousClient();
+        using HttpClient anonymous = host.CreateAnonymousClient();
+
+        using HttpResponseMessage refused = await anonymous.GetAsync(
+            new Uri(DocumentRoute, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+
+        using HttpClient client = host.CreateAuthenticatedClient();
 
         using HttpResponseMessage response = await client.GetAsync(
             new Uri(DocumentRoute, UriKind.Relative),
@@ -2957,19 +3545,70 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         Assert.NotNull(compositionRootFrame);
 
         // Names the two configuration keys, and neither of the two paths.
+        //
+        // EVALUATED BEFORE ASSERTED, AND THE MESSAGE REDACTED BEFORE IT CAN BE RENDERED (C-F). The two
+        // path-absence checks are booleans because Assert.DoesNotContain renders both operands, and the two
+        // key-presence checks read a REDACTED copy of the message because the failure they describe is
+        // "the message no longer names the key" - which is worth showing the message for, and the message
+        // is exactly the thing that might now be carrying a private-key mount point.
+        bool messageEchoesTheCertificatePath =
+            compositionRootFrame.Message.Contains(missingCertificate, StringComparison.Ordinal);
+        bool messageEchoesTheKeyPath =
+            compositionRootFrame.Message.Contains(missingKey, StringComparison.Ordinal);
+
+        string redactedMessage = compositionRootFrame.Message
+            .Replace(missingCertificate, RedactionMarker, StringComparison.Ordinal)
+            .Replace(missingKey, RedactionMarker, StringComparison.Ordinal);
+
         Assert.Contains(
             nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath),
-            compositionRootFrame.Message,
+            redactedMessage,
             StringComparison.Ordinal);
         Assert.Contains(
             nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath),
-            compositionRootFrame.Message,
+            redactedMessage,
             StringComparison.Ordinal);
-        Assert.DoesNotContain(missingCertificate, compositionRootFrame.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(missingKey, compositionRootFrame.Message, StringComparison.Ordinal);
 
-        // The cause is preserved rather than swallowed, which is what makes the startup failure diagnosable.
-        Assert.NotNull(compositionRootFrame.InnerException);
+        Assert.False(
+            messageEchoesTheCertificatePath,
+            "The startup fault reproduced the configured certificate path. A startup log is the wrong place "
+                + "to publish where an identity is mounted; the message may name the configuration key "
+                + "instead.");
+
+        Assert.False(
+            messageEchoesTheKeyPath,
+            "The startup fault reproduced the configured private-key path, which is worse than the "
+                + "certificate path for the same reason it is more sensitive.");
+
+        // NO PATH-BEARING CAUSE IS ATTACHED TO THE OPERATOR-VISIBLE CHAIN, AND THAT ABSENCE IS THE
+        // ASSERTION - THIS TEST USED TO REQUIRE THE OPPOSITE.
+        //
+        // It asserted the cause was preserved "so the failure is diagnosable", which sounded right and
+        // defeated the redaction directly above it: the file exception the runtime raises is constructed
+        // FROM THE PATH and carries it in its own Message, and startup logging renders an exception
+        // CHAIN rather than only its outermost message. So the wrapper omitted both paths and the
+        // InnerException published one anyway. Redacting a message while wrapping an unredacted cause is
+        // not redaction.
+        Assert.Null(compositionRootFrame.InnerException);
+
+        // AND NOTHING ELSE IN THE CHAIN CARRIES EITHER PATH, which is the property the previous
+        // assertion only implied. Checking the whole chain rather than the one frame is what makes this
+        // a statement about what an operator would SEE.
+        for (Exception? current = failure; current is not null; current = current.InnerException)
+        {
+            Assert.DoesNotContain(missingCertificate, current.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(missingKey, current.Message, StringComparison.Ordinal);
+        }
+
+        // DIAGNOSABILITY IS RETAINED WITHOUT THE PATH: the failure TYPE is named in the message, which is
+        // what separates a missing or unreadable file from a file that is not PEM from a key the platform
+        // will not accept. A type name carries no location.
+        // Read from the failure the platform actually raises for an absent PEM file rather than asserting
+        // one spelling: the point is that SOME type is named, not which one this runtime chose.
+        Exception probe = Assert.ThrowsAny<Exception>(
+            () => X509Certificate2.CreateFromPemFile(missingCertificate, missingKey));
+
+        Assert.Contains(probe.GetType().Name, compositionRootFrame.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -3033,14 +3672,28 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
 
         Assert.NotNull(refusingFrame);
 
-        // Both keys are named, because an operator has to know which half is missing.
+        // Both keys are named, because an operator has to know which half is missing. Same treatment as the
+        // unreadable-identity row above: the absence checks are booleans and the presence check reads a
+        // redacted copy, so neither path can reach the failure output (C-F).
+        bool messageEchoesTheCertificatePath =
+            refusingFrame.Message.Contains(certificatePath, StringComparison.Ordinal);
+        bool messageEchoesTheKeyPath =
+            refusingFrame.Message.Contains(keyPath, StringComparison.Ordinal);
+
         Assert.Contains(
             nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath),
-            refusingFrame.Message,
+            refusingFrame.Message
+                .Replace(certificatePath, RedactionMarker, StringComparison.Ordinal)
+                .Replace(keyPath, RedactionMarker, StringComparison.Ordinal),
             StringComparison.Ordinal);
 
-        Assert.DoesNotContain(certificatePath, refusingFrame.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(keyPath, refusingFrame.Message, StringComparison.Ordinal);
+        Assert.False(
+            messageEchoesTheCertificatePath,
+            "The half-configured refusal reproduced the configured certificate path.");
+
+        Assert.False(
+            messageEchoesTheKeyPath,
+            "The half-configured refusal reproduced the configured private-key path.");
     }
 
     /// <summary>
@@ -3145,17 +3798,25 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         // every authenticated outbound call goes through.
         Assert.NotNull(host.Services.GetRequiredService<IServiceTokenProvider>());
 
-        // The one place the upstream address is stated is configuration, and it is an https address with no
-        // embedded credential - both validated at startup, and both restated here because a client whose
-        // address carried a credential would leak it into every log and trace.
-        // BOTH of Gateway's outbound edges, and only two: the topology is layered and acyclic, so Gateway
-        // reaches DataServices and Security and never Persistence - which is why there is no third address
-        // to check here, and the absence is part of the assertion rather than an omission.
+        // The one place the upstream address is stated is configuration, and what is asserted about it here
+        // is that it carries NO EMBEDDED CREDENTIAL - validated at startup and restated here because a
+        // client whose address carried one would leak it into every log and trace.
+        //
+        // THE SCHEME IS DELIBERATELY NOT ASSERTED, AND THAT IS THE OPPOSITE OF AN OVERSIGHT. Every listener
+        // in this repository is cleartext, because the attached environment gates readiness on plaintext
+        // /health URLs and supplies no certificate material, and AAP 0.8.3 does not license a transport
+        // change (docs/ARCHITECTURE.md 4.1). Pinning `https` here would assert a topology the frozen
+        // environment cannot run; pinning `http` would break the moment a deployment terminates TLS, which
+        // it is entitled to do with no code change. What C-G actually requires of this edge is that trust
+        // comes from mounted material rather than from a callback in code - which is what the absence of a
+        // certificate-validation callback above asserts - and that no credential rides in the address.
         foreach (string upstream in (string[])[options.Upstreams.Security, options.Upstreams.DataServices])
         {
             Uri configured = new(upstream, UriKind.Absolute);
 
-            Assert.Equal(Uri.UriSchemeHttps, configured.Scheme);
+            Assert.True(
+                configured.Scheme == Uri.UriSchemeHttp || configured.Scheme == Uri.UriSchemeHttps,
+                $"an upstream must be addressed over HTTP semantics, got '{configured.Scheme}'");
             Assert.Empty(configured.UserInfo);
         }
 
@@ -3631,10 +4292,77 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
+    /// A not-ready upstream's own verdict survives the aggregation: the <c>503</c> body's
+    /// <c>serviceStatus</c> member is read, so a degraded upstream is reported as degraded rather than
+    /// flattened into a failure.
+    /// </summary>
+    /// <param name="reported">The token the scripted upstream puts in its problem document.</param>
+    /// <param name="expected">The per-upstream status the aggregate must report.</param>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE ARM THAT MAKES THE PUBLISHED CONTRACT DELIVERABLE. Every service in the estate answers
+    /// <c>503</c> for BOTH not-ready verdicts, because the orchestration gate reads the status code - so
+    /// the code cannot separate them, and the only other machine-readable member of a not-ready body is
+    /// <c>retCode</c>, which is <c>E_RETRY</c> for both. Without a dedicated member, a degraded upstream
+    /// and a failed one are indistinguishable on the wire and the aggregate must guess.
+    /// </para>
+    /// <para>
+    /// The <c>Healthy</c> row is the self-contradiction case: a <c>503</c> is the estate's statement that
+    /// the service is not ready, so a body claiming otherwise is evidence the body cannot be trusted, and
+    /// the code decides.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("Degraded", "Degraded")]
+    [InlineData("Unhealthy", "Unhealthy")]
+    [InlineData("Healthy", "Unhealthy")]
+    [InlineData("Sideways", "Unhealthy")]
+    public async Task TheDeployedProbeReadsANotReadyUpstreamsOwnVerdictFromItsProblemDocument(
+        string reported,
+        string expected)
+    {
+        ScriptedReadinessChannelHandler channel = new();
+        channel.ScriptEveryUpstream(() => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+        {
+            Content = new StringContent(
+                "{\"title\":\"Service Unavailable\",\"status\":503,\"serviceStatus\":\""
+                    + reported
+                    + "\",\"retCode\":-33}",
+                Encoding.UTF8,
+                "application/problem+json"),
+        });
+
+        await using GatewayTestHostFixture probeHost = CreateScriptedProbeHost(channel);
+        using HttpClient client = probeHost.CreateAnonymousClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            ReadinessRoute,
+            TestContext.Current.CancellationToken);
+
+        // Not ready either way - the aggregate is ready only when every upstream is healthy.
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        using JsonDocument document = await ReadJsonAsync(response);
+
+        foreach (string status in ReadUpstreamStatuses(document.RootElement).Values)
+        {
+            Assert.Equal(expected, status);
+        }
+
+        await AssertNoTopologyOrCredentialIsDisclosedAsync(response, document);
+    }
+
+    /// <summary>
     /// An upstream that answers with a failure status is unhealthy - it answered, and said it was not
     /// ready - rather than unreachable, which is reserved for obtaining no verdict at all.
     /// </summary>
     /// <param name="statusCode">The status the scripted upstream answers with.</param>
+    /// <remarks>
+    /// The <c>503</c> row carries a body whose only verdict-shaped member is RFC 9457's own integer
+    /// <c>status</c>, so no token is readable and the arm fails closed. The other two rows are statuses
+    /// contract C-10 does not declare on this path at all, and for those the body is not read: whatever
+    /// answered is not answering this contract.
+    /// </remarks>
     [Theory]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
     [InlineData(HttpStatusCode.InternalServerError)]
@@ -3664,6 +4392,53 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         {
             Assert.Equal("Unhealthy", status);
         }
+    }
+
+    /// <summary>
+    /// Gateway's own not-ready body carries the machine-readable verdict, so an aggregator reading Gateway
+    /// the way Gateway reads its upstreams gets a token rather than only prose.
+    /// </summary>
+    /// <param name="upstreamStatus">The status the three scripted upstreams answer with.</param>
+    /// <param name="expected">The verdict Gateway's own problem document must declare.</param>
+    /// <remarks>
+    /// The shape is symmetric BY DESIGN, and the symmetry is what makes the contract one shape rather than
+    /// four: whatever reads a leaf's not-ready body reads Gateway's the same way. A degraded aggregate is
+    /// produced by a degraded upstream, and a failed one by an unreachable upstream - the aggregate takes
+    /// the worst of its participants.
+    /// </remarks>
+    [Theory]
+    [InlineData("Degraded", "Degraded")]
+    [InlineData("Unhealthy", "Unhealthy")]
+    public async Task GatewaysOwnNotReadyBodyDeclaresItsVerdictInAMachineReadableMember(
+        string upstreamStatus,
+        string expected)
+    {
+        ScriptedReadinessChannelHandler channel = new();
+        channel.ScriptEveryUpstream(() => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+        {
+            Content = new StringContent(
+                "{\"status\":503,\"serviceStatus\":\"" + upstreamStatus + "\"}",
+                Encoding.UTF8,
+                "application/problem+json"),
+        });
+
+        await using GatewayTestHostFixture probeHost = CreateScriptedProbeHost(channel);
+        using HttpClient client = probeHost.CreateAnonymousClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            ReadinessRoute,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        using JsonDocument document = await ReadJsonAsync(response);
+
+        // RFC 9457's own member still carries the integer, which is exactly why the verdict needed a name
+        // of its own rather than sharing that one.
+        Assert.Equal(503, document.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal(expected, document.RootElement.GetProperty("serviceStatus").GetString());
+
+        await AssertNoTopologyOrCredentialIsDisclosedAsync(response, document);
     }
 
     /// <summary>
@@ -4027,13 +4802,38 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
-    /// Asserts that no public instance member of a configuration type reads like a credential.
+    /// Asserts that no public instance member of a configuration type reads like a credential, except
+    /// the one outbound client credential the token contract REQUIRES Gateway to be able to present.
     /// </summary>
     /// <param name="optionsType">The configuration type to inspect.</param>
+    /// <remarks>
+    /// <para>
+    /// THE EXCEPTION IS NAMED RATHER THAN THE SWEEP RELAXED, and the distinction is what keeps this test
+    /// worth running. What the token topology forbids is Gateway holding SIGNING material - a second
+    /// signing authority in a system with exactly one issuer. It does not forbid Gateway
+    /// AUTHENTICATING to that issuer, which the issuance operation requires precisely because a caller
+    /// cannot present a bearer token in order to obtain its first bearer token.
+    /// </para>
+    /// <para>
+    /// So exactly one property may carry a credential, it is named below, and a second one - or any
+    /// signing-key spelling at all - still fails. A boolean is skipped because a boolean cannot hold
+    /// material: a credential-shaped boolean name is a predicate ABOUT the configuration, which is what
+    /// the issuance disjunction is.
+    /// </para>
+    /// </remarks>
     private static void AssertNoCredentialShapedMember(Type optionsType)
     {
         foreach (PropertyInfo member in optionsType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
+            if (string.Equals(
+                    member.Name,
+                    nameof(GatewayOptions.SecurityClientSecret),
+                    StringComparison.Ordinal)
+                || member.PropertyType == typeof(bool))
+            {
+                continue;
+            }
+
             string normalized = member.Name.ToLowerInvariant();
 
             foreach (string vocabulary in CredentialVocabulary)
@@ -4065,35 +4865,46 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// <remarks>
     /// <para>
     /// The three interpreted tokens are covered elsewhere; these are the cases where the probe must decide
-    /// what an ANSWER WITHOUT A USABLE TOKEN means, and the two answers are deliberately different:
+    /// what an ANSWER WITHOUT A USABLE TOKEN means, and EVERY ONE OF THEM FAILS CLOSED TO UNHEALTHY.
     /// </para>
-    /// <list type="bullet">
-    /// <item>
-    /// a token outside the published vocabulary FAILS CLOSED to unhealthy, because a success status
-    /// carrying a word this code cannot interpret is not evidence of readiness; whereas
-    /// </item>
-    /// <item>
-    /// no readable token at all reads as HEALTHY, because the status code itself is the readiness signal
-    /// and the shared framework's own plain-text probe answers with exactly no token.
-    /// </item>
-    /// </list>
+    /// <para>
+    /// THAT UNIFORMITY IS THE POINT, AND IT IS A DELIBERATE CORRECTION. An earlier revision answered
+    /// HEALTHY for the six cases with no readable token, on the reasoning that the 200 was itself the
+    /// readiness signal and the shared framework's plain-text probe carries no token at all. The reasoning
+    /// does not hold: this probe only ever addresses the three upstreams named in
+    /// <c>Gateway:HealthProbes</c>, every one of which publishes contract C-10's JSON report from its own
+    /// hand-written endpoint, so "no token" is not a lesser dialect - it is a body that failed to state
+    /// its verdict. Reading it as ready converts silence into a positive assertion, which is precisely how
+    /// a health aggregate becomes worse than no aggregate: the orchestration gate opens onto an upstream
+    /// whose report nobody could parse. A body that cannot state its verdict is not a body whose verdict
+    /// can be trusted.
+    /// </para>
     /// <para>
     /// The integer case is the RFC 9457 collision and is the reason a token is read only when it is a JSON
     /// string: a problem document uses the same member name for the numeric HTTP status, so accepting a
-    /// number would let an error document be misread as a verdict.
+    /// number would let an error document be misread as a verdict. The oversized case exercises the
+    /// bounded read - the probe reads at most a few kilobytes, so a body larger than the bound arrives
+    /// truncated and unparseable, and that too must fail closed rather than be discarded in favour of the
+    /// status code.
     /// </para>
     /// </remarks>
     public static TheoryData<string, string, string> ReadinessBodyShapes =>
         new()
         {
             { "a token outside the published vocabulary", "{\"status\":\"Sideways\"}", "Unhealthy" },
-            { "an empty body", string.Empty, "Healthy" },
-            { "a plain-text body", "OK", "Healthy" },
-            { "a JSON object with no status member", "{\"state\":\"Healthy\"}", "Healthy" },
-            { "a numeric status member (RFC 9457 collision)", "{\"status\":503}", "Healthy" },
-            { "a JSON array root", "[\"Healthy\"]", "Healthy" },
-            { "a JSON string root", "\"Healthy\"", "Healthy" },
-            { "a null status member", "{\"status\":null}", "Healthy" },
+            { "an empty body", string.Empty, "Unhealthy" },
+            { "a plain-text body", "OK", "Unhealthy" },
+            { "a JSON object with no status member", "{\"state\":\"Healthy\"}", "Unhealthy" },
+            { "a numeric status member (RFC 9457 collision)", "{\"status\":503}", "Unhealthy" },
+            { "a JSON array root", "[\"Healthy\"]", "Unhealthy" },
+            { "a JSON string root", "\"Healthy\"", "Unhealthy" },
+            { "a null status member", "{\"status\":null}", "Unhealthy" },
+            { "a truncated object (only the not-ready member is declared)", "{\"serviceStatus\":\"Healthy\"}", "Unhealthy" },
+            {
+                "a body larger than the probe's bounded read",
+                "{\"padding\":\"" + new string('p', 8192) + "\",\"status\":\"Healthy\"}",
+                "Unhealthy"
+            },
         };
 
     /// <summary>
@@ -4343,4 +5154,3 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         }
     }
 }
-

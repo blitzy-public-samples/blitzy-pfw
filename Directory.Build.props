@@ -249,10 +249,13 @@
 
     WHY NOT THE OBVIOUS ALTERNATIVES. Listing the shared projects in each service solution is barred
     by C-A and would defeat the independence the per service solutions exist to demonstrate. Per
-    ProjectReference SetConfiguration metadata would work but would have to be repeated on all
-    twenty three references in the tree, so a reference added later would silently miss it. This
-    property is inherited by every project from one place, which is the same reason the package and
-    warning policies live here.
+    ProjectReference SetConfiguration metadata would work but would have to be repeated on EVERY
+    ProjectReference in the tree - there are dozens, and the exact figure is deliberately not quoted
+    here because a number in a comment goes stale the first time a project is added and the reader who
+    finds it stale learns to distrust the rest of the paragraph. The count is not what makes the
+    argument: repetition per reference is, because a reference added later would silently miss the
+    metadata and reintroduce the very defect this property prevents. This property is inherited by every
+    project from one place, which is the same reason the package and warning policies live here.
 
     The assertion target at the end of this file is what stops the guarantee from being a claim: it
     fails the build if any referenced output ever arrives from a different configuration again.

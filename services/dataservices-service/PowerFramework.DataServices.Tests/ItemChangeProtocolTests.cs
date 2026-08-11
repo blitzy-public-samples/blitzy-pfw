@@ -3072,4 +3072,3 @@ public sealed class ItemChangeProtocolTests
         Assert.True(noArmRows >= 6, "The no-arm outcome of se_cst_dw.sru:L244 must be exercised.");
     }
 }
-

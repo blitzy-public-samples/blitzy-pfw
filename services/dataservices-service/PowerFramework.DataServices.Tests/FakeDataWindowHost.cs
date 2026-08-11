@@ -179,6 +179,7 @@ using System.Globalization;
 using System.Text;
 
 using PowerFramework.DataServices.Domain;
+using PowerFramework.DataServices.Services;
 using PowerFramework.Shared.Eventful;
 
 // The two published contract enums are ALIASED rather than imported wholesale, and the alias is
@@ -2165,13 +2166,29 @@ public sealed class FakeDataWindowChild : IDataWindowChild
         return SetRedrawResult;
     }
 
+    /// <summary>
+    /// The expression most recently passed to <see cref="SetFilter"/> in its EXECUTABLE form, or
+    /// <see langword="null"/> when it has not been called.
+    /// </summary>
+    /// <remarks>
+    /// THE INJECTION ASSERTION READS THIS AND THE PARITY ASSERTION READS <see cref="LastFilterSet"/>, which
+    /// is exactly why both are recorded. A suite that only checked the rendered text could not tell a bound
+    /// execution from an interpolated one, and that is the whole property under test.
+    /// </remarks>
+    public BoundFilterExpression? LastFilterExpression { get; set; }
+
     /// <inheritdoc/>
-    public int SetFilter(string filter)
+    public int SetFilter(BoundFilterExpression filter)
     {
         ArgumentNullException.ThrowIfNull(filter);
 
-        LastFilterSet = filter;
-        Calls.Record(nameof(SetFilter), filter);
+        LastFilterExpression = filter;
+
+        // THE RENDERED TEXT IS RECORDED AND NOT EXECUTED. This fake stores rather than evaluates, so there
+        // is nothing here to inject into; recording the rendered form keeps every existing parity assertion
+        // reading the same byte-exact string it read before, which is the point of the two-form carriage.
+        LastFilterSet = filter.ObservableText;
+        Calls.Record(nameof(SetFilter), filter.ObservableText);
         return SetFilterResult;
     }
 

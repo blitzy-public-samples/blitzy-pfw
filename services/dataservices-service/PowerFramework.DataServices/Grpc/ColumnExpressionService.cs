@@ -2374,6 +2374,14 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
     private readonly IExpressionPageResolver _pageResolver;
     private readonly PinyinFirstLetterMatcher _pinyinMatcher;
     private readonly ColumnExpressionOptions _columnExpression;
+
+    /// <summary>
+    /// The backstop bound on one macro invocation, from
+    /// <c>DataServices:ColumnExpression:MacroInvocationTimeout</c>. See the remarks on
+    /// <see cref="CreateEngine"/> for why it is a backstop rather than a budget, and the option's own
+    /// remarks for why its default is the expression session's idle lifetime.
+    /// </summary>
+    private readonly TimeSpan _macroInvocationBackstop;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ColumnExpressionService>? _logger;
 
@@ -2445,6 +2453,7 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
         _pageResolver = pageResolver ?? throw new ArgumentNullException(nameof(pageResolver));
         _pinyinMatcher = pinyinMatcher ?? PinyinFirstLetterMatcher.Blocked;
         _columnExpression = options.Value.ColumnExpression;
+        _macroInvocationBackstop = options.Value.ColumnExpression.MacroInvocationTimeout;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _logger = logger;
     }
@@ -4219,10 +4228,23 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
     /// ignored, which is worse than not passing it.
     /// </para>
     /// <para>
-    /// NO INVOCATION TIMEOUT IS IMPOSED. The contract states the consequence of an unserviced macro
-    /// channel plainly - the client stalls its own calculations - and the per-call cancellation token is
-    /// the bound. A timeout invented here would turn a client's own omission into a fabricated macro
-    /// result, which is the substitution the whole channel exists to avoid.
+    /// THE INVOCATION TIMEOUT IS A BACKSTOP, NOT A BUDGET, AND IT IS DERIVED RATHER THAN INVENTED. The
+    /// ordinary bound on a macro invocation is the calculating call's own cancellation - which is real
+    /// now that every shipped client attaches a gRPC deadline, so an abandoned calculation is cancelled
+    /// and the invocation with it. What that does NOT cover is a caller that attaches no deadline at
+    /// all: this service cannot require one, and against such a caller an unserviced macro channel
+    /// would hold the session, its engines and the calculating call open indefinitely. The backstop is
+    /// therefore <c>DataServices:ColumnExpression:MacroInvocationTimeout</c>, whose default IS the
+    /// expression session's own idle lifetime: an invocation still outstanding past the point at which
+    /// the session it belongs to would have been reclaimed is holding something the service's own policy
+    /// had already given up on.
+    /// </para>
+    /// <para>
+    /// THE ORIGINAL OBJECTION IS PRESERVED, NOT OVERRULED. A timeout invented here would turn a
+    /// client's omission into a fabricated macro result, and that is still true - which is why this
+    /// value is an order of magnitude away from any plausible invocation and why an elapsed timeout is
+    /// reported as its own defined outcome rather than as a value. A properly deadlined client never
+    /// reaches it; a client with no deadline reaches it instead of stalling the session forever.
     /// </para>
     /// </remarks>
     private ColumnExpressionEngine CreateEngine(
@@ -4233,7 +4255,7 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
 
         MacroInvoker macroInvoker = new(
             _macroRouter.ChannelFor(session.SessionId),
-            invocationTimeout: null,
+            _macroInvocationBackstop,
             _timeProvider);
 
         ColumnExpressionEngine engine = new(

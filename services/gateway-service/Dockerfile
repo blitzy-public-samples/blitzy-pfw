@@ -64,6 +64,26 @@
 #      into either stage; see the HEALTHCHECK note for how the readiness probe manages without one.
 #    * No performance, latency, throughput or availability claim. The repository publishes no such
 #      budget, so none is asserted here or used to justify a choice below.
+#
+#  THE TRUST-ANCHOR MOUNT CONTRACT, STATED HERE BECAUSE THIS IMAGE DEPENDS ON IT AND CANNOT CARRY IT
+#    This service opens TLS connections to peers whose certificates are issued by the LOCAL authority
+#    docs/ARCHITECTURE.md 9.3.1 generates, and that authority is in no container's operating-system
+#    trust store - not this base image's, and not any image built from it. The anchor is therefore
+#    MOUNTED READ-ONLY at run time from the orchestration secret layer and named to the application by
+#    ONE configuration key, which the options pattern binds:
+#
+#        INTERNAL_TLS_TRUSTED_CA_PATH  ->  Gateway__InternalTls__TrustedCaPath
+#        default mount point           ->  /run/secrets/internal-tls/ca.crt
+#
+#    NOTHING IS INSTALLED INTO A TRUST STORE BY THIS FILE, and that is deliberate rather than a gap.
+#    `update-ca-certificates` needs root, and the runtime stage below drops to a non-root user on
+#    purpose; a root-privileged trust-store edit would be a strictly weaker posture than a read-only
+#    mount plus an in-process chain policy. The application narrows trust to the mounted anchor under
+#    X509ChainTrustMode.CustomRootTrust, so chain building, name validation and validity dates all stay
+#    with the platform and only the trust DECISION is redirected.
+#
+#    NO ANCHOR, CERTIFICATE OR KEY IS BAKED INTO THIS IMAGE, in any layer or any ENV. The variable
+#    above carries a PATH; the material behind it is never committed and never copied.
 # ==================================================================================================
 
 
@@ -167,27 +187,33 @@ COPY LICENSE NOTICE ./
 COPY --from=build /app/publish ./
 
 # THE LISTENING PORT - 5105, AND WHY IT IS SET HERE RATHER THAN IN THE APPLICATION
-# 5105 is the documented composition-root access URL for the whole system (http://localhost:5105),
-# and the 5101-5105 band is retained with Gateway keeping its documented port:
+# 5105 is the documented composition-root access URL for the whole system - documented as
+# http://localhost:5105 and served over TLS at https://localhost:5105, since the environment fixes the
+# PORT and the probe shape rather than the transport - and the 5101-5105 band is retained with Gateway
+# keeping its documented port:
 #
-#     5101  Persistence     gRPC + REST /health and /v1/ping
-#     5102  DataServices    gRPC primary + a thin REST projection for Gateway
+#     5101  Persistence     REST /health and /v1/ping;  5111 carries its gRPC contracts
+#     5102  DataServices    REST /health, /v1/ping and the REST projection;  5112 carries its gRPC
 #     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible, rather
 #           than reassigned to one of the four services this phase builds. Nothing is provisioned
 #           for it here: no stage, no variable and no build input.
 #     5104  Security        REST, and the system's sole token issuer
 #     5105  Gateway         REST + OpenAPI - THIS IMAGE
 #
-# Gateway declares no listening port in code and carries no Kestrel section in appsettings.json, so
-# the container supplies the address; this ENV is that supply, and it also overrides the base image's
-# own ASPNETCORE_HTTP_PORTS=8080. The published ingress is plaintext HTTP, which is why no server
-# certificate variable appears here. The three internal listeners terminate TLS instead and fix their
-# own address in configuration, so this instruction is correct for Gateway specifically and must not
-# be copied into a sibling service's Dockerfile.
+# THE PORT VARIABLE IS EMPTIED RATHER THAN SET, WHICH IS THE OPPOSITE OF WHAT IT LOOKS LIKE IT SHOULD
+# BE - and the three sibling images do the same thing for the same reason. `appsettings.json` declares
+# this service's listener as `https://+:5105`, so the address is already fixed in configuration.
+# ASPNETCORE_HTTP_PORTS composes a CLEARTEXT url from whatever it holds, and the base image ships it
+# set to 8080: leaving it populated would either add a second, plaintext listener beside the configured
+# HTTPS one or override it outright, and either outcome silently undoes the transport this service's
+# ingress depends on. Emptying it removes that possibility while leaving `ASPNETCORE_URLS` and
+# `Kestrel__Endpoints__Default__Url` available to a deployment that genuinely wants to move the address.
+#
+# EXPOSE therefore DOCUMENTS the contract rather than creating it; the binding comes from configuration.
 #
 # ASPNETCORE_ENVIRONMENT is deliberately NOT set. Leaving it unset selects the framework default,
 # Production; which overlay a deployment wants is a deployment decision that orchestration supplies.
-ENV ASPNETCORE_HTTP_PORTS=5105
+ENV ASPNETCORE_HTTP_PORTS=
 EXPOSE 5105
 
 # NON-ROOT, SWITCHED BEFORE THE ENTRY POINT.
@@ -213,18 +239,25 @@ USER $APP_UID
 # until then - which is the readiness gate a compose `depends_on: condition: service_healthy` chain
 # is built on. Requiring 200 here is therefore what makes that gate mean something.
 #
-# WHY NO curl AND NO wget: this base image ships neither, and installing one would be adding tooling
-# to a runtime image for a probe's sake. The probe below uses only what the image already has - bash,
-# its /dev/tcp socket redirection, and printf - so nothing is installed and nothing is skipped. A
-# compose manifest should INHERIT this healthcheck rather than declare a curl-based one, which in
-# this image could never succeed and would leave the readiness chain permanently unsatisfied.
+# WHY NO curl AND NO wget: this base image ships neither, and installing one would be adding tooling to
+# a runtime image for a probe's sake. `openssl` IS present, so the probe below performs the handshake
+# with it and writes the request by hand - nothing is installed and nothing is skipped.
 #
-# The port is read back from ASPNETCORE_HTTP_PORTS so that overriding the listener moves the probe
-# with it; 5105 is the fallback and matches the ENV above. A non-200 status line, a refused
-# connection or a silent socket all fail, and the status line is matched on " 200 " rather than a
-# bare 200 so a 200 appearing elsewhere in the reason phrase cannot pass.
-HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-  CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${ASPNETCORE_HTTP_PORTS:-5105} && printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r -t 4 line <&3 && case $line in *' 200 '*) exit 0 ;; *) exit 1 ;; esac"]
+# A RAW /dev/tcp SOCKET IS NOT AN OPTION HERE, AND THAT IS WHY THIS IDIOM IS USED INSTEAD. This
+# listener is `https://+:5105`; a socket redirection writes plaintext bytes into a TLS endpoint, which
+# never produces a status line and so fails PERMANENTLY - a probe that can only ever fail leaves the
+# Compose `depends_on: condition: service_healthy` chain closed for ever, which is indistinguishable
+# from a service that never started. A compose manifest should INHERIT this healthcheck rather than
+# declare one of its own, for the same reason.
+#
+# THE ANCHOR IS VERIFIED RATHER THAN SKIPPED. `-verify_return_error` plus `-verify_hostname` against
+# the same mounted CA every real consumer uses is what makes a green probe mean "this listener presents
+# the identity the rest of the stack will accept". A probe that passed `-noverify` would report healthy
+# for a listener nothing else in the estate can talk to. The status line is matched on " 200 " rather
+# than a bare 200 so a 200 appearing inside a reason phrase cannot pass, and a refused connection, a
+# failed handshake or a silent socket all fail.
+HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=5 \
+  CMD ["/bin/bash", "-c", "line=$(printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' | timeout 5 openssl s_client -quiet -verify_quiet -verify_return_error -verify_hostname localhost -CAfile \"${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}\" -servername localhost -connect 127.0.0.1:5105 2>/dev/null | head -n 1); case $line in *' 200 '*) exit 0 ;; *) exit 1 ;; esac"]
 
 # The framework-dependent application assembly, invoked by name. PowerFramework.Gateway.dll is fixed
 # by the AssemblyName in PowerFramework.Gateway.csproj; renaming either without the other breaks this

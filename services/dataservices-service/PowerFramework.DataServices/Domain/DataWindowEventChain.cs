@@ -957,9 +957,12 @@ internal static class DataWindowEventOrdering
 /// individual message would still be well formed.
 /// </para>
 /// <para>
-/// Under <see cref="OrderingDiscipline.Sequenced"/> this is never raised for an out-of-order arrival,
-/// because those events hold no cross-event state and the token there genuinely does carry reorder
-/// authority. It is still raised for a missing token, which is a fault on any discipline.
+/// Under <see cref="OrderingDiscipline.Sequenced"/> this is NOT raised for an arrival that runs AHEAD of
+/// the expected token: a gap is legitimate there, because both directions draw from one counter and the
+/// numbers the server consumed are numbers the client never sends. It IS raised there for an arrival AT OR
+/// BEHIND the ordering mark, which is a reversal or a duplicate - the events after that position have
+/// already been dispatched, so there is nowhere left to put it. And it is raised on every discipline for a
+/// missing token.
 /// </para>
 /// <para>
 /// Derives from <see cref="InvalidOperationException"/> because the fault is a protocol-state
@@ -1038,8 +1041,16 @@ public sealed class DataWindowEventSequenceException : InvalidOperationException
 /// <see cref="OrderingDiscipline.Synchronous"/> demands the exact successor and raises
 /// <see cref="DataWindowEventSequenceException"/> otherwise; the group runs inside ONE validation
 /// session on ONE stream and reordering it is semantically impossible.
-/// <see cref="OrderingDiscipline.Sequenced"/> accepts any positive token and merely advances the high
-/// water mark, because reorder authority there belongs to the consumer.
+/// <see cref="OrderingDiscipline.Sequenced"/> requires only that the token be STRICTLY ABOVE the mark: a
+/// gap is legitimate there because the counter is shared with the outbound direction, but a reversal or a
+/// duplicate is refused.
+/// </para>
+/// <para>
+/// WHICH MEANS THE TOKEN IS ACTED ON RATHER THAN MERELY RECORDED, and that is the correction of a real
+/// defect. The sequenced arm used to accept EVERY positive token - a reversal and a duplicate included -
+/// so the ordering information was measurable and unused: production dispatched in arrival order and the
+/// only reordering anywhere in the estate was a sort inside a test. <see cref="Accept"/>'s remarks record
+/// why the answer is a defined error rather than a reorder buffer, and the measurement behind it.
 /// </para>
 /// <para>
 /// Guarded by a lock, and the reason is CORRECTNESS OF THE TOKEN rather than any claim about
@@ -1086,6 +1097,27 @@ internal sealed class DataWindowEventSequencer
     }
 
     /// <summary>
+    /// The lowest token this conversation will still admit: the immediate successor of the last accepted
+    /// one, in either direction.
+    /// </summary>
+    /// <remarks>
+    /// ONE MEMBER FOR BOTH DISCIPLINES, BECAUSE THE TWO RULES DIFFER IN STRICTNESS RATHER THAN IN WHERE
+    /// THEY MEASURE FROM. The synchronous discipline requires exactly this token; the sequenced discipline
+    /// requires this token OR HIGHER. It is also the value the ordering diagnostic reports as expected, so
+    /// a client is told the floor rather than having to derive it.
+    /// </remarks>
+    internal long NextExpected
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _accepted + 1L;
+            }
+        }
+    }
+
+    /// <summary>
     /// Issues the next token and records it as accepted, which is the emitter's path: a token the
     /// chain issues itself is by construction in order.
     /// </summary>
@@ -1102,16 +1134,54 @@ internal sealed class DataWindowEventSequencer
     }
 
     /// <summary>
-    /// Validates a token that arrived from a peer, applying the rule its discipline imposes.
+    /// Validates a token that arrived from a peer, applying the rule its discipline imposes, and
+    /// advances the ordering mark past it.
     /// </summary>
     /// <param name="sequence">The arriving token. <see cref="NoToken"/> is always a fault.</param>
     /// <param name="discipline">The discipline governing the arriving event's capability area.</param>
     /// <param name="eventId">The arriving event, for the error detail.</param>
     /// <exception cref="DataWindowEventSequenceException">
-    /// <paramref name="sequence"/> is not positive, or the discipline is
-    /// <see cref="OrderingDiscipline.Synchronous"/> and the token is not the exact successor of the
-    /// last accepted one. NEVER buffered and re-sorted; see the type's remarks.
+    /// <paramref name="sequence"/> is not positive; or the discipline is
+    /// <see cref="OrderingDiscipline.Synchronous"/> and the token is not the exact successor of the last
+    /// accepted one; or the discipline is <see cref="OrderingDiscipline.Sequenced"/> and the token is at
+    /// or behind the mark, which is a reversal or a duplicate. NEVER buffered and re-sorted; the type's
+    /// remarks record the measurement that rules reordering out on this contract.
     /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE SEQUENCED ARM USED TO ACCEPT ANY POSITIVE TOKEN, AND THAT WAS THE DEFECT. It advanced the mark
+    /// when the token was above it and accepted the message anyway when it was below, on the reasoning
+    /// that reorder authority belongs to the consumer. On this boundary the server IS the consumer, so
+    /// "the consumer may reorder" resolved to nobody acting on the token at all: a reversal and a
+    /// duplicate were both dispatched silently, in arrival order, and the only reordering anywhere in the
+    /// estate was a sort inside a test.
+    /// </para>
+    /// <para>
+    /// THE RULE IS NOW STRICTLY INCREASING PAST THE MARK, AND THE TWO HALVES OF THAT ARE BOTH DELIBERATE.
+    /// A token ABOVE the mark is accepted even when it is not the immediate successor - a GAP IS
+    /// LEGITIMATE here, because both directions draw from one counter and a client's token is one past
+    /// the highest it has SEEN, so the numbers the server consumed are numbers the client never uses. A
+    /// token AT OR BELOW the mark is refused: it is a reversal or a duplicate, and dispatching it would
+    /// deliver a notification the ordering says came earlier, or run one event twice.
+    /// </para>
+    /// <para>
+    /// WHICH IS A NARROWER CONTRACT RATHER THAN A REORDERING ONE, AND THE REASON IS MEASURED. AAP 0.6.1.4
+    /// says a pattern-(a) token is sufficient for detection AND reordering, so a hold-and-release buffer
+    /// was built here first and then removed, because reordering CANNOT BE MADE SOUND on this contract:
+    /// one dispatch of token 1 leaves the next expected token at 4 - the chain's outcome report takes 2
+    /// and the result write takes 3 - so a message held awaiting token 2 waits for a number no client will
+    /// ever send. Every hold would strand. Worse, since a client must read a response to learn its next
+    /// token, it cannot pipeline, and a gRPC stream delivers one sender's messages in order: an
+    /// out-of-order pattern-(a) arrival is therefore not a transport artifact at all, it is a client
+    /// defect, and the right answer to a client defect is a defined error rather than a buffer. That is
+    /// AAP 0.1.5's rule - narrow with a defined error, never widen with a guess.
+    /// </para>
+    /// <para>
+    /// SOUND REORDERING WOULD REQUIRE CONTIGUOUS INBOUND TOKENS, which means giving each direction its own
+    /// sequence space. That is a change to the published meaning of the token ("strictly increasing within
+    /// one stream") and is deliberately not made here.
+    /// </para>
+    /// </remarks>
     internal void Accept(long sequence, OrderingDiscipline discipline, EventId eventId)
     {
         lock (_gate)
@@ -1127,10 +1197,10 @@ internal sealed class DataWindowEventSequencer
                     sequence);
             }
 
+            long expected = _accepted + 1L;
+
             if (discipline == OrderingDiscipline.Synchronous)
             {
-                long expected = _accepted + 1L;
-
                 if (sequence != expected)
                 {
                     throw new DataWindowEventSequenceException(
@@ -1143,29 +1213,46 @@ internal sealed class DataWindowEventSequencer
                         sequence);
                 }
 
-                _accepted = sequence;
-
-                if (_issued < sequence)
-                {
-                    _issued = sequence;
-                }
+                Advance(sequence);
 
                 return;
             }
 
-            // OrderingDiscipline.Sequenced, and OrderingDiscipline.Unspecified with it. Reorder
-            // authority belongs to the consumer, so an arrival behind the high water mark is accepted
-            // and merely does not advance it. Raising here would forbid exactly the reordering the
-            // discipline exists to permit.
-            if (sequence > _accepted)
+            // OrderingDiscipline.Sequenced, and OrderingDiscipline.Unspecified with it. A gap is allowed
+            // because the counter is shared with the outbound direction; a reversal is not.
+            if (sequence < expected)
             {
-                _accepted = sequence;
+                throw new DataWindowEventSequenceException(
+                    "A DataWindow event arrived at or behind the ordering mark inside a sequenced "
+                        + "ordering group, so it is a reversal or a duplicate rather than a late "
+                        + "arrival. The mark counts messages already dispatched, and the events after "
+                        + "that position have run, so there is nowhere left to place this one.",
+                    eventId,
+                    discipline,
+                    expected,
+                    sequence);
             }
 
-            if (_issued < sequence)
-            {
-                _issued = sequence;
-            }
+            Advance(sequence);
+        }
+    }
+
+    /// <summary>
+    /// Advances the mark past an accepted token, keeping the issue counter from reusing it.
+    /// </summary>
+    /// <param name="sequence">The accepted token. Always the expected successor when this is reached.</param>
+    /// <remarks>
+    /// The issue counter is pushed forward too so a token the server issues next cannot collide with one
+    /// the client has already used. Both discipline arms need exactly this, which is why it is one
+    /// method: two copies would be two chances for the counters to drift apart.
+    /// </remarks>
+    private void Advance(long sequence)
+    {
+        _accepted = sequence;
+
+        if (_issued < sequence)
+        {
+            _issued = sequence;
         }
     }
 }
@@ -3973,4 +4060,3 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
         }
     }
 }
-

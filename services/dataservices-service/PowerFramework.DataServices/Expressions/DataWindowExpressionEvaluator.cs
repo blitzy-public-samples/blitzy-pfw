@@ -1921,6 +1921,21 @@ public sealed class DataWindowExpressionEvaluator
     public const string InvalidExpressionSentinel = "!";
 
     /// <summary>
+    /// The character a bound-value placeholder begins with. NOTHING ELSE in this grammar begins with it, so
+    /// recognising it can shadow no identifier, operator, literal or column reference.
+    /// </summary>
+    public const char BoundValuePlaceholderSigil = ':';
+
+    /// <summary>The full prefix of a bound-value placeholder; the suffix is its zero-based ordinal.</summary>
+    public const string BoundValuePlaceholderPrefix = ":pfwVal";
+
+    /// <summary>Builds the placeholder token for a zero-based bound-value ordinal.</summary>
+    /// <param name="ordinal">The zero-based ordinal.</param>
+    /// <returns>The placeholder token.</returns>
+    public static string BoundValuePlaceholder(int ordinal) =>
+        BoundValuePlaceholderPrefix + ordinal.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
     /// The value <c>Describe</c> returns for an expression whose value cannot be determined. Tested
     /// alongside <see cref="InvalidExpressionSentinel"/> at the same two sites.
     /// </summary>
@@ -1989,6 +2004,17 @@ public sealed class DataWindowExpressionEvaluator
     private IExpressionPageResolver _pageResolver = UnresolvedPageResolver.Instance;
     private int _maximumRecursionDepth = DefaultMaximumRecursionDepth;
     private int _depth;
+
+    /// <summary>
+    /// The bound-value table in force for the evaluation currently running, or <see langword="null"/>.
+    /// </summary>
+    /// <remarks>
+    /// SCOPED TO ONE CALL AND RESTORED BY ITS <c>finally</c>, not accumulated. Nested evaluation is a real
+    /// path here - the recursion ceiling exists for it - and an expression reached through a macro
+    /// invocation carries its own bindings or none at all; inheriting a parent's table would let a
+    /// placeholder resolve in an expression that never declared it.
+    /// </remarks>
+    private IReadOnlyDictionary<string, ExpressionValue>? _boundValues;
 
     /// <summary>
     /// Creates an evaluator over <paramref name="host"/> with pinyin matching blocked.
@@ -2215,12 +2241,21 @@ public sealed class DataWindowExpressionEvaluator
     public DataWindowExpressionResult TryEvaluate(string? exp) => TryEvaluate(exp, NoRowContext);
 
     /// <summary>
-    /// Evaluates <paramref name="exp"/> against <paramref name="row"/> and returns the structured result.
+    /// Evaluates an expression carrying BOUND VALUES and returns the structured result.
     /// </summary>
-    /// <param name="exp">The expression, in any of the three quoting conventions.</param>
+    /// <param name="exp">The executable expression, whose caller-derived values are placeholders.</param>
     /// <param name="row">The one-based row, or <see cref="NoRowContext"/>.</param>
-    /// <returns>The result. Never throws for a malformed expression.</returns>
+    /// <param name="boundValues">Placeholder token to value.</param>
+    /// <returns>The result.</returns>
     /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE EXECUTION PATH FOR ANY EXPRESSION CARRYING A CALLER-SUPPLIED VALUE.</b> A value that
+    /// arrives as a placeholder cannot alter the expression's structure, because the token is lexed as ONE
+    /// primary whatever the value inside it is - so a value containing a quote, an operator or a function
+    /// call is inert. The rendered form, in which the value IS spliced into the text unescaped exactly as
+    /// the oracle splices it [<c>n_cst_dwsvc_columnexp.sru:L1094</c>], is retained for reporting, tracing
+    /// and characterization and is never evaluated.
+    /// </para>
     /// <para>
     /// AN EMPTY EXPRESSION IS AN ABORT, AND THAT IS THE ONE PLACE THIS FILE ORIGINATES ONE. The oracle
     /// never lets an empty expression reach <c>Describe</c>: <c>n_cst_dwsvc_columnexp.sru:L745</c> guards
@@ -2230,6 +2265,52 @@ public sealed class DataWindowExpressionEvaluator
     /// still observes the oracle's outcome instead of a spurious <c>"!"</c>.
     /// </para>
     /// </remarks>
+    public DataWindowExpressionResult TryEvaluate(
+        string? exp,
+        long row,
+        IReadOnlyDictionary<string, ExpressionValue>? boundValues)
+    {
+        IReadOnlyDictionary<string, ExpressionValue>? outer = _boundValues;
+
+        // RESTORED IN A finally SO ONE NESTED EVALUATION CANNOT LEAK ITS TABLE INTO ITS PARENT. Nested
+        // evaluation is real here - the depth ceiling below exists for it - and an expression that reached
+        // this evaluator through a macro invocation carries its own bindings or none.
+        _boundValues = boundValues;
+
+        try
+        {
+            return TryEvaluate(exp, row);
+        }
+        finally
+        {
+            _boundValues = outer;
+        }
+    }
+
+    /// <summary>
+    /// Evaluates an expression carrying BOUND VALUES and returns its legacy string.
+    /// </summary>
+    /// <param name="exp">The executable expression, whose caller-derived values are placeholders.</param>
+    /// <param name="row">The one-based row, or <see cref="NoRowContext"/>.</param>
+    /// <param name="boundValues">
+    /// Placeholder token to value. A token this table does not name is a lexical error rather than a
+    /// silently empty value, because a placeholder in the text with no value behind it can only mean the
+    /// text and the table disagree - and guessing at that would evaluate a different expression from the
+    /// one the caller composed.
+    /// </param>
+    /// <returns>The legacy string.</returns>
+    public string Evaluate(
+        string? exp,
+        long row,
+        IReadOnlyDictionary<string, ExpressionValue>? boundValues) =>
+        TryEvaluate(exp, row, boundValues).Text;
+
+    /// <summary>
+    /// Evaluates <paramref name="exp"/> against <paramref name="row"/> and returns the structured result.
+    /// </summary>
+    /// <param name="exp">The expression, in any of the three quoting conventions.</param>
+    /// <param name="row">The one-based row, or <see cref="NoRowContext"/>.</param>
+    /// <returns>The result. Never throws for a malformed expression.</returns>
     public DataWindowExpressionResult TryEvaluate(string? exp, long row)
     {
         string expression = NormaliseExpressionPayload(exp);
@@ -2738,6 +2819,7 @@ public sealed class DataWindowExpressionEvaluator
     /// </remarks>
     private static bool TryTokenize(
         string expression,
+        IReadOnlyDictionary<string, ExpressionValue>? boundValues,
         out List<Token> tokens,
         out string? error,
         out long position)
@@ -2758,6 +2840,54 @@ public sealed class DataWindowExpressionEvaluator
             }
 
             long start = index + 1L;
+
+            // ---------------------------------------------------------------------------------------------
+            //  THE BOUND-VALUE PLACEHOLDER, LEXED AS ONE PRIMARY
+            //  -------------------------------------------------------------------------------------------
+            //  A placeholder is the ONLY construct in this grammar beginning with a colon, so recognising it
+            //  costs nothing and can shadow nothing. The value it names becomes the token's value directly,
+            //  so the caller's data never passes through the lexer as text - which is what makes a value
+            //  containing a quote, an operator or a whole function call inert rather than executable.
+            //
+            //  THE TOKEN KIND IS Text FOR EVERY VALUE KIND, WHICH IS NOT A LOSS. ParsePrimary treats Number
+            //  and Text identically - both become a LiteralNode over the token's ExpressionValue - so the
+            //  kind carries no information past this point and the VALUE carries all of it.
+            //
+            //  AN UNKNOWN PLACEHOLDER IS A LEXICAL ERROR, NOT AN EMPTY VALUE. It can only mean the text and
+            //  the bound table disagree, and substituting nothing would evaluate a DIFFERENT expression
+            //  from the one composed - the class of defect that returns a plausible answer.
+            // ---------------------------------------------------------------------------------------------
+            if (current == BoundValuePlaceholderSigil
+                && expression.AsSpan(index).StartsWith(BoundValuePlaceholderPrefix, StringComparison.Ordinal))
+            {
+                int scan = index + BoundValuePlaceholderPrefix.Length;
+
+                while (scan < expression.Length && char.IsAsciiDigit(expression[scan]))
+                {
+                    scan++;
+                }
+
+                if (scan > index + BoundValuePlaceholderPrefix.Length)
+                {
+                    string placeholder = expression[index..scan];
+
+                    if (boundValues is null
+                        || !boundValues.TryGetValue(placeholder, out ExpressionValue bound))
+                    {
+                        error = Formatting.Sprintf(
+                            "'{1}' is a bound-value placeholder with no value supplied for it.",
+                            placeholder);
+                        position = start;
+
+                        return false;
+                    }
+
+                    tokens.Add(new Token(TokenKind.Text, placeholder, bound, start));
+                    index = scan;
+
+                    continue;
+                }
+            }
 
             switch (current)
             {
@@ -3922,7 +4052,12 @@ public sealed class DataWindowExpressionEvaluator
     /// <returns>The result.</returns>
     private DataWindowExpressionResult EvaluateNormalised(string expression, long row)
     {
-        if (!TryTokenize(expression, out List<Token> tokens, out string? lexicalError, out long lexicalPosition))
+        if (!TryTokenize(
+            expression,
+            _boundValues,
+            out List<Token> tokens,
+            out string? lexicalError,
+            out long lexicalPosition))
         {
             return DataWindowExpressionResult.Invalid(
                 CreateEvaluationError(

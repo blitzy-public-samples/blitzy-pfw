@@ -12,13 +12,18 @@
 //  fields - the rendered `text` and the structured `format_args` - which handed an authenticated caller
 //  internal detail it never asked for and this service cannot vet.
 //
-//  The fix is not to swallow the fault. It is to MOVE the detail: the exception is logged server-side
-//  against a correlation id, and the payload carries that id plus fixed text. So there are two
-//  properties to pin, and both matter:
+//  The fix is not to swallow the fault. It is to NARROW the detail and move what survives: the fault's
+//  TYPE CHAIN is recorded server-side against a correlation id, and the payload carries that id plus fixed
+//  text. So there are three properties to pin, and each closes a different failure:
 //
 //    1. NOTHING FROM THE EXCEPTION IS ON THE WIRE - not the type name, not the message, in either field.
-//    2. THE DETAIL IS ACTUALLY RECORDED, joined to the payload by the same id. A "fix" that merely
-//       deleted the text would pass property 1 and leave an operator with an unactionable failure.
+//    2. THE FAULT IS STILL IDENTIFIABLE, joined to the payload by the same id. A "fix" that merely deleted
+//       everything would pass property 1 and leave an operator with an unactionable failure.
+//    3. THE EXCEPTION OBJECT REACHES NEITHER CHANNEL. It used to be attached to the log record, which every
+//       provider renders by calling ToString() - message chain and stack together - so the message the wire
+//       was carefully denied was published in full one layer over. A log record is a different trust domain
+//       from this process, and a host holds this expression's variable values, so its message is caller data
+//       wherever it came from.
 //
 //  And the id has to be DETERMINISTIC, because it appears in a payload a paired characterization
 //  recording compares byte for byte. A GUID or a timestamp would have to be masked on both sides;
@@ -107,14 +112,28 @@ public sealed class ExpressionSessionHostFaultTests
 
         ForeignVariableResolution resolution = session.ResolveForeignVariable(handle, "gv_total");
 
-        // PROPERTY 2: THE DIAGNOSTIC SURVIVES. One error record, carrying the exception OBJECT so a
-        // configured provider writes type, message and stack in full.
+        // PROPERTY 2: THE DIAGNOSTIC SURVIVES, IN ITS ALLOWLISTED FORM. One error record naming the
+        // exception's TYPE CHAIN, and NO exception object.
+        //
+        // THIS ASSERTION USED TO REQUIRE THE OPPOSITE, AND THAT WAS THE DEFECT IT FROZE. It demanded the
+        // exception object be attached "so a configured provider writes type, message and stack in full" -
+        // which is precisely the leak: a host holds this expression's variable values, so its message is
+        // caller data wherever it came from, and a log record is a different trust domain from this process.
+        // Keeping the detail off the wire and putting it in the log solved half of one problem.
         RecordedLogEntry entry = Assert.Single(logger.Entries);
 
         Assert.Equal(LogLevel.Error, entry.Level);
-        Assert.NotNull(entry.Exception);
-        Assert.Equal(SecretishMessage, entry.Exception!.Message);
-        Assert.IsType<InvalidOperationException>(entry.Exception);
+        Assert.Null(entry.Exception);
+
+        // The type is named, so the fault is still identifiable...
+        Assert.Contains(
+            typeof(InvalidOperationException).FullName!,
+            entry.Message,
+            StringComparison.Ordinal);
+
+        // ...and the message it was carrying is not, on either channel.
+        Assert.DoesNotContain(SecretishMessage, entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", entry.Message, StringComparison.Ordinal);
 
         // AND THE JOIN IS THE ID THE CALLER WAS GIVEN. This is the whole design in one assertion: the
         // caller quotes the id, an operator finds this record.

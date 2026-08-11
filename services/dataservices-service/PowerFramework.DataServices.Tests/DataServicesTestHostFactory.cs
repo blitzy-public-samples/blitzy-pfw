@@ -124,6 +124,7 @@ using System.Globalization;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text.Encodings.Web;
 using System.Threading;
 using System.Threading.Tasks;
@@ -148,6 +149,7 @@ using PowerFramework.DataServices.Services;
 using PowerFramework.Shared.Eventful;
 using PowerFramework.Shared.Kernel;
 using PowerFramework.Shared.Localization;
+using Xunit;
 
 // The generated contract types are reached through ALIASES rather than a namespace import, for the same
 // reason Program.cs does it: PowerFramework.Contracts.Common.V1 publishes a `RetCode` message whose bare
@@ -162,12 +164,34 @@ using ConflictRow = PowerFramework.Contracts.Common.V1.ConflictRow;
 using DataWindowContractClient =
     PowerFramework.Contracts.DataServices.V1.DataWindowService.DataWindowServiceClient;
 using DomainContextMenuModel = PowerFramework.DataServices.Services.ContextMenuModel;
+using PersistenceBeginSessionRequest = PowerFramework.Contracts.Persistence.V1.BeginSessionRequest;
+using PersistenceBeginSessionResponse = PowerFramework.Contracts.Persistence.V1.BeginSessionResponse;
 using PersistenceCommandClient =
     PowerFramework.Contracts.Persistence.V1.CommandService.CommandServiceClient;
+using PersistenceCreateQueryTaskRequest =
+    PowerFramework.Contracts.Persistence.V1.CreateQueryTaskRequest;
+using PersistenceCreateQueryTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.CreateQueryTaskResponse;
+using PersistenceCreateUpdateTaskRequest =
+    PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskRequest;
+using PersistenceCreateUpdateTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskResponse;
+using PersistenceEndSessionRequest = PowerFramework.Contracts.Persistence.V1.EndSessionRequest;
+using PersistenceEndSessionResponse = PowerFramework.Contracts.Persistence.V1.EndSessionResponse;
 using PersistenceOperationStatus = PowerFramework.Contracts.Persistence.V1.OperationStatus;
 using PersistenceQueryClient = PowerFramework.Contracts.Persistence.V1.QueryService.QueryServiceClient;
 using PersistenceQueryRequest = PowerFramework.Contracts.Persistence.V1.QueryRequest;
 using PersistenceQueryResponse = PowerFramework.Contracts.Persistence.V1.QueryResponse;
+using PersistenceReleaseQueryTaskRequest =
+    PowerFramework.Contracts.Persistence.V1.ReleaseQueryTaskRequest;
+using PersistenceReleaseQueryTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.ReleaseQueryTaskResponse;
+using PersistenceReleaseUpdateTaskRequest =
+    PowerFramework.Contracts.Persistence.V1.ReleaseUpdateTaskRequest;
+using PersistenceReleaseUpdateTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.ReleaseUpdateTaskResponse;
+using PersistenceSessionHandle = PowerFramework.Contracts.Persistence.V1.SessionHandle;
+using PersistenceTaskHandle = PowerFramework.Contracts.Persistence.V1.TaskHandle;
 using PersistenceTransactionClient =
     PowerFramework.Contracts.Persistence.V1.TransactionService.TransactionServiceClient;
 using PersistenceUpdateClient =
@@ -264,9 +288,53 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     /// </remarks>
     public const string TestPrincipalHeaderValue = "service-level-test-principal";
 
-    /// <summary>The subject claim the test principal carries.</summary>
-    /// <remarks>A claim, never a credential. No secret, key or token value is present in it.</remarks>
-    public const string TestPrincipalSubject = "powerframework-dataservices-service-level-tests";
+    /// <summary>The subject claim the test principal carries by default.</summary>
+    /// <remarks>
+    /// <para>
+    /// A claim, never a credential. No secret, key or token value is present in it.
+    /// </para>
+    /// <para>
+    /// IT IS GATEWAY'S IDENTITY, AND IT HAS TO BE. Both contracts and every projected route now require the
+    /// caller to be one of <c>Authentication:Jwt:PermittedCallers</c>, which the shipped settings file
+    /// declares as Gateway alone - the AAP fixes the call graph as layered and acyclic, so nothing but
+    /// Gateway calls DataServices. A fixture claiming any other subject would produce a principal the
+    /// service correctly refuses, and Posture B would then be proving a refusal rather than an acceptance.
+    /// </para>
+    /// </remarks>
+    public const string TestPrincipalSubject = "powerframework-gateway";
+
+    /// <summary>
+    /// The request header a test uses to override the subject the test principal claims.
+    /// </summary>
+    /// <remarks>
+    /// PER REQUEST RATHER THAN PER FIXTURE, deliberately. A row proving that an unpermitted caller is
+    /// refused must vary the subject WITHOUT disturbing any other row, and fixture-level state shared
+    /// across a class would do exactly that. Absent, the default above applies.
+    /// </remarks>
+    public const string TestPrincipalSubjectHeaderName = "X-PowerFramework-Test-Subject";
+
+    /// <summary>
+    /// The request header a test uses to override the space-delimited scope set the test principal carries.
+    /// </summary>
+    /// <remarks>
+    /// Space-delimited because that is how RFC 6749 carries a granted scope set and how the receiver's
+    /// policy reads it, so a row exercising the split exercises the real format. An EMPTY value is
+    /// meaningful and distinct from an absent header: it produces a principal with a scope claim carrying
+    /// nothing, which is what a caller granted no scope actually holds.
+    /// </remarks>
+    public const string TestPrincipalScopeHeaderName = "X-PowerFramework-Test-Scope";
+
+    /// <summary>
+    /// The scope set the test principal carries by default - both of this service's published scopes.
+    /// </summary>
+    /// <remarks>
+    /// BOTH, because that is what Gateway's own credential carries: it requests the DataWindow scope and
+    /// the column-expression scope together in one token, since a single credential is attached to every
+    /// call it makes. A default carrying only one would make every row touching the other contract fail on
+    /// a permission it never meant to exercise.
+    /// </remarks>
+    public const string TestPrincipalScopes =
+        "dataservices.datawindow dataservices.columnexpression";
 
     /// <summary>
     /// The forwarding policy scheme that becomes the host's default authenticate scheme under test.
@@ -295,12 +363,15 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     public const string SchemeSelectorName = "PowerFramework.DataServices.Tests.SchemeSelector";
 
     /// <summary>
-    /// A DataWindow name <see cref="BindsDataWindowHost"/> deliberately refuses to bind.
+    /// A DataWindow name nothing binds - neither the deployed catalogue nor
+    /// <see cref="BindsDataWindowHost"/>.
     /// </summary>
     /// <remarks>
     /// The unknown-handle arm of every headless-model operation is published contract - it answers
-    /// <c>RetCode.E_INVALID_HANDLE</c> - so it has to stay reachable even when the fixture binds hosts.
-    /// Naming one refused value keeps it reachable without turning off the binding.
+    /// <c>RetCode.E_INVALID_HANDLE</c> - so it has to stay reachable whichever wiring is in force. This
+    /// value is absent from <c>Domain/DataWindowCatalogue.cs</c> AND explicitly refused by the fixture's
+    /// own binding, so a case can assert the negative without knowing which of the two it is running
+    /// against.
     /// </remarks>
     public const string UnboundDataWindowName = "pfw-unbound-datawindow";
 
@@ -351,6 +422,28 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     /// three on a base address, and the third rejection is a secrets control rather than tidiness.
     /// </remarks>
     private const string LoopbackSecurityAddress = "http://127.0.0.1:5104";
+
+    /// <summary>
+    /// The issuance secret every host this factory boots presents on the token-issuance edge - a value
+    /// generated once per test process and never a literal.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WITHOUT THIS, NO HOST IN THIS ASSEMBLY STARTS. <c>Configuration/DataServicesOptions.cs</c>'s
+    /// validator refuses a deployment that can present neither of the two credentials contract C-01
+    /// accepts on <c>POST /v1/tokens</c>, because such a service obtains no token and can reach nothing
+    /// downstream. That refusal is the point of the rule, so it is satisfied here rather than suppressed:
+    /// this factory does not disable <c>ValidateOnStart</c> and does not want to.
+    /// </para>
+    /// <para>
+    /// GENERATED RATHER THAN WRITTEN, for the same reason the production value is: a literal in a test
+    /// file is a credential-shaped string in version control, and a scanner cannot tell one from a real
+    /// one. It is not asserted against by any test - what tests assert is the effect of its presence or
+    /// absence - so its value is genuinely arbitrary.
+    /// </para>
+    /// </remarks>
+    private static readonly string IssuanceSecret =
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
 
     /// <summary>
     /// The retry count both resilience pipelines are reduced to.
@@ -603,26 +696,35 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// OFF BY DEFAULT SO THE DEPLOYED ANSWER STAYS OBSERVABLE. The composition root ships three
-    /// <c>Unbound*</c> implementations that bind nothing, because binding a DataWindow needs the deferred
-    /// DesignSystem ancestry <c>se_cst_dw</c> inherits from <c>se_cst_datawindow</c>
-    /// [<c>se_cst_dw.sru:L4</c>, <c>:L10</c>] and constraint C-D forbids implementing a deferred service
-    /// even partially. Their defined negative - <c>RetCode.E_INVALID_HANDLE</c> for a model or chain
-    /// request, a failed open for an expression session - is PUBLISHED CONTRACT and a suite must be able
-    /// to assert it.
+    /// OFF BY DEFAULT MEANS "USE THE DEPLOYED WIRING", AND THAT WIRING IS NO LONGER A REFUSAL. The
+    /// composition root binds a real headless host, model set and event chain over the transcribed
+    /// definitions in <c>Domain/DataWindowCatalogue.cs</c>, which is what AAP 0.2.1.3 Correction 3 and
+    /// AAP 0.3.5 require of DataServices: Correction 3 tells it to define its own host contract and
+    /// IMPLEMENT AGAINST IT, recording <c>se_cst_datawindow</c> as REFERENCE-only, and 0.3.5 assigns the
+    /// HEADLESS half of every UI capability here while deferring only the RENDERING half. An earlier
+    /// revision registered three <c>Unbound*</c> implementations and cited constraint C-D against
+    /// binding; that reading was wrong, and this switch's prose said so along with it.
     /// </para>
     /// <para>
-    /// Switch it on to reach the operations that need a bound host: the eight headless-model read and
-    /// apply operations of C-03, and C-04's <c>OpenExpressionSession</c> - which is in turn what makes the
-    /// two inverted streams, <c>InvokeMethodChannel</c> and <c>TraceChannel</c>, reachable over a real
-    /// transport. The binding is a TEST double built from <c>FakeDataWindowFixtures</c>; it is not a
-    /// DesignSystem implementation, ships nowhere, and is reachable only from this assembly.
+    /// SO WITH THIS OFF, A DEPLOYED HANDLE NAME NOW RESOLVES. <c>dw_sqlite</c> and
+    /// <c>dw_test_dwsvc</c> bind against the production catalogue, and any other name - including
+    /// <see cref="UnboundDataWindowName"/> - still answers the published negative,
+    /// <c>RetCode.E_INVALID_HANDLE</c> for a model or chain request and a failed open for an expression
+    /// session. That negative remains PUBLISHED CONTRACT and a suite must still be able to assert it.
     /// </para>
     /// <para>
-    /// <c>IDataWindowEventChainFactory</c> is NOT bound even when this is on, so C-03's bidirectional
-    /// <c>EventChain</c> still answers its unknown-handle arm. A chain double lives in another test file
-    /// and is that file's to register through <see cref="AdditionalServiceConfiguration"/>; reaching into
-    /// it from here would couple this fixture to a type outside its own dependency set.
+    /// Switch it on to substitute the FIXTURE'S OWN host - a test double built from
+    /// <c>FakeDataWindowFixtures</c>, reachable only from this assembly and shipped nowhere - when a case
+    /// needs to script host behaviour rather than exercise the deployed catalogue. It binds every name
+    /// except <see cref="UnboundDataWindowName"/>, which is broader than the catalogue and is why some
+    /// cases still want it.
+    /// </para>
+    /// <para>
+    /// <c>IDataWindowEventChainFactory</c> is NOT substituted even when this is on, so a chain request
+    /// reaches the DEPLOYED chain factory and therefore resolves for a catalogue name and refuses for any
+    /// other. A chain double lives in another test file and is that file's to register through
+    /// <see cref="AdditionalServiceConfiguration"/>; reaching into it from here would couple this fixture
+    /// to a type outside its own dependency set.
     /// </para>
     /// <para>
     /// Set it before the host is first used.
@@ -780,11 +882,12 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     /// arrangement (AAP 0.6.6.3, constraints C-F and C-G).
     /// </para>
     /// <para>
-    /// The principal satisfies the application's default policy, which requires an authenticated user and
-    /// nothing more - <c>Endpoints/PingEndpoints.cs</c> applies the PARAMETERLESS
-    /// <c>RequireAuthorization</c> and its handler reads no claim. The claims below are therefore
-    /// sufficient by construction rather than by coincidence, and the fixture does not invent a
-    /// requirement the application does not have.
+    /// The principal satisfies the application's default policy AND both named contract policies: it claims
+    /// Gateway's identity, which is the one entry in the shipped permitted-caller roster, and it carries
+    /// both published scopes, which is exactly what Gateway's own credential carries. The claims are
+    /// therefore sufficient by construction rather than by coincidence, and the fixture invents no
+    /// requirement the application does not have - a row that needs an INSUFFICIENT principal overrides the
+    /// subject or the scope set through the two headers declared above.
     /// </para>
     /// </remarks>
     public HttpClient CreateAuthenticatedClient()
@@ -795,6 +898,55 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
         // collection's own semantics; TryAddWithoutValidation would accept a name this fixture controls
         // anyway and would hide a typo in it.
         client.DefaultRequestHeaders.Add(TestPrincipalHeaderName, TestPrincipalHeaderValue);
+
+        return client;
+    }
+
+    /// <summary>
+    /// <b>POSTURE C.</b> A client whose principal is authenticated AND carries a chosen scope set.
+    /// </summary>
+    /// <param name="scopes">The scopes the principal should hold.</param>
+    /// <returns>A client whose requests carry both the principal header and the scope header.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="scopes"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// WHAT IT PROVES: that an endpoint accepts a principal holding a PARTICULAR permission, and - used
+    /// with the wrong scope, or with none - that it refuses one that does not. Posture B is authenticated
+    /// and unscoped, which the scope-gated surfaces refuse; this is the posture that gets past them.
+    /// </para>
+    /// <para>
+    /// THE SET IS JOINED WITH ONE SPACE INTO ONE CLAIM, deliberately, because that is the form Security's
+    /// issuer produces and the form the service's handler must be able to read. A fixture that emitted one
+    /// claim per scope would let a row pass against an implementation that could not read a real token.
+    /// </para>
+    /// <para>
+    /// It mints nothing and signs nothing. The scope header names permissions; it does not grant them, and
+    /// no key exists in this assembly.
+    /// </para>
+    /// </remarks>
+    public HttpClient CreateScopedClient(IReadOnlyList<string> scopes)
+    {
+        ArgumentNullException.ThrowIfNull(scopes);
+
+        HttpClient client = CreateAuthenticatedClient();
+
+        // ⚠ AN EMPTY SET TRAVELS AS A SINGLE SPACE, NOT AS AN EMPTY STRING ⚠
+        //
+        // "Holds no scope" is a state a row must be able to produce, and the handler honours an empty header
+        // value as exactly that rather than replacing it with the default - only an ABSENT header defaults.
+        // But an empty header VALUE does not reliably survive the round trip: the message pipeline is free
+        // to omit a header carrying no content, and when it does the handler sees an absent header and hands
+        // back the DEFAULT credential, which carries both scopes. The row then asserts a refusal against a
+        // fully authorised principal and fails for a reason that has nothing to do with the policy it was
+        // testing.
+        //
+        // One space is a non-empty value that cannot be dropped and that splits to nothing: the claim
+        // arrives, and both this fixture's handler and the production scope handler skip empty entries when
+        // they split the space-delimited set, so the principal holds no scope by the same rule a real token
+        // would be read under.
+        client.DefaultRequestHeaders.Add(
+            TestPrincipalScopeHeaderName,
+            scopes.Count == 0 ? " " : string.Join(' ', scopes));
 
         return client;
     }
@@ -1037,6 +1189,16 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
                 nameof(DataServicesOptions.Security),
                 nameof(SecurityClientOptions.BaseAddress)),
             LoopbackSecurityAddress);
+
+        // --- The issuance credential, so the host can start at all. -----------------------------------
+        //
+        // A FLAT KEY, NOT A SECTIONED ONE, and the spelling matters. The environment-variable provider
+        // maps only a double underscore onto the ':' separator, so this name is a top-level configuration
+        // key rather than a path into `DataServices` - which is exactly why the composition root reads it
+        // with an explicit post-configure step instead of binding it. `UseSetting` writes into the same
+        // host configuration that step reads, so this is the production resolution path and not a
+        // test-only door.
+        builder.UseSetting(SecurityClientOptions.ClientSecretConfigurationKey, IssuanceSecret);
 
         // --- Resilience, reduced on both edges and disabled on neither. -------------------------------
         foreach (string edge in ResilienceEdgeNames)
@@ -1426,13 +1588,13 @@ internal sealed class TestPrincipalAuthenticationHandler(
     /// "this handler has nothing to say", because failing would suppress any other scheme's verdict.
     /// </para>
     /// <para>
-    /// THE CLAIMS ARE EXACTLY WHAT THE APPLICATION'S POLICY NEEDS AND NOTHING MORE. The default policy
-    /// requires an authenticated user and no particular claim - <c>Endpoints/PingEndpoints.cs</c> applies
-    /// the parameterless <c>RequireAuthorization</c> and its handler reads no claim, and both gRPC
-    /// services do the same at their mapping sites. A name claim is supplied so a diagnostic has something
-    /// legible to print; the audience claim is supplied so that the principal is consistent with the
-    /// audience the host is configured for. NEITHER IS A SECRET, and no scope, key, token or signature
-    /// value appears in either.
+    /// THE CLAIMS ARE EXACTLY WHAT THE APPLICATION'S POLICIES NEED AND NOTHING MORE. The ping route applies
+    /// the parameterless <c>RequireAuthorization</c> and reads no claim; both gRPC services and the
+    /// projected REST groups name a policy that requires a PERMITTED CALLER IDENTITY and the operation's
+    /// SCOPE, so the subject and the scope set are supplied and are overridable per request. A name claim
+    /// is supplied so a diagnostic has something legible to print, and the audience claim so the principal
+    /// is consistent with the audience the host is configured for. NONE OF THEM IS A SECRET - a scope is a
+    /// permission name, not a credential - and no key, token or signature value appears in any of them.
     /// </para>
     /// <para>
     /// The identity names this scheme as its authentication type, which is what makes
@@ -1447,11 +1609,37 @@ internal sealed class TestPrincipalAuthenticationHandler(
             return Task.FromResult(AuthenticateResult.NoResult());
         }
 
+        // THE SUBJECT AND THE SCOPE SET ARE OVERRIDABLE PER REQUEST. Both contracts now require the caller
+        // to be a configured permitted identity AND to hold the operation's scope, so a row proving a
+        // refusal has to be able to vary either without disturbing another row. Absent headers yield the
+        // defaults, which are Gateway's identity and both published scopes - the credential Gateway
+        // actually obtains.
+        string subject =
+            Request.Headers[DataServicesTestHostFactory.TestPrincipalSubjectHeaderName].ToString() is
+                { Length: > 0 } declaredSubject
+                ? declaredSubject
+                : DataServicesTestHostFactory.TestPrincipalSubject;
+
+        // An EMPTY header value is honoured as an empty scope set rather than replaced by the default,
+        // because "holds no scope" is a state a row must be able to produce. Only an ABSENT header defaults.
+        string scopes =
+            Request.Headers.TryGetValue(
+                DataServicesTestHostFactory.TestPrincipalScopeHeaderName,
+                out Microsoft.Extensions.Primitives.StringValues declaredScopes)
+                ? declaredScopes.ToString()
+                : DataServicesTestHostFactory.TestPrincipalScopes;
+
         ClaimsIdentity identity = new(
             [
-                new Claim(ClaimTypes.NameIdentifier, DataServicesTestHostFactory.TestPrincipalSubject),
-                new Claim(ClaimTypes.Name, DataServicesTestHostFactory.TestPrincipalSubject),
+                // BOTH SPELLINGS OF THE SUBJECT, because the receiver's policy reads whichever is present:
+                // a bearer handler with inbound claim mapping on renames `sub` to the name-identifier claim
+                // type, and with it off leaves `sub` alone. Supplying both means the fixture does not
+                // silently depend on which mapping the host happens to use.
+                new Claim("sub", subject),
+                new Claim(ClaimTypes.NameIdentifier, subject),
+                new Claim(ClaimTypes.Name, subject),
                 new Claim("aud", DataServicesTestHostFactory.ConfiguredAudience),
+                new Claim("scope", scopes),
             ],
             Scheme.Name);
 
@@ -1549,38 +1737,136 @@ internal sealed class SharedTransportHandler(HttpMessageHandler shared) : Delega
 /// something that has to boot a host to reach a double.
 /// </para>
 /// <para>
-/// ONLY THE TWO OPERATIONS THE TRIPLE ACTUALLY NEEDS ARE SCRIPTED - the streamed retrieval and the update.
-/// Everything else on the client is left to the real implementation, which reaches the substituted
-/// transport and fails LOUDLY. That is the honest default: scripting an operation nobody asked about would
-/// let a suite assert against a fiction, whereas a loud failure names the unscripted route and the fix.
+/// EIGHT OPERATIONS ARE SCRIPTED: the streamed retrieval, the update, and the SIX HANDLE-LIFECYCLE calls
+/// the two of them now make. The lifecycle six are scripted rather than left to the real implementation
+/// because the real one reaches the substituted transport, so a retrieval would spend the resilience
+/// pipeline's whole retry budget failing to begin a session before it ever asked for a row. Everything
+/// else on the client is still left to the real implementation, which fails LOUDLY - the honest default,
+/// because a loud failure names the unscripted route and the fix, whereas a fabricated answer would let a
+/// suite assert against a fiction.
+/// </para>
+/// <para>
+/// THE LIFECYCLE HALF RECORDS RATHER THAN MERELY ANSWERS, and that is the point of it. It keeps the set of
+/// handles it has issued and not yet seen released, so a suite can assert that a request RELEASED WHAT IT
+/// TOOK - including on the conflict path and the cancellation path, where a leak is invisible to every
+/// assertion about the response. A release naming a handle it never issued, or naming one twice, answers
+/// <c>E_INVALID_HANDLE</c> exactly as the server's registries do, so a double release cannot pass as a
+/// clean one.
+/// </para>
+/// <para>
+/// ⚠ AND THE SAME RULE APPLIES TO THE TWO OPERATIONS THAT *ARE* SCRIPTED: NEITHER HAS A DEFAULT ANSWER ⚠
+/// </para>
+/// <para>
+/// An earlier form of this double answered an unscripted <c>Query</c> with a completely empty stream and an
+/// unscripted <c>Update</c> with a bare success carrying zero counts. Both are PLAUSIBLE, which is exactly
+/// what makes them dangerous: a real C-05 zero-row retrieval is not an empty stream but a three-part one -
+/// the row count, then the chunks, then the terminal status - and a real C-06 success reports the counts and
+/// the identity round trip. A test that forgot to script therefore did not fail; it passed against a shape
+/// the contract never produces, and it went on passing after the production path stopped producing anything
+/// at all.
+/// </para>
+/// <para>
+/// So an unscripted call THROWS, naming the operation and the scripting method that fixes it. A zero-row
+/// retrieval and a zero-count success are both still reachable - through
+/// <see cref="ScriptEmptyQuery"/> and <see cref="ScriptUpdateSuccess"/> - but only by asking for them,
+/// which is the difference between a suite asserting an outcome and a suite inheriting one.
 /// </para>
 /// </remarks>
 internal sealed class ScriptedPersistenceEdge
 {
+    /// <summary>Whether a retrieval has been scripted at all.</summary>
+    /// <remarks>
+    /// Tracked separately from the message list's emptiness, because "no script" and "a script whose
+    /// content happens to be nothing" are different statements and only the first is an error. A suite can
+    /// legitimately script an empty message list - <see cref="ScriptQueryMessages"/> permits it - and that
+    /// models a transport that closed the stream with no messages at all, which is a real fault worth being
+    /// able to reproduce.
+    /// </remarks>
+    private bool _queryScripted;
+
+    /// <summary>The response <c>Update</c> answers with, or <see langword="null"/> when none is scripted.</summary>
+    private PersistenceUpdateResponse? _updateResponse;
+
+    /// <summary>Guards the lifecycle counters and the held-handle sets.</summary>
+    /// <remarks>
+    /// GENUINELY NEEDED RATHER THAN DEFENSIVE. A scope's release runs from <c>DisposeAsync</c>, which the
+    /// host may complete on a different thread from the one that acquired it, and a cancelled retrieval
+    /// releases while its stream is still unwinding. A <see cref="HashSet{T}"/> mutated from two threads
+    /// can corrupt its buckets and then answer wrongly rather than throw, which would make a leak
+    /// assertion pass for the wrong reason.
+    /// </remarks>
+    private readonly Lock _lifecycleGate = new();
+
+    /// <summary>Sessions issued and not yet ended, in issue order.</summary>
+    private readonly List<string> _heldSessions = [];
+
+    /// <summary>Query tasks issued and not yet released, in issue order.</summary>
+    private readonly List<string> _heldQueryTasks = [];
+
+    /// <summary>Update tasks issued and not yet released, in issue order.</summary>
+    private readonly List<string> _heldUpdateTasks = [];
+
+    /// <summary>Every release, in the order it arrived, as a coarse kind.</summary>
+    /// <remarks>
+    /// THE ORDER IS A CONTRACT, NOT AN INCIDENTAL. A task borrows the pooled transaction its session owns,
+    /// so releasing the session first would leave the task holding a reference to something already
+    /// collected - and a count-only assertion cannot tell the two orders apart.
+    /// </remarks>
+    private readonly List<string> _releaseOrder = [];
+
+    /// <summary>The source of the identifiers this edge issues.</summary>
+    /// <remarks>
+    /// MONOTONIC AND NEVER REUSED, so a stale handle from an earlier request can never be mistaken for a
+    /// live one - which is exactly the property the server's own registries have, and the reason a double
+    /// release is detectable at all.
+    /// </remarks>
+    private long _nextHandle;
+
     /// <summary>
-    /// The messages <c>Query</c> answers with, in delivery order. Empty by default.
+    /// The messages <c>Query</c> answers with, in delivery order.
     /// </summary>
     /// <remarks>
-    /// AN EMPTY STREAM IS A LEGITIMATE RETRIEVAL RESULT, so an unscripted <c>Query</c> is not an error - a
-    /// retrieval that matched nothing is exactly what the legacy would report. A suite that wants rows
-    /// calls <see cref="ScriptQuery(long, int)"/>, which builds the three-part shape the contract
-    /// publishes: the row count, then the chunks, then the terminal status.
+    /// <para>
+    /// Writing to this list directly is supported and marks the retrieval as scripted, so a suite that needs
+    /// a shape none of the helpers builds can compose one message at a time. Reading it before anything has
+    /// been scripted yields an empty list; that does NOT mean an unscripted <c>Query</c> answers with
+    /// nothing - it throws. See <see cref="IsQueryScripted"/>.
+    /// </para>
+    /// <para>
+    /// A suite that wants the ordinary shape calls <see cref="ScriptQuery(long, int)"/>, which builds the
+    /// three-part form the contract publishes: the row count, then the chunks, then the terminal status.
+    /// </para>
     /// </remarks>
     public IList<PersistenceQueryResponse> QueryScript { get; } = [];
+
+    /// <summary>Whether a retrieval answer has been scripted.</summary>
+    /// <remarks>
+    /// Exposed so a suite can assert its own arrangement rather than discovering a missing script through a
+    /// failure - useful in a shared class fixture, where one test's <see cref="Reset"/> is the other's
+    /// missing arrangement.
+    /// </remarks>
+    public bool IsQueryScripted => _queryScripted || QueryScript.Count > 0;
+
+    /// <summary>Whether an update answer or an update conflict has been scripted.</summary>
+    public bool IsUpdateScripted => _updateResponse is not null || UpdateConflict is not null;
 
     /// <summary>
     /// The response <c>Update</c> answers with when no conflict is scripted.
     /// </summary>
     /// <remarks>
-    /// A PLAIN SUCCESS WITH ZERO COUNTS, deliberately neutral. Inventing non-zero counts here would put a
-    /// number into a suite's assertion that no oracle authorises, so a suite that cares about counts sets
-    /// them itself.
+    /// NO DEFAULT, DELIBERATELY - see the type's remarks. Reading it before anything is scripted throws
+    /// rather than inventing a neutral success, because a neutral success is the answer that lets a
+    /// forgotten arrangement pass. <see cref="ScriptUpdateSuccess"/> is the explicit way to a zero-count
+    /// success, and the setter accepts any response a suite composes itself.
     /// </remarks>
-    public PersistenceUpdateResponse UpdateResponse { get; set; } = new()
+    /// <exception cref="InvalidOperationException">No update answer has been scripted.</exception>
+    public PersistenceUpdateResponse UpdateResponse
     {
-        Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
-        Counts = new PersistenceUpdateCounts(),
-    };
+        get => _updateResponse ?? throw Unscripted(
+            "Update",
+            "ScriptUpdateSuccess(...), ScriptUpdateConflict(...), or the UpdateResponse setter");
+        set => _updateResponse = value;
+    }
 
     /// <summary>
     /// The failure <c>Update</c> throws instead of answering, or <see langword="null"/> to answer.
@@ -1611,6 +1897,102 @@ internal sealed class ScriptedPersistenceEdge
     /// <summary>The most recent update request, or <see langword="null"/> when none was made.</summary>
     public PersistenceUpdateRequest? LastUpdateRequest { get; private set; }
 
+    // -------------------------------------------------------------------------------------------------
+    //  THE HANDLE LIFECYCLE - C-05's and C-06's create/release pairs and C-08's session pair
+    // -------------------------------------------------------------------------------------------------
+
+    /// <summary>The outcome <c>BeginSession</c> answers with. <c>OK</c> by default.</summary>
+    /// <remarks>
+    /// Set it to a failing code to drive the acquisition's FIRST refusal - the case where no session was
+    /// obtained at all, so there is nothing to release and the operation must refuse without having asked
+    /// Persistence for a single row.
+    /// </remarks>
+    public long BeginSessionCode { get; set; } = RetCode.OK;
+
+    /// <summary>The outcome <c>CreateQueryTask</c> answers with. <c>OK</c> by default.</summary>
+    /// <remarks>
+    /// Set it to a failing code to drive the acquisition's SECOND refusal, which is the interesting one: a
+    /// session HAS been obtained and must still be ended. C-05 adjudicates each initial setting on this
+    /// call, so this is also how a rejected <c>QuerySpec</c> setting is modelled.
+    /// </remarks>
+    public long CreateQueryTaskCode { get; set; } = RetCode.OK;
+
+    /// <summary>The outcome <c>CreateUpdateTask</c> answers with. <c>OK</c> by default.</summary>
+    public long CreateUpdateTaskCode { get; set; } = RetCode.OK;
+
+    /// <summary>
+    /// Whether a SUCCEEDING create answers without a usable handle, modelling a malformed server reply.
+    /// </summary>
+    /// <remarks>
+    /// A REAL AND SEPARATE FAILURE MODE, not a contrivance. A status of <c>OK</c> with no handle beside it
+    /// is a producer bug, and a consumer that read the handle without testing it would send a blank one and
+    /// be refused with a code that named the wrong problem. The session is still acquired in this case, so
+    /// it must still be ended.
+    /// </remarks>
+    public bool IssueBlankTaskHandle { get; set; }
+
+    /// <summary>How many times <c>BeginSession</c> was called.</summary>
+    public int BeginSessionCalls { get; private set; }
+
+    /// <summary>How many times <c>EndSession</c> was called.</summary>
+    public int EndSessionCalls { get; private set; }
+
+    /// <summary>How many times <c>CreateQueryTask</c> was called.</summary>
+    public int CreateQueryTaskCalls { get; private set; }
+
+    /// <summary>How many times <c>ReleaseQueryTask</c> was called.</summary>
+    public int ReleaseQueryTaskCalls { get; private set; }
+
+    /// <summary>How many times <c>CreateUpdateTask</c> was called.</summary>
+    public int CreateUpdateTaskCalls { get; private set; }
+
+    /// <summary>How many times <c>ReleaseUpdateTask</c> was called.</summary>
+    public int ReleaseUpdateTaskCalls { get; private set; }
+
+    /// <summary>The most recent query-task creation, or <see langword="null"/> when none was made.</summary>
+    /// <remarks>
+    /// The assertion target for "the spec travelled on the CREATE call": C-05 puts the initial
+    /// configuration here, and a spec that arrived on the run call instead would be applied a second time
+    /// over a task that already had it - which a clause setter carrying <c>SQL_MS_APPEND</c> would turn
+    /// into a doubled fragment in the executed statement.
+    /// </remarks>
+    public PersistenceCreateQueryTaskRequest? LastCreateQueryTaskRequest { get; private set; }
+
+    /// <summary>The session identifiers issued and not yet ended, in issue order.</summary>
+    public ImmutableArray<string> HeldSessionIds => SnapshotHeld(_heldSessions);
+
+    /// <summary>The query-task identifiers issued and not yet released, in issue order.</summary>
+    public ImmutableArray<string> HeldQueryTaskIds => SnapshotHeld(_heldQueryTasks);
+
+    /// <summary>The update-task identifiers issued and not yet released, in issue order.</summary>
+    public ImmutableArray<string> HeldUpdateTaskIds => SnapshotHeld(_heldUpdateTasks);
+
+    /// <summary>
+    /// Every release this edge served, in arrival order: <c>"query-task"</c>, <c>"update-task"</c> or
+    /// <c>"session"</c>.
+    /// </summary>
+    public ImmutableArray<string> ReleaseOrder => SnapshotHeld(_releaseOrder);
+
+    /// <summary>
+    /// Whether every handle this edge issued has since been released.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> when no session and no task remains held - the assertion that a request
+    /// released what it took.
+    /// </value>
+    public bool NothingIsStillHeld
+    {
+        get
+        {
+            lock (_lifecycleGate)
+            {
+                return _heldSessions.Count == 0
+                    && _heldQueryTasks.Count == 0
+                    && _heldUpdateTasks.Count == 0;
+            }
+        }
+    }
+
     /// <summary>Scripts a retrieval as the contract's three-part stream.</summary>
     /// <param name="rowCount">The row count the leading message reports.</param>
     /// <param name="chunkCount">How many data chunks follow it. One-based and at least one.</param>
@@ -1618,16 +2000,95 @@ internal sealed class ScriptedPersistenceEdge
     /// Replaces any previous script rather than appending to it, so a suite cannot accidentally inherit
     /// another's rows. The chunk index is ONE-BASED, matching the legacy's own indexing.
     /// </remarks>
-    public void ScriptQuery(long rowCount, int chunkCount = 1)
+    public void ScriptQuery(long rowCount, int chunkCount = 1) =>
+        ScriptQueryMessages(ScriptedPersistenceResponses.QueryStream(rowCount, chunkCount));
+
+    /// <summary>
+    /// Scripts a retrieval that matched no rows, as the contract's three-part stream.
+    /// </summary>
+    /// <remarks>
+    /// THE EXPLICIT WAY TO A ZERO-ROW RESULT, and the shape is the point: a leading row count of zero, no
+    /// data chunks, and the terminal status - which is what a real C-05 retrieval that matched nothing
+    /// delivers. An empty stream is a DIFFERENT thing and models a transport that closed without saying
+    /// anything, so the two are not interchangeable and a suite has to say which it means.
+    /// </remarks>
+    public void ScriptEmptyQuery() =>
+        ScriptQueryMessages(
+        [
+            ScriptedPersistenceResponses.RowCountMessage(0L),
+            ScriptedPersistenceResponses.StatusMessage(WireRetCode.Ok),
+        ]);
+
+    /// <summary>Scripts a retrieval from messages the caller composed.</summary>
+    /// <param name="messages">The messages to deliver, in order. May be empty.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="messages"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// Replaces any previous script rather than appending to it, so a suite cannot accidentally inherit
+    /// another's messages. An empty sequence is accepted and marks the retrieval as scripted: that is how a
+    /// suite reproduces a stream that carried nothing, which is a real fault rather than a zero-row result.
+    /// </remarks>
+    public void ScriptQueryMessages(IEnumerable<PersistenceQueryResponse> messages)
     {
+        ArgumentNullException.ThrowIfNull(messages);
+
         QueryScript.Clear();
 
-        foreach (PersistenceQueryResponse message in
-            ScriptedPersistenceResponses.QueryStream(rowCount, chunkCount))
+        foreach (PersistenceQueryResponse message in messages)
         {
             QueryScript.Add(message);
         }
+
+        _queryScripted = true;
     }
+
+    /// <summary>Scripts an applied update, with the counts stated rather than assumed.</summary>
+    /// <param name="rowsInserted">How many rows the update reports inserted.</param>
+    /// <param name="rowsUpdated">How many rows it reports updated.</param>
+    /// <param name="rowsDeleted">How many rows it reports deleted.</param>
+    /// <returns>The response that was scripted, so the same values can be asserted on the way back.</returns>
+    /// <remarks>
+    /// The three counts DEFAULT TO ZERO, so <c>ScriptUpdateSuccess()</c> is the neutral success the old
+    /// implicit default used to supply - but a suite now has to write it, which is the whole difference.
+    /// Nothing here invents a non-zero count: a suite that cares about counts states them, and the response
+    /// is returned so it can assert the same values rather than a plausible shape.
+    /// </remarks>
+    public PersistenceUpdateResponse ScriptUpdateSuccess(
+        long rowsInserted = 0L,
+        long rowsUpdated = 0L,
+        long rowsDeleted = 0L)
+    {
+        PersistenceUpdateResponse response = new()
+        {
+            Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+            Counts = new PersistenceUpdateCounts
+            {
+                Inserted = rowsInserted,
+                Updated = rowsUpdated,
+                Deleted = rowsDeleted,
+            },
+        };
+
+        UpdateResponse = response;
+
+        return response;
+    }
+
+    /// <summary>Builds the refusal an unscripted operation answers with.</summary>
+    /// <param name="operation">The contract operation that was reached.</param>
+    /// <param name="scriptingMethods">The scripting entry points that would satisfy it.</param>
+    /// <returns>The exception to throw.</returns>
+    /// <remarks>
+    /// THE MESSAGE IS THE POINT. A double that fails has to say which collaborator was reached and how to
+    /// arrange it, or the failure reads as a defect in the code under test. It also states WHY there is no
+    /// default, so the next reader does not add one back as a convenience.
+    /// </remarks>
+    private static InvalidOperationException Unscripted(string operation, string scriptingMethods) =>
+        new(
+            $"The Persistence edge's {operation} was reached with no script. This double has no default "
+                + "answer for it, on purpose: a plausible default - an empty stream, or a bare success with "
+                + "zero counts - is not a shape the contract produces, so a test that forgot to arrange its "
+                + "collaborator would have passed against a fiction and kept passing after the production "
+                + $"path stopped answering at all. Arrange it with {scriptingMethods}.");
 
     /// <summary>
     /// Scripts an <c>updatewhereclause</c> mismatch: gRPC <c>Aborted</c> carrying the current row state.
@@ -1690,17 +2151,39 @@ internal sealed class ScriptedPersistenceEdge
     public void Reset()
     {
         QueryScript.Clear();
+        _queryScripted = false;
         UpdateConflict = null;
-        UpdateResponse = new PersistenceUpdateResponse
-        {
-            Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
-            Counts = new PersistenceUpdateCounts(),
-        };
+        _updateResponse = null;
 
         QueryCalls = 0;
         UpdateCalls = 0;
         LastQueryRequest = null;
         LastUpdateRequest = null;
+
+        BeginSessionCode = RetCode.OK;
+        CreateQueryTaskCode = RetCode.OK;
+        CreateUpdateTaskCode = RetCode.OK;
+        IssueBlankTaskHandle = false;
+
+        lock (_lifecycleGate)
+        {
+            BeginSessionCalls = 0;
+            EndSessionCalls = 0;
+            CreateQueryTaskCalls = 0;
+            ReleaseQueryTaskCalls = 0;
+            CreateUpdateTaskCalls = 0;
+            ReleaseUpdateTaskCalls = 0;
+            LastCreateQueryTaskRequest = null;
+
+            _heldSessions.Clear();
+            _heldQueryTasks.Clear();
+            _heldUpdateTasks.Clear();
+            _releaseOrder.Clear();
+
+            // THE HANDLE COUNTER IS DELIBERATELY NOT RESET. Reusing an identifier a previous scenario had
+            // issued would let a stale handle from that scenario pass a release as valid, which is the one
+            // thing these sets exist to detect.
+        }
     }
 
     /// <summary>Records a retrieval and reports the scripted messages.</summary>
@@ -1710,6 +2193,13 @@ internal sealed class ScriptedPersistenceEdge
     {
         QueryCalls++;
         LastQueryRequest = request;
+
+        // RECORDED BEFORE THE REFUSAL, so the attempt is evidence either way - a suite diagnosing a missing
+        // script can still see that the route was reached, and once.
+        if (!IsQueryScripted)
+        {
+            throw Unscripted("Query", "ScriptQuery(...), ScriptEmptyQuery() or ScriptQueryMessages(...)");
+        }
 
         return [.. QueryScript];
     }
@@ -1727,7 +2217,219 @@ internal sealed class ScriptedPersistenceEdge
         UpdateCalls++;
         LastUpdateRequest = request;
 
+        // The conflict wins when both are scripted, because a conflict is the answer the upstream gives
+        // INSTEAD of a response. When neither is scripted the property getter refuses, naming the operation
+        // and the scripting methods - and the count above has already been taken, so the attempt is evidence
+        // either way.
         return UpdateConflict is not null ? throw UpdateConflict : UpdateResponse;
+    }
+
+    /// <summary>Records a session begin and answers with the scripted outcome. Contract <b>C-08</b>.</summary>
+    /// <returns>The response, carrying a handle only when the outcome is <c>OK</c>.</returns>
+    /// <remarks>
+    /// A FAILING OUTCOME CARRIES NO HANDLE, which is what the contract requires of a producer and what makes
+    /// the consumer's own "status OK but no handle" test reachable only through
+    /// <see cref="IssueBlankTaskHandle"/> rather than by accident here.
+    /// </remarks>
+    internal PersistenceBeginSessionResponse RecordBeginSession()
+    {
+        lock (_lifecycleGate)
+        {
+            BeginSessionCalls++;
+
+            if (BeginSessionCode != RetCode.OK)
+            {
+                return new PersistenceBeginSessionResponse
+                {
+                    Status = new PersistenceOperationStatus
+                    {
+                        RetCode = (WireRetCode)(int)BeginSessionCode,
+                        ErrorText = "Scripted: the session was refused.",
+                    },
+                };
+            }
+
+            string sessionId = string.Create(
+                CultureInfo.InvariantCulture,
+                $"scripted-session-{++_nextHandle}");
+
+            _heldSessions.Add(sessionId);
+
+            return new PersistenceBeginSessionResponse
+            {
+                Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+                Session = new PersistenceSessionHandle { SessionId = sessionId },
+            };
+        }
+    }
+
+    /// <summary>Records a session end. Contract <b>C-08</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <returns>The response, refusing a handle this edge does not hold.</returns>
+    internal PersistenceEndSessionResponse RecordEndSession(PersistenceEndSessionRequest request)
+    {
+        lock (_lifecycleGate)
+        {
+            EndSessionCalls++;
+            _releaseOrder.Add("session");
+
+            bool held = request.Session is not null && _heldSessions.Remove(request.Session.SessionId);
+
+            return new PersistenceEndSessionResponse
+            {
+                Status = new PersistenceOperationStatus
+                {
+                    RetCode = held ? WireRetCode.Ok : (WireRetCode)(int)RetCode.E_INVALID_HANDLE,
+                    ErrorText = held ? string.Empty : "Scripted: no such session.",
+                },
+            };
+        }
+    }
+
+    /// <summary>Records a query-task creation and answers with the scripted outcome. Contract <b>C-05</b>.</summary>
+    /// <param name="request">The request as it arrived, recorded so the spec's arrival can be asserted.</param>
+    /// <returns>The response.</returns>
+    internal PersistenceCreateQueryTaskResponse RecordCreateQueryTask(
+        PersistenceCreateQueryTaskRequest request)
+    {
+        lock (_lifecycleGate)
+        {
+            CreateQueryTaskCalls++;
+            LastCreateQueryTaskRequest = request;
+
+            if (CreateQueryTaskCode != RetCode.OK)
+            {
+                return new PersistenceCreateQueryTaskResponse
+                {
+                    Status = new PersistenceOperationStatus
+                    {
+                        RetCode = (WireRetCode)(int)CreateQueryTaskCode,
+                        ErrorText = "Scripted: the query task was refused.",
+                    },
+                };
+            }
+
+            PersistenceCreateQueryTaskResponse response = new()
+            {
+                Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+            };
+
+            if (!IssueBlankTaskHandle)
+            {
+                string taskId = string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"scripted-query-task-{++_nextHandle}");
+
+                _heldQueryTasks.Add(taskId);
+                response.Task = new PersistenceTaskHandle { TaskId = taskId };
+            }
+
+            return response;
+        }
+    }
+
+    /// <summary>Records a query-task release. Contract <b>C-05</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <returns>The response, refusing a handle this edge does not hold.</returns>
+    internal PersistenceReleaseQueryTaskResponse RecordReleaseQueryTask(
+        PersistenceReleaseQueryTaskRequest request)
+    {
+        lock (_lifecycleGate)
+        {
+            ReleaseQueryTaskCalls++;
+            _releaseOrder.Add("query-task");
+
+            bool held = request.Task is not null && _heldQueryTasks.Remove(request.Task.TaskId);
+
+            return new PersistenceReleaseQueryTaskResponse
+            {
+                Status = new PersistenceOperationStatus
+                {
+                    RetCode = held ? WireRetCode.Ok : (WireRetCode)(int)RetCode.E_INVALID_HANDLE,
+                    ErrorText = held ? string.Empty : "Scripted: no such query task.",
+                },
+            };
+        }
+    }
+
+    /// <summary>Records an update-task creation and answers with the scripted outcome. Contract <b>C-06</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <returns>The response.</returns>
+    internal PersistenceCreateUpdateTaskResponse RecordCreateUpdateTask(
+        PersistenceCreateUpdateTaskRequest request)
+    {
+        lock (_lifecycleGate)
+        {
+            CreateUpdateTaskCalls++;
+
+            if (CreateUpdateTaskCode != RetCode.OK)
+            {
+                return new PersistenceCreateUpdateTaskResponse
+                {
+                    Status = new PersistenceOperationStatus
+                    {
+                        RetCode = (WireRetCode)(int)CreateUpdateTaskCode,
+                        ErrorText = "Scripted: the update task was refused.",
+                    },
+                };
+            }
+
+            PersistenceCreateUpdateTaskResponse response = new()
+            {
+                Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+            };
+
+            if (!IssueBlankTaskHandle)
+            {
+                string taskId = string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"scripted-update-task-{++_nextHandle}");
+
+                _heldUpdateTasks.Add(taskId);
+                response.Task = new PersistenceTaskHandle { TaskId = taskId };
+            }
+
+            return response;
+        }
+    }
+
+    /// <summary>Records an update-task release. Contract <b>C-06</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <returns>The response, refusing a handle this edge does not hold.</returns>
+    internal PersistenceReleaseUpdateTaskResponse RecordReleaseUpdateTask(
+        PersistenceReleaseUpdateTaskRequest request)
+    {
+        lock (_lifecycleGate)
+        {
+            ReleaseUpdateTaskCalls++;
+            _releaseOrder.Add("update-task");
+
+            bool held = request.Task is not null && _heldUpdateTasks.Remove(request.Task.TaskId);
+
+            return new PersistenceReleaseUpdateTaskResponse
+            {
+                Status = new PersistenceOperationStatus
+                {
+                    RetCode = held ? WireRetCode.Ok : (WireRetCode)(int)RetCode.E_INVALID_HANDLE,
+                    ErrorText = held ? string.Empty : "Scripted: no such update task.",
+                },
+            };
+        }
+    }
+
+    /// <summary>Snapshots a held-handle list under the gate.</summary>
+    /// <param name="held">The list to snapshot.</param>
+    /// <returns>The identifiers, in issue order.</returns>
+    /// <remarks>
+    /// A SNAPSHOT RATHER THAN THE LIST ITSELF, so an assertion cannot observe a release happening midway
+    /// through its own enumeration - the exact race a leak test would otherwise be flaky on.
+    /// </remarks>
+    private ImmutableArray<string> SnapshotHeld(List<string> held)
+    {
+        lock (_lifecycleGate)
+        {
+            return [.. held];
+        }
     }
 }
 
@@ -1807,6 +2509,105 @@ internal sealed class ScriptedPersistenceClient : PersistenceClient
         return Task.FromResult(_edge.RecordUpdate(request));
     }
 
+    /// <summary>Answers the scripted session begin. Contract <b>C-08</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The scripted response.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// THE SIX LIFECYCLE OVERRIDES BELOW SIT UNDER THE CLIENT'S OWN COMPOSITION, NOT OVER IT. The scope
+    /// helpers - <c>OpenQueryScopeAsync</c> and <c>OpenUpdateScopeAsync</c> - are deliberately left to the
+    /// real implementation so that every test driving a retrieval or an update exercises the ordering, the
+    /// refusal arms and the release path of the PRODUCTION composition. Overriding the scope helpers instead
+    /// would have been fewer lines and would have tested nothing.
+    /// </remarks>
+    public override Task<PersistenceBeginSessionResponse> BeginSessionAsync(
+        PersistenceBeginSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return Task.FromResult(_edge.RecordBeginSession());
+    }
+
+    /// <summary>Answers the scripted session end. Contract <b>C-08</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The scripted response.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// CANCELLATION IS NOT OBSERVED ON A RELEASE, deliberately mirroring the client: the release is issued
+    /// with <see cref="CancellationToken.None"/> precisely so a cancelled operation still gives its handles
+    /// back, and a double that threw on a cancelled token would make that unobservable.
+    /// </remarks>
+    public override Task<PersistenceEndSessionResponse> EndSessionAsync(
+        PersistenceEndSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return Task.FromResult(_edge.RecordEndSession(request));
+    }
+
+    /// <summary>Answers the scripted query-task creation. Contract <b>C-05</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The scripted response.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    public override Task<PersistenceCreateQueryTaskResponse> CreateQueryTaskAsync(
+        PersistenceCreateQueryTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return Task.FromResult(_edge.RecordCreateQueryTask(request));
+    }
+
+    /// <summary>Answers the scripted query-task release. Contract <b>C-05</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The scripted response.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    public override Task<PersistenceReleaseQueryTaskResponse> ReleaseQueryTaskAsync(
+        PersistenceReleaseQueryTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return Task.FromResult(_edge.RecordReleaseQueryTask(request));
+    }
+
+    /// <summary>Answers the scripted update-task creation. Contract <b>C-06</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The scripted response.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    public override Task<PersistenceCreateUpdateTaskResponse> CreateUpdateTaskAsync(
+        PersistenceCreateUpdateTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return Task.FromResult(_edge.RecordCreateUpdateTask(request));
+    }
+
+    /// <summary>Answers the scripted update-task release. Contract <b>C-06</b>.</summary>
+    /// <param name="request">The request as it arrived.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The scripted response.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    public override Task<PersistenceReleaseUpdateTaskResponse> ReleaseUpdateTaskAsync(
+        PersistenceReleaseUpdateTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return Task.FromResult(_edge.RecordReleaseUpdateTask(request));
+    }
+
     /// <summary>Delivers a snapshot as an asynchronous stream, honouring cancellation between messages.</summary>
     /// <param name="messages">The messages to deliver.</param>
     /// <param name="cancellationToken">Cancels delivery.</param>
@@ -1835,24 +2636,32 @@ internal sealed class ScriptedPersistenceClient : PersistenceClient
 //  9. THE OPTIONAL DATAWINDOW HOST BINDING
 //  ---------------------------------------------------------------------------------------------------
 //  BOTH TYPES BELOW ARE OFF UNLESS DataServicesTestHostFactory.BindsDataWindowHost IS SET, and neither is
-//  a DesignSystem implementation. The shipped composition root binds NOTHING, because binding a DataWindow
-//  requires the deferred DesignSystem ancestry `se_cst_dw` inherits from `se_cst_datawindow`
-//  [ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L4, :L10] - a STRUCTURAL INHERITANCE EDGE
-//  that no refactoring at a call site removes - and constraint C-D forbids implementing a deferred service
-//  even partially and even to stub it out. AAP 0.2.1.3 Correction 3 resolves that by having DataServices
-//  declare its own abstract host contract and record the legacy parent as REFERENCE-only.
+//  a DesignSystem implementation.
+//
+//  WHAT THEY ARE NOT: they are not the only way to reach a bound host. The shipped composition root binds
+//  a real headless host, model set and event chain over the transcribed definitions in
+//  Domain/DataWindowCatalogue.cs. That is what AAP 0.2.1.3 Correction 3 requires - DataServices declares
+//  its own abstract host contract and IMPLEMENTS AGAINST IT, recording `se_cst_datawindow` as
+//  REFERENCE-only - and what AAP 0.3.5 requires, which assigns the HEADLESS half of every UI capability to
+//  DataServices and defers only the RENDERING half. An earlier revision registered three `Unbound*`
+//  implementations here and cited constraint C-D against binding at all; that reading was wrong, and the
+//  prose in this file repeated it.
 //
 //  WHAT THESE TWO ARE, THEN: test doubles over `FakeDataWindowFixtures`, reachable only from this test
-//  assembly, shipped nowhere, and present so that a service-level suite can reach the operations which
-//  need a bound host - the eight headless-model read and apply operations of C-03, and C-04's session
-//  open, which is what in turn makes the two inverted streams reachable over a real transport. A test
-//  double is not an implementation of the capability it stands in for; the capability itself remains
-//  reserved behind the `/v1/design/**` extension point (AAP 0.4.4).
+//  assembly and shipped nowhere, present so a suite can SCRIPT host behaviour - a describe override, a
+//  forced AcceptText failure, a recorded call log - rather than exercise the deployed catalogue. They also
+//  bind ANY name except UnboundDataWindowName, which is broader than the catalogue and is the second
+//  reason a case may want them.
 //
-//  AND THE UNBOUND ANSWER STAYS REACHABLE EVEN WHILE THEY ARE ON. Both refuse
-//  DataServicesTestHostFactory.UnboundDataWindowName and both refuse a blank name, so the contract's own
-//  defined negative - RetCode.E_INVALID_HANDLE for a model request, a failed open for a session - can
-//  still be asserted without turning the binding off.
+//  THE RENDERING HALF IS STILL DEFERRED, and neither these doubles nor the deployed host touches it:
+//  nothing under Domain/ computes, stores or answers a coordinate, a size, a colour, a font, a DPI
+//  conversion or a redraw, and the rendering capability stays reserved behind the `/v1/design/**`
+//  extension point (AAP 0.4.4).
+//
+//  AND THE UNBOUND ANSWER STAYS REACHABLE UNDER EITHER WIRING. Both doubles refuse
+//  DataServicesTestHostFactory.UnboundDataWindowName and a blank name, and the deployed catalogue carries
+//  neither - so the contract's own defined negative, RetCode.E_INVALID_HANDLE for a model request and a
+//  failed open for a session, can still be asserted whichever wiring is in force.
 // -----------------------------------------------------------------------------------------------------
 
 /// <summary>
@@ -2039,5 +2848,198 @@ internal sealed class BoundDataWindowModelSetProvider : IDataWindowModelSetProvi
         dropDownSearch.OnInit(host);
 
         return new DataWindowModelSet(host, contextMenu, rowSelect, columnSort, dropDownSearch);
+    }
+}
+
+/// <summary>
+/// The self-check on <see cref="ScriptedPersistenceEdge"/>: an unscripted collaborator FAILS LOUDLY, and
+/// every plausible answer has to be asked for by name.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY A DOUBLE NEEDS ITS OWN TESTS. This one decides what a suite sees when it forgets to arrange its
+/// collaborator, and that decision is the difference between a forgotten arrangement failing and a
+/// forgotten arrangement passing against a shape the contract never produces. A permissive default is
+/// invisible precisely because it produces green runs, so the refusal is pinned here rather than left to
+/// be relied upon.
+/// </para>
+/// <para>
+/// The two members under test are the ones the retrieval/validation/update triple crosses this edge with:
+/// C-05's streamed <c>Query</c> and C-06's <c>Update</c>.
+/// </para>
+/// </remarks>
+public sealed class ScriptedPersistenceEdgeTests
+{
+    /// <summary>An unscripted retrieval refuses, names the operation, and still records the attempt.</summary>
+    [Fact]
+    public void AnUnscriptedQueryRefusesAndNamesItsScriptingEntryPoints()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        Assert.False(edge.IsQueryScripted);
+
+        InvalidOperationException refusal = Assert.Throws<InvalidOperationException>(
+            () => edge.RecordQuery(new PersistenceQueryRequest()));
+
+        // The message has to be actionable, or the failure reads as a defect in the code under test.
+        Assert.Contains("Query", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("ScriptQuery", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("ScriptEmptyQuery", refusal.Message, StringComparison.Ordinal);
+
+        // RECORDED BEFORE THE REFUSAL, so a suite diagnosing a missing script can still see that the route
+        // was reached, and reached once.
+        Assert.Equal(1, edge.QueryCalls);
+        Assert.NotNull(edge.LastQueryRequest);
+    }
+
+    /// <summary>An unscripted update refuses on the same terms.</summary>
+    [Fact]
+    public void AnUnscriptedUpdateRefusesAndNamesItsScriptingEntryPoints()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        Assert.False(edge.IsUpdateScripted);
+
+        InvalidOperationException refusal = Assert.Throws<InvalidOperationException>(
+            () => edge.RecordUpdate(new PersistenceUpdateRequest()));
+
+        Assert.Contains("Update", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("ScriptUpdateSuccess", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("ScriptUpdateConflict", refusal.Message, StringComparison.Ordinal);
+
+        Assert.Equal(1, edge.UpdateCalls);
+        Assert.NotNull(edge.LastUpdateRequest);
+    }
+
+    /// <summary>
+    /// A zero-row retrieval is reachable, and it is the contract's three-part stream rather than nothing.
+    /// </summary>
+    /// <remarks>
+    /// THE DISTINCTION THIS ROW EXISTS FOR. A retrieval that matched nothing still carries a leading row
+    /// count and a terminal status; a stream that carried no messages at all is a transport fault. The old
+    /// permissive default conflated them by answering the second when a suite meant neither.
+    /// </remarks>
+    [Fact]
+    public void AZeroRowRetrievalIsScriptedExplicitlyAndKeepsItsThreePartShape()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        edge.ScriptEmptyQuery();
+
+        Assert.True(edge.IsQueryScripted);
+
+        ImmutableArray<PersistenceQueryResponse> messages =
+            edge.RecordQuery(new PersistenceQueryRequest());
+
+        Assert.Equal(2, messages.Length);
+
+        // THE SHAPE, MEMBER BY MEMBER: the leading message is the row count carrying zero, and the trailing
+        // one is the terminal status. Neither is a data chunk, and the sequence is not empty.
+        Assert.NotNull(messages[0].RowCount);
+        Assert.Equal(0L, messages[0].RowCount.RowCount);
+        Assert.NotNull(messages[1].Status);
+        Assert.Equal(WireRetCode.Ok, messages[1].Status.RetCode);
+    }
+
+    /// <summary>An explicitly empty message sequence is a scripted transport fault, not an error.</summary>
+    /// <remarks>
+    /// The reverse of the row above: a suite that genuinely wants a stream carrying nothing can have one,
+    /// because that models a real fault. What it may not do is get one by accident.
+    /// </remarks>
+    [Fact]
+    public void AnExplicitlyEmptyMessageSequenceIsAcceptedAsAScriptedFault()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        edge.ScriptQueryMessages([]);
+
+        Assert.True(edge.IsQueryScripted);
+        Assert.Empty(edge.RecordQuery(new PersistenceQueryRequest()));
+    }
+
+    /// <summary>A success is scripted with its counts stated, and zero counts have to be asked for.</summary>
+    [Fact]
+    public void AScriptedSuccessCarriesTheCountsTheSuiteStated()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        PersistenceUpdateResponse scripted = edge.ScriptUpdateSuccess(rowsInserted: 1L, rowsUpdated: 2L);
+
+        Assert.True(edge.IsUpdateScripted);
+
+        PersistenceUpdateResponse answered =
+            edge.RecordUpdate(new PersistenceUpdateRequest());
+
+        // The SAME instance, so a suite asserts the payload it scripted rather than one of the right shape.
+        Assert.Same(scripted, answered);
+        Assert.NotNull(answered.Counts);
+        Assert.Equal(1L, answered.Counts.Inserted);
+        Assert.Equal(2L, answered.Counts.Updated);
+        Assert.Equal(0L, answered.Counts.Deleted);
+
+        // The neutral success the old implicit default used to supply is still reachable - by writing it.
+        ScriptedPersistenceEdge neutral = new();
+        _ = neutral.ScriptUpdateSuccess();
+        PersistenceUpdateCounts counts =
+            neutral.RecordUpdate(new PersistenceUpdateRequest()).Counts;
+
+        Assert.Equal(0L, counts.Inserted);
+        Assert.Equal(0L, counts.Updated);
+        Assert.Equal(0L, counts.Deleted);
+    }
+
+    /// <summary>A conflict answers instead of a response, and wins when both are scripted.</summary>
+    /// <remarks>
+    /// A CONFLICT IS AN ANSWER RATHER THAN A FAILURE OF ONE, so it takes precedence: the upstream returns
+    /// <c>Aborted</c> INSTEAD of a response, and a suite that scripted both is describing an upstream that
+    /// conflicts. The call is still counted, because "a conflict is never retried" is a statement about how
+    /// many times the upstream was invoked.
+    /// </remarks>
+    [Fact]
+    public void AScriptedConflictAnswersInsteadOfAResponseAndIsStillCounted()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        _ = edge.ScriptUpdateSuccess(rowsUpdated: 1L);
+
+        ConflictDetail detail = edge.ScriptUpdateConflict(rowsExpected: 1L, rowsMatched: 0L);
+
+        Assert.True(edge.IsUpdateScripted);
+
+        PersistenceConflictException raised = Assert.Throws<PersistenceConflictException>(
+            () => edge.RecordUpdate(new PersistenceUpdateRequest()));
+
+        Assert.Same(detail, raised.Conflict);
+        Assert.Equal(1, edge.UpdateCalls);
+    }
+
+    /// <summary>Reset returns the edge to the unscripted state rather than to a permissive one.</summary>
+    /// <remarks>
+    /// The property that makes <see cref="ScriptedPersistenceEdge.Reset"/> safe to call between scenarios:
+    /// it clears arrangements without installing defaults, so a scenario that forgets to re-arrange fails
+    /// instead of inheriting the previous one's answer or a plausible substitute for it.
+    /// </remarks>
+    [Fact]
+    public void ResetReturnsTheEdgeToTheUnscriptedStateAndNotToADefault()
+    {
+        ScriptedPersistenceEdge edge = new();
+
+        edge.ScriptQuery(rowCount: 3L);
+        _ = edge.ScriptUpdateSuccess(rowsUpdated: 1L);
+        _ = edge.RecordQuery(new PersistenceQueryRequest());
+
+        edge.Reset();
+
+        Assert.False(edge.IsQueryScripted);
+        Assert.False(edge.IsUpdateScripted);
+        Assert.Equal(0, edge.QueryCalls);
+        Assert.Equal(0, edge.UpdateCalls);
+        Assert.Null(edge.LastQueryRequest);
+        Assert.Null(edge.LastUpdateRequest);
+
+        _ = Assert.Throws<InvalidOperationException>(
+            () => edge.RecordQuery(new PersistenceQueryRequest()));
+        _ = Assert.Throws<InvalidOperationException>(
+            () => edge.RecordUpdate(new PersistenceUpdateRequest()));
     }
 }

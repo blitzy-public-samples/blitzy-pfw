@@ -104,11 +104,15 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using Grpc.Core;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
+using PowerFramework.Persistence.Authorization;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Errors;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
 
@@ -331,27 +335,51 @@ internal sealed class TransactionSession
     /// </exception>
     internal TransactionSession(
         string sessionId,
-        int referenceIndex,
+        PoolLease lease,
         in TransactionData descriptor,
         IPooledTransaction transaction,
         Lock gate)
     {
         SessionId = sessionId ?? throw new ArgumentNullException(nameof(sessionId));
-        ReferenceIndex = referenceIndex;
+        Lease = lease;
         Descriptor = descriptor;
         Transaction = transaction ?? throw new ArgumentNullException(nameof(transaction));
         Gate = gate ?? throw new ArgumentNullException(nameof(gate));
     }
 
     /// <summary>
+    /// The STABLE pool handle this session holds, safe across the calls that name it.
+    /// </summary>
+    /// <remarks>
+    /// A LEASE RATHER THAN THE ONE-BASED POOL POSITION, and the reason is that a session's whole purpose is
+    /// to be named by a LATER request. The pool's removal renumbers every later position - a preserved
+    /// legacy defect its positional API still reproduces - so a session holding an ordinal would be
+    /// silently repointed at another session's transaction by an unrelated EndSession in between. A lease
+    /// is never reused, so an outlived session resolves nothing rather than resolving a stranger.
+    /// </remarks>
+    internal PoolLease Lease { get; }
+
+    /// <summary>
+    /// Whether this session has begun retiring, so no further operation may touch its transaction.
+    /// </summary>
+    /// <remarks>
+    /// <b>WRITTEN AND READ ONLY UNDER <see cref="Gate"/>, WHICH IS WHAT MAKES THE LIFECYCLE ATOMIC.</b>
+    /// Retiring the handle from the registry is not enough on its own: a request that resolved the session
+    /// a moment earlier is already past that check and would enter the gate AFTER the release and operate
+    /// on a handed-back transaction. Because the flag is set inside the same gate the release happens in,
+    /// and every operation tests it inside that gate before touching anything, the two cannot interleave.
+    /// </remarks>
+    internal bool IsClosing { get; private set; }
+
+    /// <summary>
+    /// Marks this session as retiring. The caller MUST already hold <see cref="Gate"/>.
+    /// </summary>
+    internal void MarkClosing() => IsClosing = true;
+
+    /// <summary>
     /// The opaque wire identity of this session.
     /// </summary>
     internal string SessionId { get; }
-
-    /// <summary>
-    /// The ONE-BASED pool reference index. Never translated to zero-based at any boundary.
-    /// </summary>
-    internal int ReferenceIndex { get; }
 
     /// <summary>
     /// The descriptor this session was opened with, held for the outbound accessor to read from.
@@ -366,6 +394,32 @@ internal sealed class TransactionSession
     /// The borrowed pooled transaction. Owned by the pool, never disposed by this service.
     /// </summary>
     internal IPooledTransaction Transaction { get; }
+
+    /// <summary>
+    /// The caller identity this session is attributed to, for the per-caller ceiling.
+    /// </summary>
+    /// <value>
+    /// The token subject, or the resolver's unattributed bucket. Set once by the registry at
+    /// registration and never rendered into a response.
+    /// </value>
+    /// <remarks>
+    /// SETTABLE BY THE REGISTRY RATHER THAN A CONSTRUCTOR ARGUMENT, so that the identity - which is a
+    /// property of the BOUNDARY the registry owns - does not enter the constructor of a record whose other
+    /// five members are all the oracle's. Two call sites in this file construct sessions and neither is
+    /// interested in a quota.
+    /// </remarks>
+    internal string Principal { get; set; } = HandlePrincipalResolver.Unattributed;
+
+    /// <summary>
+    /// When a call last named this session, as UTC ticks read from the injected clock.
+    /// </summary>
+    /// <remarks>
+    /// WRITTEN AND READ THROUGH <see cref="System.Threading.Volatile"/> BY THE REGISTRY, because it is
+    /// touched on every resolve from arbitrary request threads and read by the reclaim pass on another. A
+    /// torn read of a 64-bit field is possible on a 32-bit runtime and would make a fresh handle look
+    /// ancient.
+    /// </remarks>
+    internal long LastActivityTicks;
 
     /// <summary>
     /// Serializes every operation on <see cref="Transaction"/>, reproducing the oracle's thread
@@ -453,6 +507,21 @@ internal sealed class TransactionSessionRegistry
     private readonly ConcurrentDictionary<string, TransactionSession> _sessions =
         new(StringComparer.Ordinal);
 
+    /// <summary>The ceiling on live sessions, per caller and in total.</summary>
+    private readonly HandleQuota _quota;
+
+    /// <summary>The pool every session's teardown hands its reference back to.</summary>
+    private readonly TransactionPool _pool;
+
+    /// <summary>The one clock. Stamps activity and measures idleness.</summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>Resolves the caller a new session is attributed to.</summary>
+    private readonly HandlePrincipalResolver _principals;
+
+    /// <summary>Optional structured logger, for reclaimed and drained sessions.</summary>
+    private readonly ILogger<TransactionSessionRegistry>? _logger;
+
     /// <summary>
     /// One mutual-exclusion gate per BORROWED TRANSACTION, shared by every session that holds it.
     /// </summary>
@@ -475,6 +544,47 @@ internal sealed class TransactionSessionRegistry
     /// </para>
     /// </remarks>
     private readonly ConditionalWeakTable<IPooledTransaction, Lock> _gates = [];
+
+    /// <summary>
+    /// Creates the registry over its ceilings, its clock and the pool its teardown returns references to.
+    /// </summary>
+    /// <param name="options">The bound settings the ceilings and the idle window come from.</param>
+    /// <param name="time">The one clock, shared with the pool and the pooled transaction.</param>
+    /// <param name="pool">
+    /// The reference-counted pool. REQUIRED, because a session's teardown is a pool release: a registry
+    /// that could remove a session without returning its reference would turn an abandoned handle into a
+    /// pinned connection, which is the failure this bound exists to prevent.
+    /// </param>
+    /// <param name="principals">
+    /// Resolves the caller a new session is attributed to. Optional so the registry is constructible
+    /// without a host, in which case every session is unattributed and only the total ceiling applies.
+    /// </param>
+    /// <param name="logger">Optional structured logger.</param>
+    /// <exception cref="ArgumentNullException">A required collaborator is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// PUBLIC ON AN INTERNAL TYPE, WHICH IS NOT AN ACCESSIBILITY MISTAKE. The container activates this
+    /// singleton through <c>ActivatorUtilities</c>, which considers only PUBLIC constructors - an internal
+    /// one is invisible to it, and the failure is not a compile error but a startup exception naming a type
+    /// with no suitable constructor. The type itself stays internal, so the effective reach is unchanged;
+    /// only the activator can see the door. Every service class in this file is shaped the same way.
+    /// </remarks>
+    public TransactionSessionRegistry(
+        IOptions<PersistenceOptions> options,
+        TimeProvider time,
+        TransactionPool pool,
+        HandlePrincipalResolver? principals = null,
+        ILogger<TransactionSessionRegistry>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        HandleLifecycleOptions handles = options.Value.Handles;
+
+        _quota = new HandleQuota("transaction session", handles.MaxTotalPerRegistry, handles.MaxPerPrincipal);
+        _pool = pool ?? throw new ArgumentNullException(nameof(pool));
+        _time = time ?? throw new ArgumentNullException(nameof(time));
+        _principals = principals ?? new HandlePrincipalResolver();
+        _logger = logger;
+    }
 
     /// <summary>
     /// The number of live sessions. Exposed for diagnostics and for assertions in tests.
@@ -511,12 +621,23 @@ internal sealed class TransactionSessionRegistry
     /// session that some other caller still holds.
     /// </para>
     /// </remarks>
-    internal TransactionSession Register(
-        int referenceIndex,
+    internal TransactionSession? Register(
+        PoolLease lease,
         in TransactionData descriptor,
-        IPooledTransaction transaction)
+        IPooledTransaction transaction,
+        out string diagnostic)
     {
         ArgumentNullException.ThrowIfNull(transaction);
+
+        // THE CEILING IS TESTED BEFORE THE HANDLE IS MINTED, and a refusal registers nothing - so the
+        // caller can hand its pool reference straight back. Reserving after minting would leave a live
+        // entry to unwind on the refusal path, which is exactly the kind of unwinding that gets missed.
+        string principal = _principals.Resolve();
+
+        if (!_quota.TryReserve(principal, out diagnostic))
+        {
+            return null;
+        }
 
         // One gate per borrowed transaction, created on first use and shared thereafter. Two sessions
         // opened with equal descriptors reach this line with the SAME transaction instance and so leave
@@ -527,10 +648,15 @@ internal sealed class TransactionSessionRegistry
         {
             TransactionSession session = new(
                 Guid.NewGuid().ToString("N"),
-                referenceIndex,
+                lease,
                 in descriptor,
                 transaction,
-                gate);
+                gate)
+            {
+                Principal = principal,
+            };
+
+            Volatile.Write(ref session.LastActivityTicks, _time.GetUtcNow().UtcTicks);
 
             if (_sessions.TryAdd(session.SessionId, session))
             {
@@ -558,17 +684,41 @@ internal sealed class TransactionSessionRegistry
     /// tell a caller which of its guesses was closer to a live handle, and it would answer a question
     /// the oracle has no answer for.
     /// </remarks>
-    internal bool TryResolve(SessionHandle? handle, out TransactionSession? session)
-    {
-        string? sessionId = handle?.SessionId;
+    internal bool TryResolve(SessionHandle? handle, out TransactionSession? session) =>
+        TryResolve(handle?.SessionId, out session);
 
+    /// <summary>
+    /// Resolves a session from its identity alone, without a wire handle to unwrap.
+    /// </summary>
+    /// <param name="sessionId">The identity to look up. A null or empty value never resolves.</param>
+    /// <param name="session">The live session on success; <see langword="null"/> otherwise.</param>
+    /// <returns><see langword="true"/> when a live session carries this identity.</returns>
+    /// <remarks>
+    /// THE ACTUAL LOOKUP, AND THE HANDLE OVERLOAD IS A THIN UNWRAP OVER IT. Callers inside the service
+    /// hold a wire <see cref="SessionHandle"/> and use the overload above; callers in the composition
+    /// root hold only the identity string a task request carried, and fabricating a wire message purely
+    /// to index a dictionary would put a contract type into a place that has no wire concern at all.
+    /// Both paths reach the same table and return the same three-outcomes-collapsed-to-one answer.
+    /// </remarks>
+    internal bool TryResolve(string? sessionId, out TransactionSession? session)
+    {
         if (string.IsNullOrEmpty(sessionId))
         {
             session = null;
             return false;
         }
 
-        return _sessions.TryGetValue(sessionId, out session);
+        if (!_sessions.TryGetValue(sessionId, out session))
+        {
+            return false;
+        }
+
+        // A HANDLE IN USE IS NOT AN ABANDONED HANDLE. The stamp is refreshed on every resolve, which is
+        // every call that names this session, so the reclaim pass measures time since the caller was last
+        // heard from rather than time since the session was opened.
+        Volatile.Write(ref session.LastActivityTicks, _time.GetUtcNow().UtcTicks);
+
+        return true;
     }
 
     /// <summary>
@@ -580,7 +730,159 @@ internal sealed class TransactionSessionRegistry
     /// same session therefore produce exactly one removal, and the loser sees the same unknown-session
     /// outcome as any other stale handle.
     /// </returns>
-    internal bool TryRemove(string sessionId) => _sessions.TryRemove(sessionId, out _);
+    internal bool TryRemove(string sessionId)
+    {
+        if (!_sessions.TryRemove(sessionId, out TransactionSession? removed) || removed is null)
+        {
+            return false;
+        }
+
+        // THE RESERVATION IS RETURNED BY WHICHEVER CALL WON THE REMOVAL, so a concurrent second release
+        // cannot return it twice and a caller cannot free quota it never held.
+        _quota.Release(removed.Principal);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Hands a removed session's pool reference back - the teardown half of ending a session.
+    /// </summary>
+    /// <param name="session">The session, ALREADY removed from this table.</param>
+    /// <returns>
+    /// <c>OK</c>, <c>E_OUT_OF_BOUND</c> when the reference index no longer names a pool slot, or the
+    /// first non-OK code the two pool operations produced.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="session"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// ONE IMPLEMENTATION, THREE CALLERS. <c>EndSession</c> reaches it for an explicit end, the reclaim
+    /// pass for an abandoned session and the drain for shutdown. It lived inside <c>EndSession</c> until
+    /// the reclaim pass needed it too, and copying it would have left three places for the pool protocol
+    /// below to drift.
+    /// </para>
+    /// <para>
+    /// THE TWO POOL OPERATIONS ARE THE ORACLE'S, IN ITS ORDER. <c>of_Release</c> hands the borrowed object
+    /// back and disconnects only on the LAST reference
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L141</c>], and
+    /// <c>of_RemoveRef</c> then drops the reference [<c>:L716</c>]. The second is performed even when the
+    /// first reported a problem, because leaving the reference taken would pin the entry for the life of
+    /// the process; the FIRST non-OK code is what the caller is told.
+    /// </para>
+    /// <para>
+    /// THE INDEX GUARD IS NOT DEFENSIVE PADDING, AND BOTH HALVES OF IT MATTER. The oracle writes
+    /// <c>index &lt;= 0 || index &gt; UpperBound</c> identically at three entry points - <c>of_removeref</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L89</c>], <c>of_release</c>
+    /// [<c>:L120</c>] and <c>of_get</c> [<c>:L154</c>] - and all three answer <c>E_OUT_OF_BOUND</c>. It is
+    /// checked here as well as inside the pool because the pool's own guard protects the POOL, while this
+    /// one lets the boundary report the code for a session whose index was invalidated by ANOTHER session's
+    /// departure: the pool COMPACTS its array on removal [<c>:L101-L114</c>], a preserved legacy hazard.
+    /// </para>
+    /// <para>
+    /// INDICES ARE ONE-BASED AND ARE NEVER SILENTLY TRANSLATED HERE - the migration plan's named R9 hazard.
+    /// PowerBuilder's upper bound is the LAST VALID INDEX of a one-based array, so for three entries it is
+    /// 3 and the valid indices are 1, 2 and 3; reading it as a zero-based last index would make the highest
+    /// entry unreachable, and subtracting one on the way in would make index 1 fail. Zero is therefore an
+    /// ERROR here and not "the first entry".
+    /// </para>
+    /// </remarks>
+    internal long Teardown(TransactionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        // THE LEASE IS TESTED, NOT AN ORDINAL, AND THAT IS THE POINT OF THE HANDLE. The pool COMPACTS its
+        // array on removal [<c>:L101-L114</c>] - a preserved legacy hazard - so an ordinal captured when the
+        // session opened may by now name ANOTHER session's transaction. A lease is never reused, so an
+        // outlived handle resolves nothing rather than resolving a stranger, and this guard reports the
+        // contract's out-of-bound code for a handle that no longer names an entry.
+        if (!session.Lease.IsValid)
+        {
+            return RetCode.E_OUT_OF_BOUND;
+        }
+
+        lock (session.Gate)
+        {
+            IPooledTransaction? borrowed = session.Transaction;
+            long released = _pool.Release(session.Lease, ref borrowed);
+            long removed = _pool.RemoveRef(session.Lease);
+
+            return released != RetCode.OK ? released : removed;
+        }
+    }
+
+    /// <summary>
+    /// Removes and tears down every session idle for longer than <paramref name="window"/> and not pinned
+    /// by a live task.
+    /// </summary>
+    /// <param name="now">The reclaim pass's single clock read.</param>
+    /// <param name="window">How long a session may go untouched before it is considered abandoned.</param>
+    /// <param name="pinnedSessionIds">
+    /// The sessions a live query, update or command task still names. Never reclaimed regardless of age.
+    /// </param>
+    /// <returns>How many sessions were reclaimed.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="pinnedSessionIds"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// A PINNED SESSION IS NOT MERELY SKIPPED - IT IS NOT IDLE. A task working against a session is using
+    /// that session, and the fact that no C-08 call has named it recently says nothing about whether it is
+    /// abandoned. Reclaiming one would hand its transaction back underneath a working task, which would
+    /// turn a cleanup into data loss.
+    /// </remarks>
+    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window, IReadOnlySet<string> pinnedSessionIds)
+    {
+        ArgumentNullException.ThrowIfNull(pinnedSessionIds);
+
+        long threshold = now.UtcTicks - window.Ticks;
+        int reclaimed = 0;
+
+        foreach (TransactionSession candidate in _sessions.Values)
+        {
+            if (pinnedSessionIds.Contains(candidate.SessionId)
+                || Volatile.Read(ref candidate.LastActivityTicks) > threshold
+                || !TryRemove(candidate.SessionId))
+            {
+                continue;
+            }
+
+            long code = Teardown(candidate);
+            reclaimed++;
+
+            _logger?.LogWarning(
+                "Reclaimed an abandoned transaction session held by caller {Principal} against pool lease "
+                + "{PoolLease}; the pool release answered {ReturnCode}. The session handle value is "
+                + "deliberately not recorded.",
+                candidate.Principal,
+                candidate.Lease.Id,
+                code);
+        }
+
+        return reclaimed;
+    }
+
+    /// <summary>
+    /// Removes and tears down every live session, whatever its age.
+    /// </summary>
+    /// <returns>How many sessions were released.</returns>
+    /// <remarks>
+    /// FOR SHUTDOWN, AND IT MUST RUN AFTER THE TASK REGISTRIES HAVE DRAINED. A task borrows the transaction
+    /// its session owns, so releasing sessions first would leave a task holding a returned reference. The
+    /// reclaimer owns that ordering.
+    /// </remarks>
+    internal int Drain()
+    {
+        int drained = 0;
+
+        foreach (TransactionSession candidate in _sessions.Values)
+        {
+            if (!TryRemove(candidate.SessionId))
+            {
+                continue;
+            }
+
+            _ = Teardown(candidate);
+            drained++;
+        }
+
+        return drained;
+    }
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -621,10 +923,26 @@ internal sealed class TransactionSessionRegistry
 /// recordings.
 /// </para>
 /// </remarks>
+// ====== THE ONE CONTRACT ANNOTATED PER RPC RATHER THAN PER CLASS (constraint C-G) ======
+// C-08 straddles the read/write line, and a class-level policy would have to pick the wrong side
+// for half its surface. Its session, descriptor and state READERS need only the read scope; its
+// commit, rollback, auto-commit, clear-state and set-broken operations change durable state or the
+// pooled object every later caller shares, and need the write scope. Each of the thirteen therefore
+// carries its own attribute, and there is deliberately NO class-level attribute: adding one would
+// AND itself with every method policy, so a write-scoped caller would also have to hold read.
 internal sealed class TransactionService : GeneratedTransactionServiceBase
 {
     private readonly TransactionPool _pool;
     private readonly TransactionSessionRegistry _sessions;
+
+    /// <summary>The query-task handle table, purged when a session ends.</summary>
+    private readonly QueryTaskRegistry _queryTasks;
+
+    /// <summary>The update-task handle table, purged when a session ends.</summary>
+    private readonly UpdateTaskRegistry _updateTasks;
+
+    /// <summary>The command-task handle table, purged when a session ends.</summary>
+    private readonly CommandTaskRegistry _commandTasks;
     private readonly IQueryTransactionSurface _querySurface;
     private readonly ILogger<TransactionService>? _logger;
 
@@ -668,11 +986,17 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         TransactionPool pool,
         TransactionSessionRegistry sessions,
         IQueryTransactionSurface querySurface,
+        QueryTaskRegistry queryTasks,
+        UpdateTaskRegistry updateTasks,
+        CommandTaskRegistry commandTasks,
         ILogger<TransactionService>? logger = null)
     {
         _pool = pool ?? throw new ArgumentNullException(nameof(pool));
         _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
         _querySurface = querySurface ?? throw new ArgumentNullException(nameof(querySurface));
+        _queryTasks = queryTasks ?? throw new ArgumentNullException(nameof(queryTasks));
+        _updateTasks = updateTasks ?? throw new ArgumentNullException(nameof(updateTasks));
+        _commandTasks = commandTasks ?? throw new ArgumentNullException(nameof(commandTasks));
         _logger = logger;
     }
 
@@ -898,6 +1222,18 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         + "valid only on the instance that issued it, and is single-use: EndSession retires it.";
 
     /// <summary>
+    /// The one sentence returned when the caller's request was cancelled before this service issued the
+    /// connect that <c>BeginSession</c> exists to issue.
+    /// </summary>
+    /// <remarks>
+    /// A fixed sentence quoting no value, for the same reason as
+    /// <see cref="UnknownSessionDiagnostic"/> (constraint C-F).
+    /// </remarks>
+    private const string CancelledDiagnostic =
+        "The request was cancelled before a connection was opened. No pool reference is held and no "
+        + "session was created, so there is nothing for the caller to end.";
+
+    /// <summary>
     /// Checks a stored reference index against the pool's current bounds, reproducing the guard the
     /// oracle repeats at every pool entry point.
     /// </summary>
@@ -928,10 +1264,8 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// without this session doing anything at all.
     /// </para>
     /// </remarks>
-    private long GuardReferenceIndex(int referenceIndex) =>
-        referenceIndex <= 0 || referenceIndex > _pool.UpperBound
-            ? RetCode.E_OUT_OF_BOUND
-            : RetCode.OK;
+    private long GuardLease(PoolLease lease) =>
+        !lease.IsValid || !_pool.IsLeaseLive(lease) ? RetCode.E_OUT_OF_BOUND : RetCode.OK;
 
     /// <summary>
     /// Refuses a request whose explicit connection flags disagree with what the supplied
@@ -1191,12 +1525,28 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// <c>of_connect</c> refuses it with <c>E_INVALID_TRANSACTION</c> [<c>:L113</c>] and that IS a
     /// failure by the predicate.
     /// </para>
+    /// <para>
+    /// <b>CANCELLATION: THIS IS THE ONLY RPC ON THIS CONTRACT THAT OBSERVES THE REQUEST'S TOKEN.</b> It
+    /// is the only one that issues new work, so it is the only one where a caller who has already
+    /// disconnected should stop the service from starting something. A cancelled request answers
+    /// <c>RetCode.CANCELLED</c>, holds no pool reference and creates no session, and it does so through
+    /// an arm of its own rather than through the connect's return value - because the connect's
+    /// <c>CANCELLED</c> reads as neither succeeded nor failed and that hole is the oracle's, reserved for
+    /// the oracle's own cause. Commit, rollback, auto-commit and <c>EndSession</c> deliberately do NOT
+    /// observe the token: each completes or undoes work already begun, and abandoning one would leave a
+    /// unit of work neither applied nor reverted, or leak a pool reference for the life of the process.
+    /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<BeginSessionResponse> BeginSession(
         BeginSessionRequest request,
         ServerCallContext context)
     {
         ArgumentNullException.ThrowIfNull(request);
+
+        // The ONLY handler on this contract that reads its context, and it reads exactly one member of
+        // it - see the cancellation block below the acquisition for why this verb and no other.
+        ArgumentNullException.ThrowIfNull(context);
 
         if (request.Descriptor_ is null)
         {
@@ -1237,12 +1587,12 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         // [n_cst_thread_task_sqlbase.sru:L165] `_nTransRefIdx = transPool.of_AddRef(_transData)`.
         // ONE-BASED: the oracle appends at UpperBound + 1 and returns that
         // [n_cst_thread_trans_pool.sru:L143-L151]. Stored verbatim; never decremented.
-        int referenceIndex = _pool.AddRef(in descriptor);
+        PoolLease lease = _pool.AddRefLease(in descriptor);
 
         // Defensive, and it states the one-based invariant at the boundary: the oracle's own guards
         // treat a non-positive index as out of bounds [n_cst_thread_trans_pool.sru:L89, :L120, :L154],
         // so zero is an error here rather than "the first entry".
-        if (referenceIndex <= 0)
+        if (!lease.IsValid)
         {
             return Task.FromResult(new BeginSessionResponse
             {
@@ -1253,11 +1603,11 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         // [:L168] `rtCode = transPool.of_Get(_nTransRefIdx, ref transObject)`. IsSucceeded is the
         // SHARED KERNEL predicate the oracle uses at [:L169] - under which PREVENT reads as a success -
         // and NOT the transaction object's SQLCode predicates. The two are not interchangeable.
-        long acquired = _pool.Get(referenceIndex, out IPooledTransaction? borrowed);
+        long acquired = _pool.Get(lease, out IPooledTransaction? borrowed);
 
         if (!Predicates.IsSucceeded(acquired) || borrowed is null)
         {
-            _ = _pool.RemoveRef(referenceIndex);
+            _ = _pool.RemoveRef(lease);
 
             return Task.FromResult(new BeginSessionResponse
             {
@@ -1273,6 +1623,40 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         // a pooled connection that is still live is NOT reconnected.
         if (!borrowed.IsConnected())
         {
+            // =====================================================================================
+            //  THE REQUEST'S CANCELLATION IS OBSERVED HERE, AND NOT INSIDE THE CONNECT
+            //
+            //  This is the one verb on this contract that ISSUES NEW WORK - every other verb either
+            //  completes work already begun (commit), undoes it (rollback), or reads state - so this
+            //  is the one place where a caller who has already gone should stop the service from
+            //  starting something. Observing the token before the call is also the ONLY cancellation
+            //  the connect could honour: Microsoft.Data.Sqlite is a synchronous provider with no
+            //  interrupt, so an open already in flight cannot be abandoned, and a token handed to it
+            //  could change nothing that this arm does not already decide.
+            //
+            //  WHY THE TOKEN IS NOT PASSED TO Connect ITSELF. `IPooledTransaction.Connect` answers
+            //  RetCode.CANCELLED when its own token is signalled, and the test below is IsFailed,
+            //  under which CANCELLED IS NEITHER SUCCEEDED NOR FAILED
+            //  [ws_objects/pfw.shared.pbl.src/isfailed.srf:L11-L13]. That tri-state hole is a
+            //  PRESERVED ORACLE DEFECT (constraint C-B, and see this member's remarks): the oracle
+            //  reaches it only when a before-connect hook vetoes [n_cst_thread_trans.sru:L124], and
+            //  it then registers a session over a transaction that never connected. Routing a REQUEST
+            //  cancellation through that same code would EXTEND the hole to a cause the oracle never
+            //  had, which is not preservation - it is a new defect wearing preservation's clothes.
+            //  Keeping the two causes apart is what this separate arm buys.
+            // =====================================================================================
+            if (context.CancellationToken.IsCancellationRequested)
+            {
+                // The reference taken above is released on this path exactly as on every other
+                // failure path, so a cancelled BeginSession pins no pool entry.
+                _ = _pool.RemoveRef(lease);
+
+                return Task.FromResult(new BeginSessionResponse
+                {
+                    Status = TransactionWireCodes.Status(RetCode.CANCELLED, CancelledDiagnostic),
+                });
+            }
+
             // [:L174] IsFailed, deliberately - see the tri-state note in this member's remarks.
             if (Predicates.IsFailed(borrowed.Connect()))
             {
@@ -1281,7 +1665,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 // sanctioned mapping, which masks the statement field unconditionally.
                 DbErrorData captured = borrowed.CaptureError();
 
-                _ = _pool.RemoveRef(referenceIndex);
+                _ = _pool.RemoveRef(lease);
 
                 _logger?.LogWarning(
                     "BeginSession could not connect to {Dbms} on {ServerName}/{Database}; driver code "
@@ -1300,13 +1684,36 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             }
         }
 
-        TransactionSession session = _sessions.Register(referenceIndex, in descriptor, borrowed);
+        TransactionSession? session =
+            _sessions.Register(lease, in descriptor, borrowed, out string quotaDiagnostic);
+
+        if (session is null)
+        {
+            // A PER-CALLER CEILING REFUSAL, AND THE POOL REFERENCE GOES STRAIGHT BACK. The registry tests
+            // the ceiling BEFORE it mints a handle, so nothing was registered and this arm has only the
+            // reference to unwind - which it does immediately, because a leaked reference would pin a
+            // connection for the life of the process.
+            //
+            // E_BUSY IS THE ORACLE'S OWN "NOT NOW", so a ceiling refusal introduces no new value into a
+            // consumer's branch set - the same code and the same shape the sibling task registries answer
+            // a ceiling with. The diagnostic names the ceiling and never the caller's credential.
+            _ = _pool.RemoveRef(lease);
+
+            _logger?.LogWarning(
+                "BeginSession refused a session because a handle ceiling was reached: {Diagnostic}",
+                quotaDiagnostic);
+
+            return Task.FromResult(new BeginSessionResponse
+            {
+                Status = TransactionWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
+            });
+        }
 
         _logger?.LogDebug(
-            "BeginSession opened session {SessionId} at one-based pool reference {ReferenceIndex} for "
+            "BeginSession opened session {SessionId} on pool lease {Lease} for "
             + "{Dbms} on {ServerName}/{Database}.",
             session.SessionId,
-            session.ReferenceIndex,
+            session.Lease.Id,
             descriptor.Dbms,
             descriptor.ServerName,
             descriptor.Database);
@@ -1357,6 +1764,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// than acting on whatever entry the compacted array now holds at that position.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<EndSessionResponse> EndSession(
         EndSessionRequest request,
         ServerCallContext context)
@@ -1384,7 +1792,37 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             });
         }
 
-        long guard = GuardReferenceIndex(session.ReferenceIndex);
+        // ------------------------------------------------------------------------------------------
+        //  PURGE THE SESSION'S TASKS BEFORE THE TRANSACTION GOES BACK TO THE POOL.
+        //
+        //  Every query, update and command task was created against THIS session and holds its borrowed
+        //  transaction. Releasing the transaction while those handles are still in their tables leaves
+        //  them naming a transaction the pool has taken back - and the pool may hand that same
+        //  transaction to a different session as soon as its reference count drops, so a later call on a
+        //  stale handle would write through somebody else's transaction. Purging FIRST closes that
+        //  window: by the time the release below runs, no handle can reach the transaction.
+        //
+        //  It runs before the lease guard as well, because the tasks must go whatever the lease turns out
+        //  to be - the session is already retired from its own registry at this point, so its handles can
+        //  never be legitimately used again regardless of what the pool says.
+        // ------------------------------------------------------------------------------------------
+        int retiredQueries = _queryTasks.PurgeSession(session.SessionId);
+        int retiredUpdates = _updateTasks.PurgeSession(session.SessionId);
+        int retiredCommands = _commandTasks.PurgeSession(session.SessionId);
+
+        if (_logger?.IsEnabled(LogLevel.Debug) == true
+            && retiredQueries + retiredUpdates + retiredCommands > 0)
+        {
+            _logger.LogDebug(
+                "EndSession purged {QueryTaskCount} query, {UpdateTaskCount} update and "
+                + "{CommandTaskCount} command task(s) owned by session {SessionId}.",
+                retiredQueries,
+                retiredUpdates,
+                retiredCommands,
+                session.SessionId);
+        }
+
+        long guard = GuardLease(session.Lease);
         if (guard != RetCode.OK)
         {
             return Task.FromResult(new EndSessionResponse
@@ -1401,22 +1839,28 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             // disconnects only on the last reference. The reference is passed by `ref` because the
             // oracle's signature is `ref n_cst_thread_trans` and the pool nulls the caller's handle
             // [n_cst_thread_trans_pool.sru:L129].
+            // MARKED CLOSING FIRST, INSIDE THE GATE, and this single line is what makes the lifecycle
+            // atomic. Retiring the handle from the registry above is not enough on its own: a request that
+            // resolved this session a moment earlier is already past that check and would enter this gate
+            // after the release below and operate on a handed-back transaction. Every other operation tests
+            // this flag inside this same gate, so the two cannot interleave.
+            session.MarkClosing();
+
             IPooledTransaction? borrowed = session.Transaction;
-            long released = _pool.Release(session.ReferenceIndex, ref borrowed);
+            long released = _pool.Release(session.Lease, ref borrowed);
 
             // [n_cst_thread_task_sqlbase.sru:L716] of_RemoveRef - the decrement. Performed even when the
             // release reported a problem, because leaving the reference taken would pin the entry for
             // the life of the process; the FIRST non-OK code is what the caller is told.
-            long removed = _pool.RemoveRef(session.ReferenceIndex);
+            long removed = _pool.RemoveRef(session.Lease);
 
             rtCode = released != RetCode.OK ? released : removed;
         }
 
         _logger?.LogDebug(
-            "EndSession retired session {SessionId} at one-based pool reference {ReferenceIndex} with "
-            + "code {ReturnCode}.",
+            "EndSession retired session {SessionId} on pool lease {Lease} with code {ReturnCode}.",
             session.SessionId,
-            session.ReferenceIndex,
+            session.Lease.Id,
             rtCode);
 
         return Task.FromResult(new EndSessionResponse
@@ -1465,6 +1909,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// <c>error_text</c> without inspecting the descriptor.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<GetTransactionDataResponse> GetTransactionData(
         GetTransactionDataRequest request,
         ServerCallContext context)
@@ -1487,9 +1932,30 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         long rtCode;
 
+        bool closing;
+
         lock (session.Gate)
         {
-            rtCode = session.Descriptor.GetTransactionData(ref outbound, ref errInfo);
+            closing = session.IsClosing;
+
+            if (!closing)
+            {
+                rtCode = session.Descriptor.GetTransactionData(ref outbound, ref errInfo);
+            }
+            else
+            {
+                rtCode = RetCode.E_INVALID_TRANSACTION;
+            }
+        }
+
+        if (closing)
+        {
+            return Task.FromResult(new GetTransactionDataResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.E_INVALID_TRANSACTION,
+                    UnknownSessionDiagnostic),
+            });
         }
 
         return Task.FromResult(new GetTransactionDataResponse
@@ -1531,6 +1997,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// three-valued per-statement mode.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
     public override Task<SetTransactionAutoCommitResponse> SetAutoCommit(
         SetTransactionAutoCommitRequest request,
         ServerCallContext context)
@@ -1547,9 +2014,26 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             });
         }
 
+        bool closing;
+
         lock (session.Gate)
         {
-            session.Transaction.AutoCommit = request.Autocommit;
+            closing = session.IsClosing;
+
+            if (!closing)
+            {
+                session.Transaction.AutoCommit = request.Autocommit;
+            }
+        }
+
+        if (closing)
+        {
+            return Task.FromResult(new SetTransactionAutoCommitResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.E_INVALID_TRANSACTION,
+                    UnknownSessionDiagnostic),
+            });
         }
 
         return Task.FromResult(new SetTransactionAutoCommitResponse
@@ -1586,6 +2070,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// guard-shaped outcomes above carry a code alone.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
     public override Task<AutoCommitResponse> AutoCommit(
         AutoCommitRequest request,
         ServerCallContext context)
@@ -1639,6 +2124,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// outcome is <c>E_DB_ERROR</c> either way, with the driver detail beneath it.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
     public override Task<CommitResponse> Commit(CommitRequest request, ServerCallContext context)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -1698,6 +2184,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// restore.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
     public override Task<RollbackResponse> Rollback(RollbackRequest request, ServerCallContext context)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -1757,6 +2244,16 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         lock (session.Gate)
         {
+            if (session.IsClosing)
+            {
+                // THE SESSION IS RETIRING, so its transaction has been or is about to be handed back and no
+                // operation may touch it. Refused with the same code and diagnostic an unknown session
+                // receives, because from the caller's point of view the handle it named is gone.
+                return TransactionWireCodes.Status(
+                    RetCode.E_INVALID_TRANSACTION,
+                    UnknownSessionDiagnostic);
+            }
+
             rtCode = operation(session.Transaction);
 
             captured = rtCode == RetCode.E_DB_ERROR
@@ -1805,6 +2302,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// <see cref="GuardPoolSettings"/> refuses a request that asks for a different one.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<IsConnectedResponse> IsConnected(
         IsConnectedRequest request,
         ServerCallContext context)
@@ -1824,9 +2322,31 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         bool connected;
         bool probed;
 
+        bool closing;
+
         lock (session.Gate)
         {
-            connected = session.Transaction.IsConnected(out probed);
+            closing = session.IsClosing;
+
+            if (!closing)
+            {
+                connected = session.Transaction.IsConnected(out probed);
+            }
+            else
+            {
+                connected = false;
+                probed = false;
+            }
+        }
+
+        if (closing)
+        {
+            return Task.FromResult(new IsConnectedResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.E_INVALID_TRANSACTION,
+                    UnknownSessionDiagnostic),
+            });
         }
 
         return Task.FromResult(new IsConnectedResponse
@@ -1873,6 +2393,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// implementation of the substring test stays single.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<GetDatabaseTypeResponse> GetDatabaseType(
         GetDatabaseTypeRequest request,
         ServerCallContext context)
@@ -1891,9 +2412,23 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         DatabaseType databaseType;
 
+        bool closing;
+
         lock (session.Gate)
         {
-            databaseType = session.Transaction.GetDbType();
+            closing = session.IsClosing;
+
+            databaseType = closing ? default : session.Transaction.GetDbType();
+        }
+
+        if (closing)
+        {
+            return Task.FromResult(new GetDatabaseTypeResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.E_INVALID_TRANSACTION,
+                    UnknownSessionDiagnostic),
+            });
         }
 
         return Task.FromResult(new GetDatabaseTypeResponse
@@ -1949,6 +2484,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// this is an INSPECTION WITH AN EFFECT, which is why it runs under the gate.
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<GetSessionStateResponse> GetSessionState(
         GetSessionStateRequest request,
         ServerCallContext context)
@@ -1969,6 +2505,21 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         lock (session.Gate)
         {
+            if (session.IsClosing)
+            {
+                // THE CLOSING GUARD. This handler looks like a pure read, but it is not: the broken
+                // reading below calls the CHECK HOOK, which may condemn the transaction here and now
+                // [:L531-L535]. On a retiring session that would condemn an object the pool has taken back
+                // and may already have lent to somebody else. Refused with the unknown-session code,
+                // because the handle the caller named is gone.
+                return Task.FromResult(new GetSessionStateResponse
+                {
+                    Status = TransactionWireCodes.Status(
+                        RetCode.E_INVALID_TRANSACTION,
+                        UnknownSessionDiagnostic),
+                });
+            }
+
             IPooledTransaction transaction = session.Transaction;
 
             response = new GetSessionStateResponse
@@ -2013,6 +2564,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// rarely needs it; it is carried because the oracle exposes it publicly. There is no failure mode -
     /// it is a subroutine with no return value - so <c>OK</c> is the only answer.
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
     public override Task<ClearStateResponse> ClearState(
         ClearStateRequest request,
         ServerCallContext context)
@@ -2029,14 +2581,27 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             });
         }
 
+        bool closing;
+
         lock (session.Gate)
         {
-            session.Transaction.ClearState();
+            // THE CLOSING GUARD, and this handler needs it as much as the ones that route through
+            // RunAndProject: clearing state MUTATES the transaction, so on a session that is retiring it
+            // would clear a transaction the pool has already taken back - and, with keep-alive on, one that
+            // has already been handed to a different caller.
+            closing = session.IsClosing;
+
+            if (!closing)
+            {
+                session.Transaction.ClearState();
+            }
         }
 
         return Task.FromResult(new ClearStateResponse
         {
-            Status = TransactionWireCodes.Status(RetCode.OK),
+            Status = closing
+                ? TransactionWireCodes.Status(RetCode.E_INVALID_TRANSACTION, UnknownSessionDiagnostic)
+                : TransactionWireCodes.Status(RetCode.OK),
         });
     }
 
@@ -2055,6 +2620,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// <c>:L186</c>], and the pool destroys and re-creates the entry's transaction the next time it is
     /// asked for one [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L158-L170</c>].
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
     public override Task<SetBrokenResponse> SetBroken(
         SetBrokenRequest request,
         ServerCallContext context)
@@ -2136,6 +2702,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// contracts for one operation would be two places to drift (constraint C-A).
     /// </para>
     /// </remarks>
+    [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
     public override Task<GridSyntaxFromSqlResponse> GridSyntaxFromSql(
         GridSyntaxFromSqlRequest request,
         ServerCallContext context)
@@ -2202,4 +2769,3 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         });
     }
 }
-

@@ -14,15 +14,19 @@
 #  boundary must do. It is written in the present tense throughout because that is how a contract is
 #  written, and the present tense must NOT be read as a report of behaviour that has been observed.
 #
-#  At the time of writing, in this repository: PowerFramework.Gateway has NO ENTRY POINT and does not
-#  compile (CS5001), so no endpoint of this document is implemented and none has ever answered a
-#  request; the Endpoints/ folder carries capability, ping and deferred-route metadata but no proxy
-#  endpoint; no service Dockerfile and no orchestration/docker-compose.yml exist, so there is no
-#  stack for an aggregated /health to aggregate; and no CI workflow exists. What IS verified about
-#  this file is what a static check can verify: it parses as OpenAPI 3.1, has zero unresolved internal
-#  references, and its schema set agrees with the proto files it projects - which is exactly what the
-#  contract tests in shared/PowerFramework.Contracts.Tests assert. docs/BUILD.md section 1 defines
-#  the four status labels this documentation set uses, and section 5.5 records what has been run.
+#  At the time of writing, in this repository: PowerFramework.Gateway compiles, carries an entry point,
+#  and implements this boundary - Endpoints/DataServicesProxyEndpoints.cs registers all 39 projected
+#  C-03 and C-04 operations, alongside the health, capability, ping and deferred-route endpoints - and
+#  its test suite drives every one of those 39 through the real composition root. All four service
+#  Dockerfiles exist and all four images build, and .github/workflows/ci.yml enforces the
+#  80-percent-per-service coverage floor. What is still NOT observed is behaviour against a running
+#  stack: orchestration/docker-compose.yml does not exist, so no aggregated /health has had live
+#  upstreams to aggregate and no request has crossed a real network boundary between two containers.
+#  Everything a static check can verify about this file is verified: it parses as OpenAPI 3.1, has zero
+#  unresolved internal references, and its schema set agrees with the proto files it projects - which is
+#  exactly what the contract tests in shared/PowerFramework.Contracts.Tests assert. docs/BUILD.md
+#  section 1 defines the four status labels this documentation set uses, and section 5.5 records what
+#  has been run.
 #
 #  WHY THIS DOCUMENT IS REST AND NOT gRPC
 #  ------------------------------------------------------------------------------------------------
@@ -177,25 +181,33 @@ info:
     * The four reserved-route families are *not* among the exceptions: they require a token like every
       other `/v1` route, so an unauthenticated caller cannot enumerate the deferred roster.
 
-    ### The `401` is a cross-cutting outcome of the scheme, not a response any route produces
+    ### The `401` is produced by the scheme, and every guarded operation enumerates it anyway
 
     **Every operation that does not override the document-level requirement answers `401` to an
     unauthenticated caller, and it answers it before the route runs.** The check belongs to the
-    authentication layer, so the `401` is a property of `bearerAuth` rather than something an operation
-    computes - and it is declared once, here and on the scheme, rather than being restated on every
-    operation. `x-cross-cutting-responses` below carries the same statement machine-readably.
+    authentication layer, so the `401` originates in `bearerAuth` rather than in anything an operation
+    computes. `x-cross-cutting-responses` below records that origin machine-readably.
 
-    Two consequences a consumer needs, because the convention is otherwise easy to misread:
+    **Where the refusal comes from does not change what the contract owes a consumer, and every guarded
+    operation in this document - the four reserved route families included - enumerates `401`.** An
+    earlier revision omitted it from the reserved families on the reasoning that a cross-cutting concern
+    is not a response those routes produce. The reasoning is sound about the origin and wrong about the
+    obligation: a client generated from a response set that omits `401` is told the status cannot occur
+    on paths that demonstrably return it, and a conformance tool checking response coverage reports a
+    violation against a correct server. So the reserved families declare `{401, 501}`, exactly like every
+    other guarded operation declares `401` beside its own outcomes.
 
-    * **A `401` is observable on operations that do not list one.** Most operations in this document DO
-      enumerate `401`, because they describe the problem BODY Gateway returns with it. The four reserved
-      route families deliberately do not, and their omission is not a claim that the status cannot occur
-      - it is a statement that those routes *evaluate nothing*, so `501` is the only outcome they
-      themselves produce. An unauthenticated request to one of them receives `401` from the scheme and
-      never reaches the route at all.
-    * **Where an operation states that its response set is exactly one status, that set describes what
-      the ROUTE produces.** The cross-cutting `401` sits outside it by construction, and reading such a
-      statement as "this path can never answer 401" would be wrong.
+    Two consequences a consumer needs, because the distinction is otherwise easy to lose:
+
+    * **`401` and `501` on a reserved family are not two outcomes of one handler.** They are the two
+      things a caller can receive. The `401` is the pre-handler refusal; the `501` is the *only* result
+      any reserved handler computes, and it computes it unconditionally - every method, every path
+      remainder, no evaluation of anything.
+    * **`501` being the single HANDLER outcome is the property the deferred-service compliance position
+      rests on, and enumerating the pre-handler `401` beside it leaves that property untouched.** What
+      would break it is any `2xx`, which would say part of a deferred service had been built, or any
+      `4xx` other than that `401`, which would say the route inspects the request before answering.
+      Neither appears on any of the eight operations.
 
     **Gateway holds verification material only. It is not an issuer.** Security is the sole minter in
     the system, and Gateway validates inbound tokens with the stock
@@ -242,25 +254,42 @@ info:
     | `PermissionDenied` | `403` | A valid-but-insufficient credential, deliberately distinct from a missing one |
     | `NotFound` | `404` | |
     | `Unimplemented` | `501` | Including the four reserved routes below |
-    | `Unavailable` | `503` | |
-    | `DeadlineExceeded` | `504` | |
+    | `ResourceExhausted` | `429` | A capacity ceiling declining to take more work, carrying the legacy `E_BUSY` code. A refusal, not a fault |
+    | `Unavailable` | `503` | The upstream answered that it is not currently serving - distinct from `502`, where it answered nothing |
+    | `DeadlineExceeded` | `504` | The deadline this service set on the outbound call elapsed. Every outbound call carries one |
     | `Internal` / `Unknown` | `500` | With the statement field **redacted** - see `DbError` |
+    | `AlreadyExists` | `409` | Translated, but **not declared on any operation**: see the note below |
 
     The one that matters most: **gRPC `Aborted` becomes HTTP `409`**, carrying the conflict detail
     unchanged so a caller can implement an explicit **retry-or-surface** policy. **There is no silent
     overwrite anywhere in the system.**
 
-    Two notes on what each operation actually declares, because the table above is the *translation*
-    and not a template to paste onto every route. **Each operation declares the responses it can
-    actually produce** and no others - a status every generated client must branch on but no operation
-    can return is noise that hides the real surface. And the last two rows are consequently rare in the
-    response sets below: Gateway's own resilience policy converts an exhausted retry or an unreachable
-    upstream into **`502`**, which is the status the table cannot describe because it is the case where
-    **no gRPC response arrived at all**. That failure mode is one decomposition itself creates - an
-    in-process call cannot fail in transit and a network call can - so it is declared rather than
-    omitted, because leaving it undocumented would make the first transient fault an unhandled status
-    in every generated client. `503` appears on `/health` on its own account, from C-10 rather than
-    from this mapping.
+    The table above is the *translation*, and what each operation DECLARES is a separate question with a
+    single rule: **each operation declares the responses it can actually produce** and no others, because
+    a status every generated client must branch on but no operation can return is noise that hides the
+    real surface. Applying that rule honestly is what fixes the response sets below, and it cuts in both
+    directions.
+
+    **Four statuses are declared on every projected operation because every projected operation can
+    really produce them.** `429` when a handle registry behind C-05 through C-08 refuses to hold more
+    work. `503` when an upstream answers that it is not currently serving. `504` when the deadline this
+    service sets on every outbound call elapses - a deadline is present on all of them, so its expiry is
+    an ordinary outcome rather than a hypothetical. And `502`, which is the status the table cannot
+    describe at all, because it is the case where **no gRPC response arrived**: an exhausted retry or an
+    unreachable upstream. That last failure mode is one decomposition itself creates - an in-process call
+    cannot fail in transit and a network call can - so leaving it undocumented would make the first
+    transient fault an unhandled status in every generated client.
+
+    **Two rows of the table are translated but declared nowhere, and each has a reason a reader can
+    check.** `AlreadyExists` is produced by exactly one method in the whole estate - the macro channel
+    reporting that a channel is already attached - and that method is **bidirectional and therefore not
+    projected**, so no REST operation can return it; the arm exists so a future projection could not fall
+    through to `500`. `Unimplemented` from a projected method would mean the upstream does not implement a
+    method this document projects, which under explicitly versioned contracts is a deployment defect
+    rather than an outcome; the `501` in the response sets below belongs to the four reserved routes,
+    which produce it deliberately and declare it themselves. `503` likewise appears on `/health` on its
+    own account, from C-10 rather than from this mapping, and its body there is the aggregate report
+    rather than a problem document.
 
     ## What is deliberately NOT projected: the three bidirectional streams
 
@@ -330,41 +359,46 @@ info:
 #  CROSS-CUTTING RESPONSES - declared once, machine-readably, so a consumer does not have to infer the
 #  convention from prose and a generator does not have to guess it.
 #
-#  WHY THIS EXTENSION EXISTS RATHER THAN A `401` ON EVERY OPERATION. OpenAPI has no first-class way to
-#  say "the security scheme produces this status on every operation it guards", so the choice is between
-#  restating the response on all forty-six paths - including the four reserved families, whose whole
-#  point is that their own response set is a single status because they evaluate nothing - or declaring
-#  the convention once in a form a tool can read. This is the second. Operations that enumerate `401`
-#  do so to describe the problem BODY that accompanies it; this declaration covers the STATUS, which is
-#  observable on every guarded operation whether or not one is enumerated.
+#  WHY THIS EXTENSION EXISTS EVEN THOUGH EVERY GUARDED OPERATION ALSO ENUMERATES `401`. OpenAPI has no
+#  first-class way to say "the security scheme produces this status, and it produces it before any route
+#  handler runs". Enumerating the response per operation conveys the STATUS and its BODY but not its
+#  ORIGIN, and the origin is what a consumer needs in order to know that a `401` says nothing about the
+#  operation it was requested against - it is not evidence that the route evaluated the request. So both
+#  are published: every guarded operation enumerates `401` so that a generated client and a conformance
+#  tool see a complete response set, and this declaration records once, machine-readably, where the
+#  status comes from and when it is evaluated.
+#  THE RESERVED FAMILIES ARE NOT AN EXCEPTION TO EITHER HALF. They enumerate `401` like everything else
+#  guarded, and `501` remains the only outcome any of their handlers computes.
 # ==================================================================================================
 x-cross-cutting-responses:
   - status: 401
     appliesTo: every-operation-not-overriding-document-security
     producedBy: bearerAuth
     evaluatedBefore: route-handler
-    declaredPerOperation: partial
+    declaredPerOperation: all-guarded-operations
     body: >-
-      application/problem+json where an operation enumerates the response; status-only where it does
-      not. No reserved-route operation enumerates it, because those routes evaluate nothing and their
-      own response set is exactly the single status they declare.
+      application/problem+json, described by the shared Unauthorized response that every guarded
+      operation references - the four reserved route families included.
     reason: >-
       The authentication check runs in the pipeline before any route handler, so this status is a
-      property of the security scheme rather than an outcome a route computes. Declaring it once keeps
-      the reserved families' single-status response sets honest - a second declared status on one of
-      those would say the route evaluates something before answering, which is precisely what a
-      reserved route must not imply.
+      property of the security scheme rather than an outcome a route computes. It is nonetheless
+      enumerated on every guarded operation, because a response set that omitted it would tell a
+      generated client the status cannot occur on a path that demonstrably returns it. Recording the
+      origin here is what keeps the two facts reconciled: on a reserved family the enumerated `401` is
+      the pre-handler refusal, and `501` is still the single unconditional result its handler computes.
 
 servers:
   # ONE ENTRY, DELIBERATELY. Port 5105 is Gateway's listener per docs/ARCHITECTURE.md 4.1, and it is
   # the documented composition-root access URL the attached environment fixes. The other services'
   # ports belong in their own documents, not here.
-  - url: http://localhost:5105
+  - url: https://localhost:5105
     description: >-
       The gateway-service listener and the documented composition-root access URL. Port 5105 is fixed
       by the port map in docs/ARCHITECTURE.md 4.1 and is the same value the local orchestration
-      manifest publishes. Inside the orchestration network, callers reach this service by its service
-      name on the same port rather than through localhost.
+      manifest publishes. The scheme is TLS: this is the system's sole ingress and every request that
+      crosses it carries a bearer token, so a cleartext listener here would expose every caller's
+      credential to anyone on path (CWE-319). Inside the orchestration network, callers reach this
+      service by its service name on the same port rather than through localhost.
 
 tags:
   - name: Health
@@ -448,7 +482,9 @@ paths:
 
         **`Degraded` and `Unhealthy` are different states, and the difference is carried in the body
         rather than in the status code.** A service still completing startup validation is not the same
-        as one whose dependency has failed, and the `status` member keeps the two apart. **Only
+        as one whose dependency has failed. On the 200 the report's own `status` member keeps the two
+        apart; on the 503 the body is a problem document, so the token travels in its `serviceStatus`
+        extension member instead - RFC 9457 reserves `status` there for the integer HTTP status. **Only
         `Healthy` is answered with 200**; `Degraded` means *not ready* and is answered with 503
         alongside `Unhealthy`. The reason is mechanical rather than a matter of taste: what an
         orchestrator observes is the status **code**, so a service answering 200 immediately after
@@ -475,10 +511,11 @@ paths:
         '503':
           description: >-
             Gateway is **not ready** - `Degraded` or `Unhealthy`. One of its three upstreams is not
-            ready or has failed, or Gateway's own startup validation has not completed. The `status`
-            member of the report distinguishes the two verdicts; the status code does not, for the
-            reason given above. The participant responsible is named in the problem `detail` and
-            `retCode` carries the corresponding legacy return code.
+            ready or has failed, or Gateway's own startup validation has not completed. The
+            `serviceStatus` extension member distinguishes the two verdicts; the status code does not,
+            for the reason given above, and RFC 9457's own `status` member cannot carry the token
+            because it is the integer HTTP status. The participant responsible is named in the problem
+            `detail` and `retCode` carries the corresponding legacy return code.
           content:
             application/problem+json:
               schema:
@@ -512,6 +549,8 @@ paths:
                 $ref: '#/components/schemas/PingResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   # ================================================================================================
   #  C-09 - CAPABILITY PROJECTION
@@ -558,9 +597,12 @@ paths:
         alternative builds of **one** engine, so enabling both is meaningless. The omission is
         reproduced verbatim under C-B, and the reported `allMask` reflects it.
 
-        This is the value the composition root actually initializes with: `pfw.sra:L91` calls
-        `pfwInitialize(Enums.INIT_FLAG_ENABLE_ALL)`, so the runtime-effective capability set genuinely
-        is the `BLINKFAST`-omitting sum rather than an all-bits mask.
+        This is the value the composition root actually initializes with:
+        `ws_objects/pfw.pbl.src/pfw.sra:L91` calls `pfwInitialize(Enums.INIT_FLAG_ENABLE_ALL)`, so the
+        runtime-effective capability set genuinely is the `BLINKFAST`-omitting sum rather than an
+        all-bits mask. The path is spelled in full because TWO distinct files in the legacy tree are
+        named `pfw.sra` - the framework application cited here, and the packager application at
+        `ws_objects/pfw.pack.pbl.src/pfw.sra` - so a bare `pfw.sra:L91` would be ambiguous.
 
         ## The identifiers are preserved verbatim
 
@@ -577,6 +619,8 @@ paths:
                 $ref: '#/components/schemas/CapabilityReport'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   # ================================================================================================
   #  C-09 - THE /v1/datawindow PROJECTION OF C-03 (dataservices.v1.DataWindowService)
@@ -662,10 +706,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/sessions:
     post:
@@ -704,10 +754,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/sessions/{sessionId}:
     parameters:
@@ -733,10 +789,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/update:
     post:
@@ -792,10 +854,16 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/event-gate:
     get:
@@ -835,10 +903,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/event-gate/disable:
     post:
@@ -876,10 +950,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/event-gate/enable:
     post:
@@ -916,10 +996,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
 
   # ------------------------------------------------------------------------------------------------
@@ -980,10 +1066,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/drop-down-search/apply:
     post:
@@ -1018,10 +1110,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/column-sort/state:
     post:
@@ -1052,10 +1150,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/column-sort/apply:
     post:
@@ -1088,10 +1192,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/context-menu/state:
     post:
@@ -1130,10 +1240,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/context-menu/apply:
     post:
@@ -1166,10 +1282,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/row-select/state:
     post:
@@ -1202,10 +1324,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/row-select/style:
     post:
@@ -1245,10 +1373,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   # ================================================================================================
   #  C-09 - THE /v1/datawindow/expression PROJECTION OF C-04
@@ -1304,10 +1438,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/sessions/{sessionId}:
     parameters:
@@ -1333,10 +1473,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/expressions/add:
     post:
@@ -1385,10 +1531,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/expressions/set:
     post:
@@ -1420,10 +1572,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/expressions/get:
     post:
@@ -1463,10 +1621,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/expressions/remove:
     post:
@@ -1498,10 +1662,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/expressions/remove-all:
     post:
@@ -1533,10 +1703,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/variables/add:
     post:
@@ -1572,10 +1748,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/variables/set:
     post:
@@ -1614,10 +1796,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/variable-expressions/add:
     post:
@@ -1650,10 +1838,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/variable-expressions/set:
     post:
@@ -1683,10 +1877,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/variable-expressions/get:
     post:
@@ -1717,10 +1917,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/foreign-variables/add:
     post:
@@ -1777,10 +1983,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/relative-columns/set:
     post:
@@ -1814,10 +2026,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/flags/set:
     post:
@@ -1850,10 +2068,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/calc:
     post:
@@ -1893,10 +2117,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/calc-all:
     post:
@@ -1928,10 +2158,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/calc-empty:
     post:
@@ -1963,10 +2199,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/calc-item:
     post:
@@ -1999,10 +2241,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/enabled:
     post:
@@ -2034,10 +2282,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/trace:
     post:
@@ -2071,10 +2325,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/state:
     post:
@@ -2106,10 +2366,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
 
   /v1/datawindow/expression/engine-state:
@@ -2163,10 +2429,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   /v1/datawindow/expression/event-stream:
     post:
@@ -2237,10 +2509,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
         '500':
           $ref: '#/components/responses/InternalError'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
 
   # ================================================================================================
   #  THE FOUR RESERVED EXTENSION POINTS  (docs/CONTRACTS.md 13)
@@ -2256,12 +2534,13 @@ paths:
   #
   #  STRUCTURAL SYMMETRY IS PART OF THE COMPLIANCE POSITION, NOT A TIDINESS PREFERENCE.
   #  The four declarations below are IDENTICAL in shape: the same templated catch-all path, the same
-  #  single path parameter, the same two methods, NO request body on either, and one response - `501` -
-  #  referencing one shared body schema. They differ ONLY in the path segment and in the deferred
-  #  service they name. If one of the four ever acquired more shape than the others - a request schema,
-  #  a second status, an extra field - that asymmetry would BE the evidence that capability modelling
-  #  had crept in, which is precisely what C-D forbids. Diffing them against each other is therefore a
-  #  meaningful audit, and it is meant to be performed.
+  #  single path parameter, the same two methods, NO request body on either, and the same two responses
+  #  - `401` referencing the shared Unauthorized response and `501` referencing one shared reserved body
+  #  schema. They differ ONLY in the path segment and in the deferred service they name. If one of the
+  #  four ever acquired more shape than the others - a request schema, a THIRD status, an extra field -
+  #  that asymmetry would BE the evidence that capability modelling had crept in, which is precisely
+  #  what C-D forbids. Diffing them against each other is therefore a meaningful audit, and it is meant
+  #  to be performed.
   #
   #  WHY THE RESPONSE SET IS {401, 501} AND WHY 501 IS STILL THE ONLY OUTCOME THE ROUTE PRODUCES.
   #  These two statuses are not two outcomes of one handler; they are the two things a caller can
@@ -2817,14 +3096,38 @@ components:
       name: path
       in: path
       required: true
-      description: >-
+      description: |-
         The remainder of the requested path. Present so that each reserved entry is a route FAMILY
         rather than a single route, which is what makes the eventual URL shape of the deferred service
         legible from this contract. Its value is echoed in the `route` field of the 501 body and is
         otherwise unused, because nothing exists behind the route to use it.
+
+        **This parameter's real matching behaviour cannot be expressed in OpenAPI 3.1, and the gap is
+        declared rather than papered over.** The server implements each family as an ASP.NET Core
+        catch-all route parameter, `/v1/<area>/{**path}`, which does three things a conformant OpenAPI
+        path template does not describe: the captured value MAY ITSELF CONTAIN `/`, so a nested path
+        such as `/v1/design/a/b/c` resolves here rather than falling through to a generic 404; the
+        remainder may be EMPTY, so the bare prefix `/v1/design` also resolves here; and every HTTP
+        method answers identically, not only the two enumerated below.
+
+        An earlier revision tried to say this with `allowReserved: true` on this parameter. That was
+        INVALID: OpenAPI 3.1 defines `allowReserved` for `in: query` parameters only, so the field made
+        the document fail validation while still not expressing catch-all semantics - a path parameter
+        is defined to match a single segment whatever `allowReserved` says. The field is therefore
+        removed and the behaviour is stated in `x-catch-all` below, which a tool can read and which
+        makes no false claim about the standard template. A consumer generating a client from this
+        document should treat the parameter as an opaque remainder and NOT URL-encode its separators.
       schema:
         type: string
-      allowReserved: true
+      x-catch-all:
+        routeTemplate: /v1/{area}/{**path}
+        capturesNestedSegments: true
+        matchesEmptyRemainder: true
+        matchesEveryHttpMethod: true
+        note: >-
+          A vendor extension because OpenAPI 3.1 has no conformant way to declare a multi-segment path
+          parameter. It is metadata about how the URL is templated and about nothing else - it is not a
+          request schema, and no reserved operation declares one.
 
   responses:
     ProjectedSuccess:
@@ -2860,9 +3163,21 @@ components:
 
     Forbidden:
       description: >-
-        The projected gRPC method returned `PermissionDenied`. The token is valid but does not carry
-        the scope this operation requires. Deliberately distinguished from `401` so a caller can tell
-        a missing credential from an insufficient one.
+        The token is valid but does not carry the scope this operation requires. Deliberately
+        distinguished from `401` so a caller can tell a missing credential from an insufficient one.
+        TWO LAYERS CAN PRODUCE IT, AND A CALLER NEED NOT CARE WHICH DID.
+        (1) THIS SERVICE'S OWN INGRESS CHECK, which is the usual one and is decided before any upstream
+        is contacted: `/v1/ping` requires `ping`, `/v1/capabilities` requires `capabilities`, and every
+        `/v1/datawindow/**` operation - the `expression` sub-surface included - requires `datawindow`.
+        No upstream call is made, so a refusal here costs nothing downstream.
+        (2) A PROJECTED `PermissionDenied` from the upstream gRPC method, which reaches a caller only
+        when this service's own credential for that upstream is insufficient - a deployment fault rather
+        than a caller one, since the caller does not choose the credential this service presents
+        downstream.
+        Neither cause enumerates the scopes the caller does hold or the scopes the operation would
+        accept. The scope names are the INGRESS vocabulary and are deliberately unprefixed: they name
+        capabilities this service exposes rather than the internal service that implements them, whose
+        own scopes are namespaced separately and are never presented by an external caller.
       content:
         application/problem+json:
           schema:
@@ -2941,6 +3256,61 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
 
+    UpstreamBusy:
+      description: |-
+        **A capacity ceiling refused the request, and this is a refusal rather than a fault.** The
+        projected gRPC method returned `ResourceExhausted`, which the operation projects as `429`.
+
+        The ceiling is real and reachable in ordinary operation rather than theoretical: the handle
+        registries behind C-05 through C-08 refuse a new session or task once a per-principal or global
+        limit is reached, and they answer the legacy `E_BUSY` code that this status carries in `retCode`.
+        A caller that hits it has not sent a bad request - it has sent one more than the service is
+        currently willing to hold - so the correct response is to release what it already holds, or to
+        retry later, rather than to change the request.
+
+        **Distinct from `503` on purpose.** `503` says the upstream is not currently serving; this says it
+        is serving and declining to take more. Distinct from `502` for the same reason: a `502` means no
+        gRPC response arrived at all.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    UpstreamRefused:
+      description: |-
+        The projected gRPC method returned `Unavailable`: an upstream reached this service's call and
+        answered that it is not currently able to serve it - a dependency of its own being unreachable,
+        or a shutdown in progress.
+
+        **This is the upstream's own verdict, which is what separates it from `502`.** A `502` means the
+        call never produced a gRPC response at all; this means it produced one, and the answer was "not
+        now". A caller retries both, but only this one tells it the upstream is alive.
+
+        `/health` also answers `503`, on C-10's own account rather than through this mapping, and the two
+        are not the same response: that one carries the aggregate readiness report.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    UpstreamTimedOut:
+      description: |-
+        The projected gRPC method returned `DeadlineExceeded`: the deadline this service set on the
+        outbound call elapsed before the upstream answered.
+
+        **Every outbound call carries a deadline, which is why this status is declared rather than
+        theoretical.** A call with no deadline is a call that can hang for as long as the transport
+        allows, so each operation class carries one derived from a correctness bound - the request
+        timeout for a unary call, the session lifetime for a stream. The deadline elapsing is therefore
+        an expected outcome of a slow upstream rather than a defect, and it is reported as its own status
+        instead of being folded into `502`, because the two lead a caller to different actions: a
+        timed-out unary call may simply need retrying, whereas an unreachable upstream will not answer
+        the retry either.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
     UpstreamUnavailable:
       description: |-
         An upstream service could not be reached, or the call to it failed in transit after the
@@ -2986,15 +3356,16 @@ components:
         one keeps the error path out of hand-written code, for the same reason token validation is
         left to the stock bearer handler.
 
-        ## Four extension members, and why RFC 9457 permits them
+        ## Five extension members, and why RFC 9457 permits them
 
         `retCode` carries the legacy PowerFramework return code, `upstream` names which upstream a
         forwarded failure came from, `dbError` carries the database-layer detail **when, and only when,
-        the failure originated in the data path**, and `traceId` carries the correlation identifier
-        that locates the operator record for this occurrence. RFC 9457 explicitly permits extension
-        members, which is why this schema - alone in this document apart from its own conflict
-        specialization and the delegated `ProtoPayload` - sets `additionalProperties: true` rather than
-        `false`. A consumer must ignore any member it does not recognise.
+        the failure originated in the data path**, `serviceStatus` carries the readiness verdict on the
+        one response that has one, and `traceId` carries the correlation identifier that locates the
+        operator record for this occurrence. RFC 9457 explicitly permits extension members, which is
+        why this schema - alone in this document apart from its own conflict specialization and the
+        delegated `ProtoPayload` - sets `additionalProperties: true` rather than `false`. A consumer
+        must ignore any member it does not recognise.
 
         `traceId` is declared rather than merely tolerated by that openness, and deliberately so: it is
         the only member through which a caller can reach anything this body withholds, so a caller needs
@@ -3029,6 +3400,31 @@ components:
           type: string
           format: uri-reference
           description: A URI reference identifying this specific occurrence.
+        serviceStatus:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy]
+          description: |-
+            The readiness verdict, present on the `503` of `GET /health` and on nothing else.
+
+            ## Why this member exists rather than reusing `status`
+
+            `Degraded` and `Unhealthy` are different states and both are answered `503`, so the status
+            **code** cannot separate them - which is the whole reason `GET /health` promises that the
+            body does. The obvious place for the token is a `status` member, and it cannot go there:
+            RFC 9457 already uses that name for the integer HTTP status and this schema types it as an
+            integer, so a second `status` would be a duplicate member of a different type. The verdict
+            therefore needs a name of its own, and this is it.
+
+            **It is machine-readable, and that is the point.** The verdict is also stated in `detail`
+            together with the participants responsible, but `detail` is prose for a human; Gateway's
+            aggregator reads *this* member, so a `Degraded` upstream is reported as degraded rather
+            than flattened into a failure. A consumer that cannot find this member on a `503` from
+            `GET /health` must read the response as `Unhealthy` - failing closed - because a body that
+            cannot state its verdict is not a body whose verdict can be trusted.
+
+            The same spelling is emitted by all four services, because C-10 publishes one readiness
+            shape across the estate.
         retCode:
           type: integer
           format: int64

@@ -720,10 +720,13 @@ public sealed class EventOrderingPatternTests
         {
             DataWindowEventSequenceException later =
                 Assert.Throws<DataWindowEventSequenceException>(
-                    () => sequencer.Accept(
-                        beyond,
-                        OrderingDiscipline.Synchronous,
-                        EventId.Ondoitemchanged));
+                    () =>
+                    {
+                        sequencer.Accept(
+                            beyond,
+                            OrderingDiscipline.Synchronous,
+                            EventId.Ondoitemchanged);
+                    });
 
             Assert.Equal(2L, later.ExpectedSequence);
             Assert.Equal(beyond, later.ActualSequence);
@@ -766,10 +769,13 @@ public sealed class EventOrderingPatternTests
         sequencer.Accept(1L, OrderingDiscipline.Synchronous, EventId.Ondwnitemchange);
 
         DataWindowEventSequenceException error = Assert.Throws<DataWindowEventSequenceException>(
-            () => sequencer.Accept(
-                7L,
-                OrderingDiscipline.Synchronous,
-                EventId.Ondwnitemvalidationerror));
+            () =>
+            {
+                sequencer.Accept(
+                    7L,
+                    OrderingDiscipline.Synchronous,
+                    EventId.Ondwnitemvalidationerror);
+            });
 
         // THE IN-PROCESS HALF: four typed members, fully determining the fault.
         Assert.Equal(EventId.Ondwnitemvalidationerror, error.EventId);
@@ -858,64 +864,102 @@ public sealed class EventOrderingPatternTests
     }
 
     /// <summary>
-    /// Under pattern (a) an out-of-order token is DETECTABLE and the consumer REORDERS SUCCESSFULLY -
-    /// the stream is not failed, because these events carry no cross-event state.
+    /// Under pattern (a) a GAP is admitted - the token need only be above the mark - because the sequence
+    /// space is shared with the outbound direction and the client never sends the numbers the server used.
     /// </summary>
     /// <remarks>
-    /// THE REORDER IS ASSERTED AS A SUCCESS, NOT AS A TOLERATION. Merely proving that the sequencer
-    /// does not throw would leave open whether the ordering information survived; the test therefore
-    /// recovers the TRUE order from the tokens and replays it through a fresh sequencer under the
-    /// STRICTER discipline, which only accepts a contiguous run from one. That is what "the consumer
-    /// can observe the ordering and reorder" means operationally.
+    /// <para>
+    /// THIS ROW USED TO DO THE REORDERING ITSELF, AND THAT WAS THE DEFECT IT WAS HIDING. It fed four
+    /// displaced tokens to the sequencer, asserted that none was refused, then called
+    /// <c>OrderBy(token)</c> IN THE TEST and asserted the sorted result was contiguous. Both halves passed
+    /// against an implementation that recorded the token and did nothing with it - the sort was the test's
+    /// own, so all it proved was that <c>OrderBy</c> sorts. Production dispatched in arrival order
+    /// throughout.
+    /// </para>
+    /// <para>
+    /// WHAT IT ASSERTS NOW is the rule the sequencer actually applies, in its permissive direction: an
+    /// ASCENDING run with gaps is admitted and each arrival moves the mark to itself. The restrictive
+    /// direction - a reversal or a duplicate - is the row below, and the consumer-level counterpart is in
+    /// the region at the end of this file, driven through the real <c>EventChain</c>.
+    /// </para>
+    /// <para>
+    /// WHY GAPS ARE LEGITIMATE HERE AND NOT UNDER PATTERN (b). Both directions of the chain draw from ONE
+    /// counter, so a client's token is one past the highest it has SEEN and the numbers this server
+    /// consumed for its own messages are numbers no client sends. Requiring contiguity of a sequenced
+    /// arrival would therefore refuse correct clients.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void UnderSequencedOrderingAnOutOfOrderTokenIsDetectableAndReorderedSuccessfully()
+    public void UnderSequencedOrderingAnAscendingRunWithGapsIsAdmitted()
     {
-        // The arrival order a network may produce for four notifications issued 1, 2, 3, 4.
+        // An ascending run that skips numbers, which is what a client produces when the server has
+        // consumed tokens of its own in between.
         (long Sequence, EventId EventId)[] arrivals =
         [
-            (3L, EventId.Ondwnrowchange),
             (1L, EventId.Ondwnsetfocus),
-            (4L, EventId.Ondwnrbuttonup),
-            (2L, EventId.Ondwnrowchanging),
+            (4L, EventId.Ondwnrowchanging),
+            (5L, EventId.Ondwnrowchange),
+            (9L, EventId.Ondwnrbuttonup),
         ];
 
-        DataWindowEventSequencer tolerant = new();
+        DataWindowEventSequencer sequencer = new();
 
         foreach ((long sequence, EventId eventId) in arrivals)
         {
-            // NO THROW, ON ANY OF THEM. Raising here would forbid exactly the reordering the discipline
-            // exists to permit.
-            tolerant.Accept(sequence, OrderingDiscipline.Sequenced, eventId);
+            // NO THROW, ON ANY OF THEM. Refusing a gap would refuse a correct client.
+            sequencer.Accept(sequence, OrderingDiscipline.Sequenced, eventId);
+
+            // AND THE MARK FOLLOWS THE ARRIVAL RATHER THAN CRAWLING BEHIND IT, which is what makes the
+            // next check a check against the last message actually dispatched.
+            Assert.Equal(sequence, sequencer.LastAccepted);
+            Assert.Equal(sequence + 1L, sequencer.NextExpected);
         }
+    }
 
-        // DETECTABLE: the high-water mark reports how far the stream has got, so the consumer knows an
-        // arrival was behind it without having to keep its own bookkeeping.
-        Assert.Equal(4L, tolerant.LastAccepted);
+    /// <summary>
+    /// An arrival AT OR BELOW the ordering mark is refused under pattern (a) - it is a reversal or a
+    /// duplicate rather than a late arrival - and the refusal does not move the mark.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE HALF THAT USED TO BE MISSING ENTIRELY. The sequenced arm accepted every positive token, so a
+    /// reversal and a duplicate were both dispatched silently and in arrival order; the token was
+    /// measurable and unused. This row is the enforcement, and it fails against the old implementation.
+    /// </para>
+    /// <para>
+    /// THE ONE PLACE THE TWO PATTERNS AGREE, AND FOR DIFFERENT REASONS. Pattern (b) refuses it because the
+    /// group may not be rearranged at all. Pattern (a) refuses it because the events after that position
+    /// have already been dispatched, so accepting it would deliver a notification the ordering says came
+    /// earlier - or, for a duplicate, run one event twice.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(5L)]
+    [InlineData(4L)]
+    [InlineData(1L)]
+    public void UnderSequencedOrderingAnArrivalAtOrBelowTheMarkIsRefused(long replayed)
+    {
+        DataWindowEventSequencer sequencer = new();
 
-        // AND SUCCESSFULLY REORDERED: sorting by the token recovers the issue order exactly.
-        (long Sequence, EventId EventId)[] reordered =
-            [.. arrivals.OrderBy(arrival => arrival.Sequence)];
-
-        Assert.Equal(
-            [
-                EventId.Ondwnsetfocus,
-                EventId.Ondwnrowchanging,
-                EventId.Ondwnrowchange,
-                EventId.Ondwnrbuttonup,
-            ],
-            reordered.Select(arrival => arrival.EventId));
-
-        // THE PROOF THE RECOVERY IS EXACT: the recovered order satisfies the STRICTER discipline, which
-        // accepts nothing but a contiguous run from one.
-        DataWindowEventSequencer strict = new();
-
-        foreach ((long sequence, EventId eventId) in reordered)
+        foreach (long dispatched in (long[])[1L, 5L])
         {
-            strict.Accept(sequence, OrderingDiscipline.Synchronous, eventId);
+            sequencer.Accept(dispatched, OrderingDiscipline.Sequenced, EventId.Ondwnsetfocus);
         }
 
-        Assert.Equal(4L, strict.LastAccepted);
+        DataWindowEventSequenceException refused = Assert.Throws<DataWindowEventSequenceException>(
+            () => sequencer.Accept(replayed, OrderingDiscipline.Sequenced, EventId.Ondwnsetfocus));
+
+        Assert.Equal(OrderingDiscipline.Sequenced, refused.Discipline);
+        Assert.Equal(replayed, refused.ActualSequence);
+
+        // THE DIAGNOSTIC REPORTS THE FLOOR, not a contiguity requirement the sequenced arm does not have.
+        Assert.Equal(6L, refused.ExpectedSequence);
+
+        // AND THE REFUSAL DID NOT MOVE THE MARK, so a correct arrival after it is still admitted.
+        Assert.Equal(5L, sequencer.LastAccepted);
+
+        sequencer.Accept(6L, OrderingDiscipline.Sequenced, EventId.Ondwnsetfocus);
+        Assert.Equal(6L, sequencer.LastAccepted);
     }
 
     /// <summary>
@@ -925,8 +969,11 @@ public sealed class EventOrderingPatternTests
     /// <remarks>
     /// THE POINT OF DRIVING THE SAME STREAM TWICE is that it isolates the single variable. The
     /// messages are identical, the tokens are identical and the evidence is identical; only the
-    /// discipline changes, and the outcomes are opposite. Any implementation that made the two agree -
-    /// in either direction - would be failing AAP 0.6.1.4, and this test fails for both mistakes.
+    /// discipline changes, and the outcomes are opposite at the SAME message: pattern (a) admits the gap
+    /// and pattern (b) refuses it. Any implementation that made the two agree - in either direction -
+    /// would be failing AAP 0.6.1.4, and this test fails for both mistakes. It also pins the one place
+    /// they agree, and that agreement is not the same as being identical: both refuse a REVERSAL, but only
+    /// (b) refuses the gap that precedes it.
     /// </remarks>
     [Fact]
     public void TheTwoPatternsDifferOnlyInWhatAConsumerMayDoWithAnArrival()
@@ -939,18 +986,32 @@ public sealed class EventOrderingPatternTests
         sequenced.Accept(arrivals[0], OrderingDiscipline.Sequenced, EventId.Ondwnsetfocus);
         synchronous.Accept(arrivals[0], OrderingDiscipline.Synchronous, EventId.Ondwnitemchange);
 
-        // PATTERN (a): accepted, and the ordering remains recoverable from the tokens.
+        // PATTERN (a): the gap is ADMITTED, because a sequenced token need only be above the mark.
         sequenced.Accept(arrivals[1], OrderingDiscipline.Sequenced, EventId.Ondwnrowchange);
-        sequenced.Accept(arrivals[2], OrderingDiscipline.Sequenced, EventId.Ondwnrowchanging);
+        Assert.Equal(3L, sequenced.LastAccepted);
+
+        // AND THE REVERSAL BEHIND IT IS REFUSED, which is the enforcement that used to be absent: under
+        // the old rule this very arrival was accepted and dispatched out of order.
+        DataWindowEventSequenceException reversed =
+            Assert.Throws<DataWindowEventSequenceException>(
+                () => sequenced.Accept(
+                    arrivals[2],
+                    OrderingDiscipline.Sequenced,
+                    EventId.Ondwnrowchanging));
+
+        Assert.Equal(OrderingDiscipline.Sequenced, reversed.Discipline);
         Assert.Equal(3L, sequenced.LastAccepted);
 
         // PATTERN (b): refused at the very same message, and refused again for the one behind it -
         // because the group cannot be reassembled after the fact.
         _ = Assert.Throws<DataWindowEventSequenceException>(
-            () => synchronous.Accept(
-                arrivals[1],
-                OrderingDiscipline.Synchronous,
-                EventId.Ondoitemchange));
+            () =>
+            {
+                synchronous.Accept(
+                    arrivals[1],
+                    OrderingDiscipline.Synchronous,
+                    EventId.Ondoitemchange);
+            });
 
         Assert.Equal(1L, synchronous.LastAccepted);
     }
@@ -1733,20 +1794,32 @@ public sealed class EventOrderingPatternTests
             OrderingDiscipline.Sequenced,
             DataWindowEventOrdering.DisciplineOf(EventId.Oncolumnexptrace));
 
+        // ADMITTED IN EMISSION ORDER, INCLUDING THE GAP THE FAILED DELIVERY LEFT. The trace is pattern
+        // (a), so its tokens need only ascend past the mark - and the record whose delivery faulted still
+        // took a number, so the run a consumer sees legitimately skips one.
         DataWindowEventSequencer tolerant = new();
-        tolerant.Accept(
-            afterFault.SequenceNumber,
-            OrderingDiscipline.Sequenced,
-            EventId.Oncolumnexptrace);
-        tolerant.Accept(
-            delivered.SequenceNumber,
-            OrderingDiscipline.Sequenced,
-            EventId.Oncolumnexptrace);
 
-        Assert.Equal(2L, tolerant.LastAccepted);
+        foreach (long emitted in (long[])[delivered.SequenceNumber, afterFault.SequenceNumber])
+        {
+            tolerant.Accept(emitted, OrderingDiscipline.Sequenced, EventId.Oncolumnexptrace);
+        }
 
-        // AND THE SEQUENCE NUMBERS ALONE RECOVER THE TRUE ORDER, so a consumer that reordered them
-        // arrives at the emission order without needing anything else.
+        Assert.Equal(afterFault.SequenceNumber, tolerant.LastAccepted);
+
+        // AND REPLAYING THEM IN THE OTHER ORDER IS REFUSED, which is what makes the token an enforced
+        // ordering rather than a decoration: a diagnostic channel that delivered these two the wrong way
+        // round would be reporting a call stack against the wrong expression.
+        DataWindowEventSequencer reversed = new();
+        reversed.Accept(afterFault.SequenceNumber, OrderingDiscipline.Sequenced, EventId.Oncolumnexptrace);
+
+        _ = Assert.Throws<DataWindowEventSequenceException>(
+            () => reversed.Accept(
+                delivered.SequenceNumber,
+                OrderingDiscipline.Sequenced,
+                EventId.Oncolumnexptrace));
+
+        // AND THE SEQUENCE NUMBERS ALONE RECOVER THE TRUE ORDER, so a consumer holding the records has the
+        // emission order without needing anything else.
         Assert.Equal(
             [1L, 2L],
             sink.Records.OrderBy(record => record.SequenceNumber).Select(record => record.SequenceNumber));

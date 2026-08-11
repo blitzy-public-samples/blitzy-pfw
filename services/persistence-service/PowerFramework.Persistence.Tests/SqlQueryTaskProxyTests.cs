@@ -60,6 +60,9 @@ namespace PowerFramework.Persistence.Tests;
 
 public sealed class SqlQueryTaskProxyTests
 {
+    /// <summary>The one hook class the harness's allowlist carries.</summary>
+    private const string SanctionedHookClass = "n_probe_retrieval_hook";
+
     private static CarrierState NewState() => new();
 
     // ---------------------------------------------------------------------------------------------
@@ -960,8 +963,13 @@ public sealed class SqlQueryTaskProxyTests
         Assert.Equal(RetCode.OK, f.Proxy.SetSort("age A"));
         Assert.Equal("age A", f.Worker.NewSort);
 
-        Assert.Equal(RetCode.OK, f.Proxy.SetHookClass("n_hook"));
-        Assert.Equal("n_hook", f.Worker.HookClass);
+        // A SANCTIONED name forwards and is stored; the proxy surfaces the worker's answer rather than
+        // second-guessing it, which is why an unsanctioned name surfaces the worker's refusal unchanged.
+        Assert.Equal(RetCode.OK, f.Proxy.SetHookClass(SanctionedHookClass));
+        Assert.Equal(SanctionedHookClass, f.Worker.HookClass);
+
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, f.Proxy.SetHookClass("n_not_registered"));
+        Assert.Equal(SanctionedHookClass, f.Worker.HookClass);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1441,7 +1449,7 @@ public sealed class SqlQueryTaskProxyTests
         {
         }
 
-        public long Connect() => RetCode.OK;
+        public long Connect(CancellationToken cancellationToken = default) => RetCode.OK;
 
         public long Disconnect() => RetCode.OK;
 
@@ -1453,7 +1461,10 @@ public sealed class SqlQueryTaskProxyTests
 
         public long AutoCommitCheckpoint() => RetCode.OK;
 
-        public long Exec(string? sqlCommand) => RetCode.OK;
+        public long Exec(string? sqlCommand, CancellationToken cancellationToken = default) => RetCode.OK;
+
+        // The BOUND overload, delegating to the rendered one for the same reason the engine doubles do.
+        public long Exec(in SqlCommandText command, CancellationToken cancellationToken = default) => Exec(command.RenderedText);
 
         public bool IsConnected() => true;
 
@@ -1478,6 +1489,28 @@ public sealed class SqlQueryTaskProxyTests
         public long ApplyTransactionData(in TransactionData descriptor) => RetCode.OK;
 
         public bool IsSqlFailed() => false;
+
+        /// <summary>
+        /// Reports that this double routes to no transaction engine, so no engine capability is reachable
+        /// through it.
+        /// </summary>
+        /// <typeparam name="TCapability">The capability asked for; never satisfied here.</typeparam>
+        /// <param name="capability">Always <see langword="null"/>.</param>
+        /// <returns>Always <see langword="false"/>.</returns>
+        /// <remarks>
+        /// A DOUBLE HAS NO ENGINE TO PROBE, and answering the probe honestly is the whole point. A caller
+        /// that needs a provider-shaped capability - the SQLite command source, for instance - takes its
+        /// no-capability branch against this double, which is exactly the branch a pooled transaction over
+        /// a non-SQLite engine would drive it down in production.
+        /// </remarks>
+        public bool TryGetEngineCapability<TCapability>(
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TCapability? capability)
+            where TCapability : class
+        {
+            capability = null;
+            return false;
+        }
+
 
         public bool IsSqlSucceeded() => true;
 
@@ -1555,7 +1588,10 @@ public sealed class SqlQueryTaskProxyTests
 
         public void OnInit(ICarrierParentTask parentTask) => Carrier.OnInit(parentTask);
 
-        public long Retrieve(IReadOnlyList<object?> parameters) => DataWindowBufferStore.DataStoreSuccess;
+        public ValueTask<long> RetrieveAsync(
+            IReadOnlyList<object?> parameters,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(DataWindowBufferStore.DataStoreSuccess);
 
         public void Dispose() => DisposeCalls++;
     }
@@ -1766,11 +1802,17 @@ public sealed class SqlQueryTaskProxyTests
                     FixedClock.Instance,
                     new FakeTransactionActivator());
 
+                // Sanctioned up front, because the worker refuses an unregistered hook class at the
+                // setter: the activator is an allowlist, so a name it does not carry can never produce a
+                // hook and storing it would report a success the retrieval cannot honour.
+                SqlRetrievalHookActivator hookActivator = new();
+                _ = hookActivator.Register(SanctionedHookClass, static () => new NoOpRetrievalHook());
+
                 Worker = new SqlQueryTask(
                     taskHost,
                     pool,
                     new SingleStoreFactory(FixedClock.Instance),
-                    new SqlRetrievalHookActivator(),
+                    hookActivator,
                     FixedClock.Instance,
                     NullLogger<SqlQueryTask>.Instance,
                     new FakeQueryTransactionSurface(),
@@ -1870,5 +1912,18 @@ public sealed class SqlQueryTaskProxyTests
                     "OnPrepare",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
                 .Invoke(proxy, null)!;
+    }
+    /// <summary>A sanctioned retrieval hook that declines, so the default retrieval still runs.</summary>
+    /// <remarks>
+    /// Present only so the harness's allowlist has a name to carry: these cases are about the proxy's
+    /// forwarding, not about what a hook does once it runs.
+    /// </remarks>
+    private sealed class NoOpRetrievalHook : ISqlRetrievalHook
+    {
+        /// <inheritdoc/>
+        public long OnRetrieve(
+            SqlTaskBase task,
+            IPooledTransaction transaction,
+            DataWindowCarrier data) => RetCode.E_NO_IMPLEMENTATION;
     }
 }

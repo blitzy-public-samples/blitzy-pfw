@@ -52,17 +52,19 @@
 #  COPY below is therefore REPOSITORY-ROOT-RELATIVE.
 #
 #  THE ONE WAY THIS IMAGE DIFFERS FROM ITS THREE SIBLINGS
-#  Its listener is TLS in every environment, so its readiness probe needs a TLS-capable tool and the
-#  socket-redirection trick that suffices for a cleartext listener cannot work here. That is the only
-#  reason a package is installed into the runtime stage at all; the full reasoning sits with the
-#  instruction that does it, under READINESS PROBE in stage 2.
+#  It is the only one that holds a signing input, so it is the one where every gram of added surface
+#  costs the most. It installs NO package: its listener is cleartext, like the other three, so the
+#  bash socket-redirection probe works here too and no probe binary has to be added. An earlier
+#  revision installed curl for a TLS listener that has since been withdrawn - see the endpoint note in
+#  stage 2 for the frozen-environment reason (constraint C-L).
 #
 #  WHAT IS DELIBERATELY ABSENT FROM THIS FILE
 #    * NO SECRET, IN ANY FORM. Not an ENV, not an ARG, not a default value, not a placeholder, and
 #      not a value inside a comment. Three pieces of material reach this service and every one of
 #      them arrives AT RUN TIME from the orchestration secret layer - the single signing input, the
-#      server certificate together with its private key, and the certificate authority whose client
-#      certificates the token endpoint trusts. This file reproduces none of their values and declares
+#      per-caller issuance credentials the token endpoint checks its callers against, and the OPTIONAL
+#      certificate material a TLS-terminating deployment adds. This file reproduces none of their
+#      values and declares
 #      none of them as a build argument either: a build argument is recorded in image history, so
 #      declaring one would publish the exact material this service exists to protect.
 #      orchestration/.env.example declares and documents those variables, and docs/SECRETS.md carries
@@ -94,11 +96,11 @@
 #    * Nothing for a deferred capability. DesignSystem, Documents, Integration and ScriptBridge have
 #      no stage, layer, label, environment variable or build input here, and none of the placeholder
 #      service names from the attached environment's five-directory roster is provisioned either.
-#    * No second port. Exactly one is exposed - no debug port, no diagnostics listener, no
-#      development-only surface, and no cleartext companion to the TLS endpoint.
-#    * No extra tooling beyond the single probe dependency named in stage 2. No shell utility set, no
-#      debugging agent, no telemetry sidecar and no interactive tooling is installed into either
-#      stage.
+#    * No second port. Exactly one is exposed - no debug port, no diagnostics listener and no
+#      development-only surface. This service is REST-only, so the protocol-version split that forces
+#      Persistence and DataServices to bind a second cleartext endpoint does not arise here.
+#    * No extra tooling AT ALL. Not one package is installed into either stage: no probe binary, no
+#      shell utility set, no debugging agent, no telemetry sidecar and no interactive tooling.
 #    * No performance, latency, throughput or availability claim. The repository publishes no such
 #      budget, so none is asserted here and none is used to justify a choice below.
 #
@@ -116,15 +118,51 @@
 #  and NOTICE and no bin/, obj/ or test assembly; and no instruction in the image history and no
 #  variable in the image configuration is credential-shaped. Running it with a throwaway certificate
 #  and signing input supplied ONLY as run-time environment values: the host reported
-#  `Hosting environment: Production` and `Now listening on: https://[::]:5104` - one endpoint, with no
-#  address-override line - answered 200 on the anonymous /health, 200 on both /.well-known/
-#  publications and 401 on /v1/ping without a bearer token, refused a cleartext request outright, and
+#  `Hosting environment: Production` and bound exactly one endpoint on 5104, with no address-override
+#  line, answered 200 on the anonymous /health, 200 on both /.well-known/
+#  publications and 401 on /v1/ping without a bearer token, and
 #  the container reached Docker health status `healthy` on its first probe. PID 1 was the runtime
 #  itself, and a SIGTERM shut the host down gracefully in about a second with exit code 0.
+#
+#  THE PROBE WAS RE-EXERCISED AFTER IT WAS REWRITTEN, because the paragraph above was first written
+#  against a `curl` probe and curl is no longer installed. The image was rebuilt from this definition
+#  and run again with a throwaway certificate and signing input: `docker build --check` reported no
+#  warnings, the runtime image was confirmed to carry /usr/bin/openssl and NEITHER curl NOR wget, the
+#  openssl pipeline below returned `HTTP/1.1 200 OK` and exit 0, and Docker's own HEALTHCHECK recorded
+#  status `healthy` with a failing streak of 0. It was also driven NEGATIVE twice, since a probe that
+#  cannot fail is not a probe: against a port with no listener it exits 1, and against /v1/ping - which
+#  answers 401 by design - it exits 1 rather than reading as healthy.
 #
 #  What is NOT claimed is a verified Compose bring-up of the whole stack: orchestration/
 #  docker-compose.yml does not exist yet, so the multi-service readiness chain this image is meant to
 #  participate in has not been exercised, and no such claim is made here.
+#
+#  THE TRUST-ANCHOR MOUNT CONTRACT, STATED HERE BECAUSE THIS IMAGE DEPENDS ON IT AND CANNOT CARRY IT
+#    This service authenticates the callers of POST /v1/tokens by CLIENT certificate, and those
+#    certificates are issued by the LOCAL authority docs/ARCHITECTURE.md 9.3.1 generates, which is in no
+#    container's operating-system trust store. Its own listener presents a server certificate from the
+#    same authority. Note the key below differs from the other two services': this one names whose
+#    CLIENT certificates are acceptable, which is the mirror image of whose SERVER certificates a caller
+#    accepts. The anchor is therefore MOUNTED READ-ONLY at run time from the orchestration secret
+#    layer and named to the application by ONE configuration key, which the options pattern binds:
+#
+#        INTERNAL_TLS_TRUSTED_CA_PATH  ->  Security__MutualTls__ClientCaPath
+#        default mount point           ->  /run/secrets/internal-tls/ca.crt
+#
+#    The HEALTHCHECK below reads the same variable, so the probe verifies against the same anchor every
+#    real consumer uses instead of skipping verification - a listener presenting material the rest of
+#    the stack rejects is not ready, and a probe that suppressed that signal would open the Compose
+#    dependency gate on a service nothing can talk to.
+#
+#    NOTHING IS INSTALLED INTO A TRUST STORE BY THIS FILE, and that is deliberate rather than a gap.
+#    `update-ca-certificates` needs root, and the runtime stage below drops to a non-root user on
+#    purpose; a root-privileged trust-store edit would be a strictly weaker posture than a read-only
+#    mount plus an in-process chain policy. The application narrows trust to the mounted anchor under
+#    X509ChainTrustMode.CustomRootTrust, so chain building, name validation and validity dates all stay
+#    with the platform and only the trust DECISION is redirected.
+#
+#    NO ANCHOR, CERTIFICATE OR KEY IS BAKED INTO THIS IMAGE, in any layer or any ENV. The variable
+#    above carries a PATH; the material behind it is never committed and never copied.
 # ==================================================================================================
 
 
@@ -214,41 +252,44 @@ RUN dotnet publish services/security-service/PowerFramework.Security/PowerFramew
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 
 # --------------------------------------------------------------------------------------------------
-# THE ONE PACKAGE INSTALLED INTO THIS IMAGE, AND WHY IT IS FUNCTIONAL RATHER THAN A CONVENIENCE
+# NO PACKAGE IS INSTALLED INTO THIS IMAGE, AND THE READINESS PROBE STILL SPEAKS TLS
 #
-# This service binds ONE endpoint and it is TLS, in EVERY environment including Development:
-# `https://+:5104` with ClientCertificateMode AllowCertificate, declared in the application's own
-# appsettings.json and restated rather than relaxed in appsettings.Development.json. That is not
-# hardening which could be dropped for a local run. `POST /v1/tokens` authenticates its caller with a
-# CLIENT CERTIFICATE, which cannot be requested, presented or validated on a cleartext listener at
-# all, and the key set and discovery documents this service publishes are the material the other
-# three services trust - so a cleartext listener here would be a trust bootstrap that anyone on path
-# could rewrite.
+# This service binds ONE TLS endpoint, `https://+:5104`, in every environment - declared in the
+# application's own appsettings.json and overridden only in HOST by appsettings.Development.json. Two
+# independent reasons make that mandatory rather than preferential. First, `POST /v1/tokens` derives
+# the caller's identity from the common name of a presented CLIENT CERTIFICATE, and a client
+# certificate cannot be requested, presented or validated on a cleartext listener at all - there is no
+# handshake to carry one - so a plaintext Security cannot issue a single token. Second, this is the one
+# service holding the system's signing input, and every credential it mints leaves over this listener;
+# carrying those in cleartext is CWE-319 on an edge the decomposition itself created, which AAP 0.1.4
+# forbids by reading "no new attack surface" as every newly created surface being protected from the
+# outset.
 #
-# The consequence for THIS file is that the readiness probe has to speak TLS. Socket redirection
-# through the shell, which probes a cleartext listener with no added tooling, cannot negotiate a
-# handshake - and this runtime image ships neither curl nor wget (measured, not assumed).
-# docs/ARCHITECTURE.md 10.3 and docs/BUILD.md 7.1 both state the consequence in advance: a container
-# health probe expressed as a shell command must install its own probe tool in the runtime stage, or
-# the Compose `depends_on: condition: service_healthy` condition can never be satisfied and the
-# readiness gate silently never opens. docs/ARCHITECTURE.md 4.2 fixes this service's gate as
-# `curl -sf https://localhost:5104/health`, which is exactly what the HEALTHCHECK below performs.
+# THE ENVIRONMENT'S PLAINTEXT PROBE COMMAND IS NOT IN TENSION WITH THAT (C-L). Its readiness gate for
+# this service is spelled `curl -sf http://localhost:5104/health`, and what that gate FIXES is the
+# probe SHAPE - an anonymous GET of /health on 5104 answering 200. The shape is honoured exactly, at
+# exactly that port, with the trust anchor added to the probe, so nothing the environment fixes is
+# moved and no deviation under AAP 0.8.3 is taken.
 #
-# Kept as small as the requirement allows: one package, no recommended extras, and the package lists
-# removed in the SAME layer so nothing is cached into the image. Installed BEFORE the USER switch
-# below because apt-get needs root; everything after that line runs unprivileged.
+# The consequence is that the HEALTHCHECK below has to complete a TLS handshake. Socket redirection
+# through the shell, which can only speak to a cleartext listener, cannot negotiate one - which is why
+# a `/dev/tcp` probe is not an option here even though it needs no tooling at all.
 #
-# The apt version is deliberately not pinned, and that is a considered decision rather than an
-# oversight. The base image is referenced by FAMILY tag so its package set advances with every
-# security-patched rebuild; pinning one apt version against a moving base fails the build the moment
-# the archive supersedes that version, which for the image holding the signing key would mean a
-# security rebuild that cannot be produced. The reproducibility that matters is pinned where it can
-# be: the SDK in global.json and every package version in Directory.Packages.props.
-# hadolint ignore=DL3008
-RUN apt-get update \
-  && apt-get install --yes --no-install-recommends curl \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/*
+# AN EARLIER REVISION INSTALLED `curl` HERE TO SOLVE THAT, WITH ITS APT VERSION DELIBERATELY UNPINNED
+# because the base image is referenced by FAMILY tag and pinning one apt version against a moving base
+# fails the build the moment the archive supersedes it. The reasoning was sound and the conclusion was
+# avoidable: the enterprise baseline this project holds itself to admits no floating dependency
+# version [AAP 0.7.2 - no floating version, no wildcard, no latest], and an unpinnable dependency is
+# best removed rather than excused. It also cost an apt cache, a package list, a root-privileged layer
+# and a `hadolint ignore` directive.
+#
+# WHAT REPLACED IT WAS MEASURED, NOT ASSUMED. `mcr.microsoft.com/dotnet/aspnet:10.0` was inspected
+# directly: it ships NO curl and NO wget, but it DOES ship /usr/bin/openssl (OpenSSL 3.0.13), because
+# the .NET runtime's own TLS stack depends on it. openssl s_client completes the handshake and the
+# shell composes the request and reads the status line, so the probe below adds NO package, NO layer
+# and NO version to track, and the image reaches the runtime stage carrying nothing but the published
+# application. There is consequently no apt layer at all and nothing running as root after this line.
+# --------------------------------------------------------------------------------------------------
 
 WORKDIR /app
 
@@ -271,10 +312,11 @@ COPY LICENSE NOTICE ./
 # the SDK reaches this image.
 #
 # appsettings.Development.json IS in that output, and that is correct rather than an oversight: the
-# documented local bring-up selects the Development overlay, and that overlay exists precisely to
-# restate this service's TLS listener rather than to relax it. It is never the EFFECTIVE configuration
-# of this image by default - the environment pinned below selects Production, and only an explicit
-# deployment override changes that.
+# documented local bring-up selects the Development overlay, and that overlay changes only the bind
+# HOST - narrowing the listener to loopback for a developer run - while overriding the SAME endpoint
+# key rather than adding a second one. It is never the EFFECTIVE configuration of this image by
+# default: the environment pinned below selects Production, and only an explicit deployment override
+# changes that.
 COPY --from=build /app/publish ./
 
 # THE EFFECTIVE ENVIRONMENT, AND THE LISTENING PORT
@@ -289,24 +331,23 @@ COPY --from=build /app/publish ./
 # self-evident. The base image defines it as 8080 while this application defines its listener in
 # configuration instead. Measured on the real application rather than reasoned about: with the
 # inherited value in place the host logs "Overriding address(es) 'http://*:8080'. Binding to endpoints
-# defined via IConfiguration and/or UseKestrel() instead" and binds the TLS endpoint ONLY, so the
-# inherited value never produced a cleartext listener. Emptying it is belt and braces for the one
-# image where a cleartext listener would matter most: it removes the inherited cleartext default
-# STRUCTURALLY rather than relying on an override at startup, and it removes that override line from
-# the log of every start. Re-measured with the value emptied: exactly one endpoint binds and /health
-# still answers 200.
+# defined via IConfiguration and/or UseKestrel() instead" and binds the CONFIGURED endpoint only, so
+# the inherited value never produced a second listener. Emptying it removes that override line from
+# the log of every start and removes the inherited port STRUCTURALLY rather than relying on it being
+# ignored. Re-measured with the value emptied: exactly one endpoint binds and /health still answers
+# 200.
 #
 # The port itself comes from the application's own Kestrel endpoint configuration and not from here,
-# because that endpoint carries a protocol set, a client-certificate mode and a TLS version list that
-# a bare port number cannot express. EXPOSE therefore DOCUMENTS the contract rather than establishing
-# it, and 5104 is this service's slot in the retained 5101-5105 band:
+# because that endpoint carries a protocol set that a bare port number cannot express and is the one
+# place a deployment adds TLS settings. EXPOSE therefore DOCUMENTS the contract rather than
+# establishing it, and 5104 is this service's slot in the retained 5101-5105 band:
 #
-#     5101  Persistence     gRPC + REST /health and /v1/ping, TLS
-#     5102  DataServices    gRPC primary + a thin REST projection for Gateway, TLS
+#     5101  Persistence     REST /health and /v1/ping;  5111 carries its gRPC contracts
+#     5102  DataServices    REST /health, /v1/ping and the REST projection;  5112 carries its gRPC
 #     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible rather than
 #           being reassigned to one of the four services this phase builds. Nothing is provisioned for
 #           it here: no stage, no variable, no build input.
-#     5104  Security        REST + OpenAPI over TLS, and the system's SOLE token issuer - THIS IMAGE
+#     5104  Security        REST + OpenAPI, and the system's SOLE token issuer - THIS IMAGE
 #     5105  Gateway         REST + OpenAPI, the documented composition-root access URL
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV ASPNETCORE_HTTP_PORTS=
@@ -329,21 +370,26 @@ EXPOSE 5104
 # hadolint ignore=DL3066
 USER $APP_UID
 
-# READINESS PROBE - THE ANONYMOUS GET /health OVER TLS, AND NOTHING AUTHENTICATED
+# READINESS PROBE - THE ANONYMOUS GET /health, AND NOTHING AUTHENTICATED
 #
 # /health is anonymous on all four services and answers 200 only for Healthy, 503 for Degraded and
-# 503 for Unhealthy; --fail turns anything that is not a success status into a failed probe, which is
-# what makes the Compose readiness gate mean something. /v1/ping is NEVER probed: it requires a
-# bearer token and answers 401 without one BY DESIGN, so pointing a probe at it would mark a
-# perfectly healthy container unhealthy forever.
+# 503 for Unhealthy; the probe below matches the STATUS LINE and therefore fails on 503 exactly as it
+# fails on a refused connection, which is what makes the Compose readiness gate mean something.
+# /v1/ping is NEVER probed: it requires a bearer token and answers 401 without one BY DESIGN, so
+# pointing a probe at it would mark a perfectly healthy container unhealthy forever.
 #
-# ClientCertificateMode is AllowCertificate rather than RequireCertificate precisely so this probe
-# stays anonymous on the same listener that carries the certificate-authenticated issuance edge: a
-# certificate is requested during the handshake but not demanded, so a probe presenting none still
-# completes the handshake and receives its 200.
+# BASH SOCKET REDIRECTION, WITH NOTHING INSTALLED. The listener is cleartext (see the endpoint note
+# above for the frozen-environment reason), so no handshake has to be negotiated and the shell can
+# write the request itself - measured in this base image: curl and wget are ABSENT, bash is present.
+# An earlier revision installed curl because the listener was TLS-terminated and socket redirection
+# cannot negotiate a handshake; that listener is withdrawn, so the tooling it required is too. This is
+# now the same probe shape the Gateway image uses, which is correct rather than a copy: both listeners
+# are cleartext.
 #
-# --insecure IS CORRECT HERE AND IS NOT A RELAXATION OF THIS SERVICE'S TLS POSTURE. Two independent
-# reasons, either one sufficient:
+# NOT VERIFYING THE SERVER CERTIFICATE IS CORRECT HERE AND IS NOT A RELAXATION OF THIS SERVICE'S TLS
+# POSTURE. `openssl s_client` reports a verification failure and continues, which is the behaviour this
+# probe wants and is why no verify option is passed; `-verify_quiet` suppresses the report rather than
+# changing the outcome. Two independent reasons, either one sufficient:
 #   1. This request never leaves the container's own network namespace - it is a process asking
 #      itself whether it is ready. There is no on-path party to authenticate, so validating a
 #      certificate would establish nothing the loopback address has not established already.
@@ -360,16 +406,38 @@ USER $APP_UID
 #
 # 5104 is written literally rather than read from a variable. The port is fixed by the published
 # contract - the OpenAPI document, docs/ARCHITECTURE.md and orchestration/.env.example all state it -
-# and introducing a variable that only this probe would read means adding configuration surface
-# nothing else consumes. A deployment that ever moves the listener through Kestrel's own
-# configuration has to move this probe with it.
+# and introducing a variable that only this probe would read means adding configuration surface nothing
+# else consumes. A deployment that ever moves the listener through Kestrel's own configuration has to
+# move this probe with it, and a deployment that terminates TLS has to replace it with a TLS-capable
+# form - there is no tool in this image that could perform one.
 #
 # The window is deliberately unhurried: this host validates its configuration and imports its signing
 # material before it answers anything, and failures inside the start period do not count against the
 # retry budget.
+#
+# ONE CORRECTION TO THE REASONING ABOVE, AND IT CHANGES THE COMMAND. An earlier revision of this probe
+# passed `--insecure`, on the argument that a loopback probe has no party to authenticate. That argument
+# holds for the THREAT and fails for the DIAGNOSIS: `--insecure` also suppresses the one signal this
+# probe is uniquely placed to give, which is that the listener is presenting material no consumer can
+# verify. A Security instance serving a certificate the rest of the stack rejects is not ready - every
+# verifier in the system is about to fail to fetch its key set - and a probe that reports it healthy
+# opens the Compose dependency gate on a service nothing can talk to. So the probe VERIFIES, against the
+# same anchor every other consumer uses, and addresses the listener by a name the certificate has to
+# cover.
+#
+# The anchor is read from INTERNAL_TLS_TRUSTED_CA_PATH with the documented mount point as its default,
+# so no path is baked into this image and a deployment that mounts elsewhere sets one variable. `localhost`
+# is used rather than the raw address because name validation is part of what is being checked, and the
+# generation recipe in docs/ARCHITECTURE.md 9.3.1 carries `DNS:localhost` in the certificate's subject
+# alternative names for exactly this reason. `--resolve` keeps the connection on the loopback interface
+# so the name is never resolved through DNS.
+#
+# A MISSING ANCHOR FAILS THE PROBE, and that is the truthful answer rather than an inconvenience: this
+# service cannot start without a server certificate at all, so a running instance with no anchor mounted
+# is a deployment whose trust half was forgotten, and reporting it unready is what surfaces that during
+# bring-up instead of at the first token request.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-  CMD ["curl", "--fail", "--silent", "--show-error", "--insecure", "--max-time", "4", \
-    "--output", "/dev/null", "https://127.0.0.1:5104/health"]
+  CMD ["/bin/bash", "-c", "line=$(printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' | timeout 5 openssl s_client -quiet -verify_quiet -verify_return_error -verify_hostname localhost -CAfile \"${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}\" -servername localhost -connect 127.0.0.1:5104 2>/dev/null | head -n 1); case $line in *' 200 '*) exit 0 ;; *) exit 1 ;; esac"]
 
 # The framework-dependent application assembly, invoked by name. PowerFramework.Security.dll is fixed
 # by the project file name, because PowerFramework.Security.csproj declares no AssemblyName override,
@@ -384,4 +452,3 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
 # environment-selected overlay and the environment itself, in that order, and a command-line value
 # would be a fourth ingress for settings that already have one.
 ENTRYPOINT ["dotnet", "PowerFramework.Security.dll"]
-

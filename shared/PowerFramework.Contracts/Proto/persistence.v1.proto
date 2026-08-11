@@ -1956,8 +1956,23 @@ service CommandService {
   // of_setsql [:L29]. Empty statement is E_INVALID_SQL, and the legacy checks it twice.
   rpc SetSql(SetCommandSqlRequest) returns (SetCommandSqlResponse);
 
-  // Execute. Preserves positional binding, the leading-`@` mode, batch execution and error-text
-  // retrieval.
+  // Execute. Preserves positional binding, batch execution and error-text retrieval.
+  //
+  // ============ NO LEADING-`@` MODE ON THIS RPC. THE STATEMENT IS PASSED VERBATIM. ================
+  // The `@` prefix carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and NEITHER
+  // of them is on the object this RPC drives:
+  //   1. A DATAWINDOW-OBJECT SELECTOR, in the transaction object's RETRIEVE path -
+  //      `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [n_cst_thread_trans.sru:L309]. The rest
+  //      of the string is an object NAME, not SQL.
+  //   2. A STATEMENT-CACHING hint, on the SQLite binding's own `Exec` - the demonstration at
+  //      ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398 is written "@INSERT INTO ..." and the
+  //      comment above it at :L397 records that the prefix caches the statement to speed up re-parsing.
+  //      That object is n_sqlite, reached directly, not through the transaction object.
+  // This RPC drives `of_Exec` [n_cst_thread_trans.sru:L219-L238], whose body is a plain
+  // `EXECUTE IMMEDIATE :sqlCmd USING this` with NO prefix test of any kind. So a command statement
+  // beginning with `@` is passed to the provider verbatim and fails there, exactly as it does in the
+  // legacy. Producers must not strip the character and must not read it as a mode selector: doing either
+  // would synthesize a statement the legacy never runs.
   rpc Exec(ExecRequest) returns (ExecResponse);
 }
 

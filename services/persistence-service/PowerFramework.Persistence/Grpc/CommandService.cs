@@ -7,7 +7,10 @@
 //  that category - they are WIRED THROUGH here, never re-implemented:
 //
 //      positional parameter binding                 ->  Tasks/SqlTaskBase.cs (BindParams, ParamToString)
-//      the leading-`@` execution mode               ->  Transactions/TransactionPool.cs
+//      the leading-`@` DataWindow-object selector    ->  NOT ON THIS SERVICE - the oracle's `of_Exec`
+//                                                        [n_cst_thread_trans.sru:L219] carries no such
+//                                                        test; the mode belongs to the RETRIEVE path
+//                                                        [:L309]. See SqlCommandTask's header.
 //                                                       (IPooledTransaction / PooledTransaction)
 //      multi-statement batch execution              ->  Transactions/TransactionPool.cs
 //      error-text retrieval                         ->  Transactions/TransactionPool.cs
@@ -138,10 +141,14 @@
 //     otherwise.
 using System.Collections.Concurrent;
 using Grpc.Core;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Buffers;
+using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Errors;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
@@ -309,7 +316,13 @@ internal interface ICommandTaskFactory
 /// </remarks>
 internal sealed class CommandTask : IDisposable
 {
-    private bool _disposed;
+    // THE OPERATION LEASE. The oracle guards every mutator with `if of_IsBusy() then return E_BUSY`
+    // [n_cst_threading_task_sqlbase.sru:L57, :L73, :L95, :L110, :L124], and in process the caller reading
+    // that flag IS the thread that would go on to mutate, so the read and the act cannot be separated.
+    // Across this boundary they can: two Exec calls both read "not busy", both write their statement,
+    // parameters and autocommit onto ONE proxy, and the pair that finally executes is a blend of two
+    // requests. The lease makes the read and the act indivisible; see Grpc/TaskOperationLatch.cs.
+    private readonly TaskOperationLatch _latch = new();
 
     /// <summary>
     /// Creates a task record.
@@ -352,6 +365,24 @@ internal sealed class CommandTask : IDisposable
     internal SqlCommandTask Worker => Components.Worker;
 
     /// <summary>
+    /// The caller identity this task is attributed to, for the per-caller ceiling.
+    /// </summary>
+    /// <value>
+    /// The token subject, or the resolver's unattributed bucket. Set once by the registry at registration
+    /// and never rendered into a response.
+    /// </value>
+    internal string Principal { get; set; } = HandlePrincipalResolver.Unattributed;
+
+    /// <summary>
+    /// When a call last named this task, as UTC ticks read from the injected clock.
+    /// </summary>
+    /// <remarks>
+    /// Written and read through <see cref="System.Threading.Volatile"/> by the registry, because it is
+    /// touched from arbitrary request threads and read by the reclaim pass on another.
+    /// </remarks>
+    internal long LastActivityTicks;
+
+    /// <summary>
     /// Releases both halves of the pair - the wire form of the legacy <c>Destroy</c>.
     /// </summary>
     /// <remarks>
@@ -371,16 +402,38 @@ internal sealed class CommandTask : IDisposable
     /// </remarks>
     public void Dispose()
     {
-        if (_disposed)
+        if (!_latch.TryClaimDisposal())
         {
             return;
         }
 
-        _disposed = true;
-
         Components.Proxy.Dispose();
         Components.Worker.Dispose();
     }
+
+    /// <summary>
+    /// Whether an operation currently owns this task. A DIAGNOSTIC READ - see
+    /// <see cref="TaskOperationLatch.IsRunning"/>.
+    /// </summary>
+    internal bool IsRunning => _latch.IsRunning;
+
+    /// <summary>
+    /// Takes the operation lease for one execution, reset or setter.
+    /// </summary>
+    /// <returns>The lease outcome, which the call site maps straight onto a code.</returns>
+    internal TaskLatchOutcome TryBeginOperation() => _latch.TryBegin();
+
+    /// <summary>
+    /// Gives the lease back.
+    /// </summary>
+    /// <returns><see langword="true"/> when disposal is now this caller's duty.</returns>
+    internal bool EndOperation() => _latch.End();
+
+    /// <summary>
+    /// Records that the handle has been released.
+    /// </summary>
+    /// <returns><see langword="true"/> when disposal is the releaser's duty.</returns>
+    internal bool RequestRelease() => _latch.RequestRelease();
 }
 
 /// <summary>
@@ -411,6 +464,54 @@ internal sealed class CommandTaskRegistry
 {
     private readonly ConcurrentDictionary<string, CommandTask> _tasks = new(StringComparer.Ordinal);
 
+    /// <summary>The ceiling on live command tasks, per caller and in total.</summary>
+    private readonly HandleQuota _quota;
+
+    /// <summary>The one clock. Stamps activity and measures idleness.</summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>Resolves the caller a new task is attributed to.</summary>
+    private readonly HandlePrincipalResolver _principals;
+
+    /// <summary>Optional structured logger, for reclaimed and drained tasks.</summary>
+    private readonly ILogger<CommandTaskRegistry>? _logger;
+
+    /// <summary>
+    /// Creates the registry over its ceilings and its clock.
+    /// </summary>
+    /// <param name="options">The bound settings the ceilings and the idle window come from.</param>
+    /// <param name="time">The one clock, shared with the pool and the pooled transaction.</param>
+    /// <param name="principals">
+    /// Resolves the caller a new task is attributed to. Optional so the registry is constructible without a
+    /// host, in which case every task is unattributed and only the total ceiling applies.
+    /// </param>
+    /// <param name="logger">Optional structured logger.</param>
+    /// <exception cref="ArgumentNullException">A required collaborator is <see langword="null"/>.</exception>
+    public CommandTaskRegistry(
+        IOptions<PersistenceOptions> options,
+        TimeProvider time,
+        HandlePrincipalResolver? principals = null,
+        ILogger<CommandTaskRegistry>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        HandleLifecycleOptions handles = options.Value.Handles;
+
+        _quota = new HandleQuota("command task", handles.MaxTotalPerRegistry, handles.MaxPerPrincipal);
+        _time = time ?? throw new ArgumentNullException(nameof(time));
+        _principals = principals ?? new HandlePrincipalResolver();
+        _logger = logger;
+    }
+
+    /// <summary>The number of live tasks. Exposed for diagnostics and for assertions in tests.</summary>
+    internal int Count => _tasks.Count;
+
+    /// <summary>
+    /// The session identity of every live task, so the session registry can pin what is still in use.
+    /// </summary>
+    internal IReadOnlyCollection<string> LiveSessionIds =>
+        [.. _tasks.Values.Select(task => task.Session.SessionId)];
+
     /// <summary>
     /// Registers a proxy pair under a freshly issued handle.
     /// </summary>
@@ -431,14 +532,31 @@ internal sealed class CommandTaskRegistry
     /// still holds.
     /// </para>
     /// </remarks>
-    internal CommandTask Register(TransactionSession session, CommandTaskComponents components)
+    internal CommandTask? Register(
+        TransactionSession session,
+        CommandTaskComponents components,
+        out string diagnostic)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(components);
 
+        // THE CEILING IS TESTED BEFORE THE HANDLE IS MINTED, so a refusal registers nothing and the caller
+        // disposes the pair it built.
+        string principal = _principals.Resolve();
+
+        if (!_quota.TryReserve(principal, out diagnostic))
+        {
+            return null;
+        }
+
         while (true)
         {
-            CommandTask task = new(Guid.NewGuid().ToString("N"), session, components);
+            CommandTask task = new(Guid.NewGuid().ToString("N"), session, components)
+            {
+                Principal = principal,
+            };
+
+            Volatile.Write(ref task.LastActivityTicks, _time.GetUtcNow().UtcTicks);
 
             if (_tasks.TryAdd(task.TaskId, task))
             {
@@ -473,7 +591,15 @@ internal sealed class CommandTaskRegistry
             return false;
         }
 
-        return _tasks.TryGetValue(taskId, out task);
+        if (!_tasks.TryGetValue(taskId, out task))
+        {
+            return false;
+        }
+
+        // A HANDLE IN USE IS NOT AN ABANDONED HANDLE: refreshed on every call that names this task.
+        Volatile.Write(ref task.LastActivityTicks, _time.GetUtcNow().UtcTicks);
+
+        return true;
     }
 
     /// <summary>
@@ -486,7 +612,137 @@ internal sealed class CommandTaskRegistry
     /// the same task therefore produce exactly one removal - and therefore exactly one disposal - and
     /// the loser sees the same unknown-handle outcome as any other stale handle.
     /// </returns>
-    internal bool TryRemove(string taskId, out CommandTask? task) => _tasks.TryRemove(taskId, out task);
+    internal bool TryRemove(string taskId, out CommandTask? task)
+    {
+        if (!_tasks.TryRemove(taskId, out task) || task is null)
+        {
+            return false;
+        }
+
+        // Returned by whichever call won the removal, so a concurrent second release cannot return it
+        // twice and a caller cannot free quota it never held.
+        _quota.Release(task.Principal);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes and disposes every task idle for longer than <paramref name="window"/>.
+    /// </summary>
+    /// <param name="now">The reclaim pass's single clock read.</param>
+    /// <param name="window">How long a task may go untouched before it is considered abandoned.</param>
+    /// <returns>How many tasks were reclaimed.</returns>
+    /// <remarks>
+    /// EVERY C-07 OPERATION IS UNARY AND REFRESHES THE STAMP ON THE WAY IN, so a task in use is never near
+    /// the window - which is far longer than any statement this contract executes can take. The disposal is
+    /// the release path's own, and it is idempotent
+    /// [<see cref="CommandTask.Dispose"/>], so an abandoned task's teardown is identical to a released
+    /// one's - proxy before worker, because the proxy borrows the worker's commit signal.
+    /// </remarks>
+    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
+    {
+        long threshold = now.UtcTicks - window.Ticks;
+        int reclaimed = 0;
+
+        foreach (CommandTask candidate in _tasks.Values)
+        {
+            if (Volatile.Read(ref candidate.LastActivityTicks) > threshold
+                || !TryRemove(candidate.TaskId, out CommandTask? removed)
+                || removed is null)
+            {
+                continue;
+            }
+
+            removed.Dispose();
+            reclaimed++;
+
+            _logger?.LogWarning(
+                "Reclaimed an abandoned command task held by caller {Principal}. The handle value is "
+                + "deliberately not recorded.",
+                removed.Principal);
+        }
+
+        return reclaimed;
+    }
+
+    /// <summary>
+    /// Removes and disposes every task owned by a retired transaction session.
+    /// </summary>
+    /// <param name="sessionId">The session that has ended.</param>
+    /// <returns>The number of tasks retired.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="sessionId"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A TASK CANNOT OUTLIVE THE SESSION IT WAS CREATED AGAINST, AND LEAVING ONE BEHIND IS NOT MERELY
+    /// UNTIDY.</b> Every task in this table holds the session's pooled transaction, so a task that
+    /// survives its session names a transaction the pool has already taken back - and the pool may hand
+    /// that same transaction to a DIFFERENT session as soon as its reference count drops
+    /// [<c>n_cst_thread_trans_pool.sru:L94-L114</c>]. A later call on the stale handle would then write
+    /// through somebody else's transaction, which is a data-integrity fault rather than a leak.
+    /// </para>
+    /// <para>
+    /// REMOVAL THROUGH <see cref="TryRemove"/> AND NOT PAST IT, so the handle ceiling this registry
+    /// reserved on registration is released with the entry. Reaching into the dictionary directly would
+    /// retire the task and keep its slot reserved for the life of the process - and because the ceiling is
+    /// per principal, the caller whose session ended is precisely the caller that would later be refused a
+    /// handle it is entitled to.
+    /// </para>
+    /// <para>
+    /// Removal comes before disposal for each entry, so a concurrent call on the same handle loses the
+    /// race in the table rather than reaching a half-disposed task.
+    /// </para>
+    /// </remarks>
+    internal int PurgeSession(string sessionId)
+    {
+        ArgumentNullException.ThrowIfNull(sessionId);
+
+        int retired = 0;
+
+        foreach (CommandTask candidate in _tasks.Values)
+        {
+            if (!string.Equals(candidate.Session.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!TryRemove(candidate.TaskId, out CommandTask? removed) || removed is null)
+            {
+                continue;
+            }
+
+            removed.Dispose();
+
+            retired++;
+        }
+
+        return retired;
+    }
+
+    /// <summary>
+    /// Removes and disposes every live task, whatever its age.
+    /// </summary>
+    /// <returns>How many tasks were released.</returns>
+    /// <remarks>
+    /// FOR SHUTDOWN, AND IT MUST RUN BEFORE THE SESSION REGISTRY DRAINS: the worker's disposal is what
+    /// returns its pool reference [<c>n_cst_thread_task_sqlbase.sru:L160</c>, <c>:L165</c>].
+    /// </remarks>
+    internal int Drain()
+    {
+        int drained = 0;
+
+        foreach (CommandTask candidate in _tasks.Values)
+        {
+            if (!TryRemove(candidate.TaskId, out CommandTask? removed) || removed is null)
+            {
+                continue;
+            }
+
+            removed.Dispose();
+            drained++;
+        }
+
+        return drained;
+    }
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -534,6 +790,17 @@ internal sealed class CommandTaskRegistry
 /// THIS execution's outcome rather than of a racing one.
 /// </para>
 /// </remarks>
+// ============ THE SCOPE THIS CONTRACT REQUIRES (constraint C-G) ============
+// C-07 executes whatever statement the caller supplies
+// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlcommand.sru], which cannot be assumed
+// to be a read, so every RPC on this contract needs the WRITE scope - the setters included, since
+// they compose the statement the execution will run.
+//
+// The route mapping in Program.cs additionally requires an authenticated principal, and the
+// fallback policy would close the door even if the mapping forgot to. This attribute is the
+// LEAST-PRIVILEGE half: authentication alone would let a credential minted for one contract
+// reach all four.
+[Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
 internal sealed class CommandService : GeneratedCommandServiceBase
 {
     /// <summary>
@@ -558,6 +825,19 @@ internal sealed class CommandService : GeneratedCommandServiceBase
         "A positional parameter carries no value arm. An explicitly null value is stated by setting the "
         + "null arm; a message with no arm set is an incomplete payload and is refused rather than read "
         + "as null.";
+
+    /// <summary>
+    /// The diagnostic accompanying <c>E_BUSY</c> when another operation already owns the task.
+    /// </summary>
+    /// <remarks>
+    /// It says RETRY, because <c>E_BUSY</c> is the retryable refusal - the same call unchanged succeeds once
+    /// the operation in flight has finished - whereas <see cref="UnknownTaskDiagnostic"/> names a condition
+    /// no retry can satisfy. That is the whole reason the oracle carries two codes here rather than one
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlbase.sru:L57</c>].
+    /// </remarks>
+    private const string TaskBusyDiagnostic =
+        "Another execution, reset or setter is in flight for this command task, so the request was "
+        + "refused. Retry once it has completed.";
 
     private readonly TransactionSessionRegistry _sessions;
     private readonly CommandTaskRegistry _tasks;
@@ -642,6 +922,52 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     /// command proxy, so the effect here is exactly the bare field assignment.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Takes a task's operation lease, or produces the refusal to report.
+    /// </summary>
+    /// <param name="task">The resolved task.</param>
+    /// <param name="refusal">The status to report, valid only when this returns <see langword="false"/>.</param>
+    /// <returns><see langword="true"/> when the caller owns the task and MUST call <see cref="ReleaseLease"/>.</returns>
+    /// <remarks>
+    /// <b>ONE PLACE FOR THE FOUR HANDLERS THAT NEED IT.</b> Reset, both setters and the execution take the
+    /// same lease and report the same two refusals. The lease reports WHICH refusal rather than leaving the
+    /// call site to read the state again, because that second read is itself a race - and racing on the
+    /// distinction between a retryable and a permanent refusal is worse than not drawing it at all.
+    /// </remarks>
+    private static bool TryLease(CommandTask task, out OperationStatus refusal)
+    {
+        TaskLatchOutcome lease = task.TryBeginOperation();
+
+        if (lease == TaskLatchOutcome.Acquired)
+        {
+            refusal = null!;
+
+            return true;
+        }
+
+        refusal = lease == TaskLatchOutcome.Gone
+            ? TransactionWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskDiagnostic)
+            : TransactionWireCodes.Status(RetCode.E_BUSY, TaskBusyDiagnostic);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Gives a task's operation lease back, disposing the pair when a release arrived meanwhile.
+    /// </summary>
+    /// <param name="task">The task whose lease this caller holds.</param>
+    /// <remarks>
+    /// ALWAYS FROM A <see langword="finally"/>. An operation that returns without releasing pins the task,
+    /// and every later call on that handle then answers <c>E_BUSY</c> for the life of the process.
+    /// </remarks>
+    private static void ReleaseLease(CommandTask task)
+    {
+        if (task.EndOperation())
+        {
+            task.Dispose();
+        }
+    }
+
     private static void ClearCapturedDbError(SqlCommandTaskProxy proxy)
     {
         DbErrorData empty = DbErrorData.Empty;
@@ -904,7 +1230,29 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        CommandTask task = _tasks.Register(session, components);
+        CommandTask? task = _tasks.Register(session, components, out string quotaDiagnostic);
+
+        if (task is null)
+        {
+            // THE PAIR JUST BUILT IS DISPOSED THROUGH THE SAME DISCARD SHAPE the failed-installer arm above
+            // uses - proxy before worker, which is what the record's own disposal guarantees - because the
+            // worker's disposal is what returns its pool reference. Leaving it would pin a connection for
+            // the life of the process, which is the leak this ceiling exists to bound.
+            CommandTask refused = new(string.Empty, session, components);
+            refused.Dispose();
+
+            _logger?.LogWarning(
+                "CreateCommandTask refused a task on session {SessionId} because a handle ceiling was "
+                + "reached: {Diagnostic}",
+                session.SessionId,
+                quotaDiagnostic);
+
+            return Task.FromResult(new CreateCommandTaskResponse
+            {
+                // E_BUSY - the oracle's own "not now", so no new value enters a consumer's branch set.
+                Status = TransactionWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
+            });
+        }
 
         _logger?.LogDebug(
             "Command task {TaskId} created against session {SessionId}.",
@@ -954,7 +1302,15 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        task.Dispose();
+        // ⚠ NOT AN UNCONDITIONAL TEARDOWN ANY MORE. Disposing here regardless would release both halves of
+        // the proxy pair underneath an Exec still inside the worker's body - a teardown with work pending,
+        // which the legacy's own threading notes name as a memory fault [docs/PB多线程绕坑提示.md, hazard 1].
+        // The release records itself and disposes only when nothing is in flight; otherwise the duty passes
+        // to the execution, which performs it as it exits. Exactly one of the two disposes.
+        if (task.RequestRelease())
+        {
+            task.Dispose();
+        }
 
         _logger?.LogDebug("Command task {TaskId} released.", taskId);
 
@@ -1010,10 +1366,26 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        return Task.FromResult(new ResetCommandTaskResponse
+        // The lease, which is NOT a third copy of the busy refusal - both of the oracle's own guards, the
+        // caller-side twin's [:L57] and the worker's [:L32], are still where they were and still answer
+        // E_BUSY. What the lease adds is that this reset cannot begin while an execution or a setter owns
+        // the task, which neither of those guards can prevent because both live inside it.
+        if (!TryLease(task, out OperationStatus refusal))
         {
-            Status = TransactionWireCodes.Status(task.Proxy.Reset()),
-        });
+            return Task.FromResult(new ResetCommandTaskResponse { Status = refusal });
+        }
+
+        try
+        {
+            return Task.FromResult(new ResetCommandTaskResponse
+            {
+                Status = TransactionWireCodes.Status(task.Proxy.Reset()),
+            });
+        }
+        finally
+        {
+            ReleaseLease(task);
+        }
     }
 
     /// <summary>
@@ -1071,12 +1443,26 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        // Forwarded unchanged, including a value outside the three enumerators. The caller-side twin's
-        // busy guard [n_cst_threading_task_sqlcommand.sru:L43] is the ONLY guard on this path.
-        return Task.FromResult(new SetCommandAutoCommitResponse
+        if (!TryLease(task, out OperationStatus refusal))
         {
-            Status = TransactionWireCodes.Status(task.Proxy.SetAutoCommit(request.Autocommit)),
-        });
+            return Task.FromResult(new SetCommandAutoCommitResponse { Status = refusal });
+        }
+
+        try
+        {
+            // Forwarded unchanged, including a value outside the three enumerators. The caller-side twin's
+            // busy guard [n_cst_threading_task_sqlcommand.sru:L43] is the only guard INSIDE this path; the
+            // lease above is what stops the setter overlapping an execution that would otherwise pick the
+            // new mode up half-way through its own epilogue.
+            return Task.FromResult(new SetCommandAutoCommitResponse
+            {
+                Status = TransactionWireCodes.Status(task.Proxy.SetAutoCommit(request.Autocommit)),
+            });
+        }
+        finally
+        {
+            ReleaseLease(task);
+        }
     }
 
     /// <summary>
@@ -1142,12 +1528,24 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        // C-F: the statement is forwarded and never logged from here. The only record that may ever
-        // carry it is produced through the sanctioned redactor, deeper in the stack.
-        return Task.FromResult(new SetCommandSqlResponse
+        if (!TryLease(task, out OperationStatus refusal))
         {
-            Status = TransactionWireCodes.Status(task.Proxy.SetSql(request.Sql)),
-        });
+            return Task.FromResult(new SetCommandSqlResponse { Status = refusal });
+        }
+
+        try
+        {
+            // C-F: the statement is forwarded and never logged from here. The only record that may ever
+            // carry it is produced through the sanctioned redactor, deeper in the stack.
+            return Task.FromResult(new SetCommandSqlResponse
+            {
+                Status = TransactionWireCodes.Status(task.Proxy.SetSql(request.Sql)),
+            });
+        }
+        finally
+        {
+            ReleaseLease(task);
+        }
     }
 
     /// <summary>
@@ -1275,6 +1673,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     public override Task<ExecResponse> Exec(ExecRequest request, ServerCallContext context)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
 
         if (!_tasks.TryResolve(request.Task, out CommandTask? task) || task is null)
         {
@@ -1284,160 +1683,183 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        // -------------------------------------------------------------------------------------------
-        // STEP 1 - the OPTIONAL statement, applied in the contract's own field order.
-        // -------------------------------------------------------------------------------------------
-        // Unset leaves the task's statement alone, and the task body's own emptiness guard then applies
-        // to whatever the task holds - which is how a caller who never called SetSql reaches the second
-        // of the two preserved guards. Set-but-empty is refused HERE, by the setter's guard, with
-        // E_INVALID_SQL and no message [:L45].
-        //
-        // Every mutator below carries the caller-side busy guard, so a command already in flight for
-        // this task is refused with E_BUSY rather than reconfigured underneath itself
-        // [n_cst_threading_task_sqlbase.sru:L57, :L73, :L95, :L110, :L124, :L144, :L162, :L179, :L188].
-        if (request.HasSql)
+        // ⚠ THE OPERATION LEASE, AND IT IS TAKEN BEFORE STEP 1 FOR A REASON. Steps 1 to 4 below WRITE the
+        // statement, the parameter list, the autocommit mode and the driver-error sink onto ONE proxy pair,
+        // and only step 5 executes. Without a lease two concurrent Exec calls each pass their own busy
+        // check - both read "not busy" because neither has started the body yet - and then interleave those
+        // four writes, so the statement that runs belongs to one request and the parameters bound into it to
+        // the other. The oracle cannot reach that state: its caller is one thread, so its own guard
+        // [n_cst_threading_task_sqlbase.sru:L57] is sufficient there and insufficient here.
+        if (!TryLease(task, out OperationStatus refusal))
         {
-            long statementCode = task.Proxy.SetSql(request.Sql);
-            if (Predicates.IsFailed(statementCode))
+            return Task.FromResult(new ExecResponse { Status = refusal });
+        }
+
+        try
+        {
+            // -------------------------------------------------------------------------------------------
+            // STEP 1 - the OPTIONAL statement, applied in the contract's own field order.
+            // -------------------------------------------------------------------------------------------
+            // Unset leaves the task's statement alone, and the task body's own emptiness guard then applies
+            // to whatever the task holds - which is how a caller who never called SetSql reaches the second
+            // of the two preserved guards. Set-but-empty is refused HERE, by the setter's guard, with
+            // E_INVALID_SQL and no message [:L45].
+            //
+            // Every mutator below carries the caller-side busy guard, so a command already in flight for
+            // this task is refused with E_BUSY rather than reconfigured underneath itself
+            // [n_cst_threading_task_sqlbase.sru:L57, :L73, :L95, :L110, :L124, :L144, :L162, :L179, :L188].
+            if (request.HasSql)
+            {
+                long statementCode = task.Proxy.SetSql(request.Sql);
+                if (Predicates.IsFailed(statementCode))
+                {
+                    return Task.FromResult(new ExecResponse
+                    {
+                        Status = TransactionWireCodes.Status(statementCode),
+                    });
+                }
+            }
+
+            // -------------------------------------------------------------------------------------------
+            // STEP 2 - the parameter list. Positional is the empty-NAMED case; shape rejections and the
+            // dormant null check are the caller-side base's. See ApplyParameters.
+            // -------------------------------------------------------------------------------------------
+            long parameterCode = ApplyParameters(task.Proxy, request.Parameters);
+            if (Predicates.IsFailed(parameterCode))
             {
                 return Task.FromResult(new ExecResponse
                 {
-                    Status = TransactionWireCodes.Status(statementCode),
+                    Status = parameterCode == RetCode.E_INVALID_ARGUMENT
+                        ? TransactionWireCodes.Status(parameterCode, ParameterValueMissingDiagnostic)
+                        : TransactionWireCodes.Status(parameterCode),
                 });
             }
-        }
 
-        // -------------------------------------------------------------------------------------------
-        // STEP 2 - the parameter list. Positional is the empty-NAMED case; shape rejections and the
-        // dormant null check are the caller-side base's. See ApplyParameters.
-        // -------------------------------------------------------------------------------------------
-        long parameterCode = ApplyParameters(task.Proxy, request.Parameters);
-        if (Predicates.IsFailed(parameterCode))
-        {
+            // -------------------------------------------------------------------------------------------
+            // STEP 3 - the OPTIONAL autocommit override. Unset uses the task's setting, whose default is
+            // AC_OFF [:L21]. Validates nothing, exactly as the oracle validates nothing [:L40-L43].
+            // -------------------------------------------------------------------------------------------
+            if (request.HasAutocommit)
+            {
+                long autoCommitCode = task.Proxy.SetAutoCommit(request.Autocommit);
+                if (Predicates.IsFailed(autoCommitCode))
+                {
+                    return Task.FromResult(new ExecResponse
+                    {
+                        Status = TransactionWireCodes.Status(autoCommitCode),
+                    });
+                }
+            }
+
+            // -------------------------------------------------------------------------------------------
+            // STEP 4 - clear the driver-error sink, so that what is read after the body belongs to this
+            // execution. The oracle's own clearing write; see ClearCapturedDbError.
+            // -------------------------------------------------------------------------------------------
+            ClearCapturedDbError(task.Proxy);
+
+            long rtCode;
+            long sqlNRows;
+            long sqlCode;
+            long sqlDbCode;
+            string sqlErrText;
+            bool committed;
+            DbErrorData captured;
+
+            // -------------------------------------------------------------------------------------------
+            // STEP 5 - the task body, and the outcome read, both inside the session's gate. The gate is what
+            // reproduces the oracle's thread affinity across a concurrent server; see the type remarks.
+            // -------------------------------------------------------------------------------------------
+            lock (task.Session.Gate)
+            {
+                // [:L60-L115] in full - the acquisition, the cancellation check, the binding, the inversion,
+                // the execution and BOTH epilogues. This single call is the whole of the delegation.
+                // THE REQUEST'S CANCELLATION TOKEN, THREADED RATHER THAN IGNORED. It reaches the provider
+            // through the worker's execute step, which refuses to issue a statement for a caller that has
+            // already gone. It cannot interrupt a statement already issued - see
+            // SqliteTransactionEngine.TryObserveCancellation for exactly what this provider supports.
+            rtCode = task.Worker.OnDoTask(context.CancellationToken);
+
+                // ⚠ READ FROM THE INSTANCE THE WORKER ACQUIRED, NEVER FROM THE ONE THE SESSION HOLDS.
+                // The oracle's task body reads its four accessors off the transaction IT just acquired -
+                // `transObject.SQLDBCode`, `transObject.SQLErrText` [:L110-L111] - and across this boundary
+                // the two are not always the same object: the pool REPLACES a broken entry's transaction and
+                // DISPOSES the old one
+                // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L164-L172], so the
+                // reference the session captured when it opened can be both stale and disposed by the time a
+                // command runs. Reading it would report the state of a connection that never executed this
+                // statement. Null only when the acquisition arm above already returned, in which case the
+                // driver detail travels in the raised payload instead and these four are genuinely absent.
+                IPooledTransaction? transaction = task.Worker.AttachedTransaction;
+
+                sqlNRows = transaction?.SqlNRows ?? 0L;
+                sqlCode = transaction?.SqlCode ?? 0L;
+                sqlDbCode = transaction?.SqlDbCode ?? 0L;
+                sqlErrText = transaction?.SqlErrText ?? string.Empty;
+
+                // A zero-timeout probe, never a wait [n_cst_threading_task_sqlbase.sru:L174].
+                committed = task.Proxy.IsCommitted();
+
+                captured = task.Proxy.GetLastDbErrorData();
+            }
+
+            bool driverErrorRaised = captured != DbErrorData.Empty;
+
+            // The driver payload reaches the wire ONLY through the projection in Errors/SqlRedactor.cs, which
+            // masks the statement field unconditionally and takes no policy argument a call site could
+            // weaken. This file never assigns DbError.Sqlsyntax (constraint C-F). The re-typing of the
+            // framework code onto the wire enum goes through the single named helper, for the review-invariant
+            // reason recorded on that helper.
+            OperationStatus status = driverErrorRaised
+                ? TransactionWireCodes.Status(rtCode, in captured)
+                : TransactionWireCodes.Status(rtCode);
+
+            // Assigned after composition because the helper has no three-member overload, and adding one
+            // would mean editing the file that owns it. The legacy fires BOTH events on a driver failure, so
+            // a payload and a message coexist rather than excluding one another. On the acquisition arm the
+            // message is the ACQUIRED payload's text [:L72], which is why the raised payload is preferred as
+            // the source when one exists.
+            status.ErrorText = ProjectErrorText(
+                rtCode,
+                driverErrorRaised ? captured.SqlErrText : sqlErrText);
+
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                // C-F: no statement and no credential in this record. The parameter COUNT is safe to state;
+                // the parameter VALUES and the statement text are not, and neither appears.
+                _logger.LogDebug(
+                    "Command task {TaskId} executed with {ResultCode}: sql_code {SqlCode}, "
+                    + "sql_db_code {SqlDbCode}, rows {SqlNRows}, committed {Committed}, "
+                    + "parameters {ParameterCount}.",
+                    task.TaskId,
+                    rtCode,
+                    sqlCode,
+                    sqlDbCode,
+                    sqlNRows,
+                    committed,
+                    request.Parameters.Count);
+            }
+
             return Task.FromResult(new ExecResponse
             {
-                Status = parameterCode == RetCode.E_INVALID_ARGUMENT
-                    ? TransactionWireCodes.Status(parameterCode, ParameterValueMissingDiagnostic)
-                    : TransactionWireCodes.Status(parameterCode),
+                Status = status,
+
+                SqlNrows = sqlNRows,
+
+                // Carried verbatim. 100 is a SUCCESS value here; see the remarks.
+                SqlCode = sqlCode,
+
+                SqlDbCode = sqlDbCode,
+
+                // Opaque display text, possibly non-English. Consumers classify on ret_code, never by
+                // parsing this.
+                SqlErrText = sqlErrText,
+
+                Committed = committed,
             });
         }
-
-        // -------------------------------------------------------------------------------------------
-        // STEP 3 - the OPTIONAL autocommit override. Unset uses the task's setting, whose default is
-        // AC_OFF [:L21]. Validates nothing, exactly as the oracle validates nothing [:L40-L43].
-        // -------------------------------------------------------------------------------------------
-        if (request.HasAutocommit)
+        finally
         {
-            long autoCommitCode = task.Proxy.SetAutoCommit(request.Autocommit);
-            if (Predicates.IsFailed(autoCommitCode))
-            {
-                return Task.FromResult(new ExecResponse
-                {
-                    Status = TransactionWireCodes.Status(autoCommitCode),
-                });
-            }
+            ReleaseLease(task);
         }
-
-        // -------------------------------------------------------------------------------------------
-        // STEP 4 - clear the driver-error sink, so that what is read after the body belongs to this
-        // execution. The oracle's own clearing write; see ClearCapturedDbError.
-        // -------------------------------------------------------------------------------------------
-        ClearCapturedDbError(task.Proxy);
-
-        long rtCode;
-        long sqlNRows;
-        long sqlCode;
-        long sqlDbCode;
-        string sqlErrText;
-        bool committed;
-        DbErrorData captured;
-
-        // -------------------------------------------------------------------------------------------
-        // STEP 5 - the task body, and the outcome read, both inside the session's gate. The gate is what
-        // reproduces the oracle's thread affinity across a concurrent server; see the type remarks.
-        // -------------------------------------------------------------------------------------------
-        lock (task.Session.Gate)
-        {
-            // [:L60-L115] in full - the acquisition, the cancellation check, the binding, the inversion,
-            // the execution and BOTH epilogues. This single call is the whole of the delegation.
-            rtCode = task.Worker.OnDoTask();
-
-            // ⚠ READ FROM THE INSTANCE THE WORKER ACQUIRED, NEVER FROM THE ONE THE SESSION HOLDS.
-            // The oracle's task body reads its four accessors off the transaction IT just acquired -
-            // `transObject.SQLDBCode`, `transObject.SQLErrText` [:L110-L111] - and across this boundary
-            // the two are not always the same object: the pool REPLACES a broken entry's transaction and
-            // DISPOSES the old one
-            // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L164-L172], so the
-            // reference the session captured when it opened can be both stale and disposed by the time a
-            // command runs. Reading it would report the state of a connection that never executed this
-            // statement. Null only when the acquisition arm above already returned, in which case the
-            // driver detail travels in the raised payload instead and these four are genuinely absent.
-            IPooledTransaction? transaction = task.Worker.AttachedTransaction;
-
-            sqlNRows = transaction?.SqlNRows ?? 0L;
-            sqlCode = transaction?.SqlCode ?? 0L;
-            sqlDbCode = transaction?.SqlDbCode ?? 0L;
-            sqlErrText = transaction?.SqlErrText ?? string.Empty;
-
-            // A zero-timeout probe, never a wait [n_cst_threading_task_sqlbase.sru:L174].
-            committed = task.Proxy.IsCommitted();
-
-            captured = task.Proxy.GetLastDbErrorData();
-        }
-
-        bool driverErrorRaised = captured != DbErrorData.Empty;
-
-        // The driver payload reaches the wire ONLY through the projection in Errors/SqlRedactor.cs, which
-        // masks the statement field unconditionally and takes no policy argument a call site could
-        // weaken. This file never assigns DbError.Sqlsyntax (constraint C-F). The re-typing of the
-        // framework code onto the wire enum goes through the single named helper, for the review-invariant
-        // reason recorded on that helper.
-        OperationStatus status = driverErrorRaised
-            ? TransactionWireCodes.Status(rtCode, in captured)
-            : TransactionWireCodes.Status(rtCode);
-
-        // Assigned after composition because the helper has no three-member overload, and adding one
-        // would mean editing the file that owns it. The legacy fires BOTH events on a driver failure, so
-        // a payload and a message coexist rather than excluding one another. On the acquisition arm the
-        // message is the ACQUIRED payload's text [:L72], which is why the raised payload is preferred as
-        // the source when one exists.
-        status.ErrorText = ProjectErrorText(
-            rtCode,
-            driverErrorRaised ? captured.SqlErrText : sqlErrText);
-
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
-        {
-            // C-F: no statement and no credential in this record. The parameter COUNT is safe to state;
-            // the parameter VALUES and the statement text are not, and neither appears.
-            _logger.LogDebug(
-                "Command task {TaskId} executed with {ResultCode}: sql_code {SqlCode}, "
-                + "sql_db_code {SqlDbCode}, rows {SqlNRows}, committed {Committed}, "
-                + "parameters {ParameterCount}.",
-                task.TaskId,
-                rtCode,
-                sqlCode,
-                sqlDbCode,
-                sqlNRows,
-                committed,
-                request.Parameters.Count);
-        }
-
-        return Task.FromResult(new ExecResponse
-        {
-            Status = status,
-
-            SqlNrows = sqlNRows,
-
-            // Carried verbatim. 100 is a SUCCESS value here; see the remarks.
-            SqlCode = sqlCode,
-
-            SqlDbCode = sqlDbCode,
-
-            // Opaque display text, possibly non-English. Consumers classify on ret_code, never by
-            // parsing this.
-            SqlErrText = sqlErrText,
-
-            Committed = committed,
-        });
     }
 }

@@ -458,7 +458,7 @@ internal interface IUpdateTarget
     /// THE DATAWINDOW UPDATE CONTRACT'S OWN VALUE, where <c>1</c> is success and <c>-1</c> is failure.
     /// NOT a return code - see this file's header.
     /// </returns>
-    long Update(bool acceptText, bool resetFlag);
+    long Update(bool acceptText, bool resetFlag, CancellationToken cancellationToken = default);
 }
 
 
@@ -1525,7 +1525,15 @@ internal sealed class ConflictDetector
         // original-value shadow survive the call, which is what makes the identity round trip, a retry and
         // the conflict report below possible at all - and it is why nothing in this method resets the
         // carrier.
-        long updateResult = attempt.Target.Update(UpdateAcceptsText, UpdateResetsFlags);
+        // THE ATTEMPT'S TOKEN IS HANDED TO THE UPDATE, so a changeset carrying many rows stops at the next
+        // row after the caller goes rather than running the whole walk out. It is the SAME token the two
+        // poll points above read, so a cancellation is seen consistently wherever this method looks for it,
+        // and an abandoned walk answers the DataWindow failure sentinel - which the epilogue turns into the
+        // rollback that discards the rows already applied.
+        long updateResult = attempt.Target.Update(
+            UpdateAcceptsText,
+            UpdateResetsFlags,
+            attempt.Cancellation);
 
         // STEP 7 [:L206] - `TransObject.Event OnAfterUpdate(Data,rtCode)`
         //
@@ -2177,4 +2185,3 @@ internal sealed class ConflictDetector
 }
 
 #endregion
-

@@ -52,12 +52,14 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
+using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Endpoints;
 using PowerFramework.Security.Tokens;
@@ -120,10 +122,422 @@ internal static class IssuanceFixture
     internal const string ConfiguredKeyId = "powerframework-security-signing-1";
 
     /// <summary>One scope, so that a request asks for something rather than for nothing.</summary>
-    internal const string ReadScope = "datawindow.read";
+    internal const string ReadScope = "dataservices.datawindow";
 
     /// <summary>A second scope, for the rows that assert set handling.</summary>
-    internal const string WriteScope = "datawindow.write";
+    internal const string WriteScope = "dataservices.columnexpression";
+
+    /// <summary>
+    /// Every caller identity this suite mints for, and the only ones any host it builds authorises.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AN EXPLICIT LIST RATHER THAN A WILDCARD, AND THAT IS NOT A STYLE CHOICE. The service's
+    /// authorization matrix has no wildcard and must never acquire one - a matrix that can say "any
+    /// caller" is the widening the matrix exists to close - so a harness that wanted convenience by
+    /// asking for one would be asking for a production capability. Listing the identities instead costs
+    /// one line per identity and keeps the production surface unchanged.
+    /// </para>
+    /// <para>
+    /// WHY EACH NAME IS HERE. The first four are the service identities the roster carries and the
+    /// suites mint for; the fifth is deliberately NOT a service identity, because a caller whose name is
+    /// not also an audience is the case that proves the matrix keys on the caller rather than on the
+    /// audience spelling; the last two are the harness identities the general-purpose factory and the
+    /// authorization conformance suite use as subjects.
+    /// </para>
+    /// <para>
+    /// A ROW EXERCISING THE MATRIX ITSELF DOES NOT USE THIS. It shapes the options directly, which runs
+    /// after this default is applied, so it can narrow or clear the matrix deliberately - which is how
+    /// the refusal arms are reached at all.
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<string> TestCallers { get; } =
+    [
+        CallerIdentity,
+        SecondAudience,
+        "powerframework-persistence",
+        SelfAudience,
+        "a-caller-that-is-not-an-audience",
+        "powerframework-security-tests",
+        "authorization-conformance",
+    ];
+
+    /// <summary>
+    /// Every scope this suite requests, and the only ones any host it builds permits.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE UNION OF WHAT THE SUITES ASK FOR, SO NO ROW IS SILENTLY NARROWED. A narrowing is a success
+    /// under the published contract, which means a scope missing from this set would not fail its row
+    /// with a refusal - it would quietly issue a token carrying a smaller granted set, and every
+    /// assertion comparing the granted value against the requested one would fail with a confusing
+    /// difference rather than a missing permission. Keeping the union here makes that class of failure
+    /// impossible for a row that is not about scopes.
+    /// </para>
+    /// <para>
+    /// THE NAMES ARE THE ONES THE SUITES ALREADY USED, gathered rather than invented: the two DataWindow
+    /// scopes above, the two Persistence scopes the claim matrix requests, the general-purpose factory's
+    /// own default scope, the contract-reading scope the health suite's host uses, and the single scope
+    /// the authorization conformance suite carries. None of them is a wildcard or an administrative
+    /// name, so a row cannot pass by having been granted everything.
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<string> TestScopes { get; } =
+    [
+        ReadScope,
+        WriteScope,
+        "persistence.query",
+        "persistence.update",
+        "security.test",
+        "contract.read",
+        "authorization-conformance",
+        SecurityScopes.Crypto,
+
+        // AND THE PRODUCTION ROSTER'S OWN NAMES, gathered from the settings files rather than invented:
+        // the issuance roster grants these to the deployment's own callers, and a row reading a permitted
+        // scope out of that roster would otherwise be narrowed here by a name the harness had omitted -
+        // which reads as a permission defect rather than as a gap in this list.
+        "ping",
+        "capabilities",
+        "datawindow",
+        "persistence.read",
+        "persistence.write",
+    ];
+
+    /// <summary>
+    /// Authorises every <see cref="TestCallers"/> identity for every audience already on the host's
+    /// roster, with <see cref="TestScopes"/>.
+    /// </summary>
+    /// <param name="options">The options instance being shaped, its roster already settled.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// CALLED AFTER THE ROSTER IS SETTLED AND BEFORE A ROW'S OWN SHAPING, which is the only ordering that
+    /// works: the matrix's audiences must be roster members or the service's own validator refuses the
+    /// host, and a row that wants to narrow the matrix must be able to overwrite what this installed.
+    /// </para>
+    /// <para>
+    /// IT IS ADDITIVE AND IDEMPOTENT, AND THE TWO PROPERTIES COME FROM THE SAME RULE. Nothing is cleared:
+    /// an identity is granted only when NEITHER matrix shape already names it as a caller, and a roster
+    /// entry is added only when the roster does not already name that subject. Called twice, the second
+    /// call finds every identity it would have added already present and adds nothing - so no duplicate
+    /// (caller, audience) pair can accumulate, which the service refuses to construct on because a
+    /// duplicated pair makes the effective permission depend on which row is read first.
+    /// </para>
+    /// <para>
+    /// THE DEPLOYMENT'S OWN THREE GRANTS ARE LEFT EXACTLY AS THE SETTINGS FILE STATES THEM, and this is
+    /// the correction that matters most. An earlier revision replaced the whole matrix with a blanket
+    /// grant, which made every row that OBSERVES the deployed matrix unable to observe it: a row asking
+    /// whether Gateway is refused an audience the deployment does not grant it saw a host in which Gateway
+    /// was granted everything, so the refusal it exists to prove could not occur. The deployed topology -
+    /// Gateway to DataServices, DataServices to Persistence, DataServices to Security - is therefore
+    /// untouched, and only the identities the deployment does NOT name are blanket-granted. Those are the
+    /// harness's own subjects, which is exactly the set that needs the accommodation.
+    /// </para>
+    /// <para>
+    /// A ROW THAT NEEDS EVEN THAT MUCH GONE clears the matrix in its own shaping delegate, which runs
+    /// after this, and several do.
+    /// </para>
+    /// </remarks>
+    internal static void PermitTestCallers(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        // EVERY IDENTITY EITHER SHAPE ALREADY NAMES, because the issuer enforces the union of the two and a
+        // grant added here for a caller the deployment already constrains would WIDEN that constraint
+        // rather than sit beside it.
+        HashSet<string> alreadyGranted = new(StringComparer.Ordinal);
+
+        foreach (SecurityCallerOptions declared in options.Callers)
+        {
+            if (!string.IsNullOrWhiteSpace(declared.Identity))
+            {
+                _ = alreadyGranted.Add(declared.Identity.Trim());
+            }
+        }
+
+        foreach (CallerAuthorizationOptions declared in options.CallerAuthorizations)
+        {
+            if (!string.IsNullOrWhiteSpace(declared.Caller))
+            {
+                _ = alreadyGranted.Add(declared.Caller.Trim());
+            }
+        }
+
+        foreach (string caller in TestCallers)
+        {
+            if (alreadyGranted.Contains(caller))
+            {
+                continue;
+            }
+
+            foreach (string audience in options.Audiences)
+            {
+                CallerAuthorizationOptions row = new()
+                {
+                    Caller = caller,
+                    Audience = audience,
+                };
+
+                foreach (string scope in TestScopes)
+                {
+                    row.Scopes.Add(scope);
+                }
+
+                options.CallerAuthorizations.Add(row);
+            }
+
+        }
+
+        EnsureTestCallersAreRostered(options);
+    }
+
+    /// <summary>
+    /// Adds an issuance-roster entry for every <see cref="TestCallers"/> identity the roster does not
+    /// already name, covering the audience roster as it currently stands.
+    /// </summary>
+    /// <param name="options">The options instance being shaped.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE ROSTER IS NOT THE MATRIX, AND THAT IS WHY THIS IS SEPARATE. <c>Security:Clients</c> is a
+    /// CREDENTIAL DIRECTORY: <c>TokenIssuer</c> reads no permission from it, but the issuance ENDPOINT
+    /// resolves a presented subject through it to the configuration key naming that caller's secret. A
+    /// harness identity absent from it cannot authenticate at all, so every row driving
+    /// <c>POST /v1/tokens</c> as that identity would be answered 401 before any rule it was asserting could
+    /// be reached. Because it grants nothing, adding an entry cannot widen a permission an assertion is
+    /// reading - which is what makes it safe to call this again after a shaping delegate has run, and the
+    /// reconciliation step does exactly that.
+    /// </para>
+    /// <para>
+    /// IT IS ADDITIVE AND NEVER REPLACES A DEPLOYMENT ENTRY. The shipped roster names two subjects with
+    /// narrower audience and scope lists than this would install, deliberately, and rows read those lists.
+    /// </para>
+    /// </remarks>
+    internal static void EnsureTestCallersAreRostered(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        HashSet<string> rostered = new(StringComparer.Ordinal);
+
+        foreach (SecurityClientOptions registered in options.Clients)
+        {
+            if (!string.IsNullOrWhiteSpace(registered.Subject))
+            {
+                _ = rostered.Add(registered.Subject.Trim());
+            }
+        }
+
+        foreach (string caller in TestCallers)
+        {
+            if (rostered.Contains(caller))
+            {
+                continue;
+            }
+
+            SecurityClientOptions client = new()
+            {
+                Subject = caller,
+
+                // ONE KEY FOR EVERY TEST CALLER, and it is one the factory already emits. A per-caller key
+                // would have to be added to the factory's own list in the same change or the host would not
+                // start - which is exactly the drift this single shared name removes.
+                SecretConfigurationKey = SharedRosterSecretConfigurationKey,
+            };
+
+            foreach (string audience in options.Audiences)
+            {
+                client.Audiences.Add(audience);
+            }
+
+            foreach (string scope in TestScopes)
+            {
+                client.Scopes.Add(scope);
+            }
+
+            options.Clients.Add(client);
+        }
+    }
+
+    /// <summary>
+    /// Projects both configured matrix shapes into one flat row sequence: the matrix the issuer actually
+    /// enforces, whichever shape a deployment used to author it.
+    /// </summary>
+    /// <param name="options">The bound settings.</param>
+    /// <returns>One entry per (caller, audience) statement, in nested-then-flat order.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// WHY A HELPER EXISTS AT ALL. <c>TokenIssuer</c> folds <c>Security:Callers</c> and
+    /// <c>Security:CallerAuthorizations</c> into ONE dictionary and decides from that, so a row asking
+    /// "what does this deployment permit" has to ask the same question of both shapes. Reading one of them
+    /// reports a caller as ungranted purely because the deployment expressed its grant in the other -
+    /// which is a statement about the settings file's authoring style rather than about a permission, and
+    /// it is exactly the failure this replaces.
+    /// </para>
+    /// <para>
+    /// IT PROJECTS AND DOES NOT DECIDE, which keeps it honest as a test helper. It does not intersect, does
+    /// not union a pair stated in both shapes, and does not screen a malformed entry: a caller reading it
+    /// sees every statement the configuration makes, and the decision remains the issuer's alone. A row
+    /// that needs the DECISION drives the issuer.
+    /// </para>
+    /// </remarks>
+    internal static IEnumerable<(string Caller, string Audience, IReadOnlyList<string> Scopes)>
+        EffectiveGrants(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        foreach (SecurityCallerOptions caller in options.Callers)
+        {
+            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            {
+                yield return (
+                    caller.Identity?.Trim() ?? string.Empty,
+                    grant.Audience?.Trim() ?? string.Empty,
+                    [.. grant.Scopes.Select(static scope => scope?.Trim() ?? string.Empty)]);
+            }
+        }
+
+        foreach (CallerAuthorizationOptions row in options.CallerAuthorizations)
+        {
+            yield return (
+                row.Caller?.Trim() ?? string.Empty,
+                row.Audience?.Trim() ?? string.Empty,
+                [.. row.Scopes.Select(static scope => scope?.Trim() ?? string.Empty)]);
+        }
+    }
+
+    /// <summary>
+    /// Removes whatever a shaping delegate's later narrowing of the audience roster has made incoherent,
+    /// leaving only what that delegate itself declared.
+    /// </summary>
+    /// <param name="options">The options instance, after the shaping delegate has run.</param>
+    /// <param name="preexistingRows">
+    /// The grant rows present before the delegate ran - the deployment's own and this fixture's.
+    /// </param>
+    /// <param name="preexistingClients">
+    /// The issuance-roster entries present before the delegate ran.
+    /// </param>
+    /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE ORDERING PROBLEM THIS SOLVES, STATED PLAINLY. The grant matrix and the roster are settled BEFORE
+    /// a row's own shaping, because a row must be able to overwrite what they installed - and they are
+    /// built from the audience roster as it stands at that moment. A row that then narrows the roster in its
+    /// delegate, and several declare a complete two-audience deployment of their own, leaves behind grants
+    /// and roster entries naming audiences the deployment no longer serves. The service refuses to START on
+    /// either, and it refuses with a diagnostic about a configuration position no row was exercising, which
+    /// is the most confusing failure available: the host under test never boots and the reported key belongs
+    /// to the settings file or to this fixture.
+    /// </para>
+    /// <para>
+    /// ONLY WHAT WAS THERE BEFORE THE DELEGATE IS TOUCHED, and that is what keeps this from defeating the
+    /// rows it exists to enable. Membership is decided by REFERENCE against the two snapshots, so a grant or
+    /// an entry the delegate itself added is left exactly as declared - including one deliberately naming an
+    /// audience the delegate also removed from the roster, which still refuses the host, because that IS the
+    /// fault such a row asserts and there are rows that assert it.
+    /// </para>
+    /// <para>
+    /// IT PRUNES GRANTS AND NEVER ADDS ONE, so it cannot re-widen a matrix a row deliberately narrowed - the
+    /// property the refusal rows depend on. The credential directory is the one thing it may re-populate,
+    /// and only because a roster entry grants nothing: <c>TokenIssuer</c> reads no permission from it, while
+    /// an EMPTY roster refuses the host outright, so a narrowing that emptied it has to be answered with
+    /// entries valid for the final roster rather than with an unstartable host.
+    /// </para>
+    /// </remarks>
+    internal static void ReconcileGrantsWithRoster(
+        SecurityOptions options,
+        IReadOnlyList<CallerAuthorizationOptions> preexistingRows,
+        IReadOnlyList<SecurityClientOptions> preexistingClients)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(preexistingRows);
+        ArgumentNullException.ThrowIfNull(preexistingClients);
+
+        HashSet<string> served = new(StringComparer.Ordinal);
+
+        foreach (string audience in options.Audiences)
+        {
+            if (!string.IsNullOrWhiteSpace(audience))
+            {
+                _ = served.Add(audience.Trim());
+            }
+        }
+
+        for (int index = options.CallerAuthorizations.Count - 1; index >= 0; index--)
+        {
+            CallerAuthorizationOptions row = options.CallerAuthorizations[index];
+
+            if (!Preexisting(preexistingRows, row))
+            {
+                continue;
+            }
+
+            if (!served.Contains(row.Audience?.Trim() ?? string.Empty))
+            {
+                options.CallerAuthorizations.RemoveAt(index);
+            }
+        }
+
+        for (int index = options.Clients.Count - 1; index >= 0; index--)
+        {
+            SecurityClientOptions registered = options.Clients[index];
+
+            if (!Preexisting(preexistingClients, registered))
+            {
+                continue;
+            }
+
+            for (int position = registered.Audiences.Count - 1; position >= 0; position--)
+            {
+                if (!served.Contains(registered.Audiences[position]?.Trim() ?? string.Empty))
+                {
+                    registered.Audiences.RemoveAt(position);
+                }
+            }
+
+            if (registered.Audiences.Count == 0)
+            {
+                options.Clients.RemoveAt(index);
+            }
+        }
+
+        EnsureTestCallersAreRostered(options);
+    }
+
+    /// <summary>Reports whether one instance is in a snapshot, by reference.</summary>
+    /// <typeparam name="T">The element type.</typeparam>
+    /// <param name="snapshot">The snapshot taken before the shaping delegate ran.</param>
+    /// <param name="candidate">The instance under consideration.</param>
+    /// <returns><see langword="true"/> when the snapshot holds that same instance.</returns>
+    /// <remarks>
+    /// BY REFERENCE AND DELIBERATELY NOT BY VALUE. These option types carry no value equality, and giving
+    /// them some would be the wrong fix: two grants that happen to say the same thing are still two
+    /// statements, and the question here is which of them existed before the delegate ran.
+    /// </remarks>
+    private static bool Preexisting<T>(IReadOnlyList<T> snapshot, T candidate)
+        where T : class
+    {
+        foreach (T element in snapshot)
+        {
+            if (ReferenceEquals(element, candidate))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The one configuration key every test caller's issuance-roster entry names its secret under.
+    /// </summary>
+    /// <remarks>
+    /// It is deliberately one of the keys <c>SecurityAppFactory.RosterSecretOverrides</c> already emits, so
+    /// a rebuilt roster needs no matching change there. The value behind it is a per-process random string
+    /// the factory generates; nothing in this project declares credential material.
+    /// </remarks>
+    internal const string SharedRosterSecretConfigurationKey = "SECURITY_CLIENT_SECRET";
 
     /// <summary>The logger category the operation writes its own records under.</summary>
     /// <remarks>
@@ -134,40 +548,120 @@ internal static class IssuanceFixture
     internal const string LoggerCategory = "PowerFramework.Security.Endpoints.TokenEndpoints";
 
     /// <summary>
-    /// Builds a client certificate whose common name is the supplied identity.
+    /// The one certificate authority every trusted caller certificate in this suite is issued from,
+    /// together with the PEM file the hosts point their trust-anchor setting at.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ONE AUTHORITY FOR THE WHOLE SUITE, CREATED ONCE. Every host this file starts configures the same
+    /// anchor path, so a certificate this fixture issues is honoured by any of them - which keeps a row
+    /// free to build its own host without also having to arrange its own trust. A row that needs an
+    /// UNTRUSTED certificate asks for one explicitly through
+    /// <see cref="CreateUntrustedCallerCertificate"/>, so trust is never accidental in either direction.
+    /// </para>
+    /// <para>
+    /// THE ANCHOR IS WRITTEN TO DISK BECAUSE THE SETTING IS A PATH, and the setting is a path because a
+    /// deployment mounts its authority rather than embedding it. The file carries the authority's PUBLIC
+    /// certificate only - never its key - so nothing secret is written; the signing key stays in memory
+    /// in this process and is discarded when it exits. The directory is per-run, so two concurrent runs
+    /// of this suite cannot observe each other's anchor.
+    /// </para>
+    /// </remarks>
+    private static readonly Lazy<(X509Certificate2 Authority, string AnchorPath)> TestAuthority =
+        new(CreateAuthority, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>
+    /// The path to the PEM file holding this suite's certificate authority, for a host's trust anchor.
+    /// </summary>
+    internal static string ClientCertificateAuthorityPath => TestAuthority.Value.AnchorPath;
+
+    /// <summary>
+    /// Builds a TRUSTED client certificate whose common name is the supplied identity.
     /// </summary>
     /// <param name="commonName">The identity the certificate should establish.</param>
-    /// <returns>A self-signed certificate, valid now, held only in memory.</returns>
+    /// <returns>A certificate issued by this suite's authority, valid now, held only in memory.</returns>
     /// <remarks>
-    /// SELF-SIGNED AND EPHEMERAL. Chain verification, validity and revocation are the transport's job
-    /// against a trust anchor a deployment mounts, and the implementation deliberately repeats none of
-    /// it - so a row here needs a certificate that carries an identity and nothing more. Nothing is
-    /// written to disk and no certificate store is touched.
+    /// <para>
+    /// ISSUED BY THIS SUITE'S AUTHORITY RATHER THAN SELF-SIGNED, and that changed when the trust decision
+    /// became a behaviour of this service rather than a promise about its transport. A self-signed
+    /// certificate chains to nothing the deployment configured, so the issuance operation now refuses it -
+    /// correctly - and every row asserting a successful mint needs a certificate that actually establishes
+    /// itself.
+    /// </para>
+    /// <para>
+    /// An elliptic-curve key rather than an RSA one, deliberately. The operation reads exactly ONE thing
+    /// from the certificate - the identity in its subject - and never its key, so the key type is
+    /// irrelevant to the behaviour under test; choosing the cheap one keeps a suite that builds a fresh
+    /// host per row from spending its time on key generation. That the rows pass with a non-RSA client
+    /// certificate is itself worth having asserted: the transport identity and the RSA signing identity
+    /// are separate keys with separate lifetimes.
+    /// </para>
+    /// <para>
+    /// NO EXTENDED KEY USAGE IS DECLARED, which matches what this repository's own generation recipe
+    /// produces and is therefore the shape a deployment will actually present. A certificate declaring no
+    /// usage restriction is unrestricted by definition, so it satisfies the client-authentication
+    /// requirement without naming it - and a row that needs the refusing case declares server
+    /// authentication explicitly instead.
+    /// </para>
     /// </remarks>
     internal static X509Certificate2 CreateCallerCertificate(string commonName)
     {
         ArgumentNullException.ThrowIfNull(commonName);
 
-        // An elliptic-curve key rather than an RSA one, deliberately. The operation reads exactly ONE
-        // thing from the certificate - the identity in its subject - and never its key, so the key type
-        // is irrelevant to the behaviour under test; choosing the cheap one keeps a suite that builds a
-        // fresh host per row from spending its time on key generation. That the rows pass with a
-        // non-RSA client certificate is itself worth having asserted: the transport identity and the
-        // RSA signing identity are separate keys with separate lifetimes.
+        return IssueFromAuthority(BuildSubject(commonName), extension: null);
+    }
+
+    /// <summary>
+    /// Builds a TRUSTED client certificate whose validity window brackets one specific instant.
+    /// </summary>
+    /// <param name="commonName">The identity the certificate should establish.</param>
+    /// <param name="instant">The instant the certificate must be valid at.</param>
+    /// <returns>A certificate issued by this suite's authority, valid around <paramref name="instant"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// FOR THE ROWS THAT FREEZE THE HOST'S CLOCK, AND THE COUPLING IS DELIBERATE RATHER THAN INCIDENTAL.
+    /// The trust layer measures a certificate's validity window against the INJECTED clock, because the
+    /// refactor's determinism rule requires every clock read to be substitutable - so a host frozen at a
+    /// calendar instant judges a certificate at that instant, and a certificate valid only around real
+    /// "now" is correctly refused there.
+    /// </para>
+    /// <para>
+    /// A NAMED BUILDER RATHER THAN TWO NULLABLE DATE PARAMETERS ON THE ORDINARY ONE, so that a row using
+    /// it states WHY it needs a different window - it froze the clock - instead of expressing that as two
+    /// arithmetic arguments a reader has to reverse-engineer.
+    /// </para>
+    /// </remarks>
+    internal static X509Certificate2 CreateCallerCertificateValidAt(
+        string commonName,
+        DateTimeOffset instant)
+    {
+        ArgumentNullException.ThrowIfNull(commonName);
+
+        return IssueFromAuthority(
+            BuildSubject(commonName),
+            extension: null,
+            notBefore: instant.AddMinutes(-5),
+            notAfter: instant.AddMinutes(5));
+    }
+
+    /// <summary>
+    /// Builds a client certificate that chains to NO configured authority.
+    /// </summary>
+    /// <param name="commonName">The identity the certificate claims to establish.</param>
+    /// <returns>A self-signed certificate, valid now, held only in memory.</returns>
+    /// <remarks>
+    /// The shape an attacker can produce without any cooperation from the deployment: a perfectly
+    /// well-formed certificate, inside its validity window, carrying whatever common name it likes. It
+    /// exists so the trust gate's refusal is asserted against the case that motivates it, rather than
+    /// against a malformed certificate that would fail for a different reason.
+    /// </remarks>
+    internal static X509Certificate2 CreateUntrustedCallerCertificate(string commonName)
+    {
+        ArgumentNullException.ThrowIfNull(commonName);
+
         using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
-        // Built through the framework's own encoder rather than by concatenating a string. A
-        // distinguished name has quoting, escaping and ordering rules, and an identity carrying a
-        // separator is exactly the case a concatenated string gets wrong - which is the same reason the
-        // implementation reads the identity back through the framework's accessor instead of splitting
-        // the subject itself.
-        X500DistinguishedNameBuilder subject = new();
-        subject.AddCommonName(commonName);
-
-        CertificateRequest request = new(
-            subject.Build(),
-            key,
-            HashAlgorithmName.SHA256);
+        CertificateRequest request = new(BuildSubject(commonName), key, HashAlgorithmName.SHA256);
 
         return request.CreateSelfSigned(
             DateTimeOffset.UtcNow.AddMinutes(-5),
@@ -175,29 +669,171 @@ internal static class IssuanceFixture
     }
 
     /// <summary>
-    /// Builds a certificate whose subject carries no common name at all.
+    /// Builds a TRUSTED certificate whose declared extended key usage permits server authentication only.
     /// </summary>
-    /// <returns>A self-signed certificate establishing no usable identity.</returns>
+    /// <param name="commonName">The identity the certificate carries.</param>
+    /// <returns>A certificate issued by this suite's authority.</returns>
+    /// <remarks>
+    /// A LISTENER'S CERTIFICATE IS NOT A CALLER CREDENTIAL, and this is the material that proves the
+    /// distinction is enforced. It chains to the configured authority and is inside its window, so it
+    /// fails on the usage restriction alone and on nothing else - which is what makes the row driving it
+    /// a test of the usage check rather than of the chain.
+    /// </remarks>
+    internal static X509Certificate2 CreateServerOnlyCallerCertificate(string commonName)
+    {
+        ArgumentNullException.ThrowIfNull(commonName);
+
+        // 1.3.6.1.5.5.7.3.1 is server authentication. Written as the identifier because a friendly name
+        // is localized by the platform on some hosts and an identifier is not.
+        X509EnhancedKeyUsageExtension usage = new(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") },
+            critical: false);
+
+        return IssueFromAuthority(BuildSubject(commonName), usage);
+    }
+
+    /// <summary>
+    /// Builds a TRUSTED certificate whose validity window has already closed.
+    /// </summary>
+    /// <param name="commonName">The identity the certificate carries.</param>
+    /// <returns>An expired certificate issued by this suite's authority.</returns>
+    /// <remarks>
+    /// Issued by the configured authority so that the ONLY thing wrong with it is its window - a
+    /// self-signed expired certificate would be refused for two reasons and would prove neither.
+    /// </remarks>
+    internal static X509Certificate2 CreateExpiredCallerCertificate(string commonName)
+    {
+        ArgumentNullException.ThrowIfNull(commonName);
+
+        return IssueFromAuthority(
+            BuildSubject(commonName),
+            extension: null,
+            notBefore: DateTimeOffset.UtcNow.AddDays(-10),
+            notAfter: DateTimeOffset.UtcNow.AddDays(-1));
+    }
+
+    /// <summary>
+    /// Builds a TRUSTED certificate whose subject carries no common name at all.
+    /// </summary>
+    /// <returns>A certificate establishing no usable identity.</returns>
     /// <remarks>
     /// The subject declares an organisation and nothing else, which is the shape that makes the
-    /// framework's simple-name accessor answer with nothing. It exists so the "presented but unusable"
-    /// arm is proved rather than assumed.
+    /// framework's simple-name accessor answer with nothing. It exists so the "presented, trusted, but
+    /// unusable" arm is proved rather than assumed - and it is ISSUED BY THE AUTHORITY precisely so that
+    /// it reaches the identity check instead of stopping at the trust gate.
     /// </remarks>
     internal static X509Certificate2 CreateCertificateWithoutCommonName()
+    {
+        X500DistinguishedNameBuilder subject = new();
+        subject.AddOrganizationName("powerframework-tests");
+
+        return IssueFromAuthority(subject.Build(), extension: null);
+    }
+
+    /// <summary>Encodes one common name as a distinguished name.</summary>
+    /// <param name="commonName">The identity.</param>
+    /// <returns>The encoded subject.</returns>
+    /// <remarks>
+    /// Built through the framework's own encoder rather than by concatenating a string. A distinguished
+    /// name has quoting, escaping and ordering rules, and an identity carrying a separator is exactly the
+    /// case a concatenated string gets wrong - which is the same reason the implementation reads the
+    /// identity back through the framework's accessor instead of splitting the subject itself.
+    /// </remarks>
+    private static X500DistinguishedName BuildSubject(string commonName)
+    {
+        X500DistinguishedNameBuilder subject = new();
+        subject.AddCommonName(commonName);
+
+        return subject.Build();
+    }
+
+    /// <summary>Issues one leaf certificate from this suite's authority.</summary>
+    /// <param name="subject">The encoded subject.</param>
+    /// <param name="extension">An extension to declare, or <see langword="null"/> for none.</param>
+    /// <param name="notBefore">The start of the validity window, defaulting to five minutes ago.</param>
+    /// <param name="notAfter">The end of the validity window, defaulting to five minutes hence.</param>
+    /// <returns>The issued certificate, which carries its own private key.</returns>
+    /// <remarks>
+    /// The serial number is drawn from a fresh identifier rather than a counter, so two leaves issued in
+    /// the same run can never collide - a collision would make one of them unchainable for a reason no
+    /// row is testing. The issued certificate is recombined with its own key, because the platform's
+    /// issuance produces the public half only.
+    /// </remarks>
+    private static X509Certificate2 IssueFromAuthority(
+        X500DistinguishedName subject,
+        X509Extension? extension,
+        DateTimeOffset? notBefore = null,
+        DateTimeOffset? notAfter = null)
+    {
+        using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        CertificateRequest request = new(subject, key, HashAlgorithmName.SHA256);
+
+        if (extension is not null)
+        {
+            request.CertificateExtensions.Add(extension);
+        }
+
+        using X509Certificate2 issued = request.Create(
+            TestAuthority.Value.Authority,
+            notBefore ?? DateTimeOffset.UtcNow.AddMinutes(-5),
+            notAfter ?? DateTimeOffset.UtcNow.AddMinutes(5),
+            Guid.NewGuid().ToByteArray());
+
+        return issued.CopyWithPrivateKey(key);
+    }
+
+    /// <summary>Creates the suite's authority and writes its public certificate to a temporary file.</summary>
+    /// <returns>The authority and the path its certificate was written to.</returns>
+    /// <remarks>
+    /// The authority declares itself a certificate authority with a path length of zero, which is what
+    /// makes a chain built against it accept a leaf and refuse an intermediate - the shape the
+    /// documentation's own generation recipe produces and the narrowest one that works.
+    /// </remarks>
+    private static (X509Certificate2 Authority, string AnchorPath) CreateAuthority()
     {
         using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
         X500DistinguishedNameBuilder subject = new();
-        subject.AddOrganizationName("powerframework-tests");
+        subject.AddCommonName("powerframework-security-tests-ca");
 
-        CertificateRequest request = new(
-            subject.Build(),
-            key,
-            HashAlgorithmName.SHA256);
+        CertificateRequest request = new(subject.Build(), key, HashAlgorithmName.SHA256);
 
-        return request.CreateSelfSigned(
-            DateTimeOffset.UtcNow.AddMinutes(-5),
-            DateTimeOffset.UtcNow.AddMinutes(5));
+        request.CertificateExtensions.Add(
+            new X509BasicConstraintsExtension(
+                certificateAuthority: true,
+                hasPathLengthConstraint: true,
+                pathLengthConstraint: 0,
+                critical: true));
+
+        request.CertificateExtensions.Add(
+            new X509KeyUsageExtension(
+                X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.DigitalSignature,
+                critical: true));
+
+        // A WIDE WINDOW, AND THE WIDTH HAS A REASON RATHER THAN BEING GENEROSITY. Several rows in this
+        // suite freeze their host's clock at a CALENDAR LITERAL, and the trust layer both judges a
+        // certificate's window and builds its chain against that injected clock - so the authority has to
+        // be valid at every instant any row freezes at, in either direction, and the platform additionally
+        // refuses to issue a leaf whose window starts before its issuer's. Five years each way covers the
+        // literals this suite uses with room for one to be added. It is a test fixture held in memory and
+        // in a per-run temporary file; nothing here is a deployment lifetime.
+        X509Certificate2 authority = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddYears(-5),
+            DateTimeOffset.UtcNow.AddYears(5));
+
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "pfw-security-client-ca-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
+
+        _ = Directory.CreateDirectory(directory);
+
+        string anchorPath = Path.Combine(directory, "client-ca.crt");
+
+        // The PUBLIC certificate only. The authority's key never leaves this process.
+        File.WriteAllText(anchorPath, authority.ExportCertificatePem());
+
+        return (authority, anchorPath);
     }
 
     /// <summary>Builds a well-formed request body.</summary>
@@ -205,6 +841,21 @@ internal static class IssuanceFixture
     /// <param name="audience">The intended audience.</param>
     /// <param name="scopes">The requested scopes.</param>
     /// <returns>The body.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE DEFAULT AUDIENCE IS THE CALLER'S OWN IDENTITY, AND THAT IS LOAD-BEARING RATHER THAN ARBITRARY.
+    /// The narrow matrices the refusal rows install authorise exactly this caller for exactly this audience
+    /// and nothing else, so the default is the ONE pairing a row can rely on being permitted - which is
+    /// what lets a row vary the scope set alone and attribute the answer to the scope gate. A default
+    /// naming any other roster member would make every scope row an audience refusal instead, silently: the
+    /// status is the same 403 either way, and only the sentence differs.
+    /// </para>
+    /// <para>
+    /// A caller minting for its own identity is not a self-grant of anything: the audience is the RECEIVER
+    /// a token addresses, and a deployment whose ingress is also a receiver is ordinary. The shipped
+    /// production matrix contains no such pairing, and a conformance row asserts that absence separately.
+    /// </para>
+    /// </remarks>
     internal static TokenIssuanceRequestBody Body(
         string? subject = CallerIdentity,
         string? audience = CallerIdentity,
@@ -215,6 +866,115 @@ internal static class IssuanceFixture
             Audience = audience,
             Scopes = scopes ?? [ReadScope],
         };
+
+    /// <summary>
+    /// Declares the issuance permission matrix this fixture's rows exercise.
+    /// </summary>
+    /// <param name="options">The bound options to amend.</param>
+    /// <remarks>
+    /// <para>
+    /// THE ROSTER IS PART OF THE SUBJECT HERE, NOT PLUMBING AROUND IT. Every row in this file drives the
+    /// real <c>POST /v1/tokens</c> over the real pipeline, so the issuer's permission decision - who may
+    /// address which audience, and which scopes they may hold - is on the path being tested. Declaring the
+    /// matrix explicitly is what lets a row assert that a PERMITTED pairing is issued and an unpermitted
+    /// one is refused, and it is deliberately declared here in one place rather than per row so the two
+    /// kinds of row cannot drift apart.
+    /// </para>
+    /// <para>
+    /// THE THREE CONFIGURED IDENTITIES ARE GRANTED THE THREE CONFIGURED AUDIENCES, and every grant carries
+    /// both scopes. That is broader than any real deployment would be - the shipped settings file grants
+    /// each caller only the audiences it actually calls - and it is deliberate: the narrowing behaviour has
+    /// its own rows that declare their own tighter rosters, and a broad matrix here keeps every other row
+    /// asserting the property it exists for rather than a permission it never meant to exercise.
+    /// </para>
+    /// <para>
+    /// <see cref="UnlistedAudience"/> IS DELIBERATELY ABSENT, from this matrix and from the audience roster
+    /// alike, which is what keeps the unlisted-audience rows meaningful.
+    /// </para>
+    /// </remarks>
+    internal static void ApplyTestRoster(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        options.Callers.Clear();
+
+        // BOTH SHAPES ARE CLEARED, because the issuer enforces their UNION: leaving the settings file's
+        // flat rows in place would give this host a matrix that is partly the deployment's and partly this
+        // fixture's, and a row could then pass on a production grant it was not meant to be using.
+        options.CallerAuthorizations.Clear();
+
+        // AND THE ISSUANCE ROSTER IS REBUILT, for a reason that is not about authorization at all: the
+        // options validator cross-checks every `Clients` entry's audiences and scopes against the
+        // deployment-wide `Audiences` list, so a roster left over from the settings file refuses to START
+        // any host this fixture narrows. See IssuanceFixture.PermitTestCallers for the same note.
+        options.Clients.Clear();
+
+        foreach (string identity in RosteredIdentities)
+        {
+            SecurityCallerOptions caller = new() { Identity = identity };
+
+            SecurityClientOptions client = new()
+            {
+                Subject = identity,
+                SecretConfigurationKey = SharedRosterSecretConfigurationKey,
+            };
+
+            foreach (string audience in RosteredIdentities)
+            {
+                SecurityCallerGrantOptions grant = new() { Audience = audience };
+
+                foreach (string scope in RosteredScopes)
+                {
+                    grant.Scopes.Add(scope);
+                }
+
+                caller.Grants.Add(grant);
+                client.Audiences.Add(audience);
+            }
+
+            foreach (string scope in RosteredScopes)
+            {
+                client.Scopes.Add(scope);
+            }
+
+            options.Callers.Add(caller);
+            options.Clients.Add(client);
+        }
+    }
+
+    /// <summary>
+    /// The three identities this fixture's matrix knows, used as both callers and audiences.
+    /// </summary>
+    /// <remarks>
+    /// DELIBERATELY A SUBSET of the deployment-wide audience list, and that is what makes the negative rows
+    /// reachable: a request naming an audience this service SERVES but this caller holds no grant for has
+    /// to be expressible, and it cannot be if every audience is granted to everyone.
+    /// </remarks>
+    private static readonly string[] RosteredIdentities =
+    [
+        CallerIdentity,
+        SecondAudience,
+        SelfAudience,
+    ];
+
+    /// <summary>
+    /// Every scope this fixture's matrix grants each rostered pair.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE INBOUND SCOPES BELONG HERE, NOT ONLY THE OUTBOUND ONES.</b> This matrix used to grant the two
+    /// DataWindow scopes alone, which was sufficient while the routes this service PUBLISHES were reachable
+    /// by any authenticated caller. They are not: the cryptographic surface and the authenticated probe each
+    /// require their own scope, so a host whose matrix omits them mints a token the host itself then refuses
+    /// - and, because an empty granted set is a refusal rather than an empty success, the refusal happens at
+    /// ISSUANCE, before any row reaches the behaviour it was written to assert.
+    /// </remarks>
+    private static readonly string[] RosteredScopes =
+    [
+        ReadScope,
+        WriteScope,
+        CryptoEndpoints.RequiredScope,
+        PingEndpoints.RequiredScope,
+    ];
 
     /// <summary>
     /// Builds a body whose scope set is genuinely absent rather than defaulted.
@@ -228,7 +988,7 @@ internal static class IssuanceFixture
         new()
         {
             Subject = CallerIdentity,
-            Audience = CallerIdentity,
+            Audience = SecondAudience,
             Scopes = null,
         };
 
@@ -369,6 +1129,7 @@ internal sealed class IssuanceHostFactory : WebApplicationFactory<Program>
     private readonly string? _issuancePath;
     private readonly CapturedRecords? _captured;
     private readonly LogLevel? _minimumLevel;
+    private readonly Action<SecurityOptions>? _matrix;
 
     /// <summary>Creates the factory.</summary>
     /// <param name="certificate">
@@ -393,13 +1154,20 @@ internal sealed class IssuanceHostFactory : WebApplicationFactory<Program>
     /// the configured filtering alone. Supplied by the row that asserts issuance succeeds with the
     /// operator channel switched off.
     /// </param>
+    /// <param name="matrix">
+    /// A shaping delegate applied to the authorization matrix AFTER the suite's permissive default, or
+    /// <see langword="null"/> to keep that default. Supplied by the rows that assert an authorization
+    /// REFUSAL, which the default deliberately makes unreachable - it authorises every test caller for
+    /// every roster audience precisely so that the rest of the suite is about something else.
+    /// </param>
     public IssuanceHostFactory(
         X509Certificate2? certificate = null,
         DateTimeOffset? instant = null,
         string? signingKey = null,
         string? issuancePath = null,
         CapturedRecords? captured = null,
-        LogLevel? minimumLevel = null)
+        LogLevel? minimumLevel = null,
+        Action<SecurityOptions>? matrix = null)
     {
         _certificate = certificate;
         _instant = instant;
@@ -407,6 +1175,7 @@ internal sealed class IssuanceHostFactory : WebApplicationFactory<Program>
         _issuancePath = issuancePath;
         _captured = captured;
         _minimumLevel = minimumLevel;
+        _matrix = matrix;
     }
 
     /// <inheritdoc/>
@@ -414,14 +1183,43 @@ internal sealed class IssuanceHostFactory : WebApplicationFactory<Program>
     {
         ArgumentNullException.ThrowIfNull(builder);
 
+        // EVERY ROSTER SECRET THE SETTINGS FILES NAME, WITHOUT WHICH NO HOST STARTS. The issuance
+        // registry resolves each named configuration key eagerly and refuses to construct when one is
+        // absent - the posture that turns a missing deployment secret into a startup failure rather than
+        // a caller that mysteriously cannot authenticate. Reused from the sibling factory so one
+        // generated value serves the whole process and nothing in this repository is a usable
+        // credential.
+        builder.ConfigureAppConfiguration(configuration =>
+            configuration.AddInMemoryCollection(SecurityAppFactory.RosterSecretOverrides()));
+
         builder.ConfigureServices(services =>
         {
             string signingKey = _signingKey;
             string? issuancePath = _issuancePath;
+            Action<SecurityOptions>? matrix = _matrix;
 
             services.Configure<SecurityOptions>(options =>
             {
                 options.SigningKey = signingKey;
+
+                // THE SUITE'S OWN CERTIFICATE AUTHORITY, so a certificate this fixture issued establishes
+                // itself and a self-signed one does not. Configured on EVERY host this factory builds
+                // rather than only where a row needs it, because the issuance operation establishes trust
+                // BEFORE it reads a common name - a host with no anchor answers 401 to every credential -
+                // so every row asserting anything beyond that refusal would otherwise fail on the gate
+                // rather than on what it was written to check. A row that needs the no-anchor posture
+                // clears this in its own matrix delegate below, which runs after.
+                options.ClientCertificateAuthorityPath =
+                    IssuanceFixture.ClientCertificateAuthorityPath;
+
+                // The permission matrix these rows exercise. Declared here rather than inherited from the
+                // settings file because the shipped roster grants each caller only the audiences it
+                // actually calls, and this suite deliberately varies both.
+                IssuanceFixture.ApplyTestRoster(options);
+
+                // AFTER the two defaults above, so a row asserting a refusal can narrow or clear what they
+                // installed. Applied last so its view of the roster, the matrix and the anchor is final.
+                matrix?.Invoke(options);
 
                 if (issuancePath is not null)
                 {
@@ -480,9 +1278,9 @@ internal sealed class IssuanceHostFactory : WebApplicationFactory<Program>
         TokenIssuanceResult issued = Services
             .GetRequiredService<TokenIssuer>()
             .Issue(new TokenIssuanceRequest(
-                subject: IssuanceFixture.SelfAudience,
+                subject: IssuanceFixture.SecondAudience,
                 audience: IssuanceFixture.SelfAudience,
-                scopes: [IssuanceFixture.ReadScope]));
+                scopes: [CryptoEndpoints.RequiredScope, PingEndpoints.RequiredScope]));
 
         Assert.Equal(TokenIssuanceOutcome.Issued, issued.Outcome);
         Assert.NotNull(issued.Token);
@@ -1374,13 +2172,55 @@ public sealed class TokenCallerIdentityTests
         Assert.Null(TokenEndpoints.ResolveCallerIdentity(certificate));
     }
 
-    /// <summary>The route's policy predicate refuses a connection with no certificate.</summary>
+    /// <summary>
+    /// The route's policy predicate refuses a request presenting neither credential.
+    /// </summary>
     [Fact]
-    public void PolicyRefusesAConnectionWithoutACertificate()
+    public void PolicyRefusesARequestPresentingNeitherCredential()
     {
         DefaultHttpContext connection = new();
 
-        Assert.False(TokenEndpoints.HasTransportCredential(BuildContext(connection)));
+        Assert.False(TokenEndpoints.HasIssuanceCredential(BuildContext(connection)));
+    }
+
+    /// <summary>
+    /// The route's policy predicate admits a request carrying a Basic credential and no certificate.
+    /// </summary>
+    /// <remarks>
+    /// THE ROW THAT WOULD HAVE CAUGHT AN OUTAGE. The attached environment fixes every listener in this
+    /// system to plain HTTP, so no client certificate can be presented at all; a predicate that admitted
+    /// only a certificate would therefore refuse EVERY caller, the sole issuer would answer nothing, and
+    /// no service in the system could obtain a credential - while the readiness probe reported healthy
+    /// throughout. The value presented here need not be a VALID credential, because the predicate tests
+    /// presence and the handler tests correctness.
+    /// </remarks>
+    [Fact]
+    public void PolicyAdmitsARequestCarryingABasicCredential()
+    {
+        DefaultHttpContext connection = new();
+        connection.Request.Headers.Authorization = "Basic " + Convert.ToBase64String(
+            System.Text.Encoding.UTF8.GetBytes("caller:secret"));
+
+        Assert.Null(connection.Connection.ClientCertificate);
+        Assert.False(connection.User.Identity?.IsAuthenticated ?? false);
+        Assert.True(TokenEndpoints.HasIssuanceCredential(BuildContext(connection)));
+    }
+
+    /// <summary>
+    /// The route's policy predicate is not satisfied by a bearer token.
+    /// </summary>
+    /// <remarks>
+    /// The document-level bearer requirement means a caller may well hold a token, and presenting it here
+    /// must neither authenticate it nor stand in for the credential this operation does accept - a caller
+    /// cannot present a token in order to obtain its first token.
+    /// </remarks>
+    [Fact]
+    public void PolicyIsNotSatisfiedByABearerToken()
+    {
+        DefaultHttpContext connection = new();
+        connection.Request.Headers.Authorization = "Bearer not-a-credential-for-this-operation";
+
+        Assert.False(TokenEndpoints.HasIssuanceCredential(BuildContext(connection)));
     }
 
     /// <summary>The route's policy predicate admits a connection carrying a certificate.</summary>
@@ -1399,7 +2239,7 @@ public sealed class TokenCallerIdentityTests
         connection.Features.Set<ITlsConnectionFeature>(new StubTlsConnectionFeature(certificate));
 
         Assert.False(connection.User.Identity?.IsAuthenticated ?? false);
-        Assert.True(TokenEndpoints.HasTransportCredential(BuildContext(connection)));
+        Assert.True(TokenEndpoints.HasIssuanceCredential(BuildContext(connection)));
     }
 
     /// <summary>
@@ -1421,7 +2261,7 @@ public sealed class TokenCallerIdentityTests
             new System.Security.Claims.ClaimsPrincipal(),
             resource: new object());
 
-        Assert.True(TokenEndpoints.HasTransportCredential(context));
+        Assert.True(TokenEndpoints.HasIssuanceCredential(context));
     }
 
     /// <summary>Builds an authorization context over one connection, as the middleware would.</summary>
@@ -1608,6 +2448,15 @@ public sealed class TokenRegistrationTests
 public sealed class TokenRoundTripTests
 {
     /// <summary>The issuer identity the development settings configure.</summary>
+    /// <remarks>
+    /// <b>TLS, BECAUSE THAT IS THE LISTENER THIS SERVICE BINDS.</b> Every endpoint in the estate is
+    /// <c>https</c> - a token is a bearer credential and a key set is the material every other service
+    /// trusts, so carrying either over cleartext would let an observer replay the one and substitute the
+    /// other (CWE-319). The issuer is compared BYTE FOR BYTE against the <c>iss</c> claim, so this
+    /// constant and <c>Security:Issuer</c> in <c>appsettings.Development.json</c> must agree on the SCHEME
+    /// as well as on the host and the port - a mismatch of one character rejects every token, which is
+    /// exactly what this row set exists to catch and exactly what it did catch.
+    /// </remarks>
     private const string ConfiguredIssuer = "https://localhost:5104";
 
     /// <summary>A minted token validates against the published key set.</summary>
@@ -1693,6 +2542,11 @@ public sealed class TokenRoundTripTests
         SecurityKey published = await ReadPublishedKeyAsync(client);
 
         TokenValidationParameters parameters = Parameters(published);
+        // AN AUDIENCE THE DEPLOYMENT SERVES BUT THIS TOKEN DOES NOT CARRY, which is the shape of a
+        // replay: a credential minted for one recipient presented to another. The second roster identity
+        // serves, because it is on the deployment roster and is NOT what the default body addresses - the
+        // default addresses the caller's own identity, so naming that here would validate successfully and
+        // assert the opposite of this row.
         parameters.ValidAudiences = [IssuanceFixture.SecondAudience];
 
         TokenValidationResult result =
@@ -1715,8 +2569,11 @@ public sealed class TokenRoundTripTests
     {
         DateTimeOffset issuedAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-        using X509Certificate2 certificate =
-            IssuanceFixture.CreateCallerCertificate(IssuanceFixture.CallerIdentity);
+        // Valid AT the frozen issuance instant, for the reason recorded on the builder: this host's clock
+        // is the one the trust layer measures the certificate's window against.
+        using X509Certificate2 certificate = IssuanceFixture.CreateCallerCertificateValidAt(
+            IssuanceFixture.CallerIdentity,
+            issuedAt);
 
         await using IssuanceHostFactory factory = new(certificate, issuedAt);
         using HttpClient client = factory.CreateClient();
@@ -1831,6 +2688,11 @@ public sealed class TokenRoundTripTests
             ValidateIssuer = true,
             ValidIssuers = [ConfiguredIssuer],
             ValidateAudience = true,
+            // THE AUDIENCE THE DEFAULT REQUEST BODY NAMES, read from the same constant the body reads so
+            // the two cannot drift. A verifier configured for any other audience would be validating a
+            // token this fixture never minted, and would fail for a reason unrelated to what its row
+            // asserts. The default is the caller's own identity, and Body() records why that pairing is
+            // the one every narrow matrix in this suite permits.
             ValidAudiences = [IssuanceFixture.CallerIdentity],
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
@@ -1865,8 +2727,12 @@ public sealed class TokenDeterminismTests
     {
         DateTimeOffset instant = new(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
 
-        using X509Certificate2 certificate =
-            IssuanceFixture.CreateCallerCertificate(IssuanceFixture.CallerIdentity);
+        // Valid AT the frozen instant, not at real "now": the trust layer judges a certificate's window
+        // against the injected clock, so this host - frozen at a calendar instant - would correctly
+        // refuse a certificate scoped to the wall clock.
+        using X509Certificate2 certificate = IssuanceFixture.CreateCallerCertificateValidAt(
+            IssuanceFixture.CallerIdentity,
+            instant);
 
         await using IssuanceHostFactory factory = new(certificate, instant);
         using HttpClient client = factory.CreateClient();
@@ -1876,7 +2742,14 @@ public sealed class TokenDeterminismTests
 
         Assert.Equal(first.IssuedAt, second.IssuedAt);
         Assert.Equal(first.ExpiresIn, second.ExpiresIn);
-        Assert.Equal(first.AccessToken, second.AccessToken);
+
+        // COMPARED BY FINGERPRINT, NOT BY VALUE (C-F). These two credentials came off the live endpoint, so
+        // handing them to Assert.Equal would render two working tokens into the failure message and from
+        // there into the CI log. The digest keeps the byte-identity claim exactly and makes the rendered
+        // operands one-way; SensitiveValueAssertions.cs carries the full reasoning.
+        Assert.Equal(
+            SensitiveValueAssertions.Fingerprint(first.AccessToken),
+            SensitiveValueAssertions.Fingerprint(second.AccessToken));
 
         JsonWebToken parsed = new(first.AccessToken);
 
@@ -2096,32 +2969,60 @@ public sealed class TokenGeneratedDocumentTests
     }
 
     /// <summary>
-    /// The generated document declares the mutual-TLS requirement and NO bearer alternative.
+    /// The generated document declares the two credential schemes as ALTERNATIVES and NO bearer
+    /// alternative.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
-    /// THE ROW THAT PROVES THE OVERRIDE SURVIVED GENERATION. A document listing both schemes would tell a
-    /// consumer it may present a token instead of a certificate, which is the one thing this operation
-    /// cannot accept - and the generator does not synthesise a requirement from authorization metadata by
-    /// itself, so a document with no requirement at all would advertise an anonymous mint.
+    /// <para>
+    /// THE ROW THAT PROVES THE OVERRIDE SURVIVED GENERATION. A document that also listed the bearer
+    /// scheme would tell a consumer it may present a token instead of a credential, which is the one
+    /// thing this operation cannot accept - and the generator does not synthesise a requirement from
+    /// authorization metadata by itself, so a document with no requirement at all would advertise an
+    /// anonymous mint.
+    /// </para>
+    /// <para>
+    /// TWO REQUIREMENT OBJECTS, NOT ONE OBJECT NAMING TWO SCHEMES, and this row asserts that shape
+    /// specifically because the difference is the whole meaning. A list of requirements is a DISJUNCTION
+    /// - any one satisfies the operation, which is what the handler implements - whereas two schemes
+    /// inside one requirement is a CONJUNCTION demanding both at once, which would publish an operation
+    /// no caller in this system can reach. Both spellings look nearly identical in a document and only
+    /// one of them is correct.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task GeneratedDocumentDeclaresMutualTlsOnlyAsync()
+    public async Task GeneratedDocumentDeclaresBothCredentialSchemesAsAlternativesAsync()
     {
         using JsonDocument document = await ReadAsync();
 
-        JsonElement requirement = Operation(document).GetProperty("security").EnumerateArray().Single();
+        List<JsonElement> requirements =
+            [.. Operation(document).GetProperty("security").EnumerateArray()];
 
-        Assert.True(requirement.TryGetProperty("mutualTls", out JsonElement scopes));
-        Assert.Empty(scopes.EnumerateArray());
-        Assert.False(requirement.TryGetProperty("bearerAuth", out _));
+        Assert.Equal(2, requirements.Count);
 
-        JsonElement scheme = document.RootElement
+        // Each requirement names exactly ONE scheme, which is what makes the list a disjunction.
+        foreach (JsonElement requirement in requirements)
+        {
+            Assert.Single(requirement.EnumerateObject());
+            Assert.False(requirement.TryGetProperty("bearerAuth", out _));
+        }
+
+        Assert.True(requirements[0].TryGetProperty("clientCredential", out JsonElement credentialScopes));
+        Assert.Empty(credentialScopes.EnumerateArray());
+
+        Assert.True(requirements[1].TryGetProperty("mutualTls", out JsonElement certificateScopes));
+        Assert.Empty(certificateScopes.EnumerateArray());
+
+        JsonElement schemes = document.RootElement
             .GetProperty("components")
-            .GetProperty("securitySchemes")
-            .GetProperty("mutualTls");
+            .GetProperty("securitySchemes");
 
-        Assert.Equal("mutualTLS", scheme.GetProperty("type").GetString());
+        JsonElement credentialScheme = schemes.GetProperty("clientCredential");
+
+        Assert.Equal("http", credentialScheme.GetProperty("type").GetString());
+        Assert.Equal("basic", credentialScheme.GetProperty("scheme").GetString());
+
+        Assert.Equal("mutualTLS", schemes.GetProperty("mutualTls").GetProperty("type").GetString());
     }
 
     /// <summary>

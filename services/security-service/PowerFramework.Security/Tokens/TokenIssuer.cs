@@ -197,6 +197,13 @@
 
 using System.Collections.Frozen;
 using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+
+using Microsoft.Extensions.Configuration;
 
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
@@ -208,15 +215,25 @@ using PowerFramework.Shared.Kernel;
 namespace PowerFramework.Security.Tokens;
 
 /// <summary>
-/// What an issuance attempt produced: a token, or the one refusal this issuer can report.
+/// What an issuance attempt produced: a token, or one of the four refusals this issuer can report.
 /// </summary>
 /// <remarks>
 /// <para>
-/// TWO MEMBERS, DELIBERATELY. The published contract gives issuance exactly two outcomes this type
-/// is responsible for distinguishing - a token was minted, or the requested audience is not one this
-/// issuer serves. A malformed request never reaches an outcome at all, because
-/// <see cref="TokenIssuanceRequest"/> refuses to exist in a malformed state, and caller
-/// authentication is settled by the transport before this type is reached.
+/// FIVE MEMBERS, AND FOUR OF THEM ARE REFUSALS THE PUBLISHED CONTRACT FOLDS INTO ONE STATUS. A
+/// malformed request never reaches an outcome at all, because <see cref="TokenIssuanceRequest"/>
+/// refuses to exist in a malformed state, and caller AUTHENTICATION is settled at the issuance edge
+/// before this type is reached - so every member below is an AUTHORISATION answer to a well-formed
+/// request from an authenticated caller.
+/// </para>
+/// <para>
+/// WHY FOUR RATHER THAN ONE, GIVEN THAT ALL FOUR ANSWER THE SAME STATUS CODE. Because the four have
+/// different causes and therefore different fixes, and the endpoint answers each with a sentence that
+/// names the member at fault: an audience this deployment does not serve is an operator's mistake in
+/// the deployment-wide roster, an audience this caller may not address is a mistake in that caller's
+/// roster entry, a scope this caller may not request is a mistake in the caller's request or its
+/// grants, and an unregistered subject is a caller that has no roster entry at all. Collapsing them
+/// would send an operator to the wrong configuration section, and a single opaque refusal is exactly
+/// what makes a permission model unmaintainable.
 /// </para>
 /// <para>
 /// This enumeration exists so the endpoint can select a status code without inspecting a message or
@@ -235,7 +252,7 @@ public enum TokenIssuanceOutcome
     Issued,
 
     /// <summary>
-    /// The requested audience is not on the configured roster, so nothing was minted.
+    /// The requested audience is not on the DEPLOYMENT-WIDE roster, so nothing was minted.
     /// </summary>
     /// <remarks>
     /// No token was created, no signature was computed and
@@ -243,6 +260,38 @@ public enum TokenIssuanceOutcome
     /// outcome: an unlisted audience is refused before any minting work begins.
     /// </remarks>
     AudienceNotPermitted,
+
+    /// <summary>
+    /// The authenticated caller has no authorization for the requested audience, so nothing was minted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DISTINCT FROM <see cref="AudienceNotPermitted"/> BECAUSE THE TWO ARE DIFFERENT FACTS. That one
+    /// says this issuer does not serve the audience at all; this one says the audience is served but not
+    /// to THIS caller. Both are refusals the caller cannot act on, and both are answered with the same
+    /// status and the same sentence for that reason - but an operator reading the service's own records
+    /// needs them apart, because one is fixed on the roster and the other in the authorization matrix.
+    /// </para>
+    /// <para>
+    /// It is also the outcome of an EMPTY matrix, which authorises nothing. That is the fail-closed
+    /// posture rather than a fault, and it means a deployment which blanked its matrix mints nothing
+    /// instead of minting for everyone.
+    /// </para>
+    /// </remarks>
+    CallerNotPermitted,
+
+    /// <summary>
+    /// The caller is authorised for the audience but for NONE of the scopes it requested, so nothing
+    /// was minted.
+    /// </summary>
+    /// <remarks>
+    /// THE NARROW CASE, AND IT IS NARROW ON PURPOSE. A request whose scopes are PARTLY permitted is a
+    /// SUCCESS carrying the permitted part, because the published contract states that the granted set
+    /// may be narrower than the requested one and instructs a caller to read it. This outcome is reached
+    /// only when the intersection is empty - where there is nothing to grant at all, and where the
+    /// response's required scope member could not be populated with anything truthful.
+    /// </remarks>
+    ScopesNotPermitted,
 }
 
 /// <summary>
@@ -665,8 +714,482 @@ public sealed class TokenIssuanceResult
     /// </remarks>
     internal static TokenIssuanceResult ForUnpermittedAudience() =>
         new(TokenIssuanceOutcome.AudienceNotPermitted, token: null);
+
+    /// <summary>
+    /// Reports that the authenticated caller has no authorization for the requested audience.
+    /// </summary>
+    /// <returns>
+    /// A result whose outcome is <see cref="TokenIssuanceOutcome.CallerNotPermitted"/> and whose token
+    /// is <see langword="null"/>.
+    /// </returns>
+    internal static TokenIssuanceResult ForUnpermittedCaller() =>
+        new(TokenIssuanceOutcome.CallerNotPermitted, token: null);
+
+    /// <summary>
+    /// Reports that none of the requested scopes is permitted for this caller and audience.
+    /// </summary>
+    /// <returns>
+    /// A result whose outcome is <see cref="TokenIssuanceOutcome.ScopesNotPermitted"/> and whose token
+    /// is <see langword="null"/>.
+    /// </returns>
+    internal static TokenIssuanceResult ForUnpermittedScopes() =>
+        new(TokenIssuanceOutcome.ScopesNotPermitted, token: null);
 }
 
+
+/// <summary>
+/// The scope claim: its name, its encoding, and the one question a consumer asks of it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// DECLARED BESIDE THE CODE THAT STAMPS IT, AND THAT IS THE WHOLE REASON THIS TYPE EXISTS. The claim
+/// name and the delimiter are written into every minted token by <see cref="TokenIssuer"/>; the route
+/// policies that gate this service's own operations have to read the same name with the same encoding,
+/// and a second spelling of either in an authorization file would be a silent authorization bypass -
+/// a policy reading a claim nobody stamps grants nothing and refuses nothing, it simply never matches,
+/// which looks exactly like a caller lacking a scope. One declaration, consumed by both sides.
+/// </para>
+/// <para>
+/// THE ENCODING IS A SINGLE SPACE-DELIMITED VALUE, NOT A REPEATED CLAIM, which the published contract
+/// decides: the only scope spelling in
+/// <c>shared/PowerFramework.Contracts/OpenApi/security.v1.yaml</c> is the space-delimited response
+/// member. <see cref="Grants"/> nevertheless tolerates a repeated claim as well, because tolerating one
+/// costs a loop this method already has and because a verifier that refused a shape some other issuer
+/// might produce would be brittle for no gain.
+/// </para>
+/// </remarks>
+public static class ScopeClaim
+{
+    /// <summary>The claim type carrying the granted scope set.</summary>
+    /// <remarks>
+    /// A protocol identifier rather than a value. Case-sensitive: claim names are compared ordinally
+    /// everywhere in this service, and this service's inbound bearer handler is configured NOT to map
+    /// claim names, so the name a token carries is the name a policy reads.
+    /// </remarks>
+    public const string ClaimName = "scope";
+
+    /// <summary>The delimiter joining the granted scope set into one value.</summary>
+    /// <remarks>
+    /// A single space, as the published response member's encoding requires. This is the reason a
+    /// requested scope containing white space is refused and the reason a DECLARED scope grant is
+    /// charset-checked: the encoding is lossless only while no scope carries the delimiter.
+    /// </remarks>
+    public const char Delimiter = ' ';
+
+    /// <summary>
+    /// Reports whether a principal's scope claim grants one required scope.
+    /// </summary>
+    /// <param name="principal">The authenticated principal, or <see langword="null"/>.</param>
+    /// <param name="requiredScope">The scope the operation requires.</param>
+    /// <returns>
+    /// <see langword="true"/> when a scope claim carries exactly that scope as one of its
+    /// delimiter-separated tokens; otherwise <see langword="false"/>.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="requiredScope"/> is empty or white space, which can only mean a route declared a
+    /// requirement it cannot state.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// TOKENISED RATHER THAN SUBSTRING-MATCHED, WHICH IS THE ENTIRE CORRECTNESS ARGUMENT. A claim value
+    /// of <c>persistence.readonly</c> CONTAINS the text <c>persistence.read</c>, so a containment test
+    /// would grant a scope the token does not carry - the classic scope-prefix bypass. Splitting on the
+    /// delimiter and comparing whole tokens ordinally cannot do that.
+    /// </para>
+    /// <para>
+    /// ORDINAL AND CASE-SENSITIVE, matching how the issuance roster compares a declared grant and how
+    /// the request type compares a requested scope. Folding case here would grant a scope that merely
+    /// resembles the required one.
+    /// </para>
+    /// <para>
+    /// SPAN-BASED, so a policy evaluated on every request to a protected route allocates nothing. An
+    /// absent principal, an absent claim and an empty claim value all answer false rather than throwing:
+    /// a policy is a predicate, and the caller of a predicate should not have to catch.
+    /// </para>
+    /// </remarks>
+    public static bool Grants(ClaimsPrincipal? principal, string requiredScope)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requiredScope);
+
+        if (principal is null)
+        {
+            return false;
+        }
+
+        foreach (Claim claim in principal.FindAll(
+            static candidate => string.Equals(candidate.Type, ClaimName, StringComparison.Ordinal)))
+        {
+            if (GrantsScope(claim.Value, requiredScope))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reports whether one delimiter-separated claim value carries one required scope as a whole token.
+    /// </summary>
+    /// <param name="claimValue">The claim value.</param>
+    /// <param name="requiredScope">The scope required.</param>
+    /// <returns><see langword="true"/> when a whole token matches ordinally.</returns>
+    /// <remarks>
+    /// Empty tokens - produced by a doubled, leading or trailing delimiter - are skipped rather than
+    /// compared, so a malformed claim cannot match a required scope and cannot short-circuit the scan.
+    /// </remarks>
+    private static bool GrantsScope(string claimValue, string requiredScope)
+    {
+        ReadOnlySpan<char> remaining = claimValue;
+
+        while (!remaining.IsEmpty)
+        {
+            int separator = remaining.IndexOf(Delimiter);
+
+            ReadOnlySpan<char> token = separator < 0 ? remaining : remaining[..separator];
+
+            remaining = separator < 0 ? default : remaining[(separator + 1)..];
+
+            if (!token.IsEmpty && token.SequenceEqual(requiredScope))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// One resolved issuance-roster entry: a caller identity, the audiences and scopes it may ask for, and
+/// - held privately and reachable only through a fixed-time comparison - the secret it authenticates
+/// with.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THE SECRET IS NOT A PROPERTY AND CANNOT BE READ BACK. It is a private field, the only operation over
+/// it is <see cref="SecretMatches"/>, and this type declares no string rendering, no debugger display
+/// and no serialization helper - the same discipline the options type applies to the signing key, for
+/// the same reason: a value that cannot be read cannot be logged by accident.
+/// </para>
+/// <para>
+/// THE PERMITTED SETS ARE FROZEN AT CONSTRUCTION, so the permissions enforced for a caller cannot be
+/// altered after the options validator approved them. They are exposed as read-only sets so a caller -
+/// in practice a test, or a diagnostic - can assert on them without being able to add to them.
+/// </para>
+/// </remarks>
+public sealed class RegisteredIssuanceClient
+{
+    /// <summary>The secret this caller authenticates with, UTF-8 encoded, or null when it has none.</summary>
+    private readonly byte[]? _secret;
+
+    /// <summary>
+    /// Binds one resolved roster entry.
+    /// </summary>
+    /// <param name="subject">The caller identity.</param>
+    /// <param name="permittedAudiences">The audiences this caller may request. Frozen by the caller.</param>
+    /// <param name="permittedScopes">The scopes this caller may request. Frozen by the caller.</param>
+    /// <param name="secret">
+    /// The UTF-8 encoded shared secret, or <see langword="null"/> for a caller that authenticates by
+    /// client certificate only.
+    /// </param>
+    internal RegisteredIssuanceClient(
+        string subject,
+        FrozenSet<string> permittedAudiences,
+        FrozenSet<string> permittedScopes,
+        byte[]? secret)
+    {
+        Subject = subject;
+        PermittedAudiences = permittedAudiences;
+        PermittedScopes = permittedScopes;
+        _secret = secret;
+    }
+
+    /// <summary>The caller identity: the credential identity and the token subject both.</summary>
+    public string Subject { get; }
+
+    /// <summary>The closed set of audiences this caller may request a token for.</summary>
+    public IReadOnlySet<string> PermittedAudiences { get; }
+
+    /// <summary>The closed set of scopes this caller may request.</summary>
+    public IReadOnlySet<string> PermittedScopes { get; }
+
+    /// <summary>
+    /// Whether this caller has a shared secret configured, and can therefore be authenticated by the
+    /// credential scheme at all.
+    /// </summary>
+    /// <value>
+    /// <see langword="false"/> for an entry that names no secret configuration key - a caller that
+    /// authenticates by client certificate only.
+    /// </value>
+    public bool HasSecret => _secret is not null;
+
+    /// <summary>
+    /// Reports whether a presented secret is this caller's, in time independent of how much of it
+    /// matches.
+    /// </summary>
+    /// <param name="presented">The secret the caller presented, UTF-8 encoded.</param>
+    /// <returns>
+    /// <see langword="true"/> when this caller has a secret and the presented bytes equal it exactly.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// FIXED-TIME BY CONSTRUCTION. The platform's fixed-time comparison is used rather than an equality
+    /// operator or a string comparison, because an ordinary comparison returns as soon as two bytes
+    /// differ and therefore leaks the length of the matching prefix - which is enough to recover a secret
+    /// one byte at a time over enough requests. The platform primitive also answers false for a length
+    /// mismatch without a short-circuit that would leak the length.
+    /// </para>
+    /// <para>
+    /// BYTES RATHER THAN STRINGS THROUGHOUT. A string comparison would additionally have to decide about
+    /// culture and normalisation, and a normalising comparison would accept a secret that is not the
+    /// configured one. The bytes are the credential.
+    /// </para>
+    /// </remarks>
+    internal bool SecretMatches(ReadOnlySpan<byte> presented) =>
+        _secret is not null && CryptographicOperations.FixedTimeEquals(_secret, presented);
+}
+
+/// <summary>
+/// The issuance roster, resolved: WHICH callers may obtain a token, WHAT each may ask for, and the
+/// secret each authenticates with. The one component that turns a presented credential into a caller
+/// identity.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THE CREDENTIAL DIRECTORY AND THE PERMISSION ROSTER ARE ONE TYPE. Authentication answers "who is
+/// this" and authorisation answers "what may they have", and here both answers come from the same
+/// configured entry about the same caller. Splitting them would create the two states that read as
+/// working configuration and mint nothing usable: a caller this service can authenticate but has
+/// authorised for nothing, and a caller it has authorised but cannot authenticate.
+/// </para>
+/// <para>
+/// EAGER AND FAIL-FAST. Every secret named by the roster is resolved HERE, at construction, and a named
+/// key that resolves to nothing refuses the host. The alternative - resolving lazily on each request -
+/// turns a missing secret into a caller that mysteriously cannot authenticate against a service whose
+/// readiness probe reports healthy, which is precisely the failure shape the framework application
+/// object's own posture rejects [ws_objects/pfw.pbl.src/pfw.sra:L111-L144].
+/// </para>
+/// <para>
+/// IT READS CONFIGURATION DIRECTLY, AND ONLY BY NAME. The secret for an entry is
+/// <c>configuration[entry.SecretConfigurationKey]</c> - a flat key whose NAME comes from the settings
+/// file and whose VALUE comes from the orchestration secret layer. That is the identical indirection the
+/// key store uses for caller-referenced material, and it is what keeps every credential in this system
+/// out of source, out of settings files and out of container definitions.
+/// </para>
+/// <para>
+/// NO MESSAGE, LOG RECORD OR EXCEPTION FROM THIS TYPE CARRIES A SECRET, a substring of one, or its
+/// length. The only failure it raises names a configuration KEY.
+/// </para>
+/// <para>
+/// REGISTERED AS A SINGLETON, because the roster is immutable once built and rebuilding it per request
+/// would re-read configuration and re-encode every secret on the hot path of the one operation that
+/// cannot be cached.
+/// </para>
+/// </remarks>
+public sealed class IssuanceClientRegistry
+{
+    /// <summary>The configuration key path of the roster, for failure messages.</summary>
+    private const string ClientsKey = SecurityOptions.SectionName + ":Clients";
+
+    /// <summary>
+    /// The length of the decoy compared against when no roster entry matches a presented identity.
+    /// </summary>
+    /// <remarks>
+    /// A fixed, arbitrary length. Its VALUE is irrelevant; what matters is that the unknown-identity path
+    /// performs a comparison of the same kind as the known-identity path, so that "no such client" and
+    /// "wrong secret" are not trivially separable by how quickly each answers.
+    /// </remarks>
+    private const int DecoyLength = 32;
+
+    /// <summary>The roster, keyed ordinally by subject.</summary>
+    private readonly FrozenDictionary<string, RegisteredIssuanceClient> _bySubject;
+
+    /// <summary>
+    /// Random bytes compared against on the unknown-identity path so that path does real work.
+    /// </summary>
+    private readonly byte[] _decoy = RandomNumberGenerator.GetBytes(DecoyLength);
+
+    /// <summary>
+    /// Resolves the roster and every secret it names, or refuses to construct.
+    /// </summary>
+    /// <param name="options">
+    /// The bound security configuration. Resolving its value triggers the startup validator, so the
+    /// shape rules - non-empty roster, distinct subjects, audiences the deployment serves, usable scope
+    /// tokens - have already been enforced by the time this constructor reads anything.
+    /// </param>
+    /// <param name="configuration">
+    /// The configuration root, read ONLY to resolve a secret by the flat key name the roster declares.
+    /// No other key is read through it.
+    /// </param>
+    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A roster entry names a secret configuration key that resolves to nothing, or two entries declare
+    /// the same subject. Each message names the configuration key and never a value.
+    /// </exception>
+    /// <remarks>
+    /// THE DUPLICATE CHECK IS REDUNDANT WITH THE VALIDATOR AND IS KEPT ANYWAY. Without it, a duplicate
+    /// would surface as the frozen-dictionary builder's own exception - a message about a duplicate key
+    /// that names the subject, which is caller-adjacent text this service does not put in diagnostics.
+    /// One comparison per entry buys a diagnostic that names the configuration position instead.
+    /// </remarks>
+    public IssuanceClientRegistry(IOptions<SecurityOptions> options, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        SecurityOptions security = options.Value;
+
+        Dictionary<string, RegisteredIssuanceClient> resolved = new(StringComparer.Ordinal);
+
+        for (int index = 0; index < security.Clients.Count; index++)
+        {
+            SecurityClientOptions declared = security.Clients[index];
+
+            byte[]? secret = ResolveSecret(declared, index, configuration);
+
+            RegisteredIssuanceClient client = new(
+                declared.Subject,
+                declared.Audiences.ToFrozenSet(StringComparer.Ordinal),
+                declared.Scopes.ToFrozenSet(StringComparer.Ordinal),
+                secret);
+
+            if (!resolved.TryAdd(declared.Subject, client))
+            {
+                throw new InvalidOperationException(
+                    $"Configuration key '{ClientsKey}[{index.ToString(CultureInfo.InvariantCulture)}]" +
+                    ":Subject' repeats a subject an earlier entry already declares. The roster is keyed " +
+                    "by subject, so one of the two permission sets would not be the one enforced. This " +
+                    "message does not echo the configured value.");
+            }
+        }
+
+        _bySubject = resolved.ToFrozenDictionary(StringComparer.Ordinal);
+    }
+
+    /// <summary>How many callers the roster registers.</summary>
+    /// <value>At least one, because an empty roster fails startup validation.</value>
+    public int Count => _bySubject.Count;
+
+    /// <summary>
+    /// Finds the roster entry for one subject.
+    /// </summary>
+    /// <param name="subject">The subject to look up. Compared ordinally.</param>
+    /// <param name="client">The entry when one is registered; otherwise <see langword="null"/>.</param>
+    /// <returns><see langword="true"/> when the subject is registered.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="subject"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// USED FOR AUTHORISATION, NEVER FOR AUTHENTICATION. It answers what a registered caller may ask
+    /// for; it does not and cannot establish that the requester IS that caller. The issuer calls it after
+    /// the issuance edge has authenticated the caller, and it is a lookup rather than a credential check
+    /// precisely so the two concerns cannot be confused at a call site.
+    /// </remarks>
+    public bool TryResolveSubject(
+        string subject,
+        [NotNullWhen(true)] out RegisteredIssuanceClient? client)
+    {
+        ArgumentNullException.ThrowIfNull(subject);
+
+        return _bySubject.TryGetValue(subject, out client);
+    }
+
+    /// <summary>
+    /// Authenticates a presented client identity and secret against the roster.
+    /// </summary>
+    /// <param name="clientId">The identity presented with the credential.</param>
+    /// <param name="presentedSecret">The secret presented with it.</param>
+    /// <returns>
+    /// The authenticated roster entry, or <see langword="null"/> when the identity is not registered, has
+    /// no secret configured, or the secret does not match.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// ONE RETURN VALUE FOR THREE DIFFERENT REASONS, DELIBERATELY. An unregistered identity, an identity
+    /// that authenticates by certificate only, and a wrong secret are indistinguishable to the caller of
+    /// this method and therefore to the caller of the operation. Distinguishing them would turn the
+    /// issuance edge into an oracle for enumerating this deployment's client roster, which an
+    /// unauthenticated party must not be able to do.
+    /// </para>
+    /// <para>
+    /// THE NO-MATCH PATH STILL PERFORMS A FIXED-TIME COMPARISON, against a random decoy generated once
+    /// per instance. Returning early would make "no such client" measurably faster than "wrong secret",
+    /// which is the same enumeration oracle arriving by a different route. The dictionary lookup itself
+    /// remains a timing signal that cannot be removed without scanning the whole roster; the decoy
+    /// removes the much larger signal, which is the comparison.
+    /// </para>
+    /// </remarks>
+    public RegisteredIssuanceClient? Authenticate(string clientId, string presentedSecret)
+    {
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(presentedSecret);
+
+        byte[] presented = Encoding.UTF8.GetBytes(presentedSecret);
+
+        try
+        {
+            if (!_bySubject.TryGetValue(clientId, out RegisteredIssuanceClient? candidate)
+                || !candidate.HasSecret)
+            {
+                // Deliberate: do the same kind of work the matching path does, then refuse.
+                _ = CryptographicOperations.FixedTimeEquals(_decoy, presented);
+
+                return null;
+            }
+
+            return candidate.SecretMatches(presented) ? candidate : null;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(presented);
+        }
+    }
+
+    /// <summary>
+    /// Resolves one roster entry's secret from configuration, or refuses.
+    /// </summary>
+    /// <param name="declared">The declared entry.</param>
+    /// <param name="index">Its position in the roster, for the failure message.</param>
+    /// <param name="configuration">The configuration root.</param>
+    /// <returns>
+    /// The UTF-8 encoded secret, or <see langword="null"/> when the entry names no secret key.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// The entry names a key that resolves to nothing, or to whitespace.
+    /// </exception>
+    /// <remarks>
+    /// AN ABSENT KEY NAME IS VALID; A NAMED KEY THAT RESOLVES TO NOTHING IS NOT. The first is a caller
+    /// that authenticates by client certificate. The second is a deployment that meant to supply a
+    /// secret and did not - which, left to run, is a caller that can never authenticate against a
+    /// service reporting healthy. Whitespace is treated as nothing: a secret consisting of spaces is
+    /// not a credential a deployment intended.
+    /// </remarks>
+    private static byte[]? ResolveSecret(
+        SecurityClientOptions declared,
+        int index,
+        IConfiguration configuration)
+    {
+        if (string.IsNullOrEmpty(declared.SecretConfigurationKey))
+        {
+            return null;
+        }
+
+        string? material = configuration[declared.SecretConfigurationKey];
+
+        if (string.IsNullOrWhiteSpace(material))
+        {
+            throw new InvalidOperationException(
+                $"Configuration key '{ClientsKey}[{index.ToString(CultureInfo.InvariantCulture)}]" +
+                ":SecretConfigurationKey' names a configuration key that is not set, is empty or " +
+                "contains only whitespace. A roster entry that names a secret key must have that " +
+                "secret supplied through configuration injection from the orchestration secret layer; " +
+                "omit the member entirely for a caller that authenticates by client certificate " +
+                "instead. This message names the roster position and never the key's value.");
+        }
+
+        return Encoding.UTF8.GetBytes(material);
+    }
+}
 
 /// <summary>
 /// Mints short-lived service tokens. THE ONLY COMPONENT IN THIS SYSTEM THAT MINTS ANYTHING.
@@ -789,7 +1312,7 @@ public sealed class TokenIssuer
     /// spelling and the same encoding for the claim keeps the token and the response reporting the
     /// granted set identically, which is a property a test can assert byte for byte.
     /// </remarks>
-    private const string ScopeClaimName = "scope";
+    private const string ScopeClaimName = ScopeClaim.ClaimName;
 
     /// <summary>The delimiter joining the granted scope set into one value.</summary>
     /// <remarks>
@@ -797,7 +1320,7 @@ public sealed class TokenIssuer
     /// requested scope containing white space is refused: the encoding is lossless only while no
     /// scope carries the delimiter.
     /// </remarks>
-    private const char ScopeDelimiter = ' ';
+    private const char ScopeDelimiter = ScopeClaim.Delimiter;
 
     /// <summary>The configuration key carrying the issuer identity.</summary>
     /// <remarks>
@@ -809,6 +1332,13 @@ public sealed class TokenIssuer
 
     /// <summary>The configuration key carrying the audience roster.</summary>
     private const string AudiencesKey = SecurityOptions.SectionName + ":Audiences";
+
+    /// <summary>The configuration path of the issuance permission roster, for the fixed messages.</summary>
+    private const string CallersKey = SecurityOptions.SectionName + ":Callers";
+
+    /// <summary>The configuration key naming the flat authorization-row surface.</summary>
+    private const string CallerAuthorizationsKey =
+        SecurityOptions.SectionName + ":" + nameof(SecurityOptions.CallerAuthorizations);
 
     /// <summary>The configuration key carrying the token lifetime.</summary>
     private const string LifetimeKey = SecurityOptions.SectionName + ":TokenLifetime";
@@ -841,6 +1371,72 @@ public sealed class TokenIssuer
         "Configuration key '" + AudiencesKey + "' contains an entry that is empty or whitespace " +
         "only. Every entry must be a service identity, because an entry that is not one could be " +
         "matched by a request and would then be stamped into a token as though it were an identity.";
+
+    // ----------------------------------------------------------------------------------------------
+    // THE FLAT ROW SURFACE HAS ITS OWN THREE MESSAGES, AND THAT IS NOT DUPLICATION FOR ITS OWN SAKE.
+    //
+    // The nested and flat shapes state the same DECISION and are screened against the same rules, but an
+    // operator fixes a fault in the key they actually authored. A row fault reported against
+    // `Security:Callers` sends a deployment that never wrote that key looking for configuration it does
+    // not have, which is worse than no diagnostic: it is a diagnostic pointing at the wrong file. So the
+    // rule text below is deliberately parallel to the nested messages and the KEY is the one that differs.
+    // No message echoes a configured value, for the same reason as every other message in this type.
+    // ----------------------------------------------------------------------------------------------
+
+    /// <summary>The fixed message reported when a flat matrix row names no caller or no audience.</summary>
+    private const string MatrixRowBlankMessage =
+        "Configuration key '" + CallerAuthorizationsKey + "' contains a row with no Caller or no " +
+        "Audience. A row is one (caller, audience) pair, so a row missing either half governs nothing " +
+        "while appearing to grant something. Remove the row or complete it. This message never echoes a " +
+        "configured value.";
+
+    /// <summary>
+    /// The fixed message reported when a flat matrix row permits no usable scope.
+    /// </summary>
+    private const string MatrixRowIncompleteMessage =
+        "Configuration key '" + CallerAuthorizationsKey + "' contains a row permitting no scope, or a " +
+        "scope that is blank or carries internal whitespace. A row permitting no scope produces a token " +
+        "that authorises nothing and that the receiver then refuses - a healthy-looking issuer minting " +
+        "useless credentials. A scope carrying whitespace is worse than useless: the granted set is one " +
+        "space-delimited string, so such a name is stamped as ONE entry and read back by a verifier as " +
+        "TWO. Remove the row or correct the scope. This message never echoes a configured value.";
+
+    /// <summary>
+    /// The fixed message reported when two flat matrix rows state the same pair.
+    /// </summary>
+    private const string MatrixRowDuplicateMessage =
+        "Configuration key '" + CallerAuthorizationsKey + "' states the same (Caller, Audience) pair " +
+        "twice. Which of the two an operator wrote took effect would otherwise be an implementation " +
+        "detail governing a permission decision, so the matrix is refused rather than resolved by " +
+        "last-wins or silently merged. State the pair once with the scopes it permits. Note that this " +
+        "is a rule WITHIN this key: the same pair stated once here and once under '" + CallersKey +
+        "' is a deployment authoring one decision in both supported shapes, and is granted the union " +
+        "of the two scope sets rather than refused. This message never echoes a configured value.";
+
+    /// <summary>The fixed message reported when a roster entry carries no identity.</summary>
+    private const string CallerRosterBlankMessage =
+        "Configuration key '" + CallersKey + "' contains an entry with no identity. Every entry must " +
+        "name the caller identity it governs - the common name of the client certificate that caller " +
+        "presents - because an entry with no identity governs nothing while appearing to grant " +
+        "something. This message never echoes a configured value.";
+
+    /// <summary>
+    /// The fixed message reported when a roster entry permits no audience or no scope.
+    /// </summary>
+    private const string CallerRosterIncompleteMessage =
+        "Configuration key '" + CallersKey + "' contains an entry that carries no grant, a grant with " +
+        "no audience, or a grant permitting no scope. A caller with no grant can obtain no usable " +
+        "token, and a grant permitting no scope produces a token that authorises nothing and that the " +
+        "receiver then refuses - a healthy-looking issuer minting useless credentials. Remove the entry " +
+        "or the grant instead. This message never echoes a configured value.";
+
+    /// <summary>The fixed message reported when two roster entries name one identity.</summary>
+    private const string CallerRosterDuplicateMessage =
+        "Configuration key '" + CallersKey + "' names the same caller identity twice, or grants one " +
+        "caller the same audience twice. Either way one of the two would be unreachable, and which one " +
+        "took effect would be an implementation detail governing a permission decision - so the roster " +
+        "is refused rather than resolved by last-wins or silently merged. This message never echoes a " +
+        "configured value.";
 
     /// <summary>The fixed message reported when the configured lifetime rounds below one second.</summary>
     private const string LifetimeMessage =
@@ -899,6 +1495,27 @@ public sealed class TokenIssuer
     /// </remarks>
     private readonly FrozenSet<string> _audiences;
 
+    /// <summary>
+    /// What each caller identity is permitted to ask for, frozen at construction and keyed ORDINALLY.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ROSTER ABOVE SAYS WHICH AUDIENCES EXIST; THIS SAYS WHO MAY ADDRESS THEM. Without it, any caller
+    /// whose certificate chained to the configured client authority could request a token for ANY service
+    /// in the system carrying ANY scope set it named, and every requested scope was granted verbatim - a
+    /// confused deputy in the middle of the token topology, and the reason the sole-issuer design exists at
+    /// all is that the issuer DECIDES (CWE-862, CWE-863).
+    /// </para>
+    /// <para>
+    /// KEYED ORDINALLY, like everything else identity-shaped in this service. The key is a caller identity
+    /// the issuance endpoint has already reconciled against the common name of a certificate whose chain
+    /// was built to the configured authority, so folding case here would honour a permission set belonging
+    /// to an identity the certificate does not establish.
+    /// </para>
+    /// </remarks>
+    private readonly FrozenDictionary<string, FrozenDictionary<string, FrozenSet<string>>> _callers;
+
+
     /// <summary>The issuer identity stamped into every token.</summary>
     private readonly string _issuer;
 
@@ -921,6 +1538,13 @@ public sealed class TokenIssuer
     /// material is read here.
     /// </param>
     /// <param name="options">The bound security configuration.</param>
+    /// <param name="clients">
+    /// The resolved issuance roster. THE SECOND AUTHORISATION GATE: it decides which audiences and
+    /// scopes each registered caller may ask for. Injected rather than rebuilt here so that the roster
+    /// this issuer enforces is the same instance the issuance edge authenticated against - two
+    /// independently built rosters could disagree, and the disagreement would authenticate a caller
+    /// under one set of permissions and authorise it under another.
+    /// </param>
     /// <param name="timeProvider">
     /// The clock seam, which the service entry point registers. THE ONLY SOURCE OF THE CURRENT
     /// INSTANT.
@@ -974,11 +1598,20 @@ public sealed class TokenIssuer
     public TokenIssuer(
         SigningKeyProvider signingKeys,
         IOptions<SecurityOptions> options,
+        IssuanceClientRegistry clients,
         TimeProvider timeProvider,
         ILogger<TokenIssuer> logger)
     {
         ArgumentNullException.ThrowIfNull(signingKeys);
         ArgumentNullException.ThrowIfNull(options);
+        // THE ROSTER IS REQUIRED TO EXIST BEFORE THIS TYPE DOES, AND THAT IS ALL IT IS ASKED FOR HERE.
+        // It is the CREDENTIAL DIRECTORY the issuance endpoint authenticates against, and resolving it
+        // resolves every secret it names - so demanding it as a constructor dependency is what makes a
+        // roster naming an unresolvable secret a startup failure rather than a first-request failure.
+        // AUTHORIZATION IS NOT READ FROM IT: there is exactly one authorization gate in this type, the
+        // per-caller permission matrix below, because two gates for one decision is how a deployment ends
+        // up with configuration that binds and is never consulted.
+        ArgumentNullException.ThrowIfNull(clients);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
 
@@ -990,6 +1623,7 @@ public sealed class TokenIssuer
 
         _issuer = RequireIssuer(security.Issuer);
         _audiences = RequireAudienceRoster(security.Audiences);
+        _callers = RequireCallerRoster(security.Callers, security.CallerAuthorizations);
         _lifetimeSeconds = RequireLifetime(security.TokenLifetime);
         _lifetime = TimeSpan.FromSeconds(_lifetimeSeconds);
 
@@ -1159,9 +1793,13 @@ public sealed class TokenIssuer
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        // ------------------------------------------------------------------------------------------
+        // GATE 1 OF 2 - THE DEPLOYMENT-WIDE AUDIENCE ROSTER.
+        //
         // Ordinal membership, and the check comes first so that a refusal performs no cryptographic
         // work whatsoever. Because the comparison is ordinal, the value that passes it IS the roster
         // entry byte for byte, so the audience claim below carries the configured identity exactly.
+        // ------------------------------------------------------------------------------------------
         if (!_audiences.Contains(request.Audience))
         {
             TokenIssuerLog.AudienceRefused(_logger, _issuer);
@@ -1169,12 +1807,97 @@ public sealed class TokenIssuer
             return TokenIssuanceResult.ForUnpermittedAudience();
         }
 
+        // ------------------------------------------------------------------------------------------
+        // AND WHETHER *THIS CALLER* MAY ADDRESS IT, WHICH THE CHECK ABOVE DOES NOT ANSWER.
+        //
+        // The roster above is GLOBAL - it says which identities this issuer may address at all. On its
+        // own it permitted any authenticated caller to mint a token for any service in the system with
+        // any scope set it cared to name, because the subject was reconciled against the presented
+        // certificate and then never consulted again. A caller holding a valid DataServices certificate
+        // could obtain a Gateway-audience token, or a Persistence-audience token carrying every scope
+        // Persistence publishes. The permission roster closes that: an authenticated identity is now an
+        // authorised one only for what it is listed for (CWE-862, CWE-863; constraint C-G).
+        //
+        // Before any cryptographic work, for the same reason as the roster check - and answered with the
+        // SAME outcome as an unlisted audience, so the response cannot be used to enumerate which
+        // audiences exist or which callers are configured. The contract already declares this response:
+        // "Presenting a well-formed certificate that is not authorised for the requested audience or
+        // scope is 403" [security.v1.yaml].
+        //
+        // The subject is trustworthy HERE because the issuance endpoint refuses a request whose declared
+        // subject differs from the common name of the certificate presented during the handshake, and
+        // that certificate's chain was built to the configured client authority. An allow-list keyed on a
+        // self-asserted name would be decoration; keyed on a chain-established one it is a decision.
+        // ------------------------------------------------------------------------------------------
+        if (!_callers.TryGetValue(request.Subject, out FrozenDictionary<string, FrozenSet<string>>? grants)
+            || !grants.TryGetValue(request.Audience, out FrozenSet<string>? permittedScopes))
+        {
+            TokenIssuerLog.CallerRefused(_logger, _issuer);
+
+            // ITS OWN OUTCOME, ANSWERED WITH THE SAME MESSAGE AS AN UNSERVED AUDIENCE. The published
+            // contract declares these as two DISTINCT decisions that deliberately share one sentence:
+            // "Cases 2 and 3 deliberately answer the SAME message, because a caller able to distinguish
+            // them could enumerate the deployment's audience configuration one request at a time"
+            // [security.v1.yaml, the 403 on POST /v1/tokens]. The sameness belongs to the RESPONSE, so an
+            // operator reading this service's own records can still tell a roster gap from a matrix gap -
+            // one is fixed on the audience roster and the other in the authorization matrix.
+            return TokenIssuanceResult.ForUnpermittedCaller();
+        }
+
         // ONE clock reading, truncated once, and every instant below derived from it.
         DateTimeOffset issuedAt = TruncateToWholeSecond(_timeProvider.GetUtcNow());
         DateTimeOffset expiresAt = issuedAt + _lifetime;
 
+        // THE GRANTED SET IS THE OVERLAP, NOT THE REQUEST. Every requested scope used to be granted
+        // verbatim, so the scope claim was whatever the caller wrote - which made the claim a restatement
+        // of the request rather than a decision by the issuer. It is now intersected with what this caller
+        // is permitted to hold, PRESERVING THE REQUESTED ORDER so that a caller comparing the granted set
+        // against its request reads them in the same sequence.
+        //
+        // A NARROWING IS A SUCCESS, INCLUDING A NARROWING TO NOTHING, and that is the contract's own rule
+        // rather than a lenient reading of it: the response schema states that the granted set "may be
+        // narrower than the requested set" and that "an empty string means no requested scope was granted"
+        // [security.v1.yaml TokenResponse.scope]. So a caller asking for one scope it may not hold receives
+        // a valid token that authorises nothing, reads the granted set as the contract instructs, and is
+        // refused by the receiver - rather than being handed a 403 the schema does not require here.
+        // Requesting at least one scope is guaranteed by the schema's own minItems, so the empty case can
+        // only ever be the result of this intersection.
+        //
         // One string serves both the claim and the reported granted set, so the two cannot differ.
-        string grantedScope = string.Join(ScopeDelimiter, request.Scopes.AsSpan());
+        string grantedScope = string.Join(
+            ScopeDelimiter,
+            Intersect(request.Scopes, permittedScopes));
+
+        if (grantedScope.Length == 0)
+        {
+            // Recorded because it is operationally interesting and almost always a roster gap: the caller
+            // is authorised for this audience and holds none of the scopes it asked for. Neither the
+            // requested scopes nor the permitted ones are logged - the request half is unvalidated caller
+            // text and the permitted half is configuration.
+            TokenIssuerLog.NoRequestedScopeGranted(_logger, _issuer, request.Audience);
+
+            // ------------------------------------------------------------------------------------------
+            // AND IT IS A REFUSAL, WHICH THE PUBLISHED CONTRACT SETTLES RATHER THAN LEAVES OPEN.
+            //
+            // The two rules read together are exact, and only their conjunction is: a PARTIALLY permitted
+            // set "SUCCEEDS with 200 and the response's scope member reports the narrower granted set",
+            // while this status "means that NOTHING was permitted, which is refused only because the
+            // granted scope member is required and there would be nothing truthful to report in it"
+            // [security.v1.yaml, the 403 on POST /v1/tokens]. So narrowing is a success and narrowing to
+            // nothing is not, and the boundary between them is exactly the empty granted set.
+            //
+            // MINTING HERE WOULD BE THE WORSE OF THE TWO READINGS EVEN WITHOUT THE CONTRACT. A signed,
+            // correctly addressed credential that authorises nothing is indistinguishable at a glance from
+            // one that authorises everything the caller asked for; the caller learns its request was
+            // refused only if it reads the granted set, and a caller that does not read it presents a token
+            // every receiver rejects for a reason no record here explains.
+            //
+            // NO ENUMERATION ORACLE IS OPENED, because the refusal is reachable only by a caller already
+            // authorised for this audience - it therefore learns nothing about the deployment it does not
+            // already hold, which is the contract's own reason for giving case 4 its own message.
+            // ------------------------------------------------------------------------------------------
+            return TokenIssuanceResult.ForUnpermittedScopes();
+        }
 
         SecurityTokenDescriptor descriptor = new()
         {
@@ -1290,6 +2013,262 @@ public sealed class TokenIssuer
 
         return audiences.ToFrozenSet(StringComparer.Ordinal);
     }
+
+    /// <summary>
+    /// Freezes the issuance permission roster, or refuses to construct.
+    /// </summary>
+    /// <param name="callers">The bound caller entries.</param>
+    /// <returns>The permissions of each caller identity, keyed ordinally.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The roster is empty, or an entry is null, or an entry carries no identity, no permitted audience or
+    /// no permitted scope, or two entries name the same identity.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THE SAME RULES THE OPTIONS VALIDATOR ENFORCES, ENFORCED AGAIN HERE, AND THE DUPLICATION IS THE
+    /// POINT. This type is constructible directly - a test does it, and so would any future composition
+    /// that resolved it without the validated options pipeline - so a roster that reaches this constructor
+    /// unvalidated must not be silently accepted. Every message below therefore states the rule rather
+    /// than deferring to the validator, and none echoes a configured value. It mirrors the audience
+    /// roster's own precondition checks for exactly the same reason.
+    /// </para>
+    /// <para>
+    /// The comparison is ORDINAL, matching the audience roster and the endpoint's subject reconciliation.
+    /// A duplicate identity is refused rather than resolved by last-wins, because which entry took effect
+    /// would then be an implementation detail governing a permission decision.
+    /// </para>
+    /// </remarks>
+    private static FrozenDictionary<string, FrozenDictionary<string, FrozenSet<string>>>
+        RequireCallerRoster(
+            IList<SecurityCallerOptions> callers,
+            IList<CallerAuthorizationOptions> rows)
+    {
+        // AN EMPTY MATRIX IS ACCEPTED, AND THAT IS A POSTURE RATHER THAN AN OVERSIGHT. Two earlier readings
+        // of this precondition were both wrong and are recorded so neither returns. It first required the
+        // NESTED shape specifically, which refused a deployment that stated its whole matrix in flat rows -
+        // a configuration this issuer reads and honours - and pointed the diagnostic at the key that
+        // deployment had deliberately not used. It then required the MATRIX to be non-empty, judged over
+        // both shapes, which is closer but still refuses a state that is coherent and occasionally wanted:
+        // a host serving the published key set, the discovery document, health and the whole of contract
+        // C-02 while issuing no token at all. Refusing to start on that makes every such host unstartable,
+        // including a local bring-up of the other three services against an issuer that mints nothing.
+        //
+        // NOTHING IS PERMITTED BY DEFAULT AS A RESULT, WHICH IS THE HALF THAT MATTERS. An empty matrix
+        // reaches the gate below as an empty dictionary, so EVERY request is answered CallerNotPermitted.
+        // Accepting the configuration is not the same as granting anything.
+        //
+        // THE ROSTER THAT MAY *NOT* BE EMPTY IS A DIFFERENT ONE, and conflating the two is what produced
+        // the second wrong reading. `Security:Clients` is the CREDENTIAL DIRECTORY: with it empty no caller
+        // can authenticate at all, so the sole issuer cannot give any service a credential while its
+        // readiness probe reports healthy for as long as nobody tries. That emptiness IS refused, by
+        // SecurityOptionsValidator, and its diagnostic names `Security:Clients`.
+        Dictionary<string, FrozenDictionary<string, FrozenSet<string>>> resolved =
+            new(StringComparer.Ordinal);
+
+        foreach (SecurityCallerOptions caller in callers)
+        {
+            if (caller is null || string.IsNullOrWhiteSpace(caller.Identity))
+            {
+                throw new InvalidOperationException(CallerRosterBlankMessage);
+            }
+
+            if (caller.Grants.Count == 0)
+            {
+                throw new InvalidOperationException(CallerRosterIncompleteMessage);
+            }
+
+            Dictionary<string, FrozenSet<string>> grants = new(StringComparer.Ordinal);
+
+            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            {
+                if (grant is null || string.IsNullOrWhiteSpace(grant.Audience))
+                {
+                    throw new InvalidOperationException(CallerRosterIncompleteMessage);
+                }
+
+                FrozenSet<string> scopes = FreezeNonBlank(grant.Scopes);
+
+                if (scopes.Count == 0)
+                {
+                    throw new InvalidOperationException(CallerRosterIncompleteMessage);
+                }
+
+                if (!grants.TryAdd(grant.Audience.Trim(), scopes))
+                {
+                    throw new InvalidOperationException(CallerRosterDuplicateMessage);
+                }
+            }
+
+            if (!resolved.TryAdd(
+                caller.Identity.Trim(),
+                grants.ToFrozenDictionary(StringComparer.Ordinal)))
+            {
+                throw new InvalidOperationException(CallerRosterDuplicateMessage);
+            }
+        }
+
+        // ------------------------------------------------------------------------------------------
+        // THE FLAT ROW SURFACE FOLDS INTO THE SAME MATRIX, SO THERE IS EXACTLY ONE ENFORCEMENT POINT.
+        //
+        // `Security:CallerAuthorizations` states the identical decision - which caller may address which
+        // audience carrying which scopes - one (caller, audience) pair per row rather than one nested
+        // entry per caller. TWO CONFIGURATION SHAPES FOR ONE DECISION IS A DELIBERATE ACCOMMODATION AND
+        // NOT A DUPLICATED CONTROL: a shape that binds but is never consulted is unreachable
+        // configuration that reads in a settings file exactly like working configuration, which is the
+        // single worst outcome available here. Folding both into one dictionary means the gate below
+        // cannot disagree with itself about who is authorised.
+        //
+        // NEITHER SURFACE IS INDIVIDUALLY REQUIRED - THE MATRIX IS. Each shape is validated entry by entry
+        // when it is present, and the emptiness precondition above is stated over the two together, so a
+        // deployment may author everything nested, everything flat, or part in each.
+        //
+        // A ROW MAY NOT CONTRADICT A NESTED GRANT FOR THE SAME PAIR. It is refused for the same reason a
+        // duplicate identity is refused rather than resolved last-wins: which of the two statements an
+        // operator wrote took effect would otherwise be an implementation detail governing a permission
+        // decision. A row for a caller the nested surface does not mention, or for an audience it does not
+        // grant, is additive and accepted.
+        // ------------------------------------------------------------------------------------------
+        Dictionary<string, Dictionary<string, FrozenSet<string>>> additions =
+            new(StringComparer.Ordinal);
+
+        foreach (CallerAuthorizationOptions row in rows)
+        {
+            if (row is null
+                || string.IsNullOrWhiteSpace(row.Caller)
+                || string.IsNullOrWhiteSpace(row.Audience))
+            {
+                throw new InvalidOperationException(MatrixRowBlankMessage);
+            }
+
+            // SCREENED FOR INTERNAL WHITESPACE AND NOT MERELY FOR BLANKNESS, which is the one row fault
+            // where re-screening here is load-bearing rather than tidy. A blank caller reaching the frozen
+            // matrix would be a key no request can match and therefore harmless. A SCOPE carrying a space
+            // is not harmless: the granted set is one space-delimited string, so such a name is stamped
+            // into the claim as one entry and split by a verifier into two - silently widening what the
+            // token authorises. Judged before trimming, because trimming hides exactly this fault.
+            FrozenSet<string> rowScopes = FreezeNonBlank(row.Scopes);
+
+            if (rowScopes.Count == 0 || rowScopes.Any(static scope => scope.Any(char.IsWhiteSpace)))
+            {
+                throw new InvalidOperationException(MatrixRowIncompleteMessage);
+            }
+
+            string caller = row.Caller.Trim();
+            string audience = row.Audience.Trim();
+
+            if (!additions.TryGetValue(caller, out Dictionary<string, FrozenSet<string>>? forCaller))
+            {
+                forCaller = new Dictionary<string, FrozenSet<string>>(StringComparer.Ordinal);
+                additions[caller] = forCaller;
+            }
+
+            // A PAIR STATED TWICE *WITHIN THIS KEY* IS REFUSED. Two rows for one (caller, audience) pair
+            // are two answers to one question in one place, and which one took effect would be an
+            // implementation detail governing a permission - the same rule, for the same reason, as a
+            // duplicated identity in the nested shape. It is emphatically NOT the same case as the union
+            // performed below: that one folds a pair stated once HERE and once under the nested key, which
+            // is a deployment authoring one decision in both supported shapes rather than contradicting
+            // itself, and refusing it would make such a deployment unstartable.
+            if (!forCaller.TryAdd(audience, rowScopes))
+            {
+                throw new InvalidOperationException(MatrixRowDuplicateMessage);
+            }
+        }
+
+        foreach ((string caller, Dictionary<string, FrozenSet<string>> forCaller) in additions)
+        {
+            if (resolved.TryGetValue(caller, out FrozenDictionary<string, FrozenSet<string>>? nested))
+            {
+                foreach ((string audience, FrozenSet<string> scopes) in nested)
+                {
+                    forCaller[audience] = forCaller.TryGetValue(audience, out FrozenSet<string>? already)
+                        ? Union(already, scopes)
+                        : scopes;
+                }
+            }
+
+            resolved[caller] = forCaller.ToFrozenDictionary(StringComparer.Ordinal);
+        }
+
+        return resolved.ToFrozenDictionary(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Combines two permitted scope sets for one (caller, audience) pair.
+    /// </summary>
+    /// <param name="first">The scopes one configured shape grants the pair.</param>
+    /// <param name="second">The scopes the other shape grants the same pair.</param>
+    /// <returns>Every scope either statement grants.</returns>
+    /// <remarks>
+    /// Ordinal, matching every other scope comparison in this service. Used only where the same pair is
+    /// stated twice, which a deployment expressing part of its matrix in each shape can legitimately do.
+    /// </remarks>
+    private static FrozenSet<string> Union(FrozenSet<string> first, FrozenSet<string> second)
+    {
+        HashSet<string> either = new(first, StringComparer.Ordinal);
+
+        either.UnionWith(second);
+
+        return either.ToFrozenSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Freezes a configured name list, trimming each entry and dropping blanks.
+    /// </summary>
+    /// <param name="values">The configured values.</param>
+    /// <returns>The non-blank, trimmed values as an ordinal set.</returns>
+    /// <remarks>
+    /// Trimming normalises a stray space in an environment variable, which is the one way a name arrives
+    /// with surrounding whitespace. Blanks are DROPPED rather than reported here because the caller checks
+    /// the resulting count and reports the entry as incomplete, which is a single accurate message instead
+    /// of one per blank element.
+    /// </remarks>
+    private static FrozenSet<string> FreezeNonBlank(IList<string> values)
+    {
+        HashSet<string> set = new(StringComparer.Ordinal);
+
+        foreach (string value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                _ = set.Add(value.Trim());
+            }
+        }
+
+        return set.ToFrozenSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Returns the requested values that are permitted, in the order they were requested.
+    /// </summary>
+    /// <param name="requested">The caller's requested set.</param>
+    /// <param name="permitted">What this caller may hold.</param>
+    /// <returns>The overlap, in requested order, with no duplicate.</returns>
+    /// <remarks>
+    /// REQUESTED ORDER IS PRESERVED DELIBERATELY. A caller compares the granted set against its request,
+    /// and reordering would make an identical grant look like a different one - which matters here because
+    /// the granted string is also what characterization recordings compare. Duplicates cannot arrive (the
+    /// request schema declares the requested set unique) but are guarded against anyway, because a repeated
+    /// scope in the claim would be a claim no receiver's parser is obliged to tolerate.
+    /// </remarks>
+    private static List<string> Intersect(
+        ImmutableArray<string> requested,
+        FrozenSet<string> permitted)
+    {
+        List<string> granted = [];
+        HashSet<string> emitted = new(StringComparer.Ordinal);
+
+        foreach (string scope in requested)
+        {
+            if (permitted.Contains(scope) && emitted.Add(scope))
+            {
+                granted.Add(scope);
+            }
+        }
+
+        return granted;
+    }
+
 
     /// <summary>
     /// Requires a lifetime of at least one whole second, and reduces it to whole seconds.
@@ -1509,5 +2488,72 @@ internal static partial class TokenIssuerLog
         Message = "Refused a token request: the requested audience is not on the configured roster. " +
                   "iss={Issuer}")]
     internal static partial void AudienceRefused(ILogger logger, string issuer);
-}
 
+    /// <summary>
+    /// Records a refusal on the permission roster, carrying no caller-supplied value.
+    /// </summary>
+    /// <param name="logger">The log sink.</param>
+    /// <param name="issuer">The issuer identity. Configured, not caller-supplied.</param>
+    /// <remarks>
+    /// <para>
+    /// NEITHER THE CALLER NOR THE AUDIENCE IS LOGGED, and that is a deliberate choice with a cost. It
+    /// makes the record less useful for tracing a single misconfigured caller - but a refusal here means
+    /// the pairing was NOT authorised, so at least one of the two values is unvalidated caller text, and a
+    /// log is where unvalidated text becomes a durable artifact. The existing audience refusal takes the
+    /// same position for the same reason, and an operator who needs the pairing has the caller's own logs
+    /// and its configured roster.
+    /// </para>
+    /// <para>
+    /// A WARNING RATHER THAN AN ERROR, matching the audience refusal: the issuer handled the request
+    /// exactly as it should, and the fault is a caller asking for something it is not listed for or a
+    /// roster that has not been updated for it.
+    /// </para>
+    /// </remarks>
+    [LoggerMessage(
+        EventId = 1003,
+        Level = LogLevel.Warning,
+        Message = "Refused a token request: this caller is not permitted to address the requested " +
+                  "audience. iss={Issuer}")]
+    internal static partial void CallerRefused(ILogger logger, string issuer);
+
+    /// <summary>
+    /// Records a refusal in which the caller held none of the scopes it asked for.
+    /// </summary>
+    /// <param name="logger">The log sink.</param>
+    /// <param name="issuer">The issuer identity. Configured, not caller-supplied.</param>
+    /// <param name="audience">
+    /// The audience. By this point matched ordinally against the configured roster AND against this
+    /// caller's permitted set, so it is a configured identity rather than unvalidated caller text.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// THE THIRD OF THE THREE REFUSALS, AND IT SAYS SO. An earlier revision of this record was worded as an
+    /// ISSUANCE - "Issued a service token granting NO scope ... the token is valid and authorises nothing" -
+    /// because the design it was written for minted on an empty intersection and reported the emptiness in
+    /// the response. That design was superseded: the published contract settles an empty granted set as a
+    /// REFUSAL, and the call site records why at length. A log line claiming an issuance that did not happen
+    /// is worse than no line, because it is the record an operator would use to establish that a credential
+    /// WAS handed out.
+    /// </para>
+    /// <para>
+    /// IT IS ALSO WHAT MAKES THE THREE REFUSALS DISTINGUISHABLE, which is a property with its own row: the
+    /// three answer one status and two of them answer one caller-facing sentence, so the only place a
+    /// deployment can tell a roster gap from a matrix gap from a scope gap is here.
+    /// </para>
+    /// <para>
+    /// A WARNING RATHER THAN AN ERROR, matching the other two: the issuer handled the request exactly as it
+    /// should, and the fault is a caller asking for scopes it is not listed for or a roster not updated for
+    /// it. Neither the requested scopes nor the permitted ones appear - the first is unvalidated caller text
+    /// and the second is configuration.
+    /// </para>
+    /// </remarks>
+    [LoggerMessage(
+        EventId = 1004,
+        Level = LogLevel.Warning,
+        Message = "Refused a token request: none of the requested scopes is permitted to this caller for " +
+                  "the requested audience. No token was created. iss={Issuer} aud={Audience}")]
+    internal static partial void NoRequestedScopeGranted(
+        ILogger logger,
+        string issuer,
+        string audience);
+}

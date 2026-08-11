@@ -339,6 +339,17 @@ public sealed class JwksShapeTests
     /// </remarks>
     private const string ProbeIssuer = "https://security.invalid";
 
+    /// <summary>
+    /// The scheme separator <see cref="ProbeIssuer"/> begins with.
+    /// </summary>
+    /// <remarks>
+    /// Skipped before looking for a doubled path separator, because the scheme's own <c>//</c> is not one.
+    /// </remarks>
+    private const string SchemeSeparator = "https://";
+
+    /// <summary>A doubled path separator: what a mis-joined address carries and a correct one does not.</summary>
+    private const string DoubledSeparator = "//";
+
     /// <summary>An audience identity for the direct-call rows.</summary>
     private const string ProbeAudience = "powerframework-jwks-shape";
 
@@ -680,6 +691,101 @@ public sealed class JwksShapeTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+    }
+
+    /// <summary>
+    /// Every address the discovery document publishes is the configured issuer joined to a configured
+    /// path, and none of them moves when the caller names a different authority.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHAT WENT WRONG, AS A FACT ABOUT THE CODE. This operation composed both published addresses from
+    /// the incoming request's scheme, host and path base. All three are caller-controlled - a Host header,
+    /// or an <c>X-Forwarded-*</c> header a proxy honours - so a request arriving with a chosen authority
+    /// was answered with a discovery document telling every consumer to fetch THIS issuer's verification
+    /// keys from that authority. A consumer's stock bearer handler follows <c>jwks_uri</c> without
+    /// question, which is the whole purpose of the document, so the consequence of a caller succeeding at
+    /// this is that it chooses the key material every service in the system validates tokens against.
+    /// </para>
+    /// <para>
+    /// THE FORGED AUTHORITY IS ONE THE ALLOW-LIST ADMITS, WHICH IS WHAT MAKES THE ROW ABOUT THE DOCUMENT
+    /// RATHER THAN ABOUT HOST FILTERING. A loopback spelling is used, so the request is served normally
+    /// and the published addresses are the only thing that could differ. The sibling row below drives the
+    /// filtering half.
+    /// </para>
+    /// <para>
+    /// Both addresses are asserted in FULL rather than by suffix. A suffix assertion is satisfied by an
+    /// address built on any authority at all, so it is exactly the assertion the original defect passed.
+    /// One of the three authorities carries a DISTINCTIVE PORT the issuer does not have, so reflecting any
+    /// part of the caller's authority - the host, the port, or both - shows up as an inequality rather than
+    /// having to be searched for.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ThePublishedAddressesComeFromConfigurationAndNotFromTheCallerAsync()
+    {
+        await using SecurityAppFactory factory = new();
+
+        SecurityOptions options = factory.ResolveSecurityOptions();
+        string expectedKeySet = options.Issuer.TrimEnd('/') + options.JwksPath;
+        string expectedTokenEndpoint = options.Issuer.TrimEnd('/') + options.TokenEndpointPath;
+
+        foreach (string authority in (string[])["localhost", "127.0.0.1", "localhost:9999"])
+        {
+            using HttpClient client = factory.CreateClient();
+            client.DefaultRequestHeaders.Host = authority;
+
+            using HttpResponseMessage response = await client.GetAsync(
+                new Uri(options.OpenIdConfigurationPath, UriKind.Relative),
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            using JsonDocument document = JsonDocument.Parse(
+                await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+            Assert.Equal(options.Issuer, document.RootElement.GetProperty("issuer").GetString());
+            Assert.Equal(expectedKeySet, document.RootElement.GetProperty("jwks_uri").GetString());
+            Assert.Equal(
+                expectedTokenEndpoint,
+                document.RootElement.GetProperty("token_endpoint").GetString());
+        }
+    }
+
+    /// <summary>
+    /// A request naming an authority the deployment does not publish is refused before any route runs.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// DEFENCE IN DEPTH RATHER THAN THE PRIMARY CONTROL, and stated as such. The document is already
+    /// independent of the caller after the row above, so this changes no published value; what it adds is
+    /// that the service holding the system's only signing key does not answer at all under an authority
+    /// its deployment never declared. The setting was <c>*</c>, which admits every authority.
+    /// </para>
+    /// <para>
+    /// THE ANONYMOUS ROUTE IS USED DELIBERATELY. Host filtering runs ahead of routing and authentication,
+    /// so a refusal here cannot be confused with the 401 an authenticated route would give: the route
+    /// chosen answers 200 to a caller presenting nothing, and the only reason it can fail is the
+    /// authority.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AnAuthorityTheDeploymentDoesNotDeclareIsRefusedAsync()
+    {
+        await using SecurityAppFactory factory = new();
+
+        SecurityOptions options = factory.ResolveSecurityOptions();
+
+        using HttpClient client = factory.CreateClient();
+        client.DefaultRequestHeaders.Host = "not-a-declared-authority.invalid";
+
+        using HttpResponseMessage refused = await client.GetAsync(
+            new Uri(options.OpenIdConfigurationPath, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
     }
 
     /// <summary>
@@ -1605,7 +1711,6 @@ public sealed class JwksShapeTests
 
         ProblemHttpResult problem = Assert.IsType<ProblemHttpResult>(
             JwksEndpoints.PublishProviderMetadata(
-                new DefaultHttpContext().Request,
                 provider,
                 Options.Create(faulted),
                 NullLoggerFactory.Instance));
@@ -1626,8 +1731,8 @@ public sealed class JwksShapeTests
     /// THE POSITIVE COUNTERPART TO GROUP 6, driven through the same direct entry points the failure rows
     /// use. Without it, every refusal above would be consistent with a handler that refuses
     /// unconditionally, and the whole group would be vacuous. It also covers the success arm of both
-    /// handlers at the unit level, where the request address is supplied explicitly rather than by a
-    /// booted host.
+    /// handlers at the unit level, where every published value comes from the supplied options - neither
+    /// handler reads the request at all, which is what makes both addresses independent of the caller.
     /// </remarks>
     [Fact]
     public void AConsistentConfigurationPublishesBothDocuments()
@@ -1656,7 +1761,6 @@ public sealed class JwksShapeTests
 
         Ok<ProviderMetadataDocument> metadata = Assert.IsType<Ok<ProviderMetadataDocument>>(
             JwksEndpoints.PublishProviderMetadata(
-                new DefaultHttpContext().Request,
                 provider,
                 Options.Create(options),
                 NullLoggerFactory.Instance));
@@ -1665,12 +1769,79 @@ public sealed class JwksShapeTests
             Assert.IsType<ProviderMetadataDocument>(metadata.Value);
 
         Assert.Equal(options.Issuer, metadataBody.Issuer);
-        Assert.EndsWith(options.JwksPath, metadataBody.JsonWebKeySetUri, StringComparison.Ordinal);
-        Assert.EndsWith(
-            options.TokenEndpointPath,
-            metadataBody.TokenEndpoint,
-            StringComparison.Ordinal);
+
+        // Both addresses are the canonical issuer joined to the configured path, asserted in full rather
+        // than by suffix: a suffix assertion holds for an address built on any authority at all, which is
+        // exactly the defect that composing them from the request produced.
+        Assert.Equal(options.Issuer + options.JwksPath, metadataBody.JsonWebKeySetUri);
+        Assert.Equal(options.Issuer + options.TokenEndpointPath, metadataBody.TokenEndpoint);
         Assert.Contains(options.SigningAlgorithm, metadataBody.SigningAlgorithms);
+    }
+
+    /// <summary>
+    /// An issuer configured WITH a trailing separator still publishes single-separator addresses, and is
+    /// itself published verbatim.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS ROW EXISTS AS A SEPARATE ONE. Both spellings of an authority are legitimate in
+    /// configuration and the validator accepts both, so the joining step drops one trailing separator
+    /// before appending a rooted path. Every other row here configures an issuer WITHOUT one, so all of
+    /// them hold whether or not that trim is present - the trim was live, correct and completely
+    /// unasserted, and removing it would have published <c>https://host//.well-known/jwks.json</c> with a
+    /// full suite passing.
+    /// </para>
+    /// <para>
+    /// A DOUBLED SEPARATOR IS NOT COSMETIC. A consumer's stock bearer handler fetches <c>jwks_uri</c> as
+    /// given; whether a doubled path resolves is the serving host's business, not the consumer's, so an
+    /// address this document publishes has to be the one the route actually answers on.
+    /// </para>
+    /// <para>
+    /// THE ISSUER IS ASSERTED UNTRIMMED. It is the <c>iss</c> claim of every minted token and has to match
+    /// byte for byte, so the trim belongs to the joined ADDRESSES and must not reach the published
+    /// identity. Asserting both in one row is what pins that asymmetry.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ATrailingSeparatorOnTheIssuerIsNotDoubledInThePublishedAddresses()
+    {
+        SecurityOptions options = CreateProbeOptions(
+            SecurityAppFactory.CreateSigningKeyMaterial(ProbeKeySizeInBits));
+
+        options.Issuer = ProbeIssuer + "/";
+
+        // The configuration is legitimate: the row is about a valid spelling, not about a refusal.
+        Assert.Null(JwksEndpoints.DescribeMetadataInconsistency(options));
+
+        using SigningKeyProvider provider = new(Options.Create(options));
+
+        Ok<ProviderMetadataDocument> metadata = Assert.IsType<Ok<ProviderMetadataDocument>>(
+            JwksEndpoints.PublishProviderMetadata(
+                provider,
+                Options.Create(options),
+                NullLoggerFactory.Instance));
+
+        ProviderMetadataDocument metadataBody =
+            Assert.IsType<ProviderMetadataDocument>(metadata.Value);
+
+        Assert.Equal(ProbeIssuer + options.JwksPath, metadataBody.JsonWebKeySetUri);
+        Assert.Equal(ProbeIssuer + options.TokenEndpointPath, metadataBody.TokenEndpoint);
+
+        // Stated a second way, so a future edit that trims differently cannot satisfy the equalities above
+        // by some other route: no published address carries a doubled separator after the scheme.
+        Assert.DoesNotContain(
+            DoubledSeparator,
+            metadataBody.JsonWebKeySetUri[SchemeSeparator.Length..],
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain(
+            DoubledSeparator,
+            metadataBody.TokenEndpoint[SchemeSeparator.Length..],
+            StringComparison.Ordinal);
+
+        // And the identity itself keeps the separator it was configured with.
+        Assert.Equal(options.Issuer, metadataBody.Issuer);
+        Assert.EndsWith("/", metadataBody.Issuer, StringComparison.Ordinal);
     }
 
     // ==============================================================================================

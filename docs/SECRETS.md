@@ -597,13 +597,13 @@ than a later addition. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.1 works through 
 | **Name** | `SECURITY_JWT_SIGNING_KEY` |
 | **Held by** | Security, and no other component |
 | **Kind of material** | An **RSA private key**, not a random symmetric secret. Security signs with `RS256` and publishes an RSA key set, so the two are not interchangeable: a random value has no modulus and no private exponent, cannot be imported as an RSA key, and cannot produce an `RS256` signature |
-| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — this is the shape the template carries, because an environment file has no line continuation so a multi-line PEM block cannot be expressed there. PEM is **also** accepted, for the deployment path where the value arrives from a secret store that can carry newlines: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. Validated at startup against `Security:SigningKeyFormat` (`PemOrPkcs8Base64`) and `Security:SigningKeyMinimumSizeBits` (2048) |
+| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — this is the shape the template carries, because an environment file has no line continuation so a multi-line PEM block cannot be expressed there. PEM is **also** accepted, for the deployment path where the value arrives from a secret store that can carry newlines: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. That acceptance order is **fixed code, not configuration** — see §4.1.1 |
 | **Supplied by** | Configuration injection from the orchestration secret layer, bound through the options pattern |
 | **Appears in source?** | **No** |
 | **Appears in `appsettings.json` or `appsettings.Development.json`?** | **No** |
 | **Appears in any container definition?** | **No** |
 | **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform. The command is in `orchestration/.env.example` §1 |
-| **Rotated how?** | Replace the value and restart Security. The other three services re-fetch the published key set through their stock bearer handlers, so no other service is reconfigured. Tokens minted under the withdrawn key stop verifying once it is gone; they live five minutes, so a brief overlap is the whole migration |
+| **Rotated how?** | **There is no rotation mechanism. Read §4.1.1 before planning a replacement.** Replacing the configured value and restarting Security is the only available procedure, and it is a hard cutover rather than a rollover |
 
 The **name** of the variable is recorded here because consumers need to know what to set. **Its value
 is not recorded here, is not recorded anywhere else in this repository, and no placeholder resembling a
@@ -629,22 +629,89 @@ instruction was incompatible with the published contract and is corrected here.*
 | --- | --- |
 | **Generation** | `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key` |
 | **Accepted form** | The key **material itself**, as a value rather than a path. In the template that is the single-line base64-of-DER form, because the Compose dotenv format has no line continuation and a PEM block cannot be written there; a secret store that can carry newlines may instead supply PEM, which Security tries first. An earlier revision of this document described the variable as a path to a mounted PEM file — that is not what the template declares, and the two statements are reconciled here in favour of the template, which is the artifact an operator actually fills in |
-| **Minimum size** | 2048 bits. The legacy crypto surface leaves 1024-bit RSA legal and that weak default is preserved for the **operations** C-02 publishes (§5); it is not adopted for this system's own new signing identity, which is not a legacy behaviour to reproduce |
+| **Minimum size** | **2048 bits is a recommendation, not an enforced floor — see §4.1.1.** Nothing in the service refuses a shorter key: a 1024-bit key starts the host and mints tokens |
 | **Public half** | **Derived, never configured.** Security computes the public JWK from the private key and publishes it under the `kid` in `Security:SigningKeyId`. There is no public-key variable, and there must not be one: two independently configured halves of one key pair is a way to publish material that does not verify what is being signed |
-| **Rotation** | Replace the file and restart. No code change, no rebuild, no redeploy of any other service — the verifiers re-fetch the published key set |
+| **Rotation** | **Not implemented — see §4.1.1.** Replace the configured secret value (or the object in the secret store that supplies it) and restart Security. No code change and no rebuild, and no other service is reconfigured; but every token signed with the previous key stops verifying the moment the host restarts |
+
+#### 4.1.1 What is enforced about this key, and what is only recommended
+
+This subsection exists because three rows above used to overstate the controls around this variable, and
+an overstated control is worse than a missing one: it is relied on. What follows was read off the code
+rather than off the settings file.
+
+**The accepted format is fixed code, not a validated setting.** `Tokens/SigningKeyProvider.cs` always
+attempts the same closed sequence — PEM first, both the PKCS#8 and the older PKCS#1 encodings, then
+base64 of the DER encoding — and no configuration alters it, so the accepted set cannot drift. A value
+that is none of those, `openssl rand` output being the case that actually happens, **fails the import and
+the host refuses to start**, with a message that names the variable and never echoes what was configured
+under it. That refusal is real and is worth relying on. What is *not* real is the mechanism an earlier
+revision credited it to: `appsettings.json` carries a `Security:SigningKeyFormat` leaf, but
+`Configuration/SecurityOptions.cs` declares no such property, so **the leaf binds to nothing and changing
+its value changes nothing.** It is a record of the fixed behaviour, not the cause of it.
+
+**No key-size floor is enforced anywhere.** `Security:SigningKeyMinimumSizeBits` is likewise unbound —
+there is no such property on the options type, no validator reads it, and **a 1024-bit RSA key starts the
+host and mints tokens.** That was measured on the pinned toolchain rather than assumed, and
+`PowerFramework.Security.Tests` asserts it as correct behaviour rather than tolerating it. 2048 bits is
+what an operator **should** supply and this document recommends it, but nothing compels it: treat the
+value as guidance and, where a floor genuinely matters, enforce it in the secret-issuing process outside
+this service. Anyone adding a real floor must add the bound option, the validator and the test together
+and correct this subsection, `appsettings.json` and [`BUILD.md`](BUILD.md) §8 in the same change.
+
+**Rotation is not implemented, and replacement is a hard cutover.** Security holds exactly **one** signing
+key and publishes exactly **one** JWK under the single `kid` in `Security:SigningKeyId`. There is no key
+ring, no second key slot, no re-read of the configured material while the host runs, and no overlap
+window — the schema's `keys` array is plural because RFC 7517 defines it that way and because a consumer
+must tolerate a future rollover, **not** because this phase performs one
+([`security.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/security.v1.yaml), `JsonWebKeySet`).
+The operational consequence is therefore specific rather than reassuring:
+
+- Replacing the configured secret value and restarting Security removes the old `kid` from the published
+  key set **in the same instant** the new one appears.
+- **Every token signed with the previous key stops verifying immediately.** Tokens live five minutes
+  (`Security:TokenLifetime`), so the interruption is bounded and short — but it is an interruption, and
+  callers holding a token at the moment of restart get a `401` from their next request rather than
+  continuing on a still-published old key. Earlier revisions of this document described that five-minute
+  window as a "brief overlap"; there is no overlap, only a bounded gap.
+- **Nothing is replaced on disk.** The variable carries key material rather than a path, so a rotation
+  replaces the configured secret value, or the object in the secret store that supplies it — not a file
+  in this repository, of which there is none.
+- Publishing more than one key concurrently would require a key ring in `Tokens/SigningKeyProvider.cs`
+  and a multi-key JWKS projection. Until that exists, plan a replacement as a scheduled restart, not as a
+  rollover.
 
 **The transport identity is a separate set of files.** `POST /v1/tokens` authenticates its caller with a
 client certificate (§4.3), so Security additionally needs a server certificate and a client-CA to trust.
 The **server** certificate is not Security-specific: all three TLS listeners terminate with the same
 default material, supplied once through `TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH`, which bind
-to `Kestrel:Certificates:Default:Path` and `:KeyPath`. What is Security-specific is the trust anchor it
-validates presented client certificates against, `SECURITY_MTLS_CLIENT_CA_PATH`, and the client
-certificate each calling service presents — `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` and
+to `Kestrel:Certificates:Default:Path` and `:KeyPath`. **Because one certificate serves three different
+hostnames and is probed locally at a fourth, it must carry every one of them as a subject alternative
+name — `security-service`, `dataservices-service`, `persistence-service`, `localhost` and `127.0.0.1` —
+or be replaced by one certificate per service.** A common-name-only certificate cannot authenticate the
+other names, and every TLS client in the system rejects it for them; the SAN-bearing command set is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 and is the canonical copy. What is Security-specific is the
+trust anchor it validates presented client certificates against, `SECURITY_MTLS_CLIENT_CA_PATH`, and the
+client certificate each calling service presents — `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` and
 `DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH`. All are paths, all mounted from the
-orchestration secret layer, and none is material.
-[`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 carries the full generation command set and is the canonical
-copy; [`BUILD.md`](BUILD.md) §8 and `orchestration/.env.example` §1 restate it, and the three must agree
-word for word.
+orchestration secret layer, and none is material. **`SECURITY_MTLS_CERT_PATH` and
+`SECURITY_MTLS_KEY_PATH` are not part of this roster and must not be reintroduced**: they belonged to a
+withdrawn second mutual-TLS listener, and the server certificate now comes from the shared
+`TLS_CERTIFICATE_*` pair above.
+
+> **The trust anchor is declared but not yet installed anywhere, and that gap is the one thing in this
+> section that is not operable.** `SECURITY_MTLS_CLIENT_CA_PATH` is consumed by a container definition
+> and a Compose manifest rather than by an ASP.NET Core configuration key, because *which* issuers are
+> acceptable is the container's OS trust store. `services/security-service/Dockerfile` **installs no
+> trust anchor** — it has no `ca-certificates` step, no `update-ca-certificates`, and Security registers
+> no explicit chain-validation callback — and `orchestration/docker-compose.yml` does not exist, so
+> nothing mounts the file the variable names. **Mutual-TLS caller authentication is therefore declared
+> and unexercised, not operable**, and §4.3 repeats the point at its own point of use. Closing it needs
+> one of exactly two things: copy the CA into the runtime stage and run `update-ca-certificates` there,
+> or validate presented chains explicitly against that file in application code. Until one lands, no
+> statement anywhere may describe issuance as working.
+
+[`BUILD.md`](BUILD.md) §8 and `orchestration/.env.example` §1 restate the variable roster, and the three
+must agree word for word.
 
 > #### ⚠ Where the filled-in environment file must live — read before generating a key
 >
@@ -687,6 +754,44 @@ word for word.
 > so no environment file reaches a container image. That control is about images, not about version
 > control, and it is not a substitute for the path discipline above.
 
+### 4.1a Three issuance-roster secrets, and they are a different kind of material
+
+The signing secret above is the only **signing** secret in the system, and that remains exactly true. It
+is not, however, the only *required* secret — the issuance edge authenticates its callers with a shared
+secret per caller, and a secrets register that omitted three required secrets would be incomplete in the
+one direction that matters.
+
+| | |
+| --- | --- |
+| **Names** | `SECURITY_CLIENT_SECRET_GATEWAY`, `SECURITY_CLIENT_SECRET_DATASERVICES`, `SECURITY_CLIENT_SECRET` |
+| **Held by** | Security holds all three (it verifies them); Gateway, DataServices and the end-to-end suite each hold **only their own** (they present it) |
+| **Kind of material** | A random shared secret — 32 bytes, base64. Compared byte for byte with `CryptographicOperations.FixedTimeEquals` and **imported by nothing**, which is the precise inverse of the signing key: `openssl rand -base64 32` is the right tool here and the wrong one there, and `openssl genpkey` is the right tool there and the wrong one here |
+| **Format** | Opaque. Any non-blank value is accepted, because a shared secret has no structure to check. It travels as the password half of an HTTP `Basic` credential, so it is UTF-8 and may contain a colon (the reader splits on the first colon, per RFC 7617) but must not contain a newline — an environment file holds one line per value |
+| **Named, not stored** | Each roster entry declares `SecretConfigurationKey` — the **name** of a flat configuration key. The material arrives through configuration injection from the orchestration secret layer. That is the same indirection `Security:KeyStore` uses for caller-referenced material, and it is what keeps the roster reviewable in a settings file at all (C-F) |
+| **Absence is fail-fast** | Security resolves every secret its roster names at startup and **refuses the host** when a named key resolves to nothing or to whitespace, reporting the roster **position** and never a value. The alternative is a caller that mysteriously cannot authenticate against a service whose readiness probe reports healthy |
+| **Rotation** | Per caller and independently — rotating one does not invalidate a token already minted, because a roster secret authenticates the *request for* a token and is not the material any token is signed with. That is a deliberate property: rotating the signing key invalidates every token in flight, rotating a roster secret invalidates nothing |
+
+**Why three and not five.** Gateway obtains tokens addressed to DataServices; DataServices obtains them
+addressed to Persistence and to Security's cryptographic surface. **Persistence has no roster entry and
+needs no secret** — it requests no token at all and reads Security's published key set anonymously, so
+provisioning one would create material nothing consumes and nobody rotates. The third is the operator /
+end-to-end identity `pfw-e2e-suite`, registered only in `appsettings.Development.json` because a suite
+identity is a local bring-up fact rather than a deployment one; `tests/e2e` presents it as
+`SECURITY_CLIENT_ID` and `SECURITY_CLIENT_SECRET`, and the identifier must be set to that exact subject
+because the issuance edge reconciles the claimed subject against the authenticated credential identity
+ordinally.
+
+**Do not share one value across two callers.** Sharing collapses two identities into one credential, and
+the permission model then grants each caller the other's audiences and scopes in practice while the roster
+says otherwise — a divergence between configuration and behaviour that nothing in the system reports,
+because from Security's point of view nothing is wrong.
+
+**What the secret does *not* buy.** Authenticating at the issuance edge establishes *which* caller is
+asking; it grants nothing by itself. What that caller may obtain is decided by its own roster entry —
+the audiences it may address and the scopes it may request — and a request outside either is refused
+rather than narrowed. A leaked roster secret therefore yields exactly that caller's permissions and no
+more, which is what makes least privilege here worth stating.
+
 ### 4.2 One issuer, three verifiers
 
 | Role | Held by | What it means |
@@ -707,9 +812,11 @@ word for word.
 
 There is a specific security reason this arrangement is preferred, and it is the reason Security speaks
 REST rather than gRPC: a stock bearer handler consumes a published key set and discovery document with
-**zero bespoke code**. The security-critical validation path — signature checking, key rollover, issuer
-and audience validation, clock-skew handling — is therefore **framework code rather than hand-written
-code**. Choosing gRPC for Security would have forced custom key-set retrieval into three separate
+**zero bespoke code**. The security-critical validation path — signature checking, key selection by `kid`,
+issuer and audience validation, clock-skew handling — is therefore **framework code rather than
+hand-written code**, and it would remain framework code on the day a key ring is added on the issuing
+side (§4.1.1 records that none exists yet, so no verifier has more than one key to choose between
+today). Choosing gRPC for Security would have forced custom key-set retrieval into three separate
 services, which is a net *increase* in hand-written security-critical code and precisely the wrong
 direction.
 
@@ -717,7 +824,7 @@ direction.
 `401` without one, so authentication is testable rather than merely asserted
 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.2).
 
-### 4.3 Mutual TLS is the per-pair fallback, and token issuance is that pair
+### 4.3 The issuance edge accepts two caller credentials, and mutual TLS is the per-pair fallback half
 
 Mutual TLS is the documented fallback for a pair where a token issuer is inappropriate, it applies **to
 that pair only** — adding a certificate path setting and a key path setting for those two services
@@ -725,25 +832,42 @@ rather than changing the system-wide model — and JSON Web Tokens remain the de
 edge. That is the general rule, and it has exactly one instance, which this register names rather than
 leaving abstract:
 
-> **`POST /v1/tokens` is the single mutual-TLS edge in the system, and mutual TLS is mandatory on that
-> operation.** A caller cannot present a bearer token in order to obtain its first bearer token, so
-> caller identity on issuance comes from the client certificate the transport presents.
-> `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` declares a `mutualTLS` scheme, applies it
-> to that operation as an override of the document-level bearer requirement, and defines `401` for an
-> absent or untrusted certificate and `403` for a trusted certificate whose caller is not permitted the
-> requested subject or audience.
+> **`POST /v1/tokens` is the one operation a bearer token cannot protect**, because a caller cannot
+> present a token in order to obtain its first one. `shared/PowerFramework.Contracts/OpenApi/
+> security.v1.yaml` therefore declares **two** schemes and applies both to that operation as an override
+> of the document-level bearer requirement, **either** of which satisfies it: `clientCredential`, an HTTP
+> `Basic` credential naming a subject on Security's issuance roster, and `mutualTls`, a chain-verified
+> client certificate. It defines `401` for a request presenting neither, or one this service does not
+> hold, and `403` for an authenticated caller asking for a subject, audience or scope its roster entry
+> does not permit.
 
 **The settings are scaffolded rather than merely described, and that is a correction.** An earlier
 revision of `orchestration/.env.example` listed them among its deliberate omissions on the reasoning that
 nothing should be scaffolded before the pair adopts it. The reasoning was sound and its premise was
 wrong: the pair has adopted it, since the published contract has required mutual TLS on issuance from the
 moment it was authored. Without the settings the stack starts and then cannot issue a single credential,
-so their absence was a functional defect rather than restraint. The seven variables now present are
-Security's own server certificate and key, the trust anchor it validates presented client certificates
-against, and a client certificate and key for each of the two services that request tokens — Gateway and
-DataServices. **Persistence has none**, because it reads Security's anonymous key set and calls nothing
-else there, and provisioning a credential for a caller that never authenticates would create material
-nothing consumes and nobody rotates.
+so their absence was a functional defect rather than restraint. The seven variables now present are the
+shared server certificate and key (`TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` — not
+Security-specific, since all three TLS listeners terminate with the same default material), the trust
+anchor Security validates presented client certificates against, and a client certificate and key for
+each of the two services that request tokens — Gateway and DataServices. **Persistence has none**,
+because it reads Security's anonymous key set and calls nothing else there, and provisioning a credential
+for a caller that never authenticates would create material nothing consumes and nobody rotates.
+
+> **Scaffolded is not the same as operable, and on this edge the difference is the whole story.**
+> The settings exist, both typed clients read them, and the listener requests a client certificate — but
+> **nothing in this repository yet establishes which issuers Security trusts.** Chain verification for a
+> presented client certificate is done against the container's OS trust store, and
+> `services/security-service/Dockerfile` installs no trust anchor: no `ca-certificates` package step, no
+> `update-ca-certificates`, and no explicit chain-validation callback registered in application code.
+> `orchestration/docker-compose.yml` does not exist either, so nothing mounts the file
+> `SECURITY_MTLS_CLIENT_CA_PATH` names. **Mutual-TLS caller authentication is therefore declared and
+> unexercised.** Two implementations would close it, and exactly one of them must be chosen and recorded:
+> copy the CA into the runtime stage and run `update-ca-certificates` there, so the OS store validates
+> chains; or validate presented chains explicitly in application code against the file that variable
+> names, which keeps the anchor out of the image but moves security-critical logic into hand-written code.
+> Until one lands, **no document may describe issuance as working**, and §4.1.1 says the same at its own
+> point of use.
 
 Three consequences belong in a secrets register specifically:
 
@@ -760,14 +884,17 @@ Three consequences belong in a secrets register specifically:
   without its certificate, so both-or-neither is enforced with a named error rather than discovered at
   the first token request. No path is echoed into that error — a path is not itself a credential, but a
   startup log is the wrong place to publish where one is mounted.
-- **The issuance path must not sit behind a TLS-terminating proxy.** Mutual TLS authenticates the
-  client to Security itself, so an intermediary that terminates TLS there either discards the
-  certificate or leaves Security trusting a forwarded assertion of identity it cannot verify. Both
-  outcomes defeat the sole-issuer topology this section exists to protect.
-  [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the deployment model. **There is no plain-HTTP
-  development exception on this service**, in any environment: on a plaintext listener the client
-  certificate is never requested, never presented and never validated, so issuance would not be weakly
-  authenticated but uncallable.
+- **Where the certificate scheme is in use, the issuance path must not sit behind a TLS-terminating
+  proxy.** A client certificate authenticates the client to Security itself, so an intermediary that
+  terminates TLS there either discards the certificate or leaves Security trusting a forwarded assertion
+  of identity it cannot verify. Both outcomes defeat the sole-issuer topology this section exists to
+  protect. Where the roster credential is in use the constraint does not arise, because the credential
+  travels in a header the operation reads itself — which is a further reason the contract publishes both.
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the deployment model, including what plaintext costs:
+  the roster credential, every issued token and the key set are capturable on path, and the key set is
+  substitutable. That exposure is **accepted** for the single-host, private-network bring-up the frozen
+  environment describes, and for no other topology — which is exactly why this register treats the roster
+  secret with the same handling rule as the signing key.
 
 ### 4.4 No secret is scaffolded for any deferred service
 
@@ -816,7 +943,9 @@ rotated without editing source, and anyone who can read the page can mint signat
 from legitimate ones.
 
 Security inverts every one of those properties. Its signing key arrives from configuration and exists
-nowhere in source; it can be rotated without a code change; it is never returned to a caller (§4.5);
+nowhere in source; it can be **replaced** without a code change, an edit to any tracked file or a rebuild
+(§4.1.1 is explicit that replacement is a hard cutover rather than a rollover, because no rotation
+machinery exists); it is never returned to a caller (§4.5);
 and it is held by exactly one component (§4.2), so the set of things that can mint a token is
 enumerable. That is the whole difference between the anti-pattern and the design, and it is why the
 token topology is recorded in this document alongside the material it replaces.
@@ -915,8 +1044,21 @@ service, **the audience includes a network peer and a log aggregator**, neither 
 
 ### 6.3 The control, and why it is not a behavioural change
 
-The error payload's statement field is **redacted, or structurally split into a statement plus a
-separate parameter collection**, before it crosses a boundary or reaches a log.
+The error payload's statement field is **redacted** before it crosses a boundary or reaches a log. **The
+wire carries one redacted string field and nothing beside it.**
+
+**The shape is decided rather than open, and this is the record of the decision.** Two shapes were
+permitted when the control was specified — a single redacted field, or a statement plus a separate
+parameter collection — and the **single redacted field** is the one implemented and published:
+`shared/PowerFramework.Contracts/Proto/common.v1.proto` declares `string sqlsyntax = 3` with the
+redaction rule stated on the field, `DbError` has **no** `parameters` member, and
+`services/persistence-service/PowerFramework.Persistence/Errors/SqlRedactor.cs` is the one component that
+produces the value. Adding a parameter collection now would be a contract revision, not a refinement.
+Earlier revisions of this section and of [`CONTRACTS.md`](CONTRACTS.md) §8.6 described the alternative as
+still open; that wording is withdrawn in both. The reason the single field won belongs in a secrets
+register: **a parameter collection is itself the sensitive data.** Separating a literal from its statement
+moves the value, it does not protect it, so splitting would have produced two fields to redact instead of
+one and a second place for a future change to forget.
 
 This is a **logging and transport control, not a behavioural change**, and the distinction rests on
 three points:
@@ -1039,7 +1181,7 @@ attached environment's setup instructions. Six of them bear on this document dir
 | --- | --- | --- |
 | **C-F** — nothing hardcoded may be carried forward; the three named sites are a floor, not a ceiling | Record every site with locator, severity and required action; reproduce no value; distinguish the named from the newly found | §2.3 records all **eight** in-source sites and §2.7 all **three** binary sites. §2.1 states the arithmetic — three named, eight plus three found — and the "Named in requirements?" column marks the **five** newly found. No value appears anywhere (§1.1, §8.2) |
 | **C-C** — the legacy tree is read-only and is the behavioural oracle | Determine the remediation posture accordingly, and explain why deletion is wrong | §3.1 shows all eight in-source sites lie in the read-only region. §3.2 states the posture. §3.3 explains why deletion would corrupt the oracle and buy nothing, and confirms this document **never** recommends editing any legacy path or any of the five pre-existing Chinese documents. This register is purely additive |
-| **C-G** — no new attack surface: every newly created boundary is authenticated | Carry the token topology | §4 in full: one signing secret (§4.1), sole issuer and three verifiers (§4.2), mutual TLS as a per-pair fallback (§4.3), the opaque key-reference rule (§4.5) |
+| **C-G** — no new attack surface: every newly created boundary is authenticated | Carry the token topology | §4 in full: one signing secret (§4.1), what is and is not enforced about it (§4.1.1), sole issuer and three verifiers (§4.2), mutual TLS as a per-pair fallback with its trust anchor recorded as **declared but not yet installed** (§4.3), the opaque key-reference rule (§4.5) |
 | **C-D** — do not implement the four deferred services | Scaffold no secret material for any of them | §4.4. No signing, verification or mutual-TLS variable is provisioned for DesignSystem, Documents, Integration or ScriptBridge, and the environment's design-service and localization-service names are explicitly not provisioned |
 | **C-B** — no new features, no behaviour improvements, no performance objective | Preserve the weak defaults and annotate them; assert no performance figure | §7 preserves all eight and states that annotation **is** the remediation. §6.3 justifies the one added control as a logging and transport control rather than a behavioural change. No performance, latency, throughput, availability or service-level figure appears anywhere in this document, because the repository publishes none |
 | **C-K** — document every technology-specific and boundary-specific decision | Document the remediation decisions, the operational follow-ups, and the cleared false positives | §3 carries the posture and its reasoning. §3.6 surfaces both operational follow-ups. §2.10 clears the false positives so remediation is not misdirected, and §2.9 records a corrected attribution for the same reason |
@@ -1077,6 +1219,15 @@ Stated so that the register's limits are as legible as its findings:
   gate is asserted as exercised anywhere in this document. The build-context exclusions in §3.5 are
   verified by reading `.dockerignore` at the cited locators — that is a static verification of the
   exclusion list, and nothing more is claimed from it.
+- **It does not claim mutual-TLS caller authentication on `POST /v1/tokens` is operable.** The settings
+  and the typed clients exist and the listener requests a certificate, but no container installs the
+  trust anchor and no Compose manifest mounts it, so no presented client certificate has ever been
+  validated. §4.1.1 and §4.3 both record that as a pending implementation with two named options.
+- **It does not claim that the signing key's format or size is validated from configuration, or that
+  key rotation exists.** §4.1.1 states what is actually enforced: a fixed import sequence whose failure
+  refuses startup, **no** key-size floor of any kind, and exactly one published key with no rollover
+  machinery. Two settings leaves in `appsettings.json` name a format and a minimum size and bind to
+  nothing; they are a record of intent, and this document no longer presents either as a control.
 - **It does not claim any user-specified rule governs this work.** None exists (§1.2); the bar applied
   in their place is stated there rather than assumed.
 - **It reproduces no secret value of any kind** — the claim this document opens with, and the one every

@@ -46,12 +46,18 @@ because it is where the corresponding work belongs, not because a reader can ope
 
 | Artifact | What it will carry | State |
 | --- | --- | --- |
-| The four per-service `Dockerfile`s | Container images for the four services | **Planned — not yet present** |
+| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up, for the four services this phase builds and for none of the four it defers. `orchestration/.env.example` is **present** | **Planned — not yet present** |
 
 Everything else this document references — the solution and project files, the shared libraries, the
 protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
-[`PARITY.md`](PARITY.md) and
+all four service applications with their test projects, **all four container definitions**,
+`.github/workflows/ci.yml`, and [`PARITY.md`](PARITY.md) and
 the read-only legacy tree — **is present in the tree today**.
+
+None of that changes anything this document says, and the reason is worth stating: the prohibition it
+records is about what must **not** exist for the four deferred services, so progress on the four
+in-scope services can only ever make the roster below easier to verify, never harder. The audit in
+[§5](#5-the-reserved-gateway-routes-are-metadata-not-stubs) is unaffected.
 
 ---
 
@@ -413,12 +419,29 @@ with a **machine-readable body** naming the deferred service it will eventually 
 the marker `reserved for Phase 2`. The body is structured rather than a text message so a client can
 branch on it; [`CONTRACTS.md`](CONTRACTS.md) §13 defines the field set.
 
-Each of the four declares `get` and `post`, each operation declares **exactly one response — `501`**,
-and **neither declares a request body**: a request schema would model a deferred capability, and
-modelling one is precisely what the prohibition forbids. Every *other* HTTP method on the route answers
-the same `501`, so no verb appears implemented. The four declarations are structurally identical,
-differing only in the path segment and the service they name — an asymmetry between them would itself be
-the evidence that capability modelling had crept in.
+Each of the four declares `get` and `post`, and **neither declares a request body**: a request schema
+would model a deferred capability, and modelling one is precisely what the prohibition forbids. Every
+*other* HTTP method on the route answers the same `501`, so no verb appears implemented. The four
+declarations are structurally identical, differing only in the path segment and the service they name —
+an asymmetry between them would itself be the evidence that capability modelling had crept in.
+
+**Each operation declares two responses, and a caller receives exactly one of them:**
+
+| What the caller sends | What it receives | Where it comes from |
+| --- | --- | --- |
+| No token, or an invalid one | **`401 Unauthorized`** with a problem-details body | The authentication middleware, **before any handler runs**. None of the four routes overrides the document-level bearer requirement, so the deferred roster is not anonymously enumerable |
+| A valid token | **`501 Not Implemented`** with the machine-readable body above | The handler — and it is the **only** result any handler computes, unconditionally, for every method and every path remainder, with nothing evaluated first |
+
+That unconditionality is the property this whole section rests on, and **declaring the pre-handler `401`
+beside the `501` leaves it untouched.** An earlier revision of this section said each operation declares
+exactly one response; that omission told a generated client the `401` could not occur on paths that
+demonstrably return it. The authored contract, the runtime-generated description, the contract tests and
+the end-to-end specs now all agree on `{401, 501}`.
+
+**What would still be a violation, so the line stays auditable:** any `2xx`, which would say part of a
+deferred service had been built; and any `4xx` **other** than that `401` — a `400`, a `404` or a `409`
+would each say the route inspects the request before answering. Neither appears on any of the eight
+operations.
 
 | Route | Deferred service | Capabilities it will eventually reach |
 | --- | --- | --- |

@@ -59,6 +59,15 @@ public sealed class SecurityClientCryptoTests
         DataServicesOptions options = new();
         options.Security.BaseAddress = "https://security.invalid/";
 
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST HAVE AN IDENTITY TO PRESENT. The issuance endpoint is
+        // authenticated by mutual TLS and by nothing else, so the client refuses to ask for a token when
+        // this deployment configures no certificate - a certificate-less request could only be refused,
+        // and the refusal would read like a Security fault rather than a missing setting. PATHS ONLY:
+        // nothing here is opened or loaded, because the client checks only whether an identity is
+        // configured and the composition root is what reads the material.
+        options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+
         SecurityClient client = new(
             httpClient,
             Options.Create(options),
@@ -1392,6 +1401,15 @@ public sealed class SecurityClientCryptoTests
         DataServicesOptions options = new();
         options.Security.BaseAddress = "https://security.invalid/";
 
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST HAVE AN IDENTITY TO PRESENT. The issuance endpoint is
+        // authenticated by mutual TLS and by nothing else, so the client refuses to ask for a token when
+        // this deployment configures no certificate - a certificate-less request could only be refused,
+        // and the refusal would read like a Security fault rather than a missing setting. PATHS ONLY:
+        // nothing here is opened or loaded, because the client checks only whether an identity is
+        // configured and the composition root is what reads the material.
+        options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+
         SecurityClient client = new(httpClient, Options.Create(options), logger, new MutableClock());
 
         await client.HashAsync(
@@ -1443,6 +1461,54 @@ public sealed class SecurityClientCryptoTests
     {
         Assert.Throws<JsonException>(
             () => JsonSerializer.Deserialize<FormCarrier>("{\"Form\":" + wireValue + "}"));
+    }
+
+    /// <summary>
+    /// A token differing from a declared one only in casing is refused.
+    /// </summary>
+    /// <param name="wireValue">The mis-cased token, as it would appear on the wire.</param>
+    /// <remarks>
+    /// SEPARATE FROM THE ROW ABOVE BECAUSE IT CATCHES A DIFFERENT MISTAKE. The stock string-enum
+    /// converter matches names case-insensitively by construction and does not expose that setting, so a
+    /// converter merely DERIVED from it accepts every one of these while the published contract declares
+    /// only <c>STRING</c> and <c>BLOB</c>. Accepting them would make this client tolerate a response its
+    /// own contract document forbids, which is the shape of divergence that lets a non-conforming
+    /// upstream go unnoticed.
+    /// </remarks>
+    [Theory]
+    [InlineData("\"string\"")]
+    [InlineData("\"String\"")]
+    [InlineData("\"sTRING\"")]
+    [InlineData("\"blob\"")]
+    [InlineData("\"Blob\"")]
+    public void ThePayloadFormSelector_RefusesEveryOtherCasingOfADeclaredToken(string wireValue)
+    {
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<FormCarrier>("{\"Form\":" + wireValue + "}"));
+    }
+
+    /// <summary>
+    /// The two declared tokens are still what the selector WRITES, and an undefined value is refused.
+    /// </summary>
+    /// <remarks>
+    /// The write half is asserted because the exact-token read half would be worthless if this client
+    /// sent something else: the request it builds must carry a token the issuing service's equally exact
+    /// reader accepts. The undefined arm matters because .NET does not restrict an enumeration value to
+    /// its declared members, and emitting a number would send a form this contract's own reader refuses.
+    /// </remarks>
+    [Fact]
+    public void ThePayloadFormSelector_WritesTheDeclaredTokensAndRefusesAnUndefinedValue()
+    {
+        Assert.Equal(
+            "{\"Form\":\"STRING\"}",
+            JsonSerializer.Serialize(new FormCarrier { Form = PayloadForm.STRING }));
+
+        Assert.Equal(
+            "{\"Form\":\"BLOB\"}",
+            JsonSerializer.Serialize(new FormCarrier { Form = PayloadForm.BLOB }));
+
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Serialize(new FormCarrier { Form = (PayloadForm)7 }));
     }
 
     [Fact]

@@ -29,7 +29,7 @@
 //      argument shape             SymEncrypt          SymDecrypt          consequence
 //      -----------------------    ----------------    ----------------    -----------------------
 //      no IV, no mode             L30 L34 L38 L42     L46 L50 L54 L58     runs in the ECB default
-//      no IV, WITH mode           L31 L35 L39 L43     L47 L51 L55 L59     DECISION D3 applies
+//      no IV, WITH mode           L31 L35 L39 L43     L47 L51 L55 L59     ECB only - DECISION D3
 //      WITH IV, no mode           L32 L36 L40 L44     L48 L52 L56 L60     runs in the ECB default
 //      WITH IV, WITH mode         L33 L37 L41 L45     L49 L53 L57 L61     fully specified
 //
@@ -66,7 +66,9 @@
 //        DECISION D1 and the weak-key interaction recorded under DECISION H2.
 //      * NO AUTHENTICATED ENCRYPTION. Ciphertext carries no integrity tag and a decrypt cannot
 //        detect tampering. See DECISION D2.
-//      * A ZERO INITIALIZATION VECTOR on the eight mode-without-IV overloads. See DECISION D3.
+//      * NO VECTOR IS EVER INVENTED, so the eight mode-without-IV overloads serve ECB and REFUSE
+//        every vector-consuming mode. This is the one place the port NARROWS rather than
+//        preserves, and the narrowing is the safe direction. See DECISION D3.
 //      * DES AND 3DES ARE RETAINED [enums.sru:L936-L937]. Neither may be removed from the set.
 //      * 1024-bit-era algorithm choices generally: the published sets are exactly the five cipher
 //        types at enums.sru:L936-L940 and the three modes at :L943-L945. Nothing is added and
@@ -142,16 +144,32 @@
 //  integrity it is a separate keyed-hash call over the ciphertext, using the HMAC surface the
 //  legacy already publishes at n_crypto.sru:L23-L26.
 //
-//  DECISION D3 - THE EIGHT MODE-WITHOUT-IV OVERLOADS USE AN ALL-ZERO VECTOR OF THE BLOCK LENGTH
+//  DECISION D3 - THE EIGHT MODE-WITHOUT-IV OVERLOADS SERVE ECB AND REFUSE EVERY OTHER MODE
 //  --------------------------------------------------------------------------------------------
 //  Four SymEncrypt overloads accept a mode but no vector [L31, L35, L39, L43], mirrored by four
-//  SymDecrypt overloads [L47, L51, L55, L59]. CBC and CFB both require one, so those eight arms
-//  synthesise it: an all-zero buffer of the cipher's block length, produced by the catalogue from a
-//  LENGTH ALONE and never written down as a literal. A fixed, publicly known vector destroys CBC's
-//  semantic security - the same plaintext under the same key yields the same ciphertext every time,
-//  so an observer learns when a value has not changed. It is preserved because generating a random
-//  vector would produce ciphertext the legacy could not decrypt, there being no field in the legacy
-//  format in which to transmit one.
+//  SymDecrypt overloads [L47, L51, L55, L59]. ECB consumes no vector and those arms proceed
+//  untouched. CBC and CFB both require one, and this port DOES NOT INVENT IT: the call is refused
+//  with `SymmetricParityUnavailableException`. NO VECTOR IS SYNTHESISED ANYWHERE IN THIS FILE.
+//
+//  WHY REFUSING RATHER THAN CHOOSING A VECTOR, WHICH IS THE OPPOSITE OF THIS FILE'S USUAL RULE.
+//  Everywhere else a preserved legacy weakness is reproduced verbatim. Here there is no legacy
+//  behaviour to reproduce: what the closed binary [n_crypto.sru:L8] does with these eight arms is
+//  unknown, and nothing in this repository establishes it. An all-zero buffer of the block length
+//  was once chosen on the belief that it was "the conventional legacy behaviour"; the binary could
+//  as easily derive a vector from the key, use a fixed non-zero constant, or refuse the call.
+//
+//  AND A WRONG GUESS HERE IS INVISIBLE TO EVERY TEST THIS REPOSITORY CAN RUN, because encrypting
+//  and decrypting under the SAME wrong vector round-trips perfectly. The caller would receive
+//  ciphertext that passes every available check and THAT THE LEGACY CANNOT DECRYPT - data loss
+//  wearing the appearance of success. Refusing is the only outcome that cannot be silently wrong,
+//  and it removes no capability the surface does not offer elsewhere: a caller needing CBC supplies
+//  a vector through one of the other twenty-four overloads, which the legacy also publishes.
+//
+//  THE WEAK-VECTOR WARNING STILL APPLIES WHERE A VECTOR IS SUPPLIED. A fixed, publicly known vector
+//  destroys CBC's semantic security - the same plaintext under the same key yields the same
+//  ciphertext every time, so an observer learns when a value has not changed - and this port neither
+//  prevents nor detects a caller choosing one, because the legacy format has no field in which to
+//  transmit a per-message vector.
 //
 //  DECISION D4 - THE STRING-SHAPED OVERLOADS CARRY A TEXT-SAFE ENCODED PAYLOAD
 //  --------------------------------------------------------------------------------------------
@@ -465,11 +483,12 @@ public sealed class SymmetricCipherProvider
     /// The sized key is one this platform refuses - see DECISION H2.
     /// </exception>
     /// <remarks>
-    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies: asking for CBC or CFB here supplies
-    /// no vector, and an ALL-ZERO vector of the cipher's block length is synthesised. That is a weak
-    /// default - a fixed, publicly known vector destroys CBC's semantic security, making the same
-    /// plaintext under the same key produce the same ciphertext every time - and it is preserved
-    /// because a random vector would produce ciphertext the legacy could not decrypt.
+    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies: ECB proceeds, and asking for CBC or
+    /// CFB here is REFUSED with <see cref="SymmetricParityUnavailableException"/> rather than having a
+    /// vector invented for it. NO VECTOR IS SYNTHESISED. What the closed legacy binary does with this
+    /// arm is unknown, and a guessed vector round-trips perfectly against itself while producing
+    /// ciphertext the legacy cannot decrypt - data loss wearing the appearance of success. A caller
+    /// needing CBC supplies a vector through one of the twenty-four overloads that accept one.
     /// </remarks>
     public string SymEncrypt(string plain, string key, ushort ntype, long mode)
     {
@@ -478,12 +497,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return ToPayloadText(EncryptCore(
             ToPayloadBytes(plain),
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode)));
+            initializationVector));
     }
 
     /// <summary>
@@ -618,8 +640,8 @@ public sealed class SymmetricCipherProvider
     /// The sized key is one this platform refuses - see DECISION H2.
     /// </exception>
     /// <remarks>
-    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3's all-zero vector is synthesised for CBC and
-    /// CFB. Annotated as a weak default at L31 above; the reasoning is identical here.
+    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies: ECB proceeds and CBC or CFB is
+    /// REFUSED. The reasoning is recorded once at L31 above and is identical here.
     /// </remarks>
     public string SymEncrypt(string plain, byte[] key, ushort ntype, long mode)
     {
@@ -628,12 +650,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return ToPayloadText(EncryptCore(
             ToPayloadBytes(plain),
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode)));
+            initializationVector));
     }
 
     /// <summary>
@@ -756,8 +781,8 @@ public sealed class SymmetricCipherProvider
     /// The sized key is one this platform refuses - see DECISION H2.
     /// </exception>
     /// <remarks>
-    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3's all-zero vector is synthesised for CBC and
-    /// CFB. See the weak-default annotation at L31.
+    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies: ECB proceeds and CBC or CFB is
+    /// REFUSED. See the reasoning recorded at L31.
     /// </remarks>
     public byte[] SymEncrypt(byte[] plain, string key, ushort ntype, long mode)
     {
@@ -766,12 +791,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return EncryptCore(
             plain,
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode));
+            initializationVector);
     }
 
     /// <summary>
@@ -891,7 +919,7 @@ public sealed class SymmetricCipherProvider
     /// </exception>
     /// <remarks>
     /// The LAST of the four mode-without-vector encrypt overloads [n_crypto.sru:L31, L35, L39, L43],
-    /// so DECISION D3's all-zero vector is synthesised here too when the mode is CBC or CFB.
+    /// so DECISION D3 applies here too: ECB proceeds and CBC or CFB is REFUSED.
     /// </remarks>
     public byte[] SymEncrypt(byte[] plain, byte[] key, ushort ntype, long mode)
     {
@@ -900,12 +928,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return EncryptCore(
             plain,
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode));
+            initializationVector);
     }
 
     /// <summary>
@@ -1060,10 +1091,10 @@ public sealed class SymmetricCipherProvider
     /// </exception>
     /// <exception cref="CryptographicException">See DECISION H2 and DECISION H3.</exception>
     /// <remarks>
-    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies on this side too: a CBC or CFB request
-    /// with no vector decrypts against the SAME all-zero vector the encrypt side synthesised, which
-    /// is what makes the pair round-trip at all. The weakness is annotated on the encrypt side at
-    /// L31; it is identical here.
+    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies on this side too, and SYMMETRICALLY:
+    /// ECB proceeds, and a CBC or CFB request with no vector is REFUSED rather than decrypted against
+    /// an invented one. The symmetry is what matters here - refusing on only one side would leave a
+    /// caller able to produce ciphertext it could not read back. The reasoning is recorded at L31.
     /// </remarks>
     public string SymDecrypt(string cipher, string key, ushort ntype, long mode)
     {
@@ -1072,12 +1103,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return ToPlainText(DecryptCore(
             FromPayloadText(cipher),
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode)));
+            initializationVector));
     }
 
     /// <summary>
@@ -1206,8 +1240,8 @@ public sealed class SymmetricCipherProvider
     /// </exception>
     /// <exception cref="CryptographicException">See DECISION H2 and DECISION H3.</exception>
     /// <remarks>
-    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3's all-zero vector is used for CBC and CFB -
-    /// the same vector its encrypt counterpart at L35 synthesised.
+    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies: ECB proceeds and CBC or CFB is
+    /// REFUSED, exactly as its encrypt counterpart at L35 refuses them.
     /// </remarks>
     public string SymDecrypt(string cipher, byte[] key, ushort ntype, long mode)
     {
@@ -1216,12 +1250,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return ToPlainText(DecryptCore(
             FromPayloadText(cipher),
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode)));
+            initializationVector));
     }
 
     /// <summary>
@@ -1339,7 +1376,8 @@ public sealed class SymmetricCipherProvider
     /// </exception>
     /// <exception cref="CryptographicException">See DECISION H2 and DECISION H3.</exception>
     /// <remarks>
-    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3's all-zero vector is used for CBC and CFB.
+    /// A MODE-WITHOUT-VECTOR OVERLOAD, so DECISION D3 applies: ECB proceeds and CBC or CFB is
+    /// REFUSED.
     /// </remarks>
     public byte[] SymDecrypt(byte[] cipher, string key, ushort ntype, long mode)
     {
@@ -1348,12 +1386,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return DecryptCore(
             cipher,
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode));
+            initializationVector);
     }
 
     /// <summary>
@@ -1463,7 +1504,7 @@ public sealed class SymmetricCipherProvider
     /// <exception cref="CryptographicException">See DECISION H2 and DECISION H3.</exception>
     /// <remarks>
     /// The LAST of the four mode-without-vector decrypt overloads [n_crypto.sru:L47, L51, L55, L59],
-    /// so DECISION D3's all-zero vector applies here too.
+    /// so DECISION D3 applies here too: ECB proceeds and CBC or CFB is REFUSED.
     /// </remarks>
     public byte[] SymDecrypt(byte[] cipher, byte[] key, ushort ntype, long mode)
     {
@@ -1472,12 +1513,15 @@ public sealed class SymmetricCipherProvider
 
         SymmetricCipherMetrics metrics = ScreenArguments(ntype, mode);
 
+        // HOISTED DELIBERATELY: the cell is refused BEFORE any key material exists - DECISION H4(a).
+        byte[]? initializationVector = RefuseOrOmitInitializationVector(mode);
+
         return DecryptCore(
             cipher,
             ntype,
             mode,
             LegacyDefaults.NormalizeKeyMaterial(key, metrics.KeyLengthBytes),
-            RefuseOrOmitInitializationVector(mode));
+            initializationVector);
     }
 
     /// <summary>
@@ -1553,16 +1597,17 @@ public sealed class SymmetricCipherProvider
     //  THE TWO CORE ROUTINES
     //  ------------------------------------------------------------------------------------------
     //  ALL 32 PUBLIC OVERLOADS FUNNEL THROUGH THESE TWO METHODS, which is what makes the ECB
-    //  default, DECISION D3's zero vector, DECISION D1's sizing, DECISION H1's feedback width,
+    //  default, DECISION D3's refusals, DECISION D1's sizing, DECISION H1's feedback width,
     //  DECISION H3's padding and DECISION H4(b)'s vector-ignoring impossible to apply
     //  inconsistently: there is exactly one place each of them can be applied.
     //
     //  OWNERSHIP, WHICH IS THE ONE THING TO GET RIGHT WHEN READING THESE. Each core TAKES OWNERSHIP
     //  of the normalized key and vector buffers it is handed and ZEROES THEM before returning,
     //  including on every exception path. That is safe because both are always FRESH ALLOCATIONS -
-    //  the catalogue's normalizer allocates a new buffer of the required length on every call and
-    //  its zero-vector factory allocates one too, so neither can ever be the caller's own array.
-    //  A caller's key array is therefore never mutated by this type.
+    //  the catalogue's normalizer allocates a new buffer of the required length on every call, and
+    //  the only other value a vector parameter can hold is null, since no vector is ever synthesised
+    //  here (DECISION D3). Neither buffer can be the caller's own array, so a caller's key array is
+    //  never mutated by this type.
     //
     //  WHY THE ONE-SHOT PRIMITIVES RATHER THAN A REUSABLE TRANSFORM. The mode, the padding and the
     //  feedback width are passed as ARGUMENTS to each operation instead of being assigned to the
@@ -2060,9 +2105,10 @@ public sealed class SymmetricCipherProvider
     /// </para>
     /// <para>
     /// SAFE BECAUSE OF OWNERSHIP, WHICH IS WORTH RESTATING HERE RATHER THAN ASSUMING. Both buffers
-    /// are always FRESH ALLOCATIONS produced by the catalogue - its normalizer allocates a new buffer
-    /// of the required length on every call, and its zero-vector factory allocates one too - so
-    /// neither can ever be the caller's own array and this wipe cannot destroy a caller's key.
+    /// are always FRESH ALLOCATIONS produced by the catalogue's normalizer, which allocates a new
+    /// buffer of the required length on every call - and a vector is otherwise null, because none is
+    /// ever synthesised here (DECISION D3). Neither can be the caller's own array, so this wipe cannot
+    /// destroy a caller's key.
     /// </para>
     /// <para>
     /// WHAT IT CANNOT REACH IS STATED PLAINLY. A <see cref="string"/> key or vector cannot be wiped

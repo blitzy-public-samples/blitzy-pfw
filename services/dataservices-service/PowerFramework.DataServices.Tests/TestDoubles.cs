@@ -1764,6 +1764,7 @@ internal static class MacroScripts
 internal sealed class ScriptedMacroChannel : IMacroInvocationChannel
 {
     private readonly List<MacroInvocation> _invocations = [];
+    private readonly List<CancellationToken> _observedTokens = [];
     private readonly Dictionary<string, ScriptedMacro> _scripts = new(StringComparer.Ordinal);
     private readonly HashSet<string> _unhandled = new(StringComparer.Ordinal);
 
@@ -1821,10 +1822,118 @@ internal sealed class ScriptedMacroChannel : IMacroInvocationChannel
 
     /// <summary>A side effect to run inside the channel, after recording and before answering.</summary>
     /// <remarks>
+    /// <para>
     /// The channel is the only await point inside a calculation pass, so it is the only place from which a
     /// nested pass can be driven. A suite needing re-entrancy hangs it here.
+    /// </para>
+    /// <para>
+    /// SYNCHRONOUS, AND THEREFORE BLIND TO CANCELLATION. It runs to completion before the channel looks at
+    /// the token again, so a callback hung here cannot observe the invoker's timeout firing. That is fine
+    /// for a re-entrancy scenario and WRONG for a cancellation one - use
+    /// <see cref="OnInvokeAsync"/> or <see cref="WaitForCancellation"/> for those, and see the remarks on
+    /// <see cref="OnInvokeAsync"/> for why the distinction is not a stylistic one.
+    /// </para>
     /// </remarks>
     public Action<MacroInvocation>? OnInvoke { get; set; }
+
+    /// <summary>
+    /// A cancellation-aware side effect, awaited inside the channel with the token the invoker supplied.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ THIS IS THE SEAM A CANCELLATION OR TIMEOUT TEST MUST USE, AND THE REASON IS A CORRECTNESS ONE ⚠
+    /// </para>
+    /// <para>
+    /// The invoker imposes its timeout by linking its own <see cref="CancellationTokenSource"/> to the
+    /// caller's token and handing the LINKED token to this channel. A channel that never awaits that token
+    /// can only be interrupted by the clock happening to advance far enough before it returns, so a test
+    /// built on a synchronous sleep is measuring wall time rather than propagation: it reports
+    /// <c>TimedOut</c> whether or not the linked token was ever signalled, and would keep reporting it if
+    /// the linking were removed from the production path entirely. That is a test that cannot fail for the
+    /// reason it exists.
+    /// </para>
+    /// <para>
+    /// Awaiting the received token closes that hole. Combine it with a controllable clock - the
+    /// <c>DeterministicTimeProvider</c> in section 5, whose <c>Advance</c> fires the timers created through
+    /// it - and the timeout becomes reachable with NO real waiting at all and the token itself becomes
+    /// observable through <see cref="ObservedTokens"/>.
+    /// </para>
+    /// <para>
+    /// Runs after recording and after <see cref="OnInvoke"/>, and before <see cref="Fault"/> is considered,
+    /// so a suite can prove the invocation was issued before the channel declined to answer it.
+    /// </para>
+    /// </remarks>
+    public Func<MacroInvocation, CancellationToken, ValueTask>? OnInvokeAsync { get; set; }
+
+
+    /// <summary>
+    /// A hook that also receives the EFFECTIVE cancellation token the invoker composed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THE TOKEN HAS TO BE REACHABLE, AND WHY THE SIBLING HOOK IS NOT ENOUGH. Distinguishing an
+    /// invoker-imposed timeout from a caller cancellation is a question about WHICH TOKEN FIRED, so a case
+    /// that means to exercise the timeout arm has to be able to wait for the timeout token itself. Without
+    /// this hook the only way to let the timeout elapse is to sleep for longer than it and hope the
+    /// timeout's timer callback is scheduled first - which is a race, and one that a loaded machine loses:
+    /// a blocked pool thread can delay a timer callback past the sleep it was supposed to pre-empt, and the
+    /// invocation is then classified as cancelled rather than timed out. The observed failure was exactly
+    /// that, during a parallel run of the whole solution.
+    /// </para>
+    /// <para>
+    /// It is a SEPARATE property rather than a widening of <see cref="OnInvoke"/> because most cases have
+    /// no interest in the token, and both fire so a case may use either or both.
+    /// </para>
+    /// </remarks>
+    public Action<MacroInvocation, CancellationToken>? OnInvokeWithCancellation { get; set; }
+
+    /// <summary>
+    /// The token the channel received on each invocation, in order.
+    /// </summary>
+    /// <remarks>
+    /// Recorded so a test can assert on the TOKEN rather than only on the outcome. Proving that the token
+    /// the channel was handed ended up cancelled, while the caller's own token did not, is what
+    /// distinguishes an invoker-imposed timeout from a caller cancellation - the two outcomes the contract
+    /// keeps deliberately separate because a caller should retry only one of them.
+    /// </remarks>
+    public ImmutableArray<CancellationToken> ObservedTokens => [.. _observedTokens];
+
+    /// <summary>The token of the most recent invocation, or the default when none was issued.</summary>
+    public CancellationToken LastObservedToken =>
+        _observedTokens.Count == 0 ? CancellationToken.None : _observedTokens[^1];
+
+    /// <summary>
+    /// Makes the channel wait on the token it is handed until that token is cancelled, then report it.
+    /// </summary>
+    /// <returns>This channel, so scripting can be chained.</returns>
+    /// <remarks>
+    /// <para>
+    /// The faithful shape of a client that received the request and never answered: the channel blocks
+    /// ASYNCHRONOUSLY, observes the linked token, and when it is signalled throws the
+    /// <see cref="OperationCanceledException"/> that a real cancellation-aware client would throw - carrying
+    /// the token that actually cancelled, which is what lets the invoker discriminate its own timeout from a
+    /// caller cancellation.
+    /// </para>
+    /// <para>
+    /// It supersedes the pairing of a synchronous sleep with a hand-injected
+    /// <see cref="OperationCanceledException"/>. That pairing had two independent faults: nothing observed
+    /// the token, and the exception was manufactured rather than produced, so the outcome under test was
+    /// supplied by the test itself. Here the exception is a CONSEQUENCE of the cancellation.
+    /// </para>
+    /// <para>
+    /// It cannot hang a run. <c>Task.Delay</c> with an infinite delay completes only through the token, and
+    /// the token is either the invoker's timeout or the caller's own - so an invoker with neither a timeout
+    /// nor a cancellable caller token is a test-authoring error rather than a wait, and the runner's own
+    /// per-test bound ends it.
+    /// </para>
+    /// </remarks>
+    public ScriptedMacroChannel WaitForCancellation()
+    {
+        OnInvokeAsync = static async (_, cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+
+        return this;
+    }
 
     /// <summary>Scripts a macro name with a handler.</summary>
     /// <param name="name">The macro name, compared ordinally and case-sensitively.</param>
@@ -1888,7 +1997,7 @@ internal sealed class ScriptedMacroChannel : IMacroInvocationChannel
     }
 
     /// <inheritdoc/>
-    public ValueTask<MacroInvocationResponse> InvokeAsync(
+    public async ValueTask<MacroInvocationResponse> InvokeAsync(
         MacroInvocation invocation,
         CancellationToken cancellationToken)
     {
@@ -1896,7 +2005,22 @@ internal sealed class ScriptedMacroChannel : IMacroInvocationChannel
         cancellationToken.ThrowIfCancellationRequested();
 
         _invocations.Add(invocation);
+
+        // THE TOKEN IS RECORDED, NOT MERELY CHECKED. `ObservedTokens` is what lets a test assert that the
+        // token the invoker handed over is the one that ended up cancelled, which is the difference between
+        // an invoker-imposed timeout and a caller cancellation.
+        _observedTokens.Add(cancellationToken);
+
         OnInvoke?.Invoke(invocation);
+        OnInvokeWithCancellation?.Invoke(invocation, cancellationToken);
+
+        // AWAITED WITH THE TOKEN THE INVOKER SUPPLIED, which is the linked token when a timeout is
+        // configured. This is the only point in the double at which cancellation is observable at all; see
+        // the remarks on OnInvokeAsync for why a synchronous seam cannot stand in for it.
+        if (OnInvokeAsync is { } asynchronousSideEffect)
+        {
+            await asynchronousSideEffect(invocation, cancellationToken).ConfigureAwait(false);
+        }
 
         if (Fault is not null)
         {
@@ -1909,25 +2033,27 @@ internal sealed class ScriptedMacroChannel : IMacroInvocationChannel
         if (_unhandled.Contains(invocation.Name)
             || !_scripts.TryGetValue(invocation.Name, out ScriptedMacro? script))
         {
-            return ValueTask.FromResult(new MacroInvocationResponse
+            return new MacroInvocationResponse
             {
                 InvocationId = invocationId,
                 Sequence = sequence,
                 Unhandled = true,
-            });
+            };
         }
 
         object? value = script(invocation.Row, invocation.Dwo, invocation.Name, invocation.Arguments);
 
-        // SYNCHRONOUSLY COMPLETED, with no continuation and no retry of its own. A double that awaited
-        // anything would let a test hang where it should fail, and a double that retried would make the
-        // invocation count - the evidence that the engine issued exactly one call - meaningless.
-        return ValueTask.FromResult(new MacroInvocationResponse
+        // THE ANSWER ITSELF IS STILL SYNCHRONOUS, and no retry of its own is ever attempted. The only await
+        // point in this method is the explicitly-scripted OnInvokeAsync seam above, so a suite that scripts
+        // nothing still completes on the calling stack: a double that awaited something unasked-for would
+        // let a test hang where it should fail, and a double that retried would make the invocation count -
+        // the evidence that the engine issued exactly one call - meaningless.
+        return new MacroInvocationResponse
         {
             InvocationId = invocationId,
             Sequence = sequence,
             Value = value,
-        });
+        };
     }
 }
 
@@ -2963,6 +3089,8 @@ internal sealed class DeterministicTimeProvider : TimeProvider
     public static readonly DateTimeOffset DefaultInstant = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     private readonly object _gate = new();
+    private readonly object _timerGate = new();
+    private readonly List<ManualTimer> _timers = [];
     private DateTimeOffset _instant;
     private int _reads;
 
@@ -3066,9 +3194,17 @@ internal sealed class DeterministicTimeProvider : TimeProvider
     /// <summary>Moves the clock forward, or backward for a negative value.</summary>
     /// <param name="by">How far to move.</param>
     /// <remarks>
+    /// <para>
     /// Backward motion is permitted on purpose. A clock that only went forward could not reproduce the
     /// behaviour of a host whose clock was corrected, and a cache keyed on an expiry has to be shown to
     /// cope with it.
+    /// </para>
+    /// <para>
+    /// FORWARD MOTION ALSO FIRES ANY TIMER THAT HAS BECOME DUE, which is what makes a timeout reachable
+    /// without waiting - see <see cref="CreateTimer"/>. Backward motion fires nothing and cancels nothing:
+    /// a timer's due instant is fixed when it is created, so moving the clock back merely means it is no
+    /// longer due yet.
+    /// </para>
     /// </remarks>
     public void Advance(TimeSpan by)
     {
@@ -3076,6 +3212,191 @@ internal sealed class DeterministicTimeProvider : TimeProvider
         {
             _instant += by;
         }
+
+        FireDueTimers();
+    }
+
+    /// <summary>
+    /// Creates a timer that fires only when a test moves the clock past its due instant.
+    /// </summary>
+    /// <param name="callback">The callback to invoke.</param>
+    /// <param name="state">The state passed to the callback.</param>
+    /// <param name="dueTime">How far ahead the first invocation is due.</param>
+    /// <param name="period">The repeat interval, or <see cref="Timeout.InfiniteTimeSpan"/> for one-shot.</param>
+    /// <returns>The timer, which the caller disposes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="callback"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// ⚠ WITHOUT THIS OVERRIDE THE CLOCK IS ONLY HALF SUBSTITUTED, AND THE HALF LEFT OVER IS REAL TIME ⚠
+    /// </para>
+    /// <para>
+    /// <see cref="TimeProvider"/>'s base implementation of this member schedules on the SYSTEM timer
+    /// regardless of what <see cref="GetUtcNow"/> reports. So a <see cref="CancellationTokenSource"/>
+    /// constructed with a substituted provider - which is exactly how the macro invoker imposes its
+    /// invocation timeout - would still fire after a real interval had elapsed, and a test built on that is
+    /// timing the machine rather than the code. Overriding it moves the timeout onto
+    /// <see cref="Advance(TimeSpan)"/>, where a test controls it exactly and no run waits for anything.
+    /// </para>
+    /// <para>
+    /// AAP 0.6.7 requires every clock read to be a substitutable seam so that a non-deterministic value can
+    /// be masked from BOTH sides of a paired characterization recording. A timer is a clock read whose
+    /// result arrives later, so leaving it on real time would exempt the one class of behaviour - anything
+    /// expiring - that is hardest to reproduce.
+    /// </para>
+    /// <para>
+    /// A due time of <see cref="Timeout.InfiniteTimeSpan"/> is never due, matching the platform. A zero or
+    /// negative due time is due immediately and fires on the next <see cref="Advance(TimeSpan)"/> rather
+    /// than from inside this call, so a timer can never re-enter the code that created it.
+    /// </para>
+    /// </remarks>
+    public override ITimer CreateTimer(
+        TimerCallback callback,
+        object? state,
+        TimeSpan dueTime,
+        TimeSpan period)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+
+        ManualTimer timer = new(this, callback, state, dueTime, period, Instant);
+
+        lock (_timerGate)
+        {
+            _timers.Add(timer);
+        }
+
+        return timer;
+    }
+
+    /// <summary>Removes a disposed timer, so a long-lived clock does not accumulate them.</summary>
+    /// <param name="timer">The timer to forget.</param>
+    private void Forget(ManualTimer timer)
+    {
+        lock (_timerGate)
+        {
+            _ = _timers.Remove(timer);
+        }
+    }
+
+    /// <summary>Invokes every timer whose due instant the clock has now reached.</summary>
+    /// <remarks>
+    /// The list is snapshotted before invoking, because a callback may create or dispose a timer - a
+    /// cancellation callback frequently does - and mutating the collection under enumeration would throw
+    /// from inside the clock rather than from the code under test.
+    /// </remarks>
+    private void FireDueTimers()
+    {
+        ManualTimer[] snapshot;
+
+        lock (_timerGate)
+        {
+            snapshot = [.. _timers];
+        }
+
+        DateTimeOffset now = Instant;
+
+        foreach (ManualTimer timer in snapshot)
+        {
+            timer.FireIfDue(now);
+        }
+    }
+
+    /// <summary>A timer whose only clock is the enclosing provider's, advanced by hand.</summary>
+    /// <param name="owner">The clock this timer belongs to.</param>
+    /// <param name="callback">The callback to invoke when due.</param>
+    /// <param name="state">The state passed to the callback.</param>
+    /// <param name="dueTime">How far ahead the first invocation is due.</param>
+    /// <param name="period">The repeat interval, or <see cref="Timeout.InfiniteTimeSpan"/> for one-shot.</param>
+    /// <param name="createdAt">The instant the timer was created, which the due instant is relative to.</param>
+    private sealed class ManualTimer(
+        DeterministicTimeProvider owner,
+        TimerCallback callback,
+        object? state,
+        TimeSpan dueTime,
+        TimeSpan period,
+        DateTimeOffset createdAt) : ITimer
+    {
+        private readonly object _gate = new();
+        private DateTimeOffset? _dueAt = Due(createdAt, dueTime);
+        private TimeSpan _period = period;
+        private bool _disposed;
+
+        /// <inheritdoc/>
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return false;
+                }
+
+                _dueAt = Due(owner.Instant, dueTime);
+                _period = period;
+
+                return true;
+            }
+        }
+
+        /// <inheritdoc/>
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _dueAt = null;
+            }
+
+            owner.Forget(this);
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Synchronous disposal is complete disposal here: this timer owns no unmanaged handle and no
+        /// pending platform callback, so there is nothing an asynchronous path could wait for.
+        /// </remarks>
+        public ValueTask DisposeAsync()
+        {
+            Dispose();
+
+            return ValueTask.CompletedTask;
+        }
+
+        /// <summary>Invokes the callback if the clock has reached this timer's due instant.</summary>
+        /// <param name="now">The clock's current instant.</param>
+        internal void FireIfDue(DateTimeOffset now)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _dueAt is not { } dueAt || now < dueAt)
+                {
+                    return;
+                }
+
+                // Re-armed BEFORE the callback runs, so a periodic timer whose callback advances the clock
+                // cannot be invoked twice for one period, and a one-shot timer cannot fire twice at all.
+                _dueAt = _period == Timeout.InfiniteTimeSpan || _period <= TimeSpan.Zero
+                    ? null
+                    : now + _period;
+            }
+
+            // Outside the lock: a cancellation callback runs arbitrary continuations, and holding this
+            // timer's lock across them would invite a deadlock that has nothing to do with the test.
+            callback(state);
+        }
+
+        /// <summary>Computes an absolute due instant, or none for an infinite due time.</summary>
+        /// <param name="from">The instant the due time is measured from.</param>
+        /// <param name="dueTime">The due time.</param>
+        /// <returns>The absolute instant, or <see langword="null"/> when the timer is never due.</returns>
+        private static DateTimeOffset? Due(DateTimeOffset from, TimeSpan dueTime) =>
+            dueTime == Timeout.InfiniteTimeSpan
+                ? null
+                : from + (dueTime < TimeSpan.Zero ? TimeSpan.Zero : dueTime);
     }
 
     /// <summary>Returns the clock to an explicit instant and clears the read count.</summary>
@@ -4346,6 +4667,96 @@ public sealed class TestDoublesSanityTests
     }
 
     /// <summary>
+    /// The clock's TIMERS are substituted along with its readings, so an expiry is reachable by advancing
+    /// the clock and by nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS ROW EXISTS BECAUSE THE HALF-SUBSTITUTED CASE IS INVISIBLE. <see cref="TimeProvider"/>'s base
+    /// <c>CreateTimer</c> schedules on the SYSTEM timer whatever <c>GetUtcNow</c> reports, so a clock that
+    /// overrode only the readings would leave every expiry on real time - and a test built on such a clock
+    /// still passes, just by waiting, which is exactly why the gap goes unnoticed. The first two assertions
+    /// below fail outright against a clock without the override: nothing has elapsed, so a system-scheduled
+    /// timer has not fired.
+    /// </para>
+    /// <para>
+    /// The subject is not hypothetical. The macro invoker imposes its invocation timeout by constructing a
+    /// <see cref="CancellationTokenSource"/> over its injected provider, so this is the mechanism by which
+    /// its timeout path is reachable with no real waiting at all (AAP 0.6.7).
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void DeterministicTimeProvider_FiresTimersOnlyWhenTheClockIsAdvanced()
+    {
+        DeterministicTimeProvider clock = new();
+
+        using CancellationTokenSource expiring = new(TimeSpan.FromSeconds(30), clock);
+
+        // Nothing has elapsed on the machine and nothing has moved on the clock.
+        Assert.False(expiring.IsCancellationRequested);
+
+        // Short of the due instant, still nothing - the timer is due at an ABSOLUTE instant rather than
+        // after a number of advances.
+        clock.Advance(TimeSpan.FromSeconds(29));
+        Assert.False(expiring.IsCancellationRequested);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(expiring.IsCancellationRequested);
+
+        // A one-shot timer fires ONCE. Advancing again must not re-enter the callback, which for a
+        // cancellation source would be harmless but for a periodic caller would double-count.
+        int fired = 0;
+        DeterministicTimeProvider oneShot = new();
+
+        using (ITimer timer = oneShot.CreateTimer(
+            _ => Interlocked.Increment(ref fired),
+            state: null,
+            dueTime: TimeSpan.FromSeconds(1),
+            period: Timeout.InfiniteTimeSpan))
+        {
+            oneShot.Advance(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, Volatile.Read(ref fired));
+
+            oneShot.Advance(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, Volatile.Read(ref fired));
+
+            // Re-armed by Change, measured from the clock's CURRENT instant rather than from creation.
+            Assert.True(timer.Change(TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan));
+            oneShot.Advance(TimeSpan.FromSeconds(1));
+            Assert.Equal(1, Volatile.Read(ref fired));
+
+            oneShot.Advance(TimeSpan.FromSeconds(1));
+            Assert.Equal(2, Volatile.Read(ref fired));
+        }
+
+        // Disposed, so no further advance reaches it.
+        oneShot.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal(2, Volatile.Read(ref fired));
+
+        // An infinite due time is never due, matching the platform - so a timer parked indefinitely cannot
+        // be fired by moving the clock forward at all.
+        int never = 0;
+        DeterministicTimeProvider parked = new();
+
+        using ITimer inert = parked.CreateTimer(
+            _ => Interlocked.Increment(ref never),
+            state: null,
+            dueTime: Timeout.InfiniteTimeSpan,
+            period: Timeout.InfiniteTimeSpan);
+
+        parked.Advance(TimeSpan.FromHours(1));
+        Assert.Equal(0, Volatile.Read(ref never));
+
+        // Backward motion fires nothing and cancels nothing: a due instant is fixed when the timer is
+        // created, so moving the clock back means the timer is simply not due yet.
+        DeterministicTimeProvider rewound = new();
+        using CancellationTokenSource unexpired = new(TimeSpan.FromSeconds(30), rewound);
+
+        rewound.Advance(TimeSpan.FromSeconds(-60));
+        Assert.False(unexpired.IsCancellationRequested);
+    }
+
+    /// <summary>
     /// The random source is reproducible from its seed, in every projection it offers.
     /// </summary>
     /// <remarks>
@@ -4383,11 +4794,21 @@ public sealed class TestDoublesSanityTests
         Assert.Equal(0L, first.Draws);
         Assert.Equal(first.NextHex(8), second.NextHex(8));
 
-        // The identifier is well-formed version 4 - a consumer that validates the shape must not reject it.
+        // The identifier is well-formed version 4 - a consumer that validates the shape must not reject it -
+        // and the RFC 4122 variant bits are set too, which a version check alone does not establish. The
+        // variant nibble is 8, 9, A or B for RFC 4122, because only its two most significant bits are fixed
+        // and the two below them are drawn from the random data.
         Guid identifier = first.NextGuid();
         Assert.Equal(4, identifier.Version);
-        Assert.Equal(Guid.Empty, Guid.Empty);
+        Assert.InRange(identifier.Variant, 8, 11);
         Assert.NotEqual(Guid.Empty, identifier);
+
+        // AND IT IS REPRODUCIBLE AT THIS POSITION IN THE STREAM, which is the property this whole row is
+        // about. `second` was reset alongside `first` and has taken the identical draw since, so it stands
+        // in for a second capture taken at a different time. Asserted against that generator rather than
+        // against a literal, so the assertion cannot bake in one run's output - a literal here would pass
+        // forever while proving only that the value had been copied out of a failure message once.
+        Assert.Equal(second.NextGuid(), identifier);
 
         // Bounded draws stay in range, and a non-positive bound is refused rather than wrapped.
         for (int attempt = 0; attempt < 50; attempt++)

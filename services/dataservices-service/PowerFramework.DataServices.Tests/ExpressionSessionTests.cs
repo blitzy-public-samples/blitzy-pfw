@@ -2774,4 +2774,3 @@ public enum StaticExpansionRefusal
     /// </summary>
     ContextFunctionMacro = 2,
 }
-

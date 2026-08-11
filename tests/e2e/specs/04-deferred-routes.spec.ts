@@ -174,11 +174,17 @@
 import { expect, test } from '@playwright/test';
 
 import {
-  acquireServiceToken,
   bearerHeaders,
   gatewayUrl,
   type ServiceToken,
 } from '../fixtures';
+
+import {
+  assertTokenIssuanceProvisioned,
+  requireServiceToken,
+} from '../fixtures/token-issuance';
+
+import { probeStackAvailability } from '../fixtures/live-stack';
 
 // ---------------------------------------------------------------------------
 // The reserved-route table — the single edit point of this file
@@ -402,6 +408,52 @@ function jsonShapeOf(text: string): 'object' | 'array' | 'primitive' | 'unparsea
 // ---------------------------------------------------------------------------
 
 test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
+  // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
+  //
+  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
+  // nothing else, on every topology including the local bring-up, so with no
+  // identity provisioned every authenticated assertion below is unrunnable. The
+  // hook fails this group's SETUP in a full acceptance run rather than letting
+  // fifteen token calls fail one at a time with transport errors that never say
+  // why; a run that has explicitly declared itself partial passes straight
+  // through here and its token-dependent tests skip themselves instead, with the
+  // reason stated. The whole policy lives in `fixtures/token-issuance.ts` — this
+  // line only applies it.
+  test.beforeAll(assertTokenIssuanceProvisioned);
+
+  // ---------------------------------------------------------------------------
+  // MISSING-STACK BEHAVIOUR, MADE UNIFORM AND EXPLICIT ACROSS ALL SIX SPECS
+  //
+  // This suite drives real HTTP against a running four-service stack, so three
+  // outcomes have to stay distinguishable: the contract holds (pass), the
+  // contract is violated (fail), and the stack is not up at all (neither).
+  // Without an explicit third state the last one arrives as a wall of transport
+  // errors that read exactly like the second - a false accusation against
+  // services that are merely absent - and the tempting remedy is to soften the
+  // assertions until they tolerate an unreachable host, which converts a real
+  // violation into a silent pass and destroys the suite's whole value.
+  //
+  // The probe is memoised per worker, so this costs one request per worker and
+  // not one per test.
+  //
+  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
+  // than a title match: several specs mix pure-fixture assertions in with HTTP
+  // ones, those assertions are exactly the part that still holds with nothing
+  // running, and skipping them would throw away the only coverage available
+  // before a bring-up. A tag is declarative and machine-read; a title substring
+  // would silently start skipping the moment someone reworded a test name, and
+  // two stack-free tests in this suite never carried the wording at all.
+  // ---------------------------------------------------------------------------
+  test.beforeEach(async ({}, testInfo) => {
+    if (testInfo.tags.includes('@no-stack')) {
+      return;
+    }
+
+    const availability = await probeStackAvailability();
+
+    test.skip(!availability.reachable, availability.reason);
+  });
+
   // Every route asserted in this block is a DECLARATION in Gateway's routing
   // metadata and nothing more. There is no service directory, no project file,
   // no container definition, no test project, no partial implementation and no
@@ -429,7 +481,7 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
       // asserted in the authentication spec, on a Phase-1 endpoint, and is not
       // repeated here. The helper's own failures name the method, the URL and
       // the status without quoting a response value, so nothing wraps it.
-      const token: ServiceToken = await acquireServiceToken(request);
+      const token: ServiceToken = await requireServiceToken(request);
 
       const response = await request.get(gatewayUrl(probePath), {
         headers: bearerHeaders(token),
@@ -563,4 +615,3 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
     });
   }
 });
-

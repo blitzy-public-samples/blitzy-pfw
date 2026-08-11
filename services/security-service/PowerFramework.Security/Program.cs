@@ -92,9 +92,14 @@
 //      disables even its own theming [ws_objects/pfw.pbl.src/pfw.sra:L25].
 // ==================================================================================================
 
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Options;
+using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
 using PowerFramework.Security.Endpoints;
@@ -129,6 +134,45 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // fixed sentence that describes the accepted encodings and says nothing about what was supplied - not
 // the value, not a substring, not even its length (constraint C-F).
 // --------------------------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------------
+// 0. THE LISTENER HANDS A CLIENT CERTIFICATE TO THE APPLICATION AND DECIDES NOTHING ABOUT IT.
+//
+// appsettings.json sets ClientCertificateMode to AllowCertificate, which makes the handshake REQUEST a
+// certificate without demanding one - so /health stays anonymously reachable and the C-02 operations
+// stay bearer-authenticated, while the issuance operation can require one per route. What that setting
+// does NOT do on its own is decide which certificates are acceptable: with no validation callback the
+// listener applies the platform default, which REJECTS THE WHOLE CONNECTION for any certificate that
+// does not chain to the container's OS trust store. That default is wrong here in both directions.
+//
+//   * TOO STRICT, AND IT BREAKS THE INTENDED DEPLOYMENT. A caller certificate issued by the
+//     deployment's own local authority - which is exactly what docs/ARCHITECTURE.md's generation recipe
+//     produces - is not in any base image's trust store, so the handshake would fail and the
+//     application would never see the certificate at all. The published 401 for an untrusted
+//     certificate could not be produced, because there would be no request to produce it on.
+//   * TOO BROAD, AND IT IS UNSTATEABLE. The store it consults already trusts every public root shipped
+//     in the image, so the set of issuers able to present a caller identity would be as wide as the
+//     public web PKI - written down nowhere and under nobody's control.
+//   * AND IT REFUSES AT THE WRONG GRANULARITY. Rejecting the CONNECTION denies that caller /health, the
+//     published key set, the discovery document and every C-02 operation as well, which is three
+//     contracts broken to enforce one - the same argument appsettings.json records for not requiring a
+//     certificate at the listener.
+//
+// So the listener accepts the connection and defers, and THAT IS NOT A RELAXATION: a client certificate
+// confers nothing by being accepted here. Every route on this service is anonymous by contract or
+// bearer-authenticated, with exactly one exception - POST /v1/tokens - and that operation validates the
+// certificate against the explicitly configured trust anchor before it reads one byte of identity from
+// it, answering the contract's own 401 when it does not establish itself. The decision lives in
+// Tokens/ClientCertificateTrust.cs, where a test can drive it and a reader can audit it, rather than in
+// a trust store nothing in this repository can observe.
+//
+// Nothing else about TLS is touched: the protocol set, the server certificate and the revocation
+// posture of the SERVER side all stay as configured, and no server-certificate validation anywhere is
+// relaxed.
+// --------------------------------------------------------------------------------------------------
+builder.WebHost.ConfigureKestrel(static kestrel =>
+    kestrel.ConfigureHttpsDefaults(static https =>
+        https.ClientCertificateValidation = static (_, _, _) => true));
+
 builder.Services
     .AddOptions<SecurityOptions>()
     .Bind(builder.Configuration.GetSection(SecurityOptions.SectionName))
@@ -173,6 +217,38 @@ builder.Services
     .ValidateOnStart();
 
 builder.Services.AddSingleton<IValidateOptions<SecurityOptions>, SecurityOptionsValidator>();
+
+// --------------------------------------------------------------------------------------------------
+// CALLER-CERTIFICATE TRUST - THE HALF OF THE MUTUAL-TLS EDGE THAT WAS MISSING
+//
+// POST /v1/tokens authenticates its caller by client certificate and by nothing else, and
+// Endpoints/TokenEndpoints.cs reconciles that certificate's common name against the claimed subject. A
+// NAME PROVES NOTHING ON ITS OWN: unless the certificate's chain is verified against a known authority,
+// any caller can present a self-signed certificate whose common name is `powerframework-gateway` and be
+// issued a Gateway token for every audience Gateway is allowed. The documented topology issues caller
+// certificates from a LOCAL authority that is in no container's operating-system trust store, so the
+// platform cannot make that decision either - which left the strongest identity claim in the system
+// resting on an unverified string.
+//
+// The anchor is read from configuration HERE, before Build(), for two reasons. The validation callback
+// belongs to the HTTPS defaults, which are configured on the host builder rather than resolved from the
+// container; and loading eagerly means a configured-but-unreadable anchor is a refusal to start rather
+// than a handshake failure discovered by the first caller.
+//
+// TRUST IS NARROWED, NEVER RELAXED. There is no AllowAnyClientCertificate call anywhere in this file:
+// that method REPLACES the callback below and would accept every certificate presented, which is the
+// exact defect this replaces rather than a shortcut to it. With no anchor configured the callback defers
+// to the platform's own verdict, which is what Kestrel would have done unaided.
+// --------------------------------------------------------------------------------------------------
+CallerCertificateTrust callerCertificateTrust = CallerCertificateTrust.Load(
+    builder.Configuration[
+        $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.MutualTls)}:"
+            + $"{nameof(SecurityMutualTlsOptions.ClientCaPath)}"]);
+
+builder.Services.AddSingleton(callerCertificateTrust);
+
+builder.WebHost.ConfigureKestrel(kestrel => kestrel.ConfigureHttpsDefaults(
+    https => https.ClientCertificateValidation = callerCertificateTrust.Validate));
 
 // --------------------------------------------------------------------------------------------------
 // 2. THE CRYPTOGRAPHIC SURFACE, AND ITS TWO DETERMINISM SEAMS
@@ -256,7 +332,39 @@ builder.Services.AddSingleton<CryptoReferenceResolver>();
 // the composition root rather than of a convention.
 // --------------------------------------------------------------------------------------------------
 builder.Services.AddSingleton<SigningKeyProvider>();
+
+// THE ISSUANCE ROSTER, REGISTERED BEFORE THE MINTER THAT DEPENDS ON IT AND SHARED WITH THE ISSUANCE
+// EDGE. One instance, deliberately: Endpoints/TokenEndpoints.cs authenticates a presented credential
+// against it and Tokens/TokenIssuer.cs decides what the resulting identity may ask for against it, and
+// two independently built rosters could disagree - authenticating a caller under one set of permissions
+// and authorising it under another. A singleton also means every configured secret is UTF-8 encoded once
+// at startup rather than on the hot path of the one operation that cannot be cached.
+//
+// ITS CONSTRUCTOR IS A GATE. It resolves every secret the roster names and refuses to construct when a
+// named configuration key resolves to nothing, so a deployment that meant to supply a credential and did
+// not is a startup failure rather than a caller that mysteriously cannot authenticate. Section 8
+// resolves the minter during startup, which resolves this type with it.
+builder.Services.AddSingleton<IssuanceClientRegistry>();
+
 builder.Services.AddSingleton<TokenIssuer>();
+
+// THE TRANSPORT IDENTITY'S TRUST DECISION, WHICH IS A DIFFERENT KEY WITH A DIFFERENT LIFETIME FROM THE
+// SIGNING ONE AND IS THEREFORE A SEPARATE REGISTRATION. It is what makes the published 401 on the
+// issuance operation - "no certificate was presented, OR the certificate presented is not trusted" - a
+// behaviour rather than a promise: the operation consults it BEFORE reading the certificate's common
+// name, because that name IS the caller identity and honouring one from a certificate whose issuer was
+// never established would be authentication by assertion.
+//
+// A SINGLETON THAT LOADS ITS ANCHOR ONCE, and IDisposable, so the container releases the loaded
+// certificates at shutdown exactly as it releases the signing key. Section 8 resolves it eagerly, which
+// is where a configured-but-unreadable anchor path refuses the host.
+//
+// AN UNCONFIGURED ANCHOR IS A LEGITIMATE, FAIL-CLOSED STATE and not a startup fault: nothing is
+// trusted, issuance refuses every caller with the contract's own 401, and /health, the published key
+// set, the discovery document and every C-02 operation stay reachable - so the readiness chain the other
+// three services wait on is unaffected. Failing startup instead would make a bring-up of the rest of the
+// stack impossible for a service that, without an anchor, could not have honoured a certificate anyway.
+builder.Services.AddSingleton<ClientCertificateTrust>();
 
 // --------------------------------------------------------------------------------------------------
 // 5. INBOUND TOKEN VALIDATION - THE STOCK HANDLER, AND THE ONE ASYMMETRY THAT IS DELIBERATE
@@ -324,17 +432,55 @@ builder.Services
             SecurityOptions configured = security.Value;
             IConfigurationSection inbound = configuration.GetSection(inboundAuthenticationSection);
 
-            bearer.RequireHttpsMetadata = inbound.GetValue("RequireHttpsMetadata", true);
+            // RequireHttpsMetadata IS DELIBERATELY NOT ASSIGNED HERE, AND ITS ABSENCE IS THE POINT.
+            //
+            // The setting governs ONE thing: whether the handler will fetch discovery metadata over
+            // plaintext. It is consulted only when a ConfigurationManager exists, which the handler
+            // builds only when an Authority or a MetadataAddress is configured. This handler
+            // deliberately configures NEITHER - see the block above: Security validates the tokens it
+            // minted itself and takes its verification key IN PROCESS from the signing-key layer, so it
+            // performs no metadata retrieval of any kind and there is no fetch for the setting to
+            // govern.
+            //
+            // An earlier revision read it from configuration here. That was worse than harmless: an
+            // operator reading this block, or the settings file that carried the key, would reasonably
+            // conclude Security's metadata retrieval was being held to HTTPS - when Security has no
+            // metadata retrieval at all. A setting that appears to be enforced and governs nothing is a
+            // false assurance, so the read and its now-dead settings key were both removed rather than
+            // left in place for symmetry with the other three services.
+            //
+            // THE SETTING REMAINS LIVE AND MEANINGFUL ON GATEWAY, DATASERVICES AND PERSISTENCE, which
+            // DO fetch this service's key set and discovery document over HTTP and where the property
+            // therefore has a fetch to govern. Nothing here relaxes it there. Should this handler ever
+            // acquire an Authority, the platform default is already the safe value - true - so the
+            // absence of an assignment cannot become a plaintext fetch by omission.
             bearer.MapInboundClaims = inbound.GetValue("MapInboundClaims", false);
 
-            bearer.TokenValidationParameters.ValidateIssuer =
-                inbound.GetValue("ValidateIssuer", true);
-            bearer.TokenValidationParameters.ValidateAudience =
-                inbound.GetValue("ValidateAudience", true);
-            bearer.TokenValidationParameters.ValidateLifetime =
-                inbound.GetValue("ValidateLifetime", true);
-            bearer.TokenValidationParameters.ValidateIssuerSigningKey =
-                inbound.GetValue("ValidateIssuerSigningKey", true);
+            // ALL FOUR ARE ASSIGNED LITERALLY, NOT READ. Each removes an entire class of forgery, so
+            // none is a deployment choice: without issuer validation a credential from any issuer is
+            // accepted, and THIS service is the issuer, so it would accept forgeries of its own
+            // authority; without audience validation a credential minted for Gateway, DataServices or
+            // Persistence is replayable here, which is exactly what the one-audience-per-token rule of
+            // contract C-01 exists to prevent; without lifetime validation the short lifetimes this
+            // service itself mints would bound nothing; without signing-key validation the signature is
+            // not verified at all. Reading them with a safe default still left a configuration path that
+            // could turn one OFF while this host reported healthy - an unauthenticated boundary wearing
+            // the shape of an authenticated one, which constraint C-G forbids. The keys survive in the
+            // settings file so a deployment can be audited by reading it, and section 8 refuses to start
+            // a host that sets one to false rather than ignoring the value in silence.
+            bearer.TokenValidationParameters.ValidateIssuer = true;
+            bearer.TokenValidationParameters.ValidateAudience = true;
+            bearer.TokenValidationParameters.ValidateLifetime = true;
+            bearer.TokenValidationParameters.ValidateIssuerSigningKey = true;
+
+            // INBOUND CLAIM MAPPING IS OFF, AND FOR THIS SERVICE IT IS LOAD BEARING RATHER THAN TIDY.
+            // The legacy handler rewrites standard claim names into WS-Federation URIs, so `scope` and
+            // `sub` would arrive under names the scope policy below does not look for and every scope
+            // check would silently pass nothing. It is hardcoded for the same reason as the four above:
+            // the issuer writes its claims through a dictionary precisely so they are NOT mapped on the
+            // way out, and mapping on the way back would break the round trip this service's own tests
+            // assert.
+            bearer.MapInboundClaims = false;
 
             bearer.TokenValidationParameters.ValidIssuer = configured.Issuer;
 
@@ -350,12 +496,21 @@ builder.Services
             // there is nothing private in the object handed here rather than merely nothing exposed.
             bearer.TokenValidationParameters.IssuerSigningKey = signingKeys.PublicVerificationKey;
 
-            // ZERO BY DEFAULT, DELIBERATELY DEPARTING FROM THE HANDLER'S OWN FIVE MINUTES. A tolerance
-            // IS a relaxation of lifetime validation, and the configured token lifetime is measured in
-            // minutes, so accepting the framework default would silently extend a five-minute token to
-            // ten. It stays configurable for a deployment with genuine clock drift.
-            bearer.TokenValidationParameters.ClockSkew =
-                inbound.GetValue("ClockSkew", TimeSpan.Zero);
+            // ZERO, UNCONDITIONALLY, DEPARTING FROM THE HANDLER'S OWN FIVE MINUTES.
+            //
+            // A tolerance IS a relaxation of lifetime validation: it extends every token's usable life
+            // past its own `exp`, and the configured lifetime here is measured in minutes, so the
+            // framework default would silently turn a five-minute token into a ten-minute one. Zero is
+            // additionally the only correct value for THIS service specifically: the tokens it validates
+            // are tokens it minted itself, moments earlier, on the same host and from the same clock -
+            // there is no second clock for a tolerance to accommodate.
+            //
+            // An earlier form read this from configuration with zero as the default, which left the
+            // window WIDENABLE from a settings file, an environment variable or a container definition
+            // to any value at all - including one exceeding the token lifetime, at which point the
+            // expiry check does not expire. It is a constant for the same reason the four checks above
+            // are: a bound nothing can move is a bound.
+            bearer.TokenValidationParameters.ClockSkew = TimeSpan.Zero;
         });
 
 // --------------------------------------------------------------------------------------------------
@@ -371,13 +526,38 @@ builder.Services
 // omission is invisible at the thing it guards and would evaporate silently if this policy were ever
 // relaxed, whereas an explicit call fails loudly if the route's intent ever changes.
 // --------------------------------------------------------------------------------------------------
+// AND THE CRYPTOGRAPHIC SURFACE GETS A NAMED POLICY OF ITS OWN, BECAUSE AUTHENTICATION IS NOT
+// AUTHORIZATION. The fallback below closes the door on a route that declares nothing; that policy decides
+// WHO may open the C-02 surface and for WHAT. Requiring only an authenticated principal meant any holder of
+// any token minted for this service's audience could drive all 17 operations - keyed HMAC, symmetric
+// encryption and decryption, RSA signing and RSA key generation among them - whatever the credential was
+// obtained for and whichever caller it was minted for (CWE-862, CWE-863). Contract C-02 says who the
+// surface is for: Security serves DataServices, and DataServices requests exactly `security.crypto`.
 builder.Services.AddAuthorization(static options =>
+{
+    options.AddPolicy(CryptoCallerAuthorization.PolicyName, CryptoCallerAuthorization.Configure);
+
     options.FallbackPolicy = new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
-        .Build());
+        .Build();
+});
+
+// AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK ABOVE ONLY DELIVERS THE FIRST. Every token this
+// service mints carries a `scope` claim, and security.v1.yaml publishes a 403 on thirteen operations
+// whose description says the token is valid but does not carry the scope the operation requires. Without
+// the policies registered here nothing read that claim: any token addressed to this service reached
+// every authenticated route, whatever it was scoped to, so the claim was decorative and a caller granted
+// the cryptographic surface for one purpose held all of it.
+//
+// The mechanism, the reason the framework's own claim requirement cannot express it (the claim is ONE
+// value carrying a SPACE-DELIMITED set), and the reason it is duplicated per service rather than shared
+// (the contracts project is the only permitted cross-service coupling and carries no behaviour) are all
+// recorded in Authorization/ScopeAuthorization.cs. The routes that name a policy do so at their own
+// declaration in Endpoints/, following the same explicitness rule as the anonymous exemptions.
+builder.Services.AddScopeAuthorization();
 
 // --------------------------------------------------------------------------------------------------
-// 7. THE PUBLISHED SURFACE - READINESS, THE SINGLE ERROR SHAPE, AND THE DOCUMENT
+// 7. THE PUBLISHED SURFACE - READINESS, THE SINGLE ERROR SHAPE, THE JSON READER, AND THE DOCUMENT
 //
 // Health-check registration ships INSIDE the Microsoft.AspNetCore.App shared framework, so /health
 // needs no package reference and none is declared. The probe itself is in Endpoints/HealthEndpoints.cs,
@@ -407,6 +587,43 @@ builder.Services.AddAuthorization(static options =>
 // --------------------------------------------------------------------------------------------------
 builder.Services.AddHealthChecks();
 
+// --------------------------------------------------------------------------------------------------
+// THE CLOSED REQUEST SCHEMAS, ENFORCED AT RUN TIME RATHER THAN ONLY PUBLISHED.
+//
+// Every request schema in shared/PowerFramework.Contracts/OpenApi/security.v1.yaml sets
+// `additionalProperties: false`. That is a statement about what this service accepts, and until this
+// line it was a statement only the DOCUMENT made: System.Text.Json's default UnmappedMemberHandling is
+// Skip, so an undeclared member was read, silently discarded, and the request processed as though the
+// caller had not sent it.
+//
+// WHY SILENTLY DISCARDING IT IS THE WRONG ANSWER ON THIS SERVICE IN PARTICULAR. The members a caller
+// might plausibly add are the ones that change a cryptographic decision: a `mode`, a `padding`, a
+// `keyRef`, a `bits`. A caller that misspells one - `keyReference` for `keyRef`, `padding` on an
+// operation that takes none - gets a 200 computed under this service's DEFAULTS instead of under the
+// parameters it believes it supplied, and those defaults are the preserved legacy weak ones: ECB for a
+// symmetric mode, PKCS#1 for RSA padding. The failure is therefore not "a field was ignored", it is
+// "the operation succeeded with weaker parameters than the caller asked for, and said so nowhere".
+// Refusing the request is the only answer that cannot be mistaken for the one the caller wanted.
+//
+// Disallow makes the binder throw on an undeclared member. What the caller then sees is NOT the
+// framework's bodiless 400: the refusal registered on the request pipeline in section 9
+// (Endpoints/MalformedRequestBody.cs) converts that exception into the published problem body carrying
+// a FIXED detail and E_INVALID_ARGUMENT. The distinction matters and is deliberate - the body names no
+// member and echoes no part of the request, because on the one service whose request text may itself be
+// key material a body describing WHICH member was refused would echo caller-supplied text. The caller
+// learns that the body was unreadable and nothing further; the published schema already says which
+// members exist.
+//
+// PropertyNameCaseInsensitive is left at its default of false for the same reason: the schema declares
+// exact member names, and accepting `KeyRef` for `keyRef` would be a second undeclared spelling.
+//
+// THE SETTING ITSELF IS APPLIED EXACTLY ONCE, at the single reader configuration further down this file
+// ("ONE JSON READER, CONFIGURED ONCE"). It is stated there rather than here because that block also pins
+// the case sensitivity, and the two are one decision about one reader. Registering it twice would be
+// harmless - Configure callbacks are additive - but it would leave two places to change and two places
+// to disagree.
+// --------------------------------------------------------------------------------------------------
+
 builder.Services.AddProblemDetails(static options =>
     options.CustomizeProblemDetails = static context =>
     {
@@ -421,7 +638,120 @@ builder.Services.AddProblemDetails(static options =>
             ClassifyFailure(status);
     });
 
-builder.Services.AddOpenApi();
+// THE GENERATED DOCUMENT IS BROUGHT BACK TO THE AUTHORED ONE. The generator drops schema closure and
+// types every required member as admitting null, both of which the authored document states otherwise;
+// PublishedSchemaFidelity restores them and explains why each matters. It edits the document only - no
+// binding, no validation and no response changes.
+builder.Services.AddOpenApi(PublishedSchemaFidelity.Configure);
+
+// UNKNOWN JSON MEMBERS ARE REFUSED, WHICH IS THE OTHER HALF OF `additionalProperties: false`.
+//
+// A schema that forbids a member is a statement about what the SERVICE accepts, and a document-validating
+// client is only one of the two parties that has to honour it. Left at the serializer default an unknown
+// member is silently discarded, so a caller that misspells `payloadForm` as `payloadform` gets the
+// absent-member refusal for a member it believes it sent, and a caller that sends a member this service
+// removed in a later version is told nothing at all. Disallow turns both into a refusal that names the
+// member.
+//
+// THIS DOES NOT DISPLACE THE HANDLERS' OWN VALIDATION AND MUST NOT. The crypto and issuance request shapes
+// declare nullable members deliberately, so that an ABSENT member reaches the handler and is refused with
+// E_INVALID_ARGUMENT naming its wire spelling. Disallow fires on a member that is PRESENT AND UNKNOWN,
+// which is a disjoint condition: nothing that reached a handler arm before reaches the serializer's
+// refusal now. The mapping registered on the request pipeline converts the serializer's exception into
+// the same problem body, so the two refusals are indistinguishable in shape to a caller.
+//
+// Applied once, at the single reader configuration below.
+
+// THE SETTING IS PINNED RATHER THAN LEFT TO THE ENVIRONMENT, WHICH IS THE ONLY WAY ONE CONTRACT CAN HOLD
+// EVERYWHERE. Left alone, ThrowOnBadRequest is true in Development and false elsewhere, so one malformed
+// body produces an exception in one deployment and a bodiless 400 in another - two different answers to the
+// same request, only one of which carries the published error shape. Pinned true, the refusal registered on
+// the pipeline answers every one of them identically. It is not a diagnostic setting here: nothing about the
+// exception reaches the caller or the log, only the fixed refusal does.
+builder.Services.Configure<RouteHandlerOptions>(static options => options.ThrowOnBadRequest = true);
+
+// --------------------------------------------------------------------------------------------------
+// ONE JSON READER, CONFIGURED ONCE, MATCHING THE PUBLISHED REQUEST SCHEMAS EXACTLY.
+//
+// Every request schema in shared/PowerFramework.Contracts/OpenApi/security.v1.yaml is CLOSED with
+// additionalProperties: false, and every member spelling in it is pinned on the corresponding record
+// with an explicit JsonPropertyName attribute rather than left to a naming policy. The serializer's
+// web defaults are more permissive than that document on two independent axes, and both are corrected
+// here rather than per record, because a per-record attribute is a decision a later record can be
+// added without.
+//
+//   * UNDECLARED MEMBERS ARE REFUSED. The default is to skip them silently, which means this service
+//     would accept a body that the document it publishes forbids, and a client validating against that
+//     document would refuse a request this service had already honoured. Refusing here is what makes
+//     the two agree. It also closes the shape of smuggling the closed schemas exist to prevent: an
+//     undeclared member named for key material is now a refusal rather than a member that binds
+//     nowhere and is quietly dropped - see the raw-key-material rule on contract C-02.
+//   * MEMBER NAMES ARE MATCHED EXACTLY. The web defaults match case-insensitively, so "Subject" would
+//     bind to the member the document spells "subject". A document-validating client refuses that
+//     spelling as an undeclared member, so accepting it is the same divergence as the point above
+//     wearing a different hat.
+//
+// NEITHER IS A LEGACY BEHAVIOUR CHANGE, AND THERE IS NO LEGACY BEHAVIOUR HERE TO CHANGE (constraint
+// C-B): PowerFramework is a library with no listener, no route and no wire format of any kind, so this
+// service's request bodies are net-new and the authored contract document is the only authority over
+// what they accept. Nothing about response WRITING is touched by either setting - the response member
+// spellings, their casing and their order are unchanged, and the RFC 6749 spellings on the issuance
+// result stay exactly as that record pins them.
+//
+// The payload-form enumeration is NOT governed from here. Its converter is declared on the type in
+// Endpoints/CryptoEndpoints.cs, so it applies to every path that reads that value - the generated
+// document, a hand-built serializer in a test, and this pipeline - rather than only to bodies that
+// happen to arrive through the configured reader.
+// --------------------------------------------------------------------------------------------------
+builder.Services.ConfigureHttpJsonOptions(static options =>
+{
+    options.SerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
+    options.SerializerOptions.PropertyNameCaseInsensitive = false;
+});
+
+// --------------------------------------------------------------------------------------------------
+// A BODY THE READER ABOVE REFUSES IS THE PUBLISHED 400, IN EVERY ENVIRONMENT - AND THE PIN THAT MAKES
+// THAT TRUE IS `ThrowOnBadRequest = true`, ABOVE. THIS BLOCK RECORDS WHY IT IS NOT `false`.
+//
+// The framework's route-handler option that decides this DEFAULTS TO THROWING IN DEVELOPMENT and to
+// writing a 400 everywhere else, so a malformed body is answered as the documented bad request in a
+// container and as a 500 on a developer's machine. Measured on this toolchain, both a truncated body and
+// an undeclared member produced a 500 carrying the internal-failure return code under the development
+// default - a status security.v1.yaml does not declare for either case, on the one service that holds
+// the system's signing input, and the status that pages an operator. So the setting must be pinned
+// rather than inherited. That much is settled; the only question is WHICH value.
+//
+// TWO MECHANISMS CAN PRODUCE THE PUBLISHED 400, AND THEY ARE MUTUALLY EXCLUSIVE.
+//   * SUPPRESS THE THROW (`false`). The framework writes a bodiless 400 and the status-code middleware
+//     in section 9 fills in a problem body through the problem-details service. Cheap, but the body is
+//     a GENERIC status-code rendering: it carries no fixed detail sentence, so a caller cannot tell a
+//     body this service could not READ from any other 400 the service might answer.
+//   * PIN THE THROW (`true`) AND MAP THE EXCEPTION. Endpoints/MalformedRequestBody.cs recognises the
+//     binder's own exception shapes and writes ONE fixed refusal - `MalformedRequestBody.RefusalDetail`
+//     plus E_INVALID_ARGUMENT - for every unreadable body, whatever made it unreadable. That is a
+//     stronger contract than the generic rendering, and it is the one this service publishes.
+//
+// THE SECOND IS WHAT SHIPS, so the pin is `true` and NOT `false`. Setting it false here would not merely
+// choose the weaker body: `MalformedRequestBody.Use(app)` would then never see an exception at all, so
+// the shipped mapping would become dead code while still appearing wired, and the refusal detail the
+// published document promises would silently stop being written. Both values are individually
+// defensible; holding both at once is not, and the later registration would win.
+//
+// NOTHING IS LOST DIAGNOSTICALLY UNDER THE PINNED THROW. The framework still records the binding failure
+// on its own logger with the parameter and the underlying exception; only the propagation to the client
+// is replaced, by the response the contract declares. The refusal carries the same single error shape and
+// the same retCode member as every other non-2xx response of this service.
+// --------------------------------------------------------------------------------------------------
+
+// The schema transformer restores ONE schema the generator cannot describe on its own: the
+// payload-form selector. That member carries a hand-written converter, because the stock string-enum
+// converter matches its token names case-insensitively and this contract declares exactly two tokens -
+// and the schema exporter can describe the stock converter but not a custom one, so without this the
+// generated document would say "anything" where the authored document says enum: [STRING, BLOB]. The
+// transformer lives beside the type it describes, in Endpoints/CryptoEndpoints.cs, and restates the
+// authored document and nothing else.
+builder.Services.AddOpenApi(static options =>
+    options.AddSchemaTransformer<PayloadFormSchemaTransformer>());
 
 WebApplication app = builder.Build();
 
@@ -455,12 +785,29 @@ SecurityOptions issuance = app.Services.GetRequiredService<IOptions<SecurityOpti
 
 _ = app.Services.GetRequiredService<TokenIssuer>();
 
+// Resolved eagerly for the same reason, and it is the half of the mutual-TLS story that a lazy
+// registration would get wrong. A CONFIGURED-BUT-UNREADABLE trust anchor is a structural fault: the
+// deployment declared which authority may mint caller identities and this service cannot read it, so
+// every issuance request it will ever receive is already doomed. Discovering that at startup is a failure
+// to launch; discovering it on the first token request is an outage that looks like a caller problem. An
+// UNSET anchor resolves successfully, records one warning, and trusts nothing - the fail-closed state,
+// which is a legitimate posture rather than a fault.
+_ = app.Services.GetRequiredService<ClientCertificateTrust>();
+
 // Read from the BUILT host's configuration for the same reason section 5 reads from the injected one:
 // this is the only vantage point from which the final, fully-composed configuration is visible.
 RequireIssuableInboundAudience(
     issuance,
     ReadInboundAudience(app.Configuration, inboundAuthenticationSection),
     inboundAuthenticationSection);
+
+// AND THE FOUR TOKEN-VALIDATION SWITCHES ARE INVARIANT, WHICH THIS LINE MAKES ENFORCEABLE. Section 5
+// assigns all four literally, so a configured false takes no effect - and a setting that is silently
+// ignored is worse than one that is honoured, because an operator would believe it applied. Refusing to
+// start says plainly that the value is neither honoured nor honourable. Read from the BUILT host's
+// configuration for the same reason the two lines above are: this is the only vantage point from which
+// the final, fully-composed configuration is visible, so a value contributed by a later source is seen.
+RequireInvariantTokenValidation(app.Configuration, inboundAuthenticationSection);
 
 // --------------------------------------------------------------------------------------------------
 // 9. THE PIPELINE
@@ -481,8 +828,42 @@ RequireIssuableInboundAudience(
 // established yet. With the fallback policy from section 6 in force, that ordering is what turns an
 // absent token into the documented 401 on every route that has not explicitly opted out.
 // --------------------------------------------------------------------------------------------------
-app.UseExceptionHandler();
+// A STATUS SELECTOR RATHER THAN THE PARAMETERLESS FORM, AND IT IS A CONTRACT-FIDELITY REQUIREMENT.
+//
+// The parameterless form answers 500 for EVERY exception, including the ones the framework raises to
+// report a CALLER error. The one that matters here is BadHttpRequestException, which body binding raises
+// when the payload cannot be deserialised - and which carries its own intended status, 400, that the
+// parameterless form discards.
+//
+// WHY THIS BECAME REACHABLE. Section 7 configures the JSON layer to REFUSE an undeclared member, which
+// is what makes `additionalProperties: false` in the published schema an enforced rule rather than a
+// documented wish. A caller that misspells `keyRef` therefore hits body binding, which raises
+// BadHttpRequestException(400) - and without this selector the caller would be told the SERVICE failed
+// when in fact its own request was malformed. The published contract declares 400 for a malformed body
+// and 500 for a fault of this service, so answering 500 there would be this service reporting the wrong
+// party at fault and inviting an operator to investigate a service that behaved correctly.
+//
+// NOTHING ELSE CHANGES SHAPE. Every other exception still answers 500, the problem-details service
+// configured in section 7 still writes the single published error shape with its legacy return code, and
+// the body of a refusal still carries no caller-supplied text - the framework's own message names the
+// parameter and its type and never a value, and this service's error classifier derives the return code
+// from the status alone.
+app.UseExceptionHandler(new ExceptionHandlerOptions
+{
+    StatusCodeSelector = static exception => exception is BadHttpRequestException malformed
+        ? malformed.StatusCode
+        : StatusCodes.Status500InternalServerError,
+});
 app.UseStatusCodePages();
+
+// A BODY THIS SERVICE CANNOT READ IS A CLIENT ERROR, AND IS ANSWERED INSIDE THE HANDLER ABOVE RATHER THAN
+// BY IT. The serializer refuses a member the published schema does not declare - that is what
+// `additionalProperties: false` means on the receiving side - and a truncated body fails the same way. Both
+// are 400s, and both must read identically in every environment. Placing the refusal INSIDE the exception
+// handler is what keeps the serializer's exception, whose message quotes the offending payload fragment,
+// out of the unhandled-fault log record on a surface whose payloads are plaintext, ciphertext and key
+// references. A fault it does not recognise is rethrown, so the 500 path is unchanged.
+MalformedRequestBody.Use(app);
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -726,6 +1107,238 @@ static void RequireIssuableInboundAudience(
         + "token while the service reported healthy. Add the identity to the issuance roster, or "
         + "correct the declared audience, and restart. This message never echoes either configured "
         + "value.");
+}
+
+/// <summary>
+/// Refuses to start a host that has turned off any of the four inbound token-validation checks.
+/// </summary>
+/// <param name="configuration">The built host's configuration.</param>
+/// <param name="sectionName">The inbound-authentication section the switches are read from.</param>
+/// <exception cref="ArgumentNullException">
+/// <paramref name="configuration"/> is <see langword="null"/>.
+/// </exception>
+/// <exception cref="InvalidOperationException">Any of the four switches is configured false.</exception>
+/// <remarks>
+/// <para>
+/// EACH OF THE FOUR REMOVES A WHOLE CLASS OF FORGERY, AND THIS SERVICE HAS THE MOST TO LOSE FROM IT.
+/// Without issuer validation a credential from any issuer is accepted, and this service IS the issuer,
+/// so it would honour forgeries of its own authority. Without audience validation a credential minted for
+/// Gateway, DataServices or Persistence is replayable at the cryptographic surface, which is precisely
+/// what the one-audience-per-token rule of contract C-01 exists to prevent. Without lifetime validation
+/// the short lifetimes this service itself mints bound nothing. Without signing-key validation the
+/// signature is not verified at all and any well-formed token is accepted. None of the four is a
+/// deployment choice, so section 5 assigns all four literally.
+/// </para>
+/// <para>
+/// AND A CONFIGURED FALSE IS REFUSED RATHER THAN IGNORED. Because the assignment is literal, a false
+/// value would take no effect - which is the more dangerous of the two failures, since an operator would
+/// believe the switch applied. Refusing to start is how the host says the value is neither honoured nor
+/// honourable. Every message names the exact key and states what the check protects; no configured value
+/// other than the offending boolean is echoed. ALL FOUR are reported together rather than one at a time,
+/// so a deployment with several disabled is fixed in one pass rather than in four restarts.
+/// </para>
+/// </remarks>
+static void RequireInvariantTokenValidation(IConfiguration configuration, string sectionName)
+{
+    ArgumentNullException.ThrowIfNull(configuration);
+
+    IConfigurationSection inbound = configuration.GetSection(sectionName);
+
+    string[] switches =
+    [
+        "ValidateIssuer",
+        "ValidateAudience",
+        "ValidateLifetime",
+        "ValidateIssuerSigningKey",
+    ];
+
+    List<string> disabled = [];
+
+    foreach (string name in switches)
+    {
+        // The default is the safe value, so an ABSENT key is not a fault - it is the ordinary case, and
+        // the shipped settings file states all four explicitly only so a reviewer can see them.
+        if (!inbound.GetValue(name, true))
+        {
+            disabled.Add(string.Concat("'", sectionName, ":", name, "'"));
+        }
+    }
+
+    if (disabled.Count == 0)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException(
+        $"Configuration key(s) {string.Join(", ", disabled)} are set to false. Each of the four inbound "
+        + "token-validation checks removes an entire class of forgery, so none of them is a deployment "
+        + "choice: without issuer validation a credential from any issuer is accepted - and this service "
+        + "is the issuer; without audience validation a credential minted for another service is "
+        + "replayable here; without lifetime validation the short lifetimes this service mints bound "
+        + "nothing; without signing-key validation the signature is not verified at all. The bearer "
+        + "handler is configured with all four enabled regardless of these values, so the settings would "
+        + "not take effect - and a setting that is silently ignored is worse than one that is honoured. "
+        + "Remove the key(s) or set them to true, and restart.");
+}
+
+/// <summary>
+/// Decides whether a client certificate presented on the mutual-TLS issuance edge chains to an authority
+/// this deployment accepts.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS TYPE EXISTS. <c>POST /v1/tokens</c> derives the caller's identity from the presented
+/// certificate's common name, and a name is only as good as the chain behind it. Without this, a caller
+/// could present a self-signed certificate naming any service in the system and be minted that service's
+/// token. The documented topology issues caller certificates from a local authority absent from every
+/// container's trust store, so the anchor has to be supplied explicitly for the chain to be checkable at
+/// all.
+/// </para>
+/// <para>
+/// IT IS A NARROWING, NOT A CALLBACK-SHAPED BYPASS. <see cref="Validate"/> never returns
+/// <see langword="true"/> for a certificate that fails to chain: with an anchor configured the chain must
+/// build to that anchor under <see cref="X509ChainTrustMode.CustomRootTrust"/>, and with none configured
+/// the platform's own verdict is returned unmodified. There is no arm that accepts a certificate because
+/// validation was inconvenient, and <c>AllowAnyClientCertificate</c> is deliberately not called anywhere
+/// in this service.
+/// </para>
+/// <para>
+/// REVOCATION IS NOT CHECKED, AS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN AS A RELAXATION. A local
+/// authority generated by two <c>openssl</c> invocations publishes no revocation list and runs no
+/// responder, so an online check has nothing to ask and would make every handshake wait for a lookup that
+/// must fail. The recipe's own 30-day certificate lifetime is the control that substitutes for it, and a
+/// deployment whose authority does publish revocation information leaves the anchor unset and uses
+/// platform trust, where the platform's default revocation behaviour applies.
+/// </para>
+/// <para>
+/// NOTHING ABOUT A REFUSED CERTIFICATE IS RECORDED HERE. A false result becomes a handshake failure, and
+/// the endpoint answers an absent and an untrusted certificate with the same status and the same sentence
+/// so that a response cannot be used to probe which condition was hit. Logging a subject or a thumbprint
+/// here would reintroduce that distinction in the operator record for an unauthenticated caller.
+/// </para>
+/// </remarks>
+internal sealed class CallerCertificateTrust
+{
+    private readonly X509Certificate2Collection _anchors;
+
+    /// <summary>
+    /// Creates a validator over an already-loaded anchor set.
+    /// </summary>
+    /// <param name="anchors">
+    /// The acceptable roots. An EMPTY collection means platform default trust, which is a legitimate
+    /// posture rather than a missing one.
+    /// </param>
+    private CallerCertificateTrust(X509Certificate2Collection anchors) => _anchors = anchors;
+
+    /// <summary>
+    /// Whether caller-certificate trust is pinned to a mounted anchor rather than left to the platform.
+    /// </summary>
+    public bool IsPinned => _anchors.Count > 0;
+
+    /// <summary>
+    /// Loads the anchor bundle named by <c>Security:MutualTls:ClientCaPath</c>.
+    /// </summary>
+    /// <param name="clientCaPath">
+    /// The configured path, or <see langword="null"/> or blank for platform default trust.
+    /// </param>
+    /// <returns>A validator over that anchor, or one that defers to the platform.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// A path is configured but the bundle cannot be read or does not parse. Structural, and therefore
+    /// fatal: a deployment that meant to pin caller trust and cannot would otherwise start and accept
+    /// callers on an unverified name.
+    /// </exception>
+    /// <remarks>
+    /// The path is NOT echoed into the failure message. A trust anchor is public material, but a
+    /// container's secret mount layout is not something a startup record should publish, so the message
+    /// names the configuration key exactly as <see cref="SecurityOptionsValidator"/> does.
+    /// </remarks>
+    public static CallerCertificateTrust Load(string? clientCaPath)
+    {
+        if (string.IsNullOrWhiteSpace(clientCaPath))
+        {
+            return new CallerCertificateTrust([]);
+        }
+
+        try
+        {
+            X509Certificate2Collection loaded = [];
+
+            loaded.ImportFromPemFile(clientCaPath.Trim());
+
+            if (loaded.Count == 0)
+            {
+                throw new CryptographicException("The file carried no PEM-encoded certificate.");
+            }
+
+            return new CallerCertificateTrust(loaded);
+        }
+        catch (Exception failure) when (failure
+            is CryptographicException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                "The caller-certificate authority named by "
+                    + $"'{SecurityOptions.SectionName}:{nameof(SecurityOptions.MutualTls)}:"
+                    + $"{nameof(SecurityMutualTlsOptions.ClientCaPath)}' could not be loaded, so this "
+                    + "service cannot verify which authority issued a caller's certificate and the host "
+                    + "will not start. Starting without it would leave token issuance resting on an "
+                    + "unverified common name. Check that the file exists, that the process can read it, "
+                    + "and that it is a PEM-encoded certificate or chain of them. The path is not "
+                    + "reproduced here, because a startup record must not publish a container's secret "
+                    + "mount layout.",
+                failure);
+        }
+    }
+
+    /// <summary>
+    /// The Kestrel client-certificate validation callback.
+    /// </summary>
+    /// <param name="certificate">The certificate the caller presented.</param>
+    /// <param name="chain">The chain the platform built, which may be <see langword="null"/>.</param>
+    /// <param name="errors">The platform's own verdict on that chain.</param>
+    /// <returns>
+    /// <see langword="true"/> when the certificate is acceptable; otherwise <see langword="false"/>,
+    /// which fails the handshake.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE PLATFORM'S CHAIN IS NOT REUSED WHEN AN ANCHOR IS CONFIGURED, and that is the point rather
+    /// than duplicated work. The chain the platform built was built against the MACHINE's trust store,
+    /// under which a certificate from a local authority is untrusted - so its verdict answers a different
+    /// question from the one this deployment asked. A fresh chain is built against the configured anchor,
+    /// which is the only authority whose certificates this edge accepts.
+    /// </para>
+    /// <para>
+    /// <c>NoFlag</c> is deliberate and is the strict value: no error class is ignored, so an expired
+    /// certificate, a broken signature, a wrong key usage or a chain that does not reach the anchor all
+    /// fail. Only the TRUST DECISION is redirected.
+    /// </para>
+    /// </remarks>
+    public bool Validate(X509Certificate2? certificate, X509Chain? chain, SslPolicyErrors errors)
+    {
+        if (certificate is null)
+        {
+            return false;
+        }
+
+        if (!IsPinned)
+        {
+            // No anchor configured: the platform already decided, and its decision stands. This is the
+            // same verdict Kestrel reaches with no callback installed at all.
+            return errors == SslPolicyErrors.None;
+        }
+
+        using X509Chain verification = new();
+
+        verification.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        verification.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        verification.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+        verification.ChainPolicy.CustomTrustStore.AddRange(_anchors);
+
+        return verification.Build(certificate);
+    }
 }
 
 /// <summary>

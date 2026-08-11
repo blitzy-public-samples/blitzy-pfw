@@ -539,6 +539,95 @@ public sealed class OpenApiDocumentValidationTests(OpenApiContractDocuments docu
 
     [Theory]
     [MemberData(nameof(BothDocuments))]
+    public void NoNonQueryParameterCarriesAllowReserved(string fileName)
+    {
+        ContractDocument contract = Resolve(fileName);
+
+        // A THIRD FAULT THE DEFAULT RULE SET PROVABLY DOES NOT CATCH, AND IT REACHED A PUBLISHED
+        // DOCUMENT.
+        //
+        // OpenAPI 3.1 defines `allowReserved` for `in: query` parameters ONLY - it says whether RFC 3986
+        // reserved characters may appear unescaped in a query value. On any other parameter location the
+        // field is not part of the specification, so a document carrying one fails third-party 3.1
+        // validation even though `Microsoft.OpenApi`'s default rule set reports nothing: measured, the
+        // 21-rule default set has no parameter-location rule at all, which is why this row exists rather
+        // than being left to `EachDocumentValidatesAgainstTheModelsOwnDefaultRuleSet`.
+        //
+        // WHAT ACTUALLY HAPPENED, recorded so the row is not mistaken for a hypothetical. gateway.v1.yaml
+        // set `allowReserved: true` on its `ReservedPath` PATH parameter as a way of saying "the captured
+        // value may itself contain '/'", which is how ASP.NET Core's `{**path}` catch-all behaves. It did
+        // not work in either direction: the document stopped validating, and a path parameter still
+        // matches a single segment whatever that field says, so the intended meaning was never expressed.
+        // The behaviour now lives in an `x-catch-all` vendor extension on the same parameter - a vendor
+        // extension is the conformant way to say something the specification has no field for - and the
+        // Gateway runtime's own generated parameter carries the identical extension
+        // (Endpoints/DeferredCapabilityEndpoints.cs, decision D2).
+        //
+        // Every parameter site is walked: components, path-level and operation-level, in both documents.
+        List<string> offenders = [];
+
+        OpenApiComponents? components = contract.Document.Components;
+
+        if (components?.Parameters is { Count: > 0 } componentParameters)
+        {
+            foreach ((string name, IOpenApiParameter parameter) in componentParameters)
+            {
+                Collect(offenders, $"#/components/parameters/{name}", parameter);
+            }
+        }
+
+        if (contract.Document.Paths is { Count: > 0 } paths)
+        {
+            foreach ((string route, IOpenApiPathItem pathItem) in paths)
+            {
+                if (pathItem.Parameters is { Count: > 0 } pathParameters)
+                {
+                    foreach (IOpenApiParameter parameter in pathParameters)
+                    {
+                        Collect(offenders, $"{route} (path-level)", parameter);
+                    }
+                }
+
+                if (pathItem.Operations is not { Count: > 0 } operations)
+                {
+                    continue;
+                }
+
+                foreach ((HttpMethod method, OpenApiOperation operation) in operations)
+                {
+                    if (operation.Parameters is not { Count: > 0 } operationParameters)
+                    {
+                        continue;
+                    }
+
+                    foreach (IOpenApiParameter parameter in operationParameters)
+                    {
+                        Collect(offenders, $"{method} {route}", parameter);
+                    }
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            $"'{contract.FileName}' carries 'allowReserved' on {offenders.Count} parameter(s) whose "
+                + "location is not 'query'. OpenAPI 3.1 defines that field for query parameters only, so "
+                + "the document fails 3.1 validation. If the intent is to describe multi-segment "
+                + "catch-all matching, say it in an 'x-catch-all' vendor extension - a path parameter "
+                + $"matches one segment whatever 'allowReserved' says. Sites: "
+                + $"{string.Join("; ", offenders)}. Read from '{contract.AbsolutePath}'.");
+
+        static void Collect(List<string> offenders, string site, IOpenApiParameter parameter)
+        {
+            if (parameter.AllowReserved && parameter.In != ParameterLocation.Query)
+            {
+                offenders.Add($"{site} -> '{parameter.Name}' (in: {parameter.In?.ToString() ?? "<unset>"})");
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BothDocuments))]
     public void NoReferenceInEitherDocumentIsLeftUnresolved(string fileName)
     {
         ContractDocument contract = Resolve(fileName);

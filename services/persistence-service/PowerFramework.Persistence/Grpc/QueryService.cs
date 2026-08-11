@@ -149,10 +149,14 @@
 
 using System.Collections.Concurrent;
 using Grpc.Core;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Buffers;
+using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Errors;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
@@ -255,10 +259,15 @@ internal static class QueryWireCodes
     /// </param>
     /// <returns>A status with both members populated and no driver detail.</returns>
     /// <remarks>
-    /// <b>Nothing secret can reach this parameter from this file (constraint C-F).</b> Every call site
-    /// below passes either a diagnostic produced by a collaborator or a fixed sentence that quotes no
-    /// value: no statement text, no clause body, no identifier, no connection parameter and no handle
-    /// value is ever formatted into it.
+    /// <b>Nothing secret can reach this parameter from this file (constraint C-F).</b> Almost every call
+    /// site below passes a fixed sentence that quotes no value: no statement text, no clause body, no
+    /// identifier, no connection parameter and no handle value is ever formatted into one. THE SOLE
+    /// EXCEPTION IS THE TERMINAL RELAY on the retrieval path, which passes the diagnostic the worker task
+    /// raised - text this file did not write and cannot vouch for - and that one call site masks it
+    /// through the redactor before it arrives here. This overload therefore does not redact: doing so
+    /// twice would be harmless, since the mask is idempotent, but it would put the guarantee in the wrong
+    /// place. The guarantee belongs where a text of unknown provenance enters, and there is exactly one
+    /// such place.
     /// </remarks>
     internal static OperationStatus Status(long code, string? errorText) => new()
     {
@@ -635,10 +644,13 @@ internal sealed class QueryFaultRecorder : IQueryFaultSink
 /// </remarks>
 internal sealed class QueryTaskEntry : IDisposable
 {
+    // THE COUNT FIELDS' OWN GATE, AND NOTHING ELSE'S. The running / released / disposed machine moved to
+    // TaskOperationLatch, which is shared with the update and command contracts so its disposal-handoff
+    // table exists in exactly one place. This gate is a leaf over four fields and never runs a
+    // collaborator, so the two locks cannot form a cycle: nothing below takes the latch while holding
+    // this gate, and the latch takes nothing at all.
     private readonly Lock _gate = new();
-    private bool _running;
-    private bool _released;
-    private bool _disposed;
+    private readonly TaskOperationLatch _latch = new();
     private long _rowCount;
     private long _pageCount;
     private long _recordCount;
@@ -680,6 +692,25 @@ internal sealed class QueryTaskEntry : IDisposable
     internal QueryFaultRecorder Faults { get; }
 
     /// <summary>
+    /// The caller identity this task is attributed to, for the per-caller ceiling.
+    /// </summary>
+    /// <value>
+    /// The token subject, or the resolver's unattributed bucket. Set once by the registry at registration
+    /// and never rendered into a response.
+    /// </value>
+    internal string Principal { get; set; } = HandlePrincipalResolver.Unattributed;
+
+    /// <summary>
+    /// When a call last named this task, as UTC ticks read from the injected clock.
+    /// </summary>
+    /// <remarks>
+    /// Written and read through <see cref="System.Threading.Volatile"/> by the registry: it is touched from
+    /// arbitrary request threads and read by the reclaim pass on another, and a torn 64-bit read would make
+    /// a fresh handle look ancient.
+    /// </remarks>
+    internal long LastActivityTicks;
+
+    /// <summary>
     /// Whether a retrieval is in flight for this task.
     /// </summary>
     /// <remarks>
@@ -690,16 +721,7 @@ internal sealed class QueryTaskEntry : IDisposable
     /// arriving during that merge is refused rather than racing it, and the worker's own
     /// <c>#Running</c> guard [<c>:L237</c>] still stands behind it.
     /// </remarks>
-    internal bool IsRunning
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _running;
-            }
-        }
-    }
+    internal bool IsRunning => _latch.IsRunning;
 
     /// <summary>
     /// Whether a release has been requested for this task.
@@ -713,24 +735,14 @@ internal sealed class QueryTaskEntry : IDisposable
     /// task is BUSY when the truth is that it is GONE.
     /// </para>
     /// <para>
-    /// <b>THE RESIDUAL RACE IS BENIGN AND IS ACCEPTED RATHER THAN LOCKED AWAY.</b> A mutation that reaches
-    /// the task in the instant after a release acts on an object nothing can observe any more - the handle
-    /// is unregistered and no later call can resolve it - and every setter it could reach is a field
-    /// assignment over no disposable resource. The alternative, holding this entry's lock across a
-    /// caller-supplied delegate, would hold a lock across arbitrary code to close a window with no
-    /// observable consequence, which is a worse trade.
+    /// <b>A CHEAP EARLY-OUT AND NOT A GUARD.</b> The authoritative refusal is
+    /// <see cref="TryBeginExclusive"/>'s, which answers <see cref="TaskLatchOutcome.Gone"/> and
+    /// <see cref="TaskLatchOutcome.Busy"/> as one indivisible step. Reading this property and then acting
+    /// would be exactly the check-then-act the lease removes, so it is read only to shape a refusal that
+    /// has already been decided.
     /// </para>
     /// </remarks>
-    internal bool IsReleased
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _released;
-            }
-        }
-    }
+    internal bool IsReleased => _latch.IsReleased;
 
     /// <summary>
     /// Reads the caller-side counts as one atomic value.
@@ -750,31 +762,63 @@ internal sealed class QueryTaskEntry : IDisposable
     /// Latches the task as running and clears the caller-side state, refusing when it is already
     /// running, already released or already disposed.
     /// </summary>
-    /// <returns><see langword="true"/> when the caller owns the run; otherwise <see langword="false"/>.</returns>
+    /// <returns>
+    /// <see cref="TaskLatchOutcome.Acquired"/> when the caller owns the run and must call
+    /// <see cref="EndRun"/>; otherwise the reason it was refused, which the call site maps straight onto a
+    /// code without reading any further state.
+    /// </returns>
     /// <remarks>
     /// The clear is the prepare-equivalent, so ALL THREE counts go and the recorded failure goes with
-    /// them [<c>:L507-L509</c>, and <c>n_cst_threading_task_sqlbase.sru:L208</c>]. The recorder's lock is
-    /// a leaf, so acquiring it inside this one cannot deadlock.
+    /// them [<c>:L507-L509</c>, and <c>n_cst_threading_task_sqlbase.sru:L208</c>]. It happens AFTER the
+    /// lease is taken, which is what makes it safe to perform outside the latch: no other operation can
+    /// be inside this entry once the lease is held, so nothing can observe the interval between the two
+    /// steps except a <c>Count</c> reader, which is a bare accessor with no lease in the oracle either.
     /// </remarks>
-    internal bool TryBeginRun()
+    internal TaskLatchOutcome TryBeginRun()
     {
+        TaskLatchOutcome outcome = _latch.TryBegin();
+
+        if (outcome != TaskLatchOutcome.Acquired)
+        {
+            return outcome;
+        }
+
         lock (_gate)
         {
-            if (_running || _released || _disposed)
-            {
-                return false;
-            }
-
-            _running = true;
             _rowCount = 0L;
             _pageCount = 0L;
             _recordCount = 0L;
             _counted = false;
-            Faults.Clear();
-
-            return true;
         }
+
+        Faults.Clear();
+
+        return TaskLatchOutcome.Acquired;
     }
+
+    /// <summary>
+    /// Takes the lease for a MUTATION rather than a run - a reset or a setter.
+    /// </summary>
+    /// <returns>
+    /// <see cref="TaskLatchOutcome.Acquired"/> when the caller owns the task and must call
+    /// <see cref="EndExclusive"/>; otherwise the reason it was refused.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SAME LEASE A RUN TAKES, AND DELIBERATELY SO.</b> The legacy guards every mutator with
+    /// <c>of_IsBusy()</c> [<c>n_cst_threading_task_sqlbase.sru:L57, :L73, :L95, :L110, :L124, :L144,
+    /// :L162, :L179, :L188</c>] so that a mutation and a retrieval cannot overlap. Sharing one lease
+    /// additionally stops two MUTATIONS overlapping, which in process could not happen - the caller was
+    /// one thread - and across a boundary can: two setters merging halves of two different requests'
+    /// specifications into one task is the same corruption, arrived at from the other side.
+    /// </para>
+    /// <para>
+    /// It does NOT clear the counts. A reset clears a documented subset through
+    /// <see cref="ClearAfterReset"/> and a setter clears nothing at all; clearing here would silently
+    /// change what a <c>Count</c> call answers after a mere setter.
+    /// </para>
+    /// </remarks>
+    internal TaskLatchOutcome TryBeginExclusive() => _latch.TryBegin();
 
     /// <summary>
     /// Unlatches the run.
@@ -783,15 +827,16 @@ internal sealed class QueryTaskEntry : IDisposable
     /// <see langword="true"/> when a release arrived while the retrieval was in flight, so the caller
     /// must now dispose; otherwise <see langword="false"/>.
     /// </returns>
-    internal bool EndRun()
-    {
-        lock (_gate)
-        {
-            _running = false;
+    internal bool EndRun() => _latch.End();
 
-            return _released && !_disposed;
-        }
-    }
+    /// <summary>
+    /// Unlatches a mutation. Identical to <see cref="EndRun"/>, named for its call site.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when a release arrived while the mutation was in flight, so the caller must
+    /// now dispose; otherwise <see langword="false"/>.
+    /// </returns>
+    internal bool EndExclusive() => _latch.End();
 
     /// <summary>
     /// Marks the entry released.
@@ -800,15 +845,7 @@ internal sealed class QueryTaskEntry : IDisposable
     /// <see langword="true"/> when the caller must dispose now, and <see langword="false"/> when
     /// disposal belongs to the retrieval still in flight or has already happened.
     /// </returns>
-    internal bool Release()
-    {
-        lock (_gate)
-        {
-            _released = true;
-
-            return !_running && !_disposed;
-        }
-    }
+    internal bool Release() => _latch.RequestRelease();
 
     /// <summary>
     /// Records the row count of the whole result.
@@ -903,19 +940,14 @@ internal sealed class QueryTaskEntry : IDisposable
     /// </summary>
     public void Dispose()
     {
-        lock (_gate)
+        if (!_latch.TryClaimDisposal())
         {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
+            return;
         }
 
-        // Outside the lock: the task's own teardown must not run under a lock this file's readers also
+        // Outside the latch: the task's own teardown must not run under a lock this file's readers also
         // take, and by this point no other path can reach it - the handle is unregistered and the
-        // disposed flag is already set.
+        // disposal has been claimed.
         Task.Dispose();
     }
 }
@@ -940,6 +972,58 @@ internal sealed class QueryTaskRegistry
 {
     private readonly ConcurrentDictionary<string, QueryTaskEntry> _tasks = new(StringComparer.Ordinal);
 
+    /// <summary>The ceiling on live query tasks, per caller and in total.</summary>
+    private readonly HandleQuota _quota;
+
+    /// <summary>The one clock. Stamps activity and measures idleness.</summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>Resolves the caller a new task is attributed to.</summary>
+    private readonly HandlePrincipalResolver _principals;
+
+    /// <summary>Optional structured logger, for reclaimed and drained tasks.</summary>
+    private readonly ILogger<QueryTaskRegistry>? _logger;
+
+    /// <summary>
+    /// Creates the registry over its ceilings and its clock.
+    /// </summary>
+    /// <param name="options">The bound settings the ceilings and the idle window come from.</param>
+    /// <param name="time">The one clock, shared with the pool and the pooled transaction.</param>
+    /// <param name="principals">
+    /// Resolves the caller a new task is attributed to. Optional so the registry is constructible without a
+    /// host, in which case every task is unattributed and only the total ceiling applies.
+    /// </param>
+    /// <param name="logger">Optional structured logger.</param>
+    /// <exception cref="ArgumentNullException">A required collaborator is <see langword="null"/>.</exception>
+    public QueryTaskRegistry(
+        IOptions<PersistenceOptions> options,
+        TimeProvider time,
+        HandlePrincipalResolver? principals = null,
+        ILogger<QueryTaskRegistry>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        HandleLifecycleOptions handles = options.Value.Handles;
+
+        _quota = new HandleQuota("query task", handles.MaxTotalPerRegistry, handles.MaxPerPrincipal);
+        _time = time ?? throw new ArgumentNullException(nameof(time));
+        _principals = principals ?? new HandlePrincipalResolver();
+        _logger = logger;
+    }
+
+    /// <summary>The number of live tasks. Exposed for diagnostics and for assertions in tests.</summary>
+    internal int Count => _tasks.Count;
+
+    /// <summary>
+    /// The session identity of every live task, so the session registry can pin what is still in use.
+    /// </summary>
+    /// <remarks>
+    /// SNAPSHOTTED RATHER THAN LAZY. The reclaim pass reads this to decide which sessions are spoken for,
+    /// and an enumeration that observed a concurrent release midway could pin nothing while a task was
+    /// still live - or, worse, fail to pin one.
+    /// </remarks>
+    internal IReadOnlyCollection<string> LiveSessionIds => [.. _tasks.Values.Select(entry => entry.SessionId)];
+
     /// <summary>
     /// Mints a handle for a task and registers it.
     /// </summary>
@@ -959,12 +1043,32 @@ internal sealed class QueryTaskRegistry
     /// to read. A string rather than an integer both leaves the representation to the server and removes
     /// the invitation to guess a neighbouring value.
     /// </remarks>
-    internal QueryTaskEntry Register(string sessionId, SqlQueryTask task, QueryFaultRecorder faults)
+    internal QueryTaskEntry? Register(
+        string sessionId,
+        SqlQueryTask task,
+        QueryFaultRecorder faults,
+        out string diagnostic)
     {
-        QueryTaskEntry entry = new(Guid.NewGuid().ToString("N"), sessionId, task, faults);
+        // THE CEILING IS TESTED BEFORE THE HANDLE IS MINTED, so a refusal registers nothing and the caller
+        // can dispose the task it built. Reserving after minting would leave a live entry to unwind.
+        string principal = _principals.Resolve();
+
+        if (!_quota.TryReserve(principal, out diagnostic))
+        {
+            return null;
+        }
+
+        QueryTaskEntry entry = new(Guid.NewGuid().ToString("N"), sessionId, task, faults)
+        {
+            Principal = principal,
+        };
+
+        Volatile.Write(ref entry.LastActivityTicks, _time.GetUtcNow().UtcTicks);
 
         if (!_tasks.TryAdd(entry.TaskId, entry))
         {
+            _quota.Release(principal);
+
             throw new InvalidOperationException(
                 "A newly minted query-task handle collided with a live one, so the task was not "
                 + "registered. The handle value is deliberately not quoted here.");
@@ -995,7 +1099,15 @@ internal sealed class QueryTaskRegistry
             return false;
         }
 
-        return _tasks.TryGetValue(taskId, out entry);
+        if (!_tasks.TryGetValue(taskId, out entry))
+        {
+            return false;
+        }
+
+        // A HANDLE IN USE IS NOT AN ABANDONED HANDLE: refreshed on every call that names this task.
+        Volatile.Write(ref entry.LastActivityTicks, _time.GetUtcNow().UtcTicks);
+
+        return true;
     }
 
     /// <summary>
@@ -1021,7 +1133,156 @@ internal sealed class QueryTaskRegistry
             return false;
         }
 
-        return _tasks.TryRemove(taskId, out entry);
+        if (!_tasks.TryRemove(taskId, out entry) || entry is null)
+        {
+            return false;
+        }
+
+        // Returned by whichever call won the removal, so a concurrent second release cannot return it
+        // twice and a caller cannot free quota it never held.
+        _quota.Release(entry.Principal);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes and disposes every task idle for longer than <paramref name="window"/> and not streaming.
+    /// </summary>
+    /// <param name="now">The reclaim pass's single clock read.</param>
+    /// <param name="window">How long a task may go untouched before it is considered abandoned.</param>
+    /// <returns>How many tasks were reclaimed.</returns>
+    /// <remarks>
+    /// <para>
+    /// A RETRIEVAL IN FLIGHT IS NEVER RECLAIMED, WHATEVER ITS AGE. <see cref="QueryTaskEntry.IsRunning"/>
+    /// is the adapter's own latch, raised for the whole of a streamed retrieval, and a retrieval is the one
+    /// operation on this service that can legitimately run for longer than the idle window without any
+    /// further call naming its handle. Reclaiming one would dispose a task mid-stream.
+    /// </para>
+    /// <para>
+    /// THE DISPOSAL IS THE RELEASE PATH'S OWN, NOT A SECOND ONE:
+    /// <see cref="QueryTaskEntry.Release"/> decides, and only a task that has not already been disposed is
+    /// disposed here - which is what makes an abandoned task's teardown identical to a released one's.
+    /// </para>
+    /// </remarks>
+    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
+    {
+        long threshold = now.UtcTicks - window.Ticks;
+        int reclaimed = 0;
+
+        foreach (QueryTaskEntry candidate in _tasks.Values)
+        {
+            if (candidate.IsRunning
+                || Volatile.Read(ref candidate.LastActivityTicks) > threshold
+                || !TryRemove(new TaskHandle { TaskId = candidate.TaskId }, out QueryTaskEntry? removed)
+                || removed is null)
+            {
+                continue;
+            }
+
+            if (removed.Release())
+            {
+                removed.Dispose();
+            }
+
+            reclaimed++;
+
+            _logger?.LogWarning(
+                "Reclaimed an abandoned query task held by caller {Principal} against session "
+                + "{SessionId}. The handle value is deliberately not recorded.",
+                removed.Principal,
+                removed.SessionId);
+        }
+
+        return reclaimed;
+    }
+
+    /// <summary>
+    /// Removes and disposes every live task, whatever its age.
+    /// </summary>
+    /// <returns>How many tasks were released.</returns>
+    /// <remarks>
+    /// FOR SHUTDOWN, AND IT MUST RUN BEFORE THE SESSION REGISTRY DRAINS: a task borrows the transaction its
+    /// session owns. A running task IS drained here, unlike in the reclaim pass - the host is stopping, so
+    /// the alternative is not a completed retrieval but an abandoned worker.
+    /// </remarks>
+    internal int Drain()
+    {
+        int drained = 0;
+
+        foreach (QueryTaskEntry candidate in _tasks.Values)
+        {
+            if (!TryRemove(new TaskHandle { TaskId = candidate.TaskId }, out QueryTaskEntry? removed)
+                || removed is null)
+            {
+                continue;
+            }
+
+            if (removed.Release())
+            {
+                removed.Dispose();
+            }
+
+            drained++;
+        }
+
+        return drained;
+    }
+
+    /// <summary>
+    /// Removes and disposes every task owned by a retired transaction session.
+    /// </summary>
+    /// <param name="sessionId">The session that has ended.</param>
+    /// <returns>The number of tasks retired.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A TASK CANNOT OUTLIVE THE SESSION IT WAS CREATED AGAINST, AND LEAVING ONE BEHIND IS NOT MERELY
+    /// UNTIDY.</b> Every task in this table holds the session's pooled transaction, so a task that
+    /// survives its session pins a transaction the pool has already handed back - and the pool may hand
+    /// that same transaction to a different session the moment its reference count drops. A later call on
+    /// the stale handle would then write through another session's transaction. Purging on session end is
+    /// what makes the handle's lifetime actually bounded by the session's.
+    /// </para>
+    /// <para>
+    /// Removal comes before disposal for each entry, so a concurrent call on the same handle loses the
+    /// race in the table rather than reaching a half-disposed task.
+    /// </para>
+    /// </remarks>
+    internal int PurgeSession(string sessionId)
+    {
+        ArgumentNullException.ThrowIfNull(sessionId);
+
+        int retired = 0;
+
+        foreach (QueryTaskEntry candidate in _tasks.Values)
+        {
+            if (!string.Equals(candidate.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // THROUGH TryRemove, NOT THROUGH THE DICTIONARY, and the difference is a leaked quota. The
+            // handle ceiling is reserved on registration and released by whichever call wins the removal
+            // [HandleQuota], so a purge that reached past this member would retire the task and leave its
+            // slot reserved forever - and the ceiling is per-principal, so the caller whose session ended
+            // is exactly the caller that would eventually be refused a new handle it is entitled to.
+            if (!TryRemove(new TaskHandle { TaskId = candidate.TaskId }, out QueryTaskEntry? removed)
+                || removed is null)
+            {
+                continue;
+            }
+
+            // The same two-step release the explicit release path performs: the reference is dropped
+            // and disposal happens only when this was the last one, so a run still in flight is not
+            // disposed underneath itself.
+            if (removed.Release())
+            {
+                removed.Dispose();
+            }
+
+            retired++;
+        }
+
+        return retired;
     }
 }
 
@@ -1697,6 +1958,17 @@ internal readonly record struct QuerySettingOutcome(long Code, string? ErrorText
 /// echoes a rejected value (constraint C-F).
 /// </para>
 /// </remarks>
+// ============ THE SCOPE THIS CONTRACT REQUIRES (constraint C-G) ============
+// C-05 issues only SELECT statements - the retrieval task generates nothing else
+// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru] - so every RPC on this
+// contract, the task lifecycle and the setters included, needs the READ scope and no more. The
+// task handle and its configuration are per-caller server state, not stored data.
+//
+// The route mapping in Program.cs additionally requires an authenticated principal, and the
+// fallback policy would close the door even if the mapping forgot to. This attribute is the
+// LEAST-PRIVILEGE half: authentication alone would let a credential minted for one contract
+// reach all four.
+[Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
 internal sealed class QueryService : GeneratedQueryServiceBase
 {
     /// <summary>
@@ -1896,7 +2168,27 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                 });
             }
 
-            QueryTaskEntry entry = _tasks.Register(session.SessionId, task, faults);
+            QueryTaskEntry? entry = _tasks.Register(
+                session.SessionId,
+                task,
+                faults,
+                out string quotaDiagnostic);
+
+            if (entry is null)
+            {
+                // A CEILING REFUSAL LEAVES `registered` FALSE, so the finally block below disposes the task
+                // this call built - the same deterministic drop every other refusal arm gets. E_BUSY is the
+                // oracle's own "not now", so no new value enters a consumer's branch set.
+                _logger?.LogWarning(
+                    "CreateQueryTask refused a task because a handle ceiling was reached: {Diagnostic}",
+                    quotaDiagnostic);
+
+                return Task.FromResult(new CreateQueryTaskResponse
+                {
+                    Status = QueryWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
+                });
+            }
+
             registered = true;
 
             _logger?.LogDebug(
@@ -2019,35 +2311,55 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             });
         }
 
-        // [:L57] the caller-side busy guard.
-        if (entry.IsRunning)
+        // [:L57] the caller-side busy guard - TAKEN AS A LEASE, not read. The oracle's `if of_IsBusy()
+        // then return E_BUSY` cannot be raced in process because the caller and the task are one thread of
+        // control; here two requests can both read "not busy" and both go on to reset a task the other is
+        // configuring or running. Same codes, same order, now indivisible.
+        TaskLatchOutcome lease = entry.TryBeginExclusive();
+
+        if (lease != TaskLatchOutcome.Acquired)
         {
             return Task.FromResult(new ResetQueryTaskResponse
             {
-                Status = QueryWireCodes.Status(RetCode.E_BUSY, TaskBusyText),
+                Status = lease == TaskLatchOutcome.Gone
+                    ? QueryWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskText)
+                    : QueryWireCodes.Status(RetCode.E_BUSY, TaskBusyText),
             });
         }
 
-        // [:L61] delegated; the worker's [:L237] guard stands behind this one.
-        long rtCode = entry.Task.Reset();
-
-        // [:L62] the worker's code verbatim, and CANCELLED deliberately falls through.
-        if (Predicates.IsFailed(rtCode))
+        try
         {
+            // [:L61] delegated; the worker's [:L237] guard stands behind this one.
+            long rtCode = entry.Task.Reset();
+
+            // [:L62] the worker's code verbatim, and CANCELLED deliberately falls through.
+            if (Predicates.IsFailed(rtCode))
+            {
+                return Task.FromResult(new ResetQueryTaskResponse
+                {
+                    Status = QueryWireCodes.Status(rtCode),
+                });
+            }
+
+            // [:L64-L65] and [:L292-L293].
+            entry.ClearAfterReset();
+
+            // [:L67] the literal OK, NOT rtCode.
             return Task.FromResult(new ResetQueryTaskResponse
             {
-                Status = QueryWireCodes.Status(rtCode),
+                Status = QueryWireCodes.Status(RetCode.OK),
             });
         }
-
-        // [:L64-L65] and [:L292-L293].
-        entry.ClearAfterReset();
-
-        // [:L67] the literal OK, NOT rtCode.
-        return Task.FromResult(new ResetQueryTaskResponse
+        finally
         {
-            Status = QueryWireCodes.Status(RetCode.OK),
-        });
+            // A release that arrived while this reset was in flight could not dispose the task - the
+            // teardown-with-work-pending hazard - so the duty passed to whichever path finished last, and
+            // this is that path.
+            if (entry.EndExclusive())
+            {
+                entry.Dispose();
+            }
+        }
     }
 
     // ----------------------------------------------------------------------------------------------
@@ -2433,13 +2745,17 @@ internal sealed class QueryService : GeneratedQueryServiceBase
         // The caller-side busy guard, raised BEFORE the specification is merged so a setter arriving during
         // the merge is refused rather than racing it. The worker's own latch stands behind it and answers
         // the same code if a second execution somehow reaches it.
-        if (!entry!.TryBeginRun())
+        TaskLatchOutcome lease = entry!.TryBeginRun();
+
+        if (lease != TaskLatchOutcome.Acquired)
         {
-            // TWO REASONS, TWO CODES. A run is refused either because one is already in flight - the
-            // caller-side busy guard - or because the task has been released, and telling a caller its task
-            // is BUSY when the truth is that it is GONE would send it into a retry loop that can never
-            // succeed.
-            OperationStatus refusal = entry.IsReleased
+            // TWO REASONS, TWO CODES, AND THE LEASE ALREADY DECIDED WHICH. A run is refused either because
+            // one is already in flight - the caller-side busy guard - or because the task has been
+            // released, and telling a caller its task is BUSY when the truth is that it is GONE would send
+            // it into a retry loop that can never succeed. The reason travels back WITH the refusal rather
+            // than being read again afterwards, because that second read is itself a race: a release
+            // landing between the two would report GONE for a task that was merely busy, and vice versa.
+            OperationStatus refusal = lease == TaskLatchOutcome.Gone
                 ? QueryWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskText)
                 : QueryWireCodes.Status(RetCode.E_BUSY, TaskBusyText);
 
@@ -2491,22 +2807,42 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             {
                 QueryFaultSnapshot fault = entry.Faults.Snapshot();
 
+                // THE DIAGNOSTIC IS MASKED ON ITS WAY OUT, and it is the ONE text on this contract that
+                // arrives from outside this file. Every other diagnostic this service emits is a fixed
+                // sentence it wrote itself; this one is whatever the worker task raised, and two of the
+                // task layer's arms raise statement-bearing text rather than a sentence: the carrier's
+                // select-property modification failure forwards the runtime's own message, which quotes
+                // the whole rejected `DataWindow.Table.Select='...'` assignment and therefore the
+                // generated statement inside it, and the driver's message echoes offending values - a
+                // uniqueness violation names the duplicate key, a constraint failure names the column
+                // and its value. Relaying that verbatim would hand a caller row data and statement text
+                // through a field documented as opaque display text.
+                //
+                // WHAT SURVIVES AND WHAT DOES NOT. The redactor masks literals and comment bodies ONLY,
+                // so the message's wording, its shape and its return code are unchanged and a
+                // diagnostic that quotes no value passes through byte for byte - which is every fixed
+                // sentence the legacy raises. What the caller loses is exactly the material it must not
+                // have had. The legacy performs no redaction anywhere, so this is a REQUIRED ADDITION
+                // rather than a ported behaviour (AAP 0.6.3.8), and it is applied here at the egress
+                // rather than at the recorder so the recorder stays a faithful reproduction of the
+                // proxy's own last-error field.
+                string diagnostic = SqlRedactor.Instance.Redact(fault.ErrorText);
+
                 // db_error is attached ONLY when the driver event actually fired, which is what the
                 // contract requires: it is absent on a validation failure, and that is the normal case for
                 // every guard this file reproduces. The projection masks the statement field
                 // unconditionally (constraint C-F).
                 status = fault.HasDbError
-                    ? QueryWireCodes.Status(outcome, fault.ErrorText, fault.DbError)
-                    : QueryWireCodes.Status(outcome, fault.ErrorText);
+                    ? QueryWireCodes.Status(outcome, diagnostic, fault.DbError)
+                    : QueryWireCodes.Status(outcome, diagnostic);
             }
 
             _ = await sink.WriteTerminalStatusAsync(status, cancellationToken).ConfigureAwait(false);
 
-            // ONLY THE NUMERIC CODE IS LOGGED (constraint C-F). The diagnostic is relayed to the caller
-            // verbatim because the contract requires the legacy text, and it is not written here: several
-            // legacy arms interpolate statement fragments into their message - the carrier's select-property
-            // modification failure is one - and although the task's own error hook redacts before logging,
-            // keeping the text out of this log entirely means the guarantee does not depend on that.
+            // ONLY THE NUMERIC CODE IS LOGGED (constraint C-F). The diagnostic is not written here even in
+            // its masked form: the task's own error hook already logged it once at the point it was
+            // raised, so a second record would only be a second opportunity to leak whatever the mask
+            // did not catch, and it would say nothing the first record did not.
             _logger?.LogWarning(
                 "A retrieval ended with return code {ReturnCode}; the diagnostic was relayed to the "
                 + "caller and is deliberately not logged.",
@@ -2651,13 +2987,33 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             return QueryWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskText);
         }
 
-        // The caller-side `if of_IsBusy() then return RetCode.E_BUSY`.
-        if (entry.IsRunning)
+        // The caller-side `if of_IsBusy() then return RetCode.E_BUSY` - TAKEN AS A LEASE. Reading the latch
+        // and then applying the mutation is a check-then-act that lets a setter land on a task a retrieval
+        // has already started merging its specification from, or lets two setters interleave.
+        TaskLatchOutcome lease = entry.TryBeginExclusive();
+
+        if (lease != TaskLatchOutcome.Acquired)
         {
-            return QueryWireCodes.Status(RetCode.E_BUSY, TaskBusyText);
+            return lease == TaskLatchOutcome.Gone
+                ? QueryWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskText)
+                : QueryWireCodes.Status(RetCode.E_BUSY, TaskBusyText);
         }
 
-        return mutation(entry.Task).ToStatus();
+        try
+        {
+            // THE MUTATION RUNS WITHOUT ANY LOCK HELD, which is the whole reason the exclusion is a lease
+            // rather than a lock around the delegate. Holding the entry's lock across caller-supplied code
+            // would put arbitrary work inside a critical section that every reader also enters; a lease
+            // gives the same mutual exclusion with none of that.
+            return mutation(entry.Task).ToStatus();
+        }
+        finally
+        {
+            if (entry.EndExclusive())
+            {
+                entry.Dispose();
+            }
+        }
     }
 
     /// <summary>

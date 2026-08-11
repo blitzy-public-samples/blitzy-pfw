@@ -179,11 +179,52 @@ using DomainItemChangeResult = PowerFramework.DataServices.Domain.ItemChangeResu
 using EventId = global::PowerFramework.Contracts.DataServices.V1.EventId;
 using GeneratedDataWindowServiceBase =
     global::PowerFramework.Contracts.DataServices.V1.DataWindowService.DataWindowServiceBase;
+using PersistenceBeginSessionRequest =
+    global::PowerFramework.Contracts.Persistence.V1.BeginSessionRequest;
+using PersistenceConnectionFlags =
+    global::PowerFramework.Contracts.Persistence.V1.ConnectionParameterFlags;
+using PersistenceCreateQueryTaskRequest =
+    global::PowerFramework.Contracts.Persistence.V1.CreateQueryTaskRequest;
+using PersistenceCreateUpdateTaskRequest =
+    global::PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskRequest;
+using PersistenceEndSessionRequest =
+    global::PowerFramework.Contracts.Persistence.V1.EndSessionRequest;
+using PersistencePrepareUpdateRequest =
+    global::PowerFramework.Contracts.Persistence.V1.PrepareUpdateRequest;
 using PersistenceQueryRequest = global::PowerFramework.Contracts.Persistence.V1.QueryRequest;
 using PersistenceQueryResponse = global::PowerFramework.Contracts.Persistence.V1.QueryResponse;
 using PersistenceQuerySpec = global::PowerFramework.Contracts.Persistence.V1.QuerySpec;
+using PersistenceReleaseQueryTaskRequest =
+    global::PowerFramework.Contracts.Persistence.V1.ReleaseQueryTaskRequest;
+using PersistenceReleaseUpdateTaskRequest =
+    global::PowerFramework.Contracts.Persistence.V1.ReleaseUpdateTaskRequest;
+using PersistenceSessionHandle = global::PowerFramework.Contracts.Persistence.V1.SessionHandle;
+using PersistenceTaskHandle = global::PowerFramework.Contracts.Persistence.V1.TaskHandle;
+using PersistenceTransactionDescriptor =
+    global::PowerFramework.Contracts.Persistence.V1.TransactionDescriptor;
 using PersistenceUpdateRequest = global::PowerFramework.Contracts.Persistence.V1.UpdateRequest;
 using PositionalParameter = global::PowerFramework.Contracts.Persistence.V1.PositionalParameter;
+
+// The session and task lifecycle types C-05 through C-08 publish. Aliased individually rather than
+// imported wholesale for the same reason every other Persistence type here is: the namespace publishes an
+// UpdateRequest, an UpdateResponse and a DataWindowService of its own, and naming exactly the types used
+// keeps the collision surface at zero rather than relying on lexical luck.
+using BeginSessionRequest = global::PowerFramework.Contracts.Persistence.V1.BeginSessionRequest;
+using BeginSessionResponse = global::PowerFramework.Contracts.Persistence.V1.BeginSessionResponse;
+using CreateQueryTaskRequest = global::PowerFramework.Contracts.Persistence.V1.CreateQueryTaskRequest;
+using CreateQueryTaskResponse = global::PowerFramework.Contracts.Persistence.V1.CreateQueryTaskResponse;
+using CreateUpdateTaskRequest = global::PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskRequest;
+using CreateUpdateTaskResponse = global::PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskResponse;
+using EndSessionRequest = global::PowerFramework.Contracts.Persistence.V1.EndSessionRequest;
+using OperationStatus = global::PowerFramework.Contracts.Persistence.V1.OperationStatus;
+using ReleaseQueryTaskRequest = global::PowerFramework.Contracts.Persistence.V1.ReleaseQueryTaskRequest;
+using PrepareUpdateRequest = global::PowerFramework.Contracts.Persistence.V1.PrepareUpdateRequest;
+using PrepareUpdateResponse = global::PowerFramework.Contracts.Persistence.V1.PrepareUpdateResponse;
+using TableUpdateContract = global::PowerFramework.Contracts.Persistence.V1.TableUpdateContract;
+using ReleaseUpdateTaskRequest = global::PowerFramework.Contracts.Persistence.V1.ReleaseUpdateTaskRequest;
+using SessionHandle = global::PowerFramework.Contracts.Persistence.V1.SessionHandle;
+using TaskHandle = global::PowerFramework.Contracts.Persistence.V1.TaskHandle;
+using TransactionDescriptor = global::PowerFramework.Contracts.Persistence.V1.TransactionDescriptor;
 
 // The PORTED constant catalogue, which is what every outcome code in this file is spelled from. The wire
 // twin is `common.v1.RetCode`, a wrapper message whose nested enum is aliased below as WireRetCode; the
@@ -332,6 +373,83 @@ public interface IDataWindowModelSetProvider
     /// mistyped a handle must learn that, not receive a second empty DataWindow.
     /// </returns>
     DataWindowModelSet? GetOrCreate(string dataWindowHandle);
+}
+
+/// <summary>
+/// One update table's contract, as a DataWindow's own definition declares it.
+/// </summary>
+/// <param name="TableName">The update table [<c>dw_sqlite.srd:L14</c> <c>update="COMPANY"</c>].</param>
+/// <param name="UpdatableColumns">
+/// Every column the definition marks <c>update=yes</c>, in declaration order.
+/// </param>
+/// <param name="KeyColumns">Every column the definition marks <c>key=yes</c>, in declaration order.</param>
+/// <param name="IdentityColumn">
+/// The column the definition marks <c>identity=yes</c>, or the empty string when it marks none.
+/// </param>
+/// <param name="UpdateWhere">
+/// The update-where MODE, a <c>long</c> rather than a flag: 0 is key columns only, 1 is key and
+/// updateable columns, 2 is key and modified columns. Absent means "leave the carrier's own setting
+/// alone", which is what C-06 does with an unset field.
+/// </param>
+/// <param name="UpdateKeyInPlace">
+/// Whether a key change is performed in place. Absent means "leave the carrier's own setting alone".
+/// </param>
+/// <remarks>
+/// <para>
+/// <b>THIS IS DERIVED FROM THE DEFINITION AND IS NEVER TAKEN FROM A REQUEST.</b> C-03's
+/// <c>UpdateRequest</c> carries a handle, an optional session and the rows - and deliberately no table
+/// descriptor, because the legacy has none to carry: its update contract lives in the DataWindow's own
+/// static definition, re-derived at run time from the descriptor array
+/// [<c>n_cst_thread_task_sqlupdate.sru:L98-L145</c>]. Publishing the descriptor as a request field would
+/// let a caller name an update table the DataWindow does not declare, which is an authorization hole
+/// dressed as flexibility.
+/// </para>
+/// <para>
+/// A NULL ANSWER FROM THE PROVIDER IS ORDINARY, NOT A FAULT. A derived or read-only DataWindow declares
+/// no update table at all, and C-06's prepare step accepts an empty descriptor array whenever
+/// multi-table update is off [<c>:L365</c> against <c>:L371</c>]. So an absent descriptor means "this
+/// DataWindow's own definition governs", which is precisely the legacy single-table shape.
+/// </para>
+/// </remarks>
+public sealed record DataWindowUpdateContract(
+    string TableName,
+    IReadOnlyList<string> UpdatableColumns,
+    IReadOnlyList<string> KeyColumns,
+    string IdentityColumn,
+    long? UpdateWhere,
+    bool? UpdateKeyInPlace);
+
+/// <summary>
+/// Resolves the update contract a DataWindow's own definition declares.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY A SEAM RATHER THAN A DIRECT READ OF THE DEFINITION STORE. The definition store is a
+/// <c>Domain</c> concern and this file is the boundary; the same reasoning that puts
+/// <see cref="IDataWindowModelSetProvider"/> here rather than injecting the concrete registry applies
+/// unchanged. It also keeps the update path testable without a registry: a fixture supplies the
+/// descriptor it wants to assert on.
+/// </para>
+/// <para>
+/// OPTIONAL ON THE SERVICE, AND THAT IS DELIBERATE. An update composed without this seam still runs -
+/// it names the data object and lets the carrier's own definition govern, which is the legacy
+/// single-table path exactly. What it cannot do is drive a MULTI-TABLE update, and it does not pretend
+/// to: C-03 publishes no way to request one.
+/// </para>
+/// </remarks>
+public interface IDataWindowUpdateContractProvider
+{
+    /// <summary>
+    /// Returns the update contract for a DataWindow handle.
+    /// </summary>
+    /// <param name="dataWindowHandle">The caller's own name for the DataWindow.</param>
+    /// <returns>
+    /// The contract, or <see langword="null"/> when the handle names nothing registered OR when the
+    /// definition it names declares no update table. The two are deliberately not distinguished: both
+    /// mean "there is no descriptor to send", and C-06 refuses an update against a DataWindow with no
+    /// updatable table on its own authority [<c>n_cst_thread_task_sqlupdate.sru:L179-L189</c>].
+    /// </returns>
+    DataWindowUpdateContract? GetUpdateContract(string dataWindowHandle);
 }
 
 /// <summary>
@@ -1136,15 +1254,32 @@ internal static class DataWindowWireProjection
 /// wrong.
 /// </para>
 /// <para>
-/// THE TOKEN IS FOR DETECTION, NOT FOR REORDERING, AND THAT IS THE OPPOSITE OF THE INTUITIVE READING.
-/// Inside a group assigned the synchronous discipline an out-of-order arrival is a HARD ERROR that fails
-/// the session; it is never an invitation to buffer and re-sort. The reason is mechanical: the
-/// validation-error handler READS AND THEN CLEARS the code stashed by the item-change event that
+/// WHAT THE TOKEN IS FOR DEPENDS ON THE DISCIPLINE, AND THE TWO ANSWERS ARE OPPOSITE. Inside a group
+/// assigned the SYNCHRONOUS discipline it is for DETECTION ONLY: an out-of-order arrival is a HARD ERROR
+/// that fails the session and is never an invitation to buffer and re-sort. The reason is mechanical -
+/// the validation-error handler READS AND THEN CLEARS the code stashed by the item-change event that
 /// precedes it [<c>se_cst_dw.sru:L331-L332</c>] and pre-sets its own result from that value
-/// [<c>:L338-L340</c>], so one event's behaviour is a FUNCTION OF ITS PREDECESSOR'S RETURN VALUE. A
-/// re-sorted chain reads a stash written by the wrong predecessor, or by none. NOTHING IN THIS TYPE
-/// BUFFERS OR RE-SORTS, in either strictness mode - messages are processed strictly in arrival order,
-/// always.
+/// [<c>:L338-L340</c>], so one event's behaviour is a FUNCTION OF ITS PREDECESSOR'S RETURN VALUE, and a
+/// re-sorted chain reads a stash written by the wrong predecessor or by none. NOTHING IN THIS TYPE EVER
+/// BUFFERS A SYNCHRONOUS MESSAGE, in either strictness mode.
+/// </para>
+/// <para>
+/// INSIDE A SEQUENCED GROUP THE RULE IS LOOSER BUT IT IS STILL ENFORCED, AND THAT ENFORCEMENT IS NEW.
+/// Those events carry no cross-event state, so a GAP is admitted: the counter is shared with the outbound
+/// direction, a client's token is one past the highest it has SEEN, and the numbers this server consumed
+/// are numbers the client never sends. A REVERSAL OR A DUPLICATE IS REFUSED. Previously the sequenced arm
+/// accepted every positive token including those two, so the ordering information was recorded and never
+/// acted on - which left pattern (a) indistinguishable from arrival order.
+/// </para>
+/// <para>
+/// WHY NOT REORDER, GIVEN THAT AAP 0.6.1.4 SAYS THE TOKEN IS SUFFICIENT FOR IT. Because on this contract
+/// it is not: a hold-and-release buffer was built here and then removed after measurement.
+/// <see cref="DataWindowEventSequencer.Accept"/>'s remarks carry the numbers - one dispatch of token 1
+/// leaves the next expected token at 4, because the chain's outcome report and the result write each take
+/// one from the same counter - so a message held awaiting token 2 waits for a number no client will send.
+/// A client must also read a response to learn its next token, so it cannot pipeline, and one gRPC stream
+/// delivers a sender's messages in order: a displaced pattern-(a) arrival is a client defect rather than
+/// a transport artifact, and the answer to a client defect is a defined error (AAP 0.1.5).
 /// </para>
 /// <para>
 /// THE DISCIPLINE IS THE SERVER'S TO RESOLVE, NOT THE CLIENT'S TO DECLARE. The token carries a
@@ -1281,15 +1416,15 @@ internal sealed class DataWindowEventConversation
     /// which defaults to <see langword="true"/>.
     /// </param>
     /// <exception cref="DataWindowEventSequenceException">
-    /// The token is absent or out of order inside a synchronous group AND strict ordering is in force.
+    /// The token is absent, or is out of order for its discipline, AND strict ordering is in force.
     /// </exception>
     /// <remarks>
     /// <para>
     /// THE SEQUENCER OWNS THE RULE AND THIS ONLY ASKS IT. A missing token is always a fault; inside a
     /// synchronous group a token that is not the immediate successor is a fault; inside a sequenced group
-    /// an arrival behind the high-water mark is accepted and merely does not advance it, because reorder
-    /// authority there belongs to the consumer and raising would forbid the very reordering the
-    /// discipline exists to permit.
+    /// a token above the mark is admitted - a gap is legitimate, because the counter is shared with the
+    /// outbound direction - while a token AT OR BELOW the mark is a fault, being a reversal or a
+    /// duplicate rather than a late arrival.
     /// </para>
     /// <para>
     /// WHAT THE STRICTNESS DIAL DOES AND DOES NOT DO. With it in force - the default, and the posture AAP
@@ -1654,9 +1789,21 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     private readonly IDataWindowEventChainFactory _chainFactory;
     private readonly IDataWindowModelSetProvider _models;
     private readonly PersistenceClient _persistence;
+
+    /// <summary>
+    /// Resolves the update descriptor a DataWindow's own definition declares, when one is composed.
+    /// </summary>
+    /// <remarks>
+    /// OPTIONAL, AND ITS ABSENCE IS A NARROWER UPDATE RATHER THAN A BROKEN ONE. Without it an update still
+    /// names its data object and lets the carrier's own static definition govern - which is precisely the
+    /// legacy single-table path, where no prepare runs at all
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L370-L371</c>].
+    /// </remarks>
+    private readonly IDataWindowUpdateContractProvider? _updateContracts;
     private readonly EventChainOptions _eventChain;
     private readonly SessionLifetimeOptions _sessionLifetime;
     private readonly DropDownSearchOptions _dropDownSearch;
+    private readonly PersistenceSessionOptions _persistenceSession;
     private readonly ILogger<DataWindowService>? _logger;
 
     /// <summary>
@@ -1695,7 +1842,8 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         IDataWindowEventChainFactory chainFactory,
         IDataWindowModelSetProvider models,
         PersistenceClient persistence,
-        ILogger<DataWindowService>? logger = null)
+        ILogger<DataWindowService>? logger = null,
+        IDataWindowUpdateContractProvider? updateContracts = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -1703,13 +1851,156 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         _chainFactory = chainFactory ?? throw new ArgumentNullException(nameof(chainFactory));
         _models = models ?? throw new ArgumentNullException(nameof(models));
         _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
+        _updateContracts = updateContracts;
 
         DataServicesOptions configured = options.Value;
 
         _eventChain = configured.EventChain ?? new EventChainOptions();
         _sessionLifetime = configured.Sessions?.ValidationSession ?? new SessionLifetimeOptions();
         _dropDownSearch = configured.DropDownSearch ?? new DropDownSearchOptions();
+        _persistenceSession = configured.PersistenceSession ?? new PersistenceSessionOptions();
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Composes the session request every scope this service opens is begun with.
+    /// </summary>
+    /// <returns>The request, carrying the configured descriptor and the two connection flags.</returns>
+    /// <remarks>
+    /// <para>
+    /// ONE PLACE, TWO CONTRACTS. Both C-05 retrieval and C-06 update begin a session first, and both begin
+    /// it from this one request so a deployment cannot end up connecting one way for a read and another way
+    /// for a write.
+    /// </para>
+    /// <para>
+    /// BUILT FRESH PER SESSION RATHER THAN CACHED, deliberately. The message is mutable and carries the log
+    /// password, so a single shared instance would put credential material on an object graph reachable for
+    /// the life of the process and let any accidental mutation change every later session at once. It is
+    /// cheap to build and there is no performance objective to trade against (AAP 0.8.5).
+    /// </para>
+    /// <para>
+    /// THE FLAGS ARE NOT CREDENTIALS AND ARE NOT OPTIONAL. Persistence parses <c>DisableBind</c> and
+    /// <c>NCharBind</c> into the bind behaviour that decides whether values are bound as parameters or
+    /// interpolated into the statement text at all
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129</c>], so dropping them
+    /// silently changes which statement the upstream generates.
+    /// </para>
+    /// <para>
+    /// AN UNCONFIGURED DEPLOYMENT SENDS AN EMPTY DESCRIPTOR, which is the default and is deliberate: it
+    /// names no database and holds no credential, and Persistence then resolves its own connection from its
+    /// own options (AAP 0.6.6). Nothing here is a literal - every field arrives through the options pattern
+    /// (constraint C-F).
+    /// </para>
+    /// </remarks>
+    private BeginSessionRequest BuildSessionRequest() => new()
+    {
+        Descriptor_ = BuildTransactionDescriptor(),
+        Flags = new PersistenceConnectionFlags
+        {
+            DisableBind = _persistenceSession.DisableBind,
+            NcharBind = _persistenceSession.NCharBind,
+        },
+    };
+    /// <summary>
+    /// Runs a release and swallows its failure into a log record.
+    /// </summary>
+    /// <param name="release">The release call.</param>
+    /// <param name="what">What is being released, for the diagnostic.</param>
+    /// <returns>A task that completes when the release has been attempted.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE RELEASE MUST NOT REPLACE THE FAILURE IT IS CLEANING UP AFTER.</b> These calls run in
+    /// <c>finally</c> blocks, and an exception thrown from a <c>finally</c> discards the exception already
+    /// in flight - so a retrieval that failed for a diagnosable reason would surface as a cleanup error
+    /// instead. Logging is therefore the whole of the handling, and the log record is a warning rather
+    /// than an error because the session teardown that follows releases the pooled transaction regardless.
+    /// </para>
+    /// <para>
+    /// <b>CancellationToken.None IS PASSED DELIBERATELY.</b> A release requested because the caller
+    /// cancelled must still run: honouring the cancelled token here would skip the release precisely when
+    /// it is most needed, leaving a task and its pooled connection held until the process ends.
+    /// </para>
+    /// </remarks>
+    private async Task ReleaseQuietlyAsync(Func<Task> release, string what)
+    {
+        try
+        {
+            await release().ConfigureAwait(false);
+        }
+        catch (RpcException failure)
+        {
+            _logger?.LogWarning(
+                "Releasing the {What} after a Persistence operation failed with gRPC status {StatusCode}. "
+                    + "The failure is recorded and not raised, because raising from a finally would "
+                    + "discard the operation's own diagnosis.",
+                what,
+                failure.StatusCode);
+        }
+    }
+
+    /// <summary>
+    /// Builds the failure that surfaces an upstream Persistence status this service cannot satisfy.
+    /// </summary>
+    /// <param name="attempted">What was attempted, for the diagnostic.</param>
+    /// <param name="dataWindowHandle">The handle the operation named, or the empty string when none applies.</param>
+    /// <param name="status">The upstream status, which may be absent.</param>
+    /// <returns>The exception to throw.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE RETURN CODE AND THE ERROR TEXT BOTH TRAVEL, AND THAT IS THE WHOLE POINT.</b> An upstream
+    /// terminal status carries three facts - a return code, an error text and an optional database error -
+    /// and a caller that is told only the third cannot distinguish a non-database failure from success.
+    /// The code and the text therefore travel in the RPC status detail, which is the channel gRPC provides
+    /// for exactly this and which every client library surfaces.
+    /// </para>
+    /// <para>
+    /// <b>THE STATEMENT TEXT IS NEVER LOGGED.</b> The database error's statement field carries interpolated
+    /// literal values, because the legacy runs without bind variables when <c>DisableBind</c> is set
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129</c>] and the legacy
+    /// logger performs no redaction at all. It is relayed to the caller, who is entitled to it, and the
+    /// log record below reads only the numeric code.
+    /// </para>
+    /// <para>
+    /// <b>THE STATUS CODE IS MAPPED, NOT FLATTENED.</b> A cancellation stays Cancelled and an invalid
+    /// argument stays InvalidArgument, because a caller's retry-or-surface policy keys on the status code;
+    /// mapping everything to Internal would make a caller error look like a server fault.
+    /// </para>
+    /// </remarks>
+    private RpcException BuildUpstreamFailure(
+        string attempted,
+        string dataWindowHandle,
+        OperationStatus? status)
+    {
+        long retCode = status is null ? RetCode.E_INTERNAL_ERROR : (long)status.RetCode;
+        string errorText = status?.ErrorText ?? string.Empty;
+
+        StatusCode code = retCode switch
+        {
+            RetCode.CANCELLED => StatusCode.Cancelled,
+            RetCode.E_INVALID_ARGUMENT or RetCode.E_OUT_OF_BOUND => StatusCode.InvalidArgument,
+            RetCode.E_INVALID_HANDLE or RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
+            RetCode.E_NO_SUPPORT or RetCode.E_NO_IMPLEMENTATION => StatusCode.Unimplemented,
+            RetCode.E_BUSY => StatusCode.Unavailable,
+            _ => StatusCode.Internal,
+        };
+
+        _logger?.LogWarning(
+            "Persistence could not {Attempted} for DataWindow handle {DataWindowHandle}: return code "
+                + "{ReturnCode}, database code {SqlDbCode}. Any statement text in the upstream payload is "
+                + "relayed to the caller and deliberately NOT logged.",
+            attempted,
+            dataWindowHandle.Length == 0 ? "(none)" : dataWindowHandle,
+            retCode,
+            status?.DbError?.Sqldbcode ?? 0L);
+
+        return new RpcException(new Status(
+            code,
+            string.Format(
+                CultureInfo.InvariantCulture,
+                "Persistence could not {0}. Return code {1}.{2}",
+                attempted,
+                retCode,
+                errorText.Length == 0 ? string.Empty : " " + errorText)));
     }
 
     /// <summary>
@@ -1771,6 +2062,98 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         Severity = Severity.StopSign,
         RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_HANDLE),
     };
+
+    /// <summary>
+    /// Builds the call status a streamed operation fails with when its upstream work handles could not be
+    /// acquired.
+    /// </summary>
+    /// <param name="scope">The refused acquisition, carrying its outcome code and diagnostic.</param>
+    /// <param name="dataWindowHandle">The DataWindow the operation was for, for the diagnostic record.</param>
+    /// <param name="operation">What was being attempted, for the caller-facing detail.</param>
+    /// <returns>The failure to raise.</returns>
+    /// <remarks>
+    /// <para>
+    /// A REFUSED ACQUISITION TRAVELS AS THE CALL STATUS AND NOT AS A TERMINAL CHUNK CARRYING AN ERROR, and
+    /// the contract is what decides that. <c>RetrieveChunk.error</c> is declared "present only on a failure
+    /// that the legacy would have surfaced through its error event", and <c>common.v1.DbError.sqldbcode</c>
+    /// is explicitly "NOT a RetCode" - it is the driver's own code space. A handle acquisition is neither:
+    /// it is a boundary operation the legacy does not have, because the legacy creates its session and its
+    /// task in-process and reads the outcome as a return value. Synthesising a <c>DbError</c> for it would
+    /// put a non-driver number into a driver-code field AND claim a database error event that never
+    /// happened, which would corrupt any recording that compares error events. So it travels where the
+    /// blank-handle rejection above already travels: the status.
+    /// </para>
+    /// <para>
+    /// EVERY ARM IS ANSWERABLE FOR ITSELF, rather than one blanket <c>Internal</c> or one blanket
+    /// <c>Unavailable</c>. A code naming a value the CALLER supplied is <c>InvalidArgument</c>, because C-05
+    /// adjudicates each setting on the create call and a rejected setting is the caller's to fix. A
+    /// registry at capacity is <c>ResourceExhausted</c>, which is the status a resilience policy is allowed
+    /// to retry and which projects to HTTP 429. A refusal by policy is <c>PermissionDenied</c>, which must
+    /// NOT be retried and would be if it were folded into the default. A transaction or handle that is not
+    /// valid is <c>FailedPrecondition</c>, matching what <see cref="BuildUpstreamFailure"/> gives the same
+    /// two codes so that one upstream code cannot reach a caller as two different statuses. An acquisition
+    /// that reported success and carried no handle is <c>Internal</c>, because that is the upstream breaking
+    /// the contract rather than anything the caller or a retry can address. Everything else - a provider
+    /// that is down, a handle the server declined to issue - is <c>Unavailable</c>: the operation could not
+    /// be served now, and a retrieval is a safe read, so a caller may retry it.
+    /// </para>
+    /// <para>
+    /// THE UPSTREAM DIAGNOSTIC IS RELAYED TO THE CALLER AND THE NUMERIC CODE ALONE IS LOGGED, on the same
+    /// terms as the update path's statement field: the caller is entitled to learn which setting was
+    /// refused, and this service's own log is not the place to accumulate text it did not author.
+    /// </para>
+    /// </remarks>
+    private RpcException AcquisitionFailure(
+        PersistenceWorkScope scope,
+        string dataWindowHandle,
+        string operation)
+    {
+        StatusCode status = scope.ReturnCode switch
+        {
+            RetCode.E_INVALID_ARGUMENT
+                or RetCode.E_INVALID_DATAOBJECT
+                or RetCode.E_INVALID_SQL
+                or RetCode.E_OUT_OF_BOUND => StatusCode.InvalidArgument,
+            RetCode.E_BUSY => StatusCode.ResourceExhausted,
+            RetCode.E_ACCESS_DENIED => StatusCode.PermissionDenied,
+
+            // A TRANSACTION OR HANDLE THAT IS NOT VALID IS A PRECONDITION, NOT A CAPACITY PROBLEM, and it
+            // is mapped to the SAME status BuildUpstreamFailure gives the same two codes. That agreement is
+            // the point: a caller keys its retry-or-surface policy on the status code, so one upstream code
+            // reaching it as two different statuses depending on which internal helper happened to raise it
+            // would make the policy unwritable. Unavailable invites a retry, and retrying a session whose
+            // descriptor names a transaction that is not valid produces the identical refusal forever.
+            RetCode.E_INVALID_HANDLE or RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
+
+            // AND THE ONE ARM THAT IS ABOUT THE PRODUCER RATHER THAN THE WORK. PersistenceWorkScope raises
+            // MissingHandleCode when an acquisition answered SUCCESS and then carried no handle to address -
+            // see PersistenceWorkScope.MissingSessionHandleText and MissingTaskHandleText. That is a breach
+            // of the contract by the upstream, not a condition the caller can act on and not one a retry
+            // can clear, so it is Internal: an unretryable server-side fault, which is exactly what
+            // Unavailable would have mis-stated.
+            PersistenceWorkScope.MissingHandleCode => StatusCode.Internal,
+
+            _ => StatusCode.Unavailable,
+        };
+
+        _logger?.LogWarning(
+            "A {Operation} on DataWindow handle {DataWindowHandle} could not acquire its upstream work "
+                + "handles: outcome {ReturnCode}, reported as gRPC {StatusCode}. The upstream diagnostic is "
+                + "relayed to the caller and is deliberately not logged here.",
+            operation,
+            dataWindowHandle,
+            scope.ReturnCode,
+            status);
+
+        return new RpcException(new Status(
+            status,
+            string.Format(
+                CultureInfo.InvariantCulture,
+                "The {0} could not acquire a Persistence work handle (outcome {1}). {2}",
+                operation,
+                scope.ReturnCode,
+                scope.ErrorText)));
+    }
 
     // =================================================================================================
     //  RETRIEVAL - the first third of the retrieval / validation / update triple
@@ -1857,11 +2240,119 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             ? [DwBuffer.Primary]
             : [.. request.Buffers];
 
-        PersistenceQueryRequest query = new() { Spec = BuildQuerySpec(request) };
+        // THE UPSTREAM WORK HANDLES ARE ACQUIRED BEFORE THE FIRST ROW IS ASKED FOR, AND RELEASED ON EVERY
+        // PATH OUT OF THIS METHOD - the refusal below, a failing write, an upstream fault and the caller's
+        // cancellation alike. Every C-05 operating call NAMES a server-held task, and Persistence refuses a
+        // blank handle with E_INVALID_HANDLE before it reaches a statement [Grpc/QueryService.cs], so a
+        // default handle is not a lenient default: it is a guaranteed refusal.
+        //
+        // THE SPEC TRAVELS ON THE CREATE CALL AND IS NOT REPEATED ON THE RUN CALL, AND THAT IS A
+        // CORRECTNESS REQUIREMENT RATHER THAN TIDINESS. C-05 documents QueryRequest.spec as "merged over
+        // whatever the Set* calls already applied", and a clause setter is NOT IDEMPOTENT - a WHERE clause
+        // carrying SQL_MS_APPEND applied twice appends the same fragment twice and changes the executed
+        // statement. Applying it once, at creation, is also where C-05 adjudicates each setting
+        // individually so a refusal names which one was wrong.
+        await using PersistenceWorkScope scope = await _persistence
+            .OpenQueryScopeAsync(BuildQuerySpec(request), BuildSessionRequest(), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!scope.IsAcquired)
+        {
+            throw AcquisitionFailure(scope, request.DatawindowHandle, "retrieval");
+        }
+
+        // ==========================================================================================
+        //  THE STREAM ITSELF IS A SEPARATE METHOD, AND THE SPLIT IS LOAD BEARING RATHER THAN TIDY.
+        //
+        //  The scope above must be disposed BEFORE the owed final marker is written, because disposing it
+        //  is what releases the upstream task and ends the session - and holding a pooled transaction,
+        //  and therefore a connection, across a write to a client that may be slow or gone is exactly the
+        //  leak the scope exists to prevent. An `await using` releases at the end of its enclosing BLOCK,
+        //  so the epilogue has to sit outside that block; the loop is therefore lifted into a method that
+        //  RETURNS what it delivered, and the epilogue runs after it against the returned counters.
+        //
+        //  The counters travel back rather than being recomputed because the owed marker's ordinal must
+        //  CONTINUE the sequence rather than restart it - a consumer detects a truncated stream from that
+        //  ordinal, so a marker numbered 1 after five chunks would read as a gap of four.
+        // ==========================================================================================
+        RetrievalStreamOutcome streamed = await StreamRetrievalAsync(
+                request,
+                responseStream,
+                scope.Task,
+                requested,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (streamed.FinalWritten)
+        {
+            return;
+        }
+
+        // "A stream that ends without it was truncated" is the contract's rule, so a final marker is
+        // always written on a SUCCESSFUL stream - including for an empty result, where it is the only
+        // chunk. Ending the stream silently would make a legitimately empty retrieval indistinguishable
+        // from a truncated one. A FAILING stream never reaches here: it throws.
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await responseStream
+            .WriteAsync(new RetrieveChunk
+            {
+                RowCount = 0L,
+                ChunkIndex = streamed.ChunkIndex + 1L,
+                CumulativeRowCount = streamed.CumulativeRowCount,
+                Final = true,
+            })
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Streams one retrieval's chunks, and raises a terminal upstream failure rather than masking it.
+    /// </summary>
+    /// <param name="request">The retrieval request.</param>
+    /// <param name="responseStream">The response writer.</param>
+    /// <param name="task">The Persistence task the query runs on, held by the caller's work scope.</param>
+    /// <param name="requested">The buffers the caller asked for.</param>
+    /// <param name="cancellationToken">The caller's cancellation.</param>
+    /// <returns>
+    /// What was streamed and whether the final marker has already been written. The two counters travel
+    /// back with the answer because the caller writes the owed final marker and its ordinal must continue
+    /// the sequence rather than restart it - a consumer detects a gap from that ordinal.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A TERMINAL FAILURE IS PROPAGATED, NOT SUMMARISED.</b> The upstream terminal status carries three
+    /// things - a return code, an error text and an optional database error - and this method surfaces all
+    /// three: the database error travels on the error chunk exactly as C-03 prescribes ("present only on a
+    /// failure that the legacy would have surfaced through its error event; a chunk carrying an error
+    /// carries no rows"), and the return code and error text travel in the RPC status that follows it.
+    /// Writing an empty final chunk instead - which is what this used to do for a non-database failure -
+    /// makes a failed retrieval indistinguishable from an empty successful one, and a caller cannot
+    /// recover a fact it was never told.
+    /// </para>
+    /// <para>
+    /// The order is deliberate: the chunk is written FIRST and the status raised after it, because gRPC
+    /// delivers every message before the status, so a consumer reads the payload and then learns the call
+    /// failed. Raising first would discard the payload.
+    /// </para>
+    /// <para>
+    /// <b>THE SPECIFICATION IS NOT A PARAMETER, AND ITS ABSENCE IS THE CORRECTNESS POINT.</b> C-05 applies
+    /// the spec once, on the CREATE call the work scope makes, because a clause setter is NOT IDEMPOTENT -
+    /// a WHERE clause carrying SQL_MS_APPEND applied twice appends the same fragment twice and changes the
+    /// executed statement. This method therefore names only the task, so there is no second place a spec
+    /// could be re-applied from.
+    /// </para>
+    /// </remarks>
+    private async Task<RetrievalStreamOutcome> StreamRetrievalAsync(
+        RetrieveRequest request,
+        IServerStreamWriter<RetrieveChunk> responseStream,
+        PersistenceTaskHandle task,
+        HashSet<DwBuffer> requested,
+        CancellationToken cancellationToken)
+    {
+        PersistenceQueryRequest query = new() { Task = task };
 
         long chunkIndex = 0L;
         long cumulative = 0L;
-        bool finalWritten = false;
 
         await foreach (PersistenceQueryResponse response in _persistence
             .QueryAsync(query, cancellationToken)
@@ -1880,16 +2371,24 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                     // The upstream chunk ordinal and its total are the only evidence of where the stream
                     // ends, and a zero total means the producer did not declare one - in which case the
                     // terminal status is what ends the stream, not this test.
-                    if (response.DataChunk.ChunkCount > 0L
-                        && response.DataChunk.ChunkIndex >= response.DataChunk.ChunkCount)
+                    bool upstreamDeclaredLast = response.DataChunk.ChunkCount > 0L
+                        && response.DataChunk.ChunkIndex >= response.DataChunk.ChunkCount;
+
+                    if (upstreamDeclaredLast)
                     {
                         chunk.Final = true;
-                        finalWritten = true;
                     }
 
                     cancellationToken.ThrowIfCancellationRequested();
 
                     await responseStream.WriteAsync(chunk).ConfigureAwait(false);
+
+                    if (upstreamDeclaredLast)
+                    {
+                        // The stream is complete and its final marker has been written, so the caller owes
+                        // no second one.
+                        return new RetrievalStreamOutcome(true, chunkIndex, cumulative);
+                    }
 
                     break;
 
@@ -1898,6 +2397,32 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                     // the final chunk with no rows beside it - the contract's own rule for an error chunk.
                     // The statement field inside it is RELAYED AND NEVER LOGGED: see Update's redaction
                     // note for why that field is treated as sensitive.
+                    long terminalOutcome = response.Status.RetCode == default
+                        ? RetCode.OK
+                        : (long)response.Status.RetCode;
+
+                    if (Predicates.IsFailed(terminalOutcome) && response.Status.DbError is null)
+                    {
+                        // ============================================================================
+                        //  A FAILURE WITH NOWHERE ON THE MESSAGE TO GO TRAVELS AS THE CALL STATUS.
+                        //
+                        //  RetrieveChunk carries a database error and NOTHING ELSE that can express an
+                        //  outcome, so a failing status that brought no DbError - which is what a
+                        //  rejected clause, an invalid paging request or a bad chunk size produces -
+                        //  has no field to occupy. Writing the plain final marker instead, which is
+                        //  what this arm used to do unconditionally, DELIVERED A FAILURE AS A
+                        //  SUCCESSFUL EMPTY RETRIEVAL: byte for byte the same answer a DataWindow with
+                        //  no matching rows produces, so no caller could tell a refused query from an
+                        //  empty one.
+                        //
+                        //  Raising after chunks have already been written is deliberate and correct on
+                        //  a server stream: the client receives the chunks it was sent and then a
+                        //  non-OK status, which is exactly "partial result, then failure" and is the
+                        //  only truthful encoding available once bytes are on the wire.
+                        // ============================================================================
+                        throw BuildTerminalFailure(terminalOutcome);
+                    }
+
                     RetrieveChunk terminal = new()
                     {
                         RowCount = 0L,
@@ -1915,9 +2440,36 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
                     await responseStream.WriteAsync(terminal).ConfigureAwait(false);
 
-                    finalWritten = true;
+                    // AND THEN THE FAILURE ITSELF - BUT ONLY IF THERE WAS ONE.
+                    //
+                    // The return code and the error text have nowhere to live on a RetrieveChunk: the
+                    // message declares neither field, and adding one would widen a published contract. So
+                    // for a FAILING status they travel in the RPC status, which is where a gRPC failure
+                    // belongs. What must not happen is writing this chunk and returning normally, which
+                    // reports a failed retrieval as a successful empty one - and a caller reading only the
+                    // stream would then read a database failure as "zero rows, plus an error you may
+                    // ignore".
+                    //
+                    // ⚠ THE GUARD IS THE CORRECTION, AND ITS ABSENCE FAILED EVERY SUCCESSFUL RETRIEVAL ⚠
+                    //
+                    // A terminal status is how a producer says "that is all", and it says so on SUCCESS as
+                    // well as on failure. Raising unconditionally here therefore turned the ordinary
+                    // end-of-stream marker into a call failure carrying "return code 0" - and the tri-state
+                    // algebra widens that further, because PREVENT (=1) satisfies the legacy success
+                    // predicate and CANCELLED (=-2) is excluded from failure by name, so both are
+                    // non-failures that must complete normally (C-B). The failure test is therefore the
+                    // same predicate the arm above uses, not "the status field was present".
+                    if (Predicates.IsFailed(terminalOutcome))
+                    {
+                        throw BuildUpstreamFailure(
+                            "retrieve rows",
+                            request.DatawindowHandle,
+                            response.Status);
+                    }
 
-                    break;
+                    // A NON-FAILING TERMINAL STATUS ENDS THE STREAM, AND ITS MARKER HAS JUST BEEN WRITTEN,
+                    // so the caller owes no second one - writing another would deliver two final chunks.
+                    return new RetrievalStreamOutcome(true, chunkIndex, cumulative);
 
                 case PersistenceQueryResponse.PayloadOneofCase.RowCount:
                 case PersistenceQueryResponse.PayloadOneofCase.ChildDataChunk:
@@ -1930,30 +2482,23 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                     break;
             }
 
-            if (finalWritten)
-            {
-                break;
-            }
         }
 
-        if (!finalWritten)
-        {
-            // "A stream that ends without it was truncated" is the contract's rule, so a final marker is
-            // always written - including for an empty result, where it is the only chunk. Ending the stream
-            // silently would make a legitimately empty retrieval indistinguishable from a truncated one.
-            cancellationToken.ThrowIfCancellationRequested();
-
-            await responseStream
-                .WriteAsync(new RetrieveChunk
-                {
-                    RowCount = 0L,
-                    ChunkIndex = chunkIndex + 1L,
-                    CumulativeRowCount = cumulative,
-                    Final = true,
-                })
-                .ConfigureAwait(false);
-        }
+        // The upstream stream ended without declaring a last chunk and without a terminal status, so the
+        // final marker is owed.
+        return new RetrievalStreamOutcome(false, chunkIndex, cumulative);
     }
+
+    /// <summary>
+    /// What one retrieval stream delivered, and whether it already wrote its final marker.
+    /// </summary>
+    /// <param name="FinalWritten">Whether the final marker has been written.</param>
+    /// <param name="ChunkIndex">The last one-based chunk ordinal written.</param>
+    /// <param name="CumulativeRowCount">The rows delivered across every chunk on this stream.</param>
+    private readonly record struct RetrievalStreamOutcome(
+        bool FinalWritten,
+        long ChunkIndex,
+        long CumulativeRowCount);
 
     /// <summary>
     /// Builds the upstream query specification for a retrieval.
@@ -2384,6 +2929,272 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     }
 
     // =================================================================================================
+    //  THE UPSTREAM LIFECYCLE - what makes a task-scoped C-05 / C-06 call reachable at all
+    // =================================================================================================
+
+    /// <summary>
+    /// Builds the transaction descriptor every session this service opens is resolved from.
+    /// </summary>
+    /// <returns>The descriptor, mirroring <c>transactiondata.srs</c> field for field.</returns>
+    /// <remarks>
+    /// <para>
+    /// BUILT FRESH PER SESSION RATHER THAN CACHED, deliberately. The message is mutable and it carries the
+    /// log password, so a single shared instance would put credential material on an object graph reachable
+    /// for the lifetime of the process and let any accidental mutation change every later session at once.
+    /// It is cheap to build and there is no performance objective to trade against (AAP 0.8.5).
+    /// </para>
+    /// <para>
+    /// <b>THE PASSWORD IS WRITTEN HERE AND READ NOWHERE ELSE.</b> It travels on the session request, is
+    /// never logged, never echoed and never placed on a response - the contract permanently reserves its
+    /// field number on the response view for exactly that reason - and the descriptor is not retained after
+    /// <c>BeginSession</c> returns.
+    /// </para>
+    /// </remarks>
+    private PersistenceTransactionDescriptor BuildTransactionDescriptor() => new()
+    {
+        Dbms = _persistenceSession.Dbms,
+        Servername = _persistenceSession.ServerName,
+        Database = _persistenceSession.Database,
+        Logid = _persistenceSession.LogId,
+        Logpass = _persistenceSession.LogPass,
+        Dbparm = _persistenceSession.DbParm,
+        Lock = _persistenceSession.Lock,
+        Autocommit = _persistenceSession.AutoCommit,
+        Userparm = _persistenceSession.UserParm,
+    };
+
+    /// <summary>
+    /// Creates a query task against an open session.
+    /// </summary>
+    /// <param name="session">The open session.</param>
+    /// <param name="spec">The specification the task is created with.</param>
+    /// <param name="cancellationToken">The caller's token.</param>
+    /// <returns>The task handle, or the outcome that refused it.</returns>
+    /// <remarks>
+    /// A SUCCESS WITHOUT A HANDLE IS RECLASSIFIED, exactly as for the session: a task-less request is the
+    /// defect this whole lifecycle exists to close, so it is never allowed to be reconstructed from a
+    /// malformed success.
+    /// </remarks>
+    private async Task<(PersistenceTaskHandle? Task, long ReturnCode)> CreateQueryTaskAsync(
+        PersistenceSessionHandle session,
+        PersistenceQuerySpec spec,
+        CancellationToken cancellationToken)
+    {
+        global::PowerFramework.Contracts.Persistence.V1.CreateQueryTaskResponse response = await _persistence
+            .CreateQueryTaskAsync(
+                new PersistenceCreateQueryTaskRequest { Session = session, Spec = spec },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        long outcome = response.Status is null
+            ? RetCode.E_INTERNAL_ERROR
+            : (long)response.Status.RetCode;
+
+        return !Predicates.IsFailed(outcome) && !string.IsNullOrEmpty(response.Task?.TaskId)
+            ? (response.Task, RetCode.OK)
+            : (null, Predicates.IsFailed(outcome) ? outcome : RetCode.E_INTERNAL_ERROR);
+    }
+
+    /// <summary>
+    /// Creates an update task against an open session and binds the DataWindow definition to it.
+    /// </summary>
+    /// <param name="session">The open session.</param>
+    /// <param name="dataWindowHandle">The caller's DataWindow handle, which is its data object.</param>
+    /// <param name="cancellationToken">The caller's token.</param>
+    /// <returns>The task handle, or the outcome that refused it.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE PREPARE STEP IS PART OF CREATION HERE, NOT AN OPTIONAL EXTRA, because a task created and never
+    /// prepared HAS NO SOURCE OBJECT: C-06 applies the data object only from the prepare message, so an
+    /// update run without one would submit rows against a task that does not know what it is updating.
+    /// Creation and binding therefore succeed or fail together, and a task that was created but could not be
+    /// bound is released by the caller's <c>finally</c> rather than used.
+    /// </para>
+    /// <para>
+    /// <b>MULTI-TABLE UPDATE IS DELIBERATELY LEFT OFF, AND THE DESCRIPTOR ARRAY IS DELIBERATELY EMPTY
+    /// (C-B).</b> C-03's <c>UpdateRequest</c> carries a handle, an optional session and rows - NO table
+    /// descriptors - so there is nothing to declare and declaring nothing while asserting the multi-table
+    /// switch would be refused outright by C-06's own guard. With the switch off the legacy calls the update
+    /// directly and NEVER prepares the descriptor array
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L365 versus :L371</c>], so the carrier's OWN static definition
+    /// governs update, key, identity, <c>updatewhere</c> and <c>updatekeyinplace</c> - which for the
+    /// evidenced fixture is <c>update="COMPANY" updatewhere=1 updatekeyinplace=no</c> over all six marked
+    /// columns [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>]. That is the faithful path, and it
+    /// is also why NO TABLE NAME IS SYNTHESIZED HERE: inventing one would override the carrier's definition
+    /// and change the generated statement for every caller.
+    /// </para>
+    /// </remarks>
+    private async Task<(PersistenceTaskHandle? Task, long ReturnCode)> CreateUpdateTaskAsync(
+        PersistenceSessionHandle session,
+        string dataWindowHandle,
+        CancellationToken cancellationToken)
+    {
+        global::PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskResponse created =
+            await _persistence
+                .CreateUpdateTaskAsync(
+                    new PersistenceCreateUpdateTaskRequest { Session = session },
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        long createOutcome = created.Status is null
+            ? RetCode.E_INTERNAL_ERROR
+            : (long)created.Status.RetCode;
+
+        if (Predicates.IsFailed(createOutcome) || string.IsNullOrEmpty(created.Task?.TaskId))
+        {
+            return (null, Predicates.IsFailed(createOutcome) ? createOutcome : RetCode.E_INTERNAL_ERROR);
+        }
+
+        global::PowerFramework.Contracts.Persistence.V1.PrepareUpdateResponse prepared = await _persistence
+            .PrepareUpdateAsync(
+                new PersistencePrepareUpdateRequest
+                {
+                    Task = created.Task,
+                    MultiTableUpdate = false,
+                    DataObject = dataWindowHandle,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        long prepareOutcome = prepared.Status is null
+            ? RetCode.E_INTERNAL_ERROR
+            : (long)prepared.Status.RetCode;
+
+        // THE HANDLE IS RETURNED ALONGSIDE THE FAILURE ON PURPOSE. The task exists upstream whether or not
+        // the bind succeeded, so the caller must still release it; returning null here would strand it.
+        return Predicates.IsFailed(prepareOutcome)
+            ? (created.Task, prepareOutcome)
+            : (created.Task, RetCode.OK);
+    }
+
+    /// <summary>
+    /// Builds the call status for a retrieval whose upstream stream ended in an unprojectable failure.
+    /// </summary>
+    /// <param name="returnCode">The upstream outcome.</param>
+    /// <returns>The exception to throw.</returns>
+    /// <remarks>
+    /// SEPARATE FROM THE LIFECYCLE FAILURE BECAUSE THE TWO SAY DIFFERENT THINGS. A lifecycle failure means
+    /// the retrieval never began; this means it began, ran, and was refused - so a caller that has already
+    /// received chunks needs to know the answer it holds is partial rather than empty. The status code
+    /// derivation is shared through <see cref="MapOutcomeToStatus"/>, so the same outcome code cannot arrive
+    /// as two different statuses depending on how far the retrieval had got. NO DRIVER TEXT IS PLACED ON THE
+    /// STATUS on either path: a status message is the one field intermediaries log freely, and the driver's
+    /// own message echoes offending VALUES - a uniqueness violation names the duplicate key - so the numeric
+    /// outcome is disclosed instead, which identifies the failure without carrying row data. The driver's
+    /// payload still reaches the caller, on the error chunk, where the contract declares a field for it.
+    /// </remarks>
+    private static RpcException BuildTerminalFailure(long returnCode) => new(new Status(
+        MapOutcomeToStatus(returnCode),
+        $"The upstream retrieval failed with outcome {returnCode} and carried no database error, so the "
+            + "failure has no field on RetrieveChunk to travel in and is reported as the call status. Any "
+            + "chunks already delivered are a PARTIAL result and must not be read as a complete one. The "
+            + "driver's own message is deliberately withheld from this status because a status message is "
+            + "freely logged by intermediaries and the driver text echoes offending values."));
+
+    /// <summary>
+    /// Maps an upstream outcome onto the call status a caller can act on.
+    /// </summary>
+    /// <param name="returnCode">The upstream outcome.</param>
+    /// <returns>The status code.</returns>
+    /// <remarks>
+    /// DERIVED RATHER THAN FIXED, so a retryable refusal is distinguishable from a permanent one: an
+    /// exhausted pool or a busy task is <c>ResourceExhausted</c>, a rejected descriptor or argument is
+    /// <c>FailedPrecondition</c>, and anything else is <c>Internal</c>. The numeric outcome always travels
+    /// in the message, so the specific legacy code survives even where several codes share one status.
+    /// </remarks>
+    private static StatusCode MapOutcomeToStatus(long returnCode) => returnCode switch
+    {
+        RetCode.E_BUSY or RetCode.E_RETRY or RetCode.E_OUT_OF_MEMORY => StatusCode.ResourceExhausted,
+        RetCode.E_INVALID_TRANSACTION or RetCode.E_INVALID_ARGUMENT or RetCode.E_INVALID_SQL =>
+            StatusCode.FailedPrecondition,
+        RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND => StatusCode.NotFound,
+        _ => StatusCode.Internal,
+    };
+
+    /// <summary>
+    /// Ends a session upstream, releasing its pool reference.
+    /// </summary>
+    /// <param name="session">The session to end.</param>
+    /// <remarks>
+    /// <b>DELIBERATELY TAKES NO CANCELLATION TOKEN, AND THAT IS THE WHOLE POINT OF THIS METHOD.</b> A
+    /// session holds a REFERENCE-COUNTED POOL ENTRY upstream [<c>n_cst_thread_trans_pool.sru</c>], so a
+    /// session that is never ended never gives that reference back and the pool entry is pinned for the
+    /// life of the process. The caller's token is cancelled on exactly the paths where cleanup matters
+    /// most - a client that gave up mid-retrieval - so passing it here would abandon the release precisely
+    /// when the leak is being created. Cleanup therefore runs unconditionally, and a failure to release is
+    /// logged rather than raised because it must never displace the outcome the caller is owed.
+    /// </remarks>
+    private async Task EndPersistenceSessionAsync(PersistenceSessionHandle session)
+    {
+        try
+        {
+            await _persistence
+                .EndSessionAsync(
+                    new PersistenceEndSessionRequest { Session = session },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (RpcException failure)
+        {
+            _logger?.LogWarning(
+                "Ending an upstream transaction session failed with status {StatusCode}. The session held a "
+                    + "reference-counted pool entry upstream, so the entry stays pinned until its idle "
+                    + "expiry sweeps it. The failure is logged and not raised: it must not displace the "
+                    + "outcome the caller is owed.",
+                failure.StatusCode);
+        }
+    }
+
+    /// <summary>
+    /// Releases a query task upstream.
+    /// </summary>
+    /// <param name="task">The task to release.</param>
+    /// <remarks>
+    /// Uncancellable for the same reason as <see cref="EndPersistenceSessionAsync"/>: a task retains its
+    /// carrier and its configured statement upstream until it is released.
+    /// </remarks>
+    private async Task ReleaseQueryTaskAsync(PersistenceTaskHandle task)
+    {
+        try
+        {
+            await _persistence
+                .ReleaseQueryTaskAsync(
+                    new PersistenceReleaseQueryTaskRequest { Task = task },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (RpcException failure)
+        {
+            _logger?.LogWarning(
+                "Releasing an upstream query task failed with status {StatusCode}. Logged and not raised.",
+                failure.StatusCode);
+        }
+    }
+
+    /// <summary>
+    /// Releases an update task upstream.
+    /// </summary>
+    /// <param name="task">The task to release.</param>
+    /// <remarks>Uncancellable for the same reason as <see cref="EndPersistenceSessionAsync"/>.</remarks>
+    private async Task ReleaseUpdateTaskAsync(PersistenceTaskHandle task)
+    {
+        try
+        {
+            await _persistence
+                .ReleaseUpdateTaskAsync(
+                    new PersistenceReleaseUpdateTaskRequest { Task = task },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (RpcException failure)
+        {
+            _logger?.LogWarning(
+                "Releasing an upstream update task failed with status {StatusCode}. Logged and not raised.",
+                failure.StatusCode);
+        }
+    }
+
+    // =================================================================================================
     //  UPDATE - the third of the triple, and the one carrying concurrency semantics
     // =================================================================================================
 
@@ -2473,16 +3284,133 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             }
         }
 
-        PersistenceUpdateRequest upstream = new()
+        // THE UPSTREAM WORK HANDLES ARE ACQUIRED HERE AND RELEASED ON EVERY PATH OUT, INCLUDING THE
+        // CONFLICT PATH. C-06's update call names a server-held task, and Persistence refuses a blank
+        // handle with E_INVALID_HANDLE before any statement is generated [Grpc/UpdateService.cs], so
+        // sending a default handle refused every update this service ever issued. The scope is declared
+        // BEFORE the try below so that `throw BuildConflictFailure(...)` still releases: a conflict is the
+        // most likely non-success outcome of an update, and it is exactly the path on which a leaked update
+        // task would hold a worker task and a pooled-transaction reference for the life of the process.
+        await using PersistenceWorkScope scope = await _persistence
+            .OpenUpdateScopeAsync(BuildSessionRequest(), context.CancellationToken)
+            .ConfigureAwait(false);
+
+        if (!scope.IsAcquired)
         {
-            UpdateData = BuildCarrierState(request.Rows),
-            UpdateRows = request.Rows.Count,
-        };
+            // A REFUSAL TRAVELS ON THE MESSAGE HERE, NOT AS A CALL STATUS - the opposite of Retrieve, and
+            // for the opposite reason: UpdateResponse DOES declare an outcome-code field, so the refusal
+            // has somewhere honest to go, and every other non-success outcome of this operation already
+            // travels there. Raising a status instead would make one class of update failure decode
+            // differently from all the others.
+            return new global::PowerFramework.Contracts.DataServices.V1.UpdateResponse
+            {
+                RetCode = DataWindowWireProjection.ToWireRetCode(scope.ReturnCode),
+            };
+        }
+
+        // THE CARRIER IS PROJECTED AND VALIDATED BEFORE THE UPSTREAM IS TOLD ANYTHING. A row naming a
+        // buffer the positional encoding has no segment for is a malformed request, and the receiving codec
+        // would refuse the payload anyway - so it is refused here, where the refusal can still name the
+        // request rather than arriving as an upstream decode failure the caller cannot act on.
+        if (!TryBuildCarrierState(
+                request.Rows,
+                out global::PowerFramework.Contracts.Persistence.V1.CarrierState? carrier)
+            || carrier is null)
+        {
+            return new global::PowerFramework.Contracts.DataServices.V1.UpdateResponse
+            {
+                RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
+            };
+        }
 
         global::PowerFramework.Contracts.Persistence.V1.UpdateResponse upstreamResponse;
 
         try
         {
+            PrepareUpdateRequest prepare = new()
+            {
+                Task = scope.Task,
+
+                // The handle IS the data object, exactly as it is on a retrieval: a DataWindow's own
+                // DataObject is what its Update() writes through.
+                DataObject = request.DatawindowHandle,
+
+                // See the block comment above. OFF, deliberately and unconditionally.
+                MultiTableUpdate = false,
+            };
+
+            DataWindowUpdateContract? contract =
+                _updateContracts?.GetUpdateContract(request.DatawindowHandle);
+
+            if (contract is not null)
+            {
+                TableUpdateContract descriptor = new()
+                {
+                    Name = contract.TableName,
+                    Identitycolumn = contract.IdentityColumn,
+                };
+
+                // Assigned in declaration order and never sorted: C-06 walks the arrays [:L111-L114].
+                descriptor.Updatablecolumns.AddRange(contract.UpdatableColumns);
+                descriptor.Keycolumns.AddRange(contract.KeyColumns);
+
+                // PRESENCE-GATED ON BOTH, INDEPENDENTLY. C-06 tests the two settings SEPARATELY
+                // [:L131, :L135], and an unset field there means "leave the carrier's own setting
+                // alone" - so writing a default would silently overwrite the definition's own value
+                // with a fabricated one.
+                if (contract.UpdateWhere is long updateWhere)
+                {
+                    descriptor.Updatewhere = updateWhere;
+                }
+
+                if (contract.UpdateKeyInPlace is bool keyInPlace)
+                {
+                    descriptor.Updatekeyinplace = keyInPlace;
+                }
+
+                prepare.Tables.Add(descriptor);
+            }
+
+            PrepareUpdateResponse prepared = await _persistence
+                .PrepareUpdateAsync(prepare, context.CancellationToken)
+                .ConfigureAwait(false);
+
+            if (!Predicates.IsSucceeded((long)(prepared.Status?.RetCode ?? 0)))
+            {
+                // ⚠ IN-BAND, NOT A CALL STATUS, AND FOR THE SAME REASON THE ACQUISITION REFUSAL IS ⚠
+                //
+                // This arm used to raise the upstream failure as an RPC status. That is the correct shape on
+                // Retrieve, where RetrieveChunk declares no outcome field and a refusal has nowhere else to
+                // go - and it is the wrong shape here, because UpdateResponse DOES declare one. Every other
+                // non-success outcome of this operation travels there: a refused acquisition above, a
+                // failing update below, and the tri-state codes the legacy algebra carries. Raising a status
+                // for exactly one of them would make one class of update failure decode differently from all
+                // the others, so a caller would need two decoding paths for one operation.
+                //
+                // A prepare failure arrives as the upstream's own code plus driver text, because the legacy's
+                // carrier modification call returns an error STRING with empty meaning success
+                // [:L145-L149]. The code is what a caller acts on and is what travels; the text is left with
+                // the upstream rather than folded into a field that has no place for it.
+                //
+                // THE TASK AND THE SESSION STILL RELEASE. The scope is declared above the try, so returning
+                // from inside it exits the enclosing block and `await using` releases the update task and
+                // ends the session - the same guarantee the conflict path below relies on.
+                return new global::PowerFramework.Contracts.DataServices.V1.UpdateResponse
+                {
+                    RetCode = DataWindowWireProjection.ToWireRetCode(
+                        prepared.Status is null
+                            ? RetCode.E_INTERNAL_ERROR
+                            : (long)prepared.Status.RetCode),
+                };
+            }
+
+            PersistenceUpdateRequest upstream = new()
+            {
+                Task = scope.Task,
+                UpdateData = carrier,
+                UpdateRows = request.Rows.Count,
+            };
+
             upstreamResponse = await _persistence
                 .UpdateAsync(upstream, context.CancellationToken)
                 .ConfigureAwait(false);
@@ -2492,6 +3420,13 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             // SURFACED, NOT RETRIED. Re-raised as this contract's own Aborted with this contract's own
             // declared trailer, so the chain from Persistence through DataServices to Gateway decodes one
             // key and one payload type end to end.
+            //
+            // THE WORK SCOPE STILL RELEASES ON THIS PATH, which is the whole reason it is declared ABOVE
+            // this try rather than inside it: `await using` releases the update task and ends the session
+            // when the enclosing method's block exits, including by a throw. A conflict is the most likely
+            // non-success outcome of an update, so it is exactly the path on which a leaked task would
+            // hold a worker task and a pooled-transaction reference for the life of the process - and the
+            // pool's reference counting cannot distinguish a leaked reference from a live one.
             throw BuildConflictFailure(conflict);
         }
 
@@ -2552,20 +3487,75 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// rebuilt: nothing here reads, rewrites or drops a shadow.
     /// </para>
     /// <para>
-    /// BUFFER ORDER IS PRESERVED WITHIN EACH SEGMENT AND SEGMENT ORDER FOLLOWS FIRST APPEARANCE. The Filter
-    /// buffer's rows arrive in an order that is INVERTED relative to the source
-    /// [<c>n_cst_thread_task_sqlupdate.sru:L235</c>], which looks like a defect and is not one; "correcting"
-    /// it produces wrong identity values that a row-count assertion would not catch. Grouping by first
-    /// appearance keeps every row exactly where the caller put it.
+    /// <b>ALL THREE SEGMENTS, ALWAYS, IN CANONICAL ORDER - INCLUDING THE EMPTY ONES.</b>
+    /// <c>persistence.v1.CarrierState</c> is a POSITIONAL encoding, not a set: the receiving codec tests
+    /// <c>Segments.Count</c> against the canonical length and then requires segment n to be buffer n
+    /// [<c>Buffers/ChangesetCodec.cs</c> - <c>SerializedBuffers</c>, <c>TryValidateSegments</c>], and
+    /// Persistence's own encoder emits all three unconditionally. Emitting only the buffers a request
+    /// happened to mention - which is what this method used to do - therefore produced a payload the
+    /// receiver REJECTS outright for any request that did not touch all three, which is nearly every
+    /// request: an update of one row would send a single Primary segment and be refused. Segment order is
+    /// the CANONICAL order for the same reason and not the caller's order of appearance.
+    /// </para>
+    /// <para>
+    /// ROW ORDER WITHIN EACH SEGMENT IS THE CALLER'S, UNTOUCHED. The Filter buffer's rows arrive in an
+    /// order that is INVERTED relative to the source
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L235</c>], which looks like a defect and is not one; the
+    /// identity round trip reads that buffer backwards precisely because of it, so "correcting" the order
+    /// here would pair identity values with the wrong rows - a defect that returns the right COUNT of
+    /// identities and therefore survives every row-count assertion. Rows are appended in the sequence they
+    /// were received and nothing is sorted, de-duplicated or coalesced.
+    /// </para>
+    /// <para>
+    /// AN UNDECLARED BUFFER IS REFUSED, NEVER DROPPED. With a fixed three-segment shape there is nowhere to
+    /// put a row whose buffer is outside the domain, and the two available failure modes are not equally
+    /// bad: silently omitting it would submit an UPDATE missing a row the caller asked to apply, which is
+    /// data loss that reports success. So this returns a failure and the caller answers
+    /// <c>E_INVALID_ARGUMENT</c>.
     /// </para>
     /// </remarks>
-    private static global::PowerFramework.Contracts.Persistence.V1.CarrierState BuildCarrierState(
-        IReadOnlyList<DataWindowRow> rows)
+    /// <summary>
+    /// The three buffer segments <c>persistence.v1.CarrierState</c> carries, in the order it carries them.
+    /// </summary>
+    /// <remarks>
+    /// <b>RESTATED HERE RATHER THAN REFERENCED, BECAUSE THE ALTERNATIVE IS A SERVICE-TO-SERVICE CODE
+    /// DEPENDENCY.</b> Persistence declares the same order in its own codec
+    /// [<c>Buffers/ChangesetCodec.cs</c> - <c>SerializedBuffers</c>], and reaching into it from here would
+    /// be exactly the cross-service coupling the architecture forbids - the ONLY permitted coupling is the
+    /// published contracts project (AAP 0.7.2). The order is a property OF THE CONTRACT, so both ends
+    /// restating it is correct; what keeps them from drifting is the contract text and the coherence suite,
+    /// not a shared field.
+    /// </remarks>
+    private static readonly DwBuffer[] CanonicalBufferOrder =
+    [
+        DwBuffer.Primary,
+        DwBuffer.Delete,
+        DwBuffer.Filter,
+    ];
+
+    private static bool TryBuildCarrierState(
+        IReadOnlyList<DataWindowRow> rows,
+        out global::PowerFramework.Contracts.Persistence.V1.CarrierState? state)
     {
-        global::PowerFramework.Contracts.Persistence.V1.CarrierState state = new();
+        state = null;
+
+        global::PowerFramework.Contracts.Persistence.V1.CarrierState projected = new();
 
         Dictionary<DwBuffer, global::PowerFramework.Contracts.Persistence.V1.CarrierBufferSegment> segments =
-            [];
+            new(CanonicalBufferOrder.Length);
+
+        // EVERY canonical segment is created and added up front, so the shape is correct before a single
+        // row is placed and cannot depend on what the rows happen to contain.
+        foreach (DwBuffer dwBuffer in CanonicalBufferOrder)
+        {
+            global::PowerFramework.Contracts.Persistence.V1.CarrierBufferSegment segment = new()
+            {
+                Buffer = dwBuffer,
+            };
+
+            segments[dwBuffer] = segment;
+            projected.Segments.Add(segment);
+        }
 
         foreach (DataWindowRow row in rows)
         {
@@ -2573,21 +3563,15 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 row.Buffer,
                 out global::PowerFramework.Contracts.Persistence.V1.CarrierBufferSegment? segment))
             {
-                segment = new global::PowerFramework.Contracts.Persistence.V1.CarrierBufferSegment
-                {
-                    Buffer = row.Buffer,
-                };
-
-                segments[row.Buffer] = segment;
-
-                // Added on first appearance, so segment order is the caller's order.
-                state.Segments.Add(segment);
+                return false;
             }
 
             segment.Rows.Add(row);
         }
 
-        return state;
+        state = projected;
+
+        return true;
     }
 
     /// <summary>
@@ -2944,10 +3928,14 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 StatusCode.FailedPrecondition,
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0} Event {1} carried sequence {2} where {3} was expected under the {4} discipline. "
-                        + "The token is for DETECTION ONLY inside a synchronous group: the server does not "
-                        + "reorder, because one event's behaviour there is a function of its predecessor's "
-                        + "return value. Fix the sequencing before retrying.",
+                    "{0} Event {1} carried sequence {2} where at least {3} was expected under the {4} "
+                        + "discipline. Inside a SYNCHRONOUS group the expected token is the only one "
+                        + "admitted, because one event's behaviour there is a function of its "
+                        + "predecessor's return value. Inside a SEQUENCED group any token ABOVE the mark "
+                        + "is admitted - a gap is legitimate, since both directions draw from one counter "
+                        + "- but a reversal or a duplicate is not. The server does NOT buffer and re-sort "
+                        + "in either group. Fix the sequencing before retrying: the next token is one past "
+                        + "the highest this stream has carried, in either direction.",
                     violation.Message,
                     violation.EventId,
                     violation.ActualSequence,
@@ -3466,11 +4454,17 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             // An empty expression is what CLEARS: the model's null overload re-reads the child's current
             // filter instead, which is a different operation entirely. When `clear` is set the search values
             // are ignored, per the contract.
-            string expression = request.Clear
-                ? string.Empty
+            //
+            // THE BOUND ARITY, AND THAT IS THE WHOLE OF THE CWE-94 FIX AT THIS BOUNDARY. The expression that
+            // reaches the child carries the caller's terms as BOUND LITERALS rather than as syntax, so a term
+            // containing a quote, a parenthesis or the word OR cannot alter the predicate's structure. The
+            // rendered text the oracle would have produced is preserved on the same expression and is what
+            // this response reports - see Services/BoundFilterExpression.cs.
+            BoundFilterExpression expression = request.Clear
+                ? BoundFilterExpression.Empty
                 : BuildSearchExpression(model, request.SearchValues);
 
-            outcome = model.UpdateDddwFilter(request.ColumnName ?? string.Empty, expression);
+            outcome = model.UpdateDddwFilterBound(request.ColumnName ?? string.Empty, expression);
         }
 
         return Task.FromResult(new ApplyDropDownSearchResponse
@@ -3486,33 +4480,65 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <param name="model">The model, which owns the legacy transformations.</param>
     /// <param name="searchValues">The terms as typed.</param>
     /// <returns>The expression, empty when no term produced one.</returns>
-    private static string BuildSearchExpression(
+    /// <remarks>
+    /// <b>EVERY TERM IS COMPOSED THROUGH THE BOUND COMPOSER AND THE MULTI-TERM COMBINATION IS DONE ON
+    /// EXPRESSIONS, NOT ON STRINGS.</b> Combining rendered strings and binding afterwards is not possible -
+    /// once a value is inside a string there is no longer a record of which characters were the value - so
+    /// the OR-composition below walks expressions and merges their parameter lists, renumbering as it goes.
+    /// The rendered form of the result is still exactly what string composition would have produced, because
+    /// each operand's rendered form is its own oracle-exact clause.
+    /// </remarks>
+    private static BoundFilterExpression BuildSearchExpression(
         DropDownSearchModel model,
         IReadOnlyList<string> searchValues)
     {
-        List<string> clauses = [];
+        List<BoundFilterExpression> clauses = [];
 
         foreach (string term in searchValues)
         {
-            string clause = model.GetFilter(term);
+            BoundFilterExpression clause = model.GetBoundFilter(term);
 
-            if (!string.IsNullOrEmpty(clause))
+            if (!clause.IsEmpty)
             {
                 clauses.Add(clause);
             }
         }
 
-        return clauses.Count switch
+        if (clauses.Count == 0)
         {
-            // The oracle's own single-input shape: returned verbatim, byte for byte.
-            0 => string.Empty,
-            1 => clauses[0],
+            return BoundFilterExpression.Empty;
+        }
 
-            // The contract's stated combination for terms the oracle has no single form for. Each operand is
-            // itself an oracle-exact clause and is parenthesized so the composition cannot change how any
-            // one of them binds.
-            _ => string.Join(" OR ", clauses.Select(static clause => "(" + clause + ")")),
-        };
+        // The oracle's own single-input shape: returned verbatim, byte for byte, bindings intact.
+        if (clauses.Count == 1)
+        {
+            return clauses[0];
+        }
+
+        // The contract's stated combination for terms the oracle has no single form for. Each operand is
+        // itself an oracle-exact clause and is parenthesized so the composition cannot change how any one of
+        // them binds. Placeholders are renumbered per operand so two clauses' parameters cannot collide.
+        List<BoundFilterLiteral> merged = [];
+        List<string> texts = [];
+
+        foreach (BoundFilterExpression clause in clauses)
+        {
+            // ONE SHARED RENUMBERING, NOT A SECOND HAND-WRITTEN LOOP. BoundFilterExpression.Renumber does
+            // this with a single left-to-right scan, which is what keeps a rewrite from re-entering its own
+            // output once ten parameters exist - ":pfwArg1" being a prefix of ":pfwArg10".
+            (string text, IReadOnlyList<BoundFilterLiteral> literals) = clause.Renumber(merged.Count);
+
+            merged.AddRange(literals);
+            texts.Add("(" + text + ")");
+        }
+
+        // CERTIFIED only when EVERY operand is - and note this is a report rather than an execution switch:
+        // the merged parameter list carries every bound value regardless, so an uncertified operand does not
+        // cost the others their bindings.
+        return new BoundFilterExpression(
+            string.Join(" OR ", texts),
+            merged,
+            clauses.TrueForAll(static clause => clause.Bindable));
     }
 
     /// <summary>

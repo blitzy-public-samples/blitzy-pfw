@@ -967,6 +967,71 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     private readonly Dictionary<string, ExpressionBindingSnapshot> _varBindings = [];
 
     /// <summary>
+    /// Placeholder token to the value it stands for, for every value this engine has bound.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>ENGINE-LIFETIME AND APPEND-ONLY, WHICH IS WHAT MAKES A PLACEHOLDER RESOLVABLE WHENEVER IT IS
+    /// REACHED.</b> A statically expanded placeholder is baked into an expression's executable text and is
+    /// evaluated on every later calculation of that expression, so a per-call table would resolve the first
+    /// calculation and fail every subsequent one. Entries are small - one boxed scalar each - and are
+    /// bounded by the number of typed variable binds the caller performs.
+    /// </para>
+    /// <para>
+    /// THE ORDINAL IS A MONOTONIC COUNTER RATHER THAN A HASH OR A CLOCK, so a characterization run over the
+    /// same sequence of calls produces the same tokens (AAP 0.6.7).
+    /// </para>
+    /// </remarks>
+    private readonly Dictionary<string, ExpressionValue> _boundValues = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Placeholder token to the literal the oracle renders for its value - the OBSERVABLE half.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE TRACE AND EVERY OTHER REPORTED TEXT ARE RENDERED THROUGH THIS.</b> The trace payload is a
+    /// C-04 event [<c>oncolumnexptrace</c>, <c>se_cst_dw.sru:L32</c>] carrying the PREPROCESSED expression,
+    /// which the oracle produces with the value spliced in - so a placeholder reaching a trace consumer
+    /// would be an observable change and would corrupt every characterization recording that compares one.
+    /// Keeping the rendered fragment beside the value is what lets the reported text be derived from the
+    /// executed one rather than composed a second time.
+    /// </remarks>
+    private readonly Dictionary<string, string> _boundFragments = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Variable name to the TYPED value it was bound from, for variables set through a typed overload.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>PRESENCE HERE IS WHAT DISTINGUISHES A VALUE FROM AN EXPRESSION, AND THE DISTINCTION IS THE WHOLE
+    /// FIX.</b> <c>of_addvar(name, value)</c> is documented as taking a VALUE, so a caller may legitimately
+    /// forward untrusted text through it; <c>of_addvarexp(name, exp)</c> is documented as taking an
+    /// EXPRESSION, so its argument is syntax the caller composed deliberately. Only the former is bound.
+    /// Binding the latter would be wrong twice over: it is not a scalar, and treating deliberate syntax as
+    /// data would break the API the caller chose.
+    /// </para>
+    /// <para>
+    /// AN ENTRY IS REMOVED WHEN THE SAME NAME IS LATER GIVEN AN EXPRESSION, because the variable has ceased
+    /// to be a bound value - and a stale entry would bind the OLD value into a new expression's executable
+    /// text while the observable text carried the new one.
+    /// </para>
+    /// </remarks>
+    private readonly Dictionary<string, ExpressionValue> _boundVarValues = new(StringComparer.Ordinal);
+
+    private int _boundValueOrdinal;
+
+    /// <summary>
+    /// Whether a typed bind is currently delegating to the expression path.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE EXPRESSION PATH CLEARS A STALE BINDING AND THE TYPED PATH MUST NOT HAVE ITS OWN CLEARED.</b>
+    /// The typed overloads are sugar over the expression ones - which is the oracle's own shape, since
+    /// <c>of_addvar</c> renders and forwards [<c>:L1094</c>] - so the two meet at one method that cannot
+    /// otherwise tell which of them the caller invoked. A field rather than a parameter keeps the public
+    /// signature of <c>of_addvarexp</c> exactly the oracle's.
+    /// </remarks>
+    private bool _boundVarValueAssignmentInFlight;
+
+    /// <summary>
     /// <c>GLOBALVARDATA GlobalVars[]</c> [:L103] - the global variable table. Held as the immutable
     /// environment type the sibling files publish, so a replacement is one field assignment and a reader
     /// mid-calculation cannot observe a half-updated table.
@@ -2234,7 +2299,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <param name="name">The variable name, case-sensitive.</param>
     /// <param name="value">The value, rendered as <c>Time('...')</c>.</param>
     public long AddVar(string? name, TimeOnly? value) =>
-        AddVarExp(name, ValueToExpression.Convert(value));
+        AddVarBound(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromTime(value));
 
     /// <summary>
     /// <c>of_addvar(readonly string name, readonly string value)</c> [:L1094].
@@ -2246,7 +2314,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// would change the generated expression text, which is exactly what parity is measured on.
     /// </param>
     public long AddVar(string? name, string? value) =>
-        AddVarExp(name, ValueToExpression.Convert(value));
+        AddVarBound(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromString(value));
 
     /// <summary>
     /// <c>of_addvar(readonly string name, readonly long value)</c> [:L1097].
@@ -2254,7 +2325,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <param name="name">The variable name.</param>
     /// <param name="value">The value, rendered as a bare numeral.</param>
     public long AddVar(string? name, long? value) =>
-        AddVarExp(name, ValueToExpression.Convert(value));
+        AddVarBound(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromLong(value));
 
     /// <summary>
     /// <c>of_addvar(readonly string name, readonly double value)</c> [:L1100].
@@ -2262,7 +2336,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <param name="name">The variable name.</param>
     /// <param name="value">The value, rendered as a bare numeral.</param>
     public long AddVar(string? name, double? value) =>
-        AddVarExp(name, ValueToExpression.Convert(value));
+        AddVarBound(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromDouble(value));
 
     /// <summary>
     /// <c>of_addvar(readonly string name, readonly datetime value)</c> [:L1103].
@@ -2270,7 +2347,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <param name="name">The variable name.</param>
     /// <param name="value">The value, rendered as <c>DateTime('...')</c>.</param>
     public long AddVar(string? name, DateTime? value) =>
-        AddVarExp(name, ValueToExpression.Convert(value));
+        AddVarBound(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromDateTime(value));
 
     /// <summary>
     /// <c>of_addvar(readonly string name, readonly date value)</c> [:L1106].
@@ -2278,7 +2358,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <param name="name">The variable name.</param>
     /// <param name="value">The value, rendered as <c>Date('...')</c>.</param>
     public long AddVar(string? name, DateOnly? value) =>
-        AddVarExp(name, ValueToExpression.Convert(value));
+        AddVarBound(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromDate(value));
 
     /// <summary>
     /// <c>of_addvar(readonly string name, readonly boolean value)</c> [:L1109] - the one overload with no
@@ -2293,7 +2376,7 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// string rendering it wants.
     /// </param>
     public long AddVar(string? name, bool value) =>
-        AddVarExp(name, FormatBoolean(value));
+        AddVarBound(name, FormatBoolean(value), ExpressionValue.FromBoolean(value));
 
     /// <summary>
     /// <c>of_addvarexp(readonly string name, string exp)</c> [:L1584-L1630] - define a variable whose
@@ -2316,6 +2399,191 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// name containing a delimiter therefore reports the duplicate, not the delimiter - and it is the only
     /// one of the four that reports a message at all.
     /// </remarks>
+    /// <summary>
+    /// Drops any typed binding a variable name still carries, unless a typed bind is what is running.
+    /// </summary>
+    /// <param name="variableName">The variable name.</param>
+    /// <remarks>
+    /// <b>AN EXPRESSION-VALUED VARIABLE IS NOT A BOUND VALUE.</b> A caller that first sets a variable from a
+    /// typed value and later redefines it with an EXPRESSION has stopped supplying data and started
+    /// supplying syntax; leaving the old binding in place would bind the STALE value into the new
+    /// expression's executable text while its observable text carried the new expression. The drop happens
+    /// BEFORE the parse, because the parse is what reads the table.
+    /// </remarks>
+    private void DropStaleBinding(string variableName)
+    {
+        if (!_boundVarValueAssignmentInFlight && variableName.Length > 0)
+        {
+            _ = _boundVarValues.Remove(variableName);
+        }
+    }
+
+    /// <summary>
+    /// Mints a placeholder for a value and records it, so a name is never emitted without its value.
+    /// </summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The placeholder token.</returns>
+    /// <remarks>
+    /// MINTING AND RECORDING ARE ONE OPERATION. The Persistence update carrier learned the alternative the
+    /// hard way: a mint-without-record helper there advanced no counter, so every value bound to one name.
+    /// </remarks>
+    private string MintBoundValue(in ExpressionValue value, string renderedFragment)
+    {
+        string placeholder = DataWindowExpressionEvaluator.BoundValuePlaceholder(_boundValueOrdinal++);
+
+        _boundValues[placeholder] = value;
+        _boundFragments[placeholder] = renderedFragment;
+
+        return placeholder;
+    }
+
+    /// <summary>
+    /// Renders an executable text back to the observable one by substituting each placeholder's fragment.
+    /// </summary>
+    /// <param name="text">The executable text.</param>
+    /// <returns>The observable text, byte-identical to what the oracle would have produced.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>DERIVED RATHER THAN COMPOSED A SECOND TIME, WHICH IS WHY THE TWO CANNOT DISAGREE.</b> Composing
+    /// the observable text separately would mean preprocessing twice - and preprocessing INVOKES MACROS, so
+    /// a second pass would call back into the client a second time. Substituting fragments into the text
+    /// that was actually executed has no side effects and is exact.
+    /// </para>
+    /// <para>
+    /// <b>A SINGLE LEFT-TO-RIGHT SCAN, NOT A LOOP OF REPLACEMENTS.</b> <c>:pfwVal1</c> is a PREFIX of
+    /// <c>:pfwVal10</c>, so successive replacements corrupt their own output once ten values have been
+    /// bound - the same defect the drop-down search's renumbering had and for the same reason. The digit run
+    /// is read greedily, which is what makes <c>:pfwVal10</c> one token.
+    /// </para>
+    /// </remarks>
+    private string RenderBoundText(string text)
+    {
+        const string Prefix = DataWindowExpressionEvaluator.BoundValuePlaceholderPrefix;
+
+        int at = text.IndexOf(Prefix, StringComparison.Ordinal);
+
+        if (at < 0 || _boundFragments.Count == 0)
+        {
+            return text;
+        }
+
+        System.Text.StringBuilder rendered = new(text.Length);
+        int copied = 0;
+
+        while (at >= 0)
+        {
+            int scan = at + Prefix.Length;
+
+            while (scan < text.Length && char.IsAsciiDigit(text[scan]))
+            {
+                scan++;
+            }
+
+            if (scan == at + Prefix.Length)
+            {
+                at = text.IndexOf(Prefix, scan, StringComparison.Ordinal);
+
+                continue;
+            }
+
+            _ = rendered.Append(text, copied, at - copied);
+
+            // AN UNKNOWN TOKEN IS LEFT STANDING RATHER THAN ERASED, so a disagreement between the text and
+            // the table is visible in the reported expression instead of silently deleting part of it.
+            _ = rendered.Append(
+                _boundFragments.TryGetValue(text[at..scan], out string? fragment)
+                    ? fragment
+                    : text[at..scan]);
+
+            copied = scan;
+            at = scan >= text.Length ? -1 : text.IndexOf(Prefix, scan, StringComparison.Ordinal);
+        }
+
+        _ = rendered.Append(text, copied, text.Length - copied);
+
+        return rendered.ToString();
+    }
+
+    /// <summary>
+    /// Records a variable's TYPED value and then defines it through the expression path.
+    /// </summary>
+    /// <param name="name">The variable name.</param>
+    /// <param name="rendered">The literal the oracle renders for the value - the OBSERVABLE half.</param>
+    /// <param name="value">The value itself - the EXECUTABLE half.</param>
+    /// <returns>Whatever <see cref="AddVarExp(string?, string?)"/> answers.</returns>
+    /// <remarks>
+    /// THE ORDER MATTERS: the value is recorded BEFORE the parse, because the parse is what substitutes a
+    /// static reference and therefore what needs to know the variable is bound. Recording afterwards would
+    /// leave the first expression that referenced it carrying the rendered literal in its executable text.
+    /// </remarks>
+    private long AddVarBound(string? name, string rendered, in ExpressionValue value)
+    {
+        if (name is { Length: > 0 })
+        {
+            _boundVarValues[name] = value;
+        }
+
+        _boundVarValueAssignmentInFlight = true;
+
+        long rtCode;
+
+        try
+        {
+            rtCode = AddVarExp(name, rendered);
+        }
+        finally
+        {
+            _boundVarValueAssignmentInFlight = false;
+        }
+
+        if (name is { Length: > 0 } && Predicates.IsFailed(rtCode))
+        {
+            // A REFUSED DEFINITION LEAVES NO BINDING BEHIND. Otherwise a later of_addvarexp under the same
+            // name would find a stale value and bind it into an expression that never carried it.
+            _ = _boundVarValues.Remove(name);
+        }
+
+        return rtCode;
+    }
+
+    /// <summary>
+    /// Records a variable's TYPED value and then redefines it through the expression path.
+    /// </summary>
+    /// <param name="name">The variable name.</param>
+    /// <param name="rendered">The literal the oracle renders for the value.</param>
+    /// <param name="value">The value itself.</param>
+    /// <param name="recalc">Whether to raise the variable-changed event.</param>
+    /// <param name="force">The event's <c>forcecalc</c> argument.</param>
+    /// <param name="cancellationToken">Cancels the recalculation.</param>
+    /// <returns>Whatever <see cref="SetVarExpAsync(string?, string?, bool, bool, CancellationToken)"/> answers.</returns>
+    private ValueTask<long> SetVarBoundAsync(
+        string? name,
+        string rendered,
+        in ExpressionValue value,
+        bool recalc,
+        bool force,
+        CancellationToken cancellationToken)
+    {
+        if (name is { Length: > 0 })
+        {
+            _boundVarValues[name] = value;
+        }
+
+        _boundVarValueAssignmentInFlight = true;
+
+        try
+        {
+            return SetVarExpAsync(name, rendered, recalc, force, cancellationToken);
+        }
+        finally
+        {
+            // SAFE DESPITE THE await INSIDE THE CALLEE. SetVarExpAsync's own removal of a stale binding
+            // happens synchronously before its first suspension point - it is inside AddVarExp or inside the
+            // parse - so the flag has already been read by the time this finally runs.
+            _boundVarValueAssignmentInFlight = false;
+        }
+    }
+
     public long AddVarExp(string? name, string? exp)
     {
         string variableName = name ?? string.Empty;
@@ -2343,6 +2611,8 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
                 return RetCode.E_INVALID_ARGUMENT;
             }
         }
+
+        DropStaleBinding(variableName);
 
         ParseOutcome parse = ParseExp(expression);
         if (Predicates.IsFailed(parse.ReturnCode))
@@ -2439,6 +2709,8 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
             return RetCode.OK;
         }
 
+        DropStaleBinding(variableName);
+
         ParseOutcome parse = ParseExp(expression);
         if (Predicates.IsFailed(parse.ReturnCode))
         {
@@ -2512,7 +2784,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, ValueToExpression.Convert(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromTime(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary>
     /// <c>of_setvar(readonly string name, readonly string value, readonly boolean recalc, readonly boolean
@@ -2529,7 +2807,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, ValueToExpression.Convert(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromString(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary>
     /// <c>of_setvar(readonly string name, readonly long value, readonly boolean recalc, readonly boolean
@@ -2546,7 +2830,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, ValueToExpression.Convert(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromLong(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary>
     /// <c>of_setvar(readonly string name, readonly double value, readonly boolean recalc, readonly boolean
@@ -2563,7 +2853,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, ValueToExpression.Convert(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromDouble(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary>
     /// <c>of_setvar(readonly string name, readonly datetime value, readonly boolean recalc, readonly
@@ -2580,7 +2876,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, ValueToExpression.Convert(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromDateTime(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary>
     /// <c>of_setvar(readonly string name, readonly date value, readonly boolean recalc, readonly boolean
@@ -2597,7 +2899,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, ValueToExpression.Convert(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            ValueToExpression.Convert(value),
+            ExpressionValue.FromDate(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary>
     /// <c>of_setvar(readonly string name, readonly boolean value, readonly boolean recalc, readonly
@@ -2614,7 +2922,13 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool recalc,
         bool force,
         CancellationToken cancellationToken = default) =>
-        SetVarExpAsync(name, FormatBoolean(value), recalc, force, cancellationToken);
+        SetVarBoundAsync(
+            name,
+            FormatBoolean(value),
+            ExpressionValue.FromBoolean(value),
+            recalc,
+            force,
+            cancellationToken);
 
     /// <summary><c>of_setvar(name, time value, recalc)</c> [:L1713].</summary>
     /// <param name="name">The variable name.</param>
@@ -3817,6 +4131,35 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         // so `'$v is ' + string($v)` becomes `'(3) is ' + string((3))` - the occurrence inside the literal
         // is substituted too. Reproduced rather than corrected: making the rewrite quote-aware would change
         // the stored text of every expression that mentions a variable name inside a string.
+        // ==============================================================================================
+        //  A DOCUMENTED RESIDUAL: STATIC EXPANSION SUBSTITUTES THE RENDERED VALUE AND IS NOT BOUND
+        //  ----------------------------------------------------------------------------------------------
+        //  The dynamic path binds a typed value - see PreprocessExpAsync's ordinary case - and this one
+        //  cannot, for three reasons that are behavioural rather than incidental. Each was established by
+        //  building the placeholder form and observing what it broke.
+        //
+        //   1. THE REFERENCE LISTS ARE CAPTURED AGAINST THIS TEXT. A function token's FullName and Args are
+        //      taken from sExp AFTER this rewrite [:L1449-L1464], so `$FormatPrice(n2, $精度)` is stored with
+        //      the expanded argument. A placeholder-bearing text would no longer contain the stored token, so
+        //      the function pass at :L2226 would find nothing to substitute and the macro would never be
+        //      invoked.
+        //   2. THE SCAN RE-ANCHORS ON THE SUBSTITUTED TEXT'S LENGTH at step 7 below, and the divergence
+        //      between that updated length and the loop bound captured before the loop is real, documented,
+        //      observable behaviour (section 6 of this file's header). A placeholder of a different length
+        //      from the literal it replaces moves the cursor differently and changes WHICH later macros the
+        //      scan finds - a behavioural change dressed as a security fix.
+        //   3. THE REWRITE IS DELIBERATELY QUOTE-UNAWARE (see the note below), so a value also lands INSIDE
+        //      string literals, where it is DATA and must remain text. `'$v is ' + string($v)` yields
+        //      `'(3) is ' + string((3))`; a placeholder in the literal is not lexed as a placeholder and
+        //      would appear verbatim in the result.
+        //
+        //  WHAT THE RESIDUAL DOES AND DOES NOT COST. It does not grant an authenticated C-04 caller any
+        //  capability it lacks: of_addvarexp and of_addexp accept ARBITRARY EXPRESSION SYNTAX by contract,
+        //  so the same principal can already submit an expression directly. What remains is a
+        //  confused-deputy risk for a caller that forwards untrusted third-party text through of_addvar's
+        //  VALUE parameter and then references it STATICALLY. Such a caller should reference it dynamically
+        //  (`$$name`), which binds - and that is the documented mitigation rather than a silent gap.
+        // ==============================================================================================
         sExp = Text.ReplaceAll(sExp, varData.FullName, sVarExp, true, true);
 
         // STEP 7 [:L1436-L1437] - RE-ANCHOR. The expression just changed length, so the cursor is moved to
@@ -5028,7 +5371,11 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
                 // OBJECT'S name appended, so THE PAYLOAD HAS NO TRAILING ">". The session builds it from
                 // the same stack this engine pushed onto, which is why the terminal name is passed in
                 // rather than assumed.
-                _session.EmitTrace(_handle, row, data.Dwo, sExp, traced);
+                // THE OBSERVABLE TEXT, RENDERED FROM THE EXECUTED ONE. A dynamically expanded bound value
+                // reaches the evaluator as a placeholder; the trace is a C-04 event a client consumes and a
+                // characterization recording compares, so it carries the expression the oracle would have
+                // produced - the value spliced in, unescaped, exactly as at :L2213.
+                _session.EmitTrace(_handle, row, data.Dwo, RenderBoundText(sExp), traced);
             }
 
             // :L760-L763 - the evaluator's two failure markers. DISTINCT FROM THE EMPTY STRING: these are
@@ -5851,8 +6198,21 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
                 else
                 {
                     // :L2205-L2211 - the ordinary case: the stored text IS the value.
-                    sVal = variable.Local.Exp;
-                    if (sVal.Length == 0)
+                    //
+                    // A VARIABLE BOUND FROM A TYPED VALUE SUBSTITUTES ITS PLACEHOLDER INSTEAD, which is what
+                    // closes the DYNAMIC half of the same hole the static path closes at step 6 of ParseExp.
+                    // Unlike that path this method tracks NO positions - every rewrite below is a whole-token
+                    // ReplaceAll and every test is a containment test - so a placeholder of a different length
+                    // from the literal is behaviourally inert here and no parallel string is needed.
+                    //
+                    // The empty-value refusal is still measured on the STORED text, because that is what the
+                    // oracle measures [:L2206] and a bound value's rendered literal is never empty.
+                    sVal = _boundVarValues.TryGetValue(reference.Name, out ExpressionValue boundDynamic)
+                        && variable.Local.Exp.Length > 0
+                            ? MintBoundValue(boundDynamic, variable.Local.Exp)
+                            : variable.Local.Exp;
+
+                    if (variable.Local.Exp.Length == 0)
                     {
                         RaiseError(
                             ParseErrorFormatter.CreatePlainError(
@@ -6829,7 +7189,11 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
             trimmed = "(" + trimmed + ")";
         }
 
-        return RequireEvaluator().Evaluate(trimmed, row);
+        // THE BOUND TABLE TRAVELS WITH EVERY EVALUATION. Passing it unconditionally rather than only when the
+        // text looks like it needs it is what keeps a placeholder from ever reaching the lexer unresolved -
+        // and an unresolved placeholder is a lexical error there rather than a silent empty value, so the
+        // failure would be loud but the expression would still be wrong.
+        return RequireEvaluator().Evaluate(trimmed, row, _boundValues);
     }
 
     /// <summary>
@@ -7532,4 +7896,3 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         return (long)Math.Truncate(value);
     }
 }
-

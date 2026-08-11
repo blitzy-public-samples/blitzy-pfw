@@ -627,6 +627,28 @@ public sealed class GatewayContractTests
                 operation.Responses.ContainsKey("403"),
                 $"{method} {route} must declare 403 for a projected gRPC PermissionDenied status: a "
                     + "valid-but-insufficient credential is a different outcome from a missing one.");
+
+            // THE THREE THAT WERE EMITTED AND UNDECLARED, and none of them depends on which method is
+            // projected - which is exactly why declaring them per operation is checkable here.
+            //
+            // 429: a handle registry behind C-05..C-08 refusing to hold more work answers the legacy
+            // E_BUSY code, which surfaces as ResourceExhausted on any call that needs a handle.
+            // 503: an upstream answering that it is not currently serving - a different fact from 502,
+            // which means no gRPC response arrived at all.
+            // 504: the deadline this service sets on EVERY outbound call elapsing, so its expiry is an
+            // ordinary outcome of a slow upstream rather than a hypothetical.
+            Assert.True(
+                operation.Responses.ContainsKey("429"),
+                $"{method} {route} can be refused by a capacity ceiling, so it must declare 429.");
+
+            Assert.True(
+                operation.Responses.ContainsKey("503"),
+                $"{method} {route} projects a gRPC call whose upstream can answer Unavailable, so it "
+                    + "must declare 503.");
+
+            Assert.True(
+                operation.Responses.ContainsKey("504"),
+                $"{method} {route} carries an outbound deadline, so it must declare 504.");
         }
     }
 
@@ -855,13 +877,20 @@ public sealed class GatewayContractTests
     {
         OpenApiDocument document = Document;
 
-        // THE EIGHT MAPPED STATUSES OF docs/CONTRACTS.md 12.1, PLUS EXACTLY ONE ADDITION.
+        // THE MAPPED STATUSES OF docs/CONTRACTS.md 12.1, PLUS EXACTLY ONE ADDITION.
         //
-        // The mapping table covers the statuses C-03 and C-04 RETURN: 200, 400, 401, 403, 404, 409, 500
-        // and 501. It does not cover the case where the call never reached them, so this document adds
-        // 502 - and only 502 - for an unreachable upstream or a transit failure after the retry policy
-        // is exhausted. That gap is real rather than an oversight in the specification: a gRPC status
-        // mapping cannot describe the absence of a gRPC response.
+        // The mapping table covers the statuses C-03 and C-04 RETURN: 200, 400, 401, 403, 404, 409, 429,
+        // 500, 501, 503 and 504. It does not cover the case where the call never reached them, so this
+        // document adds 502 - and only 502 - for an unreachable upstream or a transit failure after the
+        // retry policy is exhausted. That gap is real rather than an oversight in the specification: a
+        // gRPC status mapping cannot describe the absence of a gRPC response.
+        //
+        // 429, 503 AND 504 ARE IN THE SET BECAUSE THE RUNTIME REALLY EMITS THEM, and they were absent
+        // from it while it did. A capacity ceiling in a handle registry answers ResourceExhausted, an
+        // upstream that is not serving answers Unavailable, and every outbound call now carries a
+        // deadline whose expiry answers DeadlineExceeded. A status the runtime can produce and the
+        // document does not declare is the same defect as its opposite, read from the other side: a
+        // generated client has no branch for it.
         //
         // 503 IS ALSO SANCTIONED, BUT BY A DIFFERENT CONTRACT, AND THE DISTINCTION IS THE POINT.
         //
@@ -876,12 +905,15 @@ public sealed class GatewayContractTests
         string[] sanctioned =
         [
             // C-09's mapping table (docs/CONTRACTS.md 12.1).
-            "200", "400", "401", "403", "404", "409", "500", "501",
+            "200", "400", "401", "403", "404", "409", "429", "500", "501", "504",
 
             // The one addition, for a failure the mapping cannot describe: no gRPC response at all.
             "502",
 
-            // C-10's own status (docs/CONTRACTS.md 12.2): the `Unhealthy` aggregate verdict.
+            // Both C-09's `Unavailable` translation AND C-10's `Unhealthy` aggregate verdict
+            // (docs/CONTRACTS.md 12.2) land here. The two are different responses on different routes -
+            // a problem document on a projected operation, the aggregate report on /health - which is
+            // why the document declares them through different response components.
             "503",
         ];
 

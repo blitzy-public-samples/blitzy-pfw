@@ -199,22 +199,31 @@ info:
     nothing at all about the scheme. Nothing in this contract is designed to be served without TLS
     in a deployed topology.
 
-    **`POST /v1/tokens` is the one mutual-TLS edge in the entire system, and it is mandatory on
-    that operation rather than an optional hardening.** The reason is structural, not a preference:
-    a caller cannot present a bearer token in order to obtain its first bearer token, so caller
-    identity on the issuance operation has to come from somewhere other than a token, and it comes
-    from the client certificate the transport presents. Mutual TLS is the documented fallback for
-    exactly the pair where a token issuer is inappropriate, and the token-issuance edge is that
-    pair. The operation therefore declares `mutualTls` and **overrides** the document-level bearer
-    requirement, and its `401`/`403` responses are part of the contract rather than implementation
-    detail:
+    **`POST /v1/tokens` is the one edge in the entire system that a bearer token cannot protect, and
+    it is authenticated by something other than a token rather than being unauthenticated.** The
+    reason is structural, not a preference: a caller cannot present a bearer token in order to obtain
+    its first bearer token, so caller identity on the issuance operation has to come from somewhere
+    else. Two schemes establish it, and the operation accepts EITHER:
 
-    - **`401`** - no client certificate was presented, or the certificate presented is not trusted
-      by this service. There is no bearer-token alternative on this operation to fall back to.
-    - **`403`** - the certificate is trusted but the authenticated caller is not permitted the
-      requested `subject` or `audience`; in particular the claimed `subject` does not match the
-      identity the certificate establishes. The response names neither the expected identity nor
-      any part of the stored configuration.
+    - **`clientCredential`** - the caller presents the credential this service holds for it in its
+      configured issuance roster. This is the scheme a plaintext listener can carry, and the attached
+      environment binds this service on one (see `servers`), so it is the primary path.
+    - **`mutualTls`** - a client certificate presented during the TLS handshake. Reachable only where
+      a deployment terminates TLS at this listener. This is the documented fallback for exactly the
+      pair where a token issuer is inappropriate, and the token-issuance edge is that pair.
+
+    The operation declares both and **overrides** the document-level bearer requirement. Its
+    `401`/`403` responses are part of the contract rather than implementation detail:
+
+    - **`401`** - no credential was presented at all, or the credential presented is not one this
+      service holds: an unknown caller identity, a credential that does not match the stored one, or
+      a client certificate that does not chain to the configured issuer. There is no bearer-token
+      alternative on this operation to fall back to, and the response does not distinguish which of
+      those conditions was hit.
+    - **`403`** - the caller is authenticated but is not permitted what it asked for: the claimed
+      `subject` is not the identity the credential establishes, or the roster entry for that subject
+      does not permit the requested `audience` or one of the requested scopes. The response names
+      neither the expected identity nor any part of the stored configuration.
 
     Every **other** operation in this document is bearer-protected (`/v1/ping` and all of C-02) or
     deliberately anonymous (`/health` and the two `/.well-known/*` publications), and each says so
@@ -238,9 +247,9 @@ info:
     (C-G, C-K).
 
     **What the local bring-up actually does is serve everything on ONE TLS listener, not split the
-    listeners.** The service declares exactly one Kestrel endpoint - `https://+:5104`,
-    `Http1AndHttp2`, `ClientCertificateMode` `AllowCertificate` - in its BASE settings file, so it
-    applies to every environment including Development, and that one listener carries
+    listeners.** The service declares exactly one Kestrel endpoint - `https://+:5104`, `Http1`,
+    `ClientCertificateMode` `AllowCertificate` - in its BASE settings file, so it applies to every
+    environment including Development, and that one listener carries
     `POST /v1/tokens`, all of C-02, `/health`, `/v1/ping` and the two `/.well-known/*` publications
     alike. `AllowCertificate` is what makes the single listener sufficient: Kestrel REQUESTS a client
     certificate during the handshake and hands whatever it receives to the application WITHOUT
@@ -249,8 +258,13 @@ info:
     `RequireCertificate` at the LISTENER was measured and rejected: it aborts the handshake for any
     client presenting none, which takes the anonymous `/health` probe with it and the readiness chain
     that gates Gateway could then never open. **There is therefore no address at which this service
-    mints a token without a client certificate** - in development or anywhere else. A caller without
-    one is refused by the token operation, which is a different thing from an unauthenticated mint.
+    mints a token to an UNAUTHENTICATED caller** - in development or anywhere else. A caller that
+    presents neither of the two accepted credentials is refused by the token operation, which is a
+    different thing from an unauthenticated mint. The two are the client certificate this listener
+    requests and the `clientCredential` Basic secret the operation reads from the request itself; the
+    second exists because a deployment that terminates TLS ahead of this service in a proxy or a mesh
+    sidecar leaves no certificate for the application to read, and issuance must stay authenticated
+    there rather than becoming uncallable.
 
     An earlier revision described a second, cleartext endpoint carrying `/health` and C-02 so the
     attached environment's `curl -sf http://localhost:5104/health` gate could satisfy verbatim. That
@@ -369,55 +383,47 @@ info:
     shape, **this document is authoritative for the wire** and the prose is corrected to match it.
 
 servers:
-  # ONE CANONICAL ENTRY, AND IT IS HTTPS. A `servers` entry means "where you send requests for THIS
-  # API", so listing another service's port here would be wrong, not merely redundant. Port 5104 is
-  # this service's listener per docs/ARCHITECTURE.md 4.1, inside the 5101-5105 band the attached
-  # environment fixes; the composition root on 5105 is Gateway's document, not this one.
+  # ONE CANONICAL ENTRY. A `servers` entry means "where you send requests for THIS API", so listing
+  # another service's port here would be wrong, not merely redundant. Port 5104 is this service's
+  # listener per docs/ARCHITECTURE.md 4.1, inside the 5101-5105 band the attached environment fixes;
+  # the composition root on 5105 is Gateway's document, not this one.
   #
-  # WHY THE SCHEME IS https AND NOT http, WHICH IS A CORRECTION RATHER THAN A PREFERENCE:
+  # THE SCHEME IS https BECAUSE THAT IS THE LISTENER THIS SERVICE BINDS, AND ON THIS SERVICE IN
+  # PARTICULAR THE TRANSPORT IS PART OF THE SECURITY ARGUMENT (CWE-319). This service is the system's
+  # trust bootstrap: everything downstream verifies against the material published at
+  # `/.well-known/jwks.json` and `/.well-known/openid-configuration`. On a cleartext channel both are
+  # substitutable by anyone on path - an attacker who replaces the published JWK set makes every other
+  # service accept tokens the attacker signed while behaving exactly as designed - and every bearer
+  # token this service mints is replayable by anyone who observes it. The C-02 operations additionally
+  # carry ciphertext, digests and `keyRef` values. None of those exposures is acceptable on a boundary
+  # this refactor is creating from nothing, and AAP 0.1.4 settles the reading: the requirement is not
+  # "no new surface" - decomposition creates the system's first-ever ingress - but that EVERY newly
+  # created surface is authenticated from the outset.
   #
-  #   1. THE TOKEN ENDPOINT REQUIRES MUTUAL TLS. `POST /v1/tokens` is secured with the `mutualTls`
-  #      scheme below, and mutual TLS IS TLS - a client certificate cannot be presented, requested or
-  #      validated on a plaintext listener. Published over http this document described an endpoint
-  #      that could not be called at all, so NO SERVICE COULD OBTAIN ITS FIRST TOKEN. That makes the
-  #      scheme a functional defect and not a hardening preference.
-  #   2. THIS IS THE SYSTEM'S TRUST BOOTSTRAP. Everything downstream verifies against the material
-  #      published at `/.well-known/jwks.json` and `/.well-known/openid-configuration`. Fetched over
-  #      plaintext, both are trivially substitutable on path: an attacker who replaces the published
-  #      JWK set makes every other service accept tokens the attacker signed. No amount of correctness
-  #      elsewhere recovers from that, because the other three services are behaving exactly as
-  #      designed when they trust what this endpoint told them.
-  #   3. EVERY OTHER OPERATION CARRIES A BEARER TOKEN, AND C-02 CARRIES CIPHERTEXT, DIGESTS AND
-  #      `keyRef` VALUES. Over plaintext the token is replayable by anyone on path and the crypto
-  #      calls are readable. C-G requires every newly created boundary to be authenticated from the
-  #      outset, and an authentication scheme whose credentials travel in the clear is not one.
+  # WHAT AUTHENTICATES `POST /v1/tokens`, IN ADDITION TO THE TRANSPORT. The `clientCredential` scheme
+  # below: the caller presents a credential this service checks against its configured issuance roster,
+  # which also fixes the audiences and scopes that caller may ask for. The `mutualTls` scheme is
+  # retained as an ALTERNATIVE on the same operation and is honoured wherever the connection carries a
+  # client certificate this service's configured authority trusts. Either establishes the caller
+  # identity; neither is optional, because the operation refuses a request that presents no credential
+  # at all. TLS is therefore the channel, never the caller identity - a transport that merely encrypts
+  # says nothing about who is calling, which is why the credential is required on top of it.
   #
-  # THERE IS NO PLAINTEXT LISTENER ON THIS SERVICE, IN ANY ENVIRONMENT, INCLUDING FOR `/health`.
-  # An earlier revision of this comment contemplated binding an additional plaintext endpoint for the
-  # anonymous readiness probe alone, so that the attached environment's `curl -sf
-  # http://localhost:5104/health` gate would work unchanged. That is withdrawn, and the reason is worth
-  # stating because the idea is superficially safe: a second listener on this service is a second place
-  # a request can arrive, and the whole reason this document publishes one `https` server is that a
-  # caller must not be able to reach this API over a channel an attacker can rewrite. A plaintext
-  # endpoint that serves only `/health` today is one route registration away from serving more, and
-  # nothing in the transport itself enforces the restriction. The service binds exactly one endpoint,
-  # `https://+:5104`, with client-certificate negotiation enabled so that `POST /v1/tokens` can require
-  # one while every other operation does not.
-  #
-  # THE OPERATIONAL CONSEQUENCE, STATED SO IT IS NOT DISCOVERED AT A FAILING GATE. The readiness probe
-  # for THIS service is an HTTPS request - `curl -sf --cacert <ca> https://localhost:5104/health` - and
-  # the Compose health check for it must be written that way. The other three services keep their
-  # plaintext probes. `orchestration/.env.example` section 1 carries the certificate-generation recipe
-  # and the trust-anchor path; docs/ARCHITECTURE.md section 9.4 records the deviation from the attached
-  # environment's documented gate and why the requirements' own TLS mandate for this listener wins.
+  # WHERE THE CERTIFICATE COMES FROM, SINCE NONE IS COMMITTED. `Kestrel__Certificates__Default__Path`
+  # and `__KeyPath` are bound from the deployment's own secret layer, exactly as the signing key is, and
+  # `Kestrel__Endpoints__Default__ClientCertificateMode=AllowCertificate` is what makes the `mutualTls`
+  # alternative reachable. No certificate and no key is committed to this repository or embedded in any
+  # container image (constraint C-F), and the readiness probe is consequently an HTTPS request.
   - url: https://localhost:5104
     description: >-
       The security-service listener. Port 5104 is fixed by the port map in
       docs/ARCHITECTURE.md 4.1 and is the same value the local orchestration manifest publishes.
-      TLS is required: `POST /v1/tokens` authenticates with a client certificate, and the JWKS and
-      discovery documents are the verification material every other service trusts, so neither may be
-      fetched over a channel an attacker can rewrite. Inside the orchestration network, callers reach
-      this service by its service name on the same port rather than through localhost.
+      The scheme is TLS, which on this service is a security property of the contract rather than a
+      deployment detail: the key set published here is the material every other service trusts, and a
+      cleartext channel would let anyone on path substitute it. Caller identity on `POST /v1/tokens` is
+      established by the `clientCredential` scheme or by the `mutualTls` alternative, never by the
+      transport alone. Inside the orchestration network, callers reach this service by its service name
+      on the same port rather than through localhost.
 
 tags:
   - name: TokenService
@@ -496,12 +502,14 @@ paths:
         certificate - and no cleartext listener anywhere on which this operation could be reached.
         Section 2a of the document description carries the full termination model.
 
-        Consequently the request body carries **no credential of any kind** - no client secret, no
-        password, no API key, no client assertion and no key material. The `subject` field names
-        the identity the caller claims; the identity that is actually *honoured* is the one the
-        presented client certificate establishes, and a mismatch between the two is refused with
-        `403`. The request schema sets `additionalProperties: false`, so a credential field cannot
-        be smuggled in either.
+        Consequently the request BODY carries **no credential of any kind** - no client secret, no
+        password, no API key, no client assertion and no key material. The credential travels in the
+        `Authorization` header under the `clientCredential` scheme, or in the TLS handshake under
+        `mutualTls`; never in the body, so it cannot be captured by a body-logging proxy or a request
+        recorder. The `subject` field names the identity the caller claims; the identity that is
+        actually *honoured* is the one the credential establishes, and a mismatch between the two is
+        refused with `403`. The request schema sets `additionalProperties: false` and that closure is
+        enforced at run time, so a credential field cannot be smuggled into the body either.
 
         ## This is not an OAuth 2.0 grant request, and does not pretend to be
 
@@ -527,6 +535,10 @@ paths:
         as an error.
       security:
         # OVERRIDES the document-level bearer requirement. Not an omission - see the description.
+        # TWO ALTERNATIVES, and the list form means EITHER satisfies the operation: the credential the
+        # roster holds for the caller, or a client certificate where a deployment terminates TLS here.
+        # A request presenting neither is refused with 401.
+        - clientCredential: []
         - mutualTls: []
       requestBody:
         required: true
@@ -557,10 +569,25 @@ paths:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
           description: >-
-            The authenticated caller is not permitted to obtain a token for the requested subject
-            or audience - for example the claimed `subject` does not match the identity the
-            presented client certificate establishes. The response names neither the expected
-            identity nor any part of the stored configuration.
+            The authenticated caller is not permitted what it asked for. FOUR DISTINCT DECISIONS
+            answer this status, and a caller cannot tell them apart from the response by design.
+            (1) The claimed `subject` does not match the identity the presented client certificate
+            establishes. (2) The requested `audience` is not one this issuer serves at all.
+            (3) The audience IS one this issuer serves, but this caller is not authorised for it.
+            (4) NONE of the requested `scopes` is permitted for this caller and audience.
+            Cases 2 and 3 deliberately answer the SAME message, because a caller able to
+            distinguish them could enumerate the deployment's audience configuration one request at
+            a time; case 4 answers its own message, because a caller reaching it is authorised for
+            the audience and so learns nothing it does not already hold. No response enumerates the
+            configured audience roster, the configured caller authorizations or the permitted scope
+            set, and none names the expected identity or any part of the stored configuration. No
+            token is created and no signature is computed on any of the four paths.
+            NOTE WHAT IS *NOT* HERE - A PARTIALLY PERMITTED SCOPE SET IS NOT REFUSED. When some of
+            the requested scopes are permitted and some are not, the request SUCCEEDS with `200`
+            and the response's `scope` member reports the narrower granted set, per the narrowing
+            rule stated on the `200` response and on `TokenIssuanceRequest.scopes`. This status
+            therefore means that NOTHING was permitted, which is refused only because the granted
+            `scope` member is required and there would be nothing truthful to report in it.
           content:
             application/problem+json:
               schema:
@@ -714,7 +741,10 @@ paths:
 
         A service still completing its startup validation is not the same as one whose dependency
         has failed, and an operator needs to be able to tell them apart. `Degraded` carries the
-        former and `Unhealthy` the latter, and the `status` member is where that distinction lives.
+        former and `Unhealthy` the latter. On the 200 that distinction lives in the report's own
+        `status` member; on the 503 the body is a problem document, so it lives in the
+        `serviceStatus` extension member instead - RFC 9457 reserves `status` there for the integer
+        HTTP status code.
 
         **Only `Healthy` is answered with 200.** `Degraded` means *not ready*, so it is answered with
         503 alongside `Unhealthy`. The reason is mechanical: what an orchestrator observes is the
@@ -739,13 +769,14 @@ paths:
                 $ref: '#/components/schemas/HealthReport'
         '503':
           description: >-
-            The service is **not ready** - either `Degraded` or `Unhealthy`. The `status` member of
-            the report distinguishes the two; the status CODE does not, because the orchestration
-            readiness gate observes the code and a not-ready service answering 200 would open that
-            gate early. The not-ready component is named in the problem `detail`, and `retCode`
-            carries the corresponding legacy return code. This response uses the single problem shape
-            that every non-2xx in this document uses; the readiness detail travels inside it rather
-            than in a second error schema.
+            The service is **not ready** - either `Degraded` or `Unhealthy`. The `serviceStatus`
+            extension member distinguishes the two; the status CODE does not, because the
+            orchestration readiness gate observes the code and a not-ready service answering 200 would
+            open that gate early, and RFC 9457's own `status` member cannot carry the token because it
+            is the integer HTTP status. The not-ready component is named in the problem `detail`, and
+            `retCode` carries the corresponding legacy return code. This response uses the single
+            problem shape that every non-2xx in this document uses; the readiness detail travels
+            inside it rather than in a second error schema.
           content:
             application/problem+json:
               schema:
@@ -784,6 +815,8 @@ paths:
                 $ref: '#/components/schemas/PingResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ScopeForbidden'
 
 
   # ================================================================================================
@@ -842,9 +875,18 @@ paths:
 
         ## Hash type selection
 
-        `hashType` is `CryptoKeyedHashType` - the legacy set **minus** `CRYPTO_HASH_CRC32`,
-        because there is no standard construction that keys a checksum. `CRYPTO_HASH_MD5` remains
-        selectable and is a preserved weakness; the schema records both decisions and their reasons.
+        `hashType` is `CryptoHashType` - **the complete legacy set, `CRYPTO_HASH_CRC32` included**.
+        Nothing is narrowed here, because an unkeyed digest over a checksum is exactly what
+        `CRYPTO_HASH_CRC32` = 5 names in the oracle's own catalogue [`enums.sru:L926-L931`] and the
+        legacy `Hash` overloads accept it. `CRYPTO_HASH_MD5` is likewise selectable and is a preserved
+        weakness; the schema records that decision and its reason.
+
+        **The narrowed selector belongs to the KEYED operations only.** `CryptoKeyedHashType` - the same
+        identifiers minus the checksum - is used by `hmac`, `hmac-file`, `rsa/sign` and `rsa/verify`,
+        because there is no standard construction that keys a checksum: CRC32 has no compression
+        function for HMAC to key and no algorithm identifier for a signature scheme to name. Do not read
+        that exclusion across onto this operation; an earlier revision of this description did, and it
+        contradicted this operation's own request schema.
       requestBody:
         required: true
         content:
@@ -862,6 +904,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -959,9 +1003,14 @@ paths:
 
         ## Hash type selection
 
-        `hashType` is `CryptoKeyedHashType`, exactly as on the in-memory keyed operation:
-        `CRYPTO_HASH_MD5` remains selectable as a preserved weakness, and `CRYPTO_HASH_CRC32` is
-        excluded because keying a checksum is not a defined construction.
+        `hashType` is `CryptoHashType` - **the complete legacy set, `CRYPTO_HASH_CRC32` included**,
+        exactly as on the in-memory unkeyed operation and exactly as this operation's own request schema
+        declares. `CRYPTO_HASH_MD5` remains selectable as a preserved weakness.
+
+        The narrowed `CryptoKeyedHashType` selector applies to the KEYED file operation
+        (`POST /v1/crypto/hmac-file`) and to the other keyed operations, never here: keying a checksum is
+        not a defined construction, but digesting a file with one is. An earlier revision of this
+        description claimed the narrowed selector and excluded CRC32; it contradicted the schema.
       requestBody:
         required: true
         content:
@@ -1484,16 +1533,110 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        # THE SHARED SCOPE-REFUSAL COMPONENT, NOT AN INLINE SENTENCE, AND NOT THE REFERENCE ONE.
+        # This operation MINTS a reference rather than resolving one, so a reference refusal is
+        # semantically impossible here and `RefForbidden` would be the wrong component. What remains is
+        # exactly the condition `ScopeForbidden` describes: an authenticated caller that was never
+        # granted this operation's scope. The shared component additionally states what an inline
+        # sentence did not - that the scope is decided per caller by the issuance roster, and that
+        # neither the required scope nor the caller's held scopes are ever reported.
+        '403':
+          $ref: '#/components/responses/ScopeForbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+
+  /v1/crypto/rsa/keys/{keyRef}:
+    delete:
+      operationId: releaseRsaKey
+      x-contract-id: C-02
+      tags: [CryptoService]
+      summary: Release a retained generated private key by its reference.
+      description: |-
+        Releases the private key this service retained under `keyRef`, freeing the caller's share of
+        the retained-key store immediately.
+
+        ## PART OF THE SAME NARROWING AS `generateRsaKey`, NOT A LEGACY OPERATION (C-K)
+
+        The legacy has no retained-key store and therefore nothing to release: `GenRSAKey`
+        [`n_crypto.sru:L19-L20`] hands the private half straight back through a `ref` parameter and
+        the caller owns it from that moment. Retaining it here instead is what makes the generation
+        response safe across a network boundary - and a retained thing needs a way to be given back.
+
+        Without this operation, a caller's only way to free a slot is to wait out the retention
+        lifetime, so a provisioning sequence longer than the per-caller allowance would stall for no
+        reason. With it, the lifetime is a backstop for a caller that crashed rather than the only
+        mechanism.
+
+        ## THE STORE IS BOUNDED IN TOTAL, PER CALLER, AND IN TIME
+
+        Three bounds, and all three exist because this is the service that also holds the system's
+        only signing key:
+
+        - **A total cap.** Unbounded growth here would terminate authentication for Gateway,
+          DataServices and Persistence at once. Capacity is reserved **before** a key is generated,
+          so a request that could not be retained does no generation work at all.
+        - **A per-caller allowance.** A total cap alone lets one authenticated caller occupy the
+          whole store and starve its peers using nothing but legitimate calls. The caller is
+          identified by the `sub` claim of its token.
+        - **A retention lifetime.** A reference stops resolving once it elapses, and its slot returns.
+          Private key material kept for the life of the process because nobody released it is a
+          standing liability rather than a convenience.
+
+        A caller that reaches its allowance receives `500` from `generateRsaKey` with no key
+        generated. **Whether the total or the caller's own share is the binding limit is deliberately
+        not reported**, because that would describe how much of the store other callers hold.
+
+        ## A CALLER MAY RELEASE ONLY ITS OWN KEYS
+
+        Ownership is the `sub` claim of the presented token. **A reference that names nothing retained
+        and a reference that names another caller's key answer IDENTICALLY with `404`** - telling them
+        apart would turn this operation into an oracle for which references exist, and a `keyRef` is a
+        credential-like handle.
+
+        Release is idempotent from the caller's point of view: a second release of the same reference
+        answers `404`.
+
+        ## WHAT RELEASE DOES NOT DO
+
+        It drops the last reference this service holds to the key text and nothing more. The retained
+        value is a string, and a string cannot be wiped, so no memory-scrubbing guarantee is offered
+        or implied. That residual belongs to the preserved legacy signature, which returns key text
+        rather than bytes [`n_crypto.sru:L19-L20`], and it is recorded here rather than hidden.
+      parameters:
+        - name: keyRef
+          in: path
+          required: true
+          description: >-
+            The opaque reference `generateRsaKey` returned. It is never logged and never echoed in a
+            response body.
+          schema:
+            $ref: '#/components/schemas/KeyReference'
+      responses:
+        '204':
+          description: >-
+            The key was released and the caller's share of the store is free immediately. No body,
+            because there is nothing to report beyond the outcome.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: >-
-            The authenticated caller is not permitted to generate a key pair. The response names no
-            part of the configured key store.
+            The authenticated caller is not permitted to use this operation. The response names no
+            part of the configured key store and no reference.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
-        '500':
-          $ref: '#/components/responses/ServerError'
+        '404':
+          description: >-
+            No generated private key is retained under that reference FOR THIS CALLER. It may never
+            have existed, may already have been released, may have expired, or may belong to a
+            different caller - these are deliberately indistinguishable. The response never echoes
+            the reference.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
 
 
   /v1/crypto/random/blob:
@@ -1540,6 +1683,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1581,6 +1726,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1626,6 +1773,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1679,6 +1828,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1716,6 +1867,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1767,6 +1920,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RefForbidden'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1811,19 +1966,70 @@ components:
 
         This service is the sole issuer of these tokens. No other component holds a signing key.
 
+    clientCredential:
+      type: http
+      scheme: basic
+      description: |-
+        The credential this service holds for the calling identity, presented with the standard HTTP
+        `Basic` scheme: the user name is the caller identity and the password is the secret configured
+        for it. Used by `POST /v1/tokens` and by no other operation.
+
+        ## Why this scheme exists, and why it is the primary one
+
+        A caller cannot present a bearer token in order to obtain its first bearer token, so the
+        issuance edge needs a credential the transport can carry. This service's own listener is TLS and
+        requests a client certificate, so `mutualTls` is live on it - but a client certificate exists
+        only inside the handshake that terminates at the application, and a deployment that terminates
+        TLS ahead of this service in a reverse proxy or a mesh sidecar presents none. This scheme is
+        what keeps the issuance operation authenticated under that topology too, rather than leaving it
+        either uncallable or - far worse - unauthenticated (constraint C-G).
+
+        ## What the credential is, and what it is not
+
+        It is an opaque secret held by this service for one named caller, injected from the deployment
+        secret layer through the options pattern. **No credential value appears in this repository, in
+        any settings file or in any container image** (constraint C-F), and none is reproduced here.
+        It is compared in constant time, it is never logged, and it is never echoed in a response.
+
+        The credential establishes IDENTITY only. What that identity may then ask for - which
+        audiences, and which scopes - is a separate, per-subject decision this service makes against
+        its configured issuance roster, and a request outside it is refused with `403` rather than
+        silently narrowed.
+
+        ## The user name must match the claimed `subject`
+
+        The request body's `subject` is a claim; the credential is the proof. A request whose
+        credential authenticates one identity while claiming another is refused with `403`, and the
+        response reveals which identity the credential established no more than it reveals the
+        expected credential.
+
+        ## On a plaintext listener this credential is on-path visible, and that is stated rather than
+        ## glossed
+
+        Presented over `http` the credential can be captured by anyone on path, exactly as a bearer
+        token can. That is accepted only for the single-host private-network bring-up the frozen
+        environment describes, and it is why `mutualTls` below remains available and why the `servers`
+        entry records precisely what a TLS-terminating deployment changes. Rotating the credential is a
+        configuration change with no code change.
+
     mutualTls:
       type: mutualTLS
       description: |-
         A client certificate presented during the TLS handshake, **requested and validated by this
-        service**, and trusted only if it chains to the configured issuer.
+        service**, and trusted only if it chains to the configured issuer. An ALTERNATIVE to
+        `clientCredential` on `POST /v1/tokens`; either satisfies that operation.
 
-        ## This requires a TLS listener, which is why the server entry is `https`
+        ## This requires a TLS listener, so it is reachable only where a deployment terminates one
 
         A client certificate is exchanged during the handshake, so there is no plaintext form of this
         scheme: on an `http` listener the certificate is never requested, never presented and never
-        validated, and the operation below cannot be called at all. The `servers` entry is therefore
-        `https` and this scheme is the reason, stated here as well as there because the two are one
-        decision recorded in two places.
+        validated. The `servers` entry publishes the `https` listener this service binds, with
+        `ClientCertificateMode` `AllowCertificate`, so this scheme is LIVE on the shipped topology and
+        no configuration change is needed to reach it. Where it goes inert is the reverse case: a
+        deployment that terminates TLS in a proxy or sidecar ahead of this service leaves no certificate
+        for the application to read, and `clientCredential` carries the operation there instead - with no
+        change to any operation, schema or status code, which is exactly what AAP 0.6.6.3 means by mutual
+        TLS being the documented fallback "for that pair only".
 
         Validation is not merely "a certificate was presented". The service **requires** a client
         certificate on this endpoint, verifies the chain against its configured trust anchor, checks
@@ -1898,11 +2104,40 @@ components:
 
     RefForbidden:
       description: >-
-        The reference resolves, but the authenticated caller is **not permitted** to use it. This is
-        deliberately distinguished from the not-found case below, so that a caller can tell a
-        configuration mistake from an authorization one. **Neither response echoes any part of the
-        stored material**, and neither reveals anything about the configured key store beyond the
-        distinction itself. `retCode` typically carries `E_ACCESS_DENIED` (-25).
+        TWO CAUSES REACH THIS STATUS ON THIS SURFACE, AND A CALLER CAN TELL THEM APART FROM THE
+        RESPONSE BODY.
+        (1) THE SCOPE. The token is valid for this service but does not carry `security.crypto`, the
+        single scope every operation of this contract requires. This is decided before the request body
+        is read, so no payload is processed and no key material is touched. It is deliberately
+        distinguished from `401` so that a caller can tell a missing credential from an insufficient
+        one: `401` means "no usable token", this means "a usable token that is not scoped for this
+        surface".
+        (2) THE REFERENCE. The `keyRef` resolves, but the authenticated caller is **not permitted** to
+        use it - deliberately distinguished from the `404` below, so that a caller can tell a
+        configuration mistake from an authorization one.
+        **Neither cause echoes any part of the stored material**, neither reveals anything about the
+        configured key store beyond the distinction itself, and neither enumerates the scopes a caller
+        does hold. `retCode` carries `E_ACCESS_DENIED` (-25) in both cases.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    ScopeForbidden:
+      description: >-
+        The caller is authenticated, and is **not permitted this operation**. Every protected operation
+        in this document requires a named scope in addition to a valid token, and the scope a caller
+        holds is decided per caller by this service's issuance roster - so a token that is valid, that
+        is addressed to this service, and that has not expired can still be refused here. That is
+        least privilege being enforced at the surface it was written for rather than only stated at
+        issuance.
+
+        THE RESPONSE NAMES NEITHER THE REQUIRED SCOPE NOR THE SCOPES THE CALLER HOLDS. Reporting the
+        required one would let an authenticated caller enumerate this service's permission model one
+        operation at a time; reporting the held ones would echo its own credential back to it. An
+        operator diagnosing this reads the caller's roster entry, which is where the answer is.
+
+        `retCode` typically carries `E_ACCESS_DENIED` (-25).
       content:
         application/problem+json:
           schema:
@@ -1925,6 +2160,21 @@ components:
         material, no stack trace, no file path, no provider class name and no detail of the
         configured key store (C-A). `retCode` typically carries `E_INTERNAL_ERROR` (-27), or
         `UNKNOWN` (-4000) where the failure cannot be classified.
+
+
+        On the asymmetric operations this status is what the two DECIDABLE configured-material
+        faults are reported as, and the two are worded differently so an operator can tell them
+        apart from the body alone: the material behind the named reference imports as no RSA key at
+        all, or it imports and carries the **public half only** while the operation needs the
+        private one - decryption and signing. Both are checked **before** the request payload is
+        processed, so neither is ever reported as a `400` about the caller's own payload. A caller
+        cannot fix either and should not retry.
+
+
+        What this status does **not** cover is a configured key of the right kind that is simply
+        the wrong key. That is indistinguishable from a corrupt payload here, because the surface
+        carries no integrity tag at all, and it is reported as a `400`. See `PayloadForm` and the
+        symmetric decryption operation for the same limitation stated where it originates.
       content:
         application/problem+json:
           schema:
@@ -1949,12 +2199,13 @@ components:
         one keeps the error path out of hand-written code, for the same reason the token validation
         path is left to the stock bearer handler.
 
-        ## The one extension member, and why it is here
+        ## The two extension members, and why they are here
 
-        `retCode` carries the legacy PowerFramework return code. RFC 9457 explicitly permits
-        extension members, which is why this schema - alone in this document - sets
-        `additionalProperties: true` rather than `false`. The framework may add further members of
-        its own; a consumer must ignore any it does not recognise.
+        `retCode` carries the legacy PowerFramework return code, and `serviceStatus` carries the
+        readiness verdict on the one response that has one. RFC 9457 explicitly permits extension
+        members, which is why this schema - alone in this document - sets `additionalProperties: true`
+        rather than `false`. The framework may add further members of its own; a consumer must ignore
+        any it does not recognise.
       additionalProperties: true
       properties:
         type:
@@ -1981,6 +2232,31 @@ components:
           type: string
           format: uri-reference
           description: A URI reference identifying this specific occurrence.
+        serviceStatus:
+          type: string
+          enum: [Healthy, Degraded, Unhealthy]
+          x-enum-varnames: [Healthy, Degraded, Unhealthy]
+          description: |-
+            The readiness verdict, present on the `503` of `GET /health` and on nothing else.
+
+            ## Why this member exists rather than reusing `status`
+
+            `Degraded` and `Unhealthy` are different states and both are answered `503`, so the status
+            **code** cannot separate them - which is the whole reason `GET /health` promises that the
+            body does. The obvious place for the token is a `status` member, and it cannot go there:
+            RFC 9457 already uses that name for the integer HTTP status and this schema types it as an
+            integer, so a second `status` would be a duplicate member of a different type. The verdict
+            therefore needs a name of its own.
+
+            **It is machine-readable, and that is the point.** Gateway aggregates this service's
+            report, and it reads *this* member: without it, a `Degraded` leaf and an `Unhealthy` leaf
+            are indistinguishable on the wire and the aggregate flattens both into a failure. A
+            consumer that cannot find this member on a `503` from `GET /health` must read the response
+            as `Unhealthy` - failing closed - because a body that cannot state its verdict is not a
+            body whose verdict can be trusted.
+
+            The same spelling is emitted by all four services, because C-10 publishes one readiness
+            shape across the estate.
         retCode:
           type: integer
           format: int64
@@ -2421,8 +2697,10 @@ components:
         So a 3DES caller with a fifteen-character passphrase is refused here where the legacy would
         have encrypted. **No workaround is applied and no key is silently substituted** - either
         would change behaviour. The failure is loud rather than silent, and it surfaces as HTTP `500`
-        with a `ProblemDetails` body, distinctly from the `501` capability refusals tabulated on
-        `CryptoSymCryptMode`: this one is a property of the *key material supplied*, not of the port.
+        with a `ProblemDetails` body. The capability refusals tabulated on `CryptoSymCryptMode` carry
+        the same status, so the two are told apart by the BODY rather than by the status line: those
+        carry `retCode` `E_NO_IMPLEMENTATION` with a `SYMMETRIC_*_UNPROVABLE` reason and are a property
+        of this port, while this one is a property of the *key material supplied* and carries neither.
 
         A width note (C-K): `n_crypto` types this argument as a 16-bit `readonly uint`
         [n_crypto.sru:L30-L61] while `enums.sru` declares the constants as `Long`. The wire carries
@@ -2509,9 +2787,23 @@ components:
         `:L592, L607`, 3DES at `:L622, L637`. It never selects CFB and never uses a vector-less arm.
         A caller needing CBC supplies a vector through one of the 24 overloads that take one.
 
-        **How a refusal appears.** HTTP `501` with a `ProblemDetails` body whose `reason` is one of
-        the two codes tabulated above. It is deliberately **not** `400`: the request is well-formed
-        and would have succeeded, and the limitation is this port's rather than the caller's.
+        **How a refusal appears.** HTTP `500` with a `ProblemDetails` body carrying `retCode`
+        `E_NO_IMPLEMENTATION` (`-2001`) and a `reason` that is one of the two codes tabulated above.
+        Each affected operation enumerates that `500` in its own `responses` block, so the status is
+        readable from the machine-readable half of this contract and not only from this prose.
+
+        It is deliberately **not** `400`: the request is well-formed and would have succeeded, and the
+        limitation is this port's rather than the caller's.
+
+        It is deliberately **not** `501` either, and that is a hard constraint rather than a taste.
+        `501` is reserved in this system for Gateway's four deferred-capability routes and for nothing
+        else: those routes exist to declare that a whole capability area is unbuilt, and constraint C-D
+        forbids any in-scope surface from presenting itself the same way. A `501` on a Security operation
+        would say this service is a placeholder, when in fact 30 of the 32 symmetric cells are
+        implemented and answer normally. The legacy vocabulary carries the distinction the status cannot:
+        `E_NO_IMPLEMENTATION` names the missing cell without demoting the surface that hosts it. An
+        earlier revision of this description said `501`, contradicting both the operations' own response
+        metadata and the runtime; the operations and the runtime were right.
       enum: [0, 1, 2]
       x-enum-varnames:
         [CRYPTO_SYMCRYPT_MODE_ECB, CRYPTO_SYMCRYPT_MODE_CBC, CRYPTO_SYMCRYPT_MODE_CFB]
@@ -2855,19 +3147,31 @@ components:
     JsonWebKeySet:
       type: object
       title: JsonWebKeySet
-      description: >-
+      description: |-
         The set of **public** keys with which tokens issued by this service can be verified.
         Consumers normally reach this through their stock bearer handler rather than parsing it
-        themselves. More than one key may be present during a key rollover, and a consumer selects by
-        `kid`.
+        themselves, and a consumer that parses it selects by `kid`.
+
+        **Schema capacity and current behaviour are two different things, and they are stated
+        separately because conflating them has misled operators.** The schema is an array because RFC
+        7517 defines one and because a consumer must be written to tolerate more than one entry. **This
+        phase publishes exactly one key, always.** Security is configured with a single signing key and a
+        single `Security:SigningKeyId`, and **no rotation machinery exists**: there is no key ring, no
+        second key slot, no re-read of the configured material while the host runs, and no overlap
+        window. Replacing the configured key and restarting therefore makes every token signed with the
+        previous key fail verification immediately - the old `kid` disappears from this document in the
+        same instant the new one appears. Plan a replacement as a brief interruption to token
+        verification, not as a rollover. `docs/SECRETS.md` section 4.1 is the authority for the
+        operational consequence.
       additionalProperties: false
       required: [keys]
       properties:
         keys:
           type: array
           description: >-
-            The published keys. Public parameters only. May contain more than one entry while a
-            rollover is in progress, and may legitimately contain exactly one.
+            The published keys. Public parameters only. The array shape allows more than one entry so
+            that a consumer is written to tolerate a future rollover; in this phase it carries **exactly
+            one**, because Security holds one signing key and implements no rotation.
           items:
             $ref: '#/components/schemas/JsonWebKey'
 
@@ -2903,8 +3207,18 @@ components:
         members below model the RSA public parameters accordingly. A move to another key family would
         be a change to this published contract - which is the correct consequence of versioning it,
         rather than something to leave open with a permissive schema.
+
+        ## `use` and `alg` are required here, though RFC 7517 makes both optional
+
+        The standard leaves them optional because a general-purpose key set may carry keys whose
+        purpose and algorithm a consumer is expected to infer. **This issuer always publishes both**,
+        and the required list says so rather than understating it: a consumer that constrains which
+        algorithms it will accept - a constraint worth setting, because accepting whatever algorithm a
+        token declares is a well-understood token-validation weakness - can then rely on `alg` being
+        present instead of writing a fallback for a case this issuer never produces. Declaring an
+        always-present member optional is not the conservative choice; it is the inaccurate one.
       additionalProperties: false
-      required: [kty, kid, n, e]
+      required: [kty, use, alg, kid, n, e]
       properties:
         kty:
           type: string
@@ -2970,8 +3284,15 @@ components:
         document permit additional members and require consumers to ignore unrecognised ones; this
         contract nevertheless states its member set exactly, so the absence above cannot be quietly
         filled in without a version change.
+
+        ## Four members are required, which is what OpenID Connect Discovery already demands
+
+        `token_endpoint` and `id_token_signing_alg_values_supported` are required by the discovery
+        specification for any provider that is not implicit-flow-only, and this issuer publishes both
+        unconditionally. Listing only `issuer` and `jwks_uri` described a document this service has
+        never emitted and one a conforming consumer would have been entitled to reject.
       additionalProperties: false
-      required: [issuer, jwks_uri]
+      required: [issuer, jwks_uri, token_endpoint, id_token_signing_alg_values_supported]
       properties:
         issuer:
           type: string
@@ -3041,8 +3362,15 @@ components:
         The readiness of **this service only**. Security has no upstream dependency, so this report is
         never an aggregate; Gateway builds the aggregate by combining this report with those of
         DataServices and Persistence, and reports healthy only after all three do.
+
+        ## All four members are required
+
+        The service populates every one of them on every response, healthy or not, so the required list
+        states that rather than permitting a leaner report no deployment produces. `checks` in
+        particular is what makes a `Degraded` or `Unhealthy` verdict actionable - the verdict alone says
+        that something is wrong without saying which component - and Gateway's aggregation reads it.
       additionalProperties: false
-      required: [status, service]
+      required: [status, service, checkedAt, checks]
       properties:
         status:
           type: string

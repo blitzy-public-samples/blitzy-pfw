@@ -80,6 +80,9 @@ internal sealed class PersistenceStubTokenProvider : IServiceTokenProvider
     /// <summary>How many times a token was requested.</summary>
     internal int Requests { get; private set; }
 
+    /// <summary>Every request the client made, in order, so the per-operation scope mapping can be asserted.</summary>
+    internal List<ServiceTokenRequest> AllRequests { get; } = [];
+
     /// <summary>The last request the client made, so its subject, audience and scopes can be asserted.</summary>
     internal ServiceTokenRequest? LastRequest { get; private set; }
 
@@ -96,6 +99,7 @@ internal sealed class PersistenceStubTokenProvider : IServiceTokenProvider
 
         Requests++;
         LastRequest = request;
+        AllRequests.Add(request);
 
         return ValueTask.FromResult(new ServiceToken(
             Credential,
@@ -221,6 +225,30 @@ internal static class PersistenceCallFactory
 /// <summary>
 /// A double for the generated C-05 stub, recording what was sent and with which call options.
 /// </summary>
+/// <summary>
+/// The task identifiers the wire-level stubs mint, one per task-owning contract.
+/// </summary>
+/// <remarks>
+/// ONE PER CONTRACT RATHER THAN ONE SHARED VALUE, AND THE DISTINCTION IS LOAD-BEARING. A real
+/// Persistence issues a query task, an update task and a command task independently, and each handle
+/// addresses work only its own contract can run - C-05 answers E_INVALID_HANDLE for an update task's
+/// identifier as readily as for a blank one. A single shared spelling makes a service that carried the
+/// WRONG handle to the right contract indistinguishable from one that carried the right handle, which
+/// is the exact defect a task-handle assertion exists to catch. Distinct spellings make the mix-up
+/// visible in the failure message instead.
+/// </remarks>
+internal static class PersistenceStubTaskIds
+{
+    /// <summary>The handle C-05's stub issues for a query task.</summary>
+    internal const string Query = "query-task-under-test";
+
+    /// <summary>The handle C-06's stub issues for an update task.</summary>
+    internal const string Update = "update-task-under-test";
+
+    /// <summary>The handle C-07's stub issues for a command task.</summary>
+    internal const string Command = "command-task-under-test";
+}
+
 internal sealed class FakeQueryServiceClient : QueryService.QueryServiceClient
 {
     /// <summary>The messages the next retrieval should yield.</summary>
@@ -247,6 +275,17 @@ internal sealed class FakeQueryServiceClient : QueryService.QueryServiceClient
     /// <summary>Every paging request that actually reached the wire.</summary>
     internal List<SetPagingRequest> PagingRequests { get; } = [];
 
+    /// <summary>Every query-task creation that actually reached the wire, in call order.</summary>
+    /// <remarks>
+    /// THE REQUEST ITSELF AND NOT MERELY THE METHOD NAME, because C-05 carries the task's INITIAL
+    /// CONFIGURATION on this call - so "the spec travelled on the create" is only assertable against the
+    /// recorded request. The name alone would keep passing if the spec had been dropped.
+    /// </remarks>
+    internal List<CreateQueryTaskRequest> CreateTaskRequests { get; } = [];
+
+    /// <summary>Every query-task release that actually reached the wire, in call order.</summary>
+    internal List<ReleaseQueryTaskRequest> ReleaseTaskRequests { get; } = [];
+
     /// <summary>How many retrievals were started.</summary>
     internal int QueryCalls { get; private set; }
 
@@ -262,12 +301,13 @@ internal sealed class FakeQueryServiceClient : QueryService.QueryServiceClient
         CallOptions options)
     {
         Calls.Add(nameof(CreateQueryTaskAsync));
+        CreateTaskRequests.Add(request);
         LastOptions = options;
 
         return PersistenceCallFactory.Unary(Task.FromResult(new CreateQueryTaskResponse
         {
             Status = new OperationStatus { RetCode = WireRetCode.Ok },
-            Task = new TaskHandle { TaskId = "task-under-test" },
+            Task = new TaskHandle { TaskId = PersistenceStubTaskIds.Query },
         }));
     }
 
@@ -277,6 +317,7 @@ internal sealed class FakeQueryServiceClient : QueryService.QueryServiceClient
         CallOptions options)
     {
         Calls.Add(nameof(ReleaseQueryTaskAsync));
+        ReleaseTaskRequests.Add(request);
         LastOptions = options;
 
         return PersistenceCallFactory.Unary(Task.FromResult(new ReleaseQueryTaskResponse
@@ -432,6 +473,22 @@ internal sealed class FakeUpdateServiceClient : UpdateService.UpdateServiceClien
     /// <summary>Every prepare request that actually reached the wire.</summary>
     internal List<PrepareUpdateRequest> PrepareRequests { get; } = [];
 
+    /// <summary>Every update-task creation that actually reached the wire, in call order.</summary>
+    internal List<CreateUpdateTaskRequest> CreateTaskRequests { get; } = [];
+
+    /// <summary>
+    /// The outcome code the next update-task creation answers with. <c>0</c> is <c>RetCode.OK</c>.
+    /// </summary>
+    /// <remarks>
+    /// A FAILING CODE ANSWERS WITHOUT A HANDLE, as a producer must. It is how the acquisition's SECOND
+    /// refusal is reached - the one where a session HAS been obtained and must still be ended - which no
+    /// assertion about an update's own answer can distinguish from the first.
+    /// </remarks>
+    internal long CreateTaskCode { get; set; }
+
+    /// <summary>Every update-task release that actually reached the wire, in call order.</summary>
+    internal List<ReleaseUpdateTaskRequest> ReleaseTaskRequests { get; } = [];
+
     /// <summary>The call options of the most recent call.</summary>
     internal CallOptions? LastOptions { get; private set; }
 
@@ -444,12 +501,25 @@ internal sealed class FakeUpdateServiceClient : UpdateService.UpdateServiceClien
         CallOptions options)
     {
         Calls.Add(nameof(CreateUpdateTaskAsync));
+        CreateTaskRequests.Add(request);
         LastOptions = options;
+
+        if (CreateTaskCode != 0L)
+        {
+            return PersistenceCallFactory.Unary(Task.FromResult(new CreateUpdateTaskResponse
+            {
+                Status = new OperationStatus
+                {
+                    RetCode = (WireRetCode)(int)CreateTaskCode,
+                    ErrorText = "Scripted: the update task was refused.",
+                },
+            }));
+        }
 
         return PersistenceCallFactory.Unary(Task.FromResult(new CreateUpdateTaskResponse
         {
             Status = new OperationStatus { RetCode = WireRetCode.Ok },
-            Task = new TaskHandle { TaskId = "task-under-test" },
+            Task = new TaskHandle { TaskId = PersistenceStubTaskIds.Update },
         }));
     }
 
@@ -459,6 +529,7 @@ internal sealed class FakeUpdateServiceClient : UpdateService.UpdateServiceClien
         CallOptions options)
     {
         Calls.Add(nameof(ReleaseUpdateTaskAsync));
+        ReleaseTaskRequests.Add(request);
         LastOptions = options;
 
         return PersistenceCallFactory.Unary(Task.FromResult(new ReleaseUpdateTaskResponse
@@ -546,7 +617,7 @@ internal sealed class FakeCommandServiceClient : CommandService.CommandServiceCl
         return PersistenceCallFactory.Unary(Task.FromResult(new CreateCommandTaskResponse
         {
             Status = new OperationStatus { RetCode = WireRetCode.Ok },
-            Task = new TaskHandle { TaskId = "task-under-test" },
+            Task = new TaskHandle { TaskId = PersistenceStubTaskIds.Command },
         }));
     }
 
@@ -627,6 +698,13 @@ internal sealed class FakeTransactionServiceClient : TransactionService.Transact
     /// <summary>Every commit request that reached the wire.</summary>
     internal List<CommitRequest> CommitRequests { get; } = [];
 
+    /// <summary>Every session-end request that reached the wire, in call order.</summary>
+    /// <remarks>
+    /// PAIRED WITH <see cref="BeginRequests"/> ON PURPOSE: a count that does not match is a session leak,
+    /// and a leak is invisible to every assertion about the operation's own answer.
+    /// </remarks>
+    internal List<EndSessionRequest> EndRequests { get; } = [];
+
     /// <summary>The call options of the most recent call.</summary>
     internal CallOptions? LastOptions { get; private set; }
 
@@ -639,6 +717,7 @@ internal sealed class FakeTransactionServiceClient : TransactionService.Transact
         CallOptions options)
     {
         Calls.Add(nameof(EndSessionAsync));
+        EndRequests.Add(request);
         LastOptions = options;
 
         return PersistenceCallFactory.Unary(Task.FromResult(new EndSessionResponse
@@ -832,8 +911,15 @@ internal sealed class FakeTransactionServiceClient : TransactionService.Transact
 /// </summary>
 public sealed class PersistenceClientTests
 {
-    /// <summary>The task identifier every test uses.</summary>
-    private const string TaskId = "task-under-test";
+    /// <summary>The task identifier this suite SENDS on a request it builds itself.</summary>
+    /// <remarks>
+    /// A CALLER-SUPPLIED HANDLE, DELIBERATELY DISTINCT FROM EVERY MINTED ONE. The stubs mint their own
+    /// handles per contract - see <see cref="PersistenceStubTaskIds"/> - and this value is the other
+    /// direction: what a caller puts ON a request. Keeping the two vocabularies separate is what stops an
+    /// assertion from passing because a value travelled in a circle rather than because the client
+    /// forwarded what it was given.
+    /// </remarks>
+    private const string TaskId = "caller-supplied-task-under-test";
 
     /// <summary>
     /// Builds a client over fresh doubles.
@@ -1350,7 +1436,114 @@ public sealed class PersistenceClientTests
         Assert.NotNull(tokens.LastRequest);
         Assert.Equal("powerframework-dataservices", tokens.LastRequest.Subject);
         Assert.Equal("powerframework-persistence", tokens.LastRequest.Audience);
-        Assert.Equal(["persistence.read", "persistence.write"], tokens.LastRequest.Scopes);
+
+        // ONE SCOPE PER REQUEST, CHOSEN BY THE OPERATION (constraint C-G). A credential asking for read
+        // AND write on every call meant a retrieval carried the authority to update; each call now
+        // presents exactly what it is about to do, and the upstream enforces the same two names per RPC.
+        // The five calls above, in order: set-chunk-size and query READ, update and exec WRITE, commit
+        // WRITE.
+        Assert.Equal(
+            [
+                new[] { "persistence.read" },
+                new[] { "persistence.read" },
+                new[] { "persistence.write" },
+                new[] { "persistence.write" },
+                new[] { "persistence.write" },
+            ],
+            tokens.AllRequests.Select(static request => request.Scopes.ToArray()));
+
+        // AND EVERY REQUEST NAMES THIS SERVICE AND THAT ONE AUDIENCE - a per-operation scope must not
+        // become a per-operation identity.
+        Assert.All(tokens.AllRequests, static request =>
+        {
+            Assert.Equal("powerframework-dataservices", request.Subject);
+            Assert.Equal("powerframework-persistence", request.Audience);
+            Assert.Single(request.Scopes);
+        });
+    }
+
+    /// <summary>
+    /// A read-shaped call never asks for the write scope, and a write-shaped one never asks for the read
+    /// scope.
+    /// </summary>
+    /// <returns>The test.</returns>
+    /// <remarks>
+    /// The mapping is asserted across the WHOLE surface rather than on a sample, because the failure mode
+    /// is one member quietly acquiring the other half's authority - which no functional test would notice,
+    /// since a broader credential works everywhere a narrower one does.
+    /// </remarks>
+    [Fact]
+    public async Task TheScopeRequestedIsOperationSpecificAcrossTheWholeSurface()
+    {
+        (PersistenceClient client, _, _, _, _, PersistenceStubTokenProvider tokens, _) = CreateClient();
+
+        CancellationToken token = TestContext.Current.CancellationToken;
+        SessionHandle session = new() { SessionId = "session-under-test" };
+
+        // ---- READ-SHAPED: C-05 in full, plus C-08's session, descriptor and state readers ----
+        _ = await client.CreateQueryTaskAsync(new CreateQueryTaskRequest { Session = session }, token);
+        _ = await client.ReleaseQueryTaskAsync(new ReleaseQueryTaskRequest { Task = Handle() }, token);
+        _ = await client.ResetQueryTaskAsync(new ResetQueryTaskRequest { Task = Handle() }, token);
+        _ = await client.SetChunkSizeAsync(
+            new SetChunkSizeRequest { Task = Handle(), ChunkSize = PersistenceClient.DefaultChunkSize },
+            token);
+        _ = await client.SetMaxRowsAsync(new SetMaxRowsRequest { Task = Handle(), MaxRows = 1L }, token);
+        _ = await client.CountAsync(new CountRequest { Task = Handle() }, token);
+        _ = await client.BeginSessionAsync(
+            new BeginSessionRequest { Descriptor_ = new TransactionDescriptor { Dbms = "SQLite" } },
+            token);
+        _ = await client.EndSessionAsync(new EndSessionRequest { Session = session }, token);
+        _ = await client.GetTransactionDataAsync(
+            new GetTransactionDataRequest { Session = session },
+            token);
+        _ = await client.IsConnectedAsync(new IsConnectedRequest { Session = session }, token);
+        _ = await client.GetDatabaseTypeAsync(new GetDatabaseTypeRequest { Session = session }, token);
+        _ = await client.GetSessionStateAsync(new GetSessionStateRequest { Session = session }, token);
+        _ = await client.GridSyntaxFromSqlAsync(
+            new GridSyntaxFromSqlRequest { Session = session, Sql = "SELECT 1" },
+            token);
+
+        Assert.All(tokens.AllRequests, static request =>
+            Assert.Equal(["persistence.read"], request.Scopes));
+
+        int readCalls = tokens.AllRequests.Count;
+        Assert.Equal(13, readCalls);
+
+        // ---- WRITE-SHAPED: C-06 and C-07 in full, plus C-08's state changers ----
+        _ = await client.CreateUpdateTaskAsync(new CreateUpdateTaskRequest { Session = session }, token);
+        _ = await client.ReleaseUpdateTaskAsync(new ReleaseUpdateTaskRequest { Task = Handle() }, token);
+        _ = await client.ResetUpdateTaskAsync(new ResetUpdateTaskRequest { Task = Handle() }, token);
+        _ = await client.PrepareUpdateAsync(new PrepareUpdateRequest { Task = Handle() }, token);
+        _ = await client.UpdateAsync(new UpdateRequest { Task = Handle(), UpdateRows = 1L }, token);
+        _ = await client.CreateCommandTaskAsync(new CreateCommandTaskRequest { Session = session }, token);
+        _ = await client.ReleaseCommandTaskAsync(
+            new ReleaseCommandTaskRequest { Task = Handle() },
+            token);
+        _ = await client.ResetCommandTaskAsync(new ResetCommandTaskRequest { Task = Handle() }, token);
+        _ = await client.SetCommandAutoCommitAsync(
+            new SetCommandAutoCommitRequest { Task = Handle(), Autocommit = AutoCommitMode.AcOn },
+            token);
+        _ = await client.SetCommandSqlAsync(
+            new SetCommandSqlRequest { Task = Handle(), Sql = "DELETE FROM COMPANY" },
+            token);
+        _ = await client.ExecAsync(
+            new ExecRequest { Task = Handle(), Sql = "DELETE FROM COMPANY" },
+            token);
+        _ = await client.SetTransactionAutoCommitAsync(
+            new SetTransactionAutoCommitRequest { Session = session, Autocommit = true },
+            token);
+        _ = await client.AutoCommitAsync(new AutoCommitRequest { Session = session }, token);
+        _ = await client.CommitAsync(session, token);
+        _ = await client.RollbackAsync(new RollbackRequest { Session = session }, token);
+        _ = await client.ClearStateAsync(new ClearStateRequest { Session = session }, token);
+        _ = await client.SetBrokenAsync(new SetBrokenRequest { Session = session }, token);
+
+        Assert.All(
+            tokens.AllRequests.Skip(readCalls),
+            static request => Assert.Equal(["persistence.write"], request.Scopes));
+
+        // Every member exercised above asked for a credential, so none of them skipped authentication.
+        Assert.Equal(tokens.AllRequests.Count, tokens.Requests);
     }
 
     /// <summary>
@@ -1382,26 +1575,95 @@ public sealed class PersistenceClientTests
     }
 
     /// <summary>
-    /// A narrower granted scope set is a SUCCESSFUL outcome: the call proceeds, and neither the
-    /// credential nor the scope strings are logged.
+    /// A grant that withholds the required scope is refused before the call is sent, by exact name, and
+    /// nothing about the credential is logged.
+    /// </summary>
+    /// <returns>The test.</returns>
+    /// <remarks>
+    /// THE OLD SHAPE COMPARED SCOPE COUNTS AND PROCEEDED. That is wrong in two independent ways: a count
+    /// cannot say WHICH scope was withheld, and an issuer granting a completely different scope of the
+    /// same cardinality would have satisfied the comparison outright. Both are covered below - the
+    /// missing-name case and the right-count-wrong-name case.
+    /// </remarks>
+    [Fact]
+    public async Task AGrantMissingTheRequiredScope_IsRefusedBeforeTheCallAndLogsNoCredential()
+    {
+        (PersistenceClient client, _, _, _, FakeTransactionServiceClient transaction,
+            PersistenceStubTokenProvider tokens, PersistenceRecordingLogger logger) = CreateClient();
+
+        // Commit needs the WRITE scope; the issuer grants only read.
+        tokens.GrantedScopes = ["persistence.read"];
+
+        RpcException refused = await Assert.ThrowsAsync<RpcException>(() => client.CommitAsync(
+            new SessionHandle { SessionId = "session-under-test" },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCode.PermissionDenied, refused.StatusCode);
+
+        // BEFORE THE CALL, not after it: the upstream was never reached.
+        Assert.Null(transaction.LastOptions);
+
+        string logged = logger.AllText();
+        Assert.Contains("withheld a required scope", logged, StringComparison.Ordinal);
+        Assert.DoesNotContain(PersistenceStubTokenProvider.Credential, logged, StringComparison.Ordinal);
+        Assert.DoesNotContain("persistence.read", logged, StringComparison.Ordinal);
+        Assert.DoesNotContain("persistence.write", logged, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A grant of the right SIZE but the wrong NAME is refused, which a count comparison could not do.
     /// </summary>
     /// <returns>The test.</returns>
     [Fact]
-    public async Task NarrowedScopeGrant_ProceedsAndLogsNoCredential()
+    public async Task AGrantOfTheRightSizeButTheWrongName_IsRefused()
     {
-        (PersistenceClient client, _, _, _, _,
-            PersistenceStubTokenProvider tokens, PersistenceRecordingLogger logger) = CreateClient();
+        (PersistenceClient client, _, _, _, _, PersistenceStubTokenProvider tokens, _) = CreateClient();
 
-        tokens.GrantedScopes = ["persistence.read"];
+        // One scope requested, one scope granted - and not the one that was asked for.
+        tokens.GrantedScopes = ["persistence.something.else"];
+
+        RpcException refused = await Assert.ThrowsAsync<RpcException>(() => client.CommitAsync(
+            new SessionHandle { SessionId = "session-under-test" },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCode.PermissionDenied, refused.StatusCode);
+    }
+
+    /// <summary>
+    /// A grant carrying the required scope alongside others is accepted: a superset is not a narrowing.
+    /// </summary>
+    /// <returns>The test.</returns>
+    [Fact]
+    public async Task AGrantCarryingTheRequiredScopeAmongOthers_IsAccepted()
+    {
+        (PersistenceClient client, _, _, _, FakeTransactionServiceClient transaction,
+            PersistenceStubTokenProvider tokens, _) = CreateClient();
+
+        tokens.GrantedScopes = ["persistence.read", "persistence.write", "something.unrelated"];
 
         _ = await client.CommitAsync(
             new SessionHandle { SessionId = "session-under-test" },
             TestContext.Current.CancellationToken);
 
-        string logged = logger.AllText();
-        Assert.Contains("granted 1 of 2", logged, StringComparison.Ordinal);
-        Assert.DoesNotContain(PersistenceStubTokenProvider.Credential, logged, StringComparison.Ordinal);
-        Assert.DoesNotContain("persistence.read", logged, StringComparison.Ordinal);
+        Assert.NotNull(transaction.LastOptions);
+    }
+
+    /// <summary>
+    /// The scope comparison is case-sensitive, because scope names are case-sensitive strings.
+    /// </summary>
+    /// <returns>The test.</returns>
+    [Fact]
+    public async Task TheScopeComparisonIsCaseSensitive()
+    {
+        (PersistenceClient client, _, _, _, _, PersistenceStubTokenProvider tokens, _) = CreateClient();
+
+        tokens.GrantedScopes = ["PERSISTENCE.WRITE"];
+
+        RpcException refused = await Assert.ThrowsAsync<RpcException>(() => client.CommitAsync(
+            new SessionHandle { SessionId = "session-under-test" },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCode.PermissionDenied, refused.StatusCode);
     }
 
     // ==============================================================================================
@@ -2304,7 +2566,7 @@ public sealed class PersistenceClientTests
         // ---- C-05 ------------------------------------------------------------------------------
         CreateQueryTaskResponse created = await client.CreateQueryTaskAsync(
             new CreateQueryTaskRequest { Session = session }, token);
-        Assert.Equal(TaskId, created.Task.TaskId);
+        Assert.Equal(PersistenceStubTaskIds.Query, created.Task.TaskId);
 
         Assert.Equal(
             WireRetCode.Ok,
@@ -2439,9 +2701,21 @@ public sealed class PersistenceClientTests
             Assert.NotNull(options);
             Assert.Equal(expected, options.Value.Headers?.GetValue("authorization"));
 
-            // NO DEADLINE IS SET BY THIS CLIENT: a duration would be invented here, and the repository
-            // publishes no budget to derive one from. The composition root owns that policy.
-            Assert.Null(options.Value.Deadline);
+            // EVERY CALL CARRIES A DEADLINE, AND THIS ASSERTION USED TO SAY THE OPPOSITE. The reasoning
+            // it recorded - that a duration invented in the client would have no derivation, and that
+            // the policy belongs in the composition root - was right about where the policy belongs and
+            // was being used to justify having none. Without one, Persistence keeps working, and keeps
+            // the query, update, command or transaction handle behind that work alive, for a caller
+            // that has already gone; those handles are bounded per principal and globally, so the
+            // abandoned work consumes admission capacity a live caller then cannot get. The policy now
+            // exists as DataServices:Resilience:Persistence, and this client applies it.
+            //
+            // NO PARTICULAR VALUE IS ASSERTED HERE, deliberately. Which duration applies is
+            // OutboundDeadlines' contract and is asserted against that type directly; what this suite
+            // pins is that no member reaches the wire without one, which is the property that has to
+            // hold for all thirty-five of them rather than for the two a targeted test would cover.
+            Assert.NotNull(options.Value.Deadline);
+            Assert.Equal(DateTimeKind.Utc, options.Value.Deadline.Value.Kind);
         }
     }
 

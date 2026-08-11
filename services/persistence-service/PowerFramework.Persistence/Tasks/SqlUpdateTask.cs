@@ -727,6 +727,29 @@ internal sealed class SqlUpdateTask : SqlTaskBase
     private long _lastErrorCode;
 
     /// <summary>
+    /// The classification the most recent run produced, or <see langword="null"/> before the first run
+    /// reaches the classifier.
+    /// </summary>
+    /// <remarks>
+    /// NOT AN ORACLE FIELD, AND NOT A BEHAVIOURAL ADDITION EITHER. In the legacy the classification is
+    /// consumed in-process by the caller that raised the task, so it never needed a home. Across a
+    /// service boundary the same information has to be READ BACK by the wire layer, which mints the
+    /// conflict status from it - so it is latched here rather than recomputed there from a return code
+    /// that has already lost the distinction between a conflict, a veto and a database error.
+    /// </remarks>
+    private UpdateOutcome? _lastOutcome;
+
+    /// <summary>
+    /// The terminal diagnostic the most recent run finished with, or the empty string.
+    /// </summary>
+    /// <remarks>
+    /// The same value the oracle passes into its epilogue [<c>:L385-L399</c>], latched for the same
+    /// reason as <see cref="_lastOutcome"/>: the wire layer reports it, and it is not otherwise
+    /// recoverable from the return code.
+    /// </remarks>
+    private string _lastErrorText = string.Empty;
+
+    /// <summary>
     /// Creates the task.
     /// </summary>
     /// <param name="host">The threading substrate seam.</param>
@@ -870,6 +893,67 @@ internal sealed class SqlUpdateTask : SqlTaskBase
     /// <see cref="OnError"/>.
     /// </remarks>
     internal long GetLastErrorCode() => _lastErrorCode;
+
+    /// <summary>
+    /// The outcome the classifier produced for the LAST update invocation, or <see langword="null"/> when
+    /// no invocation reached the classifier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PUBLISHED BECAUSE THE OUTCOME IS RICHER THAN THE CODE IT COLLAPSES TO, and one consumer needs the
+    /// difference: contract C-06's <c>Aborted</c> response carries a whole <c>ConflictDetail</c>, and the
+    /// only place that detail exists is on the outcome. <c>OnDoTask</c> answers a return code, so without
+    /// this the conflict arm would be classified and then thrown away one frame later.
+    /// </para>
+    /// <para>
+    /// "LAST" IS EXACT ON BOTH PATHS. The single-table path invokes the classifier once. The multi-table
+    /// path invokes it once per descriptor and STOPS AT THE FIRST FAILURE
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L356-L369</c>], so the last
+    /// outcome recorded is always the one that decided the run's result.
+    /// </para>
+    /// <para>
+    /// IT IS NOT AN ACCUMULATOR AND MUST NOT BECOME ONE. Accumulation across the multi-table loop belongs
+    /// to the caller-side proxy [<c>n_cst_threading_task_sqlupdate.sru:L66-L69</c>]; this member reports
+    /// one classification.
+    /// </para>
+    /// </remarks>
+
+    /// Clears the error latch - <c>of_clearerror()</c>
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L607-L611</c>].
+    /// </summary>
+    /// <returns><c>RetCode.OK</c>, which is the only value the oracle's function can answer.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE LATCH IS PER EXECUTION, AND WITHOUT THIS IT WAS PER OBJECT.</b> The substrate clears it at
+    /// the head of EVERY execution - <c>of_ClearError()</c> is the third statement of <c>of_execute</c>,
+    /// after the running and skip guards and before <c>OnStart</c>
+    /// [<c>n_cst_thread_task.sru:L240-L246</c>] - so the epilogue's de-duplication guard
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L389, :L397</c>] only ever compares against a code THIS run
+    /// raised. A port that latches but never clears silently changes what that guard means: a second,
+    /// entirely independent failure carrying the same code as an earlier run's is read as a duplicate and
+    /// its error event is never raised, so the caller is told nothing at all went wrong on the run that
+    /// failed. The longer a task is reused, the more codes accumulate that can never be reported again.
+    /// </para>
+    /// <para>
+    /// <b>WITHIN-RUN DE-DUPLICATION IS UNAFFECTED, WHICH IS THE WHOLE POINT.</b> The clear happens once,
+    /// before the body; every raise inside the body still writes the latch and the two epilogue guards
+    /// still read it, so a code the body has already reported is still not reported twice. Clearing per
+    /// raise instead would destroy that, and clearing at the end of a run would leave the latch zero for a
+    /// guard that has not run yet.
+    /// </para>
+    /// <para>
+    /// <b>ONLY THE CODE IS CLEARED, BECAUSE ONLY THE CODE IS HELD.</b> The oracle's function also assigns
+    /// <c>_lastErrInfo = ""</c> [<c>:L608</c>], and this object deliberately holds no companion field -
+    /// nothing here reads <c>of_GetLastErrorInfo()</c>, and an unheld field cannot drift. See the remark
+    /// on <see cref="_lastErrorCode"/>.
+    /// </para>
+    /// </remarks>
+    internal long ClearError()
+    {
+        _lastErrorCode = 0L;
+
+        return RetCode.OK;
+    }
 
 
     #region The inputs - the four setters and the payload, each a verbatim port of one function
@@ -1054,6 +1138,42 @@ internal sealed class SqlUpdateTask : SqlTaskBase
         string identityColumn) =>
         _tables.AddUpdatableTable(name, updatableColumns, keyColumns, identityColumn);
 
+    /// <summary>
+    /// Replaces the descriptor array with an empty one and turns the multi-table switch off - the
+    /// descriptor half of <c>of_reset</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L63, :L67</c>].
+    /// </summary>
+    /// <returns>
+    /// <see cref="RetCode.OK"/> once the array is empty, or <see cref="RetCode.E_BUSY"/> while the task
+    /// is running [<c>:L60</c>].
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// REPLACEMENT, NOT TRIMMING - the oracle assigns a freshly declared empty array
+    /// [<c>:L67</c>], which is why the contract's repeated descriptor field replaces the set wholesale.
+    /// It is separated from <see cref="Reset"/> because a prepare needs exactly this much of
+    /// <c>of_reset</c> and must NOT also discard the payload, the auto-commit choice or the source
+    /// [<c>:L62, :L64-L65, :L68-L69</c>]. Two prepares naming one table must leave ONE table.
+    /// </para>
+    /// <para>
+    /// <b>The guard is the WORKER's running flag, applied here rather than delegated.</b> The collection's
+    /// own <c>IsBusy</c> gate is deliberately left unset - see the constructor for why - so the guard
+    /// <c>of_reset</c> carries at [<c>:L60</c>] is applied at this level, exactly as <see cref="Reset"/>
+    /// applies it. Nothing is cleared behind a refusal.
+    /// </para>
+    /// </remarks>
+    internal long ResetUpdatableTables()
+    {
+        // [:L60] the guard is FIRST, and a refusal leaves the descriptor set entirely intact.
+        if (IsRunning?.Invoke() == true)
+        {
+            return RetCode.E_BUSY;
+        }
+
+        // [:L63, :L67] the switch off and the empty array, in the oracle's own pairing.
+        return _tables.Reset();
+    }
+
     #endregion
 
     #region Reset and finalize - the two lifecycle hooks that clear the payload
@@ -1183,6 +1303,20 @@ internal sealed class SqlUpdateTask : SqlTaskBase
     internal long OnDoTask(CancellationToken cancellationToken = default)
     {
         // =========================================================================================
+        //  STEP 0 [n_cst_thread_task.sru:L246] - CLEAR THE ERROR LATCH, BEFORE THE ACQUISITION
+        //
+        //  `of_ClearError()`, the substrate's third statement in of_execute and the one that makes the
+        //  epilogue's de-duplication guard mean "already reported ON THIS RUN" rather than "reported at
+        //  some point in this object's life". The managed substrate models no of_execute - see point 7 of
+        //  this file's header - so this entry point is where the oracle's per-execution clear belongs, and
+        //  it must precede STEP 1 because the acquisition arm below is itself a raise site.
+        //
+        //  The oracle discards the return and so does this call site; the value exists because the
+        //  oracle's function has one, not because anything reads it.
+        // =========================================================================================
+        _ = ClearError();
+
+        // =========================================================================================
         //  STEP 1 [:L292-L296] - ACQUIRE THE TRANSACTION, BEFORE ANYTHING ELSE AND OUTSIDE THE BLOCK
         //
         //  `if IsFailed(of_GetTransObject(ref transObject,ref dbErrData)) then`. Note the two-argument
@@ -1190,6 +1324,13 @@ internal sealed class SqlUpdateTask : SqlTaskBase
         //  carry it. Tested with the tri-state failure predicate exactly as the oracle tests it, so a
         //  prevention - which reads as a success in that algebra - would NOT take this arm.
         // =========================================================================================
+        // The two run latches are cleared FIRST, before the transaction is even acquired, so that a run
+        // which fails at acquisition cannot report the previous run's classification or diagnostic. They
+        // are observation surfaces for the wire layer rather than oracle state, so clearing them here is
+        // invisible to behaviour.
+        _lastOutcome = null;
+        _lastErrorText = string.Empty;
+
         IPooledTransaction? transaction = null;
         DbErrorData acquisitionError = DbErrorData.Empty;
 
@@ -1510,10 +1651,51 @@ internal sealed class SqlUpdateTask : SqlTaskBase
 
         UpdateOutcome outcome = _conflictDetector.Classify(attempt);
 
+        // LATCHED FOR THE CALLER-SIDE SURFACE, AND LAST-WINS IS THE ORACLE'S SHAPE. On the multi-table
+        // path the loop stops at the first failure [:L366, :L368], so the LAST attempt is the one that
+        // decided the run - which is exactly what the published contract's classification field carries.
+        _lastOutcome = outcome;
+
         PublishOutcome(outcome);
 
         return outcome.Code;
     }
+
+    /// <summary>
+    /// The classification of the most recent update attempt, or <see langword="null"/> when none was made.
+    /// </summary>
+    /// <value>
+    /// <see langword="null"/> is a legitimate and common state rather than a fault: every arm of the run
+    /// that returns before <c>_of_Update</c> [<c>:L292-L363</c>] leaves nothing to classify. On the
+    /// multi-table path this carries the LAST attempt's classification, because the loop stops at the
+    /// first failure and therefore the last attempt is the one that decided the run.
+    /// </value>
+    /// <remarks>
+    /// READ BY THE CALLER-SIDE SURFACE, WRITTEN ONLY BY THE CLASSIFIER'S CALL SITE. It is deliberately not
+    /// cleared by <see cref="Reset"/>: the oracle's reset clears the task's INPUTS [<c>:L58-L72</c>] and
+    /// says nothing about a classification, and clearing it here would make a caller that read its result
+    /// after resetting for the next run see nothing where the oracle shows the previous outcome.
+    /// </remarks>
+    /// <remarks>
+    /// AN OBSERVATION SEAM, AND A NECESSARY ONE RATHER THAN A CONVENIENCE. It follows the same shape as
+    /// <see cref="GetUpdateRows"/> and <see cref="GetLastErrorCode"/>: the oracle keeps the equivalent in
+    /// private fields and publishes it through events, and the caller-side surface this task sits behind
+    /// has to answer with the whole classification rather than only its code. A null value therefore means
+    /// "no update has run", which is distinct from an update that ran and failed - that one carries an
+    /// outcome whose kind says so, and a caller must not read the absence as a success.
+    /// </remarks>
+    internal UpdateOutcome? LastOutcome => _lastOutcome;
+
+    /// <summary>
+    /// The terminal diagnostic the last run latched, or the empty string when none was recorded.
+    /// </summary>
+    /// <value>
+    /// EMPTY IS THE NORMAL STATE AND NOT AN OMISSION: a run that succeeded has nothing to report, and the
+    /// wire layer distinguishes "no text" from "no run" by reading <see cref="LastOutcome"/> beside it.
+    /// An outcome-carried text is preferred over a branch text wherever both exist, because the classifier
+    /// produced it and the branch texts are set only on arms the classifier never reaches.
+    /// </value>
+    internal string LastErrorText => _lastErrorText;
 
     /// <summary>
     /// Fires the caller-side proxy's two events for one classified invocation -
@@ -1663,6 +1845,14 @@ internal sealed class SqlUpdateTask : SqlTaskBase
     /// </remarks>
     private long CompleteUpdate(long rtCode, IPooledTransaction? transaction, string errorText)
     {
+        // Latched here because this is the ONE place every arm of the run converges on with its terminal
+        // diagnostic in hand. An outcome-carried text is preferred when the classifier produced one,
+        // because it is the more specific of the two - the branch texts above it are set only on arms the
+        // classifier never reaches.
+        _lastErrorText = _lastOutcome is { ErrorText.Length: > 0 } classified
+            ? classified.ErrorText
+            : errorText;
+
         // [:L385] EXACT equality. See the remarks.
         if (rtCode == RetCode.OK)
         {
@@ -1975,4 +2165,3 @@ internal sealed class SqlUpdateTask : SqlTaskBase
 }
 
 #endregion
-

@@ -1,0 +1,406 @@
+# ==================================================================================================
+#  .github/workflows/ci.yml - CONTINUOUS INTEGRATION FOR THE POWERFRAMEWORK .NET 10 DECOMPOSITION
+#  ------------------------------------------------------------------------------------------------
+#  WHAT THIS WORKFLOW IS FOR, AND THE ONE THING IT MUST GET RIGHT
+#
+#  Constraint C-H of the Agent Action Plan requires 80 percent LINE coverage PER IN-SCOPE SERVICE,
+#  "evaluated per service rather than repository-wide so that one service's coverage cannot mask
+#  another's". That sentence is the whole design of the `service` job below: four independent matrix
+#  legs, four independent Cobertura reports, four independent verdicts, and no aggregation step
+#  anywhere. There is deliberately no repository-wide coverage number computed, published or gated on
+#  in this file, because computing one would invite gating on it.
+#
+#  AAP section 0.5.4.3 additionally specifies the shape: a four-service matrix running restore, a
+#  Release build, and test with coverage collection, enforcing the gate from the Cobertura report,
+#  then building one container image per in-scope service per build. Each of those is a job below.
+#
+#  WHY `fail-fast: false` ON BOTH MATRICES IS PART OF THE REQUIREMENT RATHER THAN A CONVENIENCE
+#  With the default fail-fast, the first service to fall below the floor cancels the other three legs
+#  before they measure anything - so a run would report one failure and three unknowns, and a second
+#  service silently below the floor would stay invisible until the first was fixed. That is masking by
+#  another route. Disabling it makes every run produce all four verdicts.
+#
+#  THE FOUR IN-SCOPE SERVICES, AND ONLY THOSE
+#  gateway, dataservices, persistence, security. The four DEFERRED services - DesignSystem, Documents,
+#  Integration and ScriptBridge - appear nowhere in this file: no matrix entry, no job, no image, no
+#  environment variable and no secret. They have no project to build and no test to run, and adding a
+#  placeholder leg for one would be the partial implementation the requirements forbid.
+#
+#  WHAT IS DELIBERATELY ABSENT FROM THIS FILE
+#    * No repository-wide coverage aggregate. See above; this is the point of the file.
+#    * No branch or method coverage threshold. C-H names a line-coverage floor and nothing else.
+#    * No secret of this project's own. The signing key, the mutual-TLS material and every
+#      credential live in the orchestration secret layer and reach a service through the options
+#      pattern; nothing here needs any of them, because nothing here starts a service. The only
+#      credential used is the automatically provisioned GITHUB_TOKEN, for the container registry.
+#    * No `docker compose up`. The compose bring-up and its health gates belong to a deployment
+#      check, and this environment's own record notes that the bring-up could not be exercised where
+#      this work was authored; asserting it here would be claiming a verification that has not
+#      happened. Container correctness is asserted by BUILDING each image, which this file does do.
+#    * No step that touches the read-only legacy tree. Nothing here restores, compiles, lints or
+#      rewrites ws_objects/**, a *.pbl, *.pbt, *.pbw, *.pbr, *.pbd or *.pbg file, or any of the seven
+#      root native binaries. The legacy tree is the behavioural oracle, never a build input.
+#    * No Playwright job. tests/e2e requires all four services running and a provisioned client
+#      identity; it is run against a deployed stack, and its documented install-and-run path lives in
+#      tests/e2e/README.md.
+#    * No performance, latency or throughput assertion. The repository publishes no such budget.
+# ==================================================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  # Manual runs, so the gate can be re-measured without a commit.
+  workflow_dispatch:
+
+# Read-only by default. The one job that needs more says so for itself.
+permissions:
+  contents: read
+
+# One in-flight run per ref. A superseded run tells nobody anything useful and holds a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Quieter, faster restores, and no first-run telemetry notice cluttering the log.
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+  # Directory.Build.props switches ContinuousIntegrationBuild on when CI is set, which normalizes the
+  # source paths embedded in every assembly. GitHub Actions sets CI itself; it is restated here so the
+  # behaviour is legible from this file rather than inherited invisibly.
+  CI: 'true'
+  # The single source of truth for the gate. C-H says 80 percent; it is written once, here.
+  COVERAGE_MINIMUM_LINE_RATE: '0.80'
+
+jobs:
+
+  # ================================================================================================
+  #  THE ROOT LEG - the whole solution, and the ten test projects the per-service gate does not cover
+  #
+  #  The service gate deliberately measures ONLY the four service assemblies, so the six shared
+  #  libraries and the generated contracts project are outside it. They are not therefore unchecked:
+  #  this job builds every project in the repository solution and runs the six shared test projects
+  #  and the contracts test project. Holding a service's coverage number hostage to a shared
+  #  library's would be the masking C-H forbids, in the other direction - but leaving those projects
+  #  unbuilt and untested would be worse.
+  # ================================================================================================
+  solution:
+    name: Solution build and shared library tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          # Read from global.json rather than restated, so the SDK cannot drift from the pin the
+          # repository already declares.
+          global-json-file: global.json
+
+      - name: Restore the repository solution
+        run: dotnet restore PowerFramework.slnx
+
+      # Warnings are errors repository-wide through Directory.Build.props, so a warning fails here.
+      # Directory.Build.props also carries the PFW0001 assertion target, which fails the build if any
+      # referenced project output arrives from a configuration other than the one being built - so
+      # this step additionally proves no Release artifact consumes a Debug assembly.
+      - name: Build the repository solution in Release
+        run: dotnet build PowerFramework.slnx --configuration Release --no-restore
+
+      # The six shared test projects plus the contracts test project, named individually rather than
+      # discovered, so that a project silently dropped from the solution cannot silently stop running.
+      - name: Test the shared libraries and the published contracts
+        run: |
+          set -euo pipefail
+          for project in \
+            shared/PowerFramework.Shared.Kernel.Tests \
+            shared/PowerFramework.Shared.Diagnostics.Tests \
+            shared/PowerFramework.Shared.Eventful.Tests \
+            shared/PowerFramework.Shared.Localization.Tests \
+            shared/PowerFramework.Shared.Containers.Tests \
+            shared/PowerFramework.Contracts.Tests ; do
+            echo "::group::${project}"
+            dotnet test "${project}" --configuration Release --no-build
+            echo "::endgroup::"
+          done
+
+  # ================================================================================================
+  #  THE PER-SERVICE LEG - four independent builds, four independent coverage gates
+  #
+  #  Each leg runs the documented per-service command shape from AAP section 0.8.3 and the attached
+  #  environment's setup instructions, which must keep working with no extra argument: change into the
+  #  service directory, restore, build in Release, test with the coverage collector. Exactly one
+  #  .slnx sits in each service directory, which is what lets the bare commands resolve it and is what
+  #  makes each service genuinely buildable and testable on its own (constraint C-I).
+  #
+  #  The only addition to that shape is `--settings`, pointing at the repository-root
+  #  coverage.runsettings. That file scopes the report to the four service assemblies; without it the
+  #  report also covers the shared libraries and the thousands of generated protobuf sequence points
+  #  in PowerFramework.Contracts, and the top-level line rate reads between 13 and 51 percent for
+  #  services whose own assemblies are all above 88. The file itself carries those measurements and
+  #  the full reasoning.
+  # ================================================================================================
+  service:
+    name: ${{ matrix.service }} build, test and coverage gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    strategy:
+      # Never cancel a sibling leg. See the header: cancelling turns three verdicts into unknowns and
+      # lets a second service below the floor hide behind the first.
+      fail-fast: false
+      matrix:
+        include:
+          - service: persistence-service
+            assembly: PowerFramework.Persistence
+          - service: dataservices-service
+            assembly: PowerFramework.DataServices
+          - service: security-service
+            assembly: PowerFramework.Security
+          - service: gateway-service
+            assembly: PowerFramework.Gateway
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore ${{ matrix.service }}
+        working-directory: services/${{ matrix.service }}
+        run: dotnet restore
+
+      - name: Build ${{ matrix.service }} in Release
+        working-directory: services/${{ matrix.service }}
+        run: dotnet build --configuration Release --no-restore
+
+      # Release, not the default Debug. A bare `dotnet test` builds Debug even immediately after a
+      # Release build - a documented nuance of the toolchain rather than a defect - and coverage
+      # measured against a Debug build is not coverage of the artifact this job just produced.
+      # --no-build then guarantees the tests run against exactly the assemblies built above.
+      - name: Test ${{ matrix.service }} with coverage collection
+        working-directory: services/${{ matrix.service }}
+        run: |
+          dotnet test \
+            --configuration Release \
+            --no-build \
+            --settings "${GITHUB_WORKSPACE}/coverage.runsettings" \
+            --collect:"XPlat Code Coverage" \
+            --results-directory "${GITHUB_WORKSPACE}/coverage/${{ matrix.service }}"
+
+      # THE GATE. Three things are checked, and the second and third are what make the first
+      # trustworthy rather than merely plausible:
+      #   1. the report's line rate is at or above the floor;
+      #   2. the report contains EXACTLY ONE package, which proves the runsettings filter applied -
+      #      an unfiltered report would carry five to seven packages and a much lower rate;
+      #   3. that package is this service's own assembly, which proves the leg measured the service
+      #      it claims to.
+      # Without 2 and 3, a filter that silently stopped matching would turn the gate into a pass for
+      # whatever happened to be measured instead.
+      - name: Enforce the 80 percent line coverage floor for ${{ matrix.assembly }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import glob
+          import os
+          import sys
+          import xml.etree.ElementTree as ElementTree
+
+          service = os.environ['SERVICE']
+          assembly = os.environ['ASSEMBLY']
+          minimum = float(os.environ['COVERAGE_MINIMUM_LINE_RATE'])
+
+          reports = sorted(glob.glob(f'coverage/{service}/**/coverage.cobertura.xml', recursive=True))
+
+          if not reports:
+              sys.exit(
+                  f'::error::{service}: no coverage.cobertura.xml was produced. The coverage gate '
+                  f'cannot be evaluated, which is a structural failure rather than a quality one. '
+                  f'Check that the test project still references coverlet.collector.')
+
+          if len(reports) != 1:
+              sys.exit(
+                  f'::error::{service}: {len(reports)} coverage reports were produced where exactly '
+                  f'one was expected, so it is ambiguous which one the gate should read: {reports}')
+
+          root = ElementTree.parse(reports[0]).getroot()
+          packages = [package.get("name") for package in root.iter("package")]
+
+          if packages != [assembly]:
+              sys.exit(
+                  f'::error::{service}: the coverage report covers {packages} where it must cover '
+                  f'exactly [{assembly!r}]. Either coverage.runsettings was not applied - CI passes '
+                  f'it with the settings option - or its Include filter no longer names this '
+                  f'assembly. Until that is fixed the reported rate is not this service\'s rate.')
+
+          rate = float(root.get('line-rate'))
+
+          print(f'{service}: {assembly} line coverage {rate:.2%} '
+                f'against a floor of {minimum:.0%}')
+
+          if rate < minimum:
+              sys.exit(
+                  f'::error::{service}: line coverage {rate:.2%} is below the {minimum:.0%} floor '
+                  f'that constraint C-H of the Agent Action Plan requires for every in-scope '
+                  f'service. This gate is evaluated per service, so no other service\'s coverage '
+                  f'can raise it.')
+
+          print(f'{service}: coverage gate PASSED')
+          PYTHON
+        env:
+          SERVICE: ${{ matrix.service }}
+          ASSEMBLY: ${{ matrix.assembly }}
+
+      # Kept whatever the verdict, because the report is the evidence for it. `if: always()` means a
+      # failing gate still publishes the numbers that explain the failure.
+      - name: Publish the ${{ matrix.service }} coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: coverage/${{ matrix.service }}/**/coverage.cobertura.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ================================================================================================
+  #  THE IMAGE LEG - one container image per in-scope service per build
+  #
+  #  Four images, four Dockerfiles, no shared image and no combined one: the fused single-executable
+  #  artifact the legacy PowerBuilder project objects declare is exactly what this decomposition
+  #  replaces.
+  #
+  #  The build context is the REPOSITORY ROOT for every one of them, which is structural rather than
+  #  stylistic: each service project references the shared projects three levels up and MSBuild finds
+  #  Directory.Build.props, Directory.Packages.props and global.json by walking up to the root. The
+  #  repository-root .dockerignore is what keeps the legacy tree, the native binaries and every bin/
+  #  and obj/ directory out of that context.
+  #
+  #  PUBLISHING USES THE AUTOMATICALLY PROVISIONED TOKEN AND NO DECLARED SECRET. Images go to the
+  #  GitHub container registry authenticated with GITHUB_TOKEN, which is why this job raises
+  #  `packages: write` and the rest of the workflow stays read-only. A push happens only for a push
+  #  event on the default branch: for a pull request the token is not writable for a fork, so those
+  #  runs BUILD every image - which is the part that verifies the Dockerfile - and push none.
+  #
+  #  It depends on `service` so that an image is only produced for a service whose tests and coverage
+  #  gate have already passed. Publishing an image that failed its own gate would be worse than
+  #  publishing nothing.
+  # ================================================================================================
+  image:
+    name: ${{ matrix.service }} container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: service
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - persistence-service
+          - dataservices-service
+          - security-service
+          - gateway-service
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to the container registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The repository name is lowercased because a registry reference must be, while a GitHub
+      # repository name need not be.
+      - name: Compute the image reference
+        id: reference
+        run: |
+          set -euo pipefail
+          owner_and_repo="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${owner_and_repo}/${{ matrix.service }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and publish the ${{ matrix.service }} image
+        uses: docker/build-push-action@v6
+        with:
+          # The repository root, for the reason recorded in the job header and in each Dockerfile.
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          # Build always; push only where the token can write. A pull-request run still proves the
+          # Dockerfile builds, which is the assertion that matters for a change under review.
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ steps.reference.outputs.image }}:${{ github.sha }}
+            ${{ steps.reference.outputs.image }}:latest
+          # Provenance and SBOM attestation are left at their defaults rather than switched on: no
+          # requirement in this refactor asks for either, and enabling them changes what is published.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # ================================================================================================
+  #  THE VERDICT - one required status for the whole workflow
+  #
+  #  A branch protection rule can require this single job instead of enumerating every matrix leg,
+  #  which matters because `fail-fast: false` means a failing leg does not stop the others: without
+  #  this job a run could finish with a red leg and still present a green overall picture to anything
+  #  that only watches for completion.
+  #
+  #  It inspects the RESULT of each dependency rather than relying on `needs` alone, because a
+  #  cancelled or skipped dependency is not a success and `needs` on its own would let one through.
+  # ================================================================================================
+  ci:
+    name: CI verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - solution
+      - service
+      - image
+
+    steps:
+      - name: Require every leg to have succeeded
+        run: |
+          set -euo pipefail
+          solution_result='${{ needs.solution.result }}'
+          service_result='${{ needs.service.result }}'
+          image_result='${{ needs.image.result }}'
+
+          echo "solution=${solution_result}  service=${service_result}  image=${image_result}"
+
+          failed=0
+          for pair in "solution:${solution_result}" "service:${service_result}" "image:${image_result}" ; do
+            name="${pair%%:*}"
+            result="${pair##*:}"
+            if [ "${result}" != "success" ]; then
+              echo "::error::The ${name} leg reported '${result}' rather than 'success'."
+              failed=1
+            fi
+          done
+
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo 'Every leg succeeded: solution build, four per-service coverage gates, four images.'

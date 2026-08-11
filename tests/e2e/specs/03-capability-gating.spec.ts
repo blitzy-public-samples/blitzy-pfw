@@ -122,8 +122,9 @@
  *
  * CREDENTIALS (C-F, C-G)
  * ---------------------
- * Every token is minted at run time by Security, the sole issuer, through
- * `acquireServiceToken`. No token is embedded, none is signed locally, no
+ * Every token is minted at run time by Security, the sole issuer, and is reached
+ * through `requireServiceToken`, which applies the issuance precondition before
+ * asking. No token is embedded, none is signed locally, no
  * signing key is read or named, and no credential-shaped literal appears
  * anywhere below. No token and no `Authorization` header is ever rendered into
  * an assertion message, and one test below turns that discipline on the response
@@ -155,7 +156,6 @@ import {
   INIT_FLAG_ENABLE_UI,
   INIT_FLAG_ENABLE_WEBVIEW,
   IN_SCOPE_CAPABILITY_FLAGS,
-  acquireServiceToken,
   bearerHeaders,
   capabilityFlagsIn,
   gatewayUrl,
@@ -163,6 +163,13 @@ import {
   type CapabilityFlagName,
   type ServiceToken,
 } from '../fixtures';
+
+import {
+  assertTokenIssuanceProvisioned,
+  requireServiceToken,
+} from '../fixtures/token-issuance';
+
+import { probeStackAvailability } from '../fixtures/live-stack';
 
 /*
  * ===========================================================================
@@ -849,6 +856,52 @@ function requireNumber(
 }
 
 test.describe('Capability gating', () => {
+  // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
+  //
+  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
+  // nothing else, on every topology including the local bring-up, so with no
+  // identity provisioned every authenticated assertion below is unrunnable. The
+  // hook fails this group's SETUP in a full acceptance run rather than letting
+  // fifteen token calls fail one at a time with transport errors that never say
+  // why; a run that has explicitly declared itself partial passes straight
+  // through here and its token-dependent tests skip themselves instead, with the
+  // reason stated. The whole policy lives in `fixtures/token-issuance.ts` — this
+  // line only applies it.
+  test.beforeAll(assertTokenIssuanceProvisioned);
+
+  // ---------------------------------------------------------------------------
+  // MISSING-STACK BEHAVIOUR, MADE UNIFORM AND EXPLICIT ACROSS ALL SIX SPECS
+  //
+  // This suite drives real HTTP against a running four-service stack, so three
+  // outcomes have to stay distinguishable: the contract holds (pass), the
+  // contract is violated (fail), and the stack is not up at all (neither).
+  // Without an explicit third state the last one arrives as a wall of transport
+  // errors that read exactly like the second - a false accusation against
+  // services that are merely absent - and the tempting remedy is to soften the
+  // assertions until they tolerate an unreachable host, which converts a real
+  // violation into a silent pass and destroys the suite's whole value.
+  //
+  // The probe is memoised per worker, so this costs one request per worker and
+  // not one per test.
+  //
+  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
+  // than a title match: several specs mix pure-fixture assertions in with HTTP
+  // ones, those assertions are exactly the part that still holds with nothing
+  // running, and skipping them would throw away the only coverage available
+  // before a bring-up. A tag is declarative and machine-read; a title substring
+  // would silently start skipping the moment someone reworded a test name, and
+  // two stack-free tests in this suite never carried the wording at all.
+  // ---------------------------------------------------------------------------
+  test.beforeEach(async ({}, testInfo) => {
+    if (testInfo.tags.includes('@no-stack')) {
+      return;
+    }
+
+    const availability = await probeStackAvailability();
+
+    test.skip(!availability.reachable, availability.reason);
+  });
+
   // Deliberately NOT `mode: 'serial'`. Every assertion below is independent,
   // mutates nothing, and acquires whatever credential it needs for itself.
   // Serial execution belongs to the two mutating workflow specs, where row state
@@ -872,7 +925,7 @@ test.describe('Capability gating', () => {
    * verified with nothing running at all.
    */
 
-  test('the eight capability bits match the legacy declaration exactly (no stack)', () => {
+  test('the eight capability bits match the legacy declaration exactly (no stack)', { tag: '@no-stack' }, () => {
     // Three-way agreement, per bit: the individually exported constant, the
     // fixture's own record, and the literal transcribed from the legacy source.
     // Iterating the published name list rather than writing eight blocks means a
@@ -920,7 +973,7 @@ test.describe('Capability gating', () => {
     }
   });
 
-  test('INIT_FLAG_ENABLE_ALL is 3847 and omits BLINKFAST deliberately (no stack)', () => {
+  test('INIT_FLAG_ENABLE_ALL is 3847 and omits BLINKFAST deliberately (no stack)', { tag: '@no-stack' }, () => {
     // ===================================================================
     //  THE AGGREGATE IS 3847. IT IS NOT 3855. THAT IS CORRECT.
     //  -------------------------------------------------------------------
@@ -982,7 +1035,7 @@ test.describe('Capability gating', () => {
     ).not.toBe(KNOWN_CAPABILITY_BITS);
   });
 
-  test('the aggregate sums exactly the seven bits the legacy sums (no stack)', () => {
+  test('the aggregate sums exactly the seven bits the legacy sums (no stack)', { tag: '@no-stack' }, () => {
     // This pins WHICH seven, not merely the total. A sum that dropped ORCA (256)
     // and counted BLINKFAST (8) twice also totals 3847 while being structurally
     // wrong, and only an assertion over the named terms rejects it.
@@ -1038,7 +1091,7 @@ test.describe('Capability gating', () => {
     }
   });
 
-  test('storage is the only capability with an in-scope Phase-1 consumer (no stack)', () => {
+  test('storage is the only capability with an in-scope Phase-1 consumer (no stack)', { tag: '@no-stack' }, () => {
     // Independent corroboration that the Phase-1 slice follows a seam the legacy
     // itself recognised. Six of the eight bits belong to deferred capability
     // areas and one to packaging tooling that is not a service at any phase, so
@@ -1074,7 +1127,7 @@ test.describe('Capability gating', () => {
     }
   });
 
-  test('the table names exactly eight bits, spelled verbatim (no stack)', () => {
+  test('the table names exactly eight bits, spelled verbatim (no stack)', { tag: '@no-stack' }, () => {
     expect(
       ALL_CAPABILITY_FLAG_NAMES.length,
       'the capability set is closed by the legacy declaration at ' +
@@ -1115,7 +1168,7 @@ test.describe('Capability gating', () => {
     }
   });
 
-  test('the pure bitwise helpers agree with the table (no stack)', () => {
+  test('the pure bitwise helpers agree with the table (no stack)', { tag: '@no-stack' }, () => {
     // Storage is contained in the aggregate; the alternative engine build is not.
     // These two are the helper-level statement of the omission this file exists
     // to pin.
@@ -1196,7 +1249,7 @@ test.describe('Capability gating', () => {
   test('/v1/capabilities reports the aggregate as 3847 with BLINKFAST clear', async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     const response = await request.get(gatewayUrl(CAPABILITIES_PATH), {
       headers: bearerHeaders(token),
@@ -1341,7 +1394,7 @@ test.describe('Capability gating', () => {
   test('/v1/capabilities reports only the eight declared capabilities, consistent with the mask', async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     const response = await request.get(gatewayUrl(CAPABILITIES_PATH), {
       headers: bearerHeaders(token),
@@ -1479,7 +1532,7 @@ test.describe('Capability gating', () => {
   test('/v1/capabilities names no deferred service and no deferred route family', async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     const response = await request.get(gatewayUrl(CAPABILITIES_PATH), {
       headers: bearerHeaders(token),
@@ -1565,7 +1618,7 @@ test.describe('Capability gating', () => {
   test('/v1/capabilities exposes no secret-shaped material', async ({
     request,
   }) => {
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     const response = await request.get(gatewayUrl(CAPABILITIES_PATH), {
       headers: bearerHeaders(token),

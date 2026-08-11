@@ -69,14 +69,15 @@ because they are where the corresponding work belongs, not because a reader can 
 | `characterization/README.md` | The paired-capture store's own readme, restating the shared-volume rule verbatim | **Planned — not yet present** |
 | `characterization/workflows/` | Workflow definitions and their determinism masks | **Planned — not yet present** |
 | `characterization/recordings/legacy/<workflowId>/`, `characterization/recordings/dotnet/<workflowId>/` | The paired recordings themselves | **Planned — not yet present** |
-| `.github/workflows/ci.yml` | The per-service coverage gate described in [§8](#8-coverage-gate-mechanics) | **Planned — not yet present** |
 | `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration, the `persistence-db` volume and the readiness gates. `orchestration/.env.example` is present; the manifest and its readme are not | **Planned — not yet present** |
 
 Everything else this document references **is present in the tree today**: the read-only legacy tree
 including the entire fixture corpus, the six shared library projects and their test projects, the four
-service directories, the protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the
-Playwright specs under `tests/e2e/specs/`, `orchestration/.env.example`, and the six sibling documents
-in this folder.
+service applications with entry points and their four test projects, the protocol and OpenAPI definitions
+under `shared/PowerFramework.Contracts/`, the Playwright specs under `tests/e2e/specs/`,
+`orchestration/.env.example`, and the six sibling documents in this folder. All twenty projects build in
+Release with zero warnings and zero errors and all ten test projects pass; what remains unexercised is
+everything requiring a **container or a network hop** rather than anything requiring code.
 
 The distinction matters here more than it looks. A parity model whose *inputs* were also hypothetical
 would be unfalsifiable — but the inputs are not hypothetical. **The oracle and its fixtures exist
@@ -183,9 +184,10 @@ Stated narrowly, because a parity document that overclaims its own verification 
   [`BUILD.md`](BUILD.md) §13 states the same caveat and is the authority for it.
 - **Separately, in this repository:** restore is audit-clean and the shared libraries, the contracts
   project and the four service projects build with zero warnings and zero errors, with the test suites
-  passing. What has **not** been exercised here is a service *starting* — no `Program.cs` is authored yet,
-  so an application project supplies no entry point of its own and nothing in this document should be read
-  as evidence that a service serves a request. [`BUILD.md`](BUILD.md) §13 carries the current figures.
+  passing, and all four container definitions exist. What has **not** been exercised here is the STACK
+  starting: one image was built and run in isolation, no request crossed a boundary between two services,
+  and no orchestration manifest exists to bring the four up together, so nothing in this document should be
+  read as evidence that a service answers another service over the network. [`BUILD.md`](BUILD.md) §13 carries the current figures.
 - **Every locator in this document was resolved against the file on disk**, and the cited line numbers
   were checked against their content rather than trusted.
 - **Every count in [§3](#3-the-oracle-and-its-fixture-corpus) was produced by counting the files**, and
@@ -199,24 +201,33 @@ Stated narrowly, because a parity document that overclaims its own verification 
 
 ### 1.5 What was not verified — stated plainly
 
-**No verified container bring-up is claimed anywhere in this document**, and the reason is stronger than
-an unavailable tool: **nothing exists to bring up.** No service `Dockerfile`, no
-`orchestration/docker-compose.yml`, no `.github/workflows/ci.yml`, and no service application entry
-point. Docker was additionally not installed in the environment where this migration was planned, so the
-Compose bring-up and its ordered health probes could not have been exercised in any case.
+**No verified multi-service container bring-up is claimed anywhere in this document**, and the reason is no
+longer that nothing exists to bring up. The four service applications all have entry points and all start
+under `dotnet run`, **all four container definitions are authored**, and so is
+`.github/workflows/ci.yml`. What is missing is the thing that ASSEMBLES them:
+`orchestration/docker-compose.yml` and `orchestration/README.md` are absent, so the health-condition chain
+has no expression in the tree, and **three of the four images have not been built here**. Docker was additionally not installed in the
+environment where this migration was planned, so the Compose bring-up and its ordered health probes could
+not have been exercised in any case.
 
 This matters more in this document than in any other, because the capture rule in
 [§4.2](#42-the-rule-stated-in-full) is expressed in terms of a Docker volume. So the position must be
-exact: **the rule is authoritative, and the environment it presumes has never been stood up here — nor
-can it be yet.** Container correctness is **not asserted at present**: definition-and-manifest review plus
-CI is the intended assurance mechanism once those artifacts are authored, not a step that has been taken,
-and [R4](#r4--there-is-no-container-artifact-to-bring-up-and-none-has-been-reviewed) carries that as a
-tracked risk rather than a footnote.
+exact: **the rule is authoritative, and the environment it presumes has never been stood up here** — and
+it cannot be until the missing container definition and the Compose manifest exist. Container correctness
+is **not asserted at present**: definition-and-manifest review plus CI is the intended assurance
+mechanism once those artifacts are authored, not a step that has been taken,
+and
+[R4](#r4--the-container-set-is-incomplete-no-image-has-been-built-and-no-bring-up-has-been-reviewed)
+carries that as a tracked risk rather than a footnote.
 
-**No paired recording exists, therefore no parity result exists.** This document is the model and the
-method; it reports no comparison, because the legacy oracle has not been exercised here
+**No paired recording exists, therefore no parity result exists.** This is the claim that survives the
+services being built: `characterization/` does not exist, so there is nowhere to write a recording to. This
+document is the model and the method; it reports no comparison, because the legacy oracle has not been
+exercised here
 ([R1](#r1--pinyin-first-letter-matching-cannot-be-proven-bit-exact-from-the-repository-alone)) and the
-target side has no running service to capture from.
+target side has no *deployed* service to capture from — an in-process test host is not a capture
+environment, because the capture rule of [§4.2](#42-the-rule-stated-in-full) is expressed against a
+Docker volume that no manifest mounts.
 
 Two further things are not claimed. **No paired recording exists yet** — the store described in §4 is
 planned, so this document defines the model and the discipline, not a completed comparison. And **the
@@ -645,14 +656,15 @@ claim over all four. Three of the four are injected in source; the fourth is not
 per-row status is the point: a single "every seam is injected" sentence would be false of the fourth row,
 and — because it names no injection point — unfalsifiable for the other three.
 
-**No implemented seam here has been executed.** All three live inside service projects, and no service
-project currently produces an assembly ([§1.4](#14-what-was-verified-by-execution)), so their doubles are
-written and unrun. Exactly one piece of *executed* evidence bears on this section, and it is negative:
+**Each implemented seam here is executed by its service's own suite** — all four service test projects
+build and pass ([§1.4](#14-what-was-verified-by-execution)) — but by unit and in-process host tests rather
+than by a paired characterization capture, which is what the store below is for and which does not exist
+yet. Exactly one piece of *executed* evidence bears on this section, and it is negative:
 `shared/PowerFramework.Contracts.Tests/ContractsCarryNoBehaviourTests.cs` lists `System.TimeProvider`
 among the ambient capabilities the boundary must not hold (`:L1545-L1556`) and
 `NoExportedTypeMentionsIoNetworkDatabaseConfigurationOrAmbientStateInItsSignature` (`:L1595`) fails the
 build if any exported contract type mentions one. So the clock seam is provably **not** smuggled into the
-published boundary. That project builds and that test is among its 2,785 passing, which is why this one
+published boundary. That project builds and that test is among its 4,418 passing, which is why this one
 can be cited as a result rather than as an intention.
 
 | Seam | Where it originates | Why it must be seamed | Status |
@@ -761,11 +773,17 @@ hand-assembled approximation of them. That distinction matters for a decompositi
 behaviours in §7 are only observable *across* the boundary, and a test that calls the implementation
 class directly cannot see them.
 
-> **That is planned test architecture, not the current state.** No test in this repository uses
-> `WebApplicationFactory` or `TestServer` today, and none could: the four service applications have no
-> entry point, so the four service test projects do not build. `Microsoft.AspNetCore.Mvc.Testing` is
-> referenced by all four in anticipation. The 6,645 tests that do pass are shared-layer unit tests
-> ([`BUILD.md`](BUILD.md) §5.5).
+> **This is now the current state, not planned architecture.** All four service applications carry an
+> entry point and all four service test projects build and pass, and they do use `WebApplicationFactory`
+> against the implicitly generated internal `Program` with no `public partial` shim — the Gateway
+> authorization, health-aggregation and route-census suites, the Security endpoint suites and the
+> Persistence composition-root and endpoint suites all boot an in-process host. `Microsoft.AspNetCore.Mvc.Testing`
+> is referenced by all four because all four use it. The suite totals are in
+> [`BUILD.md`](BUILD.md) §5.5: 8,278 shared-layer and 10,325 service-layer, 18,603 passing in all.
+>
+> **What an in-process host still cannot see.** It performs no TLS handshake, no ALPN negotiation, no real
+> gRPC channel setup and no client-certificate exchange, and it is not a capture environment for §4 — the
+> capture rule is expressed against a Docker volume, and no manifest mounts one (§1.5).
 
 ### 6.2 The paging rewriters are pure-function matrices requiring no storage engine
 
@@ -806,17 +824,28 @@ And the count wrapper carries its own literal: the count form replaces the selec
 [`:L831-L833`], and wraps the result as a subquery aliased `pfwPagedSQL_Tbl` [`:L834`]. All three steps
 are observable in the generated text, so all three **must be** pinned.
 
-> **The paging matrix is PLANNED, and nothing here is pinned yet.** This is the one place in this document
-> where the gap between the model and the tests is wide enough to mislead, so it is stated plainly:
-> `SqlServerPagingRewriter`, `OraclePagingRewriter` and `PagingRewriteDispatcher` are **present in the
-> tree**, and **no test in `PowerFramework.Persistence.Tests` references any of the three.** The project
-> does not build in any case, because its application project has no entry point. So the sentinel
-> register, the four-form cross-product and the count wrapper above are a **specification of the matrix to
-> be written**, and no byte-exact assertion currently stands behind them. Earlier revisions of this
-> subsection, and comments in both rewriter files and in that test project's own manifest, described those
-> tests as existing; they do not, and the claim is withdrawn here and at each of those three sites.
+> **The paging matrix now EXISTS, and the withdrawal recorded here in an earlier revision is itself
+> withdrawn.** `SqlServerPagingRewriter`, `OraclePagingRewriter` and `PagingRewriteDispatcher` are present
+> in the tree and all three are driven: `SqlServerPagingRewriterTests.cs` carries 27 cases across the three
+> SQL Server strategies, `PagingRewriterByteExactTests.cs` carries 3 more, and between them they cover the
+> dispatcher's `DBT_MSSQL` / `DBT_ORACLE` selection and its `E_NO_IMPLEMENTATION` arm for anything else.
+> `PowerFramework.Persistence.Tests` builds and its 2,742 tests pass. So the sentinel register, the
+> four-form cross-product and the count wrapper above are pinned by byte-exact assertions rather than
+> specified for someone else to write — which is what makes them testable with no instance of either DBMS,
+> the property that let this matrix be written at all.
 >
-> **The rows the matrix must contain**, so the obligation is checkable rather than gestural:
+> **It pins the .NET output rather than certifying agreement with the oracle.** The expectations are
+> transcribed from a run of the .NET rewriters, so the suite detects drift and nothing more.
+>
+> **The limitation that remains is the one that matters, and the suite states it about itself.** Its
+> expectations are **transcribed from a run of the .NET rewriters, not derived from the legacy generator**,
+> because `n_sql` is a closed binary with no C++ source in this repository and obtaining the oracle's own
+> output would require executing PowerBuilder. It is therefore a **target characterization**: it makes any
+> change to a rewriter visible in review, and it does **not** certify agreement with `pfw.dll`. Closing
+> that gap needs a legacy-side capture (§4), not another test.
+>
+> **The rows the matrix must contain**, so the obligation is checkable rather than gestural — and so a
+> reader can audit which of them a future oracle capture has to cover:
 >
 > | # | Case | Expected outcome |
 > | ---: | --- | --- |
@@ -832,9 +861,11 @@ are observable in the generated text, so all three **must be** pinned.
 > | 10 | Count form, no order-by | Same, with no strip step observable |
 > | 11 | Page size or page index at or below zero | The invalid-paging-setting outcome, pre-dispatch |
 >
-> Each row's expectation must be derived from the **legacy generator** at
-> `n_cst_thread_task_sqlquery.sru:L320-L399` and `:L830-L834`, never from reading the .NET rewriter —
-> asserting a rewriter against itself would produce a matrix that passes and proves nothing.
+> Each row's expectation must ultimately be derived from the **legacy generator** at
+> `n_cst_thread_task_sqlquery.sru:L320-L399` and `:L830-L834`. The present suite asserts the .NET
+> rewriter against a transcription of its own output, which is what a target characterization is: it
+> detects drift, and on its own it cannot establish agreement with the oracle. That is the precise reason
+> the paired capture of §4 is a prerequisite for a parity *claim* rather than a nicety.
 
 Three further points the matrices must cover, all verified at source:
 
@@ -1330,16 +1361,31 @@ single line.
 Coverage is the only quantitative non-functional requirement in the entire brief (C-H, and §1.6), so its
 mechanics are stated precisely rather than as an aspiration.
 
-- **The collector emits `coverage.cobertura.xml`.** This was confirmed on the authoring host **against a
-  throwaway one-test skeleton project**, where the restore, release build and coverage-collecting test path
-  passed with zero warnings and zero errors and produced that report. It is the exact artifact the gate
-  will be measured from — not an inferred one — but no such report has been produced for any service in
-  this repository, because no service test project builds (§1.4).
-- **CI is to enforce 80% line coverage per in-scope service**, on new business-logic code. **The workflow
-  does not exist**: `.github/workflows/ci.yml` is planned and absent, so the gate is specified and
-  currently unenforced, and there is no service coverage figure for it to read. Four services are in scope;
-  the four deferred destinations have no project, no test and therefore no coverage figure at all (see
-  [`DEFERRED.md`](DEFERRED.md)).
+- **The collector emits `coverage.cobertura.xml`, and it now does so for every service.** All four service
+  test projects build and run, and each produces that report — the exact artifact the gate is measured
+  from, not an inferred one. Measured line rates: **Gateway 88.77%, DataServices 91.19%,
+  Persistence 88.05%, Security 91.68%**.
+- **What the report covers is scoped deliberately, and the figures above depend on it.** The repository-root
+  `coverage.runsettings` restricts the report to the four service assemblies. Without it, each service's
+  report also covers the shared libraries and the thousands of generated protobuf sequence points in
+  `PowerFramework.Contracts`, and the same four runs read **22.77%, 50.93%, 34.30% and 13.39%** — so an
+  unscoped gate would fail all four services for a reason unrelated to any service's tests. That settings
+  file carries both sets of measurements and the full reasoning.
+- **CI enforces 80% line coverage per in-scope service.** `.github/workflows/ci.yml` exists and does it, in
+  four independent matrix legs. Each leg reads its own service's report and checks three things, the second
+  and third of which are what make the first trustworthy: the line rate clears the floor; the report
+  contains **exactly one** package, which proves the settings file applied; and that package is that
+  service's own assembly, which proves the leg measured the service it claims to. The legs do not fail
+  fast against one another, so every run yields all four verdicts rather than one failure and three
+  unknowns. Four services are in scope; the four deferred destinations have no project, no test and
+  therefore no coverage figure at all (see [`DEFERRED.md`](DEFERRED.md)), and none of them appears in the
+  workflow.
+- **What has not been exercised:** a run of that workflow on a GitHub-hosted runner. The gate step was
+  extracted verbatim from the workflow and executed locally against all four real reports — passing for
+  all four, and failing correctly when the floor is raised above a measured rate, when handed an unfiltered
+  report, when handed a report for the wrong assembly, and when no report exists at all. The `actions/*`
+  and `docker/*` step versions, the registry authentication and the artifact upload are reviewed rather
+  than run.
 - **Evaluation is per service, never repository-wide.** This is the load-bearing detail. A repository-wide
   figure lets one service's coverage **mask** another's: a thoroughly tested shared library and a
   thoroughly tested Security service can carry an under-tested Persistence service over the line, and the
@@ -1372,7 +1418,7 @@ correct engineering answer is *report blocked rather than approximate*, that is 
 | R1 | Pinyin first-letter matching cannot be proven bit-exact from the repository alone — the **flags are documented**, the lookup table, the matching algorithm and the exact fuzzy-equivalence set are not | Parity — the **single genuine parity risk in the in-scope set** | Characterize the table, the algorithm and the fuzzy set from the oracle, else **report BLOCKED**. The flag decoding needs no characterization |
 | R2 | Cross-session foreign column-expression variables cannot cross a process boundary | Deliberate contract narrowing | Support co-resident references; **BLOCK the rest with a defined error** |
 | R3 | Encrypted-SQLite page-format parity | Out of Phase-1 scope | Provision the unencrypted path; document the limitation |
-| R4 | No container artifact exists to bring up, and none has been reviewed | Unverified claim, disclaimed | Definition-and-manifest review plus CI is the intended mechanism once those artifacts exist; claim neither a bring-up nor a completed review |
+| R4 | Nothing assembles the container set, so no multi-service bring-up has been reviewed | Unverified claim, disclaimed | All four definitions exist and so does CI; the Compose manifest and its readme are absent, so the readiness chain has no expression in the tree. One image was built and run in isolation. Definition-and-manifest review plus CI is the intended mechanism once the manifest exists; claim neither a multi-service bring-up nor a completed review |
 | R5 | No authoritative legacy build definition exists to translate | Reconstituting the behavioural oracle | Author the .NET build clean; read the legacy definitions for intent only |
 | R6 | The changelog is stale and is not a specification | Evidence discipline | Derive behaviour from source, with a locator on every claim |
 
@@ -1464,28 +1510,33 @@ a format the target provider cannot produce. An attempt would fail in a way that
 defect, which is worse than a documented gap. [`ARCHITECTURE.md`](ARCHITECTURE.md) records the same decision
 from the storage side.
 
-### R4 — There is no container artifact to bring up, and none has been reviewed
+### R4 — Nothing assembles the container set, so no multi-service bring-up has been reviewed
 
-No service `Dockerfile`, no `orchestration/docker-compose.yml`, no `.github/workflows/ci.yml`, and no
-service application entry point exists. Docker was additionally not installed in the environment where
-this migration was planned, so the Compose bring-up and its ordered health probes **were not run** and
-could not have been.
+`orchestration/docker-compose.yml` and `orchestration/README.md` do not exist. All four container
+definitions **do** — `gateway-service`, `dataservices-service`, `persistence-service` and
+`security-service` — and so does `.github/workflows/ci.yml`. One image, Security, was built and run and
+reached Docker health `healthy`; for the other three **`docker build` has not been run here**, so no
+layer, no `HEALTHCHECK` and no non-root switch in them has been observed to work. Docker was additionally not installed in the environment where this migration was planned, so the
+Compose bring-up and its ordered health probes **were not run** and could not have been.
 
 **Mitigation.** Definition-and-manifest review plus CI is the **intended** assurance mechanism for that
-path once the artifacts are authored. It is not a step that has been taken: there is nothing to review and
-no pipeline to run it.
+path once the remaining artifacts are authored. It is not a step that has been taken: the manifest half has
+nothing to review and no pipeline exists to run either half.
 
 > **No verified bring-up is claimed anywhere in this document, and no completed review is claimed
-> either.** No sentence here should be read as reporting a successful stack start or a reviewed manifest.
+> either.** No sentence here should be read as reporting a successful stack start, a built image or a
+> reviewed manifest.
 
 This risk is sharper in this document than elsewhere, because §4.2's capture rule is expressed in terms of a
 Docker volume: the rule is authoritative and the environment it presumes is, at the time of writing,
-unexercised here. What **was** exercised is the per-service restore, release build and coverage-collecting
-test **command shape** — passing with zero warnings and zero errors and producing a Cobertura report — and
-that run was against a **throwaway skeleton**, not against these services (§1.4, §8, and
-[`BUILD.md`](BUILD.md) §13, which is the authority for the distinction). Separately, this repository's own
-projects restore audit-clean and build with zero warnings and zero errors, and their test suites pass; no
-service has been *started*, because no `Program.cs` is authored yet.
+unexercised here. **A passing service test does not retire this risk** — an in-process host mounts no
+volume, so it cannot be the target side of a paired capture no matter how thorough it is. What **was**
+exercised is the per-service restore, release build and coverage-collecting test **command shape** —
+passing with zero warnings and zero errors and producing a Cobertura report — and that run was against a
+**throwaway skeleton**, not against these services (§1.4, §8, and [`BUILD.md`](BUILD.md) §13, which is the
+authority for the distinction). Separately, this repository's own twenty projects restore audit-clean and
+build with zero warnings and zero errors, and all ten test suites pass; **no service has been started in a
+container**, and none has served a request across a network.
 
 ### R5 — There is no authoritative legacy build definition to translate
 
@@ -1522,23 +1573,29 @@ only updatable DataWindow in the repository and `w_test_sqlite.srw` carries the 
 than assumed; that the shared-volume capture rule of §4.2 is binding and is also the technique's own
 prerequisite; that the four determinism seams of §5.1 are the enumerated sources of per-run variation; that
 the twelve groups in §7 are legacy behaviours to be reproduced and annotated, each with locators that
-resolve; that the coverage gate, once a pipeline exists to run it, is measured from
-`coverage.cobertura.xml` at 80% line coverage per in-scope service; and that the six shared and contracts
-test projects build and pass in this repository with 6,645 tests and zero failures.
+resolve; that the coverage gate is measured from `coverage.cobertura.xml` at 80% line coverage per in-scope
+service and is enforced by `.github/workflows/ci.yml` in four independent legs, with all four services
+measured above the floor; and that all ten test projects build and pass in this repository with 18,603
+tests, 4 skipped and zero failures.
 
-**It does not claim.** That any container bring-up was verified, or that any container artifact has been
-reviewed — none exists, and R4 says so. That CI enforces anything — the workflow file is absent. That any
-service builds, starts, serves a request or has been tested — all four service applications report `CS5001`
-for a missing entry point, so no service test project builds and no service coverage figure exists. That
-the restore/build/coverage path was exercised **against this repository** — it was exercised against a
-throwaway skeleton, and §1.4 says which. That the paging matrix of §6.2 exists — it is specified there and
-not written. That service-level tests run against an in-process host — that is planned architecture, and no
-test uses `WebApplicationFactory` or `TestServer` today. That any paired recording exists — the store is
-planned. That the legacy oracle has been executed in this environment — it has not, which is what makes R1
+**It does not claim.** That any container bring-up was verified — `orchestration/docker-compose.yml` does
+not exist, so the documented bring-up and its five health gates have not been run, and R4 says so. That any
+service STARTS or serves a request from its image — all four images build, and none was started here. That
+the CI workflow has run on a GitHub-hosted runner — `.github/workflows/ci.yml` exists and enforces the
+80%-per-service floor, and its gate step was extracted verbatim and exercised locally against all four real
+reports under four injected faults, but the workflow itself has not been dispatched. That any paired
+recording exists — the `characterization/` store is still planned and absent, which is what leaves the
+single parity risk of R1 open and is why the four pinyin oracle hooks skip rather than pass. That the legacy oracle has been executed in this environment — it has not, which is what makes R1
 live. That the pinyin filter can be delivered at bit-exact parity from repository evidence alone. That
 cross-session foreign expression variables will be supported. That encrypted SQLite reaches parity in this
 phase. And **no performance claim of any kind**, because the repository publishes no baseline and
 characterization compares observable outputs only, never execution time (§1.6).
+
+**It also does not claim** that any service has served a request **across a network** — every service
+test drives its host in process, so no TLS handshake, ALPN negotiation, real gRPC channel setup or
+client-certificate exchange has occurred — nor **that the paging matrix certifies agreement with the
+oracle**: its expectations are transcribed from a run of the .NET rewriters, so it detects drift and
+nothing more (§6.2).
 
 **It is additive.** This document created one file and changed nothing that already existed. No file under
 `ws_objects/**`, and none of the five pre-existing Chinese documents in this folder, was edited, translated,

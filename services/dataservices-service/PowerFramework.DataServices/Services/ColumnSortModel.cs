@@ -497,8 +497,14 @@ public sealed record ColumnSortIndicatorDescriptor
 /// constructor at all and holds no unmanaged resource, so it implements no disposal either. Adding an
 /// empty constructor to mirror the clause would be ceremony, not parity.
 /// </para>
+/// <para>
+/// IT IMPLEMENTS <see cref="IDataWindowColumnSortService"/>, WHICH IS ONE OF THE EVENT CHAIN'S FIVE
+/// ATTACHED-SERVICE CONTRACT. It declares NO member of its own beyond the two every attached
+/// service has. Declaring it is what lets the productive attached-service factory hand this model
+/// to an event chain directly rather than through an adapter.
+/// </para>
 /// </remarks>
-public sealed class ColumnSortModel : DataWindowServiceBase
+public sealed class ColumnSortModel : DataWindowServiceBase, IDataWindowColumnSortService
 {
     // ==========================================================================================
     //  CONSTANTS - SPELLINGS AND ACCESSIBILITY BOTH PRESERVED VERBATIM (AAP 0.4.5.3, DECISION 6)

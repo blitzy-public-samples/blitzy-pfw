@@ -56,8 +56,16 @@
     REGISTRY
     nuget.org for every entry. There are no private or internal package feeds in this refactor,
     and consequently no credential, key, token, password or feed URL appears anywhere in this file.
-    The repository's one npm dependency, @playwright/test 1.62.1, belongs to
-    tests/e2e/package.json and deliberately has no representation here.
+    The repository's THREE npm dependencies belong to tests/e2e/package.json and deliberately have no
+    representation here: @playwright/test 1.62.1, plus typescript 5.9.3 and @types/node 22.20.1. All
+    three are devDependencies and none ships in any container image.
+
+    THE COUNT USED TO READ "one", AND THE TWO IT OMITTED ARE THE ONES THAT MAKE THE FIRST USABLE. The
+    end-to-end root is TypeScript by specification - playwright.config.ts and specs/*.spec.ts - so a
+    compiler and the Node type declarations are what let that source type-check rather than being
+    optional tooling. The plan's own dependency inventory names only the runner because the runner is
+    the capability; these two are its language, and stating one figure while declaring three is the
+    kind of drift that makes an inventory stop being worth reading.
 
     TRANSITIVE VERSIONS THAT WILL APPEAR IN LOCK FILES AND DIFFER FROM THE DIRECT PINS
     Recorded so that a reader does not mistake any of them for drift. None needs its own entry.
@@ -202,6 +210,23 @@
       mechanically enforced instead of merely written down.
       Both are recorded in the root NOTICE, the reader as a direct reference and SharpYaml as a
       transitive one.
+
+      DECLARED DIVERGENCE: THE PLAN'S EXHAUSTIVE DIRECT PACKAGE INVENTORY DOES NOT LIST THIS PACKAGE.
+      It is the one direct reference in this file that no line of that inventory names, and it is
+      recorded here as an addition rather than left to be discovered as an unexplained entry. The need
+      is file level and arose from a decision the inventory itself forces: the plan mandates
+      Microsoft.OpenApi at exactly 2.11.0 and publishes both REST contracts as YAML, and 2.11.0 ships
+      no YAML reader, so validating those two documents against the pinned object model has no other
+      mechanism. The alternative was to not validate them, which would leave the mandatory pin with no
+      regression guard - the pin that, per the two findings above, fails restore if lowered and fails
+      compilation if raised.
+
+      THE ADDITION IS BOUNDED, AND EACH BOUND IS WHY IT IS SAFE TO ADD. It is referenced by exactly one
+      project, PowerFramework.Contracts.Tests, so it reaches no service and no container image; its
+      dependency on the mandatory pin is exactly version locked, so it cannot move that pin in either
+      direction; and it adds exactly one assembly to the graph, SharpYaml, which carries no advisory at
+      this version. No service behaviour depends on it, so removing it would cost the validation and
+      nothing else.
     -->
     <PackageVersion Include="Microsoft.OpenApi.YamlReader" Version="2.11.0" />
   </ItemGroup>

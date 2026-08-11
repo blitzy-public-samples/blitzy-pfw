@@ -97,11 +97,15 @@
 //
 // DELIBERATE ABSENCES. Each is a named constraint, so no reader "completes" this file by adding one.
 //
-//   * NO credential value of any kind, and no property that could hold one. Not as a default, not
-//     as an example, not in a comment (constraint C-F). The one property name below that contains
-//     the word "key" is ValidateIssuerSigningKey, which is a BOOLEAN SWITCH selecting whether the
-//     stock bearer handler verifies a signature; it holds no material and never could. Signing
-//     material exists in exactly one place in this system, and that place is the Security service.
+//   * NO credential VALUE of any kind. Not as a default, not as an example, not in a comment
+//     (constraint C-F). Exactly one property below carries a credential at run time -
+//     SecurityClientOptions.ClientSecret, the password half of the Basic identity this service
+//     presents to obtain its first service token - and it is empty in source, has no key in the
+//     sibling appsettings.json, and cannot be given one there: it arrives through the flat
+//     configuration key named by SecurityClientOptions.ClientSecretConfigurationKey, which the
+//     environment-variable provider cannot map into a section. So the declaration is here and the
+//     material is not, which is the only arrangement that lets the value be required and still
+//     leave nothing to leak in a committed file.
 //   * NO signing property of any name - no SigningKey, no IssuerSigningKey, no symmetric key, no
 //     issuer credential (constraint C-G). Security is the SOLE issuer; this service holds
 //     verification settings only, pointed at Security's published JWKS and discovery document so
@@ -235,10 +239,35 @@ public sealed class DataServicesOptions
     public SessionsOptions Sessions { get; set; } = new();
 
     /// <summary>
+    /// Bounds on the thin REST projection Gateway consumes.
+    /// </summary>
+    public RestProjectionOptions RestProjection { get; set; } = new();
+
+    /// <summary>
+    /// The transaction session this service opens against Persistence for a retrieval or an update.
+    /// </summary>
+    public PersistenceSessionOptions PersistenceSession { get; set; } = new();
+
+    /// <summary>
     /// How the event chain treats out-of-order delivery. Created by the decomposition; no legacy
     /// equivalent.
     /// </summary>
     public EventChainOptions EventChain { get; set; } = new();
+
+    /// <summary>
+    /// The trust anchor this service verifies its two upstreams' server certificates against. Bound
+    /// from <c>DataServices:InternalTls</c>. Created by the decomposition; no legacy equivalent.
+    /// </summary>
+    /// <remarks>
+    /// WHY IT IS REQUIRED AND NOT A HARDENING PREFERENCE. Persistence and Security both terminate TLS
+    /// with certificates issued by the local authority <c>docs/ARCHITECTURE.md</c> §9.3.1 generates,
+    /// and that authority is in no container's operating-system trust store. Left on platform default
+    /// trust every outbound channel this service opens - the four Persistence gRPC channels, the
+    /// Security token and crypto channel, and the bearer handler's key-set backchannel - refuses the
+    /// certificate the documented topology presents, and the service cannot make a single authenticated
+    /// call. Setting the anchor NARROWS trust to it; nothing here relaxes validation.
+    /// </remarks>
+    public InternalTlsTrustOptions InternalTls { get; set; } = new();
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -597,6 +626,34 @@ public sealed class ColumnExpressionOptions
     /// </remarks>
     [Range(0, int.MaxValue)]
     public int PageRowsPerPage { get; set; }
+
+    /// <summary>
+    /// The backstop on one macro invocation over the inverted channel. Must be positive. Defaults to
+    /// <see cref="SessionLifetimeOptions.DefaultIdleTimeout"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A BACKSTOP RATHER THAN A BUDGET, AND THE DISTINCTION IS THE WHOLE JUSTIFICATION FOR IT EXISTING.
+    /// The ordinary bound on a macro invocation is the calculating call's own cancellation, which is
+    /// real for any caller that attaches a gRPC deadline: an abandoned calculation is cancelled and the
+    /// invocation with it. What that does not cover is a caller that attaches no deadline at all. This
+    /// service cannot require one, and against such a caller an unserviced macro channel would hold the
+    /// session, its engines and the calculating call open indefinitely.
+    /// </para>
+    /// <para>
+    /// DERIVED, NOT CHOSEN. The default is the expression session's own idle lifetime, because an
+    /// invocation still outstanding past the point at which its session would have been reclaimed is
+    /// holding something the service's own policy had already given up on. It is deliberately an order
+    /// of magnitude away from any plausible invocation, so a properly deadlined client never reaches it
+    /// - which matters because an elapsed backstop produces a DEFINED timeout outcome rather than a
+    /// value, and a value fabricated for a macro is the substitution the whole channel exists to avoid.
+    /// </para>
+    /// <para>
+    /// SEPARATE FROM THE SESSION SETTING RATHER THAN READ FROM IT, so that shortening one does not
+    /// silently shorten the other. They start equal; a deployment that needs to move one moves one.
+    /// </para>
+    /// </remarks>
+    public TimeSpan MacroInvocationTimeout { get; set; } = SessionLifetimeOptions.DefaultIdleTimeout;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -770,6 +827,89 @@ public sealed class PersistenceClientOptions
     /// </remarks>
     [Required(AllowEmptyStrings = false)]
     public string Address { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The transaction descriptor every Persistence session this service opens is begun with. Bound from
+    /// <c>DataServices:Persistence:Transaction</c>.
+    /// </summary>
+    public PersistenceTransactionOptions Transaction { get; set; } = new();
+}
+
+/// <summary>
+/// The transaction descriptor DataServices presents when it opens a Persistence session. Bound from
+/// <c>DataServices:Persistence:Transaction</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// CREATED BY THE DECOMPOSITION, AND REQUIRED BY IT. In the legacy the DataWindow and the transaction
+/// object live in one process and a retrieval reaches the connection directly; across the boundary drawn
+/// between the DataWindow service layer and the only component permitted to execute SQL, a retrieval must
+/// name the session it runs on. C-05's <c>QueryRequest</c> carries a <c>TaskHandle</c> as its first field
+/// for exactly that reason, and a task is created against a session. So this group is what lets a
+/// retrieval have a session at all.
+/// </para>
+/// <para>
+/// <b>NO CREDENTIAL FIELD EXISTS HERE AND NONE MAY BE ADDED.</b> The descriptor's <c>logid</c> and
+/// <c>logpass</c> fields are Persistence's own, and Persistence's SQLite engine REFUSES a descriptor that
+/// supplies a credential outright - the evidenced connection is a file URI with no user
+/// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L450-L456</c>]. Carrying a credential here would
+/// therefore add a secret to configuration in order to have it rejected, which is the worst of both
+/// (constraint C-F).
+/// </para>
+/// <para>
+/// The defaults name the evidenced database and nothing else. <c>Dbms</c> is deliberately EMPTY: the
+/// legacy enumerates exactly two dialects, SQL Server as 0 and Oracle as 1
+/// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61</c>], and SQLite - the only engine
+/// with an evidenced schema - is in neither. Naming one would assert a dialect the deployment does not run
+/// (constraint C-E).
+/// </para>
+/// </remarks>
+public sealed class PersistenceTransactionOptions
+{
+    /// <summary>
+    /// The database name the descriptor carries. Defaults to the one evidenced database.
+    /// </summary>
+    /// <remarks>
+    /// <c>COMPANY</c> is the only table the repository evidences any DDL for
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469</c>], and Persistence resolves its
+    /// actual file from its own SQLite options rather than from this name, so this is the descriptor's
+    /// identity rather than a connection string.
+    /// </remarks>
+    public string Database { get; set; } = "COMPANY";
+
+    /// <summary>
+    /// The DBMS token the descriptor carries. Empty by default - see the type remarks.
+    /// </summary>
+    public string Dbms { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The server name the descriptor carries. Empty by default, because the evidenced connection is a
+    /// local file and names no server.
+    /// </summary>
+    public string ServerName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The <c>DBParm</c> string the descriptor carries. Empty by default.
+    /// </summary>
+    /// <remarks>
+    /// <c>DisableBind=1</c> is what makes the legacy interpolate literals instead of binding them, which
+    /// AAP §0.6.4 identifies as the mechanical root of the SQL-injection exposure. Leaving this empty
+    /// means bind variables are used, and a deployment that sets it is asking for the legacy's own
+    /// unbound behaviour deliberately rather than by omission.
+    /// </remarks>
+    public string DbParm { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the session is opened in auto-commit mode. Defaults to <see langword="true"/>.
+    /// </summary>
+    /// <remarks>
+    /// TRUE, BECAUSE A RETRIEVAL IS A READ AND A SINGLE UPDATE IS ONE STATEMENT. Auto-commit means each
+    /// statement commits itself, which is what a caller sending one update per request expects; a
+    /// deployment that batches several updates across requests onto one session turns this off and commits
+    /// explicitly. The two settings are not independent: Persistence REFUSES an explicit commit while
+    /// auto-commit is on [<c>n_cst_thread_trans.sru:L240</c>], and that refusal is the legacy's own.
+    /// </remarks>
+    public bool AutoCommit { get; set; } = true;
 }
 
 /// <summary>
@@ -810,19 +950,31 @@ public sealed class SecurityClientOptions
     public string BaseAddress { get; set; } = string.Empty;
 
     /// <summary>
-    /// The client identity this service presents on the single mutual-TLS edge in the system - the
-    /// Security service's token endpoint. Bound from <c>DataServices:Security:MutualTls</c>. Paths
-    /// only, never material.
+    /// The client certificate this service presents on the token-issuance edge wherever a deployment
+    /// terminates TLS at Security. Bound from <c>DataServices:Security:MutualTls</c>. Paths only, never
+    /// material. The alternative, and the one the documented topology uses, is
+    /// <see cref="ClientSecret"/>.
     /// </summary>
     /// <remarks>
     /// <para>
     /// CREATED BY THE DECOMPOSITION, and required for a functional reason rather than as hardening.
-    /// <c>POST /v1/tokens</c> is protected by mutual TLS and by nothing else, because <b>a caller
+    /// <c>POST /v1/tokens</c> is the one operation a bearer token cannot protect, because <b>a caller
     /// cannot present a bearer token in order to obtain its first bearer token</b>. DataServices is one
     /// of the two services that request tokens - it needs one for its own C-02 cryptographic calls and
-    /// one for the audience beneath it - so with no client certificate to present it obtains none, and
-    /// every authenticated call it would make is unreachable. The published contract has required this
-    /// since it was authored; this group is what makes it configurable.
+    /// one for the audience beneath it - so a deployment in which it can present NEITHER accepted
+    /// credential obtains none, and every authenticated call it would make is unreachable. That is why
+    /// <see cref="DataServicesOptions"/>'s validator refuses to start such a deployment rather than
+    /// letting the readiness probe report healthy over a service that cannot call anything.
+    /// </para>
+    /// <para>
+    /// THIS GROUP IS THE SECOND OF THE TWO SCHEMES THE CONTRACT PUBLISHES, NOT THE ONLY ONE. C-01
+    /// accepts <c>clientCredential</c> - an HTTP <c>Basic</c> credential naming a subject on Security's
+    /// issuance roster - OR <c>mutualTls</c>. A client certificate exists only inside a TLS handshake
+    /// and TLS may be terminated ahead of Security by a proxy or sidecar that strips it, so
+    /// this group cannot be the credential and <see cref="ClientSecret"/> is. It is retained, bound and
+    /// genuinely consumed - the composition root attaches it to the typed client's primary handler - so
+    /// the published alternative is reachable rather than declared, which is what makes it an
+    /// alternative instead of dead configuration.
     /// </para>
     /// <para>
     /// TWO PATHS AND NO MATERIAL, ENFORCED BY THE MEMBER SET RATHER THAN BY A CONVENTION. There is no
@@ -840,6 +992,76 @@ public sealed class SecurityClientOptions
     /// </para>
     /// </remarks>
     public MutualTlsClientOptions MutualTls { get; set; } = new();
+
+    /// <summary>
+    /// The FLAT configuration key that carries this service's issuance secret:
+    /// <c>SECURITY_CLIENT_SECRET_DATASERVICES</c>. This is a NAME, not a value; no secret appears in
+    /// this file, in any settings file, or in any container definition.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY CONVENTIONAL SECTION BINDING CANNOT WORK, and why this is a constant rather than a literal
+    /// written at the point of use. The environment-variable configuration provider translates a
+    /// double underscore, and only a double underscore, into the <c>:</c> section separator. This name
+    /// contains none, so it is a top-level configuration key of exactly this literal spelling rather
+    /// than a path into the <c>DataServices</c> section, and binding that section - however it is
+    /// bound - will never populate <see cref="ClientSecret"/>. The resolution is an explicit
+    /// post-configure step in the service entry point that reads
+    /// <c>configuration[SecurityClientOptions.ClientSecretConfigurationKey]</c> onto the bound
+    /// instance, which is the same mechanism Security uses for its own signing key and for every
+    /// roster secret it resolves. The constant is public so that the entry point and the tests which
+    /// drive configuration read one spelling from one place.
+    /// </para>
+    /// <para>
+    /// THE NAME IS FIXED BY SECURITY'S ISSUANCE ROSTER AND MUST MATCH IT EXACTLY. Security's
+    /// <c>Security:Clients</c> entry for the subject <c>powerframework-dataservices</c> names this same
+    /// key as the source of the secret it will compare against, and <c>orchestration/.env.example</c>
+    /// declares it once for both sides. Two spellings would be two ways for one deployment to be half
+    /// configured, and the failure would present as an authentication refusal rather than as the
+    /// configuration mismatch it is. No <c>DataServices__Security__ClientSecret</c> alias may be added.
+    /// </para>
+    /// </remarks>
+    public const string ClientSecretConfigurationKey = "SECURITY_CLIENT_SECRET_DATASERVICES";
+
+    /// <summary>
+    /// The shared secret this service presents as the password half of its <c>Basic</c> issuance
+    /// credential. Reaches the process through <see cref="ClientSecretConfigurationKey"/> and never
+    /// through a settings file. Never defaulted, never logged, never echoed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE USER-ID HALF IS NOT CONFIGURABLE, AND THAT IS DELIBERATE. It is the subject
+    /// <c>Clients/SecurityClient.cs</c> already declares for every token it requests, and Security
+    /// refuses a request whose claimed subject disagrees with the identity its credential establishes.
+    /// A separate setting for the identity would therefore add one value whose only legal content is
+    /// what the client already sends, and one more way for a deployment to be refused <c>403</c> for a
+    /// reason that reads like an authorization fault rather than a typo.
+    /// </para>
+    /// <para>
+    /// EMPTY IS LEGAL ONLY WHEN <see cref="MutualTls"/> IS CONFIGURED. The two are alternatives, so a
+    /// deployment supplies one or the other; supplying neither leaves this service unable to obtain any
+    /// credential at all, and <see cref="DataServicesOptions"/>'s validator refuses it at startup with
+    /// a named error rather than letting the fault surface on the first cryptographic call. Supplying
+    /// both is legal and is not a conflict: the <c>Basic</c> credential is what travels on the request,
+    /// and the certificate is available to whatever handshake the transport performs.
+    /// </para>
+    /// <para>
+    /// NOT AN <c>[Required]</c> MEMBER, because the requirement is conditional on the other scheme and
+    /// no single attribute can express "this one or that one". The rule lives in the validator, where
+    /// it can name both keys in one message.
+    /// </para>
+    /// </remarks>
+    public string ClientSecret { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this deployment can present any accepted issuance credential at all.
+    /// </summary>
+    /// <remarks>
+    /// True when either scheme is configured. Read by the validator, and by the client when it decides
+    /// which credential to attach, so the two cannot disagree about what "configured" means.
+    /// </remarks>
+    public bool HasIssuanceCredential =>
+        !string.IsNullOrWhiteSpace(ClientSecret) || MutualTls.IsConfigured;
 }
 
 /// <summary>
@@ -906,6 +1128,75 @@ public sealed class MutualTlsClientOptions
                 + "handshake without its key, and a key has nothing to present without its certificate, "
                 + "so half of this pair is unusable rather than merely weaker. Neither path is quoted "
                 + "here, because a startup log must not record where key material is mounted.");
+    }
+}
+
+/// <summary>
+/// The trust anchor internal TLS is verified against. Bound from <c>DataServices:InternalTls</c>. One
+/// path, and nothing else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A ROOT CERTIFICATE IS PUBLIC MATERIAL, SO THE PATH IS NOT ABOUT CONFIDENTIALITY. It is that the
+/// anchor is a DEPLOYMENT artefact - one local authority per environment, rotated on its own schedule,
+/// mounted read-only from the orchestration layer. Embedding one in a settings file would pin every
+/// environment to a single authority and make rotation a code change.
+/// </para>
+/// <para>
+/// ONE MEMBER, NOT TWO. Unlike <see cref="MutualTlsClientOptions"/> there is no key path, because
+/// verifying a chain needs only the public root. A trust anchor with a private key beside it would mean
+/// this service could ISSUE certificates for the internal topology, which is a capability it must not
+/// have.
+/// </para>
+/// </remarks>
+public sealed class InternalTlsTrustOptions
+{
+    /// <summary>
+    /// Path to the PEM-encoded certificate authority bundle internal server certificates are verified
+    /// against. Empty means platform default trust.
+    /// </summary>
+    /// <remarks>
+    /// The file may carry one certificate or a concatenated chain of them; every certificate it carries
+    /// becomes an acceptable root for internal traffic, and nothing else does.
+    /// </remarks>
+    public string TrustedCaPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this deployment narrows internal trust to a mounted anchor.
+    /// </summary>
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(TrustedCaPath);
+
+    /// <summary>
+    /// Describes the one way this group can be wrong: present but blank.
+    /// </summary>
+    /// <param name="configurationKeyPrefix">
+    /// The configuration path of this group, quoted into the message so an operator can find the
+    /// offending key without reading source.
+    /// </param>
+    /// <returns>
+    /// One message when the value is whitespace rather than either a path or empty, otherwise an empty
+    /// sequence.
+    /// </returns>
+    /// <remarks>
+    /// Whether the file exists and parses is decided when it is loaded at startup, so that the failure
+    /// carries the loader's own diagnosis rather than a second, weaker copy of it. The value is not
+    /// echoed: a container's secret mount layout is not something a startup record should publish.
+    /// </remarks>
+    internal IEnumerable<string> DescribeFailures(string configurationKeyPrefix)
+    {
+        if (TrustedCaPath.Length == 0 || !string.IsNullOrWhiteSpace(TrustedCaPath))
+        {
+            yield break;
+        }
+
+        yield return string.Concat(
+            configurationKeyPrefix,
+            ":",
+            nameof(TrustedCaPath),
+            " is set to whitespace, which is neither a path nor the empty value that means platform "
+                + "default trust. Set a path to the PEM certificate authority bundle internal server "
+                + "certificates are issued by, or remove the key entirely. The value is not quoted "
+                + "here, because a startup record must not publish a container's secret mount layout.");
     }
 }
 
@@ -1037,11 +1328,63 @@ public sealed class ClientResilienceOptions
     /// positive.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// This is a failure-handling bound, not a target: it decides when an unanswered call is
     /// treated as failed rather than waited on indefinitely, which is a decision the legacy never
     /// had to make because an in-process call always returned.
+    /// </para>
+    /// <para>
+    /// IT IS ALSO THE gRPC DEADLINE ON EVERY UNARY CALL OF THIS EDGE, and there is only one setting
+    /// because there must only be one number. A gRPC deadline is enforced by the client as a TOTAL
+    /// bound across the retries the resilience pipeline performs beneath it, so a deadline shorter
+    /// than the pipeline's budget would cancel the call while the pipeline was still retrying, and a
+    /// longer one would leave the upstream working after the caller had stopped waiting. Deriving
+    /// both from this value makes disagreement impossible rather than merely unlikely.
+    /// </para>
     /// </remarks>
-    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan RequestTimeout { get; set; } = DefaultRequestTimeout;
+
+    /// <summary>
+    /// The ceiling on one STREAMING call, after which it is abandoned. Must be positive. Defaults to
+    /// <see cref="DefaultStreamDeadline"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A SEPARATE BOUND BECAUSE A STREAM IS A DIFFERENT QUANTITY. A retrieval that runs for minutes is
+    /// correct behaviour, while a unary call that does so is not, so bounding both by
+    /// <see cref="RequestTimeout"/> would abandon legitimate retrievals mid-flight.
+    /// </para>
+    /// <para>
+    /// DERIVED FROM THE UPSTREAM RATHER THAN CHOSEN. Every stream on this edge reads from a
+    /// server-held Persistence task, and Persistence reclaims an idle handle after
+    /// <c>Persistence:Handles:IdleExpirySeconds</c>, whose shipped value is nine hundred seconds. A
+    /// stream still open past that point is holding a handle the upstream's own policy would already
+    /// have released had the stream not been the thing refreshing its activity stamp, so this is the
+    /// bound at which continuing to wait stops being meaningful.
+    /// </para>
+    /// <para>
+    /// PRESENT ON BOTH CONFIGURED GROUPS AND MEANINGFUL ON ONE. The Security edge is REST and carries
+    /// no streaming call, so its value bounds nothing; the two groups are deliberately the same type
+    /// so that the projection onto a handler is written once and they cannot diverge in shape, which
+    /// is the same reason recorded on <c>Program.ApplyResilience</c>.
+    /// </para>
+    /// </remarks>
+    public TimeSpan StreamDeadline { get; set; } = DefaultStreamDeadline;
+
+    /// <summary>
+    /// The shipped total bound on a unary call.
+    /// </summary>
+    /// <remarks>
+    /// Named so that <c>Clients/OutboundCallPolicy.OutboundDeadlines.Default</c> can carry the same
+    /// value: a client constructed without a configured pair still bounds its calls, and the shipped
+    /// posture is stated in exactly one place.
+    /// </remarks>
+    public static TimeSpan DefaultRequestTimeout => TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The shipped total bound on a streaming call, matching Persistence's own handle idle expiry.
+    /// </summary>
+    public static TimeSpan DefaultStreamDeadline => TimeSpan.FromSeconds(900);
 }
 
 
@@ -1111,7 +1454,18 @@ public sealed class SessionLifetimeOptions
     /// How long a session may sit without a call before it is closed and its state released. Must
     /// be positive.
     /// </summary>
-    public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromMinutes(5);
+    public TimeSpan IdleTimeout { get; set; } = DefaultIdleTimeout;
+
+    /// <summary>
+    /// The shipped idle lifetime of a server-held session.
+    /// </summary>
+    /// <remarks>
+    /// Named because it is the DERIVATION of a second setting rather than only a default of this one:
+    /// <see cref="ColumnExpressionOptions.MacroInvocationTimeout"/> is the point past which an
+    /// outstanding macro invocation is holding a session the service's own policy would already have
+    /// released, so the two values start equal and a reader can see why.
+    /// </remarks>
+    public static TimeSpan DefaultIdleTimeout => TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// How many sessions of this kind may be open at once. Must be positive.
@@ -1194,10 +1548,12 @@ public sealed class EventChainOptions
 /// merely unused here but unreachable.
 /// </para>
 /// <para>
-/// The one property name below containing the word "key" is
-/// <see cref="ValidateIssuerSigningKey"/>, and it is a BOOLEAN SWITCH: it selects whether the
-/// framework's handler verifies the signature it retrieves from Security's published verification
-/// document. It holds no material, and being a <see cref="bool"/> it could not.
+/// NO PROPERTY NAME ON THIS TYPE CONTAINS THE WORD "KEY" AT ALL. One did - a boolean switch selecting
+/// whether the framework's handler verified the signature it retrieves from Security's published
+/// verification document - and it was removed along with the other three validation switches, because
+/// a boundary whose signature checking a settings file can switch off is only optionally
+/// authenticated. Signature verification is now a compiled-in <c>true</c> in Program.cs and is not
+/// configurable from anywhere.
 /// </para>
 /// <para>
 /// This type is bound at the TOP LEVEL rather than under the <c>DataServices</c> root, by
@@ -1275,19 +1631,23 @@ public sealed class JwtAuthenticationOptions
     public bool RequireHttpsMetadata { get; set; } = true;
 
     /// <summary>
-    /// Whether the credential's issuer is checked against the discovered issuer. Defaults to
-    /// <see langword="true"/>.
+    /// Whether the credential's issuer is checked against the discovered issuer. Invariantly
+    /// <see langword="true"/>; a configured <see langword="false"/> is refused at startup.
     /// </summary>
+    /// <remarks>
+    /// <inheritdoc cref="ValidateIssuerSigningKey" path="/remarks/para[@id='invariant']"/>
+    /// </remarks>
     public bool ValidateIssuer { get; set; } = true;
 
     /// <summary>
-    /// Whether the credential's audience is checked against <see cref="Audience"/>. Defaults to
-    /// <see langword="true"/>.
+    /// Whether the credential's audience is checked against <see cref="Audience"/>. Invariantly
+    /// <see langword="true"/>; a configured <see langword="false"/> is refused at startup.
     /// </summary>
     public bool ValidateAudience { get; set; } = true;
 
     /// <summary>
-    /// Whether the credential's validity window is enforced. Defaults to <see langword="true"/>.
+    /// Whether the credential's validity window is enforced. Invariantly <see langword="true"/>; a
+    /// configured <see langword="false"/> is refused at startup.
     /// </summary>
     /// <remarks>
     /// Security mints short-lived credentials, so this switch is what makes the shortness mean
@@ -1297,15 +1657,71 @@ public sealed class JwtAuthenticationOptions
 
     /// <summary>
     /// Whether the credential's signature is verified against the material published by the
-    /// authority. Defaults to <see langword="true"/>.
+    /// authority. Invariantly <see langword="true"/>; a configured <see langword="false"/> is refused
+    /// at startup.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A switch, not a value. It selects whether verification happens; it does not and cannot carry
     /// anything used to perform it, which arrives from the authority at runtime. This is the only
     /// property in this file whose name contains the word "key", and the distinction is recorded so
     /// that a search for that word lands on an explanation rather than on a suspicion.
+    /// </para>
+    /// <para id="invariant">
+    /// THESE FOUR SWITCHES ARE BOUND SO THEY CAN BE AUDITED, NOT SO THEY CAN BE TURNED OFF. Each one
+    /// removes an entire class of forgery when it is on: without issuer validation a token from any
+    /// issuer is accepted; without audience validation a token minted for another service is replayable
+    /// here; without lifetime validation Security's short lifetimes mean nothing and a leaked credential
+    /// is permanent; without signing-key validation the signature is not checked at all and any
+    /// well-formed token is accepted. None of the four is therefore a deployment choice, and the
+    /// composition root assigns <see langword="true"/> unconditionally rather than reading these
+    /// values, so no configuration can weaken the delivered behaviour. Because ignoring a configured
+    /// <see langword="false"/> in silence would be worse than honouring it - an operator would believe a
+    /// switch took effect when it did not - the options validator REFUSES a <see langword="false"/> and
+    /// the host does not start. Constraint C-G, and the reason the properties remain visible: a
+    /// deployment can still be audited for them by reading its settings file.
+    /// </para>
     /// </remarks>
     public bool ValidateIssuerSigningKey { get; set; } = true;
+
+    /// <summary>
+    /// The caller identities permitted to reach this service's two contracts and their projected routes.
+    /// Bound from <c>Authentication:Jwt:PermittedCallers</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AUTHENTICATION IS NOT AUTHORIZATION, AND THIS IS THE SUBJECT HALF OF THE DIFFERENCE. Both contracts
+    /// and all thirty-nine projected routes used to be protected by "an authenticated user" and nothing
+    /// more, so any holder of any token minted for this audience could call every operation - including a
+    /// caller with no business here at all. The AAP fixes the call graph as layered and acyclic: nothing but
+    /// Gateway calls DataServices. This roster is that statement made enforceable, and the operation's scope
+    /// is enforced alongside it, because either alone leaves a hole (CWE-862, CWE-863).
+    /// </para>
+    /// <para>
+    /// COMPARED ORDINALLY against the token's subject claim, matching how the issuer compares an identity
+    /// everywhere else. The subject is read from <c>sub</c> or, when the bearer handler maps inbound claims,
+    /// from the framework's name-identifier claim type - whichever is present.
+    /// </para>
+    /// <para>
+    /// AN EMPTY ROSTER REFUSES EVERY CALLER, and validation requires at least one entry so that state is
+    /// unreachable through configuration. Reading an empty list as "permit everyone" would be a fail-open
+    /// default, which is the exact shape of the defect this setting closes.
+    /// </para>
+    /// <para>
+    /// EMPTY BY DEFAULT, AND THE SETTINGS FILE SUPPLIES THE VALUE. The configuration binder POPULATES an
+    /// existing collection rather than replacing it, so a non-empty default would ACCUMULATE with whatever
+    /// a deployment declares - an operator narrowing the roster would silently still permit the built-in
+    /// identity as well. An empty default plus a required minimum length makes the declared value the whole
+    /// value.
+    /// </para>
+    /// <para>
+    /// IDENTITIES ONLY. There is no member here that could hold a certificate, a key or a secret: the
+    /// token's signature establishes that the subject is genuine, and this records which subjects are
+    /// welcome.
+    /// </para>
+    /// </remarks>
+    [MinLength(1)]
+    public IList<string> PermittedCallers { get; } = [];
 }
 
 
@@ -1433,6 +1849,15 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
         {
             AppendAnnotationFailures(options.ColumnExpression, path, failures);
             AppendPageResolutionFailures(options.ColumnExpression, path, failures);
+
+            // A zero or negative backstop would abandon every macro invocation before the client could
+            // possibly answer, turning the inverted channel into a channel that always times out - and
+            // it would do so quietly, as a defined timeout outcome rather than as an error, which is
+            // exactly the kind of fault a validator has to catch instead of a caller discovering it.
+            AppendPositiveDurationFailure(
+                options.ColumnExpression.MacroInvocationTimeout,
+                string.Concat(path, ":MacroInvocationTimeout"),
+                failures);
         }
 
         // --- DropDownSearch: DELIBERATELY UNVALIDATED, and the omission is the rule --------------
@@ -1459,7 +1884,7 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
             AppendAnnotationFailures(options.Security, path, failures);
             AppendAddressFailure(options.Security.BaseAddress, string.Concat(path, ":BaseAddress"), failures);
 
-            // The token-issuance edge's client identity. Optional as a group and inseparable when
+            // The token-issuance edge's client certificate. Optional as a group and inseparable when
             // present, which is why it is checked here rather than expressed as attributes: no single
             // attribute can say "both or neither".
             string mutualTlsPath = string.Concat(path, ":MutualTls");
@@ -1467,6 +1892,36 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
             {
                 failures.AddRange(options.Security.MutualTls.DescribeFailures(mutualTlsPath));
             }
+
+            // AND AT LEAST ONE OF THE TWO ACCEPTED SCHEMES MUST BE PRESENT. This is the one rule that
+            // spans both groups, so neither group can express it alone. Without it a deployment that
+            // configured neither would start, report healthy on its anonymous probe, and then fail every
+            // cryptographic call and every call to the audience beneath it - because POST /v1/tokens is
+            // the one operation a bearer token cannot protect, so a service with no caller credential
+            // obtains no token and nothing downstream is reachable. Refusing at startup puts that fault
+            // where the missing configuration is rather than in the first request that needed it.
+            if (!options.Security.HasIssuanceCredential)
+            {
+                failures.Add(string.Concat(
+                    "Configuration key '",
+                    SecurityClientOptions.ClientSecretConfigurationKey,
+                    "' is not set and '",
+                    path,
+                    ":MutualTls' is not configured either, so this service can present neither of the "
+                        + "two credentials contract C-01 accepts on POST /v1/tokens and can therefore "
+                        + "obtain no service token at all. Every C-02 cryptographic call and every call "
+                        + "to the Persistence audience would be unreachable. Set the issuance secret - "
+                        + "the same value Security's issuance roster names for the subject this service "
+                        + "presents - or, on a deployment that terminates TLS at Security, configure the "
+                        + "client-certificate pair instead. Neither value is quoted here."));
+            }
+        }
+
+        // --- Internal TLS trust: one optional path, checked for shape only -----------------------
+        path = string.Concat(prefix, ":InternalTls");
+        if (EnsureGroupBound(options.InternalTls, path, failures))
+        {
+            failures.AddRange(options.InternalTls.DescribeFailures(path));
         }
 
         // --- Resilience: both clients, same rules, separate values -------------------------------
@@ -1491,6 +1946,34 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
 
         // --- EventChain: no rule. Its single member is a boolean whose whole domain is legal. -----
         _ = EnsureGroupBound(options.EventChain, string.Concat(prefix, ":EventChain"), failures);
+
+        // The streamed-element bound carries a range annotation, so it is only enforced if the annotations
+        // are actually walked. Without this the bound would bind a zero or a negative value silently and
+        // then refuse EVERY streamed response at the first element.
+        if (EnsureGroupBound(options.RestProjection, string.Concat(prefix, ":RestProjection"), failures))
+        {
+            AppendAnnotationFailures(
+                options.RestProjection,
+                string.Concat(prefix, ":RestProjection"),
+                failures);
+        }
+
+        // THE SESSION DESCRIPTOR IS FAIL-FAST BECAUSE EVERY RETRIEVAL AND EVERY UPDATE DEPENDS ON IT
+        // (AAP 0.1.4). Its DBMS field is not a label - Persistence substring-tests it to choose the paging
+        // dialect and falls back to SQL Server when the test does not match
+        // [n_cst_thread_trans.sru:L356-L362] - so an unbound value would silently select a dialect rather
+        // than refuse to start. Starting and then failing every data operation is precisely the graceful
+        // degradation the ported fail-fast posture forbids.
+        if (EnsureGroupBound(
+            options.PersistenceSession,
+            string.Concat(prefix, ":PersistenceSession"),
+            failures))
+        {
+            AppendAnnotationFailures(
+                options.PersistenceSession,
+                string.Concat(prefix, ":PersistenceSession"),
+                failures);
+        }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }
@@ -1706,6 +2189,28 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
             client.RequestTimeout,
             string.Concat(configurationPath, ":RequestTimeout"),
             failures);
+        AppendPositiveDurationFailure(
+            client.StreamDeadline,
+            string.Concat(configurationPath, ":StreamDeadline"),
+            failures);
+
+        // A STREAM BOUND BELOW THE UNARY BOUND IS A CONTRADICTION RATHER THAN A TIGHTER POLICY: the
+        // whole reason the two settings exist separately is that a stream is legitimately longer-lived
+        // than a single request, so a shorter stream bound abandons retrievals sooner than the ordinary
+        // calls beside them and does so silently, as a deadline failure that looks like an upstream
+        // fault. Checked here rather than by annotation because it is a relationship between two values.
+        if (client.StreamDeadline > TimeSpan.Zero
+            && client.RequestTimeout > TimeSpan.Zero
+            && client.StreamDeadline < client.RequestTimeout)
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":StreamDeadline must not be shorter than ",
+                configurationPath,
+                ":RequestTimeout. A stream is bounded by the upstream's own handle lifetime rather ",
+                "than by one request's budget, so a stream bound below the unary bound would abandon ",
+                "retrievals before an ordinary call beside them would time out."));
+        }
     }
 
     /// <summary>
@@ -1906,7 +2411,85 @@ public sealed class JwtAuthenticationOptionsValidator : IValidateOptions<JwtAuth
             }
         }
 
+        // --- The four validation switches: invariant, and a configured `false` is refused -----------
+        AppendDisabledValidationFailures(options, prefix, failures);
+
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+    }
+
+    /// <summary>
+    /// Appends one failure per token-validation switch a deployment has turned off.
+    /// </summary>
+    /// <param name="options">The bound instance being validated.</param>
+    /// <param name="prefix">The configuration path this instance was bound from.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// EACH OF THE FOUR REMOVES A WHOLE CLASS OF FORGERY, SO NONE IS A DEPLOYMENT CHOICE. Without issuer
+    /// validation a token from any issuer is accepted; without audience validation a token minted for
+    /// another service is replayable here, which is exactly what the one-audience-per-token rule of
+    /// contract C-01 exists to prevent; without lifetime validation Security's short lifetimes mean
+    /// nothing and a leaked credential is permanent; without signing-key validation the signature is not
+    /// checked at all and any well-formed token is accepted. A host that starts with one of them off is
+    /// an unauthenticated boundary wearing the shape of an authenticated one, which constraint C-G
+    /// forbids outright.
+    /// </para>
+    /// <para>
+    /// AND THE COMPOSITION ROOT DOES NOT READ THEM, WHICH IS WHY THIS CHECK EXISTS RATHER THAN BEING
+    /// REDUNDANT WITH IT. The bearer handler is configured with <see langword="true"/> unconditionally,
+    /// so a configured <see langword="false"/> would otherwise be silently ignored - and silence is the
+    /// worse failure of the two, because an operator would believe the switch took effect. Refusing to
+    /// start says plainly that the setting is not honoured and not honourable. Every message names the
+    /// exact key and states what the switch protects, so the fix is a one-line edit rather than an
+    /// investigation.
+    /// </para>
+    /// </remarks>
+    private static void AppendDisabledValidationFailures(
+        JwtAuthenticationOptions options,
+        string prefix,
+        List<string> failures)
+    {
+        AppendIfDisabled(
+            options.ValidateIssuer,
+            nameof(JwtAuthenticationOptions.ValidateIssuer),
+            "a credential minted by any issuer whatsoever would be accepted, so Security would no "
+                + "longer be the sole authority this boundary trusts");
+
+        AppendIfDisabled(
+            options.ValidateAudience,
+            nameof(JwtAuthenticationOptions.ValidateAudience),
+            "a credential minted for a different service would be replayable here, which is precisely "
+                + "what the one-audience-per-token rule of contract C-01 exists to prevent");
+
+        AppendIfDisabled(
+            options.ValidateLifetime,
+            nameof(JwtAuthenticationOptions.ValidateLifetime),
+            "an expired credential would be accepted indefinitely, so the short lifetimes Security "
+                + "mints would bound nothing");
+
+        AppendIfDisabled(
+            options.ValidateIssuerSigningKey,
+            nameof(JwtAuthenticationOptions.ValidateIssuerSigningKey),
+            "the signature would not be verified at all, so any well-formed token would be accepted");
+
+        void AppendIfDisabled(bool enabled, string member, string consequence)
+        {
+            if (enabled)
+            {
+                return;
+            }
+
+            failures.Add(string.Concat(
+                prefix,
+                ":",
+                member,
+                " is false. This switch is invariant and cannot be turned off: with it disabled, ",
+                consequence,
+                ". The bearer handler is configured with it enabled regardless of this value, so the "
+                    + "setting would not take effect - and a setting that is silently ignored is worse "
+                    + "than one that is honoured, which is why the host refuses to start instead. Remove "
+                    + "the key or set it to true."));
+        }
     }
 
     /// <summary>
@@ -2072,4 +2655,154 @@ internal static class ConfiguredAddress
 
         return null;
     }
+}
+
+/// <summary>
+/// Bounds on the thin REST projection of the two gRPC contracts.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>THIS IS A RESOURCE BOUND, NOT A PERFORMANCE SETTING, and the distinction is load bearing because no
+/// performance objective may be asserted anywhere in this refactor (AAP 0.8.5).</b> The projection answers
+/// a server-streaming gRPC method as one JSON array, which means it must hold the whole sequence before it
+/// can answer at all - that is deliberate, and it is what makes a mid-stream failure produce a clean
+/// problem body instead of a half-written success. The consequence is that an unbounded stream is an
+/// unbounded allocation, and the bound below is what stops one request from exhausting the process.
+/// </para>
+/// <para>
+/// It is CONFIGURED rather than fixed because the honest limit depends on the deployment's memory budget
+/// and on the row width its DataWindows carry, neither of which this code can know. Exceeding it is a
+/// DEFINED ERROR rather than a truncation: a truncated array is indistinguishable from a complete one, so
+/// silently dropping the tail would answer a retrieval with the wrong answer and report success.
+/// </para>
+/// </remarks>
+public sealed class RestProjectionOptions
+{
+    /// <summary>
+    /// The largest number of elements the projection will hold for one streamed response.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The default is generous rather than tight, because the projection exists for Gateway and a
+    /// legitimate retrieval of a chunked DataWindow produces one element per chunk rather than one per
+    /// row - so the element count is small for any realistic result and the bound is a backstop against a
+    /// runaway producer, not a working limit anyone should meet.
+    /// </para>
+    /// <para>
+    /// The range starts at one and not zero: a bound of zero would refuse every streamed response including
+    /// an empty one, which is a misconfiguration that reads as a total outage, and refusing it at startup
+    /// is the fail-fast posture this service applies to every structural fault.
+    /// </para>
+    /// </remarks>
+    [Range(1, int.MaxValue)]
+    public int MaxStreamedElements { get; set; } = 10_000;
+}
+
+/// <summary>
+/// The transaction session this service opens against Persistence, mirroring the legacy transaction
+/// structure field for field.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>WHY THIS EXISTS AT ALL.</b> C-05 and C-06 are TASK-scoped and a task is SESSION-scoped: a retrieval
+/// needs a query task, a query task needs a session, and a session needs a transaction descriptor. There
+/// is nowhere else for that descriptor to come from - it describes a connection, and where a connection
+/// points is a deployment decision, so it is configuration by construction. Without it this service can
+/// only send task-less requests, which C-05 and C-06 correctly reject.
+/// </para>
+/// <para>
+/// <b>THE FIELDS MIRROR <c>transactiondata.srs</c> AND ARE NOT A SUBSET</b>
+/// [<c>ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs</c>]. Persistence resolves the paging dialect
+/// by substring-testing <see cref="Dbms"/>, so it is behaviourally load bearing and not a label.
+/// </para>
+/// <para>
+/// <b><see cref="LogPass"/> IS WRITE-ONLY AND IS NEVER ECHOED OR LOGGED.</b> The legacy structure carries
+/// it and the contract carries it, but the response view RESERVES its field number permanently so it can
+/// never appear on an answer. It is bound from configuration like every other secret in this system - from
+/// the orchestration secret layer, never from a literal in source or in an application settings file
+/// (constraint C-F) - and the shipped settings file leaves it EMPTY rather than supplying a value, which
+/// is correct for SQLite: the only evidenced storage engine takes no password on the unencrypted path,
+/// and the encrypted path is out of Phase-1 scope (AAP 0.6.4).
+/// </para>
+/// </remarks>
+public sealed class PersistenceSessionOptions
+{
+    /// <summary>
+    /// The DBMS identifier. <c>[transactiondata.srs:L4]</c>
+    /// </summary>
+    /// <remarks>
+    /// ALSO THE DIALECT SELECTOR, which is why it is required rather than defaulted to an empty string:
+    /// Persistence substring-tests this value to choose the paging rewriter and falls back to SQL Server
+    /// when the test does not match [<c>n_cst_thread_trans.sru:L356-L362</c>], so an unset value would
+    /// silently select a dialect rather than fail.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Dbms { get; set; } = "SQLite";
+
+    /// <summary>The server name. <c>[transactiondata.srs:L5]</c></summary>
+    public string ServerName { get; set; } = string.Empty;
+
+    /// <summary>The database name. <c>[transactiondata.srs:L6]</c></summary>
+    public string Database { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The login identifier. <c>[transactiondata.srs:L7]</c>
+    /// </summary>
+    /// <remarks>
+    /// An ACCOUNT NAME rather than a secret, which is why - unlike the password - the contract does place
+    /// it on the response view. It is still configuration and never a literal.
+    /// </remarks>
+    public string LogId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The login password. WRITE-ONLY. <c>[transactiondata.srs:L8]</c>
+    /// </summary>
+    /// <remarks>
+    /// Supplied here, sent on the session request, and NEVER read back, echoed or logged anywhere. Empty
+    /// by default because SQLite on the unencrypted path takes none; a deployment that needs one injects it
+    /// from the orchestration secret layer.
+    /// </remarks>
+    public string LogPass { get; set; } = string.Empty;
+
+    /// <summary>The provider parameter string. <c>[transactiondata.srs:L9]</c></summary>
+    /// <remarks>
+    /// Opaque to this service and forwarded unexamined. It is the value Persistence parses for the
+    /// bind-disabling and national-character-binding flags
+    /// [<c>n_cst_thread_task_sqlbase.sru:L128-L129</c>], and it can carry a whole connection string, which
+    /// is why the contract's response view reserves its field number alongside the password's.
+    /// </remarks>
+    public string DbParm { get; set; } = string.Empty;
+
+    /// <summary>The isolation setting. <c>[transactiondata.srs:L10]</c></summary>
+    public string Lock { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the session commits each statement as it runs. <c>[transactiondata.srs:L11]</c>
+    /// </summary>
+    /// <remarks>
+    /// FALSE by default, and that is the preserved legacy posture rather than a preference: an update
+    /// applies many rows and the caller owns the carrier's state afterwards, so a session that committed
+    /// per statement would make a partially applied update unrecoverable.
+    /// </remarks>
+    public bool AutoCommit { get; set; }
+
+    /// <summary>The user parameter string. <c>[transactiondata.srs:L12]</c></summary>
+    public string UserParm { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the connection disables bind variables, mirroring the parsed <c>DisableBind</c> flag.
+    /// </summary>
+    /// <remarks>
+    /// FALSE by default, deliberately. A true value means the runtime interpolates values as literals
+    /// rather than binding them [<c>n_cst_thread_task_sqlbase.sru:L128</c>], which is the mechanical root of
+    /// the legacy SQL-injection exposure and is also what puts live row data into the statement text the
+    /// error payload carries. The setting exists because the legacy has it; the default is the safe arm.
+    /// </remarks>
+    public bool DisableBind { get; set; }
+
+    /// <summary>
+    /// Whether the connection binds national-character parameters, mirroring the parsed <c>NCharBind</c>
+    /// flag.
+    /// </summary>
+    public bool NCharBind { get; set; }
 }

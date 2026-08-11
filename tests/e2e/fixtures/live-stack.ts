@@ -1,6 +1,15 @@
 /**
- * Live-stack detection and service-token acquisition for the cross-service
- * specs.
+ * Live-stack detection for the cross-service specs.
+ *
+ * SCOPE NOTE - THIS MODULE NO LONGER ACQUIRES TOKENS
+ * --------------------------------------------------
+ * It once carried a second half that minted a service token, and that half was a
+ * DUPLICATE: `./auth` owns token acquisition for this suite and is the path the
+ * six canonical specs use. The duplicate existed only to serve an earlier,
+ * superseded spec generation which has since been removed, so it was removed with
+ * it rather than left as a second way to do one thing. What remains is the one
+ * capability nothing else provides: telling an absent stack apart from a broken
+ * one.
  *
  * WHY THIS MODULE EXISTS
  * ----------------------
@@ -62,10 +71,7 @@ import {
 import {
   GATEWAY_BASE_URL,
   HEALTH_PATH,
-  SECURITY_BASE_URL,
-  TOKEN_PATH,
   gatewayUrl,
-  securityUrl,
 } from './service-endpoints';
 
 /**
@@ -171,136 +177,4 @@ export function probeStackAvailability(): Promise<StackAvailability> {
   })();
 
   return cachedProbe;
-}
-
-/**
- * Reset the memoised probe.
- *
- * Exists for the benefit of a spec that deliberately wants a fresh probe after
- * changing the environment. Not used by the current specs, and kept minimal
- * rather than omitted because the memo is otherwise unobservable and a future
- * reader would have no way to clear it.
- */
-export function resetStackAvailabilityCache(): void {
-  cachedProbe = undefined;
-}
-
-/**
- * A service token as issued by Security, the sole issuer.
- */
-export interface IssuedToken {
-  /** The bearer token, ready to place in an `Authorization` header. */
-  readonly accessToken: string;
-
-  /** The token type Security reported; the contract fixes this to `Bearer`. */
-  readonly tokenType: string;
-}
-
-/**
- * The subset of Security's token response these specs read.
- *
- * Declared locally rather than imported because the OpenAPI document is not
- * code-generated into this project; the field names mirror
- * `security.v1.yaml`'s `TokenResponse` exactly, including its snake_case
- * spelling, which is the OAuth-style spelling the contract publishes.
- */
-interface TokenResponseBody {
-  readonly access_token?: unknown;
-  readonly token_type?: unknown;
-}
-
-/**
- * Ask Security to mint a service token.
- *
- * Security is the system's only token minter (G7): no other service holds a
- * signing key, so every authenticated call in this suite ultimately depends on
- * this one request succeeding.
- *
- * Returns `undefined` rather than throwing when a token cannot be obtained, so
- * a caller can distinguish "Security declined to issue" from "the endpoint
- * under test rejected a valid token" — two failures that would otherwise
- * present identically. Note that `POST /v1/tokens` is declared as
- * mutual-TLS-protected in `security.v1.yaml`; a stack that enforces that will
- * decline this request, which is correct behaviour on its part and is reported
- * as such rather than treated as a defect.
- *
- * @param subject the caller identity to mint for
- * @param audience the intended audience, normally the service being called
- * @param scopes the scope set being requested
- * @returns the issued token, or `undefined` when Security did not issue one
- */
-export async function issueServiceToken(
-  subject: string,
-  audience: string,
-  scopes: readonly string[],
-): Promise<IssuedToken | undefined> {
-  let context: APIRequestContext | undefined;
-
-  try {
-    context = await playwrightRequest.newContext({
-      baseURL: SECURITY_BASE_URL,
-      timeout: PROBE_TIMEOUT_MS,
-    });
-
-    const response = await context.post(TOKEN_PATH, {
-      failOnStatusCode: false,
-      timeout: PROBE_TIMEOUT_MS,
-      data: {
-        subject,
-        audience,
-        scopes: [...scopes],
-      },
-    });
-
-    if (!response.ok()) {
-      return undefined;
-    }
-
-    const body = (await response.json()) as TokenResponseBody;
-    const accessToken = body.access_token;
-    const tokenType = body.token_type;
-
-    if (typeof accessToken !== 'string' || accessToken.length === 0) {
-      return undefined;
-    }
-
-    return {
-      accessToken,
-      tokenType: typeof tokenType === 'string' ? tokenType : '',
-    };
-  } catch {
-    // A transport failure here is indistinguishable in effect from a refusal
-    // to issue, and both mean "no token to test with". The caller reports it.
-    return undefined;
-  } finally {
-    await context?.dispose();
-  }
-}
-
-/**
- * Build the `Authorization` header value for an issued token.
- *
- * Uses the token type Security reported rather than hardcoding `Bearer`, so
- * that if a stack ever reports something else the resulting failure names the
- * real mismatch instead of hiding it behind a hardcoded assumption. Falls back
- * to `Bearer` only when the type is absent, which is what the contract's
- * `const: Bearer` says it must be anyway.
- *
- * @param token the token issued by Security
- * @returns the header value, e.g. `Bearer eyJ...`
- */
-export function authorizationHeader(token: IssuedToken): string {
-  const scheme = token.tokenType.length > 0 ? token.tokenType : 'Bearer';
-
-  return `${scheme} ${token.accessToken}`;
-}
-
-/**
- * The Security token endpoint, for a spec that needs to report it.
- *
- * Re-exported so a skip reason can name the URL it tried without every spec
- * importing two more symbols to reassemble it.
- */
-export function tokenEndpointUrl(): string {
-  return securityUrl(TOKEN_PATH);
 }

@@ -25,7 +25,7 @@
  * The four remaining specs follow the shape used below, so it is kept
  * deliberately small and obvious:
  *
- *   const token = await acquireServiceToken(request);   // once, per test
+ *   const token = await requireServiceToken(request);   // once, per test
  *   ... { headers: bearerHeaders(token) }               // per request
  *
  * Acquire inside the test that needs it, attach per request, let it fall out of
@@ -109,10 +109,12 @@
  * any artifact this run produces.**
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
 import { expect, test } from '@playwright/test';
 
 import {
-  acquireServiceToken,
   anonymousHeaders,
   bearerHeaders,
   gatewayUrl,
@@ -120,8 +122,64 @@ import {
   OIDC_DISCOVERY_PATH,
   PING_PATH,
   SECURITY_BASE_URL,
+  SECURITY_DEFAULT_BASE_URL,
   type ServiceToken,
 } from '../fixtures';
+
+import {
+  assertTokenIssuanceProvisioned,
+  requireServiceToken,
+} from '../fixtures/token-issuance';
+
+import { probeStackAvailability } from '../fixtures/live-stack';
+
+/**
+ * Walk upwards from this file until the repository root is found.
+ *
+ * The root is identified by the solution file rather than by `.git`, because a
+ * worktree or a submodule checkout does not always carry a `.git` DIRECTORY, and
+ * because the solution is the artifact the coherence assertion below is actually
+ * reasoning about — the same tree that holds the service and its contract.
+ *
+ * @returns the absolute repository-root path
+ * @throws when no root is found above this file, which would mean the suite is
+ *   running from somewhere it was never installed
+ */
+function repositoryRoot(): string {
+  let candidate = __dirname;
+
+  for (;;) {
+    if (existsSync(join(candidate, 'PowerFramework.slnx'))) {
+      return candidate;
+    }
+
+    const parent = dirname(candidate);
+
+    if (parent === candidate) {
+      throw new Error(
+        'No repository root carrying PowerFramework.slnx was found above ' +
+          'this spec. The coherence assertion cannot read the published ' +
+          'contract or the service settings without it.',
+      );
+    }
+
+    candidate = parent;
+  }
+}
+
+/**
+ * Read a repository file as text.
+ *
+ * Deliberately confined to the two paths the coherence assertion names: this
+ * suite is READ-ONLY against the repository and must never reach the read-only
+ * behavioural-oracle assets (C-C). Neither path below is inside `ws_objects/`.
+ *
+ * @param relativePath repository-root-relative path
+ * @returns the file contents
+ */
+function readRepositoryText(relativePath: string): string {
+  return readFileSync(join(repositoryRoot(), relativePath), 'utf8');
+}
 
 /**
  * The one member of a JSON Web Key Set this spec reads.
@@ -160,6 +218,52 @@ interface ProviderMetadataDocument {
 const NEVER_THROW_ON_STATUS = { failOnStatusCode: false } as const;
 
 test.describe('Authentication (constraint C-G)', () => {
+  // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
+  //
+  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
+  // nothing else, on every topology including the local bring-up, so with no
+  // identity provisioned every authenticated assertion below is unrunnable. The
+  // hook fails this group's SETUP in a full acceptance run rather than letting
+  // fifteen token calls fail one at a time with transport errors that never say
+  // why; a run that has explicitly declared itself partial passes straight
+  // through here and its token-dependent tests skip themselves instead, with the
+  // reason stated. The whole policy lives in `fixtures/token-issuance.ts` — this
+  // line only applies it.
+  test.beforeAll(assertTokenIssuanceProvisioned);
+
+  // ---------------------------------------------------------------------------
+  // MISSING-STACK BEHAVIOUR, MADE UNIFORM AND EXPLICIT ACROSS ALL SIX SPECS
+  //
+  // This suite drives real HTTP against a running four-service stack, so three
+  // outcomes have to stay distinguishable: the contract holds (pass), the
+  // contract is violated (fail), and the stack is not up at all (neither).
+  // Without an explicit third state the last one arrives as a wall of transport
+  // errors that read exactly like the second - a false accusation against
+  // services that are merely absent - and the tempting remedy is to soften the
+  // assertions until they tolerate an unreachable host, which converts a real
+  // violation into a silent pass and destroys the suite's whole value.
+  //
+  // The probe is memoised per worker, so this costs one request per worker and
+  // not one per test.
+  //
+  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
+  // than a title match: several specs mix pure-fixture assertions in with HTTP
+  // ones, those assertions are exactly the part that still holds with nothing
+  // running, and skipping them would throw away the only coverage available
+  // before a bring-up. A tag is declarative and machine-read; a title substring
+  // would silently start skipping the moment someone reworded a test name, and
+  // two stack-free tests in this suite never carried the wording at all.
+  // ---------------------------------------------------------------------------
+  test.beforeEach(async ({}, testInfo) => {
+    if (testInfo.tags.includes('@no-stack')) {
+      return;
+    }
+
+    const availability = await probeStackAvailability();
+
+    test.skip(!availability.reachable, availability.reason);
+  });
+
   // Deliberately NOT `mode: 'serial'`. These four assertions share no state, in
   // no order, and each acquires whatever it needs for itself; serial execution
   // belongs to the two mutating workflow specs, where row state really is shared.
@@ -196,10 +300,41 @@ test.describe('Authentication (constraint C-G)', () => {
         'response here means the guard is not wired at all',
     ).toBe(false);
 
-    // Nothing is asserted about the body. No schema is published for this
-    // response — the 401 is a cross-cutting outcome of the bearer scheme,
-    // answered before the route runs — so inventing a shape for it would be
-    // inventing a requirement (C-B).
+    // THE BODY IS ASSERTED, AND THE REASON THIS COMMENT ONCE SAID OTHERWISE IS WORTH RECORDING.
+    // It read: no schema is published for this response, the 401 is a cross-cutting outcome of the
+    // bearer scheme answered before the route runs, so inventing a shape would be inventing a
+    // requirement (C-B). The premise was simply wrong. `gateway.v1.yaml` publishes a shared
+    // `Unauthorized` response whose only content is `application/problem+json` carrying
+    // `ProblemDetails`, and every authenticated operation in the document references it — so the
+    // shape is not invented here, it is quoted. Worse, the omission MASKED A REAL DEFECT: the
+    // service advertised that body and returned an empty one, because neither diagnostics
+    // middleware was installed, and this was the assertion positioned to catch it.
+    expect(
+      response.headers()['content-type'] ?? '',
+      'the published Unauthorized response declares application/problem+json as its only content ' +
+        'type, so a refusal carrying anything else — or carrying nothing — contradicts the ' +
+        'document a caller was handed',
+    ).toContain('application/problem+json');
+
+    const problem: unknown = await response.json();
+
+    expect(
+      problem,
+      'the refusal body must be a JSON object matching the published ProblemDetails schema',
+    ).toBeInstanceOf(Object);
+
+    // The status is read back out of the BODY as well as off the response line. A document that
+    // disagreed with its own status would be worse than no document: a caller branching on the
+    // parsed value would take the wrong branch while the transport said the right thing.
+    expect(
+      (problem as { status?: unknown }).status,
+      'the published ProblemDetails schema carries the status as a number, and it must agree with ' +
+        'the response status',
+    ).toBe(401);
+
+    // Deliberately NOT asserted: any particular title or detail wording. The document constrains
+    // the shape, not the sentences, and pinning a framework-authored phrase here would fail on a
+    // runtime upgrade that changed nothing a caller depends on.
   });
 
   test('a token minted by Security is accepted on /v1/ping', async ({
@@ -210,7 +345,7 @@ test.describe('Authentication (constraint C-G)', () => {
     // it mints nothing, signs nothing and reads no signing key. Its own failure
     // messages name the method, the URL and the status, so no wrapper is needed
     // here — and a wrapper would risk quoting a body it must not.
-    const token: ServiceToken = await acquireServiceToken(request);
+    const token: ServiceToken = await requireServiceToken(request);
 
     // A non-empty credential, asserted without ever rendering it. Nothing is
     // asserted about its structure, its claims, its segment count or its length:
@@ -371,4 +506,108 @@ test.describe('Authentication (constraint C-G)', () => {
     // members are not fixed by anything this refactor states, so asserting one
     // would invent a requirement (C-B).
   });
+
+  test(
+    'the Security base-URL default agrees with the published listener and OpenAPI server (no stack)',
+    { tag: '@no-stack' },
+    () => {
+      // ===================================================================
+      //  WHY THIS ASSERTION EXISTS, AND WHY IT COMPARES THE *DEFAULT*
+      //
+      //  SECURITY_BASE_URL defaulted to `http://localhost:5104` while Security
+      //  declares exactly one listener and it is TLS. Nothing failed loudly:
+      //  every token, key-set and discovery request in this suite simply
+      //  addressed a listener that does not exist, and the configured client
+      //  certificate could never be presented, because a client certificate
+      //  only exists inside a TLS handshake. The mutual-TLS issuance edge was
+      //  therefore untestable while appearing to be configured.
+      //
+      //  The comparison is made against SECURITY_DEFAULT_BASE_URL and NOT
+      //  against the resolved SECURITY_BASE_URL, deliberately. An environment
+      //  variable may legitimately point this suite at another origin, so
+      //  asserting the resolved value would either forbid that or pass
+      //  vacuously the moment it was used - and in the latter case the default
+      //  could drift back to a scheme the repository does not declare with no
+      //  test objecting. The default is the thing that has to stay true of the
+      //  repository, so the default is what is compared.
+      //
+      //  THREE SOURCES ARE READ, because agreeing with only one would not be
+      //  coherence: the OpenAPI document publishes where callers send requests,
+      //  the base settings file declares the listener, and the Development
+      //  overlay is where a relaxation would be introduced if one ever were.
+      // ===================================================================
+      const defaultUrl = new URL(SECURITY_DEFAULT_BASE_URL);
+
+      expect(
+        defaultUrl.protocol,
+        'the default scheme must be https: Security declares one TLS listener ' +
+          'and a client certificate cannot be presented without a handshake',
+      ).toBe('https:');
+      expect(defaultUrl.port).toBe('5104');
+
+      // ---- source 1: the published contract ----
+      const publishedContract = readRepositoryText(
+        'shared/PowerFramework.Contracts/OpenApi/security.v1.yaml',
+      );
+
+      // Matched with a pattern rather than parsed, because this suite installs
+      // no YAML parser and adding one to read a single scalar would be a
+      // dependency for an assertion. The pattern is anchored on the `url:` key
+      // inside the servers block, and comment lines cannot satisfy it because
+      // the capture requires the key at the start of a list entry.
+      const publishedServer = /^\s*-\s*url:\s*(\S+)\s*$/m.exec(publishedContract);
+
+      expect(
+        publishedServer,
+        'security.v1.yaml must publish a servers entry; without one there is ' +
+          'nothing for the fixture default to agree with',
+      ).not.toBeNull();
+
+      const publishedUrl = new URL((publishedServer as RegExpExecArray)[1] as string);
+
+      expect(publishedUrl.protocol).toBe(defaultUrl.protocol);
+      expect(publishedUrl.port).toBe(defaultUrl.port);
+
+      // ---- sources 2 and 3: the listener, in base settings and in the overlay ----
+      for (const settingsPath of [
+        'services/security-service/PowerFramework.Security/appsettings.json',
+        'services/security-service/PowerFramework.Security/appsettings.Development.json',
+      ]) {
+        const settings = readRepositoryText(settingsPath);
+
+        // Read with a pattern for the same reason, and additionally because
+        // these files are JSON WITH COMMENTS: JSON.parse rejects them outright,
+        // so a structural read would need a tolerant parser this suite does not
+        // have. The Kestrel endpoint URL is unambiguous in both files.
+        const declaredListener = /"Url"\s*:\s*"([^"]+)"/.exec(settings);
+
+        expect(
+          declaredListener,
+          `${settingsPath} must declare a Kestrel endpoint URL`,
+        ).not.toBeNull();
+
+        const declared = (declaredListener as RegExpExecArray)[1] as string;
+
+        expect(
+          declared.startsWith('https://'),
+          `${settingsPath} must declare an https listener. A cleartext ` +
+            'listener here would make the client-certificate issuance edge ' +
+            'unreachable and would publish the verification material every ' +
+            'other service trusts over a channel an attacker can rewrite.',
+        ).toBe(true);
+
+        expect(
+          declared.endsWith(`:${defaultUrl.port}`),
+          `${settingsPath} must declare the listener on port ${defaultUrl.port}`,
+        ).toBe(true);
+      }
+
+      // The resolved value is not asserted, only reported as agreeing when it
+      // has not been overridden - which keeps an override legal while still
+      // catching the case where the default itself was never applied.
+      if (process.env['SECURITY_BASE_URL'] === undefined) {
+        expect(SECURITY_BASE_URL).toBe(SECURITY_DEFAULT_BASE_URL);
+      }
+    },
+  );
 });

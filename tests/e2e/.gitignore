@@ -43,3 +43,12 @@ playwright/.cache/
 .env
 .env.*
 !.env.example
+
+# The ephemeral mutual-TLS client identity written by `npm run provision:identity`: a throwaway
+# certificate authority and a client leaf whose common name is the identity the suite claims. This
+# directory holds PRIVATE KEYS, so the rule is a secrets control rather than housekeeping - and it is the
+# reason the script may write here at all. Fresh material is generated on every run and is never shared
+# between environments, so there is nothing here worth keeping and everything here worth not committing.
+# The repository's own secrets inventory exists because committed key material is the defect this
+# refactor is remediating; do not add an exception to this rule.
+.mtls/

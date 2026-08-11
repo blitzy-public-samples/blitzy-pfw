@@ -237,20 +237,168 @@ The following arrive transitively rather than as direct references. They are
 recorded so that a reader of a lock file does not mistake any of them for an
 undeclared direct dependency, and so that their terms are on the record too.
 
-  Google.Protobuf                                3.31.1    BSD-3-Clause
-  Grpc.Tools                                     2.83.0    Apache-2.0
-  Microsoft.Extensions.Resilience                10.8.0    MIT
-  Polly.Core                                     8.4.2     BSD-3-Clause
-  Polly.Extensions                               8.4.2     BSD-3-Clause
-  Polly.RateLimiting                             8.4.2     BSD-3-Clause
-  SharpYaml                                      2.1.4     MIT
+THIS LIST IS THE ENUMERATED RESOLVED GRAPH, NOT A HAND-PICKED SELECTION. It was
+produced from
 
-SharpYaml arrives through Microsoft.OpenApi.YamlReader and is the only package
-that reader adds to the resolved graph. The reader also declares dependencies on
-Microsoft.OpenApi 2.11.0, which is already a direct reference above, and on
-System.Text.Json 8.0.5, which resolves to the Microsoft.NETCore.App shared
-framework on net10.0 rather than to a package and therefore appears in no lock
-file and adds no third-party terms.
+  dotnet list PowerFramework.slnx package --include-transitive --format json
+
+by taking every entry reported under transitivePackages across all twenty
+projects, removing those that also appear as a direct reference above, and
+reading the licence expression for each from the .nuspec of the exact resolved
+version in the local package folder. An earlier revision of this file listed
+seven packages here while claiming the list came from the resolved graph; that
+claim was false, and the remedy taken is to enumerate the graph rather than to
+weaken the claim.
+
+  108 distinct transitive package identities, at 124 identity-and-version pairs.
+  Sixteen identities resolve at two versions each because different projects
+  constrain them differently; both versions are listed against those, and both
+  declare the same terms in every case. Counts by licence, over the 124 pairs:
+  MIT 101, Apache-2.0 18, BSD-3-Clause 4, public domain 1.
+
+  Google.Protobuf                                       3.31.1            BSD-3-Clause
+  Grpc.AspNetCore.Server                                2.83.0            Apache-2.0
+  Grpc.AspNetCore.Server.ClientFactory                  2.83.0            Apache-2.0
+  Grpc.Core.Api                                         2.83.0            Apache-2.0
+  Grpc.Net.Client                                       2.83.0            Apache-2.0
+  Grpc.Net.ClientFactory                                2.83.0            Apache-2.0
+  Grpc.Net.Common                                       2.83.0            Apache-2.0
+  Grpc.Tools                                            2.83.0            Apache-2.0
+  Humanizer.Core                                        2.14.1            MIT
+  Microsoft.ApplicationInsights                         2.23.0            MIT
+  Microsoft.AspNetCore.TestHost                         10.0.10           MIT
+  Microsoft.Bcl.AsyncInterfaces                         6.0.0             MIT
+  Microsoft.Bcl.Cryptography                            10.0.2            MIT
+  Microsoft.Build.Framework                             18.0.2            MIT
+  Microsoft.CodeAnalysis.Analyzers                      3.11.0            MIT
+  Microsoft.CodeAnalysis.Common                         5.0.0             MIT
+  Microsoft.CodeAnalysis.CSharp                         5.0.0             MIT
+  Microsoft.CodeAnalysis.CSharp.Workspaces              5.0.0             MIT
+  Microsoft.CodeAnalysis.Workspaces.Common              5.0.0             MIT
+  Microsoft.CodeAnalysis.Workspaces.MSBuild             5.0.0             MIT
+  Microsoft.CodeCoverage                                18.8.1            MIT
+  Microsoft.Data.Sqlite.Core                            10.0.10           MIT
+  Microsoft.EntityFrameworkCore                         10.0.10           MIT
+  Microsoft.EntityFrameworkCore.Abstractions            10.0.10           MIT
+  Microsoft.EntityFrameworkCore.Analyzers               10.0.10           MIT
+  Microsoft.EntityFrameworkCore.Relational              10.0.10           MIT
+  Microsoft.EntityFrameworkCore.Sqlite.Core             10.0.10           MIT
+  Microsoft.Extensions.AmbientMetadata.Application      10.8.0            MIT
+  Microsoft.Extensions.Caching.Abstractions             10.0.10           MIT
+  Microsoft.Extensions.Caching.Memory                   10.0.10           MIT
+  Microsoft.Extensions.Compliance.Abstractions          10.8.0            MIT
+  Microsoft.Extensions.Configuration                    10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Configuration.Abstractions       10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Configuration.Binder             10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Configuration.CommandLine        10.0.10           MIT
+  Microsoft.Extensions.Configuration.EnvironmentVariables10.0.10           MIT
+  Microsoft.Extensions.Configuration.FileExtensions     10.0.10           MIT
+  Microsoft.Extensions.Configuration.Json               10.0.10           MIT
+  Microsoft.Extensions.Configuration.UserSecrets        10.0.10           MIT
+  Microsoft.Extensions.DependencyInjection              10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.DependencyInjection.Abstractions 10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.DependencyInjection.AutoActivation10.8.0            MIT
+  Microsoft.Extensions.DependencyModel                  10.0.10           MIT
+  Microsoft.Extensions.Diagnostics                      10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Diagnostics.Abstractions         10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Diagnostics.ExceptionSummarization10.8.0            MIT
+  Microsoft.Extensions.FileProviders.Abstractions       10.0.10           MIT
+  Microsoft.Extensions.FileProviders.Physical           10.0.10           MIT
+  Microsoft.Extensions.FileSystemGlobbing               10.0.10           MIT
+  Microsoft.Extensions.Hosting                          10.0.10           MIT
+  Microsoft.Extensions.Hosting.Abstractions             10.0.10           MIT
+  Microsoft.Extensions.Http                             10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Http.Diagnostics                 10.8.0            MIT
+  Microsoft.Extensions.Logging                          10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Logging.Abstractions             10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Logging.Configuration            10.0.10           MIT
+  Microsoft.Extensions.Logging.Console                  10.0.10           MIT
+  Microsoft.Extensions.Logging.Debug                    10.0.10           MIT
+  Microsoft.Extensions.Logging.EventLog                 10.0.10           MIT
+  Microsoft.Extensions.Logging.EventSource              10.0.10           MIT
+  Microsoft.Extensions.ObjectPool                       10.0.10           MIT
+  Microsoft.Extensions.Options                          10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Options.ConfigurationExtensions  10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Primitives                       10.0.10, 8.0.0    MIT
+  Microsoft.Extensions.Resilience                       10.8.0            MIT
+  Microsoft.Extensions.Telemetry                        10.8.0            MIT
+  Microsoft.Extensions.Telemetry.Abstractions           10.8.0            MIT
+  Microsoft.IdentityModel.Abstractions                  8.19.2, 8.22.0    MIT
+  Microsoft.IdentityModel.Logging                       8.19.2, 8.22.0    MIT
+  Microsoft.IdentityModel.Protocols                     8.19.2            MIT
+  Microsoft.IdentityModel.Protocols.OpenIdConnect       8.19.2            MIT
+  Microsoft.IdentityModel.Tokens                        8.19.2, 8.22.0    MIT
+  Microsoft.Testing.Extensions.Telemetry                1.9.1             MIT
+  Microsoft.Testing.Extensions.TrxReport.Abstractions   1.9.1             MIT
+  Microsoft.Testing.Platform                            1.9.1             MIT
+  Microsoft.Testing.Platform.MSBuild                    1.9.1             MIT
+  Microsoft.TestPlatform.ObjectModel                    18.8.1            MIT
+  Microsoft.TestPlatform.TestHost                       18.8.1            MIT
+  Microsoft.VisualStudio.SolutionPersistence            1.0.52            MIT
+  Microsoft.Win32.Registry                              5.0.0             MIT
+  Mono.TextTemplating                                   3.0.0             MIT
+  Newtonsoft.Json                                       13.0.3            MIT
+  Polly.Core                                            8.4.2             BSD-3-Clause
+  Polly.Extensions                                      8.4.2             BSD-3-Clause
+  Polly.RateLimiting                                    8.4.2             BSD-3-Clause
+  SharpYaml                                             2.1.4             MIT
+  SQLite                                                3.53.4            public domain (2)
+  SQLitePCLRaw.config.e_sqlite3                         3.0.5             Apache-2.0
+  SQLitePCLRaw.core                                     3.0.5             Apache-2.0
+  SQLitePCLRaw.provider.e_sqlite3                       3.0.5             Apache-2.0
+  System.CodeDom                                        6.0.0             MIT
+  System.Composition                                    9.0.0             MIT
+  System.Composition.AttributedModel                    9.0.0             MIT
+  System.Composition.Convention                         9.0.0             MIT
+  System.Composition.Hosting                            9.0.0             MIT
+  System.Composition.Runtime                            9.0.0             MIT
+  System.Composition.TypedParts                         9.0.0             MIT
+  System.Diagnostics.EventLog                           10.0.10           MIT
+  System.IdentityModel.Tokens.Jwt                       8.19.2            MIT
+  System.Threading.RateLimiting                         8.0.0             MIT
+  xunit.analyzers                                       1.27.0            Apache-2.0
+  xunit.v3.assert                                       3.2.2             Apache-2.0
+  xunit.v3.common                                       3.2.2             Apache-2.0
+  xunit.v3.core.mtp-v1                                  3.2.2             Apache-2.0
+  xunit.v3.extensibility.core                           3.2.2             Apache-2.0
+  xunit.v3.mtp-v1                                       3.2.2             Apache-2.0
+  xunit.v3.runner.common                                3.2.2             Apache-2.0
+  xunit.v3.runner.inproc.console                        3.2.2             Apache-2.0
+
+  (2) SQLite declares its licence as a FILE rather than as an SPDX expression.
+      The file's entire content is the sentence that SQLite is public domain,
+      followed by the URL https://sqlite.org/copyright.html. It is recorded as
+      public domain here for that reason, and it is the same upstream SQLite
+      already credited among the eleven attributions above -- reached here as a
+      native asset of the SQLitePCLRaw bundle rather than as legacy C source.
+
+Four notes on what the enumeration does and does not cover, so the completeness
+claim is exact rather than broad:
+
+  * IT IS THE .NET GRAPH OF THIS SOLUTION AT THE PINNED VERSIONS. Changing a
+    pin, adding a package, or restoring on a different SDK feature band can
+    change the graph, so this block is accurate for the pins in
+    Directory.Packages.props and must be regenerated with the command above
+    whenever one of them moves. That is the same discipline the direct list
+    above already carries.
+  * PACKAGES THAT RESOLVE TO THE SHARED FRAMEWORK ARE NOT PACKAGES HERE. On
+    net10.0 several declared dependencies are satisfied by Microsoft.NETCore.App
+    or Microsoft.AspNetCore.App rather than by a package. They appear in no lock
+    file, contribute no third-party terms, and therefore appear in no line above.
+    The two shared frameworks themselves are Microsoft components of the .NET
+    platform, licensed MIT. Microsoft.OpenApi.YamlReader is the clearest worked
+    example: it declares exactly three dependencies -- Microsoft.OpenApi 2.11.0,
+    which is already a direct reference above; SharpYaml 2.1.4, which is the one
+    package it genuinely adds and is enumerated above; and System.Text.Json
+    8.0.5, which resolves to the shared framework and so appears nowhere.
+  * IT IS NOT A CONTAINER IMAGE INVENTORY. The base images named in each
+    service's Dockerfile carry their own operating-system package sets, and
+    nothing in this file enumerates those. An image-level inventory is a separate
+    artifact and none is produced in this phase.
+  * IT IS NOT AN npm GRAPH. The three npm devDependencies below are direct
+    references of tests/e2e only; their own transitive closure is recorded in
+    tests/e2e/package-lock.json and is not restated here, because nothing in that
+    closure is shipped in any service image.
 
 Registry: npmjs.org -- used only by the cross-service end-to-end suite under
 tests/e2e. All three are devDependencies of tests/e2e/package.json, so the same

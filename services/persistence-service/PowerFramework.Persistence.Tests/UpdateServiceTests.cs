@@ -54,7 +54,9 @@
 //  are obvious non-secrets that match no provider credential pattern.
 // ==================================================================================================
 using Grpc.Core;
+using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Concurrency;
+using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Grpc;
 
 // The adapter and the generated contract wrapper share the simple name UpdateService, exactly as
@@ -239,10 +241,28 @@ public sealed class UpdateServiceTests
             return Busy ? RetCode.E_BUSY : RetCode.OK;
         }
 
+        /// <summary>Completes the moment <see cref="Execute"/> has been entered.</summary>
+        /// <remarks>
+        /// The seam the lease matrix needs. The worker side is SYNCHRONOUS by contract (AAP 0.4.5.4), so
+        /// the adapter blocks inside this call - which is what lets a test hold the operation lease open
+        /// and send a second request at it. A TaskCompletionSource rather than a wait handle so nothing
+        /// here is disposable.
+        /// </remarks>
+        internal TaskCompletionSource Entered { get; } = new();
+
+        /// <summary>Set by a test to block inside <see cref="Execute"/> until it is completed.</summary>
+        internal TaskCompletionSource? Gate { get; set; }
+
         public UpdateRunResult Execute(CancellationToken cancellationToken)
         {
             _calls.Add(nameof(Execute));
             TokenSeen = cancellationToken;
+
+            _ = Entered.TrySetResult();
+
+            // Blocking, deliberately: this is the worker-side half of the proxy pair and it does not
+            // await. Only a test ever sets the gate, so the ordinary path is unchanged.
+            Gate?.Task.GetAwaiter().GetResult();
 
             return Result;
         }
@@ -284,7 +304,7 @@ public sealed class UpdateServiceTests
         CreateService()
     {
         FakeTaskFactory factory = new();
-        UpdateTaskRegistry registry = new();
+        UpdateTaskRegistry registry = new(Options.Create(new PersistenceOptions()), TimeProvider.System);
 
         return (new UpdateService(factory, registry), factory, registry);
     }
@@ -951,7 +971,9 @@ public sealed class UpdateServiceTests
     [Fact]
     public void TheConstructorRequiresEveryBehaviouralCollaborator()
     {
-        Assert.Throws<ArgumentNullException>(() => new UpdateService(null!, new UpdateTaskRegistry()));
+        Assert.Throws<ArgumentNullException>(() => new UpdateService(
+                null!,
+                new UpdateTaskRegistry(Options.Create(new PersistenceOptions()), TimeProvider.System)));
         Assert.Throws<ArgumentNullException>(() => new UpdateService(new FakeTaskFactory(), null!));
     }
 
@@ -986,5 +1008,178 @@ public sealed class UpdateServiceTests
         Assert.Equal(string.Empty, normalized.ErrorText);
         Assert.Null(bare.DbError);
         Assert.Null(normalized.DbError);
+    }
+    // ---- THE OPERATION LEASE - one prepare, update or reset at a time, and no teardown under one ----
+
+    [Fact]
+    public async Task EveryMutatingRpcIsRefusedWhileAnUpdateIsInFlight()
+    {
+        // THE FINDING THIS PINS. The oracle's caller-side guard is `if of_IsBusy() then return E_BUSY`
+        // [n_cst_threading_task_sqlupdate.sru:L223, :L236], and in process it cannot be raced because the
+        // caller and the task are one thread of control. Across a request boundary two calls can both
+        // observe "not busy" and both proceed, so the second one's descriptor array, payload or reset
+        // lands on the task the first is already executing. The guard is therefore taken as a LEASE, and
+        // this asserts that every mutating RPC goes through it.
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        TaskCompletionSource gate = new();
+        surface.Gate = gate;
+
+        // The update runs on another thread and blocks inside the worker, holding the lease.
+        Task<UpdateResponse> inFlight = Task.Run(
+            () => service.Update(new UpdateRequest { Task = handle }, Context),
+            TestContext.Current.CancellationToken);
+
+        await surface.Entered.Task;
+
+        // ALL FOUR refusals carry E_BUSY - retryable advice - and none of them reached the task.
+        int callsBefore = surface.Calls.Count;
+
+        Assert.Equal(
+            WireRetCode.EBusy,
+            (await service.Reset(new ResetUpdateTaskRequest { Task = handle }, Context)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.EBusy,
+            (await service.PrepareUpdate(new PrepareUpdateRequest { Task = handle, Tables = { Company() } },
+                Context)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.EBusy,
+            (await service.Update(new UpdateRequest { Task = handle }, Context)).Status.RetCode);
+
+        // The refusal is the ADAPTER's, taken before delegation - so the surface saw nothing new. That is
+        // the whole difference between a lease and a re-read of a flag.
+        Assert.Equal(callsBefore, surface.Calls.Count);
+
+        gate.SetResult();
+        Assert.Equal(WireRetCode.Ok, (await inFlight).Status.RetCode);
+
+        // And the lease was given back, so the very same call now succeeds unchanged.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.Reset(new ResetUpdateTaskRequest { Task = handle }, Context)).Status.RetCode);
+    }
+
+    [Fact]
+    public async Task ABusyRefusalCarriesTheRetryableDiagnosticAndNotTheUnknownHandleOne()
+    {
+        // TWO REASONS, TWO CODES. E_BUSY says "retry"; E_INVALID_HANDLE says "do not". Conflating them
+        // would either send a caller into a loop that can never succeed or make it give up on a task that
+        // was merely busy.
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        TaskCompletionSource gate = new();
+        surface.Gate = gate;
+
+        Task<UpdateResponse> inFlight = Task.Run(
+            () => service.Update(new UpdateRequest { Task = handle }, Context),
+            TestContext.Current.CancellationToken);
+
+        await surface.Entered.Task;
+
+        UpdateResponse refused = await service.Update(new UpdateRequest { Task = handle }, Context);
+
+        Assert.Equal(WireRetCode.EBusy, refused.Status.RetCode);
+        Assert.Contains("in flight", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("Retry", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        gate.SetResult();
+        _ = await inFlight;
+    }
+
+    [Fact]
+    public async Task AReleaseArrivingDuringAnUpdateDefersTheTeardownToTheUpdatesExit()
+    {
+        // HAZARD 1 OF docs/PB多线程绕坑提示.md, at a request boundary: destroying an object with work still
+        // pending against it faults. The release therefore records itself, unregisters the handle and
+        // hands the teardown to whichever path finishes last - which here is the update.
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, UpdateTaskRegistry registry) =
+            await CreateTaskAsync();
+
+        TaskCompletionSource gate = new();
+        surface.Gate = gate;
+
+        Task<UpdateResponse> inFlight = Task.Run(
+            () => service.Update(new UpdateRequest { Task = handle }, Context),
+            TestContext.Current.CancellationToken);
+
+        await surface.Entered.Task;
+
+        // The release succeeds - the handle is retired - but it MUST NOT dispose.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.ReleaseUpdateTask(new ReleaseUpdateTaskRequest { Task = handle }, Context))
+                .Status.RetCode);
+
+        Assert.False(surface.Disposed);
+        Assert.False(registry.TryResolve(handle, out _));
+
+        gate.SetResult();
+        _ = await inFlight;
+
+        // The update's exit performed the teardown, exactly once.
+        Assert.True(surface.Disposed);
+
+        // A second release finds nothing, and answers so.
+        Assert.Equal(
+            WireRetCode.EInvalidHandle,
+            (await service.ReleaseUpdateTask(new ReleaseUpdateTaskRequest { Task = handle }, Context))
+                .Status.RetCode);
+    }
+
+    [Fact]
+    public async Task AReleaseWithNothingInFlightTearsTheTaskDownItself()
+    {
+        // The ordinary case, and the other half of the handoff: with no operation to hand it to, the
+        // releaser disposes. Asserted alongside the deferred case so the pair cannot drift into either
+        // "nobody disposes" or "both dispose".
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        Assert.False(surface.Disposed);
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.ReleaseUpdateTask(new ReleaseUpdateTaskRequest { Task = handle }, Context))
+                .Status.RetCode);
+
+        Assert.True(surface.Disposed);
+    }
+
+    [Fact]
+    public async Task ARequestArrivingAfterAReleaseIsAnUnknownHandleRatherThanBusy()
+    {
+        (UpdateService service, _, TaskHandle handle, _) = await CreateTaskAsync();
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.ReleaseUpdateTask(new ReleaseUpdateTaskRequest { Task = handle }, Context))
+                .Status.RetCode);
+
+        Assert.Equal(
+            WireRetCode.EInvalidHandle,
+            (await service.Reset(new ResetUpdateTaskRequest { Task = handle }, Context)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.EInvalidHandle,
+            (await service.Update(new UpdateRequest { Task = handle }, Context)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.EInvalidHandle,
+            (await service.PrepareUpdate(new PrepareUpdateRequest { Task = handle }, Context))
+                .Status.RetCode);
+    }
+
+    [Fact]
+    public async Task TheRequestsCancellationTokenReachesTheWorker()
+    {
+        // F-11 for this contract: the worker side is synchronous by contract, so what the token buys is
+        // that a statement is not ISSUED for a caller that has gone, and that a multi-row apply stops
+        // between rows. Both live below this seam; what is asserted here is that the request's own token
+        // - not None, and not a fresh one - is what arrives.
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        using CancellationTokenSource source = new();
+        FakeCallContext context = new(source.Token);
+
+        _ = await service.Update(new UpdateRequest { Task = handle }, context);
+
+        Assert.Equal(source.Token, surface.TokenSeen);
     }
 }

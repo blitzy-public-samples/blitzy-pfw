@@ -58,6 +58,7 @@
 // ==================================================================================================
 
 using System.Globalization;
+using System.Security.Claims;
 using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -230,16 +231,21 @@ internal static class ContractDocument
 /// </summary>
 /// <param name="Path">The route path.</param>
 /// <param name="OperationId">The operation identifier.</param>
-/// <param name="DeclaresReferenceFailures">
-/// Whether the operation declares the two reference-failure statuses, 403 and 404. It is
-/// <see langword="false"/> for the operations that resolve nothing and for key generation, which
-/// declares 403 but not 404 because it resolves no inbound reference at all.
+/// <param name="DeclaresNotFound">
+/// Whether the operation declares 404, which only the operations resolving an inbound <c>keyRef</c> can
+/// answer. Key generation resolves none, so it declares none.
 /// </param>
-/// <param name="DeclaresNotFound">Whether the operation declares 404.</param>
+/// <remarks>
+/// THERE IS NO 403 FLAG, AND THERE USED TO BE. The forbidden status was once a per-operation property
+/// carried here, true for the eleven keyRef-taking operations and false for the seven that resolve
+/// nothing. It is now UNIVERSAL across the contract: the group requires the <c>security.crypto</c> scope,
+/// so every operation can answer 403 for a reason that has nothing to do with its own parameters, and the
+/// authored document and the group's own response declaration both say so. A flag whose every row read
+/// true would invite a reader to set one to false, so the rows assert it unconditionally instead.
+/// </remarks>
 internal sealed record CryptoOperation(
     string Path,
     string OperationId,
-    bool DeclaresReferenceFailures,
     bool DeclaresNotFound);
 
 /// <summary>
@@ -265,56 +271,64 @@ internal static class CryptoFixture
     /// <summary>The route prefix the contract publishes.</summary>
     internal const string Prefix = "/v1/crypto";
 
+    /// <summary>
+    /// The one AUTHORED operation's path, kept out of <see cref="Operations"/> deliberately.
+    /// </summary>
+    /// <remarks>
+    /// EVERY ROW DRIVEN BY <see cref="Operations"/> ASSERTS A POST-SHAPED OPERATION - a request body, a
+    /// 200, a 400 and a 500. The release operation is a DELETE with a path parameter, a 204 and no 400 or
+    /// 500 at all, so folding it into that table would either break every row or force each of them to
+    /// carry an exception. It has its own conformance rows instead, which state its shape explicitly
+    /// rather than by exemption.
+    /// </remarks>
+    internal const string ReleasePath = Prefix + "/rsa/keys/{keyRef}";
+
+    /// <summary>The authored release operation's identifier.</summary>
+    internal const string ReleaseOperationId = "releaseRsaKey";
+
     /// <summary>A logger factory that records nothing, for the unit-level rows.</summary>
     internal static ILoggerFactory Loggers => NullLoggerFactory.Instance;
 
     /// <summary>All 17 operations, in the order the document declares them.</summary>
     internal static IReadOnlyList<CryptoOperation> Operations { get; } =
     [
-        new(Prefix + "/hash", "hash", DeclaresReferenceFailures: false, DeclaresNotFound: false),
-        new(Prefix + "/hmac", "hmac", DeclaresReferenceFailures: true, DeclaresNotFound: true),
-        new(Prefix + "/hash-file", "hashFile", DeclaresReferenceFailures: true, DeclaresNotFound: true),
-        new(Prefix + "/hmac-file", "hmacFile", DeclaresReferenceFailures: true, DeclaresNotFound: true),
+        new(Prefix + "/hash", "hash", DeclaresNotFound: false),
+        new(Prefix + "/hmac", "hmac", DeclaresNotFound: true),
+        new(Prefix + "/hash-file", "hashFile", DeclaresNotFound: true),
+        new(Prefix + "/hmac-file", "hmacFile", DeclaresNotFound: true),
         new(
             Prefix + "/symmetric/encrypt",
             "symmetricEncrypt",
-            DeclaresReferenceFailures: true,
             DeclaresNotFound: true),
         new(
             Prefix + "/symmetric/decrypt",
             "symmetricDecrypt",
-            DeclaresReferenceFailures: true,
             DeclaresNotFound: true),
-        new(Prefix + "/rsa/encrypt", "rsaEncrypt", DeclaresReferenceFailures: true, DeclaresNotFound: true),
-        new(Prefix + "/rsa/decrypt", "rsaDecrypt", DeclaresReferenceFailures: true, DeclaresNotFound: true),
-        new(Prefix + "/rsa/sign", "rsaSign", DeclaresReferenceFailures: true, DeclaresNotFound: true),
-        new(Prefix + "/rsa/verify", "rsaVerify", DeclaresReferenceFailures: true, DeclaresNotFound: true),
-        new(Prefix + "/rsa/keys", "generateRsaKey", DeclaresReferenceFailures: true, DeclaresNotFound: false),
+        new(Prefix + "/rsa/encrypt", "rsaEncrypt", DeclaresNotFound: true),
+        new(Prefix + "/rsa/decrypt", "rsaDecrypt", DeclaresNotFound: true),
+        new(Prefix + "/rsa/sign", "rsaSign", DeclaresNotFound: true),
+        new(Prefix + "/rsa/verify", "rsaVerify", DeclaresNotFound: true),
+        new(Prefix + "/rsa/keys", "generateRsaKey", DeclaresNotFound: false),
         new(
             Prefix + "/random/blob",
             "generateRandomBlob",
-            DeclaresReferenceFailures: false,
             DeclaresNotFound: false),
         new(
             Prefix + "/random/string",
             "generateRandomString",
-            DeclaresReferenceFailures: false,
             DeclaresNotFound: false),
-        new(Prefix + "/random/guid", "generateGuid", DeclaresReferenceFailures: false, DeclaresNotFound: false),
+        new(Prefix + "/random/guid", "generateGuid", DeclaresNotFound: false),
         new(
             Prefix + "/encoding/string-to-blob",
             "stringToBlob",
-            DeclaresReferenceFailures: false,
             DeclaresNotFound: false),
         new(
             Prefix + "/encoding/blob-to-string",
             "blobToString",
-            DeclaresReferenceFailures: false,
             DeclaresNotFound: false),
         new(
             Prefix + "/encoding/blob-reverse",
             "reverseBlob",
-            DeclaresReferenceFailures: false,
             DeclaresNotFound: false),
     ];
 
@@ -372,6 +386,11 @@ internal static class CryptoFixture
     /// The references the deployment publishes. When <see langword="null"/>, every key of
     /// <paramref name="entries"/> is permitted, which is the ordinary case.
     /// </param>
+    /// <param name="clock">
+    /// The clock the retained-key retention window is measured on. When <see langword="null"/> the real
+    /// clock is used, which is right for every row that does not exercise expiry - a row that DOES must
+    /// supply a controllable one, because waiting fifteen minutes is not a test.
+    /// </param>
     /// <returns>The resolver.</returns>
     /// <remarks>
     /// The prefix is non-empty on purpose. A deployment that publishes a permitted reference is
@@ -381,7 +400,8 @@ internal static class CryptoFixture
     /// </remarks>
     internal static CryptoReferenceResolver Store(
         IReadOnlyDictionary<string, string> entries,
-        IReadOnlyList<string>? permitted = null)
+        IReadOnlyList<string>? permitted = null,
+        TimeProvider? clock = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
 
@@ -406,13 +426,81 @@ internal static class CryptoFixture
             .AddInMemoryCollection(settings)
             .Build();
 
-        return new CryptoReferenceResolver(Options.Create(options), configuration);
+        return new CryptoReferenceResolver(
+            Options.Create(options),
+            configuration,
+            clock ?? TimeProvider.System);
     }
 
     /// <summary>An empty store, for rows about resolution failure.</summary>
+    /// <param name="timeProvider">The clock retained-key expiry is measured against.</param>
     /// <returns>A resolver whose permitted set is empty.</returns>
-    internal static CryptoReferenceResolver EmptyStore() =>
-        Store(new Dictionary<string, string>(StringComparer.Ordinal));
+    internal static CryptoReferenceResolver EmptyStore(TimeProvider? clock = null) =>
+        Store(new Dictionary<string, string>(StringComparer.Ordinal), clock: clock);
+
+    /// <summary>The caller identity every row is charged to unless it says otherwise.</summary>
+    /// <remarks>
+    /// An obviously-synthetic subject. It is a caller IDENTITY rather than a credential - the retained
+    /// store charges a slot to it - so nothing here is or resembles a secret.
+    /// </remarks>
+    internal const string DefaultOwner = "powerframework-security-tests-caller";
+
+    /// <summary>
+    /// A principal carrying a subject claim, which is the only caller identity the C-02 surface has.
+    /// </summary>
+    /// <param name="subject">
+    /// The subject to stamp, or <see langword="null"/> for a principal carrying NO subject - the case
+    /// that must be charged to the shared unattributed bucket rather than exempted from the quota.
+    /// </param>
+    /// <returns>The principal.</returns>
+    /// <remarks>
+    /// The claim is spelled with its PROTOCOL name because this service configures
+    /// <c>MapInboundClaims</c> false, so a claim arrives spelled exactly as the token spells it and the
+    /// framework's mapped alias does not exist. A row that used the alias would pass against a
+    /// differently configured host and fail against this one.
+    /// </remarks>
+    internal static ClaimsPrincipal Caller(string? subject = DefaultOwner) =>
+        new(new ClaimsIdentity(
+            subject is null ? [] : [new Claim("sub", subject)],
+            authenticationType: "PowerFramework.Security.Tests"));
+
+    /// <summary>
+    /// Reserves a slot and fills it, which is the two-step the store now requires.
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="material">The retained material.</param>
+    /// <param name="reference">The minted reference, when this returns <see langword="true"/>.</param>
+    /// <param name="owner">The caller the slot is charged to.</param>
+    /// <param name="random">The entropy source the reference's random half is drawn through.</param>
+    /// <returns><see langword="true"/> when a slot was reserved and filled.</returns>
+    /// <remarks>
+    /// A HELPER RATHER THAN A REPLACEMENT FOR THE TWO CALLS. Reserving before generating is the property
+    /// under test in its own rows, so those rows call the two members directly; this helper exists only
+    /// for the rows whose subject is something else and which need a filled store to work against.
+    /// </remarks>
+    internal static bool Retain(
+        CryptoReferenceResolver store,
+        string material,
+        out string reference,
+        string owner = DefaultOwner,
+        RandomProvider? random = null)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+
+        if (!store.TryReserveGeneratedKeySlot(
+            owner,
+            random ?? Random,
+            out GeneratedKeyReservation reservation))
+        {
+            reference = string.Empty;
+
+            return false;
+        }
+
+        reference = store.CommitGeneratedKey(reservation, material);
+
+        return true;
+    }
 
     /// <summary>
     /// Builds obviously-synthetic key material of a stated length.
@@ -533,31 +621,46 @@ public sealed class CryptoContractConformanceTests
     /// Every operation declares exactly the status set the implementation registers, and never 501.
     /// </summary>
     /// <param name="path">The route path.</param>
-    /// <param name="declaresReferenceFailures">Whether 403 is declared.</param>
     /// <param name="declaresNotFound">Whether 404 is declared.</param>
     /// <remarks>
+    /// <para>
+    /// EVERY OPERATION DECLARES A 403, AND THAT IS NOW UNIVERSAL RATHER THAN PER-OPERATION. Each
+    /// protected operation in this contract requires a named scope in addition to a valid token, and the
+    /// scope a caller holds is decided per caller by this service's issuance roster - so a scope refusal
+    /// is reachable on all seventeen, including the ones that resolve no reference at all. An operation
+    /// declaring no 403 would be a document promising a status the service can produce and the contract
+    /// does not admit.
+    /// </para>
+    /// <para>
+    /// THE ROW STILL DISTINGUISHES THE TWO REFUSALS, BY THE COMPONENT THE 403 RESOLVES TO rather than by
+    /// its presence - which is a STRONGER assertion than the one it replaces. An operation may declare
+    /// only one 403, so the keyed family points at the reference-refusal component (whose description
+    /// covers both conditions) while the unkeyed family points at the scope-refusal one. Asserting the
+    /// component is what keeps "this operation resolves a reference" a documented fact instead of an
+    /// inference from a status code that every operation now carries.
+    /// </para>
+    /// <para>
     /// The absence of 501 is asserted on EVERY operation, not once globally. Constraint C-D reserves
     /// that status for the ingress service's four deferred-capability routing declarations, so a single
     /// operation acquiring it would be a compliance breach that a global assertion could miss if the
     /// token appeared in prose elsewhere in the document.
+    /// </para>
     /// </remarks>
     [Theory]
     [MemberData(nameof(OperationStatusRows))]
-    public void OperationDeclaresExpectedStatusSet(
-        string path,
-        bool declaresReferenceFailures,
-        bool declaresNotFound)
+    public void OperationDeclaresExpectedStatusSet(string path, bool declaresNotFound)
     {
         string block = ContractDocument.PathBlock(path);
 
         Assert.Contains("        '200':", block, StringComparison.Ordinal);
         Assert.Contains("        '400':", block, StringComparison.Ordinal);
         Assert.Contains("        '401':", block, StringComparison.Ordinal);
+        Assert.Contains("        '403':", block, StringComparison.Ordinal);
         Assert.Contains("        '500':", block, StringComparison.Ordinal);
 
-        Assert.Equal(
-            declaresReferenceFailures,
-            block.Contains("        '403':", StringComparison.Ordinal));
+        // UNCONDITIONAL, because the group requires a scope: every operation of this contract can answer
+        // 403 for a valid token that is not scoped `security.crypto`, whatever its own parameters are.
+        Assert.Contains("        '403':", block, StringComparison.Ordinal);
 
         Assert.Equal(
             declaresNotFound,
@@ -613,9 +716,71 @@ public sealed class CryptoContractConformanceTests
             CryptoFixture.Operations.Select(operation => operation.Path),
             StringComparer.Ordinal);
 
-        Assert.Equal(17, documented.Count);
+        // EIGHTEEN DOCUMENTED, SEVENTEEN OVERLOAD-COVERING PLUS ONE AUTHORED. The release operation
+        // covers no legacy overload - the legacy hands the private key back through a `ref` parameter and
+        // has no store to release from - so it is counted separately here rather than folded into the
+        // table, exactly as docs/CONTRACTS.md counts it.
+        Assert.Equal(18, documented.Count);
+
+        Assert.True(
+            documented.Remove(CryptoFixture.ReleasePath),
+            "The document must declare the authored release operation: it is the counterpart of the "
+                + "retention that makes the generation response safe, and without it a caller can only "
+                + "free its share of the store by waiting out the retention lifetime.");
+
         Assert.Equal(documented, registered);
     }
+
+    /// <summary>
+    /// The authored release operation is declared as a DELETE with the status set it actually answers.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ITS SHAPE IS STATED EXPLICITLY RATHER THAN BY EXEMPTION FROM THE POST-SHAPED ROWS. It is a DELETE
+    /// because it removes the resource the generation operation named; it answers 204 because there is
+    /// nothing to report beyond the outcome; it declares NO 400, because the only input is a path segment
+    /// and any value of it is a well-formed request that simply names nothing; and it declares NO 500,
+    /// because there is no configured material for it to fail to read.
+    /// </para>
+    /// <para>
+    /// THE 404 IS THE SECURITY-BEARING STATUS. A reference naming nothing retained and one naming another
+    /// caller's key answer identically, so the document must declare exactly one 404 and describe it that
+    /// way - anything else would advertise an oracle for which references exist.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheAuthoredReleaseOperationIsDeclaredAsADeleteWithItsOwnStatusSet()
+    {
+        string block = ContractDocument.PathBlock(CryptoFixture.ReleasePath);
+
+        Assert.Contains("    delete:", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("    post:", block, StringComparison.Ordinal);
+
+        Assert.Contains(
+            "operationId: " + CryptoFixture.ReleaseOperationId,
+            block,
+            StringComparison.Ordinal);
+
+        Assert.Contains("CryptoService", block, StringComparison.Ordinal);
+
+        Assert.Contains("        '204':", block, StringComparison.Ordinal);
+        Assert.Contains("        '401':", block, StringComparison.Ordinal);
+        Assert.Contains("        '403':", block, StringComparison.Ordinal);
+        Assert.Contains("        '404':", block, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("        '200':", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("        '400':", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("        '500':", block, StringComparison.Ordinal);
+
+        // C-D reserves 501 for the ingress service's four deferred-capability declarations.
+        Assert.DoesNotContain("        '501':", block, StringComparison.Ordinal);
+
+        // The reference is a PATH parameter, which is what makes this a DELETE of a named resource
+        // rather than a POST that happens to delete.
+        Assert.Contains("name: keyRef", block, StringComparison.Ordinal);
+        Assert.Contains("in: path", block, StringComparison.Ordinal);
+    }
+
 
     /// <summary>
     /// Every request schema is closed to members the document does not declare.
@@ -681,13 +846,13 @@ public sealed class CryptoContractConformanceTests
 
     /// <summary>The declared status expectations of every operation.</summary>
     /// <returns>One row per operation.</returns>
-    public static TheoryData<string, bool, bool> OperationStatusRows()
+    public static TheoryData<string, bool> OperationStatusRows()
     {
-        TheoryData<string, bool, bool> rows = [];
+        TheoryData<string, bool> rows = [];
 
         foreach (CryptoOperation operation in CryptoFixture.Operations)
         {
-            rows.Add(operation.Path, operation.DeclaresReferenceFailures, operation.DeclaresNotFound);
+            rows.Add(operation.Path, operation.DeclaresNotFound);
         }
 
         return rows;
@@ -938,6 +1103,32 @@ public sealed class CryptoEndpointsServiceTests
     }
 
     /// <summary>
+    /// The authored release operation requires a token too, and is not one of the exemptions.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// ASSERTED SEPARATELY BECAUSE IT IS NOT IN THE POST-SHAPED TABLE, and an operation nobody covers is
+    /// an operation nobody notices going anonymous. It matters more here than on the sixteen read-only
+    /// operations: an anonymous release would let anyone destroy any caller's retained key, so the
+    /// ownership check would be reachable by a caller with no identity at all.
+    /// </remarks>
+    [Fact]
+    public async Task TheAuthoredReleaseOperationRequiresATokenAsync()
+    {
+        using SecurityHostFactory factory = new();
+        using HttpClient client = factory.CreateClient();
+
+        // A concrete reference in the path position - the route template's parameter has to be filled for
+        // the request to match the route at all, and a 404 from routing would pass this row for the wrong
+        // reason. The value names nothing and is obviously synthetic.
+        using HttpResponseMessage response = await client.DeleteAsync(
+            new Uri(CryptoFixture.Prefix + "/rsa/keys/gen-0-nothing-here", UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    /// <summary>
     /// No operation of this contract is anonymous, and none is one of the service's three exemptions.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
@@ -1004,6 +1195,41 @@ public sealed class CryptoEndpointsServiceTests
 
             Assert.Equal(operation.OperationId, post.GetProperty("operationId").GetString());
         }
+    }
+    /// <summary>
+    /// The generated document declares the release operation as a bearer-protected DELETE.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// The generated-document complement, because a consumer generates its client from whichever document
+    /// it is handed. An operation missing from the generated document is an operation a generated client
+    /// cannot call, which would leave every caller unable to release a key it holds.
+    /// </remarks>
+    [Fact]
+    public async Task GeneratedDocumentDeclaresTheAuthoredReleaseOperationAsync()
+    {
+        using JsonDocument document = await ReadGeneratedDocumentAsync();
+
+        JsonElement paths = document.RootElement.GetProperty("paths");
+
+        Assert.True(
+            paths.TryGetProperty(CryptoFixture.ReleasePath, out JsonElement item),
+            $"The generated document declares no path '{CryptoFixture.ReleasePath}'.");
+
+        Assert.True(
+            item.TryGetProperty("delete", out JsonElement delete),
+            "The release operation is a DELETE of the resource the generation operation named.");
+
+        Assert.Equal(
+            CryptoFixture.ReleaseOperationId,
+            delete.GetProperty("operationId").GetString());
+
+        Assert.True(
+            delete.TryGetProperty("security", out JsonElement security),
+            "The release operation declares a security requirement: a caller may release only its own "
+                + "keys, which requires an authenticated identity.");
+
+        Assert.Contains("bearerAuth", security.GetRawText(), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1123,14 +1349,12 @@ public sealed class CryptoEndpointsServiceTests
     /// Each operation's declared response set in the document matches the authored contract exactly.
     /// </summary>
     /// <param name="path">The route path.</param>
-    /// <param name="declaresReferenceFailures">Whether 403 is expected.</param>
     /// <param name="declaresNotFound">Whether 404 is expected.</param>
     /// <returns>A task representing the assertion.</returns>
     [Theory]
     [MemberData(nameof(CryptoContractConformanceTests.OperationStatusRows), MemberType = typeof(CryptoContractConformanceTests))]
     public async Task GeneratedDocumentDeclaresExpectedStatusSetAsync(
         string path,
-        bool declaresReferenceFailures,
         bool declaresNotFound)
     {
         using JsonDocument document = await ReadGeneratedDocumentAsync();
@@ -1146,7 +1370,10 @@ public sealed class CryptoEndpointsServiceTests
         Assert.True(responses.TryGetProperty("401", out _));
         Assert.True(responses.TryGetProperty("500", out _));
 
-        Assert.Equal(declaresReferenceFailures, responses.TryGetProperty("403", out _));
+        // UNCONDITIONAL, matching the authored document: the group's scope requirement makes 403 a
+        // property of the contract rather than of an individual operation's parameters.
+        Assert.True(responses.TryGetProperty("403", out _));
+
         Assert.Equal(declaresNotFound, responses.TryGetProperty("404", out _));
     }
 
@@ -1563,6 +1790,7 @@ public sealed class CryptoSecrecyTests
 
         GenRsaKeyResponse response = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
             new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_2048 },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Random,
             store,
@@ -1875,10 +2103,7 @@ public sealed class CryptoReferenceResolutionTests
     {
         CryptoReferenceResolver store = CryptoFixture.EmptyStore();
 
-        Assert.True(store.TryRetainGeneratedPrivateKey(
-            "synthetic-retained-material",
-            CryptoFixture.Random,
-            out string minted));
+        Assert.True(CryptoFixture.Retain(store, "synthetic-retained-material", out string minted));
 
         Assert.Null(store.TryResolveReference(minted, CryptoFixture.Loggers, out string material));
         Assert.Equal("synthetic-retained-material", material);
@@ -1912,10 +2137,15 @@ public sealed class CryptoReferenceResolutionTests
 
         for (int index = 0; index < 8; index++)
         {
-            Assert.True(store.TryRetainGeneratedPrivateKey(
+            Assert.True(CryptoFixture.Retain(
+                store,
                 "material-" + index.ToString(CultureInfo.InvariantCulture),
-                deterministic,
-                out string reference));
+                out string reference,
+
+                // A DIFFERENT OWNER PER ROW, because eight rows would otherwise reach the per-caller
+                // quota and the row would fail for a reason unrelated to reference uniqueness.
+                owner: "owner-" + index.ToString(CultureInfo.InvariantCulture),
+                random: deterministic));
 
             Assert.True(
                 minted.Add(reference),
@@ -1929,32 +2159,456 @@ public sealed class CryptoReferenceResolutionTests
         }
     }
 
-    /// <summary>The retained store is bounded, and a full store is a refusal rather than a leak.</summary>
+    /// <summary>The retained store is bounded, and the bound is taken before any key is generated.</summary>
     /// <remarks>
+    /// <para>
     /// The bound exists because this is the service holding the system's only signing key: an unbounded
     /// store that grows on request would let authenticated callers terminate authentication for every
     /// service. The refusal is what the generation handler turns into a server error, discarding the
     /// pair rather than returning a private key it cannot retain.
+    /// </para>
+    /// <para>
+    /// THE BOUNDARY IS DRIVEN THROUGH THE RESERVATION RATHER THAN THROUGH RETENTION, and that is the
+    /// contract rather than an implementation detail this test reaches around. An earlier form of the
+    /// resolver decided capacity inside the retention call, by reading the store's count and then
+    /// inserting - a check-then-act pair that concurrent callers each passed, and one that ran only after
+    /// an RSA key pair had already been generated. Capacity is now taken by an interlocked increment
+    /// BEFORE any generation, so the exactness of the boundary is a property of that call and this test
+    /// asserts it there.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void RetainedStoreIsBounded()
+    public void RetentionCapacityIsBoundedAndTakenBeforeGeneration()
     {
         CryptoReferenceResolver store = CryptoFixture.EmptyStore();
 
+        // A DISTINCT OWNER PER ENTRY, so the GLOBAL cap is what binds rather than any one caller's
+        // quota - the two bounds are separate properties and are asserted separately.
         for (int index = 0; index < CryptoReferenceResolver.MaximumRetainedGeneratedKeys; index++)
         {
-            Assert.True(store.TryRetainGeneratedPrivateKey(
+            Assert.True(CryptoFixture.Retain(
+                store,
                 "material-" + index.ToString(CultureInfo.InvariantCulture),
-                CryptoFixture.Random,
-                out _));
+                out _,
+                owner: "owner-" + index.ToString(CultureInfo.InvariantCulture)));
         }
 
-        Assert.False(store.TryRetainGeneratedPrivateKey(
+        Assert.False(CryptoFixture.Retain(
+            store,
             "one-too-many",
-            CryptoFixture.Random,
-            out string overflow));
+            out string overflow,
+            owner: "one-owner-too-many"));
 
         Assert.Equal(string.Empty, overflow);
+    }
+
+    /// <summary>
+    /// A reservation the caller does not fill is released, so a refused request costs no capacity.
+    /// </summary>
+    /// <remarks>
+    /// Without the release, a refused generation would consume a slot permanently: a service that had
+    /// answered enough invalid requests would refuse every subsequent generation while holding no keys at
+    /// all, which is a denial of service reachable by repeating a request the service itself rejects. The
+    /// handler pairs the two in a <c>try</c>/<c>finally</c> so the release cannot be forgotten on a path
+    /// added later.
+    /// </remarks>
+    [Fact]
+    public void AnUnfilledReservationIsReleasedAndTheSlotIsReusable()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        // Take every slot, then give one back the way a refused generation does.
+        for (int index = 0; index < CryptoReferenceResolver.MaximumRetainedGeneratedKeys; index++)
+        {
+            Assert.True(store.TryReserveRetentionSlot());
+        }
+
+        Assert.False(store.TryReserveRetentionSlot());
+
+        store.ReleaseRetentionSlot();
+
+        Assert.True(
+            store.TryReserveRetentionSlot(),
+            "The released slot is available again, so a refusal costs no capacity.");
+
+        Assert.False(
+            store.TryReserveRetentionSlot(),
+            "And exactly one slot came back, not more.");
+    }
+
+    /// <summary>
+    /// Concurrent callers cannot overshoot the cap, which the previous check-then-act form allowed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE REGRESSION THIS ROW EXISTS FOR, STATED PLAINLY. The earlier form read the store's count and
+    /// then inserted, so any number of callers could each observe room and each take it; the store
+    /// overshot its cap by as many callers as were in flight, and the cap was therefore a bound on
+    /// sequential use only. An interlocked increment has no such window - taking capacity IS observing
+    /// it - so the count of successes is exactly the cap however many callers arrive at once.
+    /// </para>
+    /// <para>
+    /// Four times the cap is contended for from every available core, and the assertion is an equality
+    /// rather than an inequality: "no more than the cap" would also pass an implementation that refused
+    /// everything, and that is the other way to get this wrong.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ConcurrentReservationsCannotOvershootTheCap()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        int attempts = CryptoReferenceResolver.MaximumRetainedGeneratedKeys * 4;
+        int granted = 0;
+
+        Parallel.For(
+            0,
+            attempts,
+            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+            _ =>
+            {
+                if (store.TryReserveRetentionSlot())
+                {
+                    Interlocked.Increment(ref granted);
+                }
+            });
+
+        Assert.Equal(CryptoReferenceResolver.MaximumRetainedGeneratedKeys, granted);
+    }
+
+    /// <summary>
+    /// One caller cannot occupy more than its own quota, however much room the store has left.
+    /// </summary>
+    /// <remarks>
+    /// A GLOBAL CAP ALONE IS NOT A QUOTA, and this row is the proof that the second bound exists. Without
+    /// it, one authenticated caller fills the store and every peer's generation request then fails - a
+    /// denial of service against peers assembled entirely out of legitimate calls. The row deliberately
+    /// stops at the per-caller bound while the GLOBAL store still has room, which is the only shape that
+    /// distinguishes the two bounds.
+    /// </remarks>
+    [Fact]
+    public void OneCallerCannotExceedItsOwnQuotaWhileTheStoreStillHasRoom()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        for (int index = 0;
+            index < CryptoReferenceResolver.MaximumRetainedGeneratedKeysPerCaller;
+            index++)
+        {
+            Assert.True(CryptoFixture.Retain(
+                store,
+                "material-" + index.ToString(CultureInfo.InvariantCulture),
+                out _,
+                owner: "one-busy-caller"));
+        }
+
+        Assert.False(CryptoFixture.Retain(store, "over-quota", out _, owner: "one-busy-caller"));
+
+        // The store is NOT full - the per-caller bound is well below the global one - so a different
+        // caller is still served. That is the whole point of having two bounds.
+        Assert.True(CryptoFixture.Retain(store, "another-caller", out _, owner: "a-different-caller"));
+    }
+
+    /// <summary>
+    /// A token carrying no subject is charged to a shared bucket rather than exempted from the quota.
+    /// </summary>
+    /// <remarks>
+    /// THE DIRECTION THAT MATTERS. If an unattributable caller had no quota, the quota would be escapable
+    /// by omitting a claim - which is the one caller that must not be the unbounded one. The row drives
+    /// the handler rather than the store, because the mapping from "no subject claim" to "the shared
+    /// bucket" is the handler's reading of the principal.
+    /// </remarks>
+    [Fact]
+    public void ACallerWithNoSubjectClaimIsStillHeldToTheQuota()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        for (int index = 0;
+            index < CryptoReferenceResolver.MaximumRetainedGeneratedKeysPerCaller;
+            index++)
+        {
+            _ = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
+                new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_1024 },
+                CryptoFixture.Caller(subject: null),
+                CryptoFixture.Rsa,
+                CryptoFixture.Random,
+                store,
+                CryptoFixture.Loggers));
+        }
+
+        ProblemHttpResult refused = CryptoFixture.Rejection(CryptoEndpoints.GenerateRsaKey(
+            new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_1024 },
+            CryptoFixture.Caller(subject: null),
+            CryptoFixture.Rsa,
+            CryptoFixture.Random,
+            store,
+            CryptoFixture.Loggers));
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, refused.StatusCode);
+    }
+
+    /// <summary>
+    /// A retained key stops resolving once its lifetime elapses, and its slot comes back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EXPIRY IS REQUIRED BECAUSE THE ALTERNATIVE IS UNBOUNDED RETENTION OF PRIVATE KEY MATERIAL. This is
+    /// the service that also holds the system's only signing key, so material kept for the process
+    /// lifetime because nobody released it is a standing liability. A 404 after the published lifetime is
+    /// explainable and recoverable; an un-emptyable store is not.
+    /// </para>
+    /// <para>
+    /// DRIVEN THROUGH THE INJECTED CLOCK, never by sleeping. A row that waited ten real minutes would be
+    /// unrunnable, and one that shortened the lifetime for the test would assert a value the deployment
+    /// does not use.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ARetainedKeyExpiresAndReturnsItsSlot()
+    {
+        DeterministicTimeProvider clock = new(DateTimeOffset.UnixEpoch);
+
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore(clock);
+
+        Assert.True(CryptoFixture.Retain(store, "will-expire", out string reference));
+
+        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+        Assert.Equal("will-expire", held);
+
+        // One tick past the published lifetime: the boundary itself is asserted below.
+        clock.Advance(CryptoReferenceResolver.RetainedGeneratedKeyLifetime + TimeSpan.FromTicks(1));
+
+        ProblemHttpResult expired = Assert.IsType<ProblemHttpResult>(
+            store.TryResolveReference(reference, CryptoFixture.Loggers, out string gone));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, expired.StatusCode);
+        Assert.Equal(string.Empty, gone);
+
+        // The slot came back with it, so the expiry is a release and not merely a hidden entry.
+        Assert.True(CryptoFixture.Retain(store, "after-expiry", out _));
+    }
+
+    /// <summary>
+    /// A retained key is still resolvable at the last instant of its lifetime.
+    /// </summary>
+    /// <remarks>
+    /// THE BOUNDARY, ASSERTED AT THE BOUNDARY. An off-by-one here would shorten every caller's window by
+    /// the whole lifetime or lengthen it indefinitely, and neither is visible from a row that only checks
+    /// well inside or well outside the window.
+    /// </remarks>
+    [Fact]
+    public void ARetainedKeyStillResolvesAtTheLastInstantOfItsLifetime()
+    {
+        DeterministicTimeProvider clock = new(DateTimeOffset.UnixEpoch);
+
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore(clock);
+
+        Assert.True(CryptoFixture.Retain(store, "on-the-boundary", out string reference));
+
+        clock.Advance(CryptoReferenceResolver.RetainedGeneratedKeyLifetime - TimeSpan.FromTicks(1));
+
+        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+        Assert.Equal("on-the-boundary", held);
+    }
+
+    /// <summary>
+    /// An owner releases its own key, and the slot is free immediately rather than at expiry.
+    /// </summary>
+    /// <remarks>
+    /// EXPLICIT RELEASE IS WHAT MAKES THE QUOTA WORKABLE. Without it a caller's only way to free a slot
+    /// is to wait out the expiry, so a provisioning sequence longer than the quota would stall for no
+    /// reason. The row proves the slot is genuinely returned by filling the quota, releasing one, and
+    /// retaining again.
+    /// </remarks>
+    [Fact]
+    public void AnOwnerReleasesItsOwnKeyAndTheSlotIsFreeImmediately()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        string[] references = new string[CryptoReferenceResolver.MaximumRetainedGeneratedKeysPerCaller];
+
+        for (int index = 0; index < references.Length; index++)
+        {
+            Assert.True(CryptoFixture.Retain(
+                store,
+                "material-" + index.ToString(CultureInfo.InvariantCulture),
+                out references[index]));
+        }
+
+        Assert.False(CryptoFixture.Retain(store, "at-quota", out _));
+
+        Assert.True(store.TryReleaseGeneratedKey(references[0], CryptoFixture.DefaultOwner));
+
+        // Released, so it no longer resolves...
+        ProblemHttpResult gone = Assert.IsType<ProblemHttpResult>(
+            store.TryResolveReference(references[0], CryptoFixture.Loggers, out _));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, gone.StatusCode);
+
+        // ...and the slot is available at once rather than at expiry.
+        Assert.True(CryptoFixture.Retain(store, "after-release", out _));
+
+        // A second release of the same reference is refused, so release is not silently repeatable.
+        Assert.False(store.TryReleaseGeneratedKey(references[0], CryptoFixture.DefaultOwner));
+    }
+
+    /// <summary>
+    /// A caller cannot release another caller's key, and cannot tell that refusal from an unknown one.
+    /// </summary>
+    /// <remarks>
+    /// THE INDISTINGUISHABILITY IS THE SECURITY PROPERTY, not the ownership check alone. If "not yours"
+    /// and "no such reference" answered differently, the operation would be an oracle for which
+    /// references exist - and a reference is a credential-like handle. The row asserts both halves: the
+    /// key survives the foreign release attempt, and both refusals are the same answer.
+    /// </remarks>
+    [Fact]
+    public void ACallerCannotReleaseAnotherCallersKeyAndCannotDetectTheDifference()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        Assert.True(CryptoFixture.Retain(store, "belongs-to-a", out string reference, owner: "caller-a"));
+
+        Assert.False(store.TryReleaseGeneratedKey(reference, "caller-b"));
+        Assert.False(store.TryReleaseGeneratedKey("gen-999-nothing-here", "caller-b"));
+
+        // Untouched by the foreign attempt.
+        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+        Assert.Equal("belongs-to-a", held);
+
+        // And the owner can still release it.
+        Assert.True(store.TryReleaseGeneratedKey(reference, "caller-a"));
+    }
+
+    /// <summary>
+    /// The release handler answers 204 for the owner and 404 for everyone else.
+    /// </summary>
+    /// <remarks>
+    /// The handler complement of the resolver rows above: it proves the handler reads the SUBJECT CLAIM
+    /// for ownership rather than accepting any authenticated caller, which no amount of testing the
+    /// resolver alone could establish.
+    /// </remarks>
+    [Fact]
+    public void TheReleaseHandlerAnswersNoContentForTheOwnerAndNotFoundForAnyoneElse()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        GenRsaKeyResponse generated = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
+            new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_1024 },
+            CryptoFixture.Caller(),
+            CryptoFixture.Rsa,
+            CryptoFixture.Random,
+            store,
+            CryptoFixture.Loggers));
+
+        Results<NoContent, ProblemHttpResult> foreign = CryptoEndpoints.ReleaseRsaKey(
+            generated.KeyRef,
+            CryptoFixture.Caller("a-different-caller"),
+            store,
+            CryptoFixture.Loggers);
+
+        ProblemHttpResult refused = Assert.IsType<ProblemHttpResult>(foreign.Result);
+
+        Assert.Equal(StatusCodes.Status404NotFound, refused.StatusCode);
+
+        // No reference is echoed into the body, which is the same rule every message on this surface
+        // follows.
+        Assert.DoesNotContain(
+            generated.KeyRef,
+            refused.ProblemDetails.Detail ?? string.Empty,
+            StringComparison.Ordinal);
+
+        Results<NoContent, ProblemHttpResult> owned = CryptoEndpoints.ReleaseRsaKey(
+            generated.KeyRef,
+            CryptoFixture.Caller(),
+            store,
+            CryptoFixture.Loggers);
+
+        _ = Assert.IsType<NoContent>(owned.Result);
+
+        // Idempotent from the caller's point of view: a second release is a 404, not a second success.
+        Results<NoContent, ProblemHttpResult> again = CryptoEndpoints.ReleaseRsaKey(
+            generated.KeyRef,
+            CryptoFixture.Caller(),
+            store,
+            CryptoFixture.Loggers);
+
+        Assert.Equal(
+            StatusCodes.Status404NotFound,
+            Assert.IsType<ProblemHttpResult>(again.Result).StatusCode);
+    }
+
+    /// <summary>
+    /// A generation request the platform refuses does not consume a slot.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE RESERVATION MUST BE GIVEN BACK ON EVERY FAILURE PATH, or a caller fills the store with
+    /// reservations for keys that were never generated - a denial of service assembled entirely out of
+    /// REJECTED requests, which is worse than one built from accepted ones because it costs the attacker
+    /// nothing.
+    /// </para>
+    /// <para>
+    /// A key size of one is the smallest thing the platform certainly refuses while still being inside
+    /// the declared 16-bit domain, so the row reaches the abandon path rather than the domain screen
+    /// above it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AGenerationThePlatformRefusesDoesNotConsumeASlot()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        for (int attempt = 0;
+            attempt < CryptoReferenceResolver.MaximumRetainedGeneratedKeysPerCaller + 4;
+            attempt++)
+        {
+            ProblemHttpResult refused = CryptoFixture.Rejection(CryptoEndpoints.GenerateRsaKey(
+                new GenRsaKeyRequest { Bits = 1L },
+                CryptoFixture.Caller(),
+                CryptoFixture.Rsa,
+                CryptoFixture.Random,
+                store,
+                CryptoFixture.Loggers));
+
+            // A refused SIZE, not a full store - which is the distinction the row exists to make.
+            Assert.Equal(StatusCodes.Status400BadRequest, refused.StatusCode);
+        }
+
+        // Every one of those attempts gave its slot back, so a legitimate request still succeeds.
+        Assert.True(CryptoFixture.Retain(store, "after-many-refusals", out _));
+    }
+
+    /// <summary>
+    /// A reservation may be filled exactly once, and a non-reservation may not be filled at all.
+    /// </summary>
+    /// <remarks>
+    /// BOTH ARE DEFECTS IN THE CALLING CODE RATHER THAN REQUEST STATES, so both raise rather than
+    /// answering a rejection - an internal fault reported as a caller error is a bug that hides itself.
+    /// Committing twice is the dangerous one: silently overwriting a filled slot would strand the previous
+    /// key beyond every release path, retained for the process lifetime with no reference to it.
+    /// </remarks>
+    [Fact]
+    public void AReservationIsFillableExactlyOnce()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        Assert.True(store.TryReserveGeneratedKeySlot(
+            CryptoFixture.DefaultOwner,
+            CryptoFixture.Random,
+            out GeneratedKeyReservation reservation));
+
+        Assert.True(reservation.IsReserved);
+        Assert.Equal(CryptoFixture.DefaultOwner, reservation.Owner, StringComparer.Ordinal);
+
+        _ = store.CommitGeneratedKey(reservation, "the-one-key");
+
+        _ = Assert.Throws<InvalidOperationException>(
+            () => store.CommitGeneratedKey(reservation, "a-second-key"));
+
+        _ = Assert.Throws<InvalidOperationException>(
+            () => store.CommitGeneratedKey(GeneratedKeyReservation.None, "no-reservation"));
+
+        Assert.False(GeneratedKeyReservation.None.IsReserved);
     }
 
     /// <summary>
@@ -3235,6 +3889,7 @@ public sealed class CryptoRsaMatrixTests
     {
         GenRsaKeyResponse response = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
             new GenRsaKeyRequest { Bits = bits },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Random,
             CryptoFixture.EmptyStore(),
@@ -3260,6 +3915,7 @@ public sealed class CryptoRsaMatrixTests
     {
         GenRsaKeyResponse response = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
             new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_2048, PemFormat = pemFormat },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Random,
             CryptoFixture.EmptyStore(),
@@ -3281,6 +3937,7 @@ public sealed class CryptoRsaMatrixTests
     {
         ProblemHttpResult problem = CryptoFixture.Rejection(CryptoEndpoints.GenerateRsaKey(
             new GenRsaKeyRequest { Bits = bits },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Random,
             CryptoFixture.EmptyStore(),
@@ -3305,6 +3962,7 @@ public sealed class CryptoRsaMatrixTests
 
         GenRsaKeyResponse generated = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
             new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_2048 },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Random,
             store,
@@ -4495,6 +5153,7 @@ public sealed class CryptoRejectionArmTests
     {
         ProblemHttpResult problem = CryptoFixture.Rejection(CryptoEndpoints.GenerateRsaKey(
             new GenRsaKeyRequest(),
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Random,
             CryptoFixture.EmptyStore(),
@@ -5244,4 +5903,3 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
         }
     }
 }
-

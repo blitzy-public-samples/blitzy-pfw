@@ -2652,12 +2652,29 @@ public sealed class ExpressionSession
     /// thereby entitled to it.
     /// </para>
     /// <para>
-    /// THE DETAIL IS NOT DISCARDED, IT IS MOVED. <see cref="Faulted"/> logs the original exception
-    /// server-side against the same correlation identifier this message carries, so an operator joins the
-    /// two in one lookup and the caller carries nothing it should not have. That is the whole design: the
-    /// identifier is the seam between a safe payload and a complete diagnostic.
+    /// THE DIAGNOSTIC IS NOT DISCARDED, IT IS NARROWED AND MOVED. <see cref="Faulted"/> records the fault's
+    /// TYPE CHAIN server-side against the same correlation identifier this message carries, so an operator
+    /// joins the two in one lookup while neither channel carries the fault's own text. The exception object
+    /// itself reaches neither: a host holds this expression's variable values, so its message is caller data
+    /// wherever it came from, and a log record is a different trust domain from this process.
     /// </para>
     /// </remarks>
+    /// <summary>The separator between links of a described fault chain, outermost towards innermost.</summary>
+    private const string FaultChainSeparator = " <- ";
+
+    /// <summary>The marker appended when a fault chain is deeper than the bound below.</summary>
+    private const string FaultChainTruncationMarker = "...";
+
+    /// <summary>
+    /// How many links of a fault chain are described before truncation.
+    /// </summary>
+    /// <remarks>
+    /// BOUNDED BECAUSE A CHAIN CAN BE CYCLIC. Nothing prevents an exception from being its own ancestor
+    /// through aggregation, and an unbounded walk over one would build a string until the process ran out of
+    /// memory - while handling a fault, which is the worst moment for a second one.
+    /// </remarks>
+    private const int MaximumDescribedFaultDepth = 8;
+
     private const string HostFaultedTemplate =
         "Cross-DataWindow expression reference FAILED: the expression service behind DataWindow handle "
         + "[{1}] in expression session [{2}] raised an internal error. The handle resolved and the "
@@ -2790,17 +2807,27 @@ public sealed class ExpressionSession
     {
         string faultId = NextFaultId();
 
-        // THE ONE PLACE THE EXCEPTION'S OWN TEXT IS ALLOWED TO GO. Logged with the exception object so a
-        // configured provider records the type, message and stack in full, joined to the payload by the
-        // identifier below. A null logger means the detail is lost, never that it is sent instead.
+        // THE EXCEPTION OBJECT IS NOT PASSED TO THE LOGGER, AND THE REASONING THAT USED TO PUT IT HERE WAS
+        // ONE STEP SHORT. Keeping the detail out of the wire and in the log was right about the wire and
+        // wrong about the log: the host that threw is arbitrary code holding this expression's variable
+        // VALUES, so its message can carry a caller's data, an expression fragment, a path or a
+        // configuration key - and an attached exception is rendered in full by every provider, message
+        // chain and stack together. A log record is a different trust domain from this process, and the
+        // rule the estate applies to every other arbitrary fault applies here too.
+        //
+        // WHAT IS RECORDED INSTEAD IS ALLOWLISTED AND STILL LOCATES THE FAULT. The exception's TYPE CHAIN
+        // names which failure occurred and where it came from - every name in it belongs to this codebase,
+        // the framework or a package, and none can carry a value a caller supplied. Together with the
+        // deterministic correlation id, the handle and the session it identifies the occurrence precisely;
+        // what it no longer publishes is the content the fault happened to be holding.
         _logger?.LogError(
-            exception,
             "Cross-DataWindow expression host faulted. Correlation id {FaultId}, DataWindow handle "
-                + "{Handle}, expression session {SessionId}. The caller received fixed text carrying "
-                + "this correlation id and no exception detail.",
+                + "{Handle}, expression session {SessionId}, fault types {FaultTypes}. The caller received "
+                + "fixed text carrying this correlation id and no exception detail.",
             faultId,
             handle.Value,
-            SessionId);
+            SessionId,
+            DescribeExceptionTypes(exception));
 
         ImmutableArray<string> arguments =
         [
@@ -2873,6 +2900,46 @@ public sealed class ExpressionSession
         long ordinal = Interlocked.Increment(ref _faultOrdinal);
 
         return SessionId + "/fault/" + ordinal.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Names the types in an exception chain, outermost first, without reading any message.
+    /// </summary>
+    /// <param name="error">The fault to describe.</param>
+    /// <returns>The namespace-qualified type names joined outermost-first.</returns>
+    /// <remarks>
+    /// A TYPE NAME IS ALLOWLISTED CONTENT AND A MESSAGE IS NOT. Every name this produces belongs to this
+    /// codebase, the framework or a package, so none of them can carry an expression fragment, a variable
+    /// value, a path or a configuration key - which is exactly what an arbitrary host's message can. The
+    /// chain is walked because a host fault is habitually wrapped and the type that actually failed is the
+    /// innermost one, and the walk is BOUNDED because nothing prevents a chain from being cyclic through
+    /// aggregation; a truncation marker is appended so a shortened chain is never mistaken for a complete
+    /// one.
+    /// </remarks>
+    private static string DescribeExceptionTypes(Exception error)
+    {
+        StringBuilder chain = new();
+        Exception? current = error;
+
+        for (int depth = 0; depth < MaximumDescribedFaultDepth && current is not null; depth++)
+        {
+            if (depth > 0)
+            {
+                _ = chain.Append(FaultChainSeparator);
+            }
+
+            Type type = current.GetType();
+
+            _ = chain.Append(type.FullName ?? type.Name);
+            current = current.InnerException;
+        }
+
+        if (current is not null)
+        {
+            _ = chain.Append(FaultChainSeparator).Append(FaultChainTruncationMarker);
+        }
+
+        return chain.ToString();
     }
 
 

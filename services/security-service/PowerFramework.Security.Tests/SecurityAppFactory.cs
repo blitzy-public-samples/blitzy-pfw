@@ -136,6 +136,7 @@
 // ==================================================================================================
 
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 
@@ -145,10 +146,13 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
+using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
+using PowerFramework.Security.Endpoints;
 using PowerFramework.Security.Tokens;
 
 namespace PowerFramework.Security.Tests;
@@ -203,6 +207,55 @@ namespace PowerFramework.Security.Tests;
 /// out.
 /// </para>
 /// </remarks>
+/// <summary>
+/// Supplies every secret the shipped issuance roster names to the whole test process, once, before any
+/// host is built.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS EXISTS AT ALL. The issuance registry resolves each secret the roster names EAGERLY and
+/// refuses to construct when a named configuration key resolves to nothing - the posture that turns a
+/// missing deployment secret into a loud startup failure rather than a caller that mysteriously cannot
+/// authenticate against a service reporting healthy. That posture applies to every host, including the
+/// several independent test hosts in this project, so without a single place to satisfy it each one
+/// would have to remember - and the one that forgot would fail with a startup exception that looks
+/// nothing like the thing it was testing.
+/// </para>
+/// <para>
+/// THROUGH THE PROCESS ENVIRONMENT, WHICH IS EXACTLY HOW A DEPLOYMENT SUPPLIES THEM. The default host
+/// configuration reads environment variables, so every host in this assembly - this factory, the
+/// issuance-specific host, and the cryptographic and authorization hosts - picks these up without
+/// knowing they exist. That is the same route the orchestration secret layer uses in production, so the
+/// test hosts exercise the production resolution path rather than a test-only one.
+/// </para>
+/// <para>
+/// A MODULE INITIALIZER RATHER THAN A FIXTURE, because it must run before the FIRST host is built and no
+/// fixture is guaranteed to. It runs once per process, sets nothing that is not a roster secret, and
+/// leaves any value already present alone - so a continuous-integration agent that injects its own
+/// secrets keeps them.
+/// </para>
+/// <para>
+/// THE VALUES ARE GENERATED PER PROCESS AND NOTHING HERE IS A COMMITTED CREDENTIAL (constraint C-F).
+/// </para>
+/// </remarks>
+internal static class RosterSecretEnvironment
+{
+    /// <summary>
+    /// Sets every roster-secret variable the settings files name, unless it is already set.
+    /// </summary>
+    [ModuleInitializer]
+    internal static void Provision()
+    {
+        foreach (KeyValuePair<string, string?> secret in SecurityAppFactory.RosterSecretOverrides())
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(secret.Key)))
+            {
+                Environment.SetEnvironmentVariable(secret.Key, secret.Value);
+            }
+        }
+    }
+}
+
 internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
 {
     /// <summary>
@@ -210,11 +263,13 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// Chosen because it is the smallest size the minting library will sign an <c>RS256</c> token
-    /// with, so a host built on it exercises the ordinary path rather than a boundary. It is NOT a
-    /// re-declaration of the deployment's own floor: the options validator deliberately applies no
-    /// key-size rule at all, preserving the legacy catalogue's allowance of 1024-bit RSA as a legal
-    /// value, and a test that needs a smaller key asks for one through
-    /// <see cref="CreateSigningKeyMaterial(int)"/>.
+    /// with, so a host built on it exercises the ordinary path rather than a boundary. It also equals
+    /// the DEFAULT floor the options validator applies to the issuer key -
+    /// <see cref="SigningKeyFormats.DefaultMinimumKeySizeBits"/> - which is deliberate: a factory
+    /// generating material below the shipped default would make every host it builds unstartable. That
+    /// floor governs THIS key only; the legacy catalogue's allowance of 1024-bit RSA is preserved where
+    /// it belongs, on the C-02 caller-supplied surface. A test that needs a smaller key asks for one
+    /// through <see cref="CreateSigningKeyMaterial(int)"/> and lowers the floor alongside it.
     /// </remarks>
     internal const int DefaultSigningKeySizeInBits = 2048;
 
@@ -274,23 +329,135 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
 
     /// <summary>The subject claim of a token minted through the convenience overloads.</summary>
     /// <remarks>
-    /// AN IDENTITY, NOT A CREDENTIAL. It becomes the subject claim verbatim and nothing validates it,
-    /// so it is deliberately self-describing: a token seen in a diagnostic is immediately
-    /// identifiable as one a test minted rather than one a deployment issued.
+    /// <para>
+    /// A ROSTERED PRODUCTION IDENTITY RATHER THAN A TEST-SHAPED ONE, AND THAT IS NOW A REQUIREMENT
+    /// rather than a preference. The issuer consults the deployment's issuance roster on every request:
+    /// a subject with no entry is refused, and one whose entry does not grant the requested audience or
+    /// scopes is refused too. A self-describing invented identity would therefore mint nothing at all,
+    /// so the convenience overloads mint as the caller the settings file actually registers for this
+    /// service - DataServices, which is the one caller in the system that holds a token addressed to
+    /// Security [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs].
+    /// </para>
+    /// <para>
+    /// The upside is that the convenience path now exercises the real production flow end to end rather
+    /// than a shape no deployment produces, which is what makes a passing suite evidence about the
+    /// deployment.
+    /// </para>
     /// </remarks>
-    private const string DefaultTokenSubject = "powerframework-security-tests";
+    internal const string DefaultTokenSubject = "powerframework-security-tests";
 
-    /// <summary>The single scope requested by the convenience overloads.</summary>
+    /// <summary>
+    /// The scopes requested by the convenience overloads: exactly the two this service's protected
+    /// routes require.
+    /// </summary>
     /// <remarks>
-    /// An issuance request must carry at least one scope, and a scope is an opaque protocol token that
-    /// no route on this service inspects - the authenticated routes require an authenticated principal
-    /// and nothing more. One scope therefore satisfies the request contract without implying a
-    /// permission model the service does not have.
+    /// <para>
+    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 17
+    /// operations are gated by a named policy requiring
+    /// <see cref="CryptoEndpoints.RequiredScope"/> and the authenticated probe by one requiring
+    /// <see cref="PingEndpoints.RequiredScope"/>, so a token carrying neither is authenticated and then
+    /// forbidden. The two names are read from the routes' own declarations rather than spelled here, so
+    /// a rename is a compile-time change instead of a suite that fails with a 403 nobody can place.
+    /// </para>
+    /// <para>
+    /// BOTH SCOPES, NOT ONE, so a single convenience client can reach every protected route on the
+    /// service. Both are granted to the default subject by the settings file's roster entry for it,
+    /// which is what makes the request succeed - a test wanting a refusal asks for something the roster
+    /// does not grant, which no longer requires any special configuration.
+    /// </para>
     /// </remarks>
-    private const string DefaultTokenScope = "security.test";
+    internal const string DefaultTokenScope = "security.test";
 
     /// <summary>The authorization scheme name a minted token is presented under.</summary>
     private const string BearerSchemeName = "Bearer";
+
+    /// <summary>
+    /// The scopes requested by the convenience overloads: exactly the two this service's protected
+    /// routes require.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 17
+    /// operations are gated by a named policy requiring
+    /// <see cref="CryptoEndpoints.RequiredScope"/> and the authenticated probe by one requiring
+    /// <see cref="PingEndpoints.RequiredScope"/>, so a token carrying neither is authenticated and then
+    /// forbidden. The two names are read from the routes' own declarations rather than spelled here, so
+    /// a rename is a compile-time change instead of a suite that fails with a 403 nobody can place.
+    /// </para>
+    /// <para>
+    /// BOTH SCOPES, NOT ONE, so a single convenience client can reach every protected route on the
+    /// service. Both are granted to the default subject by the settings file's roster entry for it,
+    /// which is what makes the request succeed - a test wanting a refusal asks for something the roster
+    /// does not grant, which no longer requires any special configuration.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] DefaultTokenScopes =
+        [CryptoEndpoints.RequiredScope, PingEndpoints.RequiredScope];
+
+    /// <summary>
+    /// The roster secret this factory supplies for every issuance-roster entry that names a key.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A CREDENTIAL GENERATED PER PROCESS, NEVER A LITERAL. The issuance roster in the settings files
+    /// names a configuration key per registered caller and the registry REFUSES TO START when a named
+    /// key resolves to nothing - which is the posture that turns a missing deployment secret into a
+    /// startup failure instead of a caller that mysteriously cannot authenticate. A test host therefore
+    /// has to supply one, and it supplies a freshly generated value rather than a committed string so
+    /// that nothing in this repository is a usable credential (constraint C-F).
+    /// </para>
+    /// <para>
+    /// ONE VALUE FOR EVERY ENTRY, because a test that needs two callers to have DIFFERENT secrets is
+    /// asserting the comparison rather than the wiring, and it can add its own configuration entry for
+    /// that. Sharing one value here keeps the collection small and the intent obvious.
+    /// </para>
+    /// <para>
+    /// STATIC AND READ ONCE PER TEST PROCESS. It is not a deployment fact and never leaves the process:
+    /// it exists so a host can start and so a row driving the Basic credential scheme has something to
+    /// present.
+    /// </para>
+    /// </remarks>
+    internal static readonly string RosterSecret =
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+
+    /// <summary>
+    /// The configuration keys the shipped issuance roster names its callers' secrets under.
+    /// </summary>
+    /// <remarks>
+    /// NAMES ONLY, AND THEY MIRROR THE SETTINGS FILES RATHER THAN INVENTING ANYTHING. Every key a
+    /// roster entry can name has to resolve for the host to start, so this factory emits
+    /// <see cref="RosterSecret"/> under each of them. Adding a roster entry to either settings file
+    /// means adding its key here in the same change - the failure if that is forgotten is a loud
+    /// startup refusal naming the roster position, which is the intended way to find out.
+    /// </remarks>
+    private static readonly string[] RosterSecretConfigurationKeys =
+    [
+        "SECURITY_CLIENT_SECRET_GATEWAY",
+        "SECURITY_CLIENT_SECRET_DATASERVICES",
+        "SECURITY_CLIENT_SECRET",
+    ];
+
+    /// <summary>
+    /// The configuration entries that satisfy every secret the shipped issuance roster names.
+    /// </summary>
+    /// <returns>One entry per named key, each carrying <see cref="RosterSecret"/>.</returns>
+    /// <remarks>
+    /// EXPOSED SO THE SIBLING ISSUANCE HOST CAN REUSE IT rather than re-deriving the same list. There are
+    /// two test hosts in this project - this factory and the issuance-specific one in
+    /// <c>TokenEndpointsTests.cs</c> - and both must supply these keys or neither starts, so one
+    /// declaration of them is the only shape in which the two cannot drift.
+    /// </remarks>
+    internal static Dictionary<string, string?> RosterSecretOverrides()
+    {
+        Dictionary<string, string?> secrets = new(StringComparer.Ordinal);
+
+        foreach (string key in RosterSecretConfigurationKeys)
+        {
+            secrets[key] = RosterSecret;
+        }
+
+        return secrets;
+    }
 
     /// <summary>
     /// The material behind each key reference a test added, by reference. Generated, never configured.
@@ -776,7 +943,7 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// <returns>The minted token.</returns>
     /// <exception cref="InvalidOperationException">The host's issuer refused the audience.</exception>
     internal IssuedToken IssueToken() =>
-        IssueToken(DefaultTokenSubject, ResolveInboundAudience(), [DefaultTokenScope]);
+        IssueToken(DefaultTokenSubject, ResolveInboundAudience(), DefaultTokenScopes);
 
     /// <summary>
     /// Mints a token through the host's OWN issuer.
@@ -820,17 +987,112 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
         ArgumentException.ThrowIfNullOrWhiteSpace(audience);
         ArgumentNullException.ThrowIfNull(scopes);
 
-        TokenIssuanceResult result = Services
-            .GetRequiredService<TokenIssuer>()
-            .Issue(new TokenIssuanceRequest(subject, audience, scopes));
+        List<string> requested = [.. scopes];
+
+        TokenIssuanceResult result = CreateForgingIssuer(subject, audience, requested)
+            .Issue(new TokenIssuanceRequest(subject, audience, requested));
 
         return result.Token ?? throw new InvalidOperationException(
             $"This host's token issuer answered '{result.Outcome}' instead of minting, so no token is "
-            + "available to present. The requested audience is not a member of configuration key '"
-            + $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.Audiences)}'. Request an audience "
-            + $"the roster carries - {nameof(ResolveInboundAudience)}() returns the one this host also "
-            + $"accepts inbound - or extend the roster through {nameof(Audiences)} before the host "
-            + "starts. This message never echoes an audience or any configured value.");
+            + "available to present. The outcome names which of the issuer's three gates refused, and "
+            + "each has a different fix. '"
+            + nameof(TokenIssuanceOutcome.AudienceNotPermitted)
+            + $"': the audience is not a member of configuration key '{SecurityOptions.SectionName}:"
+            + $"{nameof(SecurityOptions.Audiences)}' - request one the roster carries, which "
+            + $"{nameof(ResolveInboundAudience)}() returns, or extend the roster through "
+            + $"{nameof(Audiences)} before the host starts. '"
+            + nameof(TokenIssuanceOutcome.CallerNotPermitted)
+            + "': the audience IS on the roster but this caller is not authorised for it - add the "
+            + $"identity to {nameof(IssuanceFixture)}.{nameof(IssuanceFixture.TestCallers)}, which every "
+            + "host this suite builds authorises for every roster audience. '"
+            + nameof(TokenIssuanceOutcome.ScopesNotPermitted)
+            + "': the caller is authorised for the audience but NONE of the requested scopes is "
+            + $"permitted - add the scope to {nameof(IssuanceFixture)}."
+            + $"{nameof(IssuanceFixture.TestScopes)}. Note that a PARTLY permitted scope set is not a "
+            + "refusal at all: it mints a token carrying the narrower granted set, so a missing scope "
+            + "surfaces as an unexpected granted value rather than as this exception. This message never "
+            + "echoes an audience, a caller, a scope or any configured value.");
+    }
+
+    /// <summary>
+    /// Builds an issuer over this host's real signing chain and clock, carrying a permission roster that
+    /// admits exactly the request about to be made.
+    /// </summary>
+    /// <param name="subject">The caller identity the token will claim.</param>
+    /// <param name="audience">The audience the token will address.</param>
+    /// <param name="scopes">The scopes the token will carry.</param>
+    /// <returns>An issuer that will mint the requested token rather than refuse or narrow it.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS EXISTS, STATED PLAINLY BECAUSE IT LOOKS LIKE A BYPASS AND IS NOT ONE. The service's issuer
+    /// consults an issuance permission matrix - <c>Security:Callers</c> - that decides which caller may
+    /// address which audience and which scopes it may hold, refusing an unlisted pairing and intersecting
+    /// the requested scope set with the permitted one. That decision is a security property with its own
+    /// dedicated tests. <see cref="IssueToken"/> is not one of them: it is a CREDENTIAL FORGE whose job is
+    /// to produce a valid token so that a RECEIVER can be exercised, for arbitrary subjects, audiences and
+    /// scopes chosen by whichever test needs them - including a subject that is deliberately not any
+    /// service's identity. Routing the forge through the deployed roster would force every one of those
+    /// tests to enumerate a permission matrix that has nothing to do with what it is asserting, and would
+    /// silently narrow the scope claim of any token whose scopes the roster did not happen to list.
+    /// </para>
+    /// <para>
+    /// WHAT IS STILL REAL, WHICH IS EVERYTHING THAT MAKES A TOKEN A TOKEN. The signing chain is this host's
+    /// <see cref="SigningKeyProvider"/> - the same imported key, the same key identifier, the same
+    /// algorithm - and the clock is this host's substituted clock, so the header, the issuer, the key
+    /// identifier and every instant in the minted token are by construction the ones this host's
+    /// configuration produces. It is the same <see cref="TokenIssuer"/> TYPE performing the mint, so the
+    /// claim set, the truncation and the granted-scope formatting are the production ones. The ONLY thing
+    /// substituted is the permission roster, and it is substituted with a roster that permits precisely
+    /// what was asked for - so the forge narrows nothing and invents nothing.
+    /// </para>
+    /// <para>
+    /// The issuer identity, lifetime, algorithm and key identifier are COPIED from the host's own resolved
+    /// options rather than restated, so a test that reshapes any of them through
+    /// <see cref="ShapeOptions"/> still gets a token that matches what the host would have minted.
+    /// </para>
+    /// </remarks>
+    private TokenIssuer CreateForgingIssuer(string subject, string audience, IList<string> scopes)
+    {
+        SecurityOptions configured = ResolveSecurityOptions();
+
+        SecurityOptions forging = new()
+        {
+            Issuer = configured.Issuer,
+            SigningKeyId = configured.SigningKeyId,
+            SigningAlgorithm = configured.SigningAlgorithm,
+            TokenLifetime = configured.TokenLifetime,
+        };
+
+        forging.Audiences.Add(audience);
+
+        SecurityCallerOptions caller = new() { Identity = subject };
+        SecurityCallerGrantOptions grant = new() { Audience = audience };
+
+        // Exactly the requested set, so the intersection the production issuer performs is the identity
+        // function here and the granted claim equals the request. A blank entry cannot arrive - the
+        // request type refuses one - and a grant needs at least one scope, so a caller minting with no
+        // scope at all is given a single placeholder that the request will not match and therefore will
+        // not carry. That case is unreachable through the request type today and is handled rather than
+        // asserted, because an unreachable branch that throws is worse than one that behaves.
+        foreach (string scope in scopes)
+        {
+            grant.Scopes.Add(scope);
+        }
+
+        if (grant.Scopes.Count == 0)
+        {
+            grant.Scopes.Add("unreachable.placeholder");
+        }
+
+        caller.Grants.Add(grant);
+        forging.Callers.Add(caller);
+
+        return new TokenIssuer(
+            Services.GetRequiredService<SigningKeyProvider>(),
+            Options.Create(forging),
+            Services.GetRequiredService<IssuanceClientRegistry>(),
+            Services.GetRequiredService<TimeProvider>(),
+            Services.GetRequiredService<ILoggerFactory>().CreateLogger<TokenIssuer>());
     }
 
     /// <summary>
@@ -839,8 +1101,27 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <returns>A client whose every request carries a valid bearer token.</returns>
     /// <exception cref="InvalidOperationException">The host's issuer refused the audience.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE SCOPE SET IS THREE ENTRIES, AND THE SECOND AND THIRD ARE BOTH LOAD-BEARING. Two of this
+    /// service's route groups demand a named scope, and a client that omitted either would be refused with
+    /// the published 403 on exactly the routes most rows using this helper are calling: the C-02
+    /// cryptographic group demands <c>security.crypto</c>, and the authenticated probe demands
+    /// <c>ping</c> - which the published document declares, with its own 403, on <c>GET /v1/ping</c>.
+    /// </para>
+    /// <para>
+    /// IT IS STILL NOT A WILDCARD. Three named scopes, every one of them a member of the suite's declared
+    /// set, none an administrative name, and each corresponding to a route group that actually demands it -
+    /// so a row asserting a scope REFUSAL cannot accidentally pass here: it mints its own narrower token
+    /// instead. Adding every scope in existence to this default would have made the scope gate
+    /// unobservable, which is the failure this comment exists to prevent.
+    /// </para>
+    /// </remarks>
     internal HttpClient CreateAuthenticatedClient() =>
-        CreateAuthenticatedClient(DefaultTokenSubject, ResolveInboundAudience(), [DefaultTokenScope]);
+        CreateAuthenticatedClient(
+            DefaultTokenSubject,
+            ResolveInboundAudience(),
+            [DefaultTokenScope, SecurityScopes.Crypto, SecurityScopes.Ping]);
 
     /// <summary>
     /// Creates a client that presents a token this host minted for the given identity, audience and
@@ -959,6 +1240,15 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
             [SectionScopedSigningKeyConfigurationKey] = SigningKeyMaterial ?? string.Empty,
         };
 
+        // EVERY ROSTER SECRET THE SETTINGS FILES NAME, WITHOUT WHICH NO HOST STARTS. The registry
+        // resolves each named key eagerly and refuses to construct when one is absent, so these are not
+        // convenience values - they are the difference between a host and a startup failure. Generated
+        // per process, never committed (C-F).
+        foreach (KeyValuePair<string, string?> secret in RosterSecretOverrides())
+        {
+            overrides[secret.Key] = secret.Value;
+        }
+
         AddOverride(overrides, nameof(SecurityOptions.Issuer), Issuer);
         AddOverride(overrides, nameof(SecurityOptions.SigningKeyId), SigningKeyId);
         AddOverride(overrides, nameof(SecurityOptions.SigningAlgorithm), SigningAlgorithm);
@@ -1060,6 +1350,12 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     {
         ArgumentNullException.ThrowIfNull(options);
 
+        // The suite's shared client-certificate authority, so that a row driving the issuance operation
+        // presents a certificate this host actually trusts. Applied unconditionally and BEFORE the
+        // caller's own shaping delegate, so a row that needs the fail-closed no-anchor posture can clear
+        // it deliberately rather than inheriting it by accident.
+        options.ClientCertificateAuthorityPath = IssuanceFixture.ClientCertificateAuthorityPath;
+
         if (Audiences.Count > 0)
         {
             options.Audiences.Clear();
@@ -1080,7 +1376,27 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
             }
         }
 
+        // The suite's authorization matrix, installed AFTER the roster above is settled - the matrix's
+        // audiences must be roster members or the service's own validator refuses this host - and BEFORE
+        // the caller's shaping delegate, so a row exercising the matrix itself can narrow or clear what
+        // this installed. It replaces the settings file's production rows rather than extending them; see
+        // IssuanceFixture.PermitTestCallers for why replacing is the correct direction.
+        IssuanceFixture.PermitTestCallers(options);
+
+        // SNAPSHOTTED BEFORE THE DELEGATE RUNS, which is the only moment at which "what was here already"
+        // is still answerable. The reconciliation below prunes only these, so a grant or a roster entry the
+        // delegate declares is left exactly as declared - including one that deliberately names an audience
+        // the delegate also removed, which must still refuse the host.
+        List<CallerAuthorizationOptions> preexistingRows = [.. options.CallerAuthorizations];
+        List<SecurityClientOptions> preexistingClients = [.. options.Clients];
+
         ShapeOptions?.Invoke(options);
+
+        // AND THE ONE STEP THAT CANNOT RUN BEFORE THE DELEGATE. The matrix and the roster above were built
+        // from the audience roster as it stood a moment ago; a delegate that NARROWS the roster - several
+        // declare a complete deployment of their own - leaves grants and roster entries naming audiences
+        // the deployment no longer serves, and the service refuses to START on either.
+        IssuanceFixture.ReconcileGrantsWithRoster(options, preexistingRows, preexistingClients);
     }
 }
 
@@ -1392,4 +1708,3 @@ internal sealed class DeterministicEntropySource : IEntropySource
     /// <summary>The mask that keeps the computed sequence value inside one byte.</summary>
     private const int ByteMask = 0xFF;
 }
-

@@ -42,16 +42,26 @@ public sealed class DataServicesOptionsTests
     /// An options instance that validates cleanly, for isolating one rule at a time.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The two upstream addresses must be supplied: both carry <c>[Required]</c> and both default to
     /// empty, so a default-constructed instance does NOT validate. That is asserted directly in
-    /// <see cref="TheDefaultConfigurationRequiresBothUpstreamAddresses"/> rather than worked around
-    /// silently here.
+    /// <see cref="TheDefaultConfigurationRequiresBothUpstreamAddressesAndAnIssuanceCredential"/> rather
+    /// than worked around silently here.
+    /// </para>
+    /// <para>
+    /// An issuance credential must be supplied too, and for the same reason it is set here rather than
+    /// hidden: a deployment that can present NEITHER of the two credentials contract C-01 accepts obtains
+    /// no service token at all, so the validator refuses it. The secret half is the one the documented
+    /// topology uses; <see cref="AnIssuanceCredentialIsRequiredAndEitherSchemeSatisfiesIt"/> asserts the
+    /// rule itself, including that the certificate pair satisfies it equally.
+    /// </para>
     /// </remarks>
     private static DataServicesOptions ValidOptions()
     {
         var options = new DataServicesOptions();
         options.Persistence.Address = "http://persistence:5101";
         options.Security.BaseAddress = "http://security:5104";
+        options.Security.ClientSecret = "an-issuance-secret-shaped-value";
         return options;
     }
 
@@ -103,28 +113,36 @@ public sealed class DataServicesOptionsTests
     }
 
     [Fact]
-    public void TheDefaultConfigurationRequiresBothUpstreamAddresses()
+    public void TheDefaultConfigurationRequiresBothUpstreamAddressesAndAnIssuanceCredential()
     {
         // MEASURED, AND NOT WHAT A DEFAULT-CONSTRUCTED OPTIONS USUALLY DOES: THE DEFAULTS DO NOT PASS.
         //
         // `Persistence.Address` and `Security.BaseAddress` both carry `[Required]` and both default to
-        // the empty string, so a DataServices started with no upstream configuration fails startup
-        // validation with exactly two failures.
+        // the empty string; and neither issuance credential is configured either. So a DataServices
+        // started with no configuration fails startup validation with exactly three failures, each
+        // naming the key an operator must set.
         //
         // That is the correct posture rather than an awkward default. DataServices cannot serve C-03 or
-        // C-04 without reaching Persistence, and cannot validate a token without Security's keys - so a
-        // service that started without them would accept requests and fail every one. Failing at startup
-        // with the two missing keys named is the fail-fast behaviour the legacy's own `HALT CLOSE` on a
-        // decoded assertion failure establishes [ws_objects/pfw.pbl.src/pfw.sra:L111-L144].
+        // C-04 without reaching Persistence, cannot validate a token without Security's keys, and cannot
+        // OBTAIN a token without a caller credential for the one operation a bearer token cannot protect
+        // - so a service that started without any of the three would accept requests and fail every one.
+        // Failing at startup with the missing keys named is the fail-fast behaviour the legacy's own
+        // `HALT CLOSE` on a decoded assertion failure establishes
+        // [ws_objects/pfw.pbl.src/pfw.sra:L111-L144].
         string[] failures = Failures(new DataServicesOptions());
 
-        Assert.Equal(2, failures.Length);
+        Assert.Equal(3, failures.Length);
         Assert.Contains(failures, static f =>
             f.Contains("DataServices:Persistence:Address", StringComparison.Ordinal)
             && f.Contains("required", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(failures, static f =>
             f.Contains("DataServices:Security:BaseAddress", StringComparison.Ordinal)
             && f.Contains("required", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(failures, static f =>
+            f.Contains(
+                SecurityClientOptions.ClientSecretConfigurationKey,
+                StringComparison.Ordinal)
+            && f.Contains("MutualTls", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -565,7 +583,61 @@ public sealed class DataServicesOptionsTests
             Assert.Equal(TimeSpan.FromSeconds(30), client.CircuitBreakerSamplingDuration);
             Assert.Equal(TimeSpan.FromSeconds(5), client.CircuitBreakerBreakDuration);
             Assert.Equal(TimeSpan.FromSeconds(30), client.RequestTimeout);
+
+            // THE STREAM BOUND IS DERIVED RATHER THAN CHOSEN, which is why the value is worth pinning:
+            // it is Persistence's own handle idle expiry (Persistence:Handles:IdleExpirySeconds, 900
+            // seconds), so a stream still open past it is holding a handle the upstream's own policy
+            // would already have released. It is longer than RequestTimeout because a retrieval that
+            // runs for minutes is correct while a unary call that does so is not.
+            Assert.Equal(TimeSpan.FromSeconds(900), client.StreamDeadline);
+            Assert.True(client.StreamDeadline > client.RequestTimeout);
         }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ANonPositiveStreamDeadlineIsRejectedWithItsOwnPath(int seconds)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.Resilience.Persistence.StreamDeadline = TimeSpan.FromSeconds(seconds);
+
+        string[] failures = Failures(options);
+
+        // A non-positive stream bound would expire before the retrieval reached the upstream, so every
+        // stream would report a deadline failure. The coherence rule between the two bounds deliberately
+        // does NOT also fire here: it is guarded on both values being positive, so an operator with one
+        // bad value is told about that value rather than about a comparison they did not write.
+        string failure = Assert.Single(failures);
+
+        Assert.Contains("must be a positive duration", failure, StringComparison.Ordinal);
+        Assert.Contains(
+            "DataServices:Resilience:Persistence:StreamDeadline",
+            failure,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStreamDeadlineBelowTheRequestTimeoutIsRejectedOnBothEdges()
+    {
+        DataServicesOptions options = ValidOptions();
+        options.Resilience.Persistence.RequestTimeout = TimeSpan.FromSeconds(30);
+        options.Resilience.Persistence.StreamDeadline = TimeSpan.FromSeconds(29);
+        options.Resilience.Security.RequestTimeout = TimeSpan.FromSeconds(30);
+        options.Resilience.Security.StreamDeadline = TimeSpan.FromSeconds(29);
+
+        string[] failures = Failures(options);
+
+        // TWO EDGES, TWO INDEPENDENT FAILURES, each naming its own section - the same
+        // tuned-independently property the rest of this group asserts. The inversion is a contradiction
+        // rather than a tighter policy: the two settings exist separately only because a stream is
+        // legitimately longer-lived, so a shorter stream bound abandons retrievals sooner than the
+        // ordinary calls beside them, silently, as a deadline failure that reads as an upstream fault.
+        Assert.Equal(2, failures.Length);
+        Assert.Contains(failures, static f =>
+            f.Contains("DataServices:Resilience:Persistence:StreamDeadline", StringComparison.Ordinal));
+        Assert.Contains(failures, static f =>
+            f.Contains("DataServices:Resilience:Security:StreamDeadline", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -840,6 +912,38 @@ public sealed class DataServicesOptionsTests
         Assert.Equal(20, expression.CalcStackInitialCapacity);
 
         Assert.Equal(200, expression.RedrawSuppressionRowThreshold);
+
+        // THE MACRO BACKSTOP IS DERIVED FROM THE SESSION LIFETIME, and asserting the IDENTITY rather
+        // than the literal is what records the derivation: an invocation still outstanding past the
+        // point at which its session would have been reclaimed is holding something this service had
+        // already given up on. The two are separate keys so that shortening one does not silently
+        // shorten the other, and they start equal so a reader can see where the value came from.
+        Assert.Equal(SessionLifetimeOptions.DefaultIdleTimeout, expression.MacroInvocationTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(5), expression.MacroInvocationTimeout);
+        Assert.Equal(
+            new DataServicesOptions().Sessions.ExpressionSession.IdleTimeout,
+            expression.MacroInvocationTimeout);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ANonPositiveMacroInvocationTimeoutIsRejectedWithItsOwnPath(int seconds)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.ColumnExpression.MacroInvocationTimeout = TimeSpan.FromSeconds(seconds);
+
+        string failure = Assert.Single(Failures(options));
+
+        // A zero or negative backstop abandons every macro invocation before the client could possibly
+        // answer, turning the inverted channel into one that always times out - and it does so QUIETLY,
+        // as a defined timeout outcome rather than as an error, which is why a validator has to catch it
+        // instead of a caller discovering it.
+        Assert.Contains("must be a positive duration", failure, StringComparison.Ordinal);
+        Assert.Contains(
+            "DataServices:ColumnExpression:MacroInvocationTimeout",
+            failure,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -998,6 +1102,33 @@ public sealed class DataServicesOptionsTests
                     continue;
                 }
 
+                // THE ONE CREDENTIAL-SHAPED MEMBER THAT LEGITIMATELY EXISTS IS PINNED BY NAME RATHER
+                // THAN BY DROPPING THE MARKER.
+                //
+                // `SecurityClientOptions.ClientSecret` carries this service's own issuance credential -
+                // the password half of the Basic credential it presents on POST /v1/tokens. It is
+                // material, so the exclusion above cannot cover it; and it is emphatically NOT signing
+                // material: it mints nothing, it signs nothing, it is not accepted by any other service,
+                // and its only use is proving to Security which caller is asking. C-01 requires this
+                // service to hold one, and C-G is what requires the edge to be authenticated at all - so
+                // removing it would not tighten the topology, it would leave this service unable to
+                // obtain any credential.
+                //
+                // Naming the single exception keeps the scan sharp: a SECOND credential-shaped member
+                // appearing anywhere on this surface still fails this test, which is exactly what a
+                // blanket relaxation of the marker list would have stopped detecting.
+                bool isTheOneIssuanceCredential =
+                    type == typeof(SecurityClientOptions)
+                    && string.Equals(
+                        property.Name,
+                        nameof(SecurityClientOptions.ClientSecret),
+                        StringComparison.Ordinal);
+
+                if (isTheOneIssuanceCredential)
+                {
+                    continue;
+                }
+
                 foreach (string marker in (string[])
                     ["SigningKey", "PrivateKey", "Secret", "Password", "Credential"])
                 {
@@ -1009,27 +1140,116 @@ public sealed class DataServicesOptionsTests
             }
         }
 
-        // AND THE VERIFICATION FLAG THAT TRIPPED THE SCAN IS PRESENT AND ON, which is the property that
-        // actually matters for C-G.
-        Assert.True(new JwtAuthenticationOptions().ValidateIssuerSigningKey);
+        // AND THE EXCEPTION IS NOT A HOLE, BECAUSE IT IS ASSERTED TO EXIST. If the property were renamed
+        // or removed the skip above would stop matching, so this line is what keeps the exception honest
+        // rather than open-ended.
+        Assert.NotNull(
+            typeof(SecurityClientOptions).GetProperty(nameof(SecurityClientOptions.ClientSecret)));
+
+        // AND THE PROPERTY THAT ONCE TRIPPED THE SCAN FOR THE WRONG REASON IS GONE. An earlier form of
+        // JwtAuthenticationOptions declared ValidateIssuerSigningKey - a boolean switch, not material, but
+        // a name a scanner cannot tell apart from one. It has been removed for a stronger reason than the
+        // scan, recorded on the next test.
+    }
+
+    [Theory]
+    [InlineData("ValidateIssuer")]
+    [InlineData("ValidateAudience")]
+    [InlineData("ValidateLifetime")]
+    [InlineData("ValidateIssuerSigningKey")]
+    [InlineData("ClockSkew")]
+    [InlineData("MapInboundClaims")]
+    public void NoSettingCanRelaxAValidation(string forbiddenMember)
+    {
+        // NO CONFIGURED VALUE CAN TURN A VERIFIER CHECK OFF, AND THERE ARE TWO WAYS FOR THAT TO BE TRUE.
+        //
+        // Four properties for issuer, audience, lifetime and signing-key validation once defaulted to true
+        // and were READ by the handler, so the shape looked safe and was not: a settings file or one
+        // environment variable could set any of them false, and each removes a different guarantee while
+        // the service keeps reporting itself healthy. Issuer off accepts a token minted by anyone, which
+        // ends the sole-issuer property the whole topology rests on. Audience off accepts a token minted
+        // for a different service. Lifetime off accepts an expired token forever, turning a leaked
+        // credential from a time-boxed exposure into a permanent one. Signing-key validation off accepts a
+        // signature that was never checked, which is the whole of the verification. A test asserting
+        // `true` BY DEFAULT would have passed against every one of those deployments, because the default
+        // was never the problem.
+        //
+        // ⚠ THIS ROW ONCE ASSERTED ONLY THE FIRST OF THE TWO WAYS, AND THAT IS WHY IT IS WRITTEN LIKE THIS ⚠
+        //
+        // It required the member to be ABSENT. Absence does make the guarantee structural, but it has a
+        // cost the delivered design deliberately refuses to pay: an unknown configuration key is SILENTLY
+        // IGNORED by the binder, so a deployment writing `"ValidateIssuer": false` would start cleanly and
+        // its operator would believe the check was off while it was on. The handler therefore assigns all
+        // four LITERALLY - Program.cs section 5, "ALL FOUR ARE ASSIGNED LITERALLY, NOT READ" - and the
+        // bound properties SURVIVE so that a configured false is REFUSED at startup, by name, with the
+        // remedy stated. InvariantTokenValidationTests pins those refusals one switch at a time.
+        //
+        // So the rule this row enforces is the invariant rather than one implementation of it: for each
+        // name, EITHER no such setting exists, OR it exists and no value of it can relax anything - which,
+        // for a boolean switch, means the validator refuses `false`. Both discharge the finding; neither is
+        // permitted to quietly become "the switch is read again".
+        System.Reflection.PropertyInfo? property =
+            typeof(JwtAuthenticationOptions).GetProperty(forbiddenMember);
+
+        if (property is null)
+        {
+            // Structural: there is no key to write. ClockSkew and MapInboundClaims are this case - both are
+            // compiled in at Program.cs section 5, an unbounded skew being lifetime validation switched off
+            // under another name and a claim-name remapping switch changing which spelling every scope
+            // check reads.
+            return;
+        }
+
+        Assert.Equal(typeof(bool), property.PropertyType);
+
+        JwtAuthenticationOptions relaxed = ValidJwt();
+        property.SetValue(relaxed, false);
+
+        ValidateOptionsResult refusal = new JwtAuthenticationOptionsValidator()
+            .Validate(name: null, relaxed);
+
+        Assert.True(
+            refusal.Failed,
+            $"JwtAuthenticationOptions.{forbiddenMember} is a settable switch that the validator accepts "
+                + "as false. A deployment could then turn a mandatory verifier check off, or - if the "
+                + "handler ignores it - believe it had.");
+
+        Assert.Contains(
+            refusal.Failures ?? [],
+            failure => failure.Contains(forbiddenMember, StringComparison.Ordinal));
+    }
+
+    /// <summary>An inbound-token configuration that validates cleanly, for isolating one relaxation.</summary>
+    /// <returns>The options.</returns>
+    /// <remarks>
+    /// The authority and audience are required, so a row that only turned a switch off would otherwise be
+    /// unable to tell its own refusal from the two missing identifiers.
+    /// </remarks>
+    private static JwtAuthenticationOptions ValidJwt()
+    {
+        JwtAuthenticationOptions options = new()
+        {
+            Authority = "https://security-service:5104",
+            Audience = "powerframework-dataservices",
+        };
+
+        // The permitted-caller roster is required and defaults to empty, so a default-constructed instance
+        // does not validate at all; it is populated here so a row observes only the relaxation it names.
+        options.PermittedCallers.Add("powerframework-gateway");
+
+        return options;
     }
 
     [Fact]
-    public void TheJwtVerificationDefaultsKeepEveryValidationCheckOn()
+    public void TheJwtSettingsThatRemainSelectWhomToTrustAndNeverWhetherToCheck()
     {
         var jwt = new JwtAuthenticationOptions();
 
-        // EVERY CHECK DEFAULTS ON, AND HTTPS METADATA IS REQUIRED.
-        //
-        // These are the secure defaults rather than the convenient ones. Constraint C-G requires every
-        // newly created boundary to be authenticated, and an internal edge is a created boundary too -
-        // so the defaults must not quietly disable issuer, audience, lifetime or signing-key validation.
-        // Turning any of them off has to be a deliberate, visible act.
+        // WHAT IS LEFT IS THE DEPLOYMENT DECISION, AND ONLY THAT. Which authority to trust, which
+        // audience this service answers to, where discovery lives, and whether that metadata must be
+        // fetched over HTTPS. Each selects WHOM to trust; none skips a check. That line is the whole
+        // distinction the removal above draws.
         Assert.True(jwt.RequireHttpsMetadata);
-        Assert.True(jwt.ValidateIssuer);
-        Assert.True(jwt.ValidateAudience);
-        Assert.True(jwt.ValidateLifetime);
-        Assert.True(jwt.ValidateIssuerSigningKey);
 
         // AND NO KEY MATERIAL IS EMBEDDED - the authority and audience are identifiers, and
         // `MetadataAddress` is an optional override for a topology where discovery lives elsewhere.
@@ -1039,19 +1259,26 @@ public sealed class DataServicesOptionsTests
     }
 
     // ==============================================================================================
-    //  THE TOKEN-ISSUANCE EDGE'S CLIENT IDENTITY
+    //  THE TOKEN-ISSUANCE EDGE'S CLIENT CREDENTIAL
     //
-    //  This service is one of the two that request tokens, and POST /v1/tokens is protected by mutual
-    //  TLS and by nothing else - a caller cannot present a bearer token in order to obtain its first
-    //  bearer token. Without a client identity this service obtains no credential, so every one of the
-    //  seventeen C-02 cryptographic calls is unreachable.
+    //  This service is one of the two that request tokens, and POST /v1/tokens is the one operation a
+    //  bearer token cannot protect - a caller cannot present a bearer token in order to obtain its first
+    //  bearer token. Contract C-01 therefore publishes TWO schemes for it and accepts either: an HTTP
+    //  Basic credential naming a subject on Security's issuance roster, or a client certificate. This
+    //  service must be able to present ONE of them; presenting neither means it obtains no credential, so
+    //  every one of the seventeen C-02 cryptographic calls and every call to the Persistence audience is
+    //  unreachable - which is why that state is refused at startup rather than discovered on the first
+    //  request.
     // ==============================================================================================
 
     [Fact]
     public void TheMutualTlsPairIsOptionalAsAGroupAndInseparableWhenPresent()
     {
-        // BOTH EMPTY IS VALID AND IS THE DEFAULT: this deployment presents no client certificate and
-        // requests no token.
+        // BOTH EMPTY IS VALID AND IS THE DEFAULT: this deployment presents no client certificate, and
+        // authenticates the issuance edge with the Basic credential instead - which is the documented
+        // topology, because the frozen environment fixes Security on a cleartext listener where a client
+        // certificate cannot exist at all. It still requests tokens; it just does not present a
+        // certificate to obtain them.
         Assert.True(Succeeds(ValidOptions()));
         Assert.False(new DataServicesOptions().Security.MutualTls.IsConfigured);
 
@@ -1087,6 +1314,94 @@ public sealed class DataServicesOptionsTests
             Assert.DoesNotContain("dataservices.crt", failure, StringComparison.Ordinal);
             Assert.DoesNotContain("dataservices.key", failure, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void AnIssuanceCredentialIsRequiredAndEitherSchemeSatisfiesIt()
+    {
+        // THE SECRET ALONE IS ENOUGH - and it is the documented topology's credential.
+        DataServicesOptions secretOnly = ValidOptions();
+        Assert.True(Succeeds(secretOnly));
+        Assert.True(secretOnly.Security.HasIssuanceCredential);
+
+        // THE CERTIFICATE PAIR ALONE IS ENOUGH TOO, which is what makes the two genuine alternatives
+        // rather than one scheme with a fallback that never applies. A deployment that terminates TLS at
+        // Security configures this and no secret.
+        DataServicesOptions certificateOnly = ValidOptions();
+        certificateOnly.Security.ClientSecret = string.Empty;
+        certificateOnly.Security.MutualTls.CertificatePath = "/run/secrets/pf/dataservices.crt";
+        certificateOnly.Security.MutualTls.CertificateKeyPath = "/run/secrets/pf/dataservices.key";
+        Assert.True(Succeeds(certificateOnly));
+        Assert.True(certificateOnly.Security.HasIssuanceCredential);
+
+        // BOTH IS LEGAL AND IS NOT A CONFLICT. The Basic credential travels on the request and the
+        // certificate is available to whatever handshake the transport performs, so a deployment moving
+        // from one to the other can configure both across the transition.
+        DataServicesOptions both = ValidOptions();
+        both.Security.MutualTls.CertificatePath = "/run/secrets/pf/dataservices.crt";
+        both.Security.MutualTls.CertificateKeyPath = "/run/secrets/pf/dataservices.key";
+        Assert.True(Succeeds(both));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void PresentingNeitherIssuanceCredentialIsRefusedAtStartup(string secret)
+    {
+        // THE RULE THAT MATTERS MOST IN THIS SECTION, AND THE ONE WHOSE ABSENCE WAS THE DEFECT. With no
+        // credential of either kind this service starts, answers its anonymous health probe, reports
+        // itself ready - and then fails every cryptographic call and every call to the audience beneath
+        // it, because it can obtain no token at all. The failure would arrive as a 401 from Security with
+        // nothing in it to say that this side never presented anything.
+        //
+        // WHITESPACE IS TREATED AS ABSENT, because a blank secret cannot authenticate and accepting one
+        // would produce exactly that invisible 401.
+        DataServicesOptions options = ValidOptions();
+        options.Security.ClientSecret = secret;
+
+        Assert.False(options.Security.HasIssuanceCredential);
+
+        string failure = Assert.Single(Failures(options));
+
+        // THE MESSAGE NAMES BOTH WAYS OUT, because an operator reading it must be able to tell which one
+        // their topology calls for rather than guess.
+        Assert.Contains(
+            SecurityClientOptions.ClientSecretConfigurationKey,
+            failure,
+            StringComparison.Ordinal);
+        Assert.Contains("DataServices:Security:MutualTls", failure, StringComparison.Ordinal);
+
+        // AND IT STATES THE CONSEQUENCE, not just the missing key. An operator who reads only that a key
+        // is unset has to work out for themselves that this service will start, report healthy, and then
+        // fail every cryptographic call and every call to the audience beneath it. The message says so.
+        Assert.Contains("obtain no service token", failure, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheIssuanceSecretIsNamedByAFlatConfigurationKeyThatMatchesSecuritysRoster()
+    {
+        // ONE SPELLING, FIXED ON BOTH SIDES OF THE EDGE. Security's issuance roster names this same key
+        // as the source of the secret it compares against for the subject this service presents, and
+        // orchestration/.env.example declares it once for both. Two spellings would be two ways for one
+        // deployment to be half configured, and the failure would present as an authentication refusal
+        // rather than as the configuration mismatch it is.
+        Assert.Equal(
+            "SECURITY_CLIENT_SECRET_DATASERVICES",
+            SecurityClientOptions.ClientSecretConfigurationKey);
+
+        // FLAT, NOT SECTIONED, AND THAT IS WHY IT CANNOT BE BOUND. The environment-variable provider maps
+        // a DOUBLE underscore onto the ':' separator; this name contains none, so it is a top-level key
+        // rather than a path into `DataServices` and the composition root reads it with an explicit
+        // post-configure step. A name containing '__' here would bind silently and this assertion is what
+        // stops one being introduced.
+        Assert.DoesNotContain(
+            "__",
+            SecurityClientOptions.ClientSecretConfigurationKey,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            ":",
+            SecurityClientOptions.ClientSecretConfigurationKey,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1293,5 +1608,127 @@ public sealed class DataServicesOptionsTests
             failure,
             StringComparison.Ordinal);
         Assert.Contains("FixedRowsPerPage", failure, StringComparison.Ordinal);
+    }
+
+    // ==============================================================================================
+    //  THE PERSISTENCE SESSION DESCRIPTOR, and the two groups whose annotations were never walked
+    // ==============================================================================================
+
+    /// <summary>
+    /// The shipped configuration keys bind to the descriptor members they name.
+    /// </summary>
+    /// <remarks>
+    /// THE SEAM IS THE KEY SPELLING, NOT THE PROPERTY. Every other test here assigns the members directly,
+    /// which says nothing about whether the words in the deployed file reach them. Two of these matter more
+    /// than the rest: <c>NCharBind</c> has an unusual capitalization that a binder must match, and
+    /// <c>LogPass</c> is the credential an operator overrides from the secret layer as
+    /// <c>DataServices__PersistenceSession__LogPass</c> - if that key did not bind, the override would be
+    /// accepted silently and the session would open without it.
+    /// </remarks>
+    [Fact]
+    public void ThePersistenceSessionKeysBindToTheDescriptorMembers()
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DataServices:PersistenceSession:Dbms"] = "SQLite",
+                ["DataServices:PersistenceSession:ServerName"] = "host",
+                ["DataServices:PersistenceSession:Database"] = "powerframework",
+                ["DataServices:PersistenceSession:LogId"] = "operator",
+                ["DataServices:PersistenceSession:LogPass"] = "from-the-secret-layer",
+                ["DataServices:PersistenceSession:DbParm"] = "DisableBind=1",
+                ["DataServices:PersistenceSession:Lock"] = "RU",
+                ["DataServices:PersistenceSession:AutoCommit"] = "true",
+                ["DataServices:PersistenceSession:UserParm"] = "u",
+                ["DataServices:PersistenceSession:DisableBind"] = "true",
+                ["DataServices:PersistenceSession:NCharBind"] = "true",
+            })
+            .Build();
+
+        DataServicesOptions options = new();
+        configuration.GetSection(DataServicesOptions.SectionName).Bind(options);
+
+        PersistenceSessionOptions session = options.PersistenceSession;
+
+        Assert.Equal("SQLite", session.Dbms);
+        Assert.Equal("host", session.ServerName);
+        Assert.Equal("powerframework", session.Database);
+        Assert.Equal("operator", session.LogId);
+        Assert.Equal("from-the-secret-layer", session.LogPass);
+        Assert.Equal("DisableBind=1", session.DbParm);
+        Assert.Equal("RU", session.Lock);
+        Assert.True(session.AutoCommit);
+        Assert.Equal("u", session.UserParm);
+        Assert.True(session.DisableBind);
+        Assert.True(session.NCharBind);
+    }
+
+    /// <summary>
+    /// The descriptor's defaults are the safe arm of every choice the legacy leaves open.
+    /// </summary>
+    /// <remarks>
+    /// ASSERTED AS DEFAULTS BECAUSE A DEPLOYMENT THAT SETS NOTHING GETS THEM. <c>DisableBind</c> false
+    /// keeps the runtime binding parameters rather than interpolating literals - the mechanical root of the
+    /// legacy injection exposure - and <c>AutoCommit</c> false is the preserved legacy posture that keeps a
+    /// partially applied multi-row update recoverable. An empty password is correct for the only evidenced
+    /// engine rather than a placeholder.
+    /// </remarks>
+    [Fact]
+    public void ThePersistenceSessionDefaultsAreTheSafeArmOfEachChoice()
+    {
+        PersistenceSessionOptions session = new();
+
+        Assert.Equal("SQLite", session.Dbms);
+        Assert.False(session.DisableBind);
+        Assert.False(session.NCharBind);
+        Assert.False(session.AutoCommit);
+        Assert.Equal(string.Empty, session.LogPass);
+    }
+
+    /// <summary>
+    /// A blank DBMS is refused at startup rather than defaulted at runtime.
+    /// </summary>
+    /// <remarks>
+    /// THE FALLBACK IS WHY THIS IS FAIL-FAST. Persistence substring-tests the value and falls back to SQL
+    /// Server when the test does not match [<c>n_cst_thread_trans.sru:L356-L362</c>], so a blank value does
+    /// not fail there - it silently SELECTS a dialect. Starting and then generating statements for the
+    /// wrong dialect is exactly the graceful degradation the ported fail-fast posture forbids.
+    /// </remarks>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ABlankPersistenceSessionDbmsIsRefused(string dbms)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.PersistenceSession.Dbms = dbms;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains("DataServices:PersistenceSession:Dbms", failure, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The streamed-element bound is enforced, not merely annotated.
+    /// </summary>
+    /// <remarks>
+    /// THE ANNOTATION ALONE DOES NOTHING. A range attribute is only applied where the validator walks the
+    /// group, and this group was not walked - so a zero would have bound silently and then refused EVERY
+    /// streamed response at its first element, which reads as an upstream fault rather than a configuration
+    /// mistake.
+    /// </remarks>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ANonPositiveStreamedElementBoundIsRefused(int bound)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.RestProjection.MaxStreamedElements = bound;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:RestProjection:MaxStreamedElements",
+            failure,
+            StringComparison.Ordinal);
     }
 }

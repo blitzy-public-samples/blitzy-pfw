@@ -124,10 +124,14 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using Grpc.Core;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Concurrency;
+using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Runtime;
 
 // The generated C-06 service base, reached through an alias for two reasons. First, the mandated class
 // name below is the contract's own service name, so within this file the bare name `UpdateService`
@@ -736,7 +740,107 @@ internal interface IUpdateTaskFactory
 /// that correlate a task with its session. Never rendered into a response.
 /// </param>
 /// <param name="Task">The task this handle stands for.</param>
-internal sealed record UpdateTaskEntry(string TaskId, string SessionId, IUpdateTaskSurface Task);
+/// <remarks>
+/// <para>
+/// <b>A CLASS RATHER THAN A RECORD, AND IT CARRIES A LEASE.</b> It was a bare record, and that shape is
+/// what let three handlers - prepare, update and release - each resolve the same handle and then act on
+/// it with nothing serializing them. In process that could not happen: the oracle's caller-side guard is
+/// <c>if of_IsBusy() then return RetCode.E_BUSY</c>
+/// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlbase.sru:L57, :L73, :L95</c>], and the
+/// caller reading it IS the thread that would go on to mutate, so the read and the act are one step.
+/// Across this boundary the callers are concurrent requests, and the same two steps become a
+/// check-then-act: two prepares can interleave their descriptor arrays, an update can start against a
+/// half-replaced array, and a release can dispose a task an update is still running through.
+/// </para>
+/// <para>
+/// The lease answers the oracle's own codes - <c>E_BUSY</c> while another operation owns the task,
+/// <c>E_INVALID_HANDLE</c> once it has been released - so nothing observable changes except that the
+/// answer and the action can no longer be separated. See <c>Grpc/TaskOperationLatch.cs</c> for the
+/// state machine and for the disposal-handoff table it exists to state once.
+/// </para>
+/// <para>
+/// Value equality is deliberately given up with the record shape. Nothing compared these entries: the
+/// registry keys them by handle and every consumer is interested in identity, so structural equality was
+/// a property of the declaration rather than of the design.
+/// </para>
+/// </remarks>
+internal sealed class UpdateTaskEntry(string TaskId, string SessionId, IUpdateTaskSurface Task)
+{
+    private readonly TaskOperationLatch _latch = new();
+
+    /// <summary>The opaque server-issued handle this entry answers to.</summary>
+    internal string TaskId { get; } = TaskId ?? throw new ArgumentNullException(nameof(TaskId));
+
+    /// <summary>The session the task was created against. Diagnostics only.</summary>
+    internal string SessionId { get; } = SessionId ?? throw new ArgumentNullException(nameof(SessionId));
+
+    /// <summary>The task every mutation and the update itself delegate to.</summary>
+    internal IUpdateTaskSurface Task { get; } = Task ?? throw new ArgumentNullException(nameof(Task));
+
+    /// <summary>
+    /// Whether an operation currently owns the task. A DIAGNOSTIC READ - see
+    /// <see cref="TaskOperationLatch.IsRunning"/>.
+    /// </summary>
+    internal bool IsRunning => _latch.IsRunning;
+
+    /// <summary>Whether a release has been requested.</summary>
+    internal bool IsReleased => _latch.IsReleased;
+
+    /// <summary>
+    /// Takes the operation lease for one prepare, update or reset.
+    /// </summary>
+    /// <returns>The lease outcome, which the call site maps straight onto a code.</returns>
+    internal TaskLatchOutcome TryBeginOperation() => _latch.TryBegin();
+
+    /// <summary>
+    /// Gives the lease back.
+    /// </summary>
+    /// <returns><see langword="true"/> when disposal is now this caller's duty.</returns>
+    internal bool EndOperation() => _latch.End();
+
+    /// <summary>
+    /// Records that the handle has been released.
+    /// </summary>
+    /// <returns><see langword="true"/> when disposal is the releaser's duty.</returns>
+    internal bool RequestRelease() => _latch.RequestRelease();
+
+    /// <summary>
+    /// Disposes the task exactly once, whichever path gets here first.
+    /// </summary>
+    internal void DisposeTask()
+    {
+        if (_latch.TryClaimDisposal())
+        {
+            // Outside the latch: a task's teardown is arbitrary work and must not run inside a critical
+            // section every reader also enters.
+            Task.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The caller identity this task is attributed to, for the per-caller ceiling.
+    /// </summary>
+    /// <value>
+    /// The token subject, or the resolver's unattributed bucket. Set once by the registry at registration
+    /// and never rendered into a response.
+    /// </value>
+    /// <remarks>
+    /// A MUTABLE MEMBER ON A RECORD, deliberately, and it does not join the positional parameter list: the
+    /// three positional members are the ORACLE's - the handle, its session and the task - while this one and
+    /// the stamp below are properties of the BOUNDARY the registry owns. Keeping them out of the
+    /// constructor keeps the record's shape a statement about the port rather than about the quota.
+    /// </remarks>
+    internal string Principal { get; set; } = HandlePrincipalResolver.Unattributed;
+
+    /// <summary>
+    /// When a call last named this task, as UTC ticks read from the injected clock.
+    /// </summary>
+    /// <remarks>
+    /// Written and read through <see cref="System.Threading.Volatile"/> by the registry, because it is
+    /// touched from arbitrary request threads and read by the reclaim pass on another.
+    /// </remarks>
+    internal long LastActivityTicks;
+}
 
 /// <summary>
 /// The process-wide table mapping wire task handles onto the tasks they stand for.
@@ -765,10 +869,55 @@ internal sealed class UpdateTaskRegistry
 {
     private readonly ConcurrentDictionary<string, UpdateTaskEntry> _tasks = new(StringComparer.Ordinal);
 
+    /// <summary>The ceiling on live update tasks, per caller and in total.</summary>
+    private readonly HandleQuota _quota;
+
+    /// <summary>The one clock. Stamps activity and measures idleness.</summary>
+    private readonly TimeProvider _time;
+
+    /// <summary>Resolves the caller a new task is attributed to.</summary>
+    private readonly HandlePrincipalResolver _principals;
+
+    /// <summary>Optional structured logger, for reclaimed and drained tasks.</summary>
+    private readonly ILogger<UpdateTaskRegistry>? _logger;
+
+    /// <summary>
+    /// Creates the registry over its ceilings and its clock.
+    /// </summary>
+    /// <param name="options">The bound settings the ceilings and the idle window come from.</param>
+    /// <param name="time">The one clock, shared with the pool and the pooled transaction.</param>
+    /// <param name="principals">
+    /// Resolves the caller a new task is attributed to. Optional so the registry is constructible without a
+    /// host, in which case every task is unattributed and only the total ceiling applies.
+    /// </param>
+    /// <param name="logger">Optional structured logger.</param>
+    /// <exception cref="ArgumentNullException">A required collaborator is <see langword="null"/>.</exception>
+    public UpdateTaskRegistry(
+        IOptions<PersistenceOptions> options,
+        TimeProvider time,
+        HandlePrincipalResolver? principals = null,
+        ILogger<UpdateTaskRegistry>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        HandleLifecycleOptions handles = options.Value.Handles;
+
+        _quota = new HandleQuota("update task", handles.MaxTotalPerRegistry, handles.MaxPerPrincipal);
+        _time = time ?? throw new ArgumentNullException(nameof(time));
+        _principals = principals ?? new HandlePrincipalResolver();
+        _logger = logger;
+    }
+
     /// <summary>
     /// The number of live tasks. Exposed for diagnostics and for assertions in tests.
     /// </summary>
     internal int Count => _tasks.Count;
+
+    /// <summary>
+    /// The session identity of every live task, so the session registry can pin what is still in use.
+    /// </summary>
+    internal IReadOnlyCollection<string> LiveSessionIds =>
+        [.. _tasks.Values.Select(entry => entry.SessionId)];
 
     /// <summary>
     /// Issues a handle for a freshly created task and records it under that handle.
@@ -796,13 +945,27 @@ internal sealed class UpdateTaskRegistry
     /// loop re-issues rather than silently replacing a live task some other caller still holds.
     /// </para>
     /// </remarks>
-    internal UpdateTaskEntry Register(string sessionId, IUpdateTaskSurface task)
+    internal UpdateTaskEntry? Register(string sessionId, IUpdateTaskSurface task, out string diagnostic)
     {
         ArgumentNullException.ThrowIfNull(task);
 
+        // THE CEILING IS TESTED BEFORE THE HANDLE IS MINTED, so a refusal registers nothing and the caller
+        // disposes the task it built.
+        string principal = _principals.Resolve();
+
+        if (!_quota.TryReserve(principal, out diagnostic))
+        {
+            return null;
+        }
+
         while (true)
         {
-            UpdateTaskEntry entry = new(Guid.NewGuid().ToString("N"), sessionId, task);
+            UpdateTaskEntry entry = new(Guid.NewGuid().ToString("N"), sessionId, task)
+            {
+                Principal = principal,
+            };
+
+            Volatile.Write(ref entry.LastActivityTicks, _time.GetUtcNow().UtcTicks);
 
             if (_tasks.TryAdd(entry.TaskId, entry))
             {
@@ -831,7 +994,15 @@ internal sealed class UpdateTaskRegistry
             return false;
         }
 
-        return _tasks.TryGetValue(taskId, out entry);
+        if (!_tasks.TryGetValue(taskId, out entry))
+        {
+            return false;
+        }
+
+        // A HANDLE IN USE IS NOT AN ABANDONED HANDLE: refreshed on every call that names this task.
+        Volatile.Write(ref entry.LastActivityTicks, _time.GetUtcNow().UtcTicks);
+
+        return true;
     }
 
     /// <summary>
@@ -844,8 +1015,138 @@ internal sealed class UpdateTaskRegistry
     /// same handle therefore produce exactly one removal, and the loser sees the same unknown-handle
     /// outcome as any other stale handle - which is what stops one task being disposed twice.
     /// </returns>
-    internal bool TryRemove(string taskId, out UpdateTaskEntry? entry) =>
-        _tasks.TryRemove(taskId, out entry);
+    internal bool TryRemove(string taskId, out UpdateTaskEntry? entry)
+    {
+        if (!_tasks.TryRemove(taskId, out entry) || entry is null)
+        {
+            return false;
+        }
+
+        // Returned by whichever call won the removal, so a concurrent second release cannot return it
+        // twice and a caller cannot free quota it never held.
+        _quota.Release(entry.Principal);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes and disposes every task idle for longer than <paramref name="window"/>.
+    /// </summary>
+    /// <param name="now">The reclaim pass's single clock read.</param>
+    /// <param name="window">How long a task may go untouched before it is considered abandoned.</param>
+    /// <returns>How many tasks were reclaimed.</returns>
+    /// <remarks>
+    /// THERE IS NO IN-FLIGHT LATCH TO CONSULT HERE, AND NONE IS NEEDED. Every C-06 operation is unary and
+    /// each one refreshes the stamp on the way in, so a task in use is never near the window - which is far
+    /// longer than any update this contract declares can take. The streaming case, where a single operation
+    /// legitimately outlives the window, is C-05's, and its registry does carry a latch.
+    /// </remarks>
+    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
+    {
+        long threshold = now.UtcTicks - window.Ticks;
+        int reclaimed = 0;
+
+        foreach (UpdateTaskEntry candidate in _tasks.Values)
+        {
+            if (Volatile.Read(ref candidate.LastActivityTicks) > threshold
+                || !TryRemove(candidate.TaskId, out UpdateTaskEntry? removed)
+                || removed is null)
+            {
+                continue;
+            }
+
+            removed.Task.Dispose();
+            reclaimed++;
+
+            _logger?.LogWarning(
+                "Reclaimed an abandoned update task held by caller {Principal} against session "
+                + "{SessionId}. The handle value is deliberately not recorded.",
+                removed.Principal,
+                removed.SessionId);
+        }
+
+        return reclaimed;
+    }
+
+
+    /// <summary>
+    /// Removes and disposes every task owned by a retired transaction session.
+    /// </summary>
+    /// <param name="sessionId">The session that has ended.</param>
+    /// <returns>The number of tasks retired.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="sessionId"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A TASK CANNOT OUTLIVE THE SESSION IT WAS CREATED AGAINST, AND LEAVING ONE BEHIND IS NOT MERELY
+    /// UNTIDY.</b> Every task in this table holds the session's pooled transaction, so a task that
+    /// survives its session names a transaction the pool has already taken back - and the pool may hand
+    /// that same transaction to a DIFFERENT session as soon as its reference count drops
+    /// [<c>n_cst_thread_trans_pool.sru:L94-L114</c>]. A later call on the stale handle would then write
+    /// through somebody else's transaction, which is a data-integrity fault rather than a leak.
+    /// </para>
+    /// <para>
+    /// REMOVAL THROUGH <see cref="TryRemove"/> AND NOT PAST IT, so the handle ceiling this registry
+    /// reserved on registration is released with the entry. Reaching into the dictionary directly would
+    /// retire the task and keep its slot reserved for the life of the process - and because the ceiling is
+    /// per principal, the caller whose session ended is precisely the caller that would later be refused a
+    /// handle it is entitled to.
+    /// </para>
+    /// <para>
+    /// Removal comes before disposal for each entry, so a concurrent call on the same handle loses the
+    /// race in the table rather than reaching a half-disposed task.
+    /// </para>
+    /// </remarks>
+    internal int PurgeSession(string sessionId)
+    {
+        ArgumentNullException.ThrowIfNull(sessionId);
+
+        int retired = 0;
+
+        foreach (UpdateTaskEntry candidate in _tasks.Values)
+        {
+            if (!string.Equals(candidate.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!TryRemove(candidate.TaskId, out UpdateTaskEntry? removed) || removed is null)
+            {
+                continue;
+            }
+
+            removed.Task.Dispose();
+
+            retired++;
+        }
+
+        return retired;
+    }
+
+    /// <summary>
+    /// Removes and disposes every live task, whatever its age.
+    /// </summary>
+    /// <returns>How many tasks were released.</returns>
+    /// <remarks>
+    /// FOR SHUTDOWN, AND IT MUST RUN BEFORE THE SESSION REGISTRY DRAINS: a task borrows the transaction its
+    /// session owns, and an update task additionally holds a worker task.
+    /// </remarks>
+    internal int Drain()
+    {
+        int drained = 0;
+
+        foreach (UpdateTaskEntry candidate in _tasks.Values)
+        {
+            if (!TryRemove(candidate.TaskId, out UpdateTaskEntry? removed) || removed is null)
+            {
+                continue;
+            }
+
+            removed.Task.Dispose();
+            drained++;
+        }
+
+        return drained;
+    }
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -884,6 +1185,17 @@ internal sealed class UpdateTaskRegistry
 /// status can only be raised. See <see cref="Update"/>.
 /// </para>
 /// </remarks>
+// ============ THE SCOPE THIS CONTRACT REQUIRES (constraint C-G) ============
+// C-06 generates and executes INSERT, UPDATE and DELETE statements
+// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L204], so every RPC on this
+// contract needs the WRITE scope - including the task lifecycle and the prepare, because a
+// descriptor array is the thing that decides WHICH table the update lands on.
+//
+// The route mapping in Program.cs additionally requires an authenticated principal, and the
+// fallback policy would close the door even if the mapping forgot to. This attribute is the
+// LEAST-PRIVILEGE half: authentication alone would let a credential minted for one contract
+// reach all four.
+[Authorize(Policy = PersistenceAuthorizationPolicies.Write)]
 internal sealed class UpdateService : GeneratedUpdateServiceBase
 {
     /// <summary>
@@ -905,6 +1217,19 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// </remarks>
     private const string MissingSessionDiagnostic =
         "CreateUpdateTask requires a transaction session handle issued by BeginSession.";
+
+    /// <summary>
+    /// The diagnostic accompanying <c>E_BUSY</c> when another operation already owns the task.
+    /// </summary>
+    /// <remarks>
+    /// It says RETRY, because <c>E_BUSY</c> is the retryable refusal: the same call unchanged succeeds once
+    /// the operation in flight finishes. That is the distinction from <see cref="UnknownTaskDiagnostic"/>,
+    /// which no retry can ever satisfy, and it is the reason the two are separate codes rather than one
+    /// generic failure [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlbase.sru:L57</c>].
+    /// </remarks>
+    private const string TaskBusyDiagnostic =
+        "Another prepare, update or reset is in flight for this update task, so the request was refused. "
+        + "Retry once it has completed.";
 
     private readonly IUpdateTaskFactory _factory;
     private readonly UpdateTaskRegistry _tasks;
@@ -976,6 +1301,54 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// <c>DbError.Sqlsyntax</c> is never assigned.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Takes an entry's operation lease, or produces the refusal to report.
+    /// </summary>
+    /// <param name="entry">The resolved entry.</param>
+    /// <param name="refusal">The status to report, valid only when this returns <see langword="false"/>.</param>
+    /// <returns><see langword="true"/> when the caller owns the task and MUST call <see cref="ReleaseLease"/>.</returns>
+    /// <remarks>
+    /// <b>ONE PLACE FOR THE THREE HANDLERS THAT NEED IT.</b> Reset, prepare and update all take the same
+    /// lease and report the same two refusals, and writing the mapping out three times would give three
+    /// places for one of them to answer the wrong code. <c>E_BUSY</c> is retryable and
+    /// <c>E_INVALID_HANDLE</c> is not, so the distinction is advice a caller acts on rather than
+    /// bookkeeping - which is why the lease reports WHICH rather than leaving the call site to read the
+    /// state again and race.
+    /// </remarks>
+    private static bool TryLease(UpdateTaskEntry entry, out OperationStatus refusal)
+    {
+        TaskLatchOutcome lease = entry.TryBeginOperation();
+
+        if (lease == TaskLatchOutcome.Acquired)
+        {
+            refusal = null!;
+
+            return true;
+        }
+
+        refusal = lease == TaskLatchOutcome.Gone
+            ? UpdateWireCodes.Status(RetCode.E_INVALID_HANDLE, UnknownTaskDiagnostic)
+            : UpdateWireCodes.Status(RetCode.E_BUSY, TaskBusyDiagnostic);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Gives an entry's operation lease back, disposing the task when a release arrived meanwhile.
+    /// </summary>
+    /// <param name="entry">The entry whose lease this caller holds.</param>
+    /// <remarks>
+    /// ALWAYS FROM A <see langword="finally"/>. An operation that returns without releasing pins the task,
+    /// and every later call on that handle then answers <c>E_BUSY</c> for the life of the process.
+    /// </remarks>
+    private static void ReleaseLease(UpdateTaskEntry entry)
+    {
+        if (entry.EndOperation())
+        {
+            entry.DisposeTask();
+        }
+    }
+
     private static OperationStatus ProjectStatus(UpdateRunResult result)
     {
         // ============ THE UPDATE WAS NEVER ATTEMPTED, WHICH IS AN ORDINARY OUTCOME ==================
@@ -1140,7 +1513,27 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             });
         }
 
-        UpdateTaskEntry entry = _tasks.Register(sessionId, task);
+        UpdateTaskEntry? entry = _tasks.Register(sessionId, task, out string quotaDiagnostic);
+
+        if (entry is null)
+        {
+            // THE TASK JUST BUILT IS DISPOSED, on the same terms as the defensive arm above: nothing else
+            // in the process can reach it, so failing to dispose it would pin its pool reference for the
+            // life of the process - the very leak this ceiling exists to bound.
+            task.Dispose();
+
+            _logger?.LogWarning(
+                "CreateUpdateTask refused a task on session {SessionId} because a handle ceiling was "
+                + "reached: {Diagnostic}",
+                sessionId,
+                quotaDiagnostic);
+
+            return Task.FromResult(new CreateUpdateTaskResponse
+            {
+                // E_BUSY - the oracle's own "not now", so no new value enters a consumer's branch set.
+                Status = UpdateWireCodes.Status(RetCode.E_BUSY, quotaDiagnostic),
+            });
+        }
 
         _logger?.LogDebug(
             "CreateUpdateTask issued update task {TaskId} on session {SessionId}.",
@@ -1195,7 +1588,16 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             });
         }
 
-        removed.Task.Dispose();
+        // ⚠ THE TEARDOWN IS NOT UNCONDITIONAL ANY MORE, AND THAT IS THE FIX. Disposing here regardless is
+        // exactly the teardown-with-work-still-pending the legacy's own threading notes warn about
+        // [docs/PB多线程绕坑提示.md, hazard 1]: an update running through this task would have had its
+        // surface disposed underneath it mid-statement. The release now RECORDS itself and disposes only
+        // when nothing is in flight; otherwise the duty passes to the operation that is, which performs it
+        // as it exits. Exactly one of the two disposes, on every interleaving.
+        if (removed.RequestRelease())
+        {
+            removed.DisposeTask();
+        }
 
         _logger?.LogDebug(
             "ReleaseUpdateTask retired update task {TaskId} on session {SessionId}.",
@@ -1237,12 +1639,28 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             });
         }
 
-        long reset = entry.Task.Reset();
-
-        return Task.FromResult(new ResetUpdateTaskResponse
+        // The lease, not a second copy of the task's own E_BUSY. The task still answers E_BUSY from
+        // [:L60] when it is running - that guard is untouched and is still the one a caller who skips this
+        // boundary meets - but the lease is what stops this reset overlapping a prepare or an update in the
+        // first place, which no guard inside the task can do because both would be inside it.
+        if (!TryLease(entry, out OperationStatus refusal))
         {
-            Status = UpdateWireCodes.Status(reset),
-        });
+            return Task.FromResult(new ResetUpdateTaskResponse { Status = refusal });
+        }
+
+        try
+        {
+            long reset = entry.Task.Reset();
+
+            return Task.FromResult(new ResetUpdateTaskResponse
+            {
+                Status = UpdateWireCodes.Status(reset),
+            });
+        }
+        finally
+        {
+            ReleaseLease(entry);
+        }
     }
 
     /// <summary>
@@ -1364,149 +1782,164 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             });
         }
 
-        // WITH THE SWITCH ON, AN EMPTY ARRAY IS AN ERROR [:L359-L363] - E_INVALID_ARGUMENT with the
-        // oracle's own diagnostic, consumed from Concurrency/UpdateWhereBuilder.cs rather than retyped
-        // here: a single transposed character in a CJK literal is invisible in review and fails every
-        // parity comparison. WITH THE SWITCH OFF AN EMPTY ARRAY IS ORDINARY, because the descriptors are
-        // then never applied [:L365 versus :L371].
-        //
-        // NOTE the oracle's own arm sits at RUN time rather than at prepare time, so a caller that skips
-        // this call entirely still meets the same refusal from the task. Reproducing it here as well is
-        // the contract's own reading and mirrors the legacy's habit of guarding one condition on both
-        // sides - the command task checks its empty statement in the setter AND again in the worker.
-        if (request.MultiTableUpdate && request.Tables.Count == 0)
+        // THE OPERATION LEASE, TAKEN BEFORE ANYTHING ABOUT THIS TASK IS DECIDED. The oracle puts its
+        // caller-side busy guard first in every mutator [n_cst_threading_task_sqlbase.sru:L57, :L73,
+        // :L95], so E_BUSY precedes even a malformed-request refusal; that ordering is preserved here.
+        if (!TryLease(entry, out OperationStatus refusal))
         {
-            return Task.FromResult(new PrepareUpdateResponse
-            {
-                Status = UpdateWireCodes.Status(
-                    RetCode.E_INVALID_ARGUMENT,
-                    UpdateWhereBuilder.NoUpdatableTableMessage),
-            });
+            return Task.FromResult(new PrepareUpdateResponse { Status = refusal });
         }
 
-        // `Tables = emptyTables` [:L67] - the descriptor array is REPLACED, not appended to. Answers
-        // E_BUSY while the task is running, in which case nothing has been cleared.
-        long cleared = entry.Task.ResetUpdatableTables();
-
-        if (cleared != RetCode.OK)
+        try
         {
-            return Task.FromResult(new PrepareUpdateResponse
+            // WITH THE SWITCH ON, AN EMPTY ARRAY IS AN ERROR [:L359-L363] - E_INVALID_ARGUMENT with the
+            // oracle's own diagnostic, consumed from Concurrency/UpdateWhereBuilder.cs rather than retyped
+            // here: a single transposed character in a CJK literal is invisible in review and fails every
+            // parity comparison. WITH THE SWITCH OFF AN EMPTY ARRAY IS ORDINARY, because the descriptors are
+            // then never applied [:L365 versus :L371].
+            //
+            // NOTE the oracle's own arm sits at RUN time rather than at prepare time, so a caller that skips
+            // this call entirely still meets the same refusal from the task. Reproducing it here as well is
+            // the contract's own reading and mirrors the legacy's habit of guarding one condition on both
+            // sides - the command task checks its empty statement in the setter AND again in the worker.
+            if (request.MultiTableUpdate && request.Tables.Count == 0)
             {
-                Status = UpdateWireCodes.Status(cleared),
-            });
-        }
-
-        // [:L265-L268] set AFTER the clear, because the clear turns it off [:L63].
-        long switched = entry.Task.SetMultiTableUpdate(request.MultiTableUpdate);
-
-        if (switched != RetCode.OK)
-        {
-            return Task.FromResult(new PrepareUpdateResponse
-            {
-                Status = UpdateWireCodes.Status(switched),
-            });
-        }
-
-        for (int index = 0; index < request.Tables.Count; index++)
-        {
-            TableUpdateContract table = request.Tables[index];
-
-            // R9: reporting ordinal only. Nothing crossing the wire is rebased, and the append itself is
-            // the collection's own one-based `UpperBound + 1` [:L86].
-            int ordinal = index + OneBasedIndex.FirstIndex;
-
-            // THE PRESENCE DISPATCH. Neither setting present takes the four-argument member - the oracle's
-            // SetNull form - and otherwise the six-argument member receives each setting as present-or-null
-            // independently, because the oracle tests the two nulls SEPARATELY [:L131, :L135] and a caller
-            // may legitimately state one and omit the other.
-            long added = table.HasUpdatewhere || table.HasUpdatekeyinplace
-                ? entry.Task.AddUpdatableTable(
-                    table.Name,
-                    table.Updatablecolumns,
-                    table.Keycolumns,
-                    table.Identitycolumn,
-                    table.HasUpdatewhere ? table.Updatewhere : null,
-                    table.HasUpdatekeyinplace ? table.Updatekeyinplace : null)
-                : entry.Task.AddUpdatableTable(
-                    table.Name,
-                    table.Updatablecolumns,
-                    table.Keycolumns,
-                    table.Identitycolumn);
-
-            if (added != RetCode.OK)
-            {
-                // STOPS AT THE FIRST REFUSAL, leaving the descriptors accepted so far in place - which is
-                // the oracle's own shape: its add function returns before appending [:L84] and its
-                // multi-table loop exits on the first non-OK code [:L366, :L368].
-                //
-                // The diagnostic names the ORDINAL and nothing else. The oracle carries NO message on this
-                // arm at all, so the text is a boundary diagnostic rather than a ported one; it quotes no
-                // table name, no column name and no value, so nothing sensitive can reach a log or a
-                // response through it (constraint C-F).
-                _logger?.LogWarning(
-                    "PrepareUpdate refused update table {Ordinal} of {TableCount} on task {TaskId} with "
-                    + "code {ReturnCode}.",
-                    ordinal,
-                    request.Tables.Count,
-                    entry.TaskId,
-                    added);
-
                 return Task.FromResult(new PrepareUpdateResponse
                 {
                     Status = UpdateWireCodes.Status(
-                        added,
-                        string.Create(
-                            CultureInfo.InvariantCulture,
-                            $"Update table {ordinal} was refused. A descriptor must declare a name, at "
-                            + $"least one updatable column and at least one key column "
-                            + $"[ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L84]; "
-                            + $"the identity column may legitimately be empty, and the update-where and "
-                            + $"key-in-place settings are deliberately unchecked.")),
+                        RetCode.E_INVALID_ARGUMENT,
+                        UpdateWhereBuilder.NoUpdatableTableMessage),
                 });
             }
-        }
 
-        // The source object first, then the syntax - see this member's remarks for why the order is what it
-        // is. Each is presence-gated, so a request that names neither leaves whatever the task already
-        // holds, and a task that ends up holding neither meets the oracle's own E_INVALID_DATAOBJECT arm
-        // when it runs [:L326-L330].
-        if (request.HasDataObject)
-        {
-            long source = entry.Task.SetDataObject(request.DataObject);
+            // `Tables = emptyTables` [:L67] - the descriptor array is REPLACED, not appended to. Answers
+            // E_BUSY while the task is running, in which case nothing has been cleared.
+            long cleared = entry.Task.ResetUpdatableTables();
 
-            if (source != RetCode.OK)
+            if (cleared != RetCode.OK)
             {
                 return Task.FromResult(new PrepareUpdateResponse
                 {
-                    Status = UpdateWireCodes.Status(source),
+                    Status = UpdateWireCodes.Status(cleared),
                 });
             }
-        }
 
-        if (request.HasSqlSyntax)
-        {
-            long syntax = entry.Task.SetSqlSyntax(request.SqlSyntax);
+            // [:L265-L268] set AFTER the clear, because the clear turns it off [:L63].
+            long switched = entry.Task.SetMultiTableUpdate(request.MultiTableUpdate);
 
-            if (syntax != RetCode.OK)
+            if (switched != RetCode.OK)
             {
                 return Task.FromResult(new PrepareUpdateResponse
                 {
-                    Status = UpdateWireCodes.Status(syntax),
+                    Status = UpdateWireCodes.Status(switched),
                 });
             }
+
+            for (int index = 0; index < request.Tables.Count; index++)
+            {
+                TableUpdateContract table = request.Tables[index];
+
+                // R9: reporting ordinal only. Nothing crossing the wire is rebased, and the append itself is
+                // the collection's own one-based `UpperBound + 1` [:L86].
+                int ordinal = index + OneBasedIndex.FirstIndex;
+
+                // THE PRESENCE DISPATCH. Neither setting present takes the four-argument member - the oracle's
+                // SetNull form - and otherwise the six-argument member receives each setting as present-or-null
+                // independently, because the oracle tests the two nulls SEPARATELY [:L131, :L135] and a caller
+                // may legitimately state one and omit the other.
+                long added = table.HasUpdatewhere || table.HasUpdatekeyinplace
+                    ? entry.Task.AddUpdatableTable(
+                        table.Name,
+                        table.Updatablecolumns,
+                        table.Keycolumns,
+                        table.Identitycolumn,
+                        table.HasUpdatewhere ? table.Updatewhere : null,
+                        table.HasUpdatekeyinplace ? table.Updatekeyinplace : null)
+                    : entry.Task.AddUpdatableTable(
+                        table.Name,
+                        table.Updatablecolumns,
+                        table.Keycolumns,
+                        table.Identitycolumn);
+
+                if (added != RetCode.OK)
+                {
+                    // STOPS AT THE FIRST REFUSAL, leaving the descriptors accepted so far in place - which is
+                    // the oracle's own shape: its add function returns before appending [:L84] and its
+                    // multi-table loop exits on the first non-OK code [:L366, :L368].
+                    //
+                    // The diagnostic names the ORDINAL and nothing else. The oracle carries NO message on this
+                    // arm at all, so the text is a boundary diagnostic rather than a ported one; it quotes no
+                    // table name, no column name and no value, so nothing sensitive can reach a log or a
+                    // response through it (constraint C-F).
+                    _logger?.LogWarning(
+                        "PrepareUpdate refused update table {Ordinal} of {TableCount} on task {TaskId} with "
+                        + "code {ReturnCode}.",
+                        ordinal,
+                        request.Tables.Count,
+                        entry.TaskId,
+                        added);
+
+                    return Task.FromResult(new PrepareUpdateResponse
+                    {
+                        Status = UpdateWireCodes.Status(
+                            added,
+                            string.Create(
+                                CultureInfo.InvariantCulture,
+                                $"Update table {ordinal} was refused. A descriptor must declare a name, at "
+                                + $"least one updatable column and at least one key column "
+                                + $"[ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L84]; "
+                                + $"the identity column may legitimately be empty, and the update-where and "
+                                + $"key-in-place settings are deliberately unchecked.")),
+                    });
+                }
+            }
+
+            // The source object first, then the syntax - see this member's remarks for why the order is what it
+            // is. Each is presence-gated, so a request that names neither leaves whatever the task already
+            // holds, and a task that ends up holding neither meets the oracle's own E_INVALID_DATAOBJECT arm
+            // when it runs [:L326-L330].
+            if (request.HasDataObject)
+            {
+                long source = entry.Task.SetDataObject(request.DataObject);
+
+                if (source != RetCode.OK)
+                {
+                    return Task.FromResult(new PrepareUpdateResponse
+                    {
+                        Status = UpdateWireCodes.Status(source),
+                    });
+                }
+            }
+
+            if (request.HasSqlSyntax)
+            {
+                long syntax = entry.Task.SetSqlSyntax(request.SqlSyntax);
+
+                if (syntax != RetCode.OK)
+                {
+                    return Task.FromResult(new PrepareUpdateResponse
+                    {
+                        Status = UpdateWireCodes.Status(syntax),
+                    });
+                }
+            }
+
+            _logger?.LogDebug(
+                "PrepareUpdate recorded {TableCount} descriptor(s) on task {TaskId}; multi-table update is "
+                + "{MultiTableUpdate}.",
+                request.Tables.Count,
+                entry.TaskId,
+                request.MultiTableUpdate);
+
+            return Task.FromResult(new PrepareUpdateResponse
+            {
+                Status = UpdateWireCodes.Status(RetCode.OK),
+            });
         }
-
-        _logger?.LogDebug(
-            "PrepareUpdate recorded {TableCount} descriptor(s) on task {TaskId}; multi-table update is "
-            + "{MultiTableUpdate}.",
-            request.Tables.Count,
-            entry.TaskId,
-            request.MultiTableUpdate);
-
-        return Task.FromResult(new PrepareUpdateResponse
+        finally
         {
-            Status = UpdateWireCodes.Status(RetCode.OK),
-        });
+            ReleaseLease(entry);
+        }
     }
 
     /// <summary>
@@ -1673,99 +2106,114 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             });
         }
 
-        // [:L49, :L254-L257] `of_setautocommit(readonly boolean autocommit)`. PRESENCE-GATED: unset leaves
-        // the task's own setting alone, because false is a legal value and also the default [:L32].
-        if (request.HasAutocommit)
+        // THE OPERATION LEASE, TAKEN BEFORE ANYTHING ABOUT THIS TASK IS DECIDED. The oracle puts its
+        // caller-side busy guard first in every mutator [n_cst_threading_task_sqlbase.sru:L57, :L73,
+        // :L95], so E_BUSY precedes even a malformed-request refusal; that ordering is preserved here.
+        if (!TryLease(entry, out OperationStatus refusal))
         {
-            long autoCommit = entry.Task.SetAutoCommit(request.Autocommit);
+            return Task.FromResult(new UpdateResponse { Status = refusal });
+        }
 
-            if (autoCommit != RetCode.OK)
+        try
+        {
+            // [:L49, :L254-L257] `of_setautocommit(readonly boolean autocommit)`. PRESENCE-GATED: unset leaves
+            // the task's own setting alone, because false is a legal value and also the default [:L32].
+            if (request.HasAutocommit)
+            {
+                long autoCommit = entry.Task.SetAutoCommit(request.Autocommit);
+
+                if (autoCommit != RetCode.OK)
+                {
+                    return Task.FromResult(new UpdateResponse
+                    {
+                        Status = UpdateWireCodes.Status(autoCommit),
+                    });
+                }
+            }
+
+            // [:L44, :L74-L77] `of_setupdatedata(ref blob blbdata, readonly long rows)`. The row count travels
+            // with the payload because it is load-bearing: a rejected changeset with a ZERO count is the
+            // oracle's SUCCESS arm [:L339-L342] while a non-zero count is E_INVALID_DATA [:L343-L345]. An unset
+            // payload is the oracle's zero-length blob and is passed through as null rather than substituted.
+            long payload = entry.Task.SetUpdateData(request.UpdateData, request.UpdateRows);
+
+            if (payload != RetCode.OK)
             {
                 return Task.FromResult(new UpdateResponse
                 {
-                    Status = UpdateWireCodes.Status(autoCommit),
+                    Status = UpdateWireCodes.Status(payload),
                 });
             }
-        }
 
-        // [:L44, :L74-L77] `of_setupdatedata(ref blob blbdata, readonly long rows)`. The row count travels
-        // with the payload because it is load-bearing: a rejected changeset with a ZERO count is the
-        // oracle's SUCCESS arm [:L339-L342] while a non-zero count is E_INVALID_DATA [:L343-L345]. An unset
-        // payload is the oracle's zero-length blob and is passed through as null rather than substituted.
-        long payload = entry.Task.SetUpdateData(request.UpdateData, request.UpdateRows);
+            UpdateRunResult result = entry.Task.Execute(context.CancellationToken);
 
-        if (payload != RetCode.OK)
-        {
-            return Task.FromResult(new UpdateResponse
+            // ============ THE THROW SITE. THE ONLY ONE IN THIS FILE, AND THE ONLY RAISED STATUS ===========
+            // The projection is consumed whole - status and trailers - and raised exactly as its own
+            // documentation prescribes. Nothing here builds a status, chooses a code, or assembles a payload.
+            if (result.Outcome is { Kind: UpdateOutcomeKind.Conflict } conflict
+                && ConflictDetector.TryProjectAborted(conflict, out RichErrorProjection projection))
             {
-                Status = UpdateWireCodes.Status(payload),
-            });
-        }
+                // COUNTS AND ROW ORDINALS ONLY. No column value, no statement text and no original-value
+                // shadow is logged, because the conflict payload carries live row data by design and this log
+                // record must not become a second copy of it (constraint C-F).
+                _logger?.LogWarning(
+                    "Optimistic-concurrency conflict on task {TaskId}: {ConflictRowCount} row(s) on update "
+                    + "table {UpdateTable}; {RowsExpected} row(s) expected, {RowsMatched} matched. Reported as "
+                    + "Aborted with its detail so the caller can re-read and rebase or surface it; it is "
+                    + "neither retried nor overwritten.",
+                    entry.TaskId,
+                    conflict.Conflict?.Rows.Count ?? 0,
+                    conflict.Conflict?.UpdateTable ?? string.Empty,
+                    conflict.Conflict?.RowsExpected ?? 0L,
+                    conflict.Conflict?.RowsMatched ?? 0L);
 
-        UpdateRunResult result = entry.Task.Execute(context.CancellationToken);
+                throw new RpcException(projection.Status, projection.Trailers);
+            }
 
-        // ============ THE THROW SITE. THE ONLY ONE IN THIS FILE, AND THE ONLY RAISED STATUS ===========
-        // The projection is consumed whole - status and trailers - and raised exactly as its own
-        // documentation prescribes. Nothing here builds a status, chooses a code, or assembles a payload.
-        if (result.Outcome is { Kind: UpdateOutcomeKind.Conflict } conflict
-            && ConflictDetector.TryProjectAborted(conflict, out RichErrorProjection projection))
-        {
-            // COUNTS AND ROW ORDINALS ONLY. No column value, no statement text and no original-value
-            // shadow is logged, because the conflict payload carries live row data by design and this log
-            // record must not become a second copy of it (constraint C-F).
-            _logger?.LogWarning(
-                "Optimistic-concurrency conflict on task {TaskId}: {ConflictRowCount} row(s) on update "
-                + "table {UpdateTable}; {RowsExpected} row(s) expected, {RowsMatched} matched. Reported as "
-                + "Aborted with its detail so the caller can re-read and rebase or surface it; it is "
-                + "neither retried nor overwritten.",
-                entry.TaskId,
-                conflict.Conflict?.Rows.Count ?? 0,
-                conflict.Conflict?.UpdateTable ?? string.Empty,
-                conflict.Conflict?.RowsExpected ?? 0L,
-                conflict.Conflict?.RowsMatched ?? 0L);
-
-            throw new RpcException(projection.Status, projection.Trailers);
-        }
-
-        UpdateResponse response = new()
-        {
-            Status = ProjectStatus(result),
-        };
-
-        // The contract's own rule: the counts are present when ret_code is OK. Tested on the RUN's
-        // reconciled code - see this member's remarks for the two epilogue arms that make that matter.
-        if (result.Code == RetCode.OK)
-        {
-            // [:L247] fired on EVERY success, including a pure update and a pure delete, because the
-            // oracle's call sits OUTSIDE the inserted-count block that closes at [:L246]. So a zero triple
-            // is a real answer here rather than a missing one.
-            response.Counts = new UpdateCounts
+            UpdateResponse response = new()
             {
-                Inserted = result.Counts.Inserted,
-                Updated = result.Counts.Updated,
-                Deleted = result.Counts.Deleted,
+                Status = ProjectStatus(result),
             };
 
-            // ⚠️ ORDER-PRESERVING BY CONSTRUCTION, AT BOTH LEVELS. The blocks are appended in the order
-            // they were accumulated - which is table order - and each block's two arrays are carried by the
-            // resolver's own single mapper, which preserves every position and every null and never merges
-            // the two. Nothing here sorts, reverses, deduplicates or concatenates anything.
-            foreach (ResolvedIdentityColumnData block in result.Identity)
+            // The contract's own rule: the counts are present when ret_code is OK. Tested on the RUN's
+            // reconciled code - see this member's remarks for the two epilogue arms that make that matter.
+            if (result.Code == RetCode.OK)
             {
-                response.Identity.Add(block.ToIdentityColumnData());
+                // [:L247] fired on EVERY success, including a pure update and a pure delete, because the
+                // oracle's call sits OUTSIDE the inserted-count block that closes at [:L246]. So a zero triple
+                // is a real answer here rather than a missing one.
+                response.Counts = new UpdateCounts
+                {
+                    Inserted = result.Counts.Inserted,
+                    Updated = result.Counts.Updated,
+                    Deleted = result.Counts.Deleted,
+                };
+
+                // ⚠️ ORDER-PRESERVING BY CONSTRUCTION, AT BOTH LEVELS. The blocks are appended in the order
+                // they were accumulated - which is table order - and each block's two arrays are carried by the
+                // resolver's own single mapper, which preserves every position and every null and never merges
+                // the two. Nothing here sorts, reverses, deduplicates or concatenates anything.
+                foreach (ResolvedIdentityColumnData block in result.Identity)
+                {
+                    response.Identity.Add(block.ToIdentityColumnData());
+                }
             }
+
+            _logger?.LogDebug(
+                "Update on task {TaskId} answered {ReturnCode}; {IdentityBlockCount} identity block(s), "
+                + "{Inserted} inserted, {Updated} updated, {Deleted} deleted.",
+                entry.TaskId,
+                result.Code,
+                response.Identity.Count,
+                response.Counts?.Inserted ?? 0L,
+                response.Counts?.Updated ?? 0L,
+                response.Counts?.Deleted ?? 0L);
+
+            return Task.FromResult(response);
         }
-
-        _logger?.LogDebug(
-            "Update on task {TaskId} answered {ReturnCode}; {IdentityBlockCount} identity block(s), "
-            + "{Inserted} inserted, {Updated} updated, {Deleted} deleted.",
-            entry.TaskId,
-            result.Code,
-            response.Identity.Count,
-            response.Counts?.Inserted ?? 0L,
-            response.Counts?.Updated ?? 0L,
-            response.Counts?.Deleted ?? 0L);
-
-        return Task.FromResult(response);
+        finally
+        {
+            ReleaseLease(entry);
+        }
     }
 }

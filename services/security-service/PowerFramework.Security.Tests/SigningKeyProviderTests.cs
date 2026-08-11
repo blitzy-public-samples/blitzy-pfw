@@ -910,9 +910,11 @@ public sealed class SigningKeyProviderTests
     /// GENERATED RATHER THAN WRITTEN DOWN. No key literal appears in this file, and nothing is copied
     /// from any hardcoded-secret site in the repository. Generating also proves more than a fixture
     /// would: the provider must read what it is handed rather than recognise a known value. 2048 bits
-    /// because the minting library applies its own asymmetric minimum when it creates a signature
-    /// provider - that is the library's rule, and the provider under test deliberately imposes none of
-    /// its own [ws_objects/pfw.shared.pbl.src/enums.sru:L965 keeps 1024 a legal size].
+    /// because that is the provider's OWN floor for the issuer identity
+    /// (Security:SigningKeyMinimumSizeBits, default 2048), which it enforces before any credential
+    /// exists; the minting library's separate asymmetric minimum is satisfied by the same value. The
+    /// legacy allowance of 1024 bits [ws_objects/pfw.shared.pbl.src/enums.sru:L965] belongs to C-02's
+    /// key-GENERATION surface and is untouched - SigningKeyPolicyTests pins the two apart.
     /// </remarks>
     private sealed class GeneratedKeyMaterial
     {

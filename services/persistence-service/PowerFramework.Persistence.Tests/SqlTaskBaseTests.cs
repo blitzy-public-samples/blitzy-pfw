@@ -38,6 +38,7 @@
 
 using System.Diagnostics.CodeAnalysis;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -918,6 +919,73 @@ public sealed class SqlTaskBaseTests
     }
 
     [Fact]
+    public void OnDbError_MasksBothTextMembersInItsLogAndNeitherInThePayloadItRaises()
+    {
+        // CONSTRAINT C-F, AND THE DRIVER MESSAGE IS THE HALF THAT IS EASY TO MISS. The statement member
+        // obviously carries the whole generated statement - with DisableBind=1 the runtime interpolates
+        // values as literals rather than binding them
+        // [n_cst_thread_task_sqlbase.sru:L128] - but a driver message echoes offending values too: a
+        // uniqueness violation names the duplicate key. Masking one and logging the other raw would put
+        // the same material in the same record by a different route.
+        //
+        // THE PAYLOAD IS UNTOUCHED. The caller-side proxy receives the structure exactly as the oracle
+        // builds it [:L86-L95], because that is the in-band channel the contract carries and the wire
+        // projection does its own masking on the statement field (constraint C-B). Only the log is
+        // narrowed, and the oracle's own logger narrows nothing at all (AAP 0.6.3.8).
+        RecordingTaskLogger logger = new();
+        using Harness harness = new(logger: logger);
+
+        const string DriverText = "UNIQUE constraint failed: COMPANY.ID (duplicate value 4711)";
+        const string Statement = "INSERT INTO COMPANY (ID, NAME) VALUES (4711, 'Zhang Wei')";
+
+        Assert.Equal(
+            SqlTaskBase.DbErrorEventResult,
+            harness.Task.OnDbError(2627L, DriverText, Statement, DwBuffer.Primary, 3L));
+
+        // IN BAND: byte for byte, both members.
+        DbErrorData raised = Assert.Single(harness.Proxy.Errors);
+        Assert.Equal(DriverText, raised.SqlErrText);
+        Assert.Equal(Statement, raised.SqlSyntax);
+        Assert.Equal(2627L, raised.SqlDbCode);
+        Assert.Equal(3L, raised.Row);
+
+        // IN THE LOG: no value from either member survives.
+        string record = Assert.Single(logger.Records);
+        Assert.DoesNotContain("4711", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("Zhang Wei", record, StringComparison.Ordinal);
+
+        // ...while everything that locates the fault does: the driver code, the buffer, the row, the
+        // shape of the message and the shape of the statement.
+        Assert.Contains("2627", record, StringComparison.Ordinal);
+        Assert.Contains("Primary", record, StringComparison.Ordinal);
+        Assert.Contains("UNIQUE constraint failed", record, StringComparison.Ordinal);
+        Assert.Contains("INSERT INTO COMPANY", record, StringComparison.Ordinal);
+        // THREE masks, and the arithmetic is per LITERAL rather than per member: the driver message
+        // carries one numeric, and the statement carries a numeric and a quoted string. Asserting the
+        // count rather than mere presence is what would catch a mask that stopped at the first literal.
+        Assert.Equal(3, CountOccurrences(record, SqlRedactor.DefaultPlaceholder));
+    }
+
+    /// <summary>Counts non-overlapping occurrences of a marker.</summary>
+    /// <param name="text">The text to scan.</param>
+    /// <param name="marker">The marker to count.</param>
+    /// <returns>The count.</returns>
+    private static int CountOccurrences(string text, string marker)
+    {
+        int count = 0;
+        int index = text.IndexOf(marker, StringComparison.Ordinal);
+
+        while (index >= 0)
+        {
+            count++;
+            index = text.IndexOf(marker, index + marker.Length, StringComparison.Ordinal);
+        }
+
+        return count;
+    }
+
+
+    [Fact]
     public void OnPrepare_CallsTheAncestorFirst_AndResetsAnExistingSignal()
     {
         // [:L725-L729] the ancestor runs FIRST here - the opposite of OnError - and the body then
@@ -991,6 +1059,70 @@ public sealed class SqlTaskBaseTests
         Assert.False(harness.Task.HasTransactionReference);
     }
 
+    [Fact]
+    public void RunPrepare_RaisesThePrepareEvent_SoTheCommitSignalIsReArmedPerDispatch()
+    {
+        // THE SEAM THE COMPOSITION ROOT RAISES THE EVENT THROUGH. OnPrepare is protected because the
+        // oracle declares it as an EVENT, raised by the substrate; this service has no substrate, so the
+        // task factory is the substrate and this is how it raises it. While nothing called it, the commit
+        // signal was never re-armed between dispatches - so a committed reading survived from one run
+        // into the next.
+        using Harness harness = new();
+
+        _ = harness.Task.GetCommitEvent();
+        harness.Task.GetCommitEvent().Set();
+        Assert.True(harness.Task.IsCommitted());
+
+        Assert.Equal(0L, harness.Task.RunPrepare());
+        Assert.Equal(["ancestor:OnPrepare"], harness.Order);
+        Assert.False(harness.Task.IsCommitted());
+    }
+
+    [Fact]
+    public void RunUninit_RaisesTheUninitEvent_AndDisposalRaisesItToo()
+    {
+        // TEARDOWN GOES THROUGH THE HOOK ON EVERY PATH, which is the point: the two used to carry the
+        // same three actions side by side, so disposing a task skipped the hook entirely - the ancestor's
+        // uninit never ran and a derived override never ran either.
+        using Harness harness = new();
+        harness.Task.SetTransData(Descriptor("DisableBind=0"));
+
+        IPooledTransaction? transaction = null;
+        Assert.Equal(RetCode.OK, harness.Task.CallGetTransObject(ref transaction));
+        _ = harness.Task.GetCommitEvent();
+
+        harness.Task.RunUninit();
+
+        Assert.Equal(["ancestor:OnUninit"], harness.Order);
+        Assert.False(harness.Task.HasTransactionReference);
+        Assert.False(harness.Task.HasCommitSignal);
+
+        // Disposal raises it AGAIN and the hook absorbs the repeat rather than double-releasing: the
+        // pooled reference is guarded on a positive index and the signal on a non-null reference.
+        harness.Task.Dispose();
+
+        Assert.Equal(["ancestor:OnUninit", "ancestor:OnUninit"], harness.Order);
+        Assert.False(harness.Task.HasTransactionReference);
+    }
+
+    [Fact]
+    public void Dispose_RaisesTheUninitEvent_ForATaskThatNeverReachedItExplicitly()
+    {
+        // The safety net, now expressed as the hook rather than as a copy of its body.
+        using Harness harness = new();
+        harness.Task.SetTransData(Descriptor("DisableBind=0"));
+
+        IPooledTransaction? transaction = null;
+        Assert.Equal(RetCode.OK, harness.Task.CallGetTransObject(ref transaction));
+        _ = harness.Task.GetCommitEvent();
+
+        harness.Task.Dispose();
+
+        Assert.Equal(["ancestor:OnUninit"], harness.Order);
+        Assert.False(harness.Task.HasTransactionReference);
+        Assert.False(harness.Task.HasCommitSignal);
+    }
+
     // ==========================================================================================
     //  SUITE 8 - THE PLACEHOLDER BINDER  [n_cst_thread_task_sqlbase.sru:L371-L482]
     // ==========================================================================================
@@ -1015,6 +1147,103 @@ public sealed class SqlTaskBaseTests
 
         Assert.Equal(RetCode.OK, harness.Task.CallBindParams(ref sql, (long)DatabaseType.DbtMssql));
         Assert.Equal("SELECT * FROM COMPANY WHERE id = 7", sql);
+    }
+
+    [Fact]
+    public void BindParams_DualForm_EmitsTheObservableTextAndAParameterizedOneTogether()
+    {
+        // BOTH FORMS FROM ONE PASS. The observable text is what the oracle produces and what a
+        // SQL-preview hook, a DbError payload and a characterization recording all compare against; the
+        // parameterized text is what actually executes, so the interpolated literal never reaches the
+        // provider as statement text. Neither can be dropped, and producing them together is what stops
+        // them disagreeing.
+        using Harness harness = new();
+        harness.Task.AddParam("name", "Alice");
+        harness.Task.AddParam("age", 30L);
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "SELECT * FROM COMPANY WHERE name = :name AND age > :age",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        Assert.Equal(
+            "SELECT * FROM COMPANY WHERE name = 'Alice' AND age > 30",
+            bound.ObservableText);
+        Assert.Equal(
+            "SELECT * FROM COMPANY WHERE name = @p1 AND age > @p2",
+            bound.ParameterizedText);
+
+        Assert.Equal(2, bound.Parameters.Count);
+        Assert.Equal("@p1", bound.Parameters[0].Name);
+        Assert.Equal("Alice", bound.Parameters[0].Value);
+        Assert.Equal("@p2", bound.Parameters[1].Name);
+        Assert.Equal(30L, bound.Parameters[1].Value);
+    }
+
+    [Fact]
+    public void BindParams_DualForm_CarriesOneParameterPerNameHoweverManyPlaceholdersShareIt()
+    {
+        // A NAMED parameter fills every placeholder sharing its name [:L460, :L472], and the
+        // parameterized form reproduces that with ONE bound value reused at each occurrence - which is
+        // exactly what a named provider parameter means. Two values for one name would be a different
+        // statement.
+        using Harness harness = new();
+        harness.Task.AddParam("id", 7L);
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "SELECT * FROM COMPANY WHERE id = :id OR parent = :id",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        Assert.Equal("SELECT * FROM COMPANY WHERE id = 7 OR parent = 7", bound.ObservableText);
+        Assert.Equal("SELECT * FROM COMPANY WHERE id = @p1 OR parent = @p1", bound.ParameterizedText);
+        Assert.Equal("@p1", Assert.Single(bound.Parameters).Name);
+    }
+
+    [Fact]
+    public void BindParams_DualForm_WithNoPlaceholders_LeavesTheTwoFormsIdentical()
+    {
+        // Nothing to bind means nothing for the two forms to differ about, which is why the
+        // overwhelming majority of statements execute exactly as they always did.
+        using Harness harness = new();
+        harness.Task.AddParam("unused", 1L);
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "DELETE FROM COMPANY",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        Assert.Equal("DELETE FROM COMPANY", bound.ObservableText);
+        Assert.Equal("DELETE FROM COMPANY", bound.ParameterizedText);
+        Assert.Empty(bound.Parameters);
+    }
+
+    [Fact]
+    public void BindParams_DualForm_NeverBindsInsideAQuotedRun()
+    {
+        // The quote tracking is the oracle's [:L425-L434, :L441], and it governs BOTH forms: a colon
+        // inside a literal is not a placeholder, so it must not become a bound parameter either.
+        using Harness harness = new();
+        harness.Task.AddParam("id", 7L);
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "SELECT ':id' AS literal, id FROM COMPANY WHERE id = :id",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        Assert.Equal("SELECT ':id' AS literal, id FROM COMPANY WHERE id = 7", bound.ObservableText);
+        Assert.Equal(
+            "SELECT ':id' AS literal, id FROM COMPANY WHERE id = @p1",
+            bound.ParameterizedText);
+        Assert.Equal("@p1", Assert.Single(bound.Parameters).Name);
     }
 
     [Fact]
@@ -1242,7 +1471,7 @@ public sealed class SqlTaskBaseTests
     // ==========================================================================================
 
     [Fact]
-    public void RetrieveWithParams_WithNamedParameters_MatchesByName()
+    public async Task RetrieveWithParams_WithNamedParameters_MatchesByName()
     {
         // [:L616-L623] each argument position is filled by NAME, regardless of the parameter order.
         using Harness harness = new();
@@ -1252,12 +1481,16 @@ public sealed class SqlTaskBaseTests
         harness.Task.AddParam("name", "Alice");
         harness.Task.AddParam("id", 7L);
 
-        Assert.Equal(2L, harness.Task.CallRetrieveWithParams(store));
+        Assert.Equal(
+            2L,
+            await harness.Task.CallRetrieveWithParamsAsync(
+                store,
+                TestContext.Current.CancellationToken));
         Assert.Equal([7L, "Alice"], harness.Runtime.LastParameters);
     }
 
     [Fact]
-    public void RetrieveWithParams_WhenANameDoesNotMatch_FallsBackToTheSamePosition()
+    public async Task RetrieveWithParams_WhenANameDoesNotMatch_FallsBackToTheSamePosition()
     {
         // [:L624-L627] 没有找到按顺序取参. THE SECOND LOOP-VARIABLE-OUTLIVES-ITS-LOOP DEPENDENCY: the
         // oracle detects "no name matched" by testing the INNER loop's counter after it ended, which a
@@ -1269,14 +1502,18 @@ public sealed class SqlTaskBaseTests
         harness.Task.AddParam("id", 7L);
         harness.Task.AddParam("other", "Alice");
 
-        Assert.Equal(2L, harness.Task.CallRetrieveWithParams(store));
+        Assert.Equal(
+            2L,
+            await harness.Task.CallRetrieveWithParamsAsync(
+                store,
+                TestContext.Current.CancellationToken));
 
         // Position 1 matched by name; position 2 found no "missing" and took PARAMETER 2 positionally.
         Assert.Equal([7L, "Alice"], harness.Runtime.LastParameters);
     }
 
     [Fact]
-    public void RetrieveWithParams_WithNoNamedParameters_CopiesPositionally()
+    public async Task RetrieveWithParams_WithNoNamedParameters_CopiesPositionally()
     {
         // [:L632-L636]
         using Harness harness = new();
@@ -1286,12 +1523,16 @@ public sealed class SqlTaskBaseTests
         harness.Task.AddParam(string.Empty, 7L);
         harness.Task.AddParam(string.Empty, "Alice");
 
-        Assert.Equal(2L, harness.Task.CallRetrieveWithParams(store));
+        Assert.Equal(
+            2L,
+            await harness.Task.CallRetrieveWithParamsAsync(
+                store,
+                TestContext.Current.CancellationToken));
         Assert.Equal([7L, "Alice"], harness.Runtime.LastParameters);
     }
 
     [Fact]
-    public void RetrieveWithParams_WithFewerParametersThanArguments_FallsBackToWholePositional()
+    public async Task RetrieveWithParams_WithFewerParametersThanArguments_FallsBackToWholePositional()
     {
         // [:L615] the by-name block is GATED on `nParmCnt >= nDwArgCnt`, so with fewer parameters than
         // arguments it is skipped entirely and [:L632-L636] copies what there is.
@@ -1301,12 +1542,16 @@ public sealed class SqlTaskBaseTests
         ISqlDataStore store = harness.Task.CallGetCacheDataStore(OtherDataObject);
         harness.Task.AddParam("id", 7L);
 
-        Assert.Equal(1L, harness.Task.CallRetrieveWithParams(store));
+        Assert.Equal(
+            1L,
+            await harness.Task.CallRetrieveWithParamsAsync(
+                store,
+                TestContext.Current.CancellationToken));
         Assert.Equal([7L], harness.Runtime.LastParameters);
     }
 
     [Fact]
-    public void RetrieveWithParams_WithNoParametersAtAll_RetrievesWithAnEmptyList()
+    public async Task RetrieveWithParams_WithNoParametersAtAll_RetrievesWithAnEmptyList()
     {
         // [:L651-L652] the zero arm of the unroll - and the whole reason the unroll has nothing to port
         // is that ONE variadic call covers every arity (C-D). The legacy ceiling of 20 is recorded as a
@@ -1315,7 +1560,11 @@ public sealed class SqlTaskBaseTests
 
         ISqlDataStore store = harness.Task.CallGetCacheDataStore(DwSqliteFixture.DataObjectName);
 
-        Assert.Equal(0L, harness.Task.CallRetrieveWithParams(store));
+        Assert.Equal(
+            0L,
+            await harness.Task.CallRetrieveWithParamsAsync(
+                store,
+                TestContext.Current.CancellationToken));
         Assert.Empty(harness.Runtime.LastParameters);
 
         // Twenty-five parameters - five past the legacy unroll's ceiling - go through unremarkably.
@@ -1324,7 +1573,11 @@ public sealed class SqlTaskBaseTests
             harness.Task.AddParam(string.Empty, (long)index);
         }
 
-        Assert.Equal(25L, harness.Task.CallRetrieveWithParams(store));
+        Assert.Equal(
+            25L,
+            await harness.Task.CallRetrieveWithParamsAsync(
+                store,
+                TestContext.Current.CancellationToken));
         Assert.Equal(25, harness.Runtime.LastParameters.Count);
     }
 
@@ -1387,6 +1640,40 @@ public sealed class SqlTaskBaseTests
         Assert.Equal("failed", wire.Sqlerrtext);
         Assert.Equal(DwBuffer.Primary, wire.Buffer);
         Assert.Equal(3L, wire.Row);
+    }
+
+    [Fact]
+    public void OnDbError_TheLogRecordMasksBothTheStatementAndTheProviderText()
+    {
+        // THE PROVIDER'S ERROR TEXT WAS THE SECOND ROUTE OUT, AND IT USED TO BE OPEN. The statement went
+        // through the redactor and the provider's own text went through nothing at all - and a provider
+        // composes that text FROM the statement it was executing, so it quotes the offending value back:
+        // this is what a UNIQUE-constraint or type-conversion message really looks like. One record, two
+        // fields, one rule.
+        using Harness harness = new();
+
+        harness.Task.OnDbError(
+            -19L,
+            "UNIQUE constraint failed: COMPANY.NAME = 'O''Hara' (salary 1500.00)",
+            "UPDATE COMPANY SET salary = 1500.00 WHERE name = 'O''Hara'",
+            DwBuffer.Primary,
+            3L);
+
+        string record = Assert.Single(harness.Log.Records);
+
+        // Neither literal survives, from either field.
+        Assert.DoesNotContain("1500.00", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("O''Hara", record, StringComparison.Ordinal);
+
+        // What an operator needs does survive: the provider code, the buffer, the row, the constraint name
+        // and the statement's shape.
+        Assert.Contains("-19", record, StringComparison.Ordinal);
+        Assert.Contains("UNIQUE constraint failed: COMPANY.NAME", record, StringComparison.Ordinal);
+        Assert.Contains("UPDATE COMPANY SET salary", record, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, record, StringComparison.Ordinal);
+
+        // And no exception object is attached, which would have rendered both fields unmasked beside it.
+        Assert.All(harness.Log.Exceptions, Assert.Null);
     }
 
     [Fact]
@@ -1563,9 +1850,28 @@ public sealed class SqlTaskBaseTests
     /// </summary>
     private sealed class Harness : IDisposable
     {
-        internal Harness(bool isMainThread = false, int taskIndex = 1, bool attachProxy = true)
+        /// <summary>Builds the environment.</summary>
+        /// <param name="isMainThread">Whether the substrate reports the main thread.</param>
+        /// <param name="taskIndex">The substrate's task index.</param>
+        /// <param name="attachProxy">Whether a caller-side proxy is attached.</param>
+        /// <param name="logger">
+        /// The recording sink the task writes into, or <see langword="null"/> to have one created.
+        /// </param>
+        /// <remarks>
+        /// THE SUPPLIED SINK IS THE ONE THE TASK GETS, and taking the parameter without honouring it is
+        /// worse than not offering it: a caller that passes its own recorder then asserts against a list
+        /// the task never wrote to, and an empty list reads as "nothing was logged" rather than as
+        /// "you are holding the wrong list". Either spelling works - pass one and assert on it, or pass
+        /// none and assert on <see cref="Log"/> - and both name the same object.
+        /// </remarks>
+        internal Harness(
+            bool isMainThread = false,
+            int taskIndex = 1,
+            bool attachProxy = true,
+            RecordingTaskLogger? logger = null)
         {
             Order = [];
+            Log = logger ?? new RecordingTaskLogger();
             Proxy = new FakeSqlTaskProxy();
             Host = new FakeSqlTaskHost(Order)
             {
@@ -1594,10 +1900,21 @@ public sealed class SqlTaskBaseTests
                 Pool,
                 new RecordingDataStoreFactory(Runtime),
                 HookActivator,
-                FixedClock.Instance);
+                FixedClock.Instance,
+                Log);
         }
 
         internal List<string> Order { get; }
+
+        /// <summary>
+        /// The records the task under test wrote.
+        /// </summary>
+        /// <remarks>
+        /// SUPPLIED BECAUSE A REDACTION CLAIM CANNOT BE MADE ABOUT A NULL LOGGER. The wire payload's masking
+        /// was already asserted, and the LOG record - a second, independent copy of the same statement and
+        /// the provider's own text - was written to a sink nothing could read.
+        /// </remarks>
+        internal RecordingTaskLogger Log { get; }
 
         internal FakeSqlTaskHost Host { get; }
 
@@ -1638,6 +1955,40 @@ public sealed class SqlTaskBaseTests
     }
 
     /// <summary>
+    /// Captures the formatted records a task writes, so a redaction claim can be made about the log as well
+    /// as about the wire.
+    /// </summary>
+    /// <remarks>
+    /// THE FORMATTED TEXT IS WHAT A SINK WRITES, and it is what the two masked placeholders have to appear in.
+    /// The exception argument is captured as well, because an attached exception is rendered in full by every
+    /// provider and would republish whatever the formatted text was careful to mask.
+    /// </remarks>
+    private sealed class RecordingTaskLogger : ILogger<TestSqlTask>
+    {
+        internal List<string> Records { get; } = [];
+
+        internal List<Exception?> Exceptions { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            Records.Add(formatter(state, exception));
+            Exceptions.Add(exception);
+        }
+    }
+
+    /// <summary>
     /// A concrete <c>SqlTaskBase</c> that exposes the protected surface the suites exercise. It adds no
     /// behaviour of its own, so every assertion above is an assertion about the base.
     /// </summary>
@@ -1648,14 +1999,15 @@ public sealed class SqlTaskBaseTests
             TransactionPool transactionPool,
             ISqlDataStoreFactory dataStoreFactory,
             ISqlRetrievalHookActivator hookActivator,
-            TimeProvider timeProvider)
+            TimeProvider timeProvider,
+            ILogger<TestSqlTask>? logger = null)
             : base(
                 host,
                 transactionPool,
                 dataStoreFactory,
                 hookActivator,
                 timeProvider,
-                NullLogger<TestSqlTask>.Instance)
+                logger ?? NullLogger<TestSqlTask>.Instance)
         {
         }
 
@@ -1682,7 +2034,23 @@ public sealed class SqlTaskBaseTests
         internal long CallBindParams(ref string sql, long dbType, string dwArgString) =>
             BindParams(ref sql, dbType, dwArgString);
 
-        internal long CallRetrieveWithParams(ISqlDataStore data) => RetrieveWithParams(data);
+        /// <summary>Reaches the DUAL-FORM binder, which publishes both statement texts at once.</summary>
+        /// <param name="sql">The statement to bind.</param>
+        /// <param name="dbType">The dialect selecting the literal formats.</param>
+        /// <param name="statement">The observable text, the parameterized text and the values.</param>
+        /// <returns>Whatever the production overload returns.</returns>
+        /// <remarks>
+        /// Separate from the <see langword="ref"/> pass-through rather than replacing it, because the two
+        /// production overloads are BOTH live: the ref one is the oracle's own progressive-rewrite shape
+        /// and the dual-form one is what carries the parameterized text to the provider.
+        /// </remarks>
+        internal long CallBindParams(string sql, long dbType, out SqlBoundStatement statement) =>
+            BindParams(sql, dbType, out statement);
+
+        internal ValueTask<long> CallRetrieveWithParamsAsync(
+            ISqlDataStore data,
+            CancellationToken cancellationToken) =>
+            RetrieveWithParamsAsync(data, cancellationToken);
 
         internal long CallOnPrepare() => OnPrepare();
 
@@ -1830,10 +2198,13 @@ public sealed class SqlTaskBaseTests
             return _definitions.TryGetValue(dataObject, out definition);
         }
 
-        public long Retrieve(ISqlDataStore data, IReadOnlyList<object?> parameters)
+        public ValueTask<long> RetrieveAsync(
+            ISqlDataStore data,
+            IReadOnlyList<object?> parameters,
+            CancellationToken cancellationToken)
         {
             LastParameters = [.. parameters];
-            return parameters.Count;
+            return ValueTask.FromResult((long)parameters.Count);
         }
     }
 
@@ -1908,7 +2279,10 @@ public sealed class SqlTaskBaseTests
             _inner.OnInit(parentTask);
         }
 
-        public long Retrieve(IReadOnlyList<object?> parameters) => _inner.Retrieve(parameters);
+        public ValueTask<long> RetrieveAsync(
+            IReadOnlyList<object?> parameters,
+            CancellationToken cancellationToken) =>
+            _inner.RetrieveAsync(parameters, cancellationToken);
     }
 
     /// <summary>The pool's activator double, so the pool itself needs no engine and no connection.</summary>
@@ -1988,7 +2362,7 @@ public sealed class SqlTaskBaseTests
             // Nothing to record: no suite in this file asserts on stamped provider state.
         }
 
-        public long Connect()
+        public long Connect(CancellationToken cancellationToken = default)
         {
             if (ConnectFails)
             {
@@ -2021,7 +2395,10 @@ public sealed class SqlTaskBaseTests
 
         public long AutoCommitCheckpoint() => RetCode.OK;
 
-        public long Exec(string? sqlCommand) => RetCode.OK;
+        public long Exec(string? sqlCommand, CancellationToken cancellationToken = default) => RetCode.OK;
+
+        // The BOUND overload, delegating to the rendered one for the same reason the engine doubles do.
+        public long Exec(in SqlCommandText command, CancellationToken cancellationToken = default) => Exec(command.RenderedText);
 
         public bool IsConnected() => Connected;
 
@@ -2048,6 +2425,28 @@ public sealed class SqlTaskBaseTests
         public long ApplyTransactionData(in TransactionData descriptor) => RetCode.OK;
 
         public bool IsSqlFailed() => false;
+
+        /// <summary>
+        /// Reports that this double routes to no transaction engine, so no engine capability is reachable
+        /// through it.
+        /// </summary>
+        /// <typeparam name="TCapability">The capability asked for; never satisfied here.</typeparam>
+        /// <param name="capability">Always <see langword="null"/>.</param>
+        /// <returns>Always <see langword="false"/>.</returns>
+        /// <remarks>
+        /// A DOUBLE HAS NO ENGINE TO PROBE, and answering the probe honestly is the whole point. A caller
+        /// that needs a provider-shaped capability - the SQLite command source, for instance - takes its
+        /// no-capability branch against this double, which is exactly the branch a pooled transaction over
+        /// a non-SQLite engine would drive it down in production.
+        /// </remarks>
+        public bool TryGetEngineCapability<TCapability>(
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TCapability? capability)
+            where TCapability : class
+        {
+            capability = null;
+            return false;
+        }
+
 
         public bool IsSqlSucceeded() => true;
 

@@ -85,12 +85,17 @@
  *    seeds, health-gates or waits for anything. The single local bring-up path
  *    is `orchestration/docker-compose.yml`.
  * 3. **It is the only design that can authenticate on the token endpoint at
- *    all.** Token issuance is the system's single mutual-TLS edge — a caller
- *    cannot present a bearer token in order to obtain its first bearer token —
- *    and `playwright.config.ts` supplies the client certificate through
- *    `use.clientCertificates`. The injected `request` fixture therefore already
- *    presents it; a context this module built for itself would not, unless it
- *    rebuilt that configuration and drifted from it thereafter.
+ *    all.** Token issuance is the one operation a bearer token cannot protect — a
+ *    caller cannot present a bearer token in order to obtain its first bearer
+ *    token — so the operation accepts either of two caller credentials, and the
+ *    injected fixture is what carries the one that lives at the transport layer.
+ *    `playwright.config.ts` supplies any configured client certificate through
+ *    `use.clientCertificates`, so the injected `request` fixture already presents
+ *    it; a context this module built for itself would not, unless it rebuilt that
+ *    configuration and drifted from it thereafter. The `Basic` credential is
+ *    applied per request by {@link postTokenRequest} instead, because a header is
+ *    the one part of a credential a request context cannot be relied upon to
+ *    carry for us.
  *
  * WHAT THIS MODULE DELIBERATELY DOES NOT DO
  * -----------------------------------------
@@ -128,8 +133,10 @@ import type { APIRequestContext, APIResponse } from '@playwright/test';
 
 import {
   SECURITY_CLIENT_CERTIFICATE,
+  SECURITY_CLIENT_CREDENTIAL,
   SERVICE_ENDPOINTS,
   TOKEN_PATH,
+  basicAuthorizationHeader,
   securityUrl,
 } from './service-endpoints';
 
@@ -198,11 +205,34 @@ export interface TokenRequest {
  *
  * Because the honoured identity is the one the certificate establishes, a
  * deployment whose certificate maps to some other name will refuse this value
- * with `403`. That is the contract behaving correctly, and this constant is the
- * single place to change if a deployment's certificate establishes a different
- * identity.
+ * with `403`. That is the contract behaving correctly.
+ *
+ * ⚠ SO IT IS READ FROM THE ENVIRONMENT, AND ONLY DEFAULTS TO THIS NAME ⚠
+ *
+ * The default matches the client identity the documented recipe generates
+ * (`docs/ARCHITECTURE.md` §9.3.1 issues a certificate for this exact common
+ * name alongside Gateway's and DataServices'), so the out-of-the-box
+ * configuration agrees with itself. `E2E_TOKEN_SUBJECT` exists for the case it
+ * cannot cover: a deployment whose certificate authority issues under a
+ * different naming convention. Aligning the two is then one variable rather than
+ * an edit to this file, which matters because the alternative is a spec change
+ * that looks like a behavioural change and would be reviewed as one.
+ *
+ * The value is trimmed and an all-whitespace override is treated as absent,
+ * because the published schema requires a non-empty subject and refusing here —
+ * with the variable named — is a better failure than sending a blank subject and
+ * reading the schema violation back off the wire.
+ *
+ * It remains an **identifier, not a credential**, however it is supplied: it
+ * authenticates nothing on its own, and the certificate is what does.
  */
-export const E2E_TOKEN_SUBJECT: string = 'pfw-e2e-suite';
+export const E2E_TOKEN_SUBJECT: string = ((): string => {
+  const configured: string | undefined = process.env['E2E_TOKEN_SUBJECT'];
+
+  const trimmed: string = configured === undefined ? '' : configured.trim();
+
+  return trimmed.length === 0 ? 'pfw-e2e-suite' : trimmed;
+})();
 
 /**
  * The audience this suite's tokens are issued for: **Gateway**.
@@ -616,16 +646,18 @@ function describeCause(cause: unknown): string {
 /**
  * Explains a refusal on the one edge that is not bearer-authenticated.
  *
- * Token issuance is the system's **single mutual-TLS edge**, and it is the one
- * operation a bearer token cannot protect: a caller cannot present a token in
- * order to obtain its first token. A `401` or `403` here therefore means
- * something quite different from the same status anywhere else in the system,
- * and a diagnostic that did not say so would send a reader looking for a
- * missing bearer token that was never applicable.
+ * Token issuance is the one operation a bearer token cannot protect: a caller
+ * cannot present a token in order to obtain its first token. A `401` or `403`
+ * here therefore means something quite different from the same status anywhere
+ * else in the system, and a diagnostic that did not say so would send a reader
+ * looking for a missing bearer token that was never applicable.
  *
- * The one thing this reads from the certificate setting is **whether one is
- * configured at all** — a boolean. No path, no passphrase and no other member of
- * it is read, rendered or logged, here or anywhere else in this module.
+ * The published contract accepts **either** of two caller credentials, so the
+ * message has to name which ones this run actually had available; a hint that
+ * mentioned only one would send an operator to configure the wrong thing. The one
+ * thing this reads from either setting is **whether it is configured at all** — a
+ * boolean each. No identifier, secret, path or passphrase is read, rendered or
+ * logged, here or anywhere else in this module (C-F).
  *
  * @param status the refusal status
  * @returns an explanatory clause, or an empty string for any other status
@@ -636,30 +668,53 @@ function callerAuthenticationHint(status: number): string {
   }
 
   const preamble: string =
-    ' Token issuance is the single mutual-TLS edge in this system: it is' +
-    ' authenticated by a client certificate and by nothing else, because a' +
-    ' caller cannot present a bearer token in order to obtain its first one.';
+    ' Token issuance is the one operation in this system a bearer token cannot' +
+    ' protect, because a caller cannot present a token in order to obtain its' +
+    ' first one. It authenticates its caller by one of two credentials instead:' +
+    ' an HTTP Basic credential naming a subject on the issuance roster, or a' +
+    ' client certificate where a deployment terminates TLS at Security.';
 
   if (status === 403) {
     return (
-      `${preamble} The certificate was trusted, but this caller is not` +
-      ' permitted the requested subject or audience — most often the claimed' +
-      ' subject does not match the identity the certificate establishes.'
+      `${preamble} The caller WAS authenticated, so this is an authorization` +
+      ' refusal rather than an authentication one: the claimed subject does not' +
+      ' match the identity the presented credential establishes, or the roster' +
+      ' entry for that subject does not permit the requested audience or one of' +
+      ' the requested scopes.'
     );
   }
 
-  return SECURITY_CLIENT_CERTIFICATE === undefined
-    ? `${preamble} No client certificate is configured for this suite, so none` +
-        ' was presented. Issuance requires one on every topology: Security' +
-        ' publishes POST /v1/tokens only on its mutual-TLS listener, so there is' +
-        ' no address — local or deployed — that mints a token without a' +
-        ' certificate. Generate the local set and configure the' +
-        ' client-certificate settings the endpoint table documents; a spec that' +
-        ' needs a token skips itself until then.'
-    : `${preamble} A client certificate IS configured, so either the issuer` +
-        ' does not trust it or the request context did not present it — a' +
-        " context built outside the runner's configuration carries none, which" +
-        " is why this helper uses the caller's own request fixture.";
+  const hasCredential: boolean = SECURITY_CLIENT_CREDENTIAL !== undefined;
+  const hasCertificate: boolean = SECURITY_CLIENT_CERTIFICATE !== undefined;
+
+  if (!hasCredential && !hasCertificate) {
+    return (
+      `${preamble} Neither is configured for this suite, so nothing was` +
+      ' presented and a 401 is the specified answer rather than a defect.' +
+      ' Configure the Basic credential — that is the path the documented' +
+      ' cleartext bring-up uses, and the endpoint table names its two' +
+      ' variables — or, against a deployment that terminates TLS at Security,' +
+      ' the client-certificate settings. A spec that needs a token skips itself' +
+      ' until one of them is set.'
+    );
+  }
+
+  const configured: string = hasCredential
+    ? hasCertificate
+      ? 'Both a Basic credential and a client certificate ARE configured'
+      : 'A Basic credential IS configured'
+    : 'A client certificate IS configured';
+
+  return (
+    `${preamble} ${configured}, so the credential reached Security and was` +
+    ' refused: the subject is not on the issuance roster, or the secret does' +
+    ' not match, or the certificate does not chain to the configured issuer.' +
+    ' The response deliberately does not distinguish those, so check the' +
+    " roster Security is running with. If only a certificate is configured," +
+    ' note that a request context built outside the runner\u2019s configuration' +
+    " presents none, which is why this helper uses the caller\u2019s own request" +
+    ' fixture.'
+  );
 }
 
 /**
@@ -677,6 +732,27 @@ function callerAuthenticationHint(status: number): string {
  * it is not on the parse path below: no response was received, so there is no
  * body and no token material to carry forward.
  *
+ * THE `Basic` CREDENTIAL IS APPLIED HERE, PER REQUEST, AND NOWHERE ELSE
+ * --------------------------------------------------------------------
+ * The published contract accepts either of two caller credentials on this
+ * operation. The client certificate lives at the transport layer and the runner
+ * presents it for us; the `Basic` credential is a header, so exactly one place
+ * has to attach it, and this is that place. Attaching it per request rather than
+ * configuring it as an `extraHTTPHeaders` default is deliberate: an
+ * `extraHTTPHeaders` entry would ride along on **every** request the suite makes,
+ * including the ones to Gateway, DataServices and Persistence, sending Security's
+ * issuance secret to three services that have no business receiving it.
+ *
+ * When no credential is configured the header is simply absent and the request
+ * goes out anonymously. That is not a fallback to an unauthenticated call — it is
+ * the request whose specified answer is `401`, which
+ * `specs/02-authentication.spec.ts` asserts on directly, and
+ * {@link callerAuthenticationHint} explains when it arrives unexpectedly.
+ *
+ * The header value never appears in a diagnostic. The `catch` below names the
+ * method and the URL only, and the object it is built from is discarded with the
+ * call (C-F).
+ *
  * No timeout is passed. The request inherits the runner's configured timeout,
  * and inventing one here would be a latency figure the repository does not
  * publish (C-B). No retry is attempted either, for the same reason.
@@ -693,10 +769,16 @@ async function postTokenRequest(
   url: string,
   body: TokenRequestBody,
 ): Promise<APIResponse> {
+  const headers: Record<string, string> | undefined =
+    SECURITY_CLIENT_CREDENTIAL === undefined
+      ? undefined
+      : { [AUTHORIZATION_HEADER]: basicAuthorizationHeader(SECURITY_CLIENT_CREDENTIAL) };
+
   try {
     return await request.post(url, {
       data: body,
       failOnStatusCode: false,
+      ...(headers === undefined ? {} : { headers }),
     });
   } catch (cause: unknown) {
     throw new Error(

@@ -752,14 +752,42 @@ public sealed class RsaProvider
         // LegacyDefaults.STRING_PAYLOAD_ENCODING, because key text is NOT a DECISION D4 payload:
         // the framework's own stored keys are Base64 and must stay importable however D4 is later
         // settled.
-        prikey = pemformat
-            ? rsa.ExportRSAPrivateKeyPem()
-            : _encoding.BlobToString(rsa.ExportRSAPrivateKey(), Enums.CRYPTO_ENCODING_BASE64);
+        if (pemformat)
+        {
+            prikey = rsa.ExportRSAPrivateKeyPem();
+        }
+        else
+        {
+            // THE EXPORTED PRIVATE STRUCTURE IS HELD IN A LOCAL AND ZEROED, rather than passed inline
+            // as an anonymous temporary. Inline, the array holding the private key in the clear would be
+            // left on the managed heap for the collector - which is non-deterministic and may COPY the
+            // buffer while compacting, so the material can outlive the call in more than one place. A
+            // local plus a finally is what makes the wipe happen on the failure path as well.
+            byte[] privateDer = rsa.ExportRSAPrivateKey();
 
+            try
+            {
+                prikey = _encoding.BlobToString(privateDer, Enums.CRYPTO_ENCODING_BASE64);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(privateDer);
+            }
+        }
+
+        // THE PUBLIC STRUCTURE IS NOT WIPED, AND THAT IS NOT AN INCONSISTENCY. It carries no secret -
+        // it is the half this service publishes anonymously - so wiping it would suggest a
+        // confidentiality property that does not exist and is not needed.
         pubkey = pemformat
             ? rsa.ExportSubjectPublicKeyInfoPem()
             : _encoding.BlobToString(rsa.ExportSubjectPublicKeyInfo(), Enums.CRYPTO_ENCODING_BASE64);
 
+        // WHAT THIS CANNOT REACH, STATED RATHER THAN HIDDEN. Both `prikey` shapes are strings, and a
+        // .NET string cannot be wiped, so the armoured path has no buffer to clear and the Base64 path's
+        // OUTPUT survives the call by design - it is the caller's requested result. The preserved legacy
+        // signature returns key text through a by-reference string parameter
+        // [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20], so that residual belongs to the
+        // signature and not to this implementation. What is removed here is the AVOIDABLE copy.
         return true;
     }
 
@@ -1476,7 +1504,116 @@ public sealed class RsaProvider
     //
     //  None holds key material, none writes to a field, and none logs anything.
     // ==========================================================================================
+    /// <summary>
+    /// Reports which kind of RSA key some material holds, WITHOUT performing any cryptographic
+    /// operation with it and without reporting anything about the material itself.
+    /// </summary>
+    /// <param name="keyText">The key material to classify, exactly as it was configured.</param>
+    /// <returns>
+    /// <see cref="RsaKeyKind.Unusable"/> when the material imports as no RSA structure at all,
+    /// <see cref="RsaKeyKind.PublicOnly"/> when it imports but carries the public half only, and
+    /// <see cref="RsaKeyKind.KeyPair"/> when it carries the private half - from which the public half
+    /// is derivable, so a key pair satisfies every operation on this surface.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="keyText"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// THIS IS NOT A LEGACY SUBSTITUTION AND SUBSTITUTES NO OVERLOAD. It exists because the boundary
+    /// above this type must answer a question the legacy never had to: <c>n_crypto</c> was handed key
+    /// material as an ordinary in-parameter by the same in-process code that owned it, whereas here the
+    /// material is CONFIGURED BY THE DEPLOYMENT and reached through an opaque reference the caller
+    /// cannot inspect. A key that imports but holds only the public half therefore fails a decrypt or a
+    /// signature for a reason that is nobody's fault but the deployment's - and, without this, that
+    /// failure is indistinguishable at the boundary from an unprocessable payload, which is the
+    /// caller's. Classifying the material lets the boundary answer a server fault as one.
+    /// </para>
+    /// <para>
+    /// EVERY OBSERVABLE BEHAVIOUR OF THE SUBSTITUTED OVERLOADS IS UNTOUCHED. Nothing above calls this
+    /// instead of an operation; it is consulted BEFORE one, and the operation then runs exactly as it
+    /// did. The import policy is the single one <see cref="ImportKey"/> owns - deliberately, so that a
+    /// material this method calls usable cannot then be refused by the operation, and the reverse.
+    /// </para>
+    /// <para>
+    /// IT REPORTS A KIND AND NOTHING ELSE. No length, no fragment, no parameter and no exception detail
+    /// crosses back, and nothing is logged: the classification is three states wide precisely so that
+    /// it cannot become a channel for the material it inspected. The key size is deliberately not
+    /// reported either - the operation's own platform screen owns that question, and 1024 bits remains
+    /// a legal size on this surface as a preserved legacy weakness.
+    /// </para>
+    /// </remarks>
+    internal RsaKeyKind ClassifyKey(string keyText)
+    {
+        ArgumentNullException.ThrowIfNull(keyText);
+
+        RSA imported;
+
+        try
+        {
+            imported = ImportKey(keyText, nameof(keyText));
+        }
+        catch (ArgumentException)
+        {
+            // The single fixed failure ImportKey raises for empty material and for material in no
+            // recognised form alike. It is swallowed rather than propagated because this method's
+            // whole contract is to answer a question rather than to raise, and because the exception's
+            // own message is the one that names the accepted forms - which the boundary must not echo.
+            return RsaKeyKind.Unusable;
+        }
+
+        try
+        {
+            return HoldsPrivateHalf(imported) ? RsaKeyKind.KeyPair : RsaKeyKind.PublicOnly;
+        }
+        finally
+        {
+            imported.Dispose();
+        }
+    }
+
     #region Private routines - one point of decision each
+
+    /// <summary>
+    /// Asks an imported key whether it holds its private half, by attempting the one export that
+    /// requires it.
+    /// </summary>
+    /// <param name="key">The imported key.</param>
+    /// <returns>
+    /// <see langword="true"/> when the private half is present; otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// ASKED OF THE PLATFORM RATHER THAN INFERRED FROM KEY PARAMETERS, so the answer is the platform's
+    /// own. The exported buffer IS private key material in the clear, so it is zeroed in a finally
+    /// block whichever way the attempt went, and it is never returned, measured, inspected or logged -
+    /// it exists solely to be discarded. This routine's entire vocabulary is true and false.
+    /// <para>
+    /// The signing layer carries its own copy of this probe deliberately rather than sharing this one.
+    /// That layer runs at STARTUP, raises its own fixed configuration messages and must not depend on
+    /// the ported legacy surface at all; coupling the two would put the host's fail-fast gate behind a
+    /// type whose reason to exist is legacy parity.
+    /// </para>
+    /// </remarks>
+    private static bool HoldsPrivateHalf(RSA key)
+    {
+        byte[]? exported = null;
+
+        try
+        {
+            exported = key.ExportPkcs8PrivateKey();
+
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+        finally
+        {
+            if (exported is not null)
+            {
+                CryptographicOperations.ZeroMemory(exported);
+            }
+        }
+    }
 
     /// <summary>
     /// Imports a key from text, accepting armoured text or bare Base64-encoded binary in any of the
@@ -1560,14 +1697,29 @@ public sealed class RsaProvider
             throw new ArgumentException(KeyImportFailureMessage, parameterName, ex);
         }
 
-        // Tried in evidence order and short-circuited by the null-coalescing chain, so a successful
-        // import does no further work. Static lambdas: they capture nothing, so no key material can
-        // be closed over.
-        RSA? imported =
-            TryImportDer(der, static (rsa, bytes) => rsa.ImportRSAPrivateKey(bytes, out _)) ??
-            TryImportDer(der, static (rsa, bytes) => rsa.ImportPkcs8PrivateKey(bytes, out _)) ??
-            TryImportDer(der, static (rsa, bytes) => rsa.ImportSubjectPublicKeyInfo(bytes, out _)) ??
-            TryImportDer(der, static (rsa, bytes) => rsa.ImportRSAPublicKey(bytes, out _));
+        // THE DECODED STRUCTURE IS WIPED ON EVERY PATH, INCLUDING THE FAILURE PATH. Two of the four
+        // structures attempted below are PRIVATE-key structures, so this buffer holds a private key in
+        // the clear whenever a caller supplied one. Leaving it for the collector is non-deterministic
+        // and may COPY the buffer while compacting, which puts the material in a second place nothing
+        // can then reach. The finally also covers the no-import-succeeded throw, which is exactly the
+        // path a hand-written wipe after the chain would miss.
+        RSA? imported;
+
+        try
+        {
+            // Tried in evidence order and short-circuited by the null-coalescing chain, so a successful
+            // import does no further work. Static lambdas: they capture nothing, so no key material can
+            // be closed over.
+            imported =
+                TryImportDer(der, static (rsa, bytes) => rsa.ImportRSAPrivateKey(bytes, out _)) ??
+                TryImportDer(der, static (rsa, bytes) => rsa.ImportPkcs8PrivateKey(bytes, out _)) ??
+                TryImportDer(der, static (rsa, bytes) => rsa.ImportSubjectPublicKeyInfo(bytes, out _)) ??
+                TryImportDer(der, static (rsa, bytes) => rsa.ImportRSAPublicKey(bytes, out _));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(der);
+        }
 
         if (imported is null)
         {
@@ -1817,4 +1969,45 @@ public sealed class RsaProvider
     }
 
     #endregion
+}
+
+/// <summary>
+/// Which half of an RSA key pair some configured material holds.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THREE STATES, BECAUSE THE BOUNDARY ABOVE OWES A DIFFERENT ANSWER TO EACH. Material that imports as no
+/// RSA structure at all and material that imports as a public key are both deployment faults when a
+/// private half is required, but they are different faults - one says the configured value is not a key,
+/// the other says it is the wrong one - and a deployment fixing either needs to know which.
+/// </para>
+/// <para>
+/// A KEY PAIR SATISFIES EVERY OPERATION ON THIS SURFACE, which is why there is no fourth state for
+/// "private only": the public half is derivable from the private one, so an encrypt or a verification
+/// handed a key pair succeeds exactly as it would with the public half alone. Only the reverse
+/// direction - a private half required and a public-only key supplied - is a mismatch.
+/// </para>
+/// <para>
+/// IT CARRIES NO MEASUREMENT OF THE MATERIAL. No size, no structure name and no fragment: the whole
+/// point of answering in three states is that the answer cannot become a channel for what was inspected.
+/// </para>
+/// </remarks>
+internal enum RsaKeyKind
+{
+    /// <summary>
+    /// The material imports as no RSA key structure in either accepted form. A deployment fault.
+    /// </summary>
+    Unusable,
+
+    /// <summary>
+    /// The material imports and carries the PUBLIC half only. Sufficient for encryption and for
+    /// signature verification, and a deployment fault for decryption or signing.
+    /// </summary>
+    PublicOnly,
+
+    /// <summary>
+    /// The material imports and carries the PRIVATE half, so the public half is derivable from it.
+    /// Sufficient for every operation on this surface.
+    /// </summary>
+    KeyPair,
 }

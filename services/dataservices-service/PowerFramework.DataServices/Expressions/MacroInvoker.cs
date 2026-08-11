@@ -2097,12 +2097,22 @@ public sealed class MacroInvoker
         CancellationTokenSource? timeoutSource = null;
         CancellationTokenSource? linkedSource = null;
 
+        // THE DEADLINE IS RECORDED, NOT INFERRED FROM THE TIMER LATER. Classifying a cancellation by
+        // asking whether the timeout source had already SIGNALLED makes the answer depend on whether a
+        // timer CALLBACK has been scheduled and run - which is thread-pool work, and therefore late under
+        // load. A genuinely timed-out invocation would then be reported as a caller cancellation, and the
+        // two are deliberately distinct results a caller retries differently. Comparing against the
+        // recorded instant asks the question that actually matters - has the deadline ELAPSED - and it
+        // reads the same clock seam the timer was armed from, so a substituted clock still governs both.
+        DateTimeOffset deadline = DateTimeOffset.MaxValue;
+
         try
         {
             CancellationToken effectiveToken = cancellationToken;
 
             if (InvocationTimeout is { } timeout)
             {
+                deadline = _timeProvider.GetUtcNow() + timeout;
                 timeoutSource = new CancellationTokenSource(timeout, _timeProvider);
                 linkedSource = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken,
@@ -2120,12 +2130,23 @@ public sealed class MacroInvoker
             }
             catch (OperationCanceledException)
             {
-                // The caller's intent wins when both fired: a deliberate cancellation is not a timeout.
-                return cancellationToken.IsCancellationRequested
-                    || timeoutSource is null
-                    || !timeoutSource.IsCancellationRequested
-                        ? MacroInvocationResult.ForCancelled(invocationId, sequence)
-                        : MacroInvocationResult.ForTimedOut(invocationId, sequence);
+                // THE CALLER'S INTENT WINS WHEN BOTH FIRED: a deliberate cancellation is not a timeout,
+                // and it is asked first for exactly that reason.
+                //
+                // Otherwise the invocation timed out when a timeout was configured AND the deadline has
+                // passed - established EITHER by the timeout source having signalled OR by the recorded
+                // deadline having elapsed on the same clock the source was armed from. Both are consulted
+                // because each covers a gap in the other: the signal is the authoritative answer once the
+                // timer callback has run, and the elapsed comparison is what keeps a genuinely late answer
+                // from being misreported as a cancellation while that callback is still queued behind
+                // other thread-pool work. A substituted clock governs both, so a deterministic test that
+                // advances time sees the same classification a real one does.
+                bool timedOut = timeoutSource is not null
+                    && (timeoutSource.IsCancellationRequested || _timeProvider.GetUtcNow() >= deadline);
+
+                return cancellationToken.IsCancellationRequested || !timedOut
+                    ? MacroInvocationResult.ForCancelled(invocationId, sequence)
+                    : MacroInvocationResult.ForTimedOut(invocationId, sequence);
             }
 
             ValidateCorrelation(invocation, response);

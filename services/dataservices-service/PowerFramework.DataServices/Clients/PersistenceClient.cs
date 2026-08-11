@@ -446,19 +446,41 @@ public class PersistenceClient
     private const string UpdateMethodName = "Update";
 
     /// <summary>
-    /// The token request DataServices makes for this upstream.
+    /// The token request made for a call that only reads.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>ONE SCOPE PER REQUEST, AND THE REQUEST IS CHOSEN BY THE OPERATION (constraint C-G).</b> A
+    /// single credential asking for read AND write was attached to every call this client makes, which
+    /// meant a retrieval carried the authority to update - so any weakness anywhere on the read path
+    /// borrowed the write path's privileges. Each call now presents a credential for exactly what it is
+    /// about to do, and the upstream enforces the same two names per RPC.
+    /// </para>
+    /// <para>
     /// Built once because <see cref="ServiceTokenRequest"/> validates on construction and copies its
-    /// scope set defensively, which makes the instance immutable and safe to share. Both scopes are
-    /// requested together, in one request, because a single credential is attached to every call this
-    /// client makes - a read-only member cannot usefully present a narrower credential than the one the
-    /// connection already carries. THE GRANTED SET MAY BE NARROWER THAN THE REQUESTED ONE, and a
-    /// narrowing is a SUCCESSFUL outcome rather than a failure, so it is read and reported and never
-    /// asserted on.
+    /// scope set defensively, which makes the instance immutable and safe to share.
+    /// </para>
+    /// <para>
+    /// <b>A NARROWED GRANT IS NO LONGER PROCEEDED ON.</b> The token contract permits the issuer to grant
+    /// less than was asked for, and it remains a successful token response - but with one scope per
+    /// request, a narrowing can only mean the ONE scope the call requires was withheld, and continuing
+    /// would send a request the upstream must refuse. See
+    /// <see cref="CreateAuthenticatedCallOptionsAsync"/>.
+    /// </para>
     /// </remarks>
-    private static readonly ServiceTokenRequest OutboundTokenRequest =
-        new(TokenSubject, PersistenceAudience, [ReadScope, WriteScope]);
+    private static readonly ServiceTokenRequest ReadTokenRequest =
+        new(TokenSubject, PersistenceAudience, [ReadScope]);
+
+    /// <summary>
+    /// The token request made for a call that changes stored data or shared transaction state.
+    /// </summary>
+    /// <remarks>
+    /// It does NOT also carry <see cref="ReadScope"/>. Write does not imply read anywhere in this system,
+    /// and a write-shaped RPC on the upstream requires only the write name, so adding the read name would
+    /// be privilege this call has no use for.
+    /// </remarks>
+    private static readonly ServiceTokenRequest WriteTokenRequest =
+        new(TokenSubject, PersistenceAudience, [WriteScope]);
 
     /// <summary>
     /// The rich-error binding declared on C-06's <c>Update</c>, read from the generated descriptor.
@@ -499,6 +521,7 @@ public class PersistenceClient
 
     /// <summary>Supplies the bearer credential for every outbound call.</summary>
     private readonly IServiceTokenProvider _tokenProvider;
+    private readonly OutboundDeadlines _deadlines;
 
     /// <summary>The logger. Never receives a credential, a statement, a descriptor or a row payload.</summary>
     private readonly ILogger<PersistenceClient> _logger;
@@ -565,7 +588,8 @@ public class PersistenceClient
         CommandService.CommandServiceClient commandClient,
         TransactionService.TransactionServiceClient transactionClient,
         IServiceTokenProvider tokenProvider,
-        ILogger<PersistenceClient> logger)
+        ILogger<PersistenceClient> logger,
+        OutboundDeadlines? deadlines = null)
     {
         ArgumentNullException.ThrowIfNull(queryClient);
         ArgumentNullException.ThrowIfNull(updateClient);
@@ -579,6 +603,7 @@ public class PersistenceClient
         _command = commandClient;
         _transaction = transactionClient;
         _tokenProvider = tokenProvider;
+        _deadlines = deadlines ?? OutboundDeadlines.Default;
         _logger = logger;
     }
 
@@ -618,7 +643,7 @@ public class PersistenceClient
     public virtual Task<CreateQueryTaskResponse> CreateQueryTaskAsync(
         CreateQueryTaskRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_query.CreateQueryTaskAsync, request, cancellationToken);
+        InvokeAsync(_query.CreateQueryTaskAsync, request, ReadTokenRequest, cancellationToken);
 
     /// <summary>
     /// Releases a server-held query task. Contract <b>C-05</b>. The wire form of the legacy
@@ -640,7 +665,7 @@ public class PersistenceClient
     public virtual Task<ReleaseQueryTaskResponse> ReleaseQueryTaskAsync(
         ReleaseQueryTaskRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_query.ReleaseQueryTaskAsync, request, cancellationToken);
+        InvokeAsync(_query.ReleaseQueryTaskAsync, request, ReadTokenRequest, cancellationToken);
 
     /// <summary>
     /// Resets a query task's accumulated settings. Contract <b>C-05</b>, legacy <c>of_reset</c>.
@@ -666,7 +691,7 @@ public class PersistenceClient
         ArgumentNullException.ThrowIfNull(request);
 
         return RejectIfTaskBusy(request.Task, static status => new ResetQueryTaskResponse { Status = status })
-            ?? InvokeAsync(_query.ResetAsync, request, cancellationToken);
+            ?? InvokeAsync(_query.ResetAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -713,7 +738,7 @@ public class PersistenceClient
                 + "so 1001 is the smallest legal value.")));
         }
 
-        return InvokeAsync(_query.SetChunkSizeAsync, request, cancellationToken);
+        return InvokeAsync(_query.SetChunkSizeAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -758,7 +783,7 @@ public class PersistenceClient
                 + "legal and means no ceiling.")));
         }
 
-        return InvokeAsync(_query.SetMaxRowsAsync, request, cancellationToken);
+        return InvokeAsync(_query.SetMaxRowsAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -808,7 +833,7 @@ public class PersistenceClient
         Task<SetWhereClauseResponse>? rejection =
             RejectIfTaskBusy(request.Task, Shape) ?? RejectIfClauseInvalid(request.Clause, Shape);
 
-        return rejection ?? InvokeAsync(_query.SetWhereClauseAsync, request, cancellationToken);
+        return rejection ?? InvokeAsync(_query.SetWhereClauseAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -898,7 +923,7 @@ public class PersistenceClient
         Task<SetOrderByClauseResponse>? rejection =
             RejectIfTaskBusy(request.Task, Shape) ?? RejectIfClauseInvalid(request.Clause, Shape);
 
-        return rejection ?? InvokeAsync(_query.SetOrderByClauseAsync, request, cancellationToken);
+        return rejection ?? InvokeAsync(_query.SetOrderByClauseAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -988,7 +1013,7 @@ public class PersistenceClient
         ArgumentNullException.ThrowIfNull(request);
 
         return RejectIfTaskBusy(request.Task, static status => new SetPagingResponse { Status = status })
-            ?? InvokeAsync(_query.SetPagingAsync, request, cancellationToken);
+            ?? InvokeAsync(_query.SetPagingAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1023,7 +1048,7 @@ public class PersistenceClient
         return RejectIfTaskBusy(
                 request.Task,
                 static status => new SetPagedUniqueIndexColumnsResponse { Status = status })
-            ?? InvokeAsync(_query.SetPagedUniqueIndexColumnsAsync, request, cancellationToken);
+            ?? InvokeAsync(_query.SetPagedUniqueIndexColumnsAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1103,7 +1128,10 @@ public class PersistenceClient
 
         try
         {
-            CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+            CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                    OutboundCallClass.Stream,
+                    ReadTokenRequest,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             using AsyncServerStreamingCall<QueryResponse> call = _query.Query(request, options);
@@ -1152,7 +1180,7 @@ public class PersistenceClient
         ArgumentNullException.ThrowIfNull(request);
 
         return RejectIfTaskBusy(request.Task, static status => new CountResponse { Status = status })
-            ?? InvokeAsync(_query.CountAsync, request, cancellationToken);
+            ?? InvokeAsync(_query.CountAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     // ==============================================================================================
@@ -1192,7 +1220,7 @@ public class PersistenceClient
     public virtual Task<CreateUpdateTaskResponse> CreateUpdateTaskAsync(
         CreateUpdateTaskRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_update.CreateUpdateTaskAsync, request, cancellationToken);
+        InvokeAsync(_update.CreateUpdateTaskAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Releases a server-held update task. Contract <b>C-06</b>.
@@ -1206,7 +1234,7 @@ public class PersistenceClient
     public virtual Task<ReleaseUpdateTaskResponse> ReleaseUpdateTaskAsync(
         ReleaseUpdateTaskRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_update.ReleaseUpdateTaskAsync, request, cancellationToken);
+        InvokeAsync(_update.ReleaseUpdateTaskAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Resets an update task, clearing its descriptor array and accumulated settings. Contract
@@ -1231,7 +1259,7 @@ public class PersistenceClient
         ArgumentNullException.ThrowIfNull(request);
 
         return RejectIfTaskBusy(request.Task, static status => new ResetUpdateTaskResponse { Status = status })
-            ?? InvokeAsync(_update.ResetAsync, request, cancellationToken);
+            ?? InvokeAsync(_update.ResetAsync, request, WriteTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1343,7 +1371,7 @@ public class PersistenceClient
             }
         }
 
-        return InvokeAsync(_update.PrepareUpdateAsync, request, cancellationToken);
+        return InvokeAsync(_update.PrepareUpdateAsync, request, WriteTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1441,7 +1469,10 @@ public class PersistenceClient
 
         try
         {
-            CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+            CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                    OutboundCallClass.Unary,
+                    WriteTokenRequest,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             UpdateResponse response;
@@ -1535,7 +1566,7 @@ public class PersistenceClient
     public virtual Task<CreateCommandTaskResponse> CreateCommandTaskAsync(
         CreateCommandTaskRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_command.CreateCommandTaskAsync, request, cancellationToken);
+        InvokeAsync(_command.CreateCommandTaskAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Releases a server-held command task. Contract <b>C-07</b>.
@@ -1549,7 +1580,7 @@ public class PersistenceClient
     public virtual Task<ReleaseCommandTaskResponse> ReleaseCommandTaskAsync(
         ReleaseCommandTaskRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_command.ReleaseCommandTaskAsync, request, cancellationToken);
+        InvokeAsync(_command.ReleaseCommandTaskAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Resets a command task. Contract <b>C-07</b>, legacy <c>of_reset</c>.
@@ -1572,7 +1603,7 @@ public class PersistenceClient
         ArgumentNullException.ThrowIfNull(request);
 
         return RejectIfTaskBusy(request.Task, static status => new ResetCommandTaskResponse { Status = status })
-            ?? InvokeAsync(_command.ResetAsync, request, cancellationToken);
+            ?? InvokeAsync(_command.ResetAsync, request, WriteTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1604,7 +1635,7 @@ public class PersistenceClient
         return RejectIfTaskBusy(
                 request.Task,
                 static status => new SetCommandAutoCommitResponse { Status = status })
-            ?? InvokeAsync(_command.SetAutoCommitAsync, request, cancellationToken);
+            ?? InvokeAsync(_command.SetAutoCommitAsync, request, WriteTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1652,7 +1683,7 @@ public class PersistenceClient
             }));
         }
 
-        return InvokeAsync(_command.SetSqlAsync, request, cancellationToken);
+        return InvokeAsync(_command.SetSqlAsync, request, WriteTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1711,7 +1742,10 @@ public class PersistenceClient
 
         try
         {
-            CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+            CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                    OutboundCallClass.Unary,
+                    WriteTokenRequest,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             ExecResponse response = await _command.ExecAsync(request, options).ConfigureAwait(false);
@@ -1864,7 +1898,7 @@ public class PersistenceClient
             + "its log password is write-only, and its log identity and connection parameters are "
             + "withheld on the same grounds.");
 
-        return InvokeAsync(_transaction.BeginSessionAsync, request, cancellationToken);
+        return InvokeAsync(_transaction.BeginSessionAsync, request, ReadTokenRequest, cancellationToken);
     }
 
     /// <summary>
@@ -1879,7 +1913,322 @@ public class PersistenceClient
     public virtual Task<EndSessionResponse> EndSessionAsync(
         EndSessionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.EndSessionAsync, request, cancellationToken);
+        InvokeAsync(_transaction.EndSessionAsync, request, ReadTokenRequest, cancellationToken);
+
+    // ==============================================================================================
+    //  THE HANDLE LIFECYCLE, COMPOSED - the five members below
+    //  ----------------------------------------------------------------------------------------------
+    //  Every operating call on C-05 and C-06 names a server-held task handle, and until these members
+    //  existed nothing in this service created one: `Grpc/DataWindowService.cs` sent a DEFAULT handle and
+    //  Persistence refused it with E_INVALID_HANDLE before it reached a statement. The six lifecycle
+    //  operations above were all published and none was called.
+    //
+    //  These compose them into one acquisition and one release, so a call site is an `await using` rather
+    //  than three nested try/finally blocks - and so the release ordering (task, THEN session) is stated
+    //  once instead of at each site. See Clients/PersistenceWorkScope.cs for why the release obligation is
+    //  the part that has to be structural.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Opens a C-05 retrieval scope: a transaction session, a query task on it, and the obligation to
+    /// release both.
+    /// </summary>
+    /// <param name="spec">The retrieval specification the task is created with.</param>
+    /// <param name="cancellationToken">Cancels the acquisition.</param>
+    /// <returns>
+    /// The scope. Test <see cref="PersistenceWorkScope.IsAcquired"/> before using it, and dispose it on
+    /// every path - INCLUDING a refusal, which may still be holding a session.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="spec"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE SPEC TRAVELS ON THE CREATE CALL, NOT ON THE RETRIEVE CALL, because that is where C-05 puts it:
+    /// <c>CreateQueryTaskRequest</c> carries both the session and the spec, and <c>QueryRequest</c> carries
+    /// only the handle and a spec that may refine it. Creating the task with the spec is what lets
+    /// Persistence validate the source object once, at creation, rather than per stream.
+    /// </para>
+    /// <para>
+    /// INTERNAL AND VIRTUAL. Internal because the scope type it answers is internal - a scope is this
+    /// service's own composition of the published operations, not a published operation itself, and
+    /// widening it would put a type with a release obligation on a public surface. Virtual so a test can
+    /// substitute the whole acquisition through the friend-assembly grant - but the DEFAULT implementation
+    /// calls the six published operations, which is what keeps them exercised by every test that drives a
+    /// retrieval rather than only by a test written for them.
+    /// </para>
+    /// </remarks>
+    internal virtual async Task<PersistenceWorkScope> OpenQueryScopeAsync(
+        QuerySpec spec,
+        BeginSessionRequest session,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        ArgumentNullException.ThrowIfNull(session);
+
+        (SessionHandle? opened, long code, string text) = await BeginWorkSessionAsync(
+                session,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (opened is null)
+        {
+            return PersistenceWorkScope.Refused(this, PersistenceWorkKind.Query, code, text);
+        }
+
+        CreateQueryTaskResponse created = await CreateQueryTaskAsync(
+                new CreateQueryTaskRequest { Session = opened, Spec = spec },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        long taskCode = created.Status is null
+            ? PowerFramework.Shared.Kernel.RetCode.E_INTERNAL_ERROR
+            : (long)created.Status.RetCode;
+
+        if (taskCode != PowerFramework.Shared.Kernel.RetCode.OK)
+        {
+            return PersistenceWorkScope.SessionOnly(
+                this,
+                PersistenceWorkKind.Query,
+                opened,
+                taskCode,
+                created.Status?.ErrorText ?? string.Empty);
+        }
+
+        if (created.Task is null || string.IsNullOrWhiteSpace(created.Task.TaskId))
+        {
+            return PersistenceWorkScope.SessionOnly(
+                this,
+                PersistenceWorkKind.Query,
+                opened,
+                PersistenceWorkScope.MissingHandleCode,
+                PersistenceWorkScope.MissingTaskHandleText);
+        }
+
+        return new PersistenceWorkScope(
+            this,
+            PersistenceWorkKind.Query,
+            opened,
+            created.Task,
+            PowerFramework.Shared.Kernel.RetCode.OK,
+            string.Empty);
+    }
+
+    /// <summary>
+    /// Opens a C-06 update scope: a transaction session, an update task on it, and the obligation to
+    /// release both.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the acquisition.</param>
+    /// <returns>The scope, on the same terms as <see cref="OpenQueryScopeAsync"/>.</returns>
+    /// <remarks>
+    /// NO SPEC, BECAUSE C-06 HAS NONE ON CREATION. <c>CreateUpdateTaskRequest</c> carries the session
+    /// alone; an update task's contract - the updatable tables, the key columns, the identity column - is
+    /// installed afterwards through <c>PrepareUpdate</c>, and its rows arrive on the update call itself.
+    /// </remarks>
+    internal virtual async Task<PersistenceWorkScope> OpenUpdateScopeAsync(
+        BeginSessionRequest session,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        (SessionHandle? opened, long code, string text) = await BeginWorkSessionAsync(
+                session,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (opened is null)
+        {
+            return PersistenceWorkScope.Refused(this, PersistenceWorkKind.Update, code, text);
+        }
+
+        CreateUpdateTaskResponse created = await CreateUpdateTaskAsync(
+                new CreateUpdateTaskRequest { Session = opened },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        long taskCode = created.Status is null
+            ? PowerFramework.Shared.Kernel.RetCode.E_INTERNAL_ERROR
+            : (long)created.Status.RetCode;
+
+        if (taskCode != PowerFramework.Shared.Kernel.RetCode.OK)
+        {
+            return PersistenceWorkScope.SessionOnly(
+                this,
+                PersistenceWorkKind.Update,
+                opened,
+                taskCode,
+                created.Status?.ErrorText ?? string.Empty);
+        }
+
+        if (created.Task is null || string.IsNullOrWhiteSpace(created.Task.TaskId))
+        {
+            return PersistenceWorkScope.SessionOnly(
+                this,
+                PersistenceWorkKind.Update,
+                opened,
+                PersistenceWorkScope.MissingHandleCode,
+                PersistenceWorkScope.MissingTaskHandleText);
+        }
+
+        return new PersistenceWorkScope(
+            this,
+            PersistenceWorkKind.Update,
+            opened,
+            created.Task,
+            PowerFramework.Shared.Kernel.RetCode.OK,
+            string.Empty);
+    }
+
+    /// <summary>
+    /// Begins a transaction session, or reports why it could not be begun.
+    /// </summary>
+    /// <param name="session">The session request the caller composed, descriptor and flags included.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The handle when one was issued, together with the outcome and its diagnostic.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE DESCRIPTOR IS THE CALLER'S TO COMPOSE, AND THIS METHOD DELIBERATELY DOES NOT INVENT ONE. It used
+    /// to send an empty descriptor unconditionally, on the reasoning that a descriptor names a database and
+    /// carries a password and both are Persistence's business alone. That reasoning is right about the
+    /// DEFAULT and wrong as a hard rule, and it had two consequences worth naming: it made
+    /// <c>DataServices:PersistenceSession</c> - a bound, validated options group - dead configuration that
+    /// a validator still enforced, and it dropped the two connection-parameter FLAGS, which are not
+    /// credentials at all but per-session behaviour that decides whether the upstream binds parameters or
+    /// interpolates literals into the statement text.
+    /// </para>
+    /// <para>
+    /// THE DEFAULT IS STILL EMPTY, so nothing is weakened by the change: with no
+    /// <c>DataServices:PersistenceSession</c> configured, the composed descriptor names no database and
+    /// holds no credential, and Persistence resolves its own connection from its own options exactly as
+    /// before (AAP 0.6.6). A deployment that DOES configure the group gets what C-08 publishes - the
+    /// descriptor mirroring <c>transactiondata.srs</c> field for field with <c>logpass</c> write-only - and
+    /// no value reaches this code as a literal: every field arrives through the options pattern from the
+    /// orchestration secret layer (constraint C-F).
+    /// </para>
+    /// <para>
+    /// THE PASSWORD TRAVELS ON THIS CALL AND ON NO OTHER, which is the reason a session exists as a concept:
+    /// it is resolved ONCE here so that the field does not appear on every later task-scoped call, is never
+    /// logged, never echoed, and is not retained after the response.
+    /// </para>
+    /// </remarks>
+    private async Task<(SessionHandle? Session, long ReturnCode, string ErrorText)> BeginWorkSessionAsync(
+        BeginSessionRequest session,
+        CancellationToken cancellationToken)
+    {
+        BeginSessionResponse begun = await BeginSessionAsync(session, cancellationToken)
+            .ConfigureAwait(false);
+
+        long code = begun.Status is null ? PowerFramework.Shared.Kernel.RetCode.E_INTERNAL_ERROR : (long)begun.Status.RetCode;
+
+        if (code != PowerFramework.Shared.Kernel.RetCode.OK)
+        {
+            return (null, code, begun.Status?.ErrorText ?? string.Empty);
+        }
+
+        if (begun.Session is null || string.IsNullOrWhiteSpace(begun.Session.SessionId))
+        {
+            return (
+                null,
+                PersistenceWorkScope.MissingHandleCode,
+                PersistenceWorkScope.MissingSessionHandleText);
+        }
+
+        return (begun.Session, PowerFramework.Shared.Kernel.RetCode.OK, string.Empty);
+    }
+
+    /// <summary>
+    /// Releases a task through whichever contract owns it, recording rather than raising a failure.
+    /// </summary>
+    /// <param name="kind">Which contract owns the task.</param>
+    /// <param name="task">The task to release.</param>
+    /// <returns>A task representing the release.</returns>
+    /// <remarks>
+    /// <para>
+    /// A FAILURE IS RECORDED AND SWALLOWED, and the reason is that this runs on the fault path. Raising here
+    /// would REPLACE the operation's own result: a successful retrieval whose cleanup hiccuped would be
+    /// reported as a failure, and a failing one would have its real cause replaced by its cleanup's. The
+    /// record carries the code so an operator can see a registry leaking.
+    /// </para>
+    /// <para>
+    /// CANCELLATION IS NOT PROPAGATED INTO THE RELEASE. It is reached BECAUSE the caller's token was
+    /// cancelled, so passing that token would cancel the very call that undoes the acquisition - and the
+    /// handle would then be held for the process's lifetime. The release is issued with
+    /// <see cref="CancellationToken.None"/> deliberately.
+    /// </para>
+    /// </remarks>
+    internal async Task ReleaseWorkTaskAsync(PersistenceWorkKind kind, TaskHandle task)
+    {
+        ArgumentNullException.ThrowIfNull(task);
+
+        try
+        {
+            OperationStatus? status = kind == PersistenceWorkKind.Query
+                ? (await ReleaseQueryTaskAsync(
+                        new ReleaseQueryTaskRequest { Task = task },
+                        CancellationToken.None)
+                    .ConfigureAwait(false)).Status
+                : (await ReleaseUpdateTaskAsync(
+                        new ReleaseUpdateTaskRequest { Task = task },
+                        CancellationToken.None)
+                    .ConfigureAwait(false)).Status;
+
+            if (status is not null && status.RetCode != WireRetCode.Ok)
+            {
+                _logger.LogWarning(
+                    "Releasing the {WorkKind} task {TaskId} answered {ReturnCode}, so the server may still "
+                    + "be holding it. The operation's own result is unaffected: a cleanup failure is "
+                    + "recorded rather than raised, because raising it would replace the answer the caller "
+                    + "is entitled to.",
+                    kind,
+                    task.TaskId,
+                    status.RetCode);
+            }
+        }
+        catch (RpcException failure)
+        {
+            _logger.LogWarning(
+                "Releasing the {WorkKind} task {TaskId} failed with gRPC status {StatusCode}, so the "
+                + "server may still be holding it. Only the status code is recorded; the failure is not "
+                + "raised, for the reason above.",
+                kind,
+                task.TaskId,
+                failure.StatusCode);
+        }
+    }
+
+    /// <summary>
+    /// Ends a transaction session, recording rather than raising a failure.
+    /// </summary>
+    /// <param name="session">The session to end.</param>
+    /// <returns>A task representing the release.</returns>
+    /// <remarks>On the same terms as <see cref="ReleaseWorkTaskAsync"/>.</remarks>
+    internal async Task EndWorkSessionAsync(SessionHandle session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        try
+        {
+            EndSessionResponse ended = await EndSessionAsync(
+                    new EndSessionRequest { Session = session },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+
+            if (ended.Status is not null && ended.Status.RetCode != WireRetCode.Ok)
+            {
+                _logger.LogWarning(
+                    "Ending session {SessionId} answered {ReturnCode}, so its pooled-transaction reference "
+                    + "may still be held. Recorded rather than raised.",
+                    session.SessionId,
+                    ended.Status.RetCode);
+            }
+        }
+        catch (RpcException failure)
+        {
+            _logger.LogWarning(
+                "Ending session {SessionId} failed with gRPC status {StatusCode}, so its "
+                + "pooled-transaction reference may still be held. Recorded rather than raised.",
+                session.SessionId,
+                failure.StatusCode);
+        }
+    }
 
     /// <summary>
     /// Reads a session's descriptor through the REDACTED read model. Contract <b>C-08</b>, legacy
@@ -1904,7 +2253,7 @@ public class PersistenceClient
     public virtual Task<GetTransactionDataResponse> GetTransactionDataAsync(
         GetTransactionDataRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.GetTransactionDataAsync, request, cancellationToken);
+        InvokeAsync(_transaction.GetTransactionDataAsync, request, ReadTokenRequest, cancellationToken);
 
     /// <summary>
     /// Sets a session's autocommit switch. Contract <b>C-08</b>.
@@ -1926,7 +2275,7 @@ public class PersistenceClient
     public virtual Task<SetTransactionAutoCommitResponse> SetTransactionAutoCommitAsync(
         SetTransactionAutoCommitRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.SetAutoCommitAsync, request, cancellationToken);
+        InvokeAsync(_transaction.SetAutoCommitAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Reads whether a session's autocommit switch is on. Contract <b>C-08</b>.
@@ -1941,7 +2290,7 @@ public class PersistenceClient
     public virtual Task<AutoCommitResponse> AutoCommitAsync(
         AutoCommitRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.AutoCommitAsync, request, cancellationToken);
+        InvokeAsync(_transaction.AutoCommitAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Commits a session's work. Contract <b>C-08</b>, legacy <c>of_commit</c>.
@@ -1964,7 +2313,7 @@ public class PersistenceClient
     public virtual Task<CommitResponse> CommitAsync(
         CommitRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.CommitAsync, request, cancellationToken);
+        InvokeAsync(_transaction.CommitAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Commits a session's work with automatic rollback on failure - the no-argument legacy form. Contract
@@ -2010,7 +2359,7 @@ public class PersistenceClient
     public virtual Task<RollbackResponse> RollbackAsync(
         RollbackRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.RollbackAsync, request, cancellationToken);
+        InvokeAsync(_transaction.RollbackAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Reads whether a session's connection is live. Contract <b>C-08</b>.
@@ -2028,7 +2377,7 @@ public class PersistenceClient
     public virtual Task<IsConnectedResponse> IsConnectedAsync(
         IsConnectedRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.IsConnectedAsync, request, cancellationToken);
+        InvokeAsync(_transaction.IsConnectedAsync, request, ReadTokenRequest, cancellationToken);
 
     /// <summary>
     /// Reads a session's database type. Contract <b>C-08</b>, legacy <c>of_getdbtype</c>.
@@ -2049,7 +2398,7 @@ public class PersistenceClient
     public virtual Task<GetDatabaseTypeResponse> GetDatabaseTypeAsync(
         GetDatabaseTypeRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.GetDatabaseTypeAsync, request, cancellationToken);
+        InvokeAsync(_transaction.GetDatabaseTypeAsync, request, ReadTokenRequest, cancellationToken);
 
     /// <summary>
     /// Reads a session's last driver state. Contract <b>C-08</b>.
@@ -2074,7 +2423,7 @@ public class PersistenceClient
     public virtual Task<GetSessionStateResponse> GetSessionStateAsync(
         GetSessionStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.GetSessionStateAsync, request, cancellationToken);
+        InvokeAsync(_transaction.GetSessionStateAsync, request, ReadTokenRequest, cancellationToken);
 
     /// <summary>
     /// Clears a session's last driver state. Contract <b>C-08</b>, legacy <c>of_clearstate</c>.
@@ -2092,7 +2441,7 @@ public class PersistenceClient
     public virtual Task<ClearStateResponse> ClearStateAsync(
         ClearStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.ClearStateAsync, request, cancellationToken);
+        InvokeAsync(_transaction.ClearStateAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Marks a session broken so it is not reused. Contract <b>C-08</b>.
@@ -2111,7 +2460,7 @@ public class PersistenceClient
     public virtual Task<SetBrokenResponse> SetBrokenAsync(
         SetBrokenRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.SetBrokenAsync, request, cancellationToken);
+        InvokeAsync(_transaction.SetBrokenAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
     /// Derives a grid presentation syntax from a statement. Contract <b>C-08</b>, legacy
@@ -2132,7 +2481,7 @@ public class PersistenceClient
     public virtual Task<GridSyntaxFromSqlResponse> GridSyntaxFromSqlAsync(
         GridSyntaxFromSqlRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_transaction.GridSyntaxFromSqlAsync, request, cancellationToken);
+        InvokeAsync(_transaction.GridSyntaxFromSqlAsync, request, ReadTokenRequest, cancellationToken);
 
     // ==============================================================================================
     //  INTERNALS - authentication, invocation, the conflict decode, the busy guard, the two enum
@@ -2367,37 +2716,73 @@ public class PersistenceClient
     /// mints none.
     /// </para>
     /// <para>
-    /// NO DEADLINE IS SET HERE. A deadline would be a duration invented in this file, and the repository
-    /// publishes no budget from which one could be derived; the composition root is where any such policy
-    /// belongs, alongside the resilience pipeline it has to agree with.
+    /// THE DEADLINE COMES FROM THE COMPOSITION ROOT, WHICH IS WHAT MAKES IT LEGITIMATE. This file
+    /// previously set none, on the reasoning that a duration invented here would have no derivation and
+    /// that the policy belonged where the resilience pipeline is configured. Both halves of that were
+    /// right; what was missing was the policy. It now exists as <c>DataServices:Resilience:Persistence</c>,
+    /// the unary bound is the same setting that configures that pipeline's total request timeout, and the
+    /// stream bound is derived from Persistence's own handle idle expiry - so no duration originates here.
     /// </para>
     /// <para>
-    /// NEITHER THE CREDENTIAL NOR THE SCOPE STRINGS ARE EVER LOGGED. A narrower grant than requested is a
-    /// SUCCESSFUL outcome under the token contract rather than a failure, so the granted set is READ - which
-    /// the contract obliges a caller to do instead of assuming its request was honoured in full - and
-    /// reported as counts only, then left for the upstream to enforce.
+    /// WHY CANCELLATION ALONE WAS NOT ENOUGH, since it was already threaded through every member. A
+    /// cancellation token bounds THIS process's willingness to wait and tells the upstream nothing. When
+    /// this caller goes away in a way the transport has not yet noticed - a half-open connection, a
+    /// container killed mid-request - Persistence keeps working and keeps the query, update, command or
+    /// transaction handle alive, and only its own idle sweep eventually reclaims it. Those handles are
+    /// bounded per principal and globally, so the abandoned work consumes admission capacity a live caller
+    /// then cannot get. The deadline is what puts the bound on the wire where the server can act on it.
+    /// </para>
+    /// <para>
+    /// NEITHER THE CREDENTIAL NOR THE SCOPE STRINGS ARE EVER LOGGED (constraint C-F). The granted set is
+    /// READ - which the token contract obliges a caller to do instead of assuming its request was honoured
+    /// in full - and reported by NAME COUNT only.
+    /// </para>
+    /// <para>
+    /// <b>A GRANT MISSING THE REQUIRED SCOPE IS REFUSED HERE, BY EXACT NAME.</b> The previous shape
+    /// compared scope COUNTS and proceeded on a narrowing, which is wrong in two independent ways: a count
+    /// cannot tell WHICH scope was withheld, and an issuer that granted a completely different scope of the
+    /// same cardinality would have satisfied the comparison entirely. Since each request now asks for
+    /// exactly the one name the call needs, absence of that name means the call cannot succeed, and sending
+    /// it anyway would trade a clear local refusal for an opaque upstream one - or, on an upstream that
+    /// checked authentication but not authorization, for a call that should never have been made.
+    /// </para>
+    /// <para>
+    /// The refusal is an <see cref="RpcException"/> carrying
+    /// <see cref="StatusCode.PermissionDenied"/> - the same status the upstream would answer, so a caller
+    /// handles one shape rather than two, and the message names the scope without reproducing any part of
+    /// the credential.
     /// </para>
     /// </remarks>
-    private async Task<CallOptions> CreateAuthenticatedCallOptionsAsync(CancellationToken cancellationToken)
+    private async Task<CallOptions> CreateAuthenticatedCallOptionsAsync(
+        OutboundCallClass callClass,
+        ServiceTokenRequest tokenRequest,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         ServiceToken token = await _tokenProvider
-            .GetTokenAsync(OutboundTokenRequest, cancellationToken)
+            .GetTokenAsync(tokenRequest, cancellationToken)
             .ConfigureAwait(false);
 
-        int grantedScopeCount = token.GrantedScopes.Count;
-        int requestedScopeCount = OutboundTokenRequest.Scopes.Count;
-        bool narrowed = grantedScopeCount < requestedScopeCount;
-
-        if (narrowed && _logger.IsEnabled(LogLevel.Debug))
+        // EXACT, ORDINAL AND CASE-SENSITIVE, because scope names are case-sensitive strings in the OAuth
+        // framework. Every requested name must be present; there is no prefix match, no wildcard and no
+        // implication between read and write.
+        foreach (string required in tokenRequest.Scopes)
         {
-            _logger.LogDebug(
-                "Security granted {GrantedScopeCount} of {RequestedScopeCount} requested scope(s) for the "
-                + "Persistence audience. A narrowing is a successful outcome, so the call proceeds and the "
-                + "upstream decides what the credential permits.",
-                grantedScopeCount,
-                requestedScopeCount);
+            if (!token.GrantedScopes.Contains(required, StringComparer.Ordinal))
+            {
+                _logger.LogWarning(
+                    "Security withheld a required scope for the Persistence audience: {GrantedScopeCount} "
+                    + "of {RequestedScopeCount} requested name(s) were granted, so the call was refused "
+                    + "before it was sent. Neither the credential nor any scope name is logged.",
+                    token.GrantedScopes.Count,
+                    tokenRequest.Scopes.Count);
+
+                throw new RpcException(new Status(
+                    StatusCode.PermissionDenied,
+                    "The credential issued for the Persistence audience does not carry the scope this "
+                    + "operation requires, so the call was refused before it was sent."));
+            }
         }
 
         Metadata headers = new()
@@ -2405,7 +2790,10 @@ public class PersistenceClient
             { AuthorizationHeaderName, string.Concat(token.TokenType, " ", token.AccessToken) },
         };
 
-        return new CallOptions(headers: headers, cancellationToken: cancellationToken);
+        return new CallOptions(
+            headers: headers,
+            deadline: _deadlines.DeadlineFor(callClass),
+            cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -2416,6 +2804,11 @@ public class PersistenceClient
     /// <typeparam name="TResponse">The response message type.</typeparam>
     /// <param name="operation">The generated stub method to invoke.</param>
     /// <param name="request">The request message.</param>
+    /// <param name="tokenRequest">
+    /// The credential this operation needs - <see cref="ReadTokenRequest"/> or
+    /// <see cref="WriteTokenRequest"/>. Named at every call site rather than defaulted, so a new member
+    /// cannot acquire write authority by forgetting to say what it needs.
+    /// </param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The response, exactly as the upstream produced it.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
@@ -2429,12 +2822,16 @@ public class PersistenceClient
     private async Task<TResponse> InvokeAsync<TRequest, TResponse>(
         Func<TRequest, CallOptions, AsyncUnaryCall<TResponse>> operation,
         TRequest request,
+        ServiceTokenRequest tokenRequest,
         CancellationToken cancellationToken)
         where TRequest : class
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Unary,
+                tokenRequest,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return await operation(request, options).ConfigureAwait(false);

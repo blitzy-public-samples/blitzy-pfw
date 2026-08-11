@@ -24,14 +24,18 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Grpc.Core;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -40,8 +44,10 @@ using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 using PowerFramework.Persistence.Concurrency;
+using PowerFramework.Persistence.Authorization;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Grpc;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql.Paging;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
@@ -60,10 +66,22 @@ public sealed class CompositionRootTests
 {
     /// <summary>The issuer the host under test is configured to trust.</summary>
     /// <remarks>A reserved test host, so nothing resolves and no metadata is ever fetched.</remarks>
-    private const string TrustedIssuer = "https://security.invalid";
+    private const string TrustedIssuer = CompositionHost.TrustedIssuer;
+
+    /// <summary>
+    /// The caller identity this host's forged token claims, and therefore the one its permitted-caller
+    /// roster must carry.
+    /// </summary>
+    /// <remarks>
+    /// Stated as a constant rather than written twice, so the token's <c>sub</c> claim and the configured
+    /// roster cannot drift apart and leave a row failing on a permission it never meant to test.
+    /// FORWARDED from the host that mints the token rather than restated, for the same reason and in
+    /// the same way <see cref="TrustedAudience"/> is.
+    /// </remarks>
+    private const string TokenSubject = CompositionHost.TokenSubject;
 
     /// <summary>The audience the host under test is configured to accept.</summary>
-    private const string TrustedAudience = "powerframework-persistence-composition";
+    private const string TrustedAudience = CompositionHost.TrustedAudience;
 
     /// <summary>The compact-serialization scheme name.</summary>
     private const string BearerScheme = "Bearer";
@@ -163,6 +181,37 @@ public sealed class CompositionRootTests
         Assert.Equal(rewriters.Count, rewriters.Select(rewriter => rewriter.Dialect).Distinct().Count());
     }
 
+    /// <summary>
+    /// The pool's idle collection is DRIVEN in production, by a hosted service the host starts, and the
+    /// sweeper the host runs is the same instance a test can resolve and drive.
+    /// </summary>
+    /// <remarks>
+    /// THE COLLECTION'S OWN LOGIC BEING COVERED PROVES NOTHING ABOUT IT RUNNING. The legacy subscribes the
+    /// pool to the framework's idle notification inside its keep-alive branch
+    /// [n_cst_thread_trans_pool.sru:L80]; a service has no such notification, so if nothing here registers
+    /// a driver the collection is reachable only from a test and every retained transaction is held for
+    /// the life of the process. That gap is invisible to the collection's own suite - each of its tests
+    /// calls the entry point directly - so the REGISTRATION is asserted here rather than there.
+    /// </remarks>
+    [Fact]
+    public void TheIdleSweepIsHostedAndIsTheSameInstanceATestCanDrive()
+    {
+        using CompositionHost host = CompositionHost.Create();
+
+        TransactionPoolIdleSweeper sweeper =
+            host.Services.GetRequiredService<TransactionPoolIdleSweeper>();
+
+        // ONE sweeper, shared - a second instance would sweep a pool nobody else is using.
+        Assert.Same(sweeper, host.Services.GetRequiredService<TransactionPoolIdleSweeper>());
+
+        // AND THE HOST STARTS IT. Resolved through the hosted-service collection, because that is the
+        // only registration the host itself consults.
+        Assert.Contains(sweeper, host.Services.GetServices<IHostedService>());
+
+        // Scheduled by default, so an operator who configures nothing still gets collection.
+        Assert.True(sweeper.IsScheduled);
+    }
+
     // ==============================================================================================
     //  2. THE PUBLISHED ROUTES
     // ==============================================================================================
@@ -200,6 +249,12 @@ public sealed class CompositionRootTests
     [Fact]
     public async Task ReadinessIsAnonymousAndPingIsNot()
     {
+        // PROVISIONED FIRST, because readiness verifies the schema and not merely that the engine answers.
+        // Deliberately still the REAL storage check rather than a stub: the property under test is that
+        // the DEPLOYED composition answers an anonymous readiness request with 200 and an uncredentialled
+        // ping with 401, and substituting the check would move the assertion off that composition.
+        await CompositionHost.ProvisionSchemaAsync(TestContext.Current.CancellationToken);
+
         using CompositionHost host = CompositionHost.Create();
         using HttpClient client = host.CreateClient();
 
@@ -212,6 +267,73 @@ public sealed class CompositionRootTests
 
         Assert.Equal(HttpStatusCode.OK, readiness.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, ping.StatusCode);
+    }
+
+    /// <summary>
+    /// Every framework-generated failure status carries the same problem body this service's own error
+    /// responses carry.
+    /// </summary>
+    /// <param name="route">The route to request.</param>
+    /// <param name="method">The method to request it with.</param>
+    /// <param name="authenticated">Whether the request presents a credential this host trusts.</param>
+    /// <param name="expected">The status the framework answers.</param>
+    /// <param name="expectedRetCode">The legacy code this service's vocabulary assigns to it.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// ONE SERVICE MUST NOT ANSWER TWO ERROR SHAPES DEPENDING ON WHICH LAYER FAILED. The readiness endpoint
+    /// writes a problem body with a return code because its own code does; the challenge, the refusal, an
+    /// unmatched route and a rejected method are produced beneath any of this service's code and used to
+    /// carry no body at all. The row above asserts the STATUS of the refusal and passed throughout, which is
+    /// exactly why the missing body went unnoticed.
+    /// </para>
+    /// <para>
+    /// BOTH EXTENSION MEMBERS ARE ASSERTED, because the middleware alone would produce a body without them:
+    /// <c>retCode</c> comes from the composition root's classification of a framework status into the legacy
+    /// vocabulary, and <c>traceId</c> is what lets an operator find the record for the occurrence.
+    /// </para>
+    /// <para>
+    /// The 405 row is also the assertion that the gRPC catch-all route stays switched off. That route is two
+    /// parameter segments wide, so with it enabled it matches <c>/v1/ping</c> and answers from the gRPC
+    /// handler - which reports 404 for a rejected method and writes a gRPC content type rather than a problem
+    /// body.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("/v1/ping", "GET", false, HttpStatusCode.Unauthorized, RetCode.E_ACCESS_DENIED)]
+    [InlineData("/v1/ping", "DELETE", true, HttpStatusCode.MethodNotAllowed, RetCode.E_NO_SUPPORT)]
+    [InlineData("/v1/no-such-route", "GET", true, HttpStatusCode.NotFound, RetCode.E_OBJECT_NOT_FOUND)]
+    public async Task EveryFrameworkGeneratedStatusCarriesTheProblemBody(
+        string route,
+        string method,
+        bool authenticated,
+        HttpStatusCode expected,
+        long expectedRetCode)
+    {
+        using CompositionHost host = CompositionHost.Create();
+        using HttpClient client = host.CreateClient();
+
+        using HttpRequestMessage request = new(new HttpMethod(method), new Uri(route, UriKind.Relative));
+
+        if (authenticated)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue(BearerScheme, host.MintToken());
+        }
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+
+        using JsonDocument body = JsonDocument.Parse(
+            await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+        // The RFC 9457 member, which is the HTTP status as an integer rather than a status word.
+        Assert.Equal((int)expected, body.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal(expectedRetCode, body.RootElement.GetProperty("retCode").GetInt64());
+        Assert.False(string.IsNullOrEmpty(body.RootElement.GetProperty("traceId").GetString()));
     }
 
     /// <summary>
@@ -278,6 +400,42 @@ public sealed class CompositionRootTests
         Assert.Equal(HttpStatusCode.NotFound, unknownResponse.StatusCode);
     }
 
+    /// <summary>
+    /// The composed host resolves exactly one status interceptor, and it carries the host-backed
+    /// termination effect.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ASSERTED BECAUSE THE REGISTRATION IS A FACTORY RATHER THAN A TYPE, and the difference is not
+    /// observable anywhere else in this suite. Registered by type, the container fills every constructor
+    /// parameter it can - including the termination seam, whose whole purpose is to be the host-backed
+    /// default in production and an injected recorder only in a test. A factory states the three real
+    /// dependencies and leaves the seam alone, so the deployed path cannot be displaced by an unrelated
+    /// registration of the same delegate type.
+    /// </para>
+    /// <para>
+    /// The single-instance half matters for a different reason: the gRPC hosting layer resolves the
+    /// interceptor from the container when one is registered, and a per-call instance would rebuild the
+    /// redactor and the logger on the hot path of every call on all four contracts.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheComposedHostResolvesOneStatusInterceptor()
+    {
+        using CompositionHost host = CompositionHost.Create();
+
+        // Forces the host to build, so the resolution below runs against the real composition rather than
+        // a lazily unstarted one.
+        using HttpClient _ = host.CreateClient();
+
+        PersistenceStatusInterceptor first =
+            host.Services.GetRequiredService<PersistenceStatusInterceptor>();
+        PersistenceStatusInterceptor second =
+            host.Services.GetRequiredService<PersistenceStatusInterceptor>();
+
+        Assert.Same(first, second);
+    }
+
     // ==============================================================================================
     //  3. THE CENTRAL STATUS MAPPING
     // ==============================================================================================
@@ -321,22 +479,33 @@ public sealed class CompositionRootTests
     }
 
     /// <summary>
-    /// A failed assertion is a structural fault: the caller is told, and the host is stopped.
+    /// A failed assertion is a structural fault: the caller is told, and termination is requested with
+    /// the documented non-zero exit code.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
+    /// <para>
     /// The legacy terminates the application after decoding an assertion payload
-    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>]. Preserved here as a stop request plus an
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>]. Preserved here as a termination request plus an
     /// immediate answer, rather than leaving the caller waiting for a socket to close.
+    /// </para>
+    /// <para>
+    /// THE EXIT CODE IS ASSERTED, NOT MERELY THE STOP. A stop request on its own leaves the exit status at
+    /// zero, so every mechanism that reads an exit status - a restart policy scoped to failures, a
+    /// supervisor's success accounting - would treat a broken invariant as an orderly shutdown. The
+    /// termination seam is injected so the assertion costs the test process nothing.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task AFailedAssertionStopsTheHostAndAnswersImmediately()
     {
+        List<int> requestedExitCodes = [];
         RecordingLifetime lifetime = new();
         PersistenceStatusInterceptor interceptor = new(
             Errors.SqlRedactor.Instance,
             lifetime,
-            NullLogger<PersistenceStatusInterceptor>.Instance);
+            NullLogger<PersistenceStatusInterceptor>.Instance,
+            requestProcessTermination: requestedExitCodes.Add);
 
         RpcException thrown = await Assert.ThrowsAsync<RpcException>(() =>
             interceptor.UnaryServerHandler<string, string>(
@@ -346,7 +515,194 @@ public sealed class CompositionRootTests
 
         Assert.Equal(StatusCode.Internal, thrown.StatusCode);
         Assert.Equal(PersistenceStatusInterceptor.AssertionFaultDetail, thrown.Status.Detail);
-        Assert.True(lifetime.Stopped);
+        Assert.Equal(
+            [PersistenceStatusInterceptor.StructuralFaultExitCode],
+            requestedExitCodes);
+        Assert.NotEqual(0, PersistenceStatusInterceptor.StructuralFaultExitCode);
+    }
+
+    /// <summary>
+    /// The default termination effect reports the structural-fault exit code BEFORE it asks the host to
+    /// stop, and it asks rather than aborting.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE ONLY TEST HERE THAT EXERCISES THE SHIPPED SEAM RATHER THAN AN INJECTED ONE, which is why it is
+    /// also the only one that has to restore process state afterwards. Every other case injects, so the
+    /// exit code the deployed path actually reports would otherwise be asserted nowhere at all - and the
+    /// composition root supplies no callback, so the shipped path is the one that runs in production.
+    /// </para>
+    /// <para>
+    /// The ordering claim is checked at the moment of the stop request rather than after it returns,
+    /// because only the reading taken inside <c>StopApplication</c> can tell a code set beforehand from
+    /// one set afterwards - and a code set afterwards races the host's own return from its run loop.
+    /// </para>
+    /// <para>
+    /// Shutdown is REQUESTED and the process is not aborted, because the registered shutdown path is where
+    /// the pooled transactions drain and the handle registries release what they hold, and because the
+    /// legacy halt likewise runs the application close event - the framework finalize call
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L108</c>] - before terminating.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheDefaultTerminationEffectSetsTheExitCodeBeforeRequestingShutdown()
+    {
+        int previousExitCode = Environment.ExitCode;
+        RecordingLifetime lifetime = new();
+
+        try
+        {
+            PersistenceStatusInterceptor interceptor = new(
+                Errors.SqlRedactor.Instance,
+                lifetime,
+                NullLogger<PersistenceStatusInterceptor>.Instance);
+
+            await Assert.ThrowsAsync<RpcException>(() =>
+                interceptor.UnaryServerHandler<string, string>(
+                    "request",
+                    new StubCallContext(CancellationToken.None),
+                    (_, _) => throw new AssertionFailure("an invariant is broken")));
+
+            Assert.True(lifetime.Stopped);
+            Assert.Equal(
+                PersistenceStatusInterceptor.StructuralFaultExitCode,
+                lifetime.ExitCodeWhenStopped);
+            Assert.Equal(PersistenceStatusInterceptor.StructuralFaultExitCode, Environment.ExitCode);
+        }
+        finally
+        {
+            Environment.ExitCode = previousExitCode;
+        }
+    }
+
+    /// <summary>
+    /// Termination is requested even when reporting the fault fails.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// THE FAILURE MODE THIS CLOSES WAS SILENT AND STRICTLY WORSE THAN A LOST LOG RECORD. With the
+    /// termination request placed after the log write, a provider that throws carried the fault out of the
+    /// mapping and left the process serving requests in a state its own invariants had already declared
+    /// impossible - and the only trace of it was the write failure the caller never saw. The write is now
+    /// best effort and the termination is not, so the log fault still propagates to the caller as a fault
+    /// while the process still ends.
+    /// </remarks>
+    [Fact]
+    public async Task TerminationIsRequestedEvenWhenReportingTheFaultThrows()
+    {
+        List<int> requestedExitCodes = [];
+        PersistenceStatusInterceptor interceptor = new(
+            Errors.SqlRedactor.Instance,
+            new RecordingLifetime(),
+            new ThrowingLogger<PersistenceStatusInterceptor>(),
+            requestProcessTermination: requestedExitCodes.Add);
+
+        InvalidOperationException surfaced = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            interceptor.UnaryServerHandler<string, string>(
+                "request",
+                new StubCallContext(CancellationToken.None),
+                (_, _) => throw new AssertionFailure("an invariant is broken")));
+
+        Assert.Same(ThrowingLogger<PersistenceStatusInterceptor>.WriteFault, surfaced);
+        Assert.Equal(
+            [PersistenceStatusInterceptor.StructuralFaultExitCode],
+            requestedExitCodes);
+    }
+
+    /// <summary>
+    /// Every handler shape terminates on a structural fault, not only the unary one.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// Asserted per shape because retrieval is a SERVER STREAM: a termination path wired into the unary
+    /// shape alone would leave this service's primary read path able to break an invariant and carry on.
+    /// </remarks>
+    [Fact]
+    public async Task EveryHandlerShapeTerminatesOnAStructuralFault()
+    {
+        List<int> requestedExitCodes = [];
+        PersistenceStatusInterceptor interceptor = new(
+            Errors.SqlRedactor.Instance,
+            new RecordingLifetime(),
+            NullLogger<PersistenceStatusInterceptor>.Instance,
+            requestProcessTermination: requestedExitCodes.Add);
+
+        await Assert.ThrowsAsync<RpcException>(() =>
+            interceptor.ServerStreamingServerHandler<string, string>(
+                "request",
+                new StubStreamWriter(),
+                new StubCallContext(CancellationToken.None),
+                (_, _, _) => throw new AssertionFailure("an invariant is broken")));
+
+        await Assert.ThrowsAsync<RpcException>(() =>
+            interceptor.ClientStreamingServerHandler<string, string>(
+                new StubStreamReader(),
+                new StubCallContext(CancellationToken.None),
+                (_, _) => throw new AssertionFailure("an invariant is broken")));
+
+        await Assert.ThrowsAsync<RpcException>(() =>
+            interceptor.DuplexStreamingServerHandler<string, string>(
+                new StubStreamReader(),
+                new StubStreamWriter(),
+                new StubCallContext(CancellationToken.None),
+                (_, _, _) => throw new AssertionFailure("an invariant is broken")));
+
+        Assert.Equal(
+            [
+                PersistenceStatusInterceptor.StructuralFaultExitCode,
+                PersistenceStatusInterceptor.StructuralFaultExitCode,
+                PersistenceStatusInterceptor.StructuralFaultExitCode,
+            ],
+            requestedExitCodes);
+    }
+
+    /// <summary>
+    /// No fault other than a failed assertion terminates the process.
+    /// </summary>
+    /// <param name="faultKind">Which fault the handler raises.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// THE OTHER HALF OF THE FAIL-FAST POSTURE, AND THE HALF THAT IS EASIER TO BREAK. Terminating on a
+    /// request fault would convert a caller's bad argument, a database error, or a caller hanging up into
+    /// an outage for every other caller of the instance. Only a broken invariant is structural.
+    /// </remarks>
+    [Theory]
+    [InlineData("chosen-status")]
+    [InlineData("unhandled")]
+    [InlineData("caller-cancelled")]
+    [InlineData("internal-cancellation")]
+    public async Task NoOtherFaultTerminatesTheProcess(string faultKind)
+    {
+        using CancellationTokenSource cancelled = new();
+        await cancelled.CancelAsync();
+
+        bool callerCancelled = faultKind == "caller-cancelled";
+        List<int> requestedExitCodes = [];
+        RecordingLifetime lifetime = new();
+        PersistenceStatusInterceptor interceptor = new(
+            Errors.SqlRedactor.Instance,
+            lifetime,
+            NullLogger<PersistenceStatusInterceptor>.Instance,
+            requestProcessTermination: requestedExitCodes.Add);
+
+        Exception fault = faultKind switch
+        {
+            "chosen-status" => new RpcException(new Status(StatusCode.Aborted, "the row changed")),
+            "unhandled" => new InvalidOperationException("a request fault"),
+            "caller-cancelled" => new OperationCanceledException(cancelled.Token),
+            _ => new OperationCanceledException("nobody cancelled this"),
+        };
+
+        await Assert.ThrowsAsync<RpcException>(() =>
+            interceptor.UnaryServerHandler<string, string>(
+                "request",
+                new StubCallContext(callerCancelled ? cancelled.Token : CancellationToken.None),
+                (_, _) => throw fault));
+
+        Assert.Empty(requestedExitCodes);
+        Assert.False(lifetime.Stopped);
+        Assert.Null(lifetime.ExitCodeWhenStopped);
     }
 
     /// <summary>
@@ -399,14 +755,30 @@ public sealed class CompositionRootTests
     }
 
     /// <summary>
-    /// A literal interpolated into a statement reaches neither the log record nor the wire.
+    /// A literal interpolated into a statement reaches neither the log record nor the wire, and it reaches
+    /// neither from an inner exception either.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
+    /// <para>
     /// The legacy database-error structure's statement field carries the complete generated statement
-    /// including its interpolated literal values, and the legacy logger performed no redaction at all.
-    /// An exception message raised near statement generation carries the same thing, so the message is
-    /// redacted before it is recorded and the wire receives a constant.
+    /// including its interpolated literal values, and the legacy logger performed no redaction at all. An
+    /// exception message raised near statement generation carries the same thing, so every message in the
+    /// chain is redacted before it is recorded and the wire receives a constant.
+    /// </para>
+    /// <para>
+    /// THIS ASSERTION USED TO PASS WHILE THE LITERAL WAS PUBLISHED IN FULL, and both reasons are fixed here.
+    /// The record was formatted from a redacted message and the exception was attached beside it, so a
+    /// provider rendered the unredacted original through <c>ToString()</c> - and the recorder captured only
+    /// the formatted text, so nothing could see it. The exception is now recorded as well and asserted
+    /// absent.
+    /// </para>
+    /// <para>
+    /// THE LITERAL IS PLACED ON AN INNER EXCEPTION, which is where it really is. A provider fault arrives
+    /// wrapped - a task fault around a command fault around the provider's own - so redacting only the
+    /// outermost message would leave the ordinary case fully exposed while a test using a single flat
+    /// exception passed.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task StatementLiteralsReachNeitherTheLogNorTheWire()
@@ -419,12 +791,15 @@ public sealed class CompositionRootTests
             new RecordingLifetime(),
             logger);
 
+        InvalidOperationException wrapped = new(
+            "the update task faulted",
+            new InvalidOperationException($"UPDATE COMPANY SET NAME = '{Literal}' WHERE ID = 7"));
+
         RpcException thrown = await Assert.ThrowsAsync<RpcException>(() =>
             interceptor.UnaryServerHandler<string, string>(
                 "request",
                 new StubCallContext(CancellationToken.None),
-                (_, _) => throw new InvalidOperationException(
-                    $"UPDATE COMPANY SET NAME = '{Literal}' WHERE ID = 7")));
+                (_, _) => throw wrapped));
 
         Assert.Equal(StatusCode.Internal, thrown.StatusCode);
         Assert.Equal(PersistenceStatusInterceptor.UnhandledFaultDetail, thrown.Status.Detail);
@@ -435,6 +810,51 @@ public sealed class CompositionRootTests
             Literal,
             string.Join("\n", logger.Records),
             StringComparison.Ordinal);
+
+        // NO EXCEPTION IS ATTACHED, which is the assertion the formatted text cannot make: an attached
+        // exception is rendered in full by every provider, so its presence alone republishes the literal.
+        Assert.All(logger.Exceptions, Assert.Null);
+
+        // The chain is still identified, so dropping the object costs an operator nothing they needed: both
+        // type names are named, outermost first.
+        Assert.Contains(
+            typeof(InvalidOperationException).FullName!
+                + PersistenceStatusInterceptor.FaultChainSeparator
+                + typeof(InvalidOperationException).FullName!,
+            string.Join("\n", logger.Records),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The structural arm still attaches its exception, because that record reproduces the legacy dialog.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// THE ASYMMETRY IS DELIBERATE AND IS ASSERTED SO IT CANNOT BE "TIDIED" INTO UNIFORMITY. An assertion
+    /// payload carries no statement, no path and no credential - it carries the seven fields the legacy
+    /// producer emits - and the record is written at most once per process because the path it belongs to
+    /// terminates the host. C-B requires the legacy dialog be preserved in full
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L141</c>], and the managed stack is the part of it that has no
+    /// legacy equivalent to lose.
+    /// </remarks>
+    [Fact]
+    public async Task TheStructuralArmStillCarriesItsException()
+    {
+        RecordingLogger<PersistenceStatusInterceptor> logger = new();
+        AssertionFailure assertion = new("an invariant is broken");
+        PersistenceStatusInterceptor interceptor = new(
+            Errors.SqlRedactor.Instance,
+            new RecordingLifetime(),
+            logger,
+            requestProcessTermination: static _ => { });
+
+        _ = await Assert.ThrowsAsync<RpcException>(() =>
+            interceptor.UnaryServerHandler<string, string>(
+                "request",
+                new StubCallContext(CancellationToken.None),
+                (_, _) => throw assertion));
+
+        Assert.Same(assertion, Assert.Single(logger.Exceptions));
     }
 
     /// <summary>
@@ -607,148 +1027,406 @@ public sealed class CompositionRootTests
         }
     }
 
-    // ==============================================================================================
-    //  5. THE SHIPPED SEAMS AND THEIR DEFINED NEGATIVES
-    // ==============================================================================================
-
     /// <summary>
-    /// The unprovisioned engine fails the writes and no-ops the unwinds.
+    /// The gate resolves every SQL seam, so a fully composed graph starts and an incomplete one does not.
     /// </summary>
     /// <remarks>
-    /// THE COMMIT ASSERTION IS THE IMPORTANT ONE. A commit that reported success would tell a caller
-    /// data had been written that never was, which is the one failure mode worse than refusing. The
-    /// unwinds succeed because they are idempotent and there is genuinely nothing to undo, which is also
-    /// how the legacy tolerates disconnecting something that never connected.
+    /// THE SECOND HALF IS THE LOAD-BEARING ONE. A provider missing a seam used to start happily and then
+    /// answer every request with a refusal, which is the failure mode this gate exists to convert into a
+    /// startup failure. Removing the transaction engine is the cheapest way to prove the conversion
+    /// happened, because it is the seam every statement in the service ultimately runs through.
     /// </remarks>
     [Fact]
-    public void TheUnprovisionedEngineFailsWritesAndNoOpsUnwinds()
+    public void TheGateResolvesEverySqlSeamAndRefusesAnIncompleteGraph()
     {
-        using UnprovisionedTransactionEngine engine = new();
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-graph-{Guid.NewGuid():n}");
 
-        TransactionData descriptor = new() { Dbms = "MSS Microsoft SQL Server" };
-        engine.ApplyConnectionFields(in descriptor);
+        try
+        {
+            using ServiceProvider complete = BuildRuntimeGraphProvider(directory, omitEngine: false);
 
-        // The dialect is echoed so the paging dispatcher still classifies exactly as the legacy does.
-        Assert.Equal("MSS Microsoft SQL Server", engine.Dbms);
-        Assert.Equal(0, engine.DbHandle);
+            // A complete graph passes without terminating, and leaves no probe debris behind it.
+            complete.ValidatePersistenceStructuralPreconditions();
+            Assert.Empty(Directory.GetFileSystemEntries(directory));
 
-        Assert.Equal(-1, engine.Connect().SqlCode);
-        Assert.Equal(-1, engine.Commit().SqlCode);
-        Assert.Equal(-1, engine.Execute("SELECT 1").SqlCode);
-        Assert.Equal(RetCode.E_NO_IMPLEMENTATION, engine.Connect().SqlDbCode);
-        Assert.Contains(
-            "No database engine is provisioned",
-            engine.Connect().SqlErrText,
-            StringComparison.Ordinal);
+            using ServiceProvider incomplete = BuildRuntimeGraphProvider(directory, omitEngine: true);
 
-        Assert.Equal(0, engine.Rollback().SqlCode);
-        Assert.Equal(0, engine.Disconnect().SqlCode);
+            InvalidOperationException refused = Assert.Throws<InvalidOperationException>(
+                incomplete.ValidatePersistenceStructuralPreconditions);
+
+            Assert.Contains("runtime seam", refused.Message, StringComparison.Ordinal);
+
+            // The seam that could not be produced is named by the INNER exception, so an operator reading
+            // the terminal record learns which registration to fix rather than only that one is missing.
+            Assert.NotNull(refused.InnerException);
+            Assert.Contains(
+                nameof(ITransactionEngine),
+                refused.InnerException.Message,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
     }
 
+    // ==============================================================================================
+    //  5. THE PROVISIONED SEAMS AND THE NEGATIVES THAT REMAIN REACHABLE
+    // ==============================================================================================
+    //
+    //  WHAT THIS SECTION USED TO ASSERT, AND WHY IT NO LONGER DOES. Six seams of this service once
+    //  shipped as refusals - an engine that failed every write, two factories answering
+    //  E_NO_IMPLEMENTATION, and three runtimes returning the datastore failure value - and the cases
+    //  here pinned those refusals as intended behaviour. They are not. The AAP requires this service to
+    //  be the one that generates and executes SQL and the only one holding a storage provider
+    //  [AAP 0.1.1], its own file schema requires a conflict mismatch to surface as gRPC Aborted with a
+    //  populated ConflictDetail and a database error's statement text to be provably redacted, and
+    //  neither is reachable through a seam that refuses before it reads anything. The refusals were
+    //  therefore replaced by the provisioned implementations, and these cases now assert what those
+    //  implementations do.
+    //
+    //  THE NEGATIVES DID NOT DISAPPEAR - THEY MOVED TO THE INPUTS THAT GENUINELY EARN THEM. An unknown
+    //  data-object name still resolves to nothing, because PowerBuilder leaves a datastore whose data
+    //  object failed to load in exactly that state and the retrieval task detects it. An unknown session
+    //  handle still refuses, with the transaction contract's own code rather than a not-implemented one.
+    //  A malformed grid syntax still fails with a diagnostic. What changed is that a WELL-FORMED request
+    //  against a LIVE session now succeeds, which is the whole difference between a provisioned service
+    //  and a documented gap.
+    // ==============================================================================================
     /// <summary>
-    /// The two refusing factories answer the legacy's own not-implemented code with no half-built pair.
-    /// </summary>
-    [Fact]
-    public void TheRefusingFactoriesAnswerTheLegacyNotImplementedCode()
-    {
-        Assert.Equal(
-            RetCode.E_NO_IMPLEMENTATION,
-            new UnboundUpdateTaskFactory().TryCreate("session", out IUpdateTaskSurface? update));
-        Assert.Null(update);
-
-        Assert.Equal(
-            RetCode.E_NO_IMPLEMENTATION,
-            new UnboundCommandTaskFactory().Create(out CommandTaskComponents? command));
-        Assert.Null(command);
-    }
-
-    /// <summary>
-    /// The unbound runtimes refuse without ever claiming a successful empty result.
+    /// The SQLite engine echoes the caller's dialect, refuses before it is connected, and then performs
+    /// a real connect, execute, commit and rollback.
     /// </summary>
     /// <remarks>
-    /// A zero row count would read as "retrieved successfully, nothing matched", which is the most
-    /// damaging answer available, so the datastore channel's own failure value is used instead.
+    /// THE DIALECT ASSERTION IS THE LOAD-BEARING ONE AND IS UNCHANGED FROM THE REFUSING ENGINE. The
+    /// paging dispatcher classifies this string with two arms and a not-implemented else
+    /// [AAP 0.6.4], and provisioning a real connection must not alter what a caller is told about its
+    /// own dialect - the string is echoed back exactly as supplied, with no SQLite arm invented for it.
+    /// The refuse-before-connect assertions preserve the property the old case was really protecting: a
+    /// commit that reported success without a connection would tell a caller data had been written that
+    /// never was.
     /// </remarks>
     [Fact]
-    public void TheUnboundRuntimesRefuseWithoutClaimingZeroRows()
+    public void TheSqliteEngineEchoesTheDialectRefusesUnconnectedAndThenWritesForReal()
     {
-        UnboundDataObjectRuntime dataObjects = new();
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-engine-{Guid.NewGuid():n}");
 
-        Assert.False(dataObjects.TryResolveDefinition("d_any", out DataObjectDefinition? definition));
-        Assert.Null(definition);
+        try
+        {
+            using SqliteConnectionFactory storage = CreateStorage(directory);
+            using SqliteTransactionEngine engine = new(
+                storage,
+                NullLogger<SqliteTransactionEngine>.Instance);
 
-        // The datastore channel's failure value, NOT zero. Zero would read as "retrieved successfully,
-        // nothing matched", which is the most damaging answer available here.
-        ISqlDataStore store = CreateDataStore();
-        Assert.Equal(
-            Buffers.DataWindowBufferStore.DataStoreFailure,
-            dataObjects.Retrieve(store, []));
+            TransactionData descriptor = new() { Dbms = "MSS Microsoft SQL Server" };
+            engine.ApplyConnectionFields(in descriptor);
 
-        UnboundQueryDataWindowRuntime carriers = new();
-        using IPooledTransaction transaction = CreatePooledTransaction();
+            // Echoed unchanged, so the paging dispatcher classifies exactly as the legacy does.
+            Assert.Equal("MSS Microsoft SQL Server", engine.Dbms);
+            Assert.Equal(0, engine.DbHandle);
 
-        Assert.False(carriers.TryGetChild(
-            CreateDataStore(),
-            "column",
-            out Buffers.DataWindowBufferStore? child));
-        Assert.Null(child);
-        Assert.Equal(
-            Buffers.DataWindowBufferStore.DataStoreFailure,
-            carriers.AttachTransaction(CreateDataStore(), transaction));
+            // Before a connection exists, a write refuses rather than claiming a phantom success.
+            Assert.Equal(-1, engine.Execute("SELECT 1", TestContext.Current.CancellationToken).SqlCode);
+            Assert.Contains(
+                "not connected",
+                engine.Execute("SELECT 1", TestContext.Current.CancellationToken).SqlErrText,
+                StringComparison.OrdinalIgnoreCase);
 
-        CarrierCreateOutcome created = carriers.CreateFromSyntax(CreateDataStore(), "table(...)");
-        Assert.Equal(Buffers.DataWindowBufferStore.DataStoreFailure, created.Result);
-        Assert.NotEmpty(created.ErrorText);
+            Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+            Assert.Equal(SqliteTransactionEngine.ConnectedHandle, engine.DbHandle);
+
+            Assert.Equal(
+                0,
+                engine.Execute("CREATE TABLE probe (id INTEGER PRIMARY KEY, name TEXT)", TestContext.Current.CancellationToken).SqlCode);
+            Assert.Equal(0, engine.Execute("INSERT INTO probe (name) VALUES ('written')", TestContext.Current.CancellationToken).SqlCode);
+            Assert.Equal(0, engine.Commit().SqlCode);
+
+            // The rollback discards work the commit above did not cover, and the committed row survives.
+            Assert.Equal(0, engine.Execute("INSERT INTO probe (name) VALUES ('discarded')", TestContext.Current.CancellationToken).SqlCode);
+            Assert.Equal(0, engine.Rollback().SqlCode);
+
+            using Microsoft.Data.Sqlite.SqliteCommand survivors = engine.CreateCommand();
+            survivors.CommandText = "SELECT count(*) FROM probe";
+            Assert.Equal(1L, Convert.ToInt64(survivors.ExecuteScalar(), CultureInfo.InvariantCulture));
+
+            Assert.Equal(0, engine.Disconnect().SqlCode);
+            Assert.Equal(0, engine.DbHandle);
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
     }
 
     /// <summary>
-    /// The unbound transaction surface refuses productively and vetoes nothing.
+    /// The update factory refuses an unknown session with the transaction contract's own code, and never
+    /// hands back a half-built pair.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS THE NEGATIVE THAT SURVIVED PROVISIONING, AND ITS CODE CHANGED FOR A REASON. A refusing
+    /// factory answered <c>E_NO_IMPLEMENTATION</c>, which told a caller the capability does not exist.
+    /// The capability now exists, so the honest answer to an unusable handle is
+    /// <c>E_INVALID_TRANSACTION</c> - what the oracle returns when asked to act on a transaction it
+    /// cannot use [<c>n_cst_thread_trans.sru:L113</c>]. The null assertion is unchanged: a caller that
+    /// was refused holds nothing it could mistake for a working task.
+    /// </remarks>
+    [Fact]
+    public void TheUpdateFactoryRefusesAnUnknownSessionWithoutBuildingAPair()
+    {
+        using ServiceProvider provider = BuildTaskFactoryProvider();
+
+        IUpdateTaskFactory factory = provider.GetRequiredService<IUpdateTaskFactory>();
+
+        Assert.Equal(
+            RetCode.E_INVALID_TRANSACTION,
+            factory.TryCreate("no-such-session", out IUpdateTaskSurface? surface));
+        Assert.Null(surface);
+    }
+
+    /// <summary>
+    /// Both factories build a real, joined proxy pair rather than refusing.
+    /// </summary>
+    /// <remarks>
+    /// THE PAIR IS WHAT IS BEING ASSERTED, NOT MERELY A NON-NULL RESULT. The AAP forbids flattening the
+    /// caller-side proxy and the worker-side task into one object [AAP 0.4.5.4], so a successful create
+    /// must yield BOTH halves with the worker joined to the proxy that will receive its published
+    /// results. The command factory hands both back explicitly, which is what these assertions read; the
+    /// update factory hides its pair behind the surface, so its pair is proven through the surface
+    /// accepting the contract calls that only a live pair can service.
+    /// </remarks>
+    [Fact]
+    public void TheFactoriesBuildAJoinedProxyPair()
+    {
+        using ServiceProvider provider = BuildTaskFactoryProvider();
+
+        ICommandTaskFactory commands = provider.GetRequiredService<ICommandTaskFactory>();
+
+        Assert.Equal(RetCode.OK, commands.Create(out CommandTaskComponents? components));
+        Assert.NotNull(components);
+
+        Assert.NotNull(components.Proxy);
+        Assert.NotNull(components.Worker);
+
+        // The worker holds the disposable half of the pair, and the proxy is released with it.
+        components.Worker.Dispose();
+    }
+
+    /// <summary>
+    /// The data-object runtime resolves the evidenced fixture and still answers nothing for a name it
+    /// has never been given.
+    /// </summary>
+    /// <remarks>
+    /// THE EVIDENCED DEFINITION IS TRANSCRIBED, NOT READ. The legacy tree is read-only and is the
+    /// behavioural oracle [AAP C-C], so the one updatable DataWindow's literals - its select, its sort
+    /// including the trailing space the oracle emits, and its update table - live in the catalogue as
+    /// transcriptions of <c>dw_sqlite.srd:L14</c> rather than as a parse of the file at run time. The
+    /// unknown-name arm is the negative that survived: it is a REACHED PowerBuilder behaviour the
+    /// retrieval task detects through its own units probe, not a gap.
+    /// </remarks>
+    [Fact]
+    public void TheDataObjectRuntimeResolvesTheEvidencedFixtureAndOnlyThat()
+    {
+        SqliteDataObjectRuntime runtime = new(
+            new DataObjectDefinitionCatalogue(),
+            new DataWindowStoreBindings(),
+            NullLogger<SqliteDataObjectRuntime>.Instance);
+
+        Assert.True(runtime.TryResolveDefinition(
+            DataObjectDefinitionCatalogue.EvidencedDataObject,
+            out DataObjectDefinition? evidenced));
+        Assert.NotNull(evidenced);
+        Assert.Equal(DataObjectDefinitionCatalogue.EvidencedSelect, evidenced.SqlSelect);
+
+        // The trailing space is the oracle's, and it is preserved rather than trimmed.
+        Assert.Equal(DataObjectDefinitionCatalogue.EvidencedSort, evidenced.Sort);
+
+        // The units value is load bearing: the retrieval task probes DataWindow.Units to tell a resolved
+        // data object from an unresolved one [n_cst_thread_task_sqlquery.sru:L554-L557].
+        Assert.Equal(DataObjectDefinitionCatalogue.ResolvedUnits, evidenced.Units);
+
+        Assert.False(runtime.TryResolveDefinition("d_never_registered", out DataObjectDefinition? absent));
+        Assert.Null(absent);
+    }
+
+    /// <summary>
+    /// The carrier runtime creates a store from well-formed grid syntax and fails a malformed one with a
+    /// diagnostic.
+    /// </summary>
+    [Fact]
+    public void TheCarrierRuntimeCreatesFromSyntaxAndDiagnosesMalformedSyntax()
+    {
+        DataObjectDefinitionCatalogue catalogue = new();
+        DataWindowStoreBindings bindings = new();
+        SqliteQueryDataWindowRuntime carriers = new(catalogue, bindings);
+        SqlDataStoreFactory stores = new(
+            new SqliteDataObjectRuntime(
+                catalogue,
+                bindings,
+                NullLogger<SqliteDataObjectRuntime>.Instance),
+            TimeProvider.System);
+
+        string syntax = GridSyntax.From("SELECT id, name FROM COMPANY", ["id", "name"]);
+
+        ISqlDataStore created = stores.Create(Buffers.CarrierThreadAffinity.WorkerThread);
+        CarrierCreateOutcome success = carriers.CreateFromSyntax(created, syntax);
+
+        Assert.Equal(Buffers.DataWindowBufferStore.DataStoreSuccess, success.Result);
+        Assert.Equal(string.Empty, success.ErrorText);
+        Assert.Equal("SELECT id, name FROM COMPANY", created.GetSqlSelect());
+
+        // A syntax carrying no column declaration cannot describe a result, and says so.
+        ISqlDataStore rejected = stores.Create(Buffers.CarrierThreadAffinity.WorkerThread);
+        CarrierCreateOutcome failure = carriers.CreateFromSyntax(rejected, "table(retrieve=\"SELECT 1\")");
+
+        Assert.Equal(Buffers.DataWindowBufferStore.DataStoreFailure, failure.Result);
+        Assert.NotEmpty(failure.ErrorText);
+    }
+
+    /// <summary>
+    /// The transaction surface derives real grid syntax, runs a real count query, and still vetoes
+    /// nothing on the two retrieval hooks.
+    /// </summary>
+    /// <remarks>
+    /// THE HOOK ASSERTIONS ARE UNCHANGED FROM THE REFUSING SURFACE, DELIBERATELY. Both hooks are
+    /// vetoable NOTIFICATIONS, and PowerBuilder returns zero from an event nobody implemented, so a
+    /// provisioned surface must prevent exactly as little as an unprovisioned one did. Answering a veto
+    /// here would invent a refusal the legacy never issues.
+    /// </remarks>
+    [Fact]
+    public async Task TheTransactionSurfaceDerivesSyntaxCountsForRealAndVetoesNothing()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-surface-{Guid.NewGuid():n}");
+
+        try
+        {
+            using SqliteConnectionFactory storage = CreateStorage(directory);
+            using IPooledTransaction transaction = CreateLiveTransaction(storage);
+
+            Assert.Equal(0, transaction.Exec("CREATE TABLE probe (id INTEGER PRIMARY KEY, name TEXT)", TestContext.Current.CancellationToken));
+            Assert.Equal(0, transaction.Exec("INSERT INTO probe (name) VALUES ('one'), ('two')", TestContext.Current.CancellationToken));
+
+            SqliteQueryTransactionSurface surface = new(
+                NullLogger<SqliteQueryTransactionSurface>.Instance);
+
+            GridSyntaxOutcome syntax = surface.GridSyntaxFromSql(transaction, "SELECT id, name FROM probe");
+
+            Assert.Equal(string.Empty, syntax.ErrorText);
+            Assert.Contains("column=(name=id", syntax.Syntax, StringComparison.Ordinal);
+            Assert.Contains("column=(name=name", syntax.Syntax, StringComparison.Ordinal);
+
+            Buffers.DataWindowCarrier carrier = new(TimeProvider.System);
+            Assert.Equal(RetCode.OK, surface.RaiseBeforeRetrieve(transaction, carrier));
+            surface.RaiseAfterRetrieve(transaction, carrier, rowCount: 0);
+
+            CountQueryOutcome counted = await surface.Query(
+                transaction,
+                "SELECT count(*) AS count FROM probe",
+                TestContext.Current.CancellationToken);
+
+            // THE RETURN CODE IS A ROW COUNT, NOT A RETURN CODE, and that is the legacy's own shape:
+            // the count path tests it against 1 rather than against success
+            // [n_cst_thread_task_sqlquery.sru:L851-L853]. One row retrieved is therefore the value here,
+            // and it is what the caller's `rtCode = 1` arm needs to see.
+            Assert.Equal(1L, counted.ReturnCode);
+            Assert.NotNull(counted.Result);
+            Assert.Equal(string.Empty, counted.ErrorText);
+
+            // Two rows were inserted, so the scalar the count statement produced is 2 - read out of row
+            // one, column one, exactly where the count path reads it [:L852].
+            Assert.Equal(
+                2L,
+                Convert.ToInt64(
+                    counted.Result.GetItemValue(1, 1, DwBuffer.Primary),
+                    CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
+    /// <summary>
+    /// The caller's cancellation outranks any work the surface would otherwise start.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
-    /// <remarks>
-    /// The two retrieval hooks are vetoable NOTIFICATIONS, so a surface with nothing to notify must
-    /// prevent nothing: answering a veto would invent a refusal the legacy never issues for a hook
-    /// nobody implemented.
-    /// </remarks>
     [Fact]
-    public async Task TheUnboundTransactionSurfaceRefusesProductivelyAndVetoesNothing()
+    public async Task CancellationOutranksTheSurfacesWork()
     {
-        UnboundQueryTransactionSurface surface = new();
-        using IPooledTransaction transaction = CreatePooledTransaction();
-        Buffers.DataWindowCarrier carrier = new(TimeProvider.System);
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-cancel-{Guid.NewGuid():n}");
 
-        GridSyntaxOutcome syntax = surface.GridSyntaxFromSql(transaction, "SELECT 1");
-        Assert.Equal(string.Empty, syntax.Syntax);
-        Assert.NotEmpty(syntax.ErrorText);
+        try
+        {
+            using CancellationTokenSource cancelled = new();
+            await cancelled.CancelAsync();
 
-        Assert.Equal(RetCode.OK, surface.RaiseBeforeRetrieve(transaction, carrier));
-        surface.RaiseAfterRetrieve(transaction, carrier, rowCount: 0);
+            using SqliteConnectionFactory storage = CreateStorage(directory);
+            using IPooledTransaction transaction = CreateLiveTransaction(storage);
 
-        CountQueryOutcome refused = await surface.Query(
-            transaction,
-            "SELECT 1",
-            TestContext.Current.CancellationToken);
+            SqliteQueryTransactionSurface surface = new(
+                NullLogger<SqliteQueryTransactionSurface>.Instance);
 
-        Assert.Equal(RetCode.E_NO_IMPLEMENTATION, refused.ReturnCode);
-        Assert.Null(refused.Result);
-        Assert.NotEmpty(refused.ErrorText);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await surface.Query(transaction, "SELECT 1", cancelled.Token));
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
     }
 
     /// <summary>
-    /// The caller's cancellation outranks the surface's capability verdict.
+    /// A bound host resolves its own task at the sole index, and refuses every other index.
     /// </summary>
-    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// THE COMMIT-SIGNAL WALK IS THE ONE CALLER AND IT IS WHY THIS MATTERS. <c>SqlTaskBase.OnCommitted</c>
+    /// counts DOWN from the host's task index and sets the commit signal of every task it resolves. While
+    /// the host refused every index, that walk found nothing, no signal was ever set, and the caller-side
+    /// <c>IsCommitted()</c> could not become true however the transaction actually ended - so a committed
+    /// command reported as uncommitted. Rebinding is refused because a host serving two tasks would hand
+    /// the walk the wrong one.
+    /// </remarks>
     [Fact]
-    public async Task CancellationOutranksTheCapabilityVerdict()
+    public void ABoundHostResolvesItsOwnTaskAndRefusesEveryOtherIndex()
     {
-        using CancellationTokenSource cancelled = new();
-        await cancelled.CancelAsync();
+        using ServiceProvider provider = BuildRuntimeProvider();
 
-        UnboundQueryTransactionSurface surface = new();
-        using IPooledTransaction transaction = CreatePooledTransaction();
+        ICommandTaskFactory commands = provider.GetRequiredService<ICommandTaskFactory>();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await surface.Query(transaction, "SELECT 1", cancelled.Token));
+        Assert.Equal(RetCode.OK, commands.Create(out CommandTaskComponents? composed));
+        Assert.NotNull(composed);
+
+        try
+        {
+            // The factory bound the worker to its host, which is what makes the commit signal reachable:
+            // the proxy resolved the worker through the host during initialization.
+            Assert.False(composed!.Proxy.IsCommitted());
+
+            PersistenceSqlTaskHost host = new(
+                NullLogger<PersistenceSqlTaskHost>.Instance,
+                Errors.SqlRedactor.Instance);
+
+            host.BindTask(composed.Worker);
+
+            Assert.Equal(
+                RetCode.OK,
+                host.GetTask(PersistenceSqlTaskHost.SoleTaskIndex, out SqlTaskBase? resolved));
+            Assert.Same(composed.Worker, resolved);
+
+            // Any other position names nothing, and saying so is the accurate answer.
+            Assert.Equal(RetCode.E_OUT_OF_BOUND, host.GetTask(2, out SqlTaskBase? beyond));
+            Assert.Null(beyond);
+
+            Assert.Equal(RetCode.E_OUT_OF_BOUND, host.GetTask(0, out SqlTaskBase? below));
+            Assert.Null(below);
+
+            // Rebinding is refused rather than silently accepted.
+            Assert.Throws<InvalidOperationException>(() => host.BindTask(composed.Worker));
+        }
+        finally
+        {
+            composed!.Proxy.Dispose();
+            composed.Worker.Dispose();
+        }
     }
 
     /// <summary>
@@ -765,6 +1443,7 @@ public sealed class CompositionRootTests
         QueryFaultRecorder collector = new();
         PersistenceSqlTaskHost host = new(
             NullLogger<PersistenceSqlTaskHost>.Instance,
+            SqlRedactor.Instance,
             collector,
             new QueryFaultProxy(collector));
 
@@ -773,7 +1452,7 @@ public sealed class CompositionRootTests
         Assert.Equal(PersistenceSqlTaskHost.SoleTaskIndex, host.TaskIndex);
         Assert.NotNull(host.ParentTasking);
 
-        // A sibling lookup has no answer on a host that owns exactly one task.
+        // AN UNBOUND HOST GENUINELY HOLDS NO TASK, and out-of-bound says so rather than inventing one.
         Assert.Equal(RetCode.E_OUT_OF_BOUND, host.GetTask(1, out SqlTaskBase? sibling));
         Assert.Null(sibling);
 
@@ -794,6 +1473,166 @@ public sealed class CompositionRootTests
         QueryFaultSnapshot snapshot = collector.Snapshot();
         Assert.Equal(RetCode.FAILED, snapshot.Code);
         Assert.Equal("broken", snapshot.ErrorText);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  2c. THE WORKER HOST IS THE FINAL SINK FOR EVERY FRAMEWORK DIAGNOSTIC, SO IT IS WHERE IT MASKS
+    // ---------------------------------------------------------------------------------------------
+    //
+    //  Every OnError raise in the whole task layer funnels through SqlTaskBase.OnError into this one
+    //  member, and several of those raises carry statement-bearing text rather than a fixed sentence -
+    //  the query task forwards the runtime's Modify diagnostic, which quotes the whole rejected
+    //  `DataWindow.Table.Select='...'` assignment, and the command task forwards the driver's own
+    //  message, which echoes offending values. Masking one raise site at a time would be a list that
+    //  goes stale; masking the sink covers every present and future raise by construction.
+    //
+    //  THE ASYMMETRY IS THE POINT. The in-band forward keeps the text VERBATIM, because that is the
+    //  diagnostic channel the contract carries out to the caller and the oracle delivers it unaltered
+    //  (constraint C-B). Only the log record is masked (constraint C-F, AAP 0.6.3.8 - the oracle's own
+    //  logger redacts nothing at all, so this is a required addition rather than a ported behaviour).
+
+    [Fact]
+    public void TheWorkerHostForwardsTheDiagnosticVerbatimAndMasksOnlyWhatItLogs()
+    {
+        // Shaped exactly like the real one: a fixed prefix, then the whole rejected property assignment
+        // with a statement inside it, then a bare numeric.
+        const string Raw =
+            "Cannot set property: DataWindow.Table.Select='SELECT ID FROM COMPANY WHERE NAME = "
+            + "\"Zhang Wei\"' at offset 82500";
+
+        QueryFaultRecorder collector = new();
+        RecordingLogger<PersistenceSqlTaskHost> logger = new();
+        PersistenceSqlTaskHost host = new(
+            logger,
+            Errors.SqlRedactor.Instance,
+            collector,
+            new QueryFaultProxy(collector));
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnError(RetCode.E_INTERNAL_ERROR, Raw));
+
+        // IN BAND: byte for byte. A consumer classifying on the text still sees what the oracle sends.
+        Assert.Equal(Raw, collector.Snapshot().ErrorText);
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, collector.Snapshot().Code);
+
+        // IN THE LOG: the literals are gone and nothing else is.
+        string record = Assert.Single(logger.Records);
+        Assert.DoesNotContain("Zhang Wei", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("82500", record, StringComparison.Ordinal);
+        Assert.Contains(Errors.SqlRedactor.DefaultPlaceholder, record, StringComparison.Ordinal);
+
+        // The message SHAPE survives, which is what makes the record still worth reading: the prefix, the
+        // property name and the numeric code are all present.
+        Assert.Contains("Cannot set property", record, StringComparison.Ordinal);
+        Assert.Contains("DataWindow.Table.Select", record, StringComparison.Ordinal);
+        Assert.Contains(
+            RetCode.E_INTERNAL_ERROR.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            record,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWorkerHostMasksNotificationTextOnTheSameGrounds()
+    {
+        // A LEVEL IS NOT AN ACCESS CONTROL. Notifications are recorded at trace level, but they land in
+        // the same sink as everything else and their text is free-form from the task layer, so the same
+        // rule applies.
+        QueryFaultRecorder collector = new();
+        RecordingLogger<PersistenceSqlTaskHost> logger = new();
+        PersistenceSqlTaskHost host = new(
+            logger,
+            Errors.SqlRedactor.Instance,
+            collector,
+            new QueryFaultProxy(collector));
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnNotify(3, 4, "Retrieved 4711 rows for 'COMPANY'"));
+
+        string record = Assert.Single(logger.Records);
+        Assert.DoesNotContain("4711", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("COMPANY", record, StringComparison.Ordinal);
+        Assert.Contains("Retrieved", record, StringComparison.Ordinal);
+        Assert.Contains(Errors.SqlRedactor.DefaultPlaceholder, record, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AHostWithNoSinkStillMasksItsLogAndDoesNotThrowOnANullDiagnostic()
+    {
+        // The public constructor leaves both collaborators null - that is the shape the composition root
+        // uses for a task nobody is collecting for - and a null diagnostic is a legitimate legacy outcome
+        // rather than an error in its own right.
+        RecordingLogger<PersistenceSqlTaskHost> logger = new();
+        PersistenceSqlTaskHost host = new(logger, Errors.SqlRedactor.Instance);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnError(RetCode.FAILED, null!));
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnNotify(0, 0, null!));
+
+        Assert.Equal(2, logger.Records.Count);
+    }
+
+    /// <summary>
+    /// The framework-error channel hands the sink the raw text and the log record a redacted one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE TWO DESTINATIONS ARE DIFFERENT ON PURPOSE AND THIS PINS BOTH HALVES. The sink is the CONTRACT
+    /// channel - it is what the caller is told about its own request, and the legacy's general-error event
+    /// carries the text in full - so masking it there would change observable behaviour. The log record is
+    /// not a contract, and it is the one that lands in a deployment's default log store.
+    /// </para>
+    /// <para>
+    /// The payload used here is not invented. <c>Tasks/SqlQueryTask.cs</c> composes exactly this shape
+    /// when a carrier rejects a caller's expression: the fixed prefix
+    /// <see cref="FullStateCodec.SetFilterMessagePrefix"/> concatenated with the externally supplied
+    /// filter, UNTRIMMED and in full. A filter expression carries literal comparison values, so a
+    /// verbatim log record writes caller data into the log of the one service whose whole disclosure
+    /// posture is that no literal reaches a log or a response.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheWorkerHostRedactsTheLogRecordAndNotTheContractChannel()
+    {
+        const string Filter = "name = 'Ada Lovelace' and salary > 92500";
+        string raised = FullStateCodec.SetFilterMessagePrefix + Filter;
+
+        QueryFaultRecorder collector = new();
+        RecordingLogger<PersistenceSqlTaskHost> log = new();
+        PersistenceSqlTaskHost host = new(log, SqlRedactor.Instance, collector, new QueryFaultProxy(collector));
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnError(RetCode.E_INVALID_ARGUMENT, raised));
+
+        // The contract channel is untouched, character for character.
+        QueryFaultSnapshot snapshot = collector.Snapshot();
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, snapshot.Code);
+        Assert.Equal(raised, snapshot.ErrorText);
+
+        string record = Assert.Single(log.Records);
+
+        // Neither literal survives into the record, and the string literal's quoted body is what a
+        // verbatim log would have disclosed.
+        Assert.DoesNotContain("Ada Lovelace", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("92500", record, StringComparison.Ordinal);
+
+        // What DOES survive is the classification, the safe length metadata and the masked structure, so
+        // an operator can still see that a value was present and where the expression failed.
+        Assert.Contains(
+            RetCode.E_INVALID_ARGUMENT.ToString(CultureInfo.InvariantCulture),
+            record,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            raised.Length.ToString(CultureInfo.InvariantCulture),
+            record,
+            StringComparison.Ordinal);
+        Assert.Contains("name =", record, StringComparison.Ordinal);
+        Assert.Contains("salary >", record, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -827,15 +1666,20 @@ public sealed class CompositionRootTests
     }
 
     /// <summary>
-    /// Builds a provider carrying only what the startup gate reads.
+    /// Builds a provider carrying the WHOLE storage and SQL layer, which is what a factory needs.
     /// </summary>
     /// <param name="dataDirectory">The storage directory to configure.</param>
-    /// <returns>A provider the gate can be run against.</returns>
-    private static ServiceProvider BuildGateProvider(string dataDirectory)
+    /// <returns>A provider the task factories can be resolved from.</returns>
+    /// <remarks>
+    /// Composed through the host's own registration methods rather than by hand, so these cases exercise
+    /// the same graph the service builds instead of a parallel one that could drift away from it unnoticed.
+    /// </remarks>
+    private static ServiceProvider BuildSqlLayerProvider(string dataDirectory)
     {
         ServiceCollection services = new();
 
         services.AddLogging();
+        services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IValidateOptions<PersistenceOptions>, PersistenceOptionsValidator>();
         services.AddOptions<PersistenceOptions>().Configure(options =>
         {
@@ -844,35 +1688,319 @@ public sealed class CompositionRootTests
             options.Jwt.Audience = TrustedAudience;
         });
 
+        _ = services
+            .AddPersistenceStorage()
+            .AddPersistenceSqlLayer()
+            .AddPersistencePublishedSurface();
+
         return services.BuildServiceProvider();
     }
 
     /// <summary>
-    /// Produces a real pooled transaction over the shipped engine rather than a hand-written stub.
+    /// Builds a provider carrying only what the startup gate reads.
     /// </summary>
-    /// <returns>A pooled transaction.</returns>
+    /// <param name="dataDirectory">The storage directory to configure.</param>
+    /// <returns>A provider the gate can be run against.</returns>
     /// <remarks>
-    /// Using the real activator means these cases exercise the same composition the host performs,
-    /// instead of a parallel object graph that could drift away from it unnoticed.
+    /// THE FULL RUNTIME GRAPH, NOT A MINIMAL ONE, because the gate now resolves every SQL seam as well as
+    /// probing the storage directory. A cut-down provider would fail the graph check for a reason that has
+    /// nothing to do with the directory each of these cases is actually about. The ORDERING inside the
+    /// gate is what keeps them honest anyway: the directory is validated first, so a case supplying an
+    /// unusable directory still terminates for the directory's reason and never reaches the graph.
     /// </remarks>
-    private static IPooledTransaction CreatePooledTransaction() =>
+    private static ServiceProvider BuildGateProvider(string dataDirectory) =>
+        BuildRuntimeGraphProvider(dataDirectory, omitEngine: false);
+
+    /// <summary>
+    /// Builds a storage seam over a temporary directory, bypassing configuration binding so a case
+    /// depends on nothing but the path it chose.
+    /// </summary>
+    /// <param name="dataDirectory">The directory the database file should live in.</param>
+    /// <returns>A seam that has not yet opened anything.</returns>
+    /// <remarks>
+    /// THE DIRECTORY IS CREATED HERE BECAUSE THE STARTUP GATE CREATES IT IN PRODUCTION. The gate under
+    /// test in section 4 above is what guarantees a writable storage directory exists before the service
+    /// serves anything, so a case exercising the layers BEHIND that gate has to stand where the gate
+    /// leaves them. Leaving it absent would assert a state the service never reaches.
+    /// </remarks>
+    private static SqliteConnectionFactory CreateStorage(string dataDirectory)
+    {
+        Directory.CreateDirectory(dataDirectory);
+
+        return new SqliteConnectionFactory(
+            Options.Create(new PersistenceOptions
+            {
+                Sqlite = new SqliteOptions
+                {
+                    DataDirectory = dataDirectory,
+                    DatabaseFileName = "test.db",
+                    Mode = "rwc",
+                    Journal = "DELETE",
+                },
+            }),
+            NullLogger<SqliteConnectionFactory>.Instance,
+            TimeProvider.System);
+    }
+
+    /// <summary>
+    /// Produces a pooled transaction over a live SQLite engine, connected and ready to execute.
+    /// </summary>
+    /// <param name="storage">The storage seam the engine composes its connection string from.</param>
+    /// <returns>A connected pooled transaction the caller owns and disposes.</returns>
+    /// <remarks>
+    /// THE REAL ACTIVATOR, NOT A PARALLEL GRAPH. These cases go through the same
+    /// <see cref="PooledTransactionActivator"/> the host uses, so a change to how the host composes a
+    /// pooled transaction cannot drift away from what is asserted here without a case noticing.
+    /// </remarks>
+    private static IPooledTransaction CreateLiveTransaction(SqliteConnectionFactory storage)
+    {
+        IPooledTransaction transaction = new PooledTransactionActivator(
+            () => new SqliteTransactionEngine(storage, NullLogger<SqliteTransactionEngine>.Instance),
+            TimeProvider.System).CreateDefault();
+
+        transaction.AutoCommit = true;
+        Assert.Equal(0, transaction.Connect());
+
+        return transaction;
+    }
+
+    /// <summary>
+    /// Builds the service's real runtime graph, optionally with the transaction engine withheld.
+    /// </summary>
+    /// <param name="dataDirectory">The storage directory to configure.</param>
+    /// <param name="omitEngine">
+    /// When <see langword="true"/>, the transaction engine is pre-registered as a factory that throws, so
+    /// the graph is composed but not producible - the closest a container can come to a seam whose
+    /// registration is present and broken.
+    /// </param>
+    /// <returns>A provider the gate can be run against.</returns>
+    /// <remarks>
+    /// THE OMISSION IS EXPRESSED AS A THROWING FACTORY RATHER THAN A MISSING REGISTRATION, because every
+    /// registration in this service is <c>TryAdd</c>-shaped: removing one is impossible from outside, and
+    /// a pre-registration wins. A registration that cannot produce its instance is also the more
+    /// realistic fault - a seam whose constructor rejects its configuration - and the gate must catch it
+    /// either way.
+    /// </remarks>
+    private static ServiceProvider BuildRuntimeGraphProvider(string dataDirectory, bool omitEngine)
+    {
+        ServiceCollection services = new();
+
+        services.AddLogging();
+
+        if (omitEngine)
+        {
+            services.AddTransient<ITransactionEngine>(static _ => throw new InvalidOperationException(
+                $"This case withholds {nameof(ITransactionEngine)} on purpose, standing in for a seam "
+                + "whose constructor rejects its configuration."));
+        }
+
+        services.AddOptions<PersistenceOptions>().Configure(options =>
+        {
+            options.Sqlite.DataDirectory = dataDirectory;
+            options.Sqlite.DatabaseFileName = "test.db";
+            options.Jwt.Authority = TrustedIssuer;
+            options.Jwt.Audience = TrustedAudience;
+
+            // The gate reads Value, which runs the validator, and the validator requires a permitted-caller
+            // roster: the four gRPC contracts refuse a caller identity this service does not serve, and an
+            // empty roster refuses everyone rather than permitting everyone. Supplied here so these rows
+            // fail on the storage condition they exist to assert rather than on configuration.
+            options.Jwt.PermittedCallers.Add(TokenSubject);
+        });
+
+        // THE GATE RESOLVES THE TRUST ANCHOR, SO THIS PROVIDER HAS TO CARRY IT. The gate loads it with
+        // GetRequiredService rather than GetService deliberately: a configured-but-unreadable anchor
+        // means the bearer handler cannot fetch the key set it validates every inbound token against,
+        // so the fault has to stop the host. Resolving it OPTIONALLY would also silently tolerate the
+        // registration being dropped, at which point the anchor would never be loaded and nothing would
+        // notice - which is the failure mode the gate exists to prevent. The options here leave the
+        // path empty, so this registration exercises the platform-default-trust branch; the pinned and
+        // unreadable branches are covered directly by InternalTlsTrustTests.
+        services.AddSingleton(provider => new InternalTlsTrust(
+            provider.GetRequiredService<IOptions<PersistenceOptions>>().Value.InternalTls));
+
+        services.AddSingleton<IValidateOptions<PersistenceOptions>, PersistenceOptionsValidator>();
+        services.AddPersistenceDeterminismSeam();
+        services.AddPersistenceStorage();
+        services.AddPersistenceSqlLayer();
+        services.AddPersistencePublishedSurface();
+
+        return services.BuildServiceProvider();
+    }
+
+    /// <summary>
+    /// Builds a provider carrying the graph the two task factories resolve their collaborators from.
+    /// </summary>
+    /// <returns>A provider the factories can be resolved out of.</returns>
+    /// <remarks>
+    /// REGISTERED THROUGH THE SERVICE'S OWN EXTENSION, so this fixture cannot describe a graph the host
+    /// does not actually build. Only the storage directory is overridden, because a factory case must not
+    /// depend on whichever directory the ambient configuration happens to name.
+    /// </remarks>
+    private static ServiceProvider BuildTaskFactoryProvider()
+    {
+        ServiceCollection services = new();
+
+        services.AddLogging();
+        services.AddOptions<PersistenceOptions>().Configure(static options =>
+        {
+            options.Sqlite.DataDirectory = Path.Combine(
+                Path.GetTempPath(),
+                $"pfw-factory-{Guid.NewGuid():n}");
+            options.Sqlite.DatabaseFileName = "test.db";
+            options.Jwt.Authority = TrustedIssuer;
+            options.Jwt.Audience = TrustedAudience;
+        });
+
+        services.AddPersistenceDeterminismSeam();
+        services.AddPersistenceStorage();
+        services.AddPersistenceSqlLayer();
+        services.AddPersistencePublishedSurface();
+
+        return services.BuildServiceProvider();
+    }
+
+    /// <summary>
+    /// Removes a directory a case created, tolerating one that was never created at all.
+    /// </summary>
+    /// <param name="directory">The directory to remove.</param>
+    /// <remarks>
+    /// SCOPED TO A PATH THIS CASE ITSELF CHOSE UNDER THE TEMPORARY ROOT, and never to a configured
+    /// storage directory: the persistence volume's state is what the paired characterization captures
+    /// compare against, and a case that deleted it would invalidate them.
+    /// </remarks>
+
+    private static IPooledTransaction CreatePooledTransaction(string dataDirectory) =>
         new PooledTransactionActivator(
-            static () => new UnprovisionedTransactionEngine(),
+            () => CreateEngine(dataDirectory),
             TimeProvider.System).CreateDefault();
 
     /// <summary>
-    /// Produces a real worker-affine datastore over the shipped unbound runtime, not a stub.
+    /// Produces the production engine over a throwaway data directory.
     /// </summary>
-    /// <returns>A datastore.</returns>
-    private static ISqlDataStore CreateDataStore() =>
-        new SqlDataStoreFactory(new UnboundDataObjectRuntime(), TimeProvider.System)
-            .Create(Buffers.CarrierThreadAffinity.WorkerThread);
+    /// <param name="dataDirectory">The directory the database file is created under.</param>
+    /// <returns>The engine.</returns>
+    private static SqliteTransactionEngine CreateEngine(string dataDirectory) =>
+        new(
+            CreateConnectionFactory(dataDirectory),
+            NullLogger<SqliteTransactionEngine>.Instance);
+
+    /// <summary>
+    /// Produces the ONE seam that owns the legacy connection URI grammar, over a throwaway directory.
+    /// </summary>
+    /// <param name="dataDirectory">The directory the database file is created under.</param>
+    /// <returns>The factory.</returns>
+    private static SqliteConnectionFactory CreateConnectionFactory(string dataDirectory)
+    {
+        PersistenceOptions options = new();
+        options.Sqlite.DataDirectory = dataDirectory;
+
+        return new SqliteConnectionFactory(
+            Options.Create(options),
+            NullLogger<SqliteConnectionFactory>.Instance,
+            TimeProvider.System);
+    }
+
+    /// <summary>
+    /// Removes a throwaway directory, tolerating one that was never created.
+    /// </summary>
+    /// <param name="directory">The directory.</param>
+    private static void DeleteDirectory(string directory)
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Builds a provider carrying the whole runtime and published surface.
+    /// </summary>
+    /// <returns>A provider the factory registrations can be resolved from.</returns>
+    private static ServiceProvider BuildRuntimeProvider()
+    {
+        ServiceCollection services = new();
+
+        services.AddLogging();
+        services.AddOptions<PersistenceOptions>().Configure(static options =>
+        {
+            options.Jwt.Authority = TrustedIssuer;
+            options.Jwt.Audience = TrustedAudience;
+        });
+        services.AddPersistenceDeterminismSeam();
+        services.AddPersistenceStorage();
+        services.AddPersistenceSqlLayer();
+        services.AddPersistencePublishedSurface();
+
+        return services.BuildServiceProvider();
+    }
+
+    /// <summary>An engine that records nothing and connects to nothing.</summary>
+    /// <remarks>
+    /// Present so the composition cases can produce a REAL pooled transaction - through the real
+    /// activator, so they exercise the same composition the host performs - without opening a database.
+    /// It composes no SQLite engine, which is precisely the case the read side's defined negative covers.
+    /// </remarks>
+    private sealed class StubEngine : ITransactionEngine
+    {
+        /// <inheritdoc/>
+        public int DbHandle => 0;
+
+        /// <inheritdoc/>
+        public string Dbms { get; private set; } = string.Empty;
+
+        /// <inheritdoc/>
+        public bool AutoCommit { get; set; }
+
+        /// <inheritdoc/>
+        public void ApplyConnectionFields(in TransactionData transData) => Dbms = transData.Dbms;
+
+        /// <inheritdoc/>
+        public SqlState Connect(CancellationToken cancellationToken = default) =>
+            SqlState.Failed(RetCode.E_NO_IMPLEMENTATION, "not connected");
+
+        /// <inheritdoc/>
+        public SqlState Disconnect() => SqlState.Succeeded();
+
+        /// <inheritdoc/>
+        public SqlState Commit() => SqlState.Failed(RetCode.E_NO_IMPLEMENTATION, "not connected");
+
+        /// <inheritdoc/>
+        public SqlState Rollback() => SqlState.Succeeded();
+
+        /// <inheritdoc/>
+        public SqlState Execute(string statement, CancellationToken cancellationToken = default) =>
+            SqlState.Failed(RetCode.E_NO_IMPLEMENTATION, "not connected");
+
+        // THE BOUND OVERLOAD IS WHERE THE WORK BELONGS, so the double implements it and lets the
+        // single-string form forward. A double that implemented only the string form would let a
+        // production type opt back into splicing literals without any row noticing.
+        public SqlState Execute(in SqlCommandText command, CancellationToken cancellationToken = default) =>
+            Execute(command.CanonicalText, cancellationToken);
+
+        /// <inheritdoc/>
+        public void Dispose()
+        {
+        }
+    }
 
     /// <summary>Records whether the host was asked to stop.</summary>
     private sealed class RecordingLifetime : IHostApplicationLifetime
     {
         /// <summary>Whether a stop was requested.</summary>
         internal bool Stopped { get; private set; }
+
+        /// <summary>
+        /// The process exit code as it stood AT THE MOMENT the stop was requested, or
+        /// <see langword="null"/> while no stop has been requested.
+        /// </summary>
+        /// <remarks>
+        /// CAPTURED HERE BECAUSE THE ORDERING IS THE SUBSTANCE OF THE REQUIREMENT, not just the values.
+        /// Reading <see cref="Environment.ExitCode"/> after the call returns cannot distinguish a code set
+        /// before the stop request from one set after it, and only the first ordering survives a host that
+        /// returns from its run loop promptly.
+        /// </remarks>
+        internal int? ExitCodeWhenStopped { get; private set; }
 
         /// <inheritdoc/>
         public CancellationToken ApplicationStarted => CancellationToken.None;
@@ -884,15 +2012,27 @@ public sealed class CompositionRootTests
         public CancellationToken ApplicationStopped => CancellationToken.None;
 
         /// <inheritdoc/>
-        public void StopApplication() => Stopped = true;
+        public void StopApplication()
+        {
+            ExitCodeWhenStopped = Environment.ExitCode;
+            Stopped = true;
+        }
     }
 
-    /// <summary>Captures formatted log records so a redaction claim can be checked.</summary>
+    /// <summary>A logger whose every write throws, standing in for a saturated or broken sink.</summary>
     /// <typeparam name="T">The category type.</typeparam>
-    private sealed class RecordingLogger<T> : ILogger<T>
+    /// <remarks>
+    /// EXISTS TO PROVE ONE THING: that reporting a structural fault and terminating on it are
+    /// independent. A logging provider can fail - a full disk, a saturated sink, a formatter that throws
+    /// on an argument it did not expect - and before the termination request was moved into a
+    /// <c>finally</c>, such a failure propagated out of the mapping and left the process serving requests
+    /// in a state its own invariants had already declared impossible.
+    /// </remarks>
+    private sealed class ThrowingLogger<T> : ILogger<T>
     {
-        /// <summary>The formatted records.</summary>
-        internal List<string> Records { get; } = [];
+        /// <summary>The fault every write raises.</summary>
+        internal static readonly InvalidOperationException WriteFault =
+            new("the log sink is unavailable");
 
         /// <inheritdoc/>
         public IDisposable? BeginScope<TState>(TState state)
@@ -902,10 +2042,43 @@ public sealed class CompositionRootTests
         public bool IsEnabled(LogLevel logLevel) => true;
 
         /// <inheritdoc/>
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) => throw WriteFault;
+    }
+
+    /// <summary>Captures formatted log records so a redaction claim can be checked.</summary>
+    /// <typeparam name="T">The category type.</typeparam>
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        /// <summary>The formatted records.</summary>
+        internal List<string> Records { get; } = [];
+
+        /// <summary>
+        /// The exception each record was written WITH, in the same order, with a null entry where a record
+        /// carried none.
+        /// </summary>
         /// <remarks>
-        /// Only the FORMATTED record is captured, deliberately. That is what a log sink writes, so it is
-        /// the thing a redaction claim has to be made about.
+        /// CAPTURED BECAUSE THE FORMATTED MESSAGE IS ONLY HALF OF WHAT A SINK WRITES, and the half this
+        /// recorder used to ignore was where a leak could hide in plain sight. Every provider renders an
+        /// attached exception by calling <c>ToString()</c> on it, which emits the UNREDACTED message, every
+        /// inner exception's unredacted message and the stack - so a record whose formatted text is perfectly
+        /// redacted still publishes all of it when an exception is attached beside it. A redaction claim has
+        /// to be made about both, which is why both are recorded here.
         /// </remarks>
+        internal List<Exception?> Exceptions { get; } = [];
+
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        /// <inheritdoc/>
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        /// <inheritdoc/>
         public void Log<TState>(
             LogLevel logLevel,
             EventId eventId,
@@ -916,6 +2089,7 @@ public sealed class CompositionRootTests
             ArgumentNullException.ThrowIfNull(formatter);
 
             Records.Add(formatter(state, exception));
+            Exceptions.Add(exception);
         }
     }
 
@@ -991,78 +2165,428 @@ public sealed class CompositionRootTests
             Task.CompletedTask;
     }
 
+    // ==============================================================================================
+    //  2b. THE TWO NAMED SCOPE POLICIES
+    // ==============================================================================================
+
     /// <summary>
-    /// Boots the service's own composition root in process.
+    /// The scope parser reads a space-delimited claim by exact name.
+    /// </summary>
+    /// <param name="claimType">The claim the set arrives in.</param>
+    /// <param name="claimValue">The claim's value.</param>
+    /// <param name="required">The scope being asked about.</param>
+    /// <param name="expected">Whether the parser should answer true.</param>
+    /// <remarks>
+    /// THE ENCODING IS THE ISSUER'S, NOT A GUESS. Security mints ONE <c>scope</c> claim carrying the
+    /// granted set as a single space-delimited value
+    /// [services/security-service/PowerFramework.Security/Tokens/TokenIssuer.cs], so reading it means
+    /// splitting - and a parser that compared the whole claim value would never match a token carrying
+    /// more than one scope, which is every token this system issues for a multi-scope request.
+    /// </remarks>
+    [Theory]
+    // The single-scope shape, both ways round.
+    [InlineData("scope", "persistence.read", "persistence.read", true)]
+    [InlineData("scope", "persistence.read", "persistence.write", false)]
+    // The space-delimited shape the issuer actually mints, at each position.
+    [InlineData("scope", "persistence.read persistence.write", "persistence.read", true)]
+    [InlineData("scope", "persistence.read persistence.write", "persistence.write", true)]
+    [InlineData("scope", "a persistence.write z", "persistence.write", true)]
+    // A SUPERSET IS NOT A NARROWING: an unrelated scope alongside the required one changes nothing.
+    [InlineData("scope", "something.else persistence.read", "persistence.read", true)]
+    // PREFIX AND SUBSTRING MATCHES MUST NOT SATISFY IT, which is what makes the comparison exact.
+    [InlineData("scope", "persistence.readonly", "persistence.read", false)]
+    [InlineData("scope", "xpersistence.read", "persistence.read", false)]
+    [InlineData("scope", "persistence", "persistence.read", false)]
+    // CASE-SENSITIVE, because scope names are case-sensitive strings in the OAuth framework.
+    [InlineData("scope", "PERSISTENCE.READ", "persistence.read", false)]
+    // The alternative claim name some issuers use. Accepted so a deployment pointed at such an issuer
+    // does not fail closed for a reason nobody can see.
+    [InlineData("scp", "persistence.write", "persistence.write", true)]
+    // A claim that is not a scope claim is not consulted at all.
+    [InlineData("role", "persistence.write", "persistence.write", false)]
+    // Degenerate values answer false rather than throwing.
+    [InlineData("scope", "", "persistence.read", false)]
+    [InlineData("scope", "   ", "persistence.read", false)]
+    // Tabs and line breaks are treated as delimiters, so a value that arrived with one still reads.
+    [InlineData("scope", "persistence.read\tpersistence.write", "persistence.write", true)]
+    [InlineData("scope", "persistence.read\npersistence.write", "persistence.write", true)]
+    public void TheScopeParserReadsASpaceDelimitedClaimByExactName(
+        string claimType,
+        string claimValue,
+        string required,
+        bool expected)
+    {
+        ClaimsPrincipal user = new(new ClaimsIdentity([new Claim(claimType, claimValue)], "Test"));
+
+        Assert.Equal(expected, PersistenceAuthorizationPolicies.HasScope(user, required));
+    }
+
+    /// <summary>
+    /// A principal with no claims at all, and a null principal, both answer false.
+    /// </summary>
+    [Fact]
+    public void TheScopeParserAnswersFalseForNothingRatherThanThrowing()
+    {
+        Assert.False(PersistenceAuthorizationPolicies.HasScope(null, "persistence.read"));
+        Assert.False(PersistenceAuthorizationPolicies.HasScope(new ClaimsPrincipal(), "persistence.read"));
+
+        // The scope being asked about is a programming input rather than caller data, so an empty one is
+        // an error and not a question.
+        Assert.Throws<ArgumentException>(() =>
+            PersistenceAuthorizationPolicies.HasScope(new ClaimsPrincipal(), string.Empty));
+    }
+
+    /// <summary>
+    /// The registered policies admit exactly the credential that names their own scope.
+    /// </summary>
+    /// <param name="policy">The policy being evaluated.</param>
+    /// <param name="grantedScope">The scope value on the principal's claim.</param>
+    /// <param name="expected">Whether authorization should succeed.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// EVALUATED THROUGH THE CONTAINER'S OWN <see cref="IAuthorizationService"/>, so what is under test is
+    /// the policy AS REGISTERED - the assertion and the authenticated-user requirement together - rather
+    /// than a re-statement of it. Authentication alone previously satisfied every contract, which is the
+    /// least-privilege failure this closes.
+    /// </remarks>
+    [Theory]
+    [InlineData("persistence.read", "persistence.read", true)]
+    [InlineData("persistence.read", "persistence.write", false)]
+    [InlineData("persistence.read", "persistence.read persistence.write", true)]
+    [InlineData("persistence.write", "persistence.write", true)]
+    [InlineData("persistence.write", "persistence.read", false)]
+    [InlineData("persistence.write", "persistence.read persistence.write", true)]
+    [InlineData("persistence.write", "", false)]
+    public async Task EachPolicyAdmitsExactlyTheCredentialNamingItsOwnScope(
+        string policy,
+        string grantedScope,
+        bool expected)
+    {
+        using CompositionHost host = CompositionHost.Create();
+
+        IAuthorizationService authorization = host.Services
+            .GetRequiredService<IAuthorizationService>();
+
+        ClaimsPrincipal user = new(new ClaimsIdentity(
+            [new Claim("sub", "composition-root-test"), new Claim("scope", grantedScope)],
+            JwtBearerDefaults.AuthenticationScheme));
+
+        AuthorizationResult result = await authorization.AuthorizeAsync(user, resource: null, policy);
+
+        Assert.Equal(expected, result.Succeeded);
+    }
+
+    /// <summary>
+    /// An unauthenticated principal satisfies neither policy, even carrying the scope.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// Both policies pair the scope assertion with <c>RequireAuthenticatedUser</c>, so a claim on an
+    /// unauthenticated identity - which is what an unsigned or unverified credential would produce -
+    /// cannot buy access on its own.
+    /// </remarks>
+    [Fact]
+    public async Task AnUnauthenticatedPrincipalSatisfiesNeitherPolicy()
+    {
+        using CompositionHost host = CompositionHost.Create();
+
+        IAuthorizationService authorization = host.Services
+            .GetRequiredService<IAuthorizationService>();
+
+        // NO authentication type, so IsAuthenticated is false.
+        ClaimsPrincipal user = new(new ClaimsIdentity(
+            [new Claim("scope", "persistence.read persistence.write")]));
+
+        Assert.False((await authorization.AuthorizeAsync(
+            user,
+            resource: null,
+            PersistenceAuthorizationPolicies.Read)).Succeeded);
+        Assert.False((await authorization.AuthorizeAsync(
+            user,
+            resource: null,
+            PersistenceAuthorizationPolicies.Write)).Succeeded);
+    }
+
+    /// <summary>
+    /// Every routed RPC declares the scope policy its contract requires.
     /// </summary>
     /// <remarks>
-    /// The bearer handler is given a static verification configuration, which is what makes it skip
-    /// metadata retrieval entirely - so these cases prove the DEPLOYED authorization posture without
-    /// depending on a Security instance being reachable.
+    /// <para>
+    /// THE MAPPING IS ASSERTED ROUTE BY ROUTE, not per contract, because C-08 is annotated PER RPC: its
+    /// readers need read and its state changers need write, and a class-level policy could only pick one
+    /// side. A new RPC arriving on any contract without an attribute fails here rather than silently
+    /// inheriting nothing beyond authentication.
+    /// </para>
+    /// <para>
+    /// The route pattern is <c>/{package}.{service}/{method}</c>, which is how the method name is
+    /// recovered without reflecting over the implementation.
+    /// </para>
     /// </remarks>
-    private sealed class CompositionHost : WebApplicationFactory<Program>
+    [Fact]
+    public void EveryRoutedRpcDeclaresTheScopePolicyItsContractRequires()
     {
-        /// <summary>The key credentials are signed and verified with.</summary>
-        private readonly byte[] _key = RandomNumberGenerator.GetBytes(32);
+        // The C-08 split. Everything not named here writes.
+        string[] transactionReaders =
+        [
+            "BeginSession", "EndSession", "GetTransactionData", "IsConnected", "GetDatabaseType",
+            "GetSessionState", "GridSyntaxFromSql",
+        ];
 
-        /// <summary>Creates a host.</summary>
-        /// <returns>A started-on-first-use host.</returns>
-        internal static CompositionHost Create() => new();
+        using CompositionHost host = CompositionHost.Create();
 
-        /// <summary>Mints a credential this host accepts.</summary>
-        /// <returns>A compact-serialized token.</returns>
-        internal string MintToken()
+        List<RouteEndpoint> mapped = host.Services
+            .GetRequiredService<EndpointDataSource>()
+            .Endpoints
+            .OfType<RouteEndpoint>()
+            .Where(static endpoint => endpoint.RoutePattern.RawText is string text
+                && text.StartsWith("/persistence.v1.", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.NotEmpty(mapped);
+
+        foreach (RouteEndpoint endpoint in mapped)
         {
-            DateTimeOffset now = TimeProvider.System.GetUtcNow();
-            DateTimeOffset issued = now - TimeSpan.FromMinutes(1);
-            DateTimeOffset expires = now + TimeSpan.FromMinutes(10);
+            string route = endpoint.RoutePattern.RawText!;
+            string method = route[(route.LastIndexOf('/') + 1)..];
 
-            string header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
-            string payload = string.Create(
-                CultureInfo.InvariantCulture,
-                $"{{\"iss\":\"{TrustedIssuer}\",\"aud\":\"{TrustedAudience}\",\"sub\":\"composition-root-test\",\"iat\":{issued.ToUnixTimeSeconds()},\"nbf\":{issued.ToUnixTimeSeconds()},\"exp\":{expires.ToUnixTimeSeconds()}}}");
+            string expected = route.StartsWith("/persistence.v1.QueryService/", StringComparison.Ordinal)
+                ? PersistenceAuthorizationPolicies.Read
+                : route.StartsWith("/persistence.v1.TransactionService/", StringComparison.Ordinal)
+                    ? transactionReaders.Contains(method, StringComparer.Ordinal)
+                        ? PersistenceAuthorizationPolicies.Read
+                        : PersistenceAuthorizationPolicies.Write
+                    : PersistenceAuthorizationPolicies.Write;
 
-            string signingInput = string.Concat(
-                Encode(Encoding.UTF8.GetBytes(header)),
-                ".",
-                Encode(Encoding.UTF8.GetBytes(payload)));
+            string[] declared =
+            [
+                .. endpoint.Metadata
+                    .GetOrderedMetadata<IAuthorizeData>()
+                    .Select(static data => data.Policy)
+                    .Where(static policy => !string.IsNullOrEmpty(policy))
+                    .Select(static policy => policy!),
+            ];
 
-            return string.Concat(
-                signingInput,
-                ".",
-                Encode(HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(signingInput))));
+            Assert.Contains(expected, declared);
+
+            // AND EXACTLY ONE SCOPE POLICY PER ROUTE. Two would be ANDed, so a caller would need both
+            // scopes - which is not what either contract asks of anyone.
+            Assert.Single(declared);
         }
-
-        /// <inheritdoc/>
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
-        {
-            ArgumentNullException.ThrowIfNull(builder);
-
-            builder.UseEnvironment(Environments.Production);
-
-            // Supplied as host configuration so the service's OWN startup gate runs against them.
-            builder.UseSetting("Jwt:Authority", TrustedIssuer);
-            builder.UseSetting("Jwt:Audience", TrustedAudience);
-            builder.UseSetting("Jwt:RequireHttpsMetadata", "true");
-            builder.UseSetting(
-                "Sqlite:DataDirectory",
-                Path.Combine(Path.GetTempPath(), "pfw-composition-root"));
-
-            builder.ConfigureServices(services => services.Configure<JwtBearerOptions>(
-                JwtBearerDefaults.AuthenticationScheme,
-                options =>
-                {
-                    OpenIdConnectConfiguration verification = new() { Issuer = TrustedIssuer };
-                    verification.SigningKeys.Add(new SymmetricSecurityKey(_key));
-
-                    options.Configuration = verification;
-                    options.TokenValidationParameters.ValidIssuer = TrustedIssuer;
-                    options.TokenValidationParameters.ValidAudience = TrustedAudience;
-                }));
-        }
-
-        /// <summary>Base64url-encodes a segment, unpadded, as the compact serialization requires.</summary>
-        /// <param name="value">The bytes to encode.</param>
-        /// <returns>The encoded segment.</returns>
-        private static string Encode(byte[] value) => System.Buffers.Text.Base64Url.EncodeToString(value);
     }
+
+    /// <summary>
+    /// The two policy names are the two scope names the client requests and the issuer mints.
+    /// </summary>
+    /// <remarks>
+    /// The one string that has to agree across three services, and nothing in the build enforces it: the
+    /// client names it in a token request, the issuer copies it into the claim, and this service compares
+    /// it. Pinned so a rename in any one of the three breaks a test rather than a deployment.
+    /// </remarks>
+    [Fact]
+    public void ThePolicyNamesAreTheScopeNames()
+    {
+        Assert.Equal("persistence.read", PersistenceAuthorizationPolicies.Read);
+        Assert.Equal("persistence.write", PersistenceAuthorizationPolicies.Write);
+    }
+
+}
+
+/// <summary>
+/// Boots the service's own composition root in process.
+/// </summary>
+/// <remarks>
+/// The bearer handler is given a static verification configuration, which is what makes it skip
+/// metadata retrieval entirely - so these cases prove the DEPLOYED authorization posture without
+/// depending on a Security instance being reachable.
+/// </remarks>
+internal sealed class CompositionHost : WebApplicationFactory<Program>
+{
+    /// <summary>The issuer this host trusts, and the one it stamps into a minted credential.</summary>
+    /// <remarks>
+    /// OWNED HERE RATHER THAN BY A TEST CLASS, because it is a property of the HOST: it is supplied as host
+    /// configuration so the service's own startup gate runs against it, and it is stamped into every token
+    /// this factory mints. Two suites boot this host, so a copy in either of them would be a second
+    /// spelling that could drift from the configuration it has to match.
+    /// </remarks>
+    internal const string TrustedIssuer = "https://security.invalid";
+
+    /// <summary>The audience this host accepts, and the one it stamps into a minted credential.</summary>
+    internal const string TrustedAudience = "powerframework-persistence-composition";
+
+    /// <summary>The key credentials are signed and verified with.</summary>
+    private readonly byte[] _key = RandomNumberGenerator.GetBytes(32);
+
+    /// <summary>Creates a host.</summary>
+    /// <returns>A started-on-first-use host.</returns>
+    internal static CompositionHost Create() => new();
+
+    /// <summary>
+    /// The data directory every host in this file is configured with.
+    /// </summary>
+    /// <remarks>
+    /// Named once and read by both the host and the readiness case, so the two cannot drift. Fixed
+    /// rather than per-instance because these cases boot many hosts and none of them writes: the only
+    /// case that needs a database provisions this directory itself.
+    /// </remarks>
+    internal static string DataDirectory { get; } =
+        Path.Combine(Path.GetTempPath(), "pfw-composition-root");
+
+    /// <summary>
+    /// Provisions the real schema in <see cref="DataDirectory"/> by applying the real migrations.
+    /// </summary>
+    /// <param name="cancellationToken">The test's token.</param>
+    /// <returns>A task that completes when the schema is present.</returns>
+    /// <remarks>
+    /// Needed because the readiness probe verifies the schema and not merely that the engine answers,
+    /// so a service with no database is correctly NOT ready. Applying the real migrations - rather
+    /// than hand-written DDL or <c>EnsureCreated</c> - is what makes this case assert that the
+    /// deployed provisioning path satisfies the deployed readiness check. Idempotent, so repeated runs
+    /// against the shared directory are safe.
+    /// </remarks>
+    internal static async Task ProvisionSchemaAsync(CancellationToken cancellationToken)
+    {
+        _ = Directory.CreateDirectory(DataDirectory);
+
+        SqliteConnectionStringBuilder builder = new()
+        {
+            DataSource = Path.Combine(DataDirectory, "test.db"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+
+            // POOLING OFF, a TEST-HARNESS necessity and not a product concern.
+            // Microsoft.Data.Sqlite pools by connection string, so disposing the context returns its
+            // connection to the pool WITHOUT closing the underlying handle - and a later RUNTIME open
+            // would then block for its whole busy timeout trying to set the journal mode, which needs an
+            // exclusive lock. In production the migration tool is a separate PROCESS that exits, so no
+            // handle survives it and nothing needs disabling; here the two share one process.
+            Pooling = false,
+        };
+
+        DbContextOptions<PowerFrameworkDbContext> options =
+            new DbContextOptionsBuilder<PowerFrameworkDbContext>()
+                .UseSqlite(builder.ConnectionString)
+                .Options;
+
+        await using PowerFrameworkDbContext context = new(options);
+
+        await context.Database.MigrateAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The subject this host's forged credential claims, and the sole entry of the permitted-caller
+    /// roster it starts with.
+    /// </summary>
+    /// <remarks>
+    /// Declared HERE rather than on the suite, because the two have to agree: the roster below is
+    /// supplied as host configuration so the service's own startup gate runs against it, and the token
+    /// minted above must name a caller that gate accepts. Splitting the two across types is how they
+    /// come to disagree.
+    /// </remarks>
+    internal const string TokenSubject = "composition-root-test";
+
+    /// <summary>Mints a credential this host accepts.</summary>
+    /// <param name="scopes">
+    /// The scopes the credential carries as ONE space-delimited <c>scope</c> claim. Space-delimited and
+    /// not one claim per scope, because that is the RFC 6749 form the shipped requirement handler
+    /// splits [<c>Authorization/ScopeAuthorization.cs</c>] - minting one claim per scope would pass a
+    /// handler that compared whole values and would not exercise the split at all.
+    /// </param>
+    /// <returns>A compact-serialized token.</returns>
+    /// <remarks>
+    /// <b>THREE DISTINCT CREDENTIALS ARE REACHABLE, AND THEY ARE NOT INTERCHANGEABLE.</b> Two suites boot
+    /// this host and each needs a different one, so the mapping is written out rather than left to be
+    /// inferred from a default:
+    /// <list type="bullet">
+    /// <item>
+    /// <see langword="null"/> - the default - stamps BOTH of this service's scopes, which is the
+    /// credential its only real caller sends when it holds both. This is what the REST rows want (they
+    /// need only an authenticated principal) and what the "accepted everywhere" row means by "the
+    /// credential the real caller sends". It must NOT mean "no scope", because that row would then assert
+    /// the opposite of its own name and would be refused at every contract.
+    /// </item>
+    /// <item>
+    /// An EMPTY collection omits the claim ENTIRELY - a token that never carried a scope at all.
+    /// </item>
+    /// <item>
+    /// A collection holding one empty string stamps the claim PRESENT AND EMPTY. That is a different
+    /// credential from the one above and reaches a different branch of the handler, and a policy that
+    /// refused only the absent one would let the empty one through.
+    /// </item>
+    /// </list>
+    /// </remarks>
+    internal string MintToken(IReadOnlyList<string>? scopes = null)
+    {
+        DateTimeOffset now = TimeProvider.System.GetUtcNow();
+        DateTimeOffset issued = now - TimeSpan.FromMinutes(1);
+        DateTimeOffset expires = now + TimeSpan.FromMinutes(10);
+
+        string header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+
+        // The three-way mapping documented above. An ABSENT claim and a PRESENT EMPTY one are different
+        // credentials and reach different branches of the handler, so neither is folded into the other,
+        // and the unasked-for case stamps both scopes rather than none.
+        string scopeClaim = scopes is null
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $",\"scope\":\"{PersistenceScopes.Read} {PersistenceScopes.Write}\"")
+            : scopes.Count == 0
+                ? string.Empty
+                : string.Create(
+                    CultureInfo.InvariantCulture,
+                    $",\"scope\":\"{string.Join(' ', scopes)}\"");
+
+        string payload = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{{\"iss\":\"{TrustedIssuer}\",\"aud\":\"{TrustedAudience}\",\"sub\":\"{TokenSubject}\",\"iat\":{issued.ToUnixTimeSeconds()},\"nbf\":{issued.ToUnixTimeSeconds()},\"exp\":{expires.ToUnixTimeSeconds()}{scopeClaim}}}");
+
+        string signingInput = string.Concat(
+            Encode(Encoding.UTF8.GetBytes(header)),
+            ".",
+            Encode(Encoding.UTF8.GetBytes(payload)));
+
+        return string.Concat(
+            signingInput,
+            ".",
+            Encode(HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(signingInput))));
+    }
+
+    /// <inheritdoc/>
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.UseEnvironment(Environments.Production);
+
+        // Supplied as host configuration so the service's OWN startup gate runs against them.
+        builder.UseSetting("Jwt:Authority", TrustedIssuer);
+        builder.UseSetting("Jwt:Audience", TrustedAudience);
+        builder.UseSetting("Jwt:RequireHttpsMetadata", "true");
+
+        // THE PERMITTED-CALLER ROSTER, SUPPLIED BECAUSE THE HOST NOW REFUSES WITHOUT ONE. Authentication
+        // is not authorization: the four gRPC contracts require the operation's scope AND a caller
+        // identity this service serves, so an empty roster refuses every caller and the options contract
+        // requires at least one entry. It carries the subject THIS host's own forged token claims, so
+        // the positive rows still exercise a caller the service accepts rather than one it rejects for
+        // a reason they were not written to assert.
+        builder.UseSetting("Jwt:PermittedCallers:0", TokenSubject);
+        builder.UseSetting(
+            "Sqlite:DataDirectory",
+            Path.Combine(Path.GetTempPath(), "pfw-composition-root"));
+
+        builder.ConfigureServices(services => services.Configure<JwtBearerOptions>(
+            JwtBearerDefaults.AuthenticationScheme,
+            options =>
+            {
+                OpenIdConnectConfiguration verification = new() { Issuer = TrustedIssuer };
+                verification.SigningKeys.Add(new SymmetricSecurityKey(_key));
+
+                options.Configuration = verification;
+                options.TokenValidationParameters.ValidIssuer = TrustedIssuer;
+                options.TokenValidationParameters.ValidAudience = TrustedAudience;
+            }));
+    }
+
+    /// <summary>Base64url-encodes a segment, unpadded, as the compact serialization requires.</summary>
+    /// <param name="value">The bytes to encode.</param>
+    /// <returns>The encoded segment.</returns>
+    private static string Encode(byte[] value) => System.Buffers.Text.Base64Url.EncodeToString(value);
 }

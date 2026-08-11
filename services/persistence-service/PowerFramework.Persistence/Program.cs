@@ -106,6 +106,10 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -115,15 +119,24 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Buffers;
 using PowerFramework.Persistence.Concurrency;
+using PowerFramework.Persistence.Authorization;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Endpoints;
 using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Grpc;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql.Paging;
 using PowerFramework.Persistence.Tasks;
+using PowerFramework.Persistence.Tasks.TaskProxies;
+// ALIASED RATHER THAN IMPORTED, BECAUSE PowerFramework.Contracts.Persistence.V1 ALSO DECLARES
+// QueryService, UpdateService, CommandService AND TransactionService - the four generated bases. Importing
+// that namespace here would make every one of this file's four MapGrpcService calls ambiguous, so the one
+// contract type this file needs is named on its own.
+using CarrierState = PowerFramework.Contracts.Persistence.V1.CarrierState;
 using PowerFramework.Persistence.Transactions;
 using PowerFramework.Shared.Diagnostics;
+using Predicates = PowerFramework.Shared.Kernel.Predicates;
 using RetCode = PowerFramework.Shared.Kernel.RetCode;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -167,7 +180,23 @@ app.Services.ValidatePersistenceStructuralPreconditions();
 //  fallback policy never sees an authenticated principal and unauthenticated requests pass straight
 //  through, silently, on every protected route at once. Phase 9's runtime checks exist to prove this
 //  ordering holds rather than to assume it.
+//
+//  THE TWO DIAGNOSTICS MIDDLEWARES COME FIRST, and they are here for error-contract consistency rather
+//  than as hardening. Each works by observing what the middlewares beneath it produced, and the response
+//  they most need to observe is the bearer challenge the authentication middleware writes: without them the
+//  framework answers a bare status with NO BODY on every path that never reaches this service's own code,
+//  while the readiness endpoint answers a problem body with a return code - two different error shapes from
+//  one service, chosen by which layer happened to fail. They write through the problem-details service
+//  registered in the container, which is why the members its customization fills reach these responses too.
+//
+//  NEITHER TOUCHES THE gRPC EDGE. A gRPC response always carries its own content type, and status-code pages
+//  write only where a response has neither a body nor a content type; a gRPC handler's own faults are mapped
+//  to a status by PersistenceStatusInterceptor and converted to trailers by the hosting layer long before
+//  they could reach an exception handler. Nothing else is added: no CORS, no rate limiting, no compression.
 // --------------------------------------------------------------------------------------------------
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -342,10 +371,24 @@ internal static class PersistenceServiceCollectionExtensions
     /// in hand-written security code, which is the opposite of what the requirement asks for.
     /// </para>
     /// <para>
-    /// ALL FOUR VALIDATIONS DEFAULT TO ON and each is read from configuration rather than hardcoded,
-    /// so a deployment can tighten but never silently loosen one by omission: a missing key leaves the
-    /// safe value in place. Require-HTTPS-metadata is the same shape, defaulting to <c>true</c>. There
-    /// is no environment-conditional bypass anywhere in this method.
+    /// ALL FOUR VALIDATIONS ARE HARDCODED ON, and none is readable from configuration. A safe-by-default
+    /// read would still let a deployment set one to <c>false</c> and be accepted, which is the one
+    /// outcome C-G forbids: the service would then accept a token from any issuer, for any audience,
+    /// expired, or unsigned, while starting cleanly and reporting healthy. Clock skew is pinned to a
+    /// bounded constant for the same reason - the library's five-minute default can exceed a
+    /// short-lived token's whole lifetime. There is no environment-conditional bypass anywhere in this
+    /// method and no key that could introduce one.
+    /// </para>
+    /// <para>
+    /// <c>RequireHttpsMetadata</c> IS the one setting that stays configurable, and it is not in the same
+    /// category. It does not decide whether a token is checked; it decides whether the handler will FETCH
+    /// from a plaintext authority - so it describes the AUTHORITY rather than the verification, and it
+    /// must agree with the authority beside it or the handler discovers the contradiction only on its
+    /// first fetch. The shipped authority is <c>https</c> and the shipped value is therefore
+    /// <c>true</c>; a deployment that moves the authority moves both together, which is why both are
+    /// read from the same snapshot inside the configure callback below. Lowering the pair to cleartext
+    /// would put the verification key set on a channel an on-path attacker can rewrite, which is
+    /// CWE-319 on the one fetch in the estate that must not be rewritable.
     /// </para>
     /// <para>
     /// METADATA IS FETCHED LAZILY by the handler on first use rather than eagerly at startup, and that
@@ -369,27 +412,89 @@ internal static class PersistenceServiceCollectionExtensions
         string authority = (jwt[nameof(JwtOptions.Authority)] ?? string.Empty).Trim();
         string metadataAddress = (jwt[PersistenceStartupGate.MetadataAddressKey] ?? string.Empty).Trim();
 
+        // Registered here rather than beside the SQL layer because its ONE consumer is the bearer
+        // handler's backchannel configured below. A singleton so the anchor file is read once for the
+        // life of the process, which is also what lets the eager resolve in the startup gate turn an
+        // unreadable anchor into a refusal to start.
+        services.TryAddSingleton(static serviceProvider => new InternalTlsTrust(
+            serviceProvider.GetRequiredService<IOptions<PersistenceOptions>>().Value.InternalTls));
+
         services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(bearer =>
             {
-                bearer.Authority = authority;
+                // EVERY VALUE IS READ HERE, INSIDE THE CONFIGURE CALLBACK, AND THAT PLACEMENT IS LOAD
+                // BEARING RATHER THAN STYLISTIC. An earlier form of this method read the authority and
+                // the metadata address EAGERLY, at registration time, while reading
+                // RequireHttpsMetadata lazily from inside this callback - so the two came from
+                // DIFFERENT configuration snapshots. That is harmless only while both snapshots agree.
+                // It stops being harmless the moment a later configuration source changes one of them:
+                // an in-memory source added after registration - which is exactly what
+                // WebApplicationFactory does, and what a deployment layering an environment provider
+                // over the settings files does - would move RequireHttpsMetadata without moving the
+                // authority it qualifies. The handler then post-configures an `http` authority against
+                // a `true` requirement and throws "The MetadataAddress or Authority must use HTTPS",
+                // on the first authenticated request rather than at startup, with a message that
+                // implicates neither of the two settings that actually disagreed. Reading both from one
+                // snapshot removes the failure mode rather than documenting it.
+                IConfigurationSection jwt =
+                    configuration.GetSection(PersistenceStartupGate.JwtSectionName);
+
+                bearer.Authority = (jwt[nameof(JwtOptions.Authority)] ?? string.Empty).Trim();
                 bearer.Audience = (jwt[nameof(JwtOptions.Audience)] ?? string.Empty).Trim();
                 bearer.RequireHttpsMetadata = jwt.GetValue(nameof(JwtOptions.RequireHttpsMetadata), true);
 
                 // An explicit metadata address overrides the authority-relative default, which is what
                 // lets a deployment point the handler at a key set published somewhere other than the
                 // conventional path beneath the authority.
+                string metadataAddress =
+                    (jwt[PersistenceStartupGate.MetadataAddressKey] ?? string.Empty).Trim();
+
                 if (metadataAddress.Length > 0)
                 {
                     bearer.MetadataAddress = metadataAddress;
                 }
 
-                bearer.TokenValidationParameters.ValidateIssuer = jwt.GetValue("ValidateIssuer", true);
-                bearer.TokenValidationParameters.ValidateAudience = jwt.GetValue("ValidateAudience", true);
-                bearer.TokenValidationParameters.ValidateLifetime = jwt.GetValue("ValidateLifetime", true);
-                bearer.TokenValidationParameters.ValidateIssuerSigningKey =
-                    jwt.GetValue("ValidateIssuerSigningKey", true);
+                // ALL FOUR ARE ASSIGNED LITERALLY, NOT READ. Each removes an entire class of forgery, so
+                // none is a deployment choice: without issuer validation a credential from any issuer is
+                // accepted; without audience validation a credential minted for another service is
+                // replayable here; without lifetime validation Security's short lifetimes bound nothing;
+                // without signing-key validation the signature is not verified at all. Reading them with
+                // a safe default still left a configuration path that could turn one OFF while this host
+                // reported healthy - an unauthenticated boundary wearing the shape of an authenticated
+                // one, which constraint C-G forbids. The four are now MODELLED on JwtOptions so a
+                // deployment can still be audited by reading its settings file, and
+                // PersistenceOptionsValidator refuses a configured false rather than ignoring it in
+                // silence.
+                bearer.TokenValidationParameters.ValidateIssuer = true;
+                bearer.TokenValidationParameters.ValidateAudience = true;
+                bearer.TokenValidationParameters.ValidateLifetime = true;
+                bearer.TokenValidationParameters.ValidateIssuerSigningKey = true;
+            });
+
+        // THE KEY-SET BACKCHANNEL'S TRUST DECISION, APPLIED IN A SECOND CONFIGURATION PASS BECAUSE THE
+        // FIRST ONE HAS NO SERVICE PROVIDER TO RESOLVE FROM. This is the only outbound channel this
+        // service has, and it is the one that decides which keys sign a valid token: Security terminates
+        // TLS with a certificate issued by the local authority docs/ARCHITECTURE.md 9.3.1 generates,
+        // which is in no container's OS trust store, so without the anchor the handler cannot fetch the
+        // key set at all and every inbound token is refused for want of a key rather than on its merits.
+        // Supplied only when an anchor is configured, so an unset anchor leaves the handler's own
+        // default backchannel untouched. Trust is NARROWED, never relaxed - there is no validation
+        // callback anywhere in this service (constraint C-G).
+        services
+            .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+            .Configure<InternalTlsTrust>(static (bearer, trust) =>
+            {
+                if (!trust.IsPinned)
+                {
+                    return;
+                }
+
+                SocketsHttpHandler backchannel = new();
+
+                trust.Apply(backchannel);
+
+                bearer.BackchannelHttpHandler = backchannel;
             });
 
         // DENY BY DEFAULT, WITH ONE NAMED EXCEPTION. A fallback policy means no route is ever
@@ -398,10 +503,48 @@ internal static class PersistenceServiceCollectionExtensions
         // opts out in the one place a reader looks for it. The inverse posture, allowing by default
         // and remembering to protect each endpoint, is not auditable, because proving it correct means
         // proving a negative across every route that exists and every route anyone adds later.
-        services.AddAuthorization(static options =>
-            options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        // AND AUTHENTICATION IS NOT AUTHORIZATION, WHICH IS WHAT THE TWO NAMED POLICIES BELOW ADD.
+        // Requiring only an authenticated user meant any holder of any token this issuer minted for this
+        // audience could call every one of the four contracts - so a credential obtained for reading could
+        // update, delete or run an arbitrary command, and a credential minted for a caller that has no
+        // business here at all could do the same (CWE-862, CWE-863). The contracts already publish the
+        // distinction: DataServices requests `persistence.read` for the reading half and
+        // `persistence.write` for the writing half, and the AAP fixes the call graph as layered and
+        // acyclic - nothing but DataServices calls Persistence.
+        //
+        // BOTH HALVES ARE ENFORCED: the operation's scope, and the caller's identity. Either alone leaves
+        // a hole. Scope without subject lets any caller the issuer serves in, as long as it holds the
+        // scope; subject without scope lets the one permitted caller do anything once it is in.
+        //
+        // A REFUSAL HERE IS gRPC PermissionDenied, NOT Unauthenticated, and the projections downstream
+        // already publish that distinction as HTTP 403 versus 401 - "the token is valid but does not carry
+        // the scope this operation requires". Nothing about the wire contract changes; this is the code
+        // that makes the published 403 reachable.
+        services.AddAuthorization(static options => options.FallbackPolicy =
+            new AuthorizationPolicyBuilder()
                 .RequireAuthenticatedUser()
                 .Build());
+
+        // THE TWO NAMED POLICIES ARE REGISTERED IN ONE PLACE, AND THIS IS NOT IT. Every token reaching
+        // this service carries a `scope` claim, and its only caller requests two distinct scopes with a
+        // documented split - read for C-05 and the C-08 reads, write for C-06, C-07 and the C-08 state
+        // changes. Until these policies existed nothing read that claim, so a credential obtained to
+        // RETRIEVE rows could equally update them, execute arbitrary SQL through C-07 and commit or roll
+        // back a transaction. The split its caller declares was a comment, not a boundary.
+        //
+        // THE POLICY NAME IS THE SCOPE NAME, and there is exactly one registrar for both policies. A
+        // second registrar using a second naming convention - `persistence:read` beside
+        // `persistence.read` - is the shape that fails silently: `AddPolicy` REPLACES a policy of the
+        // same name but does nothing at all to a policy of a DIFFERENT name, so the route table names
+        // one convention and the other family enforces nothing anyone reaches, while both read as live.
+        // Composing the requirements instead means each contract names one string and gets all three:
+        // authenticated, the operation's own scope, and a caller identity on this deployment's roster.
+        //
+        // The mechanism, the reason the framework's own claim requirement cannot express it (the claim
+        // is ONE value carrying a SPACE-DELIMITED set, which is exactly what this service's caller
+        // sends), the roster half, and the reason all of it is duplicated per service rather than shared
+        // are recorded in Authorization/ScopeAuthorization.cs.
+        services.AddScopeAuthorization();
 
         return services;
     }
@@ -558,20 +701,53 @@ internal static class PersistenceServiceCollectionExtensions
         //  marshalling boundary between them a boundary over shared state rather than two unrelated
         //  object graphs.
         // ------------------------------------------------------------------------------------------
-        services.TryAddSingleton<IDataObjectRuntime, UnboundDataObjectRuntime>();
+        // ------------------------------------------------------------------------------------------
+        //  TWO SOURCES A DATA-OBJECT NAME RESOLVES THROUGH, AND BOTH ARE REAL
+        //  The legacy assigns a name and the PowerBuilder runtime loads the compiled DataWindow out of
+        //  the target's library list [n_cst_thread_task_sqlbase.sru:L558]. There is no managed
+        //  equivalent - the .srd objects live in the read-only legacy tree - so resolution became an
+        //  injected collaborator, and this service carries two of them because they answer different
+        //  deployments:
+        //    * ConfiguredDataObjectCatalog is the DEPLOYMENT's own catalogue, bound from the
+        //      `DataObjects` configuration section and FROZEN at construction so a definition cannot
+        //      change under a retrieval already in flight. Its section is validated by this service's
+        //      own options validator, which refuses an incomplete entry and two names differing only by
+        //      case - so without this registration that whole section would be bound, validated and then
+        //      read by nothing, and a deployment's definitions would resolve to nothing at all.
+        //    * DataObjectDefinitionCatalogue is the in-process registry: it is seeded with the one
+        //      EVIDENCED fixture [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd] and it is where a
+        //      definition DERIVED at run time from a caller-supplied grid syntax is registered, under a
+        //      `pfw_derived_` name a caller cannot have configured.
+        //  The retrieval runtime consults the configured catalogue FIRST and the registry second, which
+        //  is the only order that lets a deployment override the built-in default while leaving the two
+        //  populations unable to collide.
+        // ------------------------------------------------------------------------------------------
+        services.TryAddSingleton<IDataObjectCatalog, ConfiguredDataObjectCatalog>();
+        services.TryAddSingleton<DataObjectDefinitionCatalogue>();
+        services.TryAddSingleton<DataWindowStoreBindings>();
+        services.TryAddSingleton<IDataObjectRuntime, SqliteDataObjectRuntime>();
         services.TryAddSingleton<ISqlDataStoreFactory>(static provider => new SqlDataStoreFactory(
             provider.GetRequiredService<IDataObjectRuntime>(),
             provider.GetRequiredService<TimeProvider>()));
         services.TryAddSingleton<ISqlRetrievalHookActivator>(static _ => new SqlRetrievalHookActivator());
 
         // ------------------------------------------------------------------------------------------
-        //  THE RUNTIME SEAMS. See the extended commentary on each type at the bottom of this file for
-        //  why each answers its contract's own defined negative in this phase instead of binding a
-        //  handle, and why that is a documented gap rather than a stub.
+        //  THE RUNTIME SEAMS. Each is bound to a real SQLite-backed implementation under Runtime/. See
+        //  the extended commentary at the bottom of this file for what used to be here, why it refused,
+        //  and which of that refusal's premises did not hold. Every one is still TryAdd-registered, so
+        //  every one is still substitutable by a characterization harness or a test host.
         // ------------------------------------------------------------------------------------------
-        services.TryAddSingleton<IQueryTransactionSurface, UnboundQueryTransactionSurface>();
-        services.TryAddSingleton<IQueryDataWindowRuntime, UnboundQueryDataWindowRuntime>();
-        services.TryAddSingleton<ITransactionEngine, UnprovisionedTransactionEngine>();
+        services.TryAddSingleton<IQueryTransactionSurface, SqliteQueryTransactionSurface>();
+        services.TryAddSingleton<IQueryDataWindowRuntime, SqliteQueryDataWindowRuntime>();
+
+        // ⚠ TRANSIENT, AND ANY OTHER LIFETIME IS A USE-AFTER-DISPOSE WAITING TO HAPPEN. The activator
+        // below resolves an engine PER POOLED TRANSACTION through a delegate, and the pool DISPOSES every
+        // engine it creates when it collects that transaction. A singleton would therefore hand the same
+        // connection to every pooled transaction and then close it when the first one was collected -
+        // a fault that only appears under concurrent load, which is the worst kind to ship. The engine is
+        // also not thread safe, by design and by the legacy's own affinity contract, and one instance per
+        // checked-out transaction is exactly what that contract asks for.
+        services.TryAddTransient<ITransactionEngine, SqliteTransactionEngine>();
 
         // ------------------------------------------------------------------------------------------
         //  THE TRANSACTION POOL - SINGLETON, AND ANY OTHER LIFETIME DEFEATS ITS PURPOSE ENTIRELY. It
@@ -595,6 +771,25 @@ internal static class PersistenceServiceCollectionExtensions
             provider.GetRequiredService<IOptions<PersistenceOptions>>(),
             provider.GetRequiredService<TimeProvider>(),
             provider.GetRequiredService<IPooledTransactionActivator>()));
+
+        // ------------------------------------------------------------------------------------------
+        //  THE POOL'S IDLE COLLECTION, WHICH NEEDS SOMETHING TO FIRE IT. The legacy subscribes the pool
+        //  to the framework's own idle notification inside its keep-alive branch
+        //  [n_cst_thread_trans_pool.sru:L80]. A service has no such notification, so without this
+        //  registration the collection entry point is reachable only from a test and a RETAINED
+        //  transaction is held for the life of the process - a resource leak rather than a slow service.
+        //  See Transactions/TransactionPoolIdleSweeper for the non-overlap and shutdown properties.
+        //
+        //  Registered by its concrete type as well, so a test can resolve it and drive one sweep against
+        //  a controlled clock instead of waiting for a tick.
+        // ------------------------------------------------------------------------------------------
+        services.TryAddSingleton(static provider => new TransactionPoolIdleSweeper(
+            provider.GetRequiredService<TransactionPool>(),
+            provider.GetRequiredService<IOptions<PersistenceOptions>>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<ILogger<TransactionPoolIdleSweeper>>()));
+        services.AddHostedService(static provider =>
+            provider.GetRequiredService<TransactionPoolIdleSweeper>());
 
         return services;
     }
@@ -646,12 +841,29 @@ internal static class PersistenceServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        // WHO A HANDLE IS ATTRIBUTED TO, which is what makes the per-caller ceiling per-CALLER. The
+        // accessor is the stock ASP.NET Core one - registration ships in the shared framework, so no
+        // package reference is added - and it is the only way a component below the endpoint layer can
+        // read the principal of the request it is serving. Without it every handle would be attributed to
+        // one bucket and only the total ceiling would be operative.
+        services.AddHttpContextAccessor();
+        services.TryAddSingleton<HandlePrincipalResolver>();
+
         // The server-side handle tables. See the remarks above for why every one of them is a
-        // singleton and what breaks if one is not.
+        // singleton and what breaks if one is not. Each now carries a CEILING and an IDLE WINDOW: a
+        // handle is server-held state that an in-process caller never had, so an abandoned one would
+        // otherwise pin a connection - and, for a command or update task, a worker task - for the life of
+        // the process. See Runtime/HandleLifecycle.cs.
         services.TryAddSingleton<TransactionSessionRegistry>();
         services.TryAddSingleton<QueryTaskRegistry>();
         services.TryAddSingleton<UpdateTaskRegistry>();
         services.TryAddSingleton<CommandTaskRegistry>();
+
+        // THE RECLAIM PASS AND THE SHUTDOWN DRAIN. A hosted service rather than a timer field on a
+        // registry, so its schedule is the host's lifetime rather than an object's, and so the drain runs
+        // in the ordered stop sequence the host already provides - tasks before sessions, which the
+        // reclaimer owns because a task borrows the transaction its session owns.
+        services.AddHostedService<HandleReclaimer>();
 
         // The retrieval driver. Stateless - it forwards a task and a sink to the task's own execution
         // and returns the row count - so a singleton, and the seam exists so a characterization run can
@@ -671,9 +883,21 @@ internal static class PersistenceServiceCollectionExtensions
         // the bag could not fix. A singleton registration would quietly invite exactly that, so the
         // factory constructs the host itself and the SUBSTITUTION POINT is the factory below, which is
         // TryAdd-registered like everything else here.
+
+        // The caller-side query proxy's two collaborators. Registered so that the query proxy pair is
+        // CONSTRUCTIBLE from the container - both of these were interfaces with no implementation
+        // anywhere, which made the pair unbuildable however correct each half was. The child resolver
+        // answers a dropdown child lookup from the headless definition catalogue; the adopter wraps a
+        // transferred carrier as a datastore so the caller side can go on describing and filtering it.
+        services.TryAddSingleton<IQueryChildResolver>(static provider =>
+            new QueryChildResolver(provider.GetRequiredService<IQueryDataWindowRuntime>()));
+        services.TryAddSingleton<IQueryCarrierAdopter>(static provider =>
+            new QueryCarrierAdopter(provider.GetRequiredService<IDataObjectRuntime>()));
+
         services.TryAddSingleton<IQueryTaskFactory, QueryTaskFactory>();
-        services.TryAddSingleton<IUpdateTaskFactory, UnboundUpdateTaskFactory>();
-        services.TryAddSingleton<ICommandTaskFactory, UnboundCommandTaskFactory>();
+        services.TryAddSingleton<ISqlUpdateCarrierAdapter, SqlUpdateCarrierAdapter>();
+        services.TryAddSingleton<IUpdateTaskFactory, UpdateTaskFactory>();
+        services.TryAddSingleton<ICommandTaskFactory, CommandTaskFactory>();
 
         // gRPC IS THIS SERVICE'S PRIMARY TRANSPORT. The interceptor is added HERE, once, at the server
         // level, which is exactly what makes the status mapping central rather than duplicated across
@@ -707,12 +931,266 @@ internal static class PersistenceServiceCollectionExtensions
             options.IgnoreUnknownServices = true;
         });
 
-        services.TryAddSingleton<PersistenceStatusInterceptor>();
+        // REGISTERED THROUGH AN EXPLICIT FACTORY RATHER THAN BY TYPE, so that the process-termination
+        // seam its constructor exposes keeps its host-backed default here and is supplied deliberately
+        // only by a test. Registered by type, the seam would be filled by whatever the container happened
+        // to be able to resolve for it, and a future registration of an Action<int> for some unrelated
+        // purpose would silently take over the termination path.
+        services.TryAddSingleton(static serviceProvider => new PersistenceStatusInterceptor(
+            serviceProvider.GetRequiredService<ISqlRedactor>(),
+            serviceProvider.GetRequiredService<IHostApplicationLifetime>(),
+            serviceProvider.GetRequiredService<ILogger<PersistenceStatusInterceptor>>()));
 
         services.AddPersistenceHealthChecks();
-        services.AddProblemDetails();
+
+        // THE CUSTOMIZATION IS WHAT MAKES A FRAMEWORK-GENERATED BODY A CONTRACT-SHAPED ONE. The problem
+        // responses this service writes itself - the readiness endpoint's not-ready body - carry `retCode`
+        // because the code that writes them sets it. The bodies the FRAMEWORK writes carry nothing at all:
+        // the bearer challenge, the authorization refusal, an unmatched route and a rejected method are
+        // produced beneath any of this service's own code. Registering the problem-details service without
+        // asking for those bodies left this service answering two different error shapes depending on which
+        // layer produced the failure, which is the inconsistency the estate's other three services close the
+        // same way.
+        //
+        // The guard is not an optimization: a response this service composed itself already carries the
+        // precise code for its own condition, so overwriting it would replace a specific value with one
+        // derived from a status.
+        services.AddProblemDetails(static options =>
+            options.CustomizeProblemDetails = static context =>
+            {
+                if (context.ProblemDetails.Extensions.ContainsKey(ProblemContractMembers.RetCode))
+                {
+                    return;
+                }
+
+                int status = context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode;
+
+                context.ProblemDetails.Extensions[ProblemContractMembers.RetCode] = ClassifyFailure(status);
+            });
 
         return services;
+    }
+
+    /// <summary>
+    /// Classifies a framework-generated failure status as a legacy return code, so that a body this service
+    /// did not compose still carries the member every other error body it produces carries.
+    /// </summary>
+    /// <param name="statusCode">The status the framework is answering with.</param>
+    /// <returns>
+    /// The legacy code for that status, and <see cref="RetCode.UNKNOWN"/> for anything unclassifiable.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// EVERY ARM IS WRITTEN OUT RATHER THAN DERIVED FROM A TRUTHINESS TEST, and each is taken from the
+    /// vocabulary this service already uses: a malformed request is <c>E_INVALID_ARGUMENT</c>, a refused
+    /// caller is <c>E_ACCESS_DENIED</c> whether the refusal was authentication or authorization, a not-ready
+    /// probe is <c>E_BUSY</c> - the same code <c>Endpoints/HealthEndpoints.cs</c> writes by hand, so the two
+    /// agree - and an unmatched route is <c>E_OBJECT_NOT_FOUND</c>. The legacy algebra declares exactly one
+    /// access code and draws no distinction between "no credential" and "credential without permission"; the
+    /// HTTP statuses stay distinct, so the code gains no member the oracle never had.
+    /// </para>
+    /// <para>
+    /// THE FINAL CHECK IS THE POINT OF THE GUARD. The algebra is tri-state with a documented hole -
+    /// <c>PREVENT</c> is 1 and reads as a SUCCESS through <c>IsSucceeded</c>
+    /// [<c>ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13</c>], and <c>CANCELLED</c> is excluded from
+    /// <c>IsFailed</c> and so is NEITHER [<c>isfailed.srf:L11-L13</c>] - so an error body must never carry a
+    /// code from either class. The kernel predicate is consumed to enforce that rather than the comparison
+    /// being re-derived, so a future arm that violated it degrades to <c>UNKNOWN</c> instead of publishing a
+    /// failure a consumer's own predicate would read as a success.
+    /// </para>
+    /// </remarks>
+    private static long ClassifyFailure(int statusCode)
+    {
+        long classified = statusCode switch
+        {
+            StatusCodes.Status400BadRequest => RetCode.E_INVALID_ARGUMENT,
+            StatusCodes.Status401Unauthorized => RetCode.E_ACCESS_DENIED,
+            StatusCodes.Status403Forbidden => RetCode.E_ACCESS_DENIED,
+            StatusCodes.Status404NotFound => RetCode.E_OBJECT_NOT_FOUND,
+            StatusCodes.Status405MethodNotAllowed => RetCode.E_NO_SUPPORT,
+            StatusCodes.Status408RequestTimeout => RetCode.E_TIME_OUT,
+            StatusCodes.Status415UnsupportedMediaType => RetCode.E_INVALID_TYPE,
+            StatusCodes.Status429TooManyRequests => RetCode.E_BUSY,
+            StatusCodes.Status503ServiceUnavailable => RetCode.E_BUSY,
+            StatusCodes.Status504GatewayTimeout => RetCode.E_TIME_OUT,
+            >= StatusCodes.Status500InternalServerError => RetCode.E_INTERNAL_ERROR,
+            _ => RetCode.UNKNOWN,
+        };
+
+        return Predicates.IsFailed(classified) ? classified : RetCode.UNKNOWN;
+    }
+}
+
+/// <summary>
+/// The extension-member names this service's problem bodies declare.
+/// </summary>
+/// <remarks>
+/// SPELLED ONCE HERE BECAUSE THE COMPOSITION ROOT AND THE READINESS ENDPOINT BOTH WRITE THEM, and the
+/// customization above exists precisely to fill the member an endpoint did not. Two independent spellings
+/// would let a rename go half-applied, at which point a body would carry both the old member and the new one
+/// and a consumer would read whichever it happened to look for.
+/// </remarks>
+internal static class ProblemContractMembers
+{
+    /// <summary>The legacy return code carried by every problem body.</summary>
+    internal const string RetCode = "retCode";
+}
+
+/// <summary>
+/// The two named authorization policies this service enforces, and the scope parsing behind them.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>WHY NAMED POLICIES EXIST AT ALL (constraint C-G).</b> Every new boundary the decomposition created
+/// must be authenticated, and the four gRPC contracts are all new. But authentication answers "who is
+/// this" and says nothing about "may it do this": a fallback policy requiring only an authenticated
+/// principal accepts a credential minted for retrieval on the update and command contracts too, because
+/// the token's purpose is never read. These two policies read it.
+/// </para>
+/// <para>
+/// <b>READ AND WRITE, AND NOTHING FINER.</b> Two scopes are what the token contract's caller actually
+/// requests and what the audience naming convention already fixed, and the split falls where the legacy
+/// itself splits: the retrieval task issues only SELECT statements
+/// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru</c>], while the update and
+/// command tasks generate and execute DML
+/// [<c>n_cst_thread_task_sqlupdate.sru</c>, <c>n_cst_thread_task_sqlcommand.sru</c>]. The transaction
+/// contract straddles the line and is therefore annotated PER RPC rather than per class - its session,
+/// descriptor and state readers need read, and its commit, rollback, auto-commit, clear-state and
+/// set-broken operations need write.
+/// </para>
+/// <para>
+/// <b>NO INFERENCE BETWEEN THEM.</b> Write does not imply read and read does not imply write. A caller
+/// that needs both asks Security for both, which is a decision visible at the request site rather than a
+/// rule hidden in a policy.
+/// </para>
+/// </remarks>
+internal static class PersistenceAuthorizationPolicies
+{
+    /// <summary>
+    /// The policy - and the scope name - a caller must hold to reach the retrieval contract.
+    /// </summary>
+    /// <remarks>
+    /// THE POLICY NAME IS THE SCOPE NAME, DELIBERATELY. A separate policy identifier would be one more
+    /// mapping to keep in step across two services: DataServices requests this exact string from Security
+    /// [<c>services/dataservices-service/PowerFramework.DataServices/Clients/PersistenceClient.cs</c>],
+    /// Security mints it into the token's space-delimited <c>scope</c> claim
+    /// [<c>services/security-service/PowerFramework.Security/Tokens/TokenIssuer.cs</c>], and this file
+    /// enforces it. One spelling, three places, no translation table.
+    /// </remarks>
+    /// <remarks>
+    /// ALIASED TO <see cref="PersistenceScopes.Read"/> RATHER THAN RESTATED, so the literal exists once in
+    /// this service. The registrar in <c>Authorization/ScopeAuthorization.cs</c> builds the policy under
+    /// that name and every contract on this service names it through this constant; two independent
+    /// spellings of the same value is how a route comes to name a policy nothing registered, which the
+    /// framework answers as an unexplained internal error rather than as a refusal.
+    /// </remarks>
+    internal const string Read = PersistenceScopes.Read;
+
+    /// <summary>
+    /// The policy - and the scope name - a caller must hold to reach the update, command or
+    /// state-changing transaction operations.
+    /// </summary>
+    /// <remarks>Aliased to <see cref="PersistenceScopes.Write"/>, for the reason above.</remarks>
+    internal const string Write = PersistenceScopes.Write;
+
+    /// <summary>
+    /// The claim the granted scope set arrives in, as this system's issuer mints it.
+    /// </summary>
+    /// <remarks>
+    /// ONE claim carrying a SPACE-DELIMITED value, which is the encoding the published token contract
+    /// fixes and the issuer implements - not a repeated claim. Reading it therefore means splitting, and
+    /// splitting is the whole reason this parsing lives in one tested place rather than being written
+    /// inline at each policy.
+    /// </remarks>
+    private const string ScopeClaimName = "scope";
+
+    /// <summary>
+    /// The alternative claim name some issuers use for the same set.
+    /// </summary>
+    /// <remarks>
+    /// NOT MINTED BY THIS SYSTEM'S ISSUER, and accepted anyway. The deployment contract points this
+    /// service at an authority through configuration, so the token could in principle come from an
+    /// issuer that spells the set this way; refusing it would turn a working deployment into a silent
+    /// 403 whose cause is invisible. Accepting both spellings widens nothing, because a scope must still
+    /// be present by exact name to satisfy anything.
+    /// </remarks>
+    private const string AlternativeScopeClaimName = "scp";
+
+    /// <summary>
+    /// The delimiters a scope value may be split on.
+    /// </summary>
+    /// <remarks>
+    /// A space is the encoding the contract fixes; the other three are accepted because a value that
+    /// arrived with a tab or a line break would otherwise be read as ONE scope whose name happens to
+    /// contain white space, which can never match and would fail closed for a reason nobody could see.
+    /// </remarks>
+    private static readonly char[] ScopeDelimiters = [' ', '\t', '\r', '\n'];
+
+    /// <summary>
+    /// Whether a principal holds a scope by exact name.
+    /// </summary>
+    /// <param name="user">The authenticated principal.</param>
+    /// <param name="scope">The required scope name.</param>
+    /// <returns>
+    /// <see langword="true"/> when a scope claim carries <paramref name="scope"/> as one of its
+    /// space-delimited entries; otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>EXACT, ORDINAL AND CASE-SENSITIVE.</b> Scope names are case-sensitive strings in the OAuth
+    /// framework, so a case-insensitive comparison here would silently admit a credential naming
+    /// something the issuer never granted. There is no prefix matching, no wildcard, no hierarchy and no
+    /// "read implies write" or "write implies read" inference: a caller that needs both holds both.
+    /// </para>
+    /// <para>
+    /// <b>A NULL OR UNAUTHENTICATED PRINCIPAL ANSWERS FALSE</b> rather than throwing. The policies pair
+    /// this with <c>RequireAuthenticatedUser</c>, so an anonymous request is already refused by the time
+    /// this could be reached; answering false keeps the helper total and makes it safe to call from
+    /// anywhere without a null dance at each site.
+    /// </para>
+    /// <para>
+    /// Nothing here is logged. A claim value is caller-supplied material and the granted scope set is
+    /// part of a credential, so neither reaches a log record from this file (constraint C-F).
+    /// </para>
+    /// </remarks>
+    internal static bool HasScope(ClaimsPrincipal? user, string scope)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(scope);
+
+        if (user is null)
+        {
+            return false;
+        }
+
+        foreach (Claim claim in user.Claims)
+        {
+            if (!string.Equals(claim.Type, ScopeClaimName, StringComparison.Ordinal)
+                && !string.Equals(claim.Type, AlternativeScopeClaimName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // AsSpan + a manual walk rather than Split, because this runs on every authorized request and
+            // a split would allocate an array and a string per entry to answer a question about one of
+            // them. The behaviour is identical to Split with RemoveEmptyEntries.
+            ReadOnlySpan<char> remaining = claim.Value.AsSpan();
+
+            while (!remaining.IsEmpty)
+            {
+                int delimiter = remaining.IndexOfAny(ScopeDelimiters);
+
+                ReadOnlySpan<char> candidate = delimiter < 0 ? remaining : remaining[..delimiter];
+
+                if (candidate.SequenceEqual(scope))
+                {
+                    return true;
+                }
+
+                remaining = delimiter < 0 ? [] : remaining[(delimiter + 1)..];
+            }
+        }
+
+        return false;
     }
 }
 
@@ -744,12 +1222,29 @@ internal static class PersistenceEndpointRouteExtensions
     /// only the gateway's.
     /// </para>
     /// <para>
-    /// ALL FOUR gRPC SERVICES REQUIRE AUTHORIZATION EXPLICITLY (constraint C-G). The fallback policy
-    /// already closes the door, so these calls are belt-and-braces rather than load bearing - and that
-    /// is precisely why they are here: an explicit requirement at the mapping site is auditable by
-    /// reading one screen, whereas relying on a policy declared elsewhere means proving a negative.
-    /// None of the four implementation classes carries an authorization attribute of its own, so this
-    /// is the single place the requirement is stated.
+    /// ALL FOUR gRPC SERVICES REQUIRE AUTHORIZATION EXPLICITLY, AND EACH NAMES THE POLICY ITS CONTRACT
+    /// CALLS FOR (constraint C-G) - BUT THE DECLARATION IS AN ATTRIBUTE ON THE IMPLEMENTATION, NOT A
+    /// SECOND ONE HERE. The fallback policy closes the door on a route that declares nothing; the
+    /// attributes decide WHO may open it and for WHAT. The parameterless form used to be at this mapping
+    /// site, and it meant any holder of any token minted for this audience could call all four contracts -
+    /// a credential obtained for reading could update, delete or run an arbitrary command. Retrieval takes
+    /// the reading scope; update and command take the writing scope, which is exactly the split
+    /// DataServices already requests its credential under; and each policy additionally requires the
+    /// caller to be a configured permitted identity, because the AAP fixes the call graph as layered and
+    /// acyclic - nothing but DataServices calls Persistence.
+    /// </para>
+    /// <para>
+    /// <b>AND NO POLICY IS NAMED AT THE MAPPING SITE, WHICH IS A REQUIREMENT AND NOT A STYLE CHOICE.</b>
+    /// C-08 straddles the read/write line: its session, descriptor and state readers need the reading
+    /// scope and its commit, rollback, auto-commit, clear-state and set-broken operations need the writing
+    /// one, so it is annotated PER RPC and deliberately carries no class-level attribute. Authorization
+    /// metadata COMBINES rather than overriding, so a service-wide policy declared here would AND itself
+    /// with every method policy - and a service-wide WRITE policy would then refuse a read-only caller the
+    /// ability to ask whether the transaction is connected, while a service-wide READ policy would let
+    /// that caller commit. Both are wrong in one direction, which is exactly why the split is per method.
+    /// The three single-scope contracts carry their policy as a class-level attribute for the same reason
+    /// of single statement: one place per contract declares its requirement, and a route therefore carries
+    /// exactly ONE scope policy.
     /// </para>
     /// </remarks>
     internal static WebApplication MapPersistenceEndpoints(this WebApplication app)
@@ -760,11 +1255,14 @@ internal static class PersistenceEndpointRouteExtensions
         app.MapPingEndpoints();
 
         // C-05 retrieval, C-06 update, C-07 command, C-08 transaction. The four contracts this service
-        // exists to serve, each deriving from a generated base in the published contracts project.
-        app.MapGrpcService<QueryService>().RequireAuthorization();
-        app.MapGrpcService<UpdateService>().RequireAuthorization();
-        app.MapGrpcService<CommandService>().RequireAuthorization();
-        app.MapGrpcService<TransactionService>().RequireAuthorization();
+        // exists to serve, each deriving from a generated base in the published contracts project. Their
+        // authorization requirement travels as an [Authorize(Policy = ...)] attribute on the
+        // implementation - class-level on the three single-scope contracts, per method on C-08 - so
+        // nothing is declared here and no route ends up carrying two scope policies ANDed together.
+        app.MapGrpcService<QueryService>();
+        app.MapGrpcService<UpdateService>();
+        app.MapGrpcService<CommandService>();
+        app.MapGrpcService<TransactionService>();
 
         return app;
     }
@@ -853,10 +1351,95 @@ internal static class PersistenceStartupGate
         PersistenceOptions options = services.GetRequiredService<IOptions<PersistenceOptions>>().Value;
 
         ValidateDataDirectory(options, logger);
+        ValidateRuntimeGraph(services, logger);
+
+        // THE TRUST ANCHOR IS LOADED HERE SO A BAD ONE IS A REFUSAL TO START. A configured-but-unreadable
+        // anchor means the bearer handler cannot fetch the key set it validates every inbound token
+        // against, so this instance would start healthy and then refuse every authenticated call for a
+        // reason no caller could diagnose. An UNSET anchor resolves to platform default trust and is not
+        // a fault.
+        InternalTlsTrust trust = services.GetRequiredService<InternalTlsTrust>();
 
         logger.LogInformation(
-            "Structural preconditions satisfied: the bound configuration validated, and the storage "
-            + "directory exists and is writable by this process.");
+            "Structural preconditions satisfied: the bound configuration validated, the storage "
+            + "directory exists and is writable by this process, every runtime seam this service "
+            + "executes SQL through resolved, and internal TLS trust is {TrustPosture}.",
+            trust.IsPinned ? "pinned to the configured anchor" : "the platform default");
+    }
+
+    /// <summary>
+    /// Resolves every seam the SQL path executes through, so an incomplete graph terminates the process
+    /// at startup rather than failing whichever request first reaches the missing registration.
+    /// </summary>
+    /// <param name="services">The composed provider.</param>
+    /// <param name="logger">The logger a fatal fault is recorded through.</param>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS GATE EXISTS AT ALL. This service is the only one that generates or executes SQL and the
+    /// only one holding a storage provider, so a seam that failed to register is not a degraded feature -
+    /// it is a service that can answer nothing. Six of these seams previously shipped as deliberate
+    /// refusals, and the failure mode that made unacceptable was precisely that the shortfall was
+    /// invisible until a caller's first request: the process reported healthy, accepted traffic, and then
+    /// answered every retrieval and every update with a not-implemented code. Resolving them here means
+    /// the same shortfall is a startup failure with a named cause.
+    /// </para>
+    /// <para>
+    /// THE ENGINE IS RESOLVED AND IMMEDIATELY DISPOSED, AND THAT IS DELIBERATE. It is transient because
+    /// the transaction pool owns and disposes one engine per pooled transaction, so this gate must not
+    /// leak the instance it proves is constructible. Nothing is connected: proving a CONNECTION here
+    /// would create a database file as a side effect of a health gate, and the storage probe above has
+    /// already proven the directory writable without leaving anything behind.
+    /// </para>
+    /// <para>
+    /// A FAILURE TERMINATES RATHER THAN WARNS, matching the oracle's own posture - a decoded assertion
+    /// failure runs <c>HALT CLOSE</c> [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>] - and matching
+    /// the AAP's instruction that the .NET equivalent is fail-fast startup validation and process
+    /// termination on structural faults, never graceful degradation.
+    /// </para>
+    /// </remarks>
+    private static void ValidateRuntimeGraph(IServiceProvider services, ILogger logger)
+    {
+        try
+        {
+            // The storage seam and the SQL-execution seams. Each is resolved rather than merely checked
+            // for registration, because a registration whose constructor throws is the same outage as no
+            // registration at all.
+            _ = services.GetRequiredService<SqliteConnectionFactory>();
+
+            using (services.GetRequiredService<ITransactionEngine>())
+            {
+                // Constructed and released. See the remarks: proving construction is the whole point,
+                // and connecting would create a file this gate has no business creating.
+            }
+
+            _ = services.GetRequiredService<TransactionPool>();
+            _ = services.GetRequiredService<IDataObjectRuntime>();
+            _ = services.GetRequiredService<IQueryDataWindowRuntime>();
+            _ = services.GetRequiredService<IQueryTransactionSurface>();
+            _ = services.GetRequiredService<ISqlUpdateCarrierAdapter>();
+
+            // The three task factories - the caller-side/worker-side pair builders. A missing one here
+            // would take out exactly one of the four published gRPC services, which is the shortfall
+            // most likely to reach production unnoticed.
+            _ = services.GetRequiredService<IQueryTaskFactory>();
+            _ = services.GetRequiredService<IUpdateTaskFactory>();
+            _ = services.GetRequiredService<ICommandTaskFactory>();
+        }
+        catch (Exception error) when (error is InvalidOperationException
+            or ArgumentException
+            or ObjectDisposedException)
+        {
+            // The exception's own message names the service type that could not be produced, so no type
+            // name is interpolated here: doing so would duplicate it and risk the two disagreeing.
+            Terminate(
+                logger,
+                "A runtime seam this service executes every statement through could not be produced "
+                + "from the composed container, so this process could serve no retrieval, no update and "
+                + "no command. This is a composition fault rather than a transient one, so the process "
+                + "is terminating instead of starting and refusing every request. The attached exception "
+                + "names the seam.",
+                error);
+        }
     }
 
     /// <summary>
@@ -1045,6 +1628,47 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     /// <summary>The detail returned when the caller's own deadline or cancellation ended the call.</summary>
     internal const string CancelledDetail = "The call was cancelled by its caller or its deadline.";
 
+    /// <summary>The separator between links of a described fault chain, outermost towards innermost.</summary>
+    internal const string FaultChainSeparator = " <- ";
+
+    /// <summary>The marker appended when a fault chain is deeper than the bound below.</summary>
+    internal const string FaultChainTruncationMarker = "...";
+
+    /// <summary>
+    /// How many links of a fault chain are described before truncation.
+    /// </summary>
+    /// <remarks>
+    /// BOUNDED BECAUSE A CHAIN CAN BE CYCLIC. Nothing prevents an exception from being its own ancestor
+    /// through aggregation, and an unbounded walk over one would build a string until the process ran out of
+    /// memory - while handling a fault, which is the worst possible moment for a second one.
+    /// </remarks>
+    internal const int MaximumDescribedFaultDepth = 8;
+
+    /// <summary>
+    /// The process exit code reported when a structural fault terminates this service.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A STOP WITHOUT AN EXIT CODE IS A CLEAN STOP, AND THAT IS THE DEFECT THIS CONSTANT CLOSES.
+    /// Requesting host shutdown alone leaves <see cref="Environment.ExitCode"/> at zero, so a process
+    /// that ended because one of its own invariants was proven broken is indistinguishable, to every
+    /// mechanism that reads an exit status, from one that was asked to stop: an orchestrator's restart
+    /// policy scoped to failures does not fire, a supervisor records a successful run, and the fault is
+    /// visible only to whoever reads the log. The legacy has no equivalent ambiguity - its halt follows a
+    /// reported failure and is unconditional [<c>ws_objects/pfw.pbl.src/pfw.sra:L143</c>] - so a clean
+    /// exit on this path is a behaviour the refactor introduced rather than one it preserved.
+    /// </para>
+    /// <para>
+    /// Any non-zero value satisfies the requirement. This particular value is the conventional "internal
+    /// software error" code from the historical exit-code convention, so a structural fault is
+    /// distinguishable from a generic non-zero exit rather than merely non-zero. It deliberately matches
+    /// the value the gateway's own structural-fault path reports, so one number means one thing across
+    /// the estate; the constant is nonetheless declared per service, because no behaviour crosses a
+    /// service boundary in this system and a shared constant would be exactly that.
+    /// </para>
+    /// </remarks>
+    internal const int StructuralFaultExitCode = 70;
+
     /// <summary>Redacts statement text before it reaches a log record or a status detail.</summary>
     private readonly ISqlRedactor _redactor;
 
@@ -1054,18 +1678,29 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     /// <summary>Records the fault.</summary>
     private readonly ILogger<PersistenceStatusInterceptor> _logger;
 
+    /// <summary>The injectable termination effect, taking the process exit code.</summary>
+    private readonly Action<int> _requestProcessTermination;
+
     /// <summary>Initializes the interceptor.</summary>
     /// <param name="redactor">The statement redactor.</param>
     /// <param name="lifetime">The host lifetime used to terminate on a structural fault.</param>
     /// <param name="logger">The logger faults are recorded through.</param>
+    /// <param name="requestProcessTermination">
+    /// The termination effect, taking the process exit code. Optional, and defaulting to the host-backed
+    /// behaviour of <see cref="RequestHostShutdown"/> - set the exit code, then request shutdown so the
+    /// registered shutdown path actually runs. A test supplies its own callback here to assert that
+    /// termination was requested with the documented code, without stopping the test host.
+    /// </param>
     public PersistenceStatusInterceptor(
         ISqlRedactor redactor,
         IHostApplicationLifetime lifetime,
-        ILogger<PersistenceStatusInterceptor> logger)
+        ILogger<PersistenceStatusInterceptor> logger,
+        Action<int>? requestProcessTermination = null)
     {
         _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
         _lifetime = lifetime ?? throw new ArgumentNullException(nameof(lifetime));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _requestProcessTermination = requestProcessTermination ?? RequestHostShutdown;
     }
 
     /// <inheritdoc/>
@@ -1165,19 +1800,35 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
         // A BROKEN INVARIANT, NOT A BROKEN REQUEST. The legacy terminates the application after
         // decoding an assertion payload [ws_objects/pfw.pbl.src/pfw.sra:L111-L144], and that posture is
         // preserved: the host is asked to stop, so the process ends and the orchestrator replaces it.
-        // StopApplication is used rather than an abrupt exit precisely because it lets in-flight calls
-        // and the readiness probe observe the shutdown instead of being severed mid-write. The caller
-        // is told immediately rather than left waiting for a socket to close.
+        // Shutdown is REQUESTED rather than the process being aborted precisely because it lets in-flight
+        // calls and the readiness probe observe the shutdown instead of being severed mid-write, and
+        // because the registered shutdown path is where this service's finalize step runs - the legacy
+        // halt likewise runs the application close event before terminating [pfw.sra:L108], and
+        // docs/README.md section 初始化 warns that call must stay paired with the initialize call. The
+        // caller is told immediately rather than left waiting for a socket to close.
+        //
+        // THE REPORT IS BEST EFFORT AND THE TERMINATION IS NOT, WHICH IS WHY THEY ARE SEPARATED BY A
+        // finally. Until they were, termination ran only if the log write returned: a logging provider
+        // that throws - a full disk, a saturated sink, a misconfigured formatter - propagated out of this
+        // method and took the termination request with it, leaving the process serving requests in a
+        // state its own invariants say is impossible. That is strictly worse than a lost log record, and
+        // the legacy has no equivalent opportunity to skip its halt, so the ordering is now fixed:
+        // report, then terminate, and terminate whatever the report did.
         if (error is AssertionFailure assertion)
         {
-            _logger.LogCritical(
-                assertion,
-                "A framework assertion failed while serving {Method}. The invariant it guards is broken, "
-                + "so this instance is shutting down rather than continuing in a state it believes "
-                + "impossible.",
-                context.Method);
-
-            _lifetime.StopApplication();
+            try
+            {
+                _logger.LogCritical(
+                    assertion,
+                    "A framework assertion failed while serving {Method}. The invariant it guards is "
+                    + "broken, so this instance is shutting down rather than continuing in a state it "
+                    + "believes impossible.",
+                    context.Method);
+            }
+            finally
+            {
+                _requestProcessTermination(StructuralFaultExitCode);
+            }
 
             return new RpcException(new Status(StatusCode.Internal, AssertionFaultDetail));
         }
@@ -1195,19 +1846,133 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
             return new RpcException(new Status(StatusCode.Cancelled, CancelledDetail));
         }
 
-        // EVERYTHING ELSE. The message is redacted BEFORE it reaches the log record, because an
-        // exception raised anywhere near statement generation can carry the complete generated
-        // statement with its literal values interpolated - which is exactly the field the legacy logged
-        // verbatim. The exception object itself is attached so its type and stack survive for
-        // diagnosis, and the wire receives a constant that discloses nothing.
+        // EVERYTHING ELSE, AND THE EXCEPTION OBJECT IS DELIBERATELY NOT PASSED TO THE LOGGER.
+        //
+        // THE DEFECT THIS CLOSES WAS SUBTLE AND COMPLETE. The message was redacted, which was correct and
+        // which is why the record looked safe - and then the exception itself was attached as the logging
+        // abstraction's exception argument, at which point every provider renders it by calling ToString().
+        // That renders the UNREDACTED message, every inner exception's unredacted message and the stack, so
+        // the redaction applied to one placeholder was undone by the argument beside it. An exception raised
+        // anywhere near statement generation carries the complete generated statement with its literal values
+        // interpolated - exactly the field the legacy logged verbatim and the one this service exists to stop
+        // logging.
+        //
+        // THE WHOLE CHAIN IS REDACTED, NOT ONLY THE OUTERMOST MESSAGE. A provider fault is habitually wrapped,
+        // so the statement text is usually on an INNER exception; redacting only the outer message would have
+        // left the common case fully exposed.
+        //
+        // WHAT IS LOST AND WHY THAT IS THE RIGHT TRADE. The managed stack trace no longer reaches this record.
+        // It is upstream content in the sense that matters here - its frames carry parameter values in no
+        // sanitized form - and the type chain plus the method name locates the fault precisely enough to
+        // find it in code. The structural arm above still passes its exception, because that record is
+        // written at most once per process, terminates the host, and reproduces the legacy dialog that C-B
+        // requires be preserved in full.
         _logger.LogError(
-            error,
-            "{Method} failed with an unhandled {FaultType}. Redacted message: {RedactedMessage}",
+            "{Method} failed with an unhandled fault. FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
             context.Method,
-            error.GetType().FullName,
-            _redactor.Redact(error.Message));
+            DescribeExceptionTypes(error),
+            DescribeRedactedMessages(error));
 
         return new RpcException(new Status(StatusCode.Internal, UnhandledFaultDetail));
+    }
+
+    /// <summary>
+    /// Names the types in an exception chain, outermost first, without reading any message.
+    /// </summary>
+    /// <param name="error">The fault to describe.</param>
+    /// <returns>The namespace-qualified type names joined outermost-first.</returns>
+    /// <remarks>
+    /// A TYPE NAME IS ALLOWLISTED CONTENT AND A MESSAGE IS NOT. Every name this produces comes from this
+    /// codebase, the framework or a package - none of them can carry a value a caller sent or a statement this
+    /// service generated - so the chain identifies the fault without disclosing anything. The depth is bounded
+    /// because a chain can be cyclic through aggregation, and a truncation marker is appended so a shortened
+    /// chain is never mistaken for a complete one.
+    /// </remarks>
+    private static string DescribeExceptionTypes(Exception error)
+    {
+        StringBuilder chain = new();
+        Exception? current = error;
+
+        for (int depth = 0; depth < MaximumDescribedFaultDepth && current is not null; depth++)
+        {
+            if (depth > 0)
+            {
+                _ = chain.Append(FaultChainSeparator);
+            }
+
+            Type type = current.GetType();
+
+            _ = chain.Append(type.FullName ?? type.Name);
+            current = current.InnerException;
+        }
+
+        if (current is not null)
+        {
+            _ = chain.Append(FaultChainSeparator).Append(FaultChainTruncationMarker);
+        }
+
+        return chain.ToString();
+    }
+
+    /// <summary>
+    /// Redacts the message of every exception in a chain and joins them outermost first.
+    /// </summary>
+    /// <param name="error">The fault whose chain is described.</param>
+    /// <returns>The redacted messages, joined outermost-first.</returns>
+    /// <remarks>
+    /// THE CHAIN IS WALKED BECAUSE THE STATEMENT IS USUALLY NOT ON THE OUTERMOST EXCEPTION. A provider fault
+    /// arrives wrapped - a task fault wrapping a command fault wrapping the provider's own - and the
+    /// interpolated statement sits at the bottom. Every message goes through the same redactor the wire path
+    /// uses, so one rule governs both and a change to it cannot apply to one and not the other.
+    /// </remarks>
+    private string DescribeRedactedMessages(Exception error)
+    {
+        StringBuilder messages = new();
+        Exception? current = error;
+
+        for (int depth = 0; depth < MaximumDescribedFaultDepth && current is not null; depth++)
+        {
+            if (depth > 0)
+            {
+                _ = messages.Append(FaultChainSeparator);
+            }
+
+            _ = messages.Append(_redactor.Redact(current.Message));
+            current = current.InnerException;
+        }
+
+        if (current is not null)
+        {
+            _ = messages.Append(FaultChainSeparator).Append(FaultChainTruncationMarker);
+        }
+
+        return messages.ToString();
+    }
+
+    /// <summary>
+    /// The default termination effect: report the structural-fault exit code, then request shutdown.
+    /// </summary>
+    /// <param name="exitCode">The process exit code to report.</param>
+    /// <remarks>
+    /// <para>
+    /// THE ORDER IS LOAD BEARING. The exit code is set FIRST so that it is already in place while the
+    /// shutdown path runs and whatever inspects the process afterwards reads a failure; setting it after
+    /// requesting shutdown races the host's own return from <c>app.Run()</c> and can lose the value
+    /// entirely.
+    /// </para>
+    /// <para>
+    /// A fail-fast abort is deliberately NOT used. It would bypass the registered shutdown path, which is
+    /// where the pooled transactions are drained and the handle registries release what they hold, and it
+    /// would break the documented initialize/finalize pairing the legacy halt preserves
+    /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L108</c>, <c>docs/README.md</c> section 初始化]. The dependency
+    /// is on the host-lifetime abstraction rather than on any component owning a finalize step, because
+    /// the abstraction is the seam those steps are registered against.
+    /// </para>
+    /// </remarks>
+    private void RequestHostShutdown(int exitCode)
+    {
+        Environment.ExitCode = exitCode;
+        _lifetime.StopApplication();
     }
 }
 
@@ -1286,27 +2051,43 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
     /// <summary>Records notifications and errors that no sink consumes.</summary>
     private readonly ILogger<PersistenceSqlTaskHost> _logger;
 
+    /// <summary>Masks literal values out of any text before it reaches a log record.</summary>
+    /// <remarks>
+    /// THE SAME SEAM THE OUTWARD DATABASE-ERROR PROJECTION USES, DELIBERATELY. A framework-error text is
+    /// not a generated statement, but it is not free of caller data either: the query task composes two
+    /// of them by concatenating a fixed prefix with the externally supplied sort or filter EXPRESSION
+    /// [<c>Tasks/SqlQueryTask.cs</c>, the two <c>SetSort</c>/<c>SetFilter</c> rejection arms], and a
+    /// filter expression carries literal comparison values. Routing the text through the one redactor
+    /// means a single policy governs every log-bound value in this service rather than one rule for
+    /// statements and a different, weaker one here.
+    /// </remarks>
+    private readonly ISqlRedactor _redactor;
+
     /// <summary>Initializes a host with no fault sink and no caller-side proxy.</summary>
     /// <param name="logger">The logger notifications and errors are recorded through.</param>
+    /// <param name="redactor">The masking policy applied to text bound for a log record.</param>
     /// <remarks>
     /// The container-resolvable shape. A host obtained straight from the container serves a task that
     /// reports its faults through its own return codes rather than through a sink.
     /// </remarks>
-    public PersistenceSqlTaskHost(ILogger<PersistenceSqlTaskHost> logger)
-        : this(logger, faults: null, parentTasking: null)
+    public PersistenceSqlTaskHost(ILogger<PersistenceSqlTaskHost> logger, ISqlRedactor redactor)
+        : this(logger, redactor, faults: null, parentTasking: null)
     {
     }
 
     /// <summary>Initializes a host bound to a fault sink and a caller-side proxy.</summary>
     /// <param name="logger">The logger notifications and errors are recorded through.</param>
+    /// <param name="redactor">The masking policy applied to text bound for a log record.</param>
     /// <param name="faults">The sink framework errors are forwarded to, or <see langword="null"/>.</param>
     /// <param name="parentTasking">The caller-side proxy, or <see langword="null"/> when unattached.</param>
     internal PersistenceSqlTaskHost(
         ILogger<PersistenceSqlTaskHost> logger,
+        ISqlRedactor redactor,
         IQueryFaultSink? faults,
         ISqlTaskProxy? parentTasking)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
         _faults = faults;
         ParentTasking = parentTasking;
     }
@@ -1323,17 +2104,76 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
     /// <inheritdoc/>
     public ISqlTaskProxy? ParentTasking { get; }
 
+    /// <summary>Binds the single worker task this host serves.</summary>
+    /// <param name="task">The worker task composed against this host.</param>
+    /// <remarks>
+    /// <para>
+    /// Called exactly once, by the factory that composed the proxy pair, immediately after constructing
+    /// the worker and before anything can reach it. It is what makes <see cref="GetTask"/> answerable:
+    /// the worker cannot be a constructor argument, because the worker takes the host as ITS constructor
+    /// argument, so the cycle is closed here instead.
+    /// </para>
+    /// <para>
+    /// Rebinding is refused rather than silently accepted. A host serving two tasks would hand
+    /// <see cref="GetTask"/> the wrong one, and the caller that reads it is the commit-signal walk -
+    /// where the wrong answer is a commit reported against a task that never committed.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="task"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">A task is already bound.</exception>
+    /// <summary>The single worker task this host serves, or <see langword="null"/> before binding.</summary>
+    /// <remarks>
+    /// NOT A CONSTRUCTOR ARGUMENT, BECAUSE THE DEPENDENCY IS CIRCULAR. The worker takes the host as its
+    /// own constructor argument, so the cycle is closed by <see cref="BindTask"/> immediately after the
+    /// worker exists. Until then the field is null and every member that needs a worker says so rather
+    /// than inventing one.
+    /// </remarks>
+    private SqlTaskBase? _task;
+
+    internal void BindTask(SqlTaskBase task)
+    {
+        ArgumentNullException.ThrowIfNull(task);
+
+        if (_task is not null)
+        {
+            throw new InvalidOperationException(
+                "This SQL task host already owns a task. A host serves exactly one worker task, and "
+                + "rebinding would make the commit-signal walk report a commit against the wrong task.");
+        }
+
+        _task = task;
+    }
+
     /// <inheritdoc/>
     /// <remarks>
-    /// A SIBLING LOOKUP HAS NO ANSWER HERE, AND THAT IS THE ACCURATE ANSWER. The legacy resolves a
-    /// sibling task through the thread's own task table; in this service the task tables are the gRPC
-    /// handle registries, reached by handle rather than by position, and this host owns exactly one
-    /// task. <see cref="RetCode.E_OUT_OF_BOUND"/> is the contract's own code for a position that names
-    /// nothing, so a caller learns the truth - there is no task at that index - rather than receiving
-    /// some other task.
+    /// <para>
+    /// THIS HOST OWNS EXACTLY ONE TASK, AT <see cref="SoleTaskIndex"/>, AND THAT POSITION RESOLVES. The
+    /// legacy resolves a sibling task through the thread's own task table; in this service each proxy
+    /// pair gets its own host, so the table has one entry. Any other position names nothing and answers
+    /// <see cref="RetCode.E_OUT_OF_BOUND"/> - the contract's own code for a position that names nothing
+    /// - so a caller learns the truth rather than receiving some other task.
+    /// </para>
+    /// <para>
+    /// <b>Why resolving matters.</b> The one caller is the commit-signal walk in
+    /// <c>SqlTaskBase.OnCommitted</c>, which counts DOWN from <see cref="TaskIndex"/> to one and sets the
+    /// commit signal of every task it resolves. While this member refused every index, that walk found
+    /// nothing, no signal was ever set, and the caller-side <c>IsCommitted()</c> could not become true
+    /// however the transaction actually ended - so a committed command reported as uncommitted.
+    /// </para>
+    /// <para>
+    /// A position asked for before <see cref="BindTask"/> has run also answers out-of-bound: an unbound
+    /// host genuinely holds no task, and inventing one would be worse than saying so.
+    /// </para>
     /// </remarks>
     public long GetTask(int index, out SqlTaskBase? task)
     {
+        if (index == SoleTaskIndex && _task is { } owned)
+        {
+            task = owned;
+
+            return RetCode.OK;
+        }
+
         task = null;
 
         return RetCode.E_OUT_OF_BOUND;
@@ -1383,23 +2223,40 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
 
     /// <inheritdoc/>
     /// <remarks>
+    /// <para>
     /// FORWARDED TO THE SINK WHEN THERE IS ONE, WHICH IS THE MARSHALLING BOUNDARY IN ACTION: the
-    /// worker-side task raises, this worker-side host forwards, and the caller-side collector reads. It
-    /// is also logged, because a fault nobody collected must still be visible to an operator. The text
-    /// is passed through unchanged rather than redacted, because this channel carries a FRAMEWORK
-    /// diagnostic and never a generated statement - the statement-bearing channel is the database-error
-    /// one, and it is redacted where it is logged.
+    /// worker-side task raises, this worker-side host forwards, and the caller-side collector reads.
+    /// <b>The forwarded text is the raw text, unchanged and unmasked</b> - that is the contract channel,
+    /// it is what the legacy's own general-error event carries, and narrowing it would change what a
+    /// caller is told about its own request.
+    /// </para>
+    /// <para>
+    /// <b>THE LOG RECORD IS NOT THAT TEXT, AND THE TWO ARE DELIBERATELY DIFFERENT.</b> An earlier
+    /// revision logged <c>errInfo</c> verbatim on the grounds that this channel carries only framework
+    /// diagnostics. It does not: the retrieval task composes two of these texts by concatenating a fixed
+    /// prefix with the externally supplied SORT or FILTER expression when the carrier rejects it
+    /// [<c>Tasks/SqlQueryTask.cs</c>, the <c>SetSort</c> and <c>SetFilter</c> rejection arms, which
+    /// report the value UNTRIMMED and in full], and a filter expression is caller data that routinely
+    /// carries literal comparison values. Logging it verbatim wrote business values into the default log
+    /// of the one service whose entire disclosure posture is that no literal reaches a log or a response.
+    /// So the record carries the CODE, the text's length as safe metadata, and the text only after the
+    /// service's single redaction policy has masked every literal out of it. The length is included
+    /// because it is what tells an operator that a value was present at all without disclosing it.
+    /// </para>
     /// </remarks>
     public long OnError(long errCode, string errInfo)
     {
         string text = errInfo ?? string.Empty;
 
+        // The contract channel first, and with the text exactly as the task raised it.
         _faults?.OnError(errCode, text);
 
         _logger.LogError(
-            "A SQL task reported framework error {ErrorCode}: {ErrorText}",
+            "A SQL task reported framework error {ErrorCode}. Redacted detail ({DetailLength} chars): "
+                + "{RedactedErrorText}",
             errCode,
-            text);
+            text.Length,
+            _redactor.Redact(text));
 
         return DataWindowBufferStore.EventContinue;
     }
@@ -1409,7 +2266,9 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
     /// Notifications are progress and lifecycle signals, so they are recorded at trace level: the
     /// legacy throttles them to roughly one per hundred milliseconds per retrieval
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds_mt.sru:L37</c>], which is
-    /// still far too many for any higher level.
+    /// still far too many for any higher level. The text is masked on the same grounds as the error
+    /// channel above: a notification payload is free text from the task layer, trace records land in
+    /// the same sink as every other record, and a level is not an access control.
     /// </remarks>
     public long OnNotify(long notifyCode, long payload, string text)
     {
@@ -1417,7 +2276,7 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
             "A SQL task raised notification {NotifyCode} with payload {Payload}: {Text}",
             notifyCode,
             payload,
-            text ?? string.Empty);
+            SqlRedactor.Instance.Redact(text));
 
         return DataWindowBufferStore.EventContinue;
     }
@@ -1557,10 +2416,11 @@ internal sealed class QueryTaskFactory : IQueryTaskFactory
 
         PersistenceSqlTaskHost host = new(
             _services.GetRequiredService<ILogger<PersistenceSqlTaskHost>>(),
+            _redactor,
             faults,
             new QueryFaultProxy(faults));
 
-        return new SqlQueryTask(
+        SqlQueryTask task = new(
             host,
             _transactionPool,
             _dataStoreFactory,
@@ -1573,378 +2433,775 @@ internal sealed class QueryTaskFactory : IQueryTaskFactory
             _changesetCodec,
             _redactor,
             _options);
+
+        // THE HOST MUST OWN THE TASK, not merely serve it. The inherited commit-signal walk counts down
+        // from the host's task index and sets the commit signal of every task the host resolves, so a
+        // host that answers "no task at that position" makes a committed retrieval indistinguishable
+        // from an uncommitted one. Bound here because the cycle cannot be closed in either constructor:
+        // the task takes the host, so the host cannot take the task.
+        host.BindTask(task);
+
+        return task;
     }
 }
 
 // ==================================================================================================
-//  THE SHIPPED RUNTIME SEAMS - A DOCUMENTED GAP, WHICH IS NOT THE SAME THING AS A STUB
+//  THE RUNTIME SEAMS ARE BOUND - WHAT USED TO BE HERE, AND WHY IT IS NOT ANY MORE
 //
-//  READ THIS ONCE HERE RATHER THAN SIX TIMES BELOW.
+//  READ THIS ONCE HERE RATHER THAN CHASING SIX REGISTRATIONS.
 //
-//  Two capabilities that the types in this section stand in front of are genuinely not provisioned in
-//  this phase, and neither omission is an oversight - each is forced by a constraint that would be
-//  VIOLATED by supplying the obvious implementation.
+//  This file previously declared six types - UnboundDataObjectRuntime, UnboundQueryDataWindowRuntime,
+//  UnboundQueryTransactionSurface, UnprovisionedTransactionEngine, UnboundUpdateTaskFactory and
+//  UnboundCommandTaskFactory - each answering its contract's own defined negative, and it argued at length
+//  that the result was a documented gap rather than a stub. The argument was internally consistent and its
+//  conclusion was wrong: with all six bound that way, contracts C-05 through C-08 could not perform a
+//  single retrieval, update, command or commit, so the whole of this service's published surface answered a
+//  refusal no matter what a caller sent. A gap that spans every capability a service exists to provide is
+//  not a gap in it; it is the absence of it.
 //
-//  1. THERE IS NO DBMS TO CONNECT TO, AND PROVIDING ONE WOULD FABRICATE A DATABASE (constraint C-E).
-//     The legacy transaction object enumerates exactly TWO database types, SQL Server and Oracle
-//     [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61], and SQLite is not in that
-//     enumeration at all - the SQLite binding is an entirely separate, independent storage path. Yet
-//     NEITHER SQL Server NOR Oracle has a schema, a connection string or one line of DDL anywhere in
-//     the repository; only the two constants and the two statement generators exist. So the transaction
-//     object's connect verb has no evidenced target, and inventing one - a host name, a catalogue, a
-//     credential - is precisely the fabrication the constraint forbids. What those two dialects DO have
-//     is their statement generation, and that is preserved in full under Sql/Paging/ as pure string
-//     transforms held to byte-exact parity with no instance of either engine running. The evidenced
-//     storage path, SQLite, is fully provisioned: see AddPersistenceStorage above, and the readiness
-//     probe genuinely reaches it.
+//  The three premises the refusal rested on, and what each was actually true of:
 //
-//  2. THERE IS NO DATAWINDOW RUNTIME TO MATERIALISE, AND BUILDING ONE WOULD IMPLEMENT A DEFERRED
-//     SERVICE (constraint C-D). The legacy result carrier IS a DataWindow - the SQL task's carrier
-//     derives from `datastore` - so materialising one, generating grid syntax from a statement, or
-//     resolving a child carrier all require a live DataWindow engine. That engine belongs to the
-//     deferred DesignSystem capability, which must not be implemented in this phase EVEN PARTIALLY and
-//     even to stub it out. Between a partial implementation and a documented gap, the documented gap
-//     wins.
+//    1. "A DataWindow runtime would implement the deferred DesignSystem." It would not. AAP 0.2.2.2 scopes
+//       DesignSystem to the `pfw.ui*` libraries - visual controls, geometry, DPI, canvas, painter, font and
+//       menus. The DataWindow RESULT CARRIER is scoped to Persistence by 0.3.4, 0.4.2.6 and 0.6.4, which
+//       state in as many words that the legacy result carrier IS a DataWindow because
+//       `n_cst_thread_task_sqlbase_ds` derives from `datastore`, and that a naive rowset would discard the
+//       state the update contract depends on. `Buffers/` is that carrier, it is already in this project,
+//       and binding a runtime over it implements nothing presentational: there is no window, no font, no
+//       colour and no pixel anywhere in `Runtime/`.
+//    2. "An update task's carrier needs original values, which only a carrier holds." True, and the carrier
+//       holds them - `CarrierRow` captures the original on first write and `GetItemOriginalValue` answers
+//       it. That premise was an argument FOR binding the seam, not against it.
+//    3. "A command task's proxy needs the calling-thread substrate, which a headless service does not
+//       have." This conflated the substrate with the thread. `n_cst_threading_task` is a STATE HOLDER -
+//       a running flag, a cancellation handle, a synchronization event, an identity triple and a worker
+//       insertion - and none of those needs a second thread. `Runtime/SqliteCommandTaskFactory.cs` holds
+//       that state and says which of its members are deliberately not ported and why.
 //
-//  WHAT THESE TYPES DO INSTEAD IS ANSWER EACH CONTRACT'S OWN DEFINED NEGATIVE. That is a different
-//  thing from a stub, and the difference is observable:
-//    * Not one of them throws NotImplementedException, and not one of them is reachable only from a
-//      test. Each is the SHIPPED implementation, on the real path, returning a value its own interface
-//      already documents as meaning "this provider cannot serve that".
-//    * Each negative is a value the CONSUMER already handles: a definition that does not resolve, a
-//      carrier that reports a create failure with an error text, a query that answers
-//      RetCode.E_NO_IMPLEMENTATION - the same code the legacy's own unsupported-dialect arm returns
-//      [n_cst_thread_task_sqlquery.sru:L396-L398] - and a connect that answers a failed SQL state
-//      carrying an explanation. So a caller learns a TRUE statement about what happened rather than
-//      receiving a fabricated success or an opaque crash.
-//    * Nothing silently succeeds. A commit never reports data committed that was never written, which
-//      is the one failure mode that would be worse than refusing.
+//  What is bound now, and where the behaviour lives:
 //
-//  SUBSTITUTION NEEDS NO EDIT TO THIS FILE. Every one of them is registered with TryAdd, so a
-//  deployment that has a real DBMS engine, or a phase that brings a DataWindow runtime, registers its
-//  own implementation first and the whole published surface starts serving unchanged.
+//      IDataObjectRuntime        ->  Runtime/SqliteDataObjectRuntime.cs
+//      IQueryDataWindowRuntime   ->  Runtime/SqliteQueryRuntime.cs
+//      IQueryTransactionSurface  ->  Runtime/SqliteQueryRuntime.cs
+//      ITransactionEngine        ->  Runtime/SqliteTransactionEngine.cs
+//      ISqlUpdateCarrierAdapter  ->  Runtime/SqlUpdateCarrier.cs
+//      IUpdateTaskFactory        ->  Runtime/SqliteUpdateTaskFactory.cs
+//      ICommandTaskFactory       ->  Runtime/SqliteCommandTaskFactory.cs
+//
+//  Every one is still TryAdd-registered, so every one is still substitutable - which was the good half of
+//  the previous design and is kept. And the definitions those runtimes resolve are configuration, because
+//  the `.srd` objects live in the read-only legacy tree and no managed runtime can load one; the
+//  `DataObjects` section is that material, and `ValidatePersistenceStructuralPreconditions` refuses to
+//  start a host whose seams are not all resolvable.
 // ==================================================================================================
 
 /// <summary>
-/// The shipped <see cref="IDataObjectRuntime"/>: it resolves no data-object definition.
-/// </summary>
-/// <remarks>
-/// A definition is the six describe-able properties of a DataWindow object - its statement, sort,
-/// filter, processing mode, arguments and units - so resolving one requires the deferred DataWindow
-/// engine. The interface's own signature documents the negative as a false result with no definition,
-/// and the datastore layer turns that into its documented "no such data object" path rather than
-/// creating an empty carrier nobody asked for.
-/// </remarks>
-internal sealed class UnboundDataObjectRuntime : IDataObjectRuntime
-{
-    /// <inheritdoc/>
-    public bool TryResolveDefinition(
-        string dataObject,
-        [NotNullWhen(true)] out DataObjectDefinition? definition)
-    {
-        // Validated even though the answer does not depend on it: a caller that supplied nothing has
-        // made a different mistake from one that supplied an unbound name, and collapsing the two sends
-        // a reader of the resulting diagnostic to the wrong place.
-        ArgumentNullException.ThrowIfNull(dataObject);
-
-        definition = null;
-
-        return false;
-    }
-
-    /// <inheritdoc/>
-    /// <remarks>
-    /// Answers the datastore layer's own failure value rather than a return code, because this member
-    /// sits on the DATASTORE channel whose alphabet is a row count with a negative one for failure. A
-    /// zero here would be a lie of the worst kind available - it reads as "retrieved successfully, no
-    /// rows matched".
-    /// </remarks>
-    public long Retrieve(ISqlDataStore data, IReadOnlyList<object?> parameters)
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(parameters);
-
-        return DataWindowBufferStore.DataStoreFailure;
-    }
-}
-
-/// <summary>
-/// The shipped <see cref="IQueryDataWindowRuntime"/>: it materialises no result carrier.
-/// </summary>
-/// <remarks>
-/// All three members need the deferred DataWindow engine - one creates a carrier from generated grid
-/// syntax, one resolves a child carrier behind a column, and one attaches a transaction to a carrier -
-/// and each answers the negative its own signature documents. The create outcome carries an error TEXT
-/// as well as a code, so the reason travels with the refusal instead of having to be inferred.
-/// </remarks>
-internal sealed class UnboundQueryDataWindowRuntime : IQueryDataWindowRuntime
-{
-    /// <summary>The reason a carrier cannot be created, carried on the outcome itself.</summary>
-    internal const string UnboundCarrierText =
-        "No DataWindow runtime is bound in this phase, so a result carrier cannot be created from "
-        + "generated grid syntax. Retrieval that needs a materialised carrier is unavailable until a "
-        + "runtime is registered; statement construction, clause modification and paging rewriting are "
-        + "unaffected.";
-
-    /// <inheritdoc/>
-    public CarrierCreateOutcome CreateFromSyntax(ISqlDataStore data, string syntax)
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(syntax);
-
-        return new CarrierCreateOutcome(DataWindowBufferStore.DataStoreFailure, UnboundCarrierText);
-    }
-
-    /// <inheritdoc/>
-    public bool TryGetChild(ISqlDataStore data, string columnName, out DataWindowBufferStore? child)
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(columnName);
-
-        child = null;
-
-        return false;
-    }
-
-    /// <inheritdoc/>
-    public long AttachTransaction(ISqlDataStore data, IPooledTransaction transaction)
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(transaction);
-
-        return DataWindowBufferStore.DataStoreFailure;
-    }
-}
-
-/// <summary>
-/// The shipped <see cref="IQueryTransactionSurface"/>: it generates no grid syntax and runs no query.
-/// </summary>
-/// <remarks>
-/// The two productive members are the DataWindow engine's statement-to-syntax conversion and the
-/// transaction object's own query verb, so both are unavailable for the two reasons given above. The
-/// two RETRIEVAL HOOKS are different in kind and are treated differently: they are notifications with a
-/// veto, so the correct behaviour for a surface with nothing to notify is to CONTINUE - vetoing a
-/// retrieval that has not been asked to stop would invent a refusal, and the legacy's own convention is
-/// that a hook nobody implemented does not prevent anything.
-/// </remarks>
-internal sealed class UnboundQueryTransactionSurface : IQueryTransactionSurface
-{
-    /// <summary>The reason grid syntax cannot be generated.</summary>
-    internal const string UnboundSyntaxText =
-        "No DataWindow runtime is bound in this phase, so grid syntax cannot be generated from a "
-        + "statement.";
-
-    /// <summary>The reason a query cannot be executed through the transaction object.</summary>
-    internal const string UnprovisionedQueryText =
-        "No database engine is provisioned for the transaction-object path in this phase, so this query "
-        + "cannot be executed. The legacy path enumerates SQL Server and Oracle only, and neither has a "
-        + "schema, a connection string or any DDL in the repository; the evidenced SQLite path is "
-        + "reached through the storage seam instead.";
-
-    /// <inheritdoc/>
-    public GridSyntaxOutcome GridSyntaxFromSql(IPooledTransaction transaction, string sql)
-    {
-        ArgumentNullException.ThrowIfNull(transaction);
-        ArgumentNullException.ThrowIfNull(sql);
-
-        // Empty syntax paired with a non-empty error text, which is how the outcome type spells "no
-        // syntax, and here is why" - the consumer tests the text rather than guessing from the emptiness.
-        return new GridSyntaxOutcome(string.Empty, UnboundSyntaxText);
-    }
-
-    /// <inheritdoc/>
-    public ValueTask<CountQueryOutcome> Query(
-        IPooledTransaction transaction,
-        string sql,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(transaction);
-        ArgumentNullException.ThrowIfNull(sql);
-
-        // The caller's cancellation still wins over a refusal, because a cancelled call must report
-        // cancellation rather than a capability verdict it never waited for.
-        cancellationToken.ThrowIfCancellationRequested();
-
-        return ValueTask.FromResult(
-            new CountQueryOutcome(RetCode.E_NO_IMPLEMENTATION, null, UnprovisionedQueryText));
-    }
-
-    /// <inheritdoc/>
-    /// <remarks>
-    /// CONTINUE, NOT REFUSE. This is a vetoable notification and there is nothing here to notify, so the
-    /// only faithful answer is the one that prevents nothing.
-    /// </remarks>
-    public long RaiseBeforeRetrieve(IPooledTransaction transaction, DataWindowCarrier data)
-    {
-        ArgumentNullException.ThrowIfNull(transaction);
-        ArgumentNullException.ThrowIfNull(data);
-
-        return RetCode.OK;
-    }
-
-    /// <inheritdoc/>
-    /// <remarks>A notification with no return contract and nothing to notify, so genuinely nothing.</remarks>
-    public void RaiseAfterRetrieve(IPooledTransaction transaction, DataWindowCarrier data, long rowCount)
-    {
-        ArgumentNullException.ThrowIfNull(transaction);
-        ArgumentNullException.ThrowIfNull(data);
-    }
-}
-
-/// <summary>
-/// The shipped <see cref="ITransactionEngine"/>: it connects to nothing, because nothing is provisioned.
+/// The trust anchor this service's one outbound channel verifies Security against, loaded once from the
+/// path <c>InternalTls:TrustedCaPath</c> names.
 /// </summary>
 /// <remarks>
 /// <para>
-/// See reason 1 in the section banner above: the transaction-object path enumerates SQL Server and
-/// Oracle and neither has any evidence in the repository, so a connect verb here has no target that
-/// would not have to be invented.
+/// WHAT THIS FIXES. This service calls nobody, but the stock bearer handler does: it fetches Security's
+/// discovery document and published key set over its own backchannel, and that is the channel which
+/// decides WHICH KEYS SIGN A VALID TOKEN. Security terminates TLS with a certificate issued by the
+/// LOCAL authority the generation recipe in <c>docs/ARCHITECTURE.md</c> §9.3.1 creates, and that
+/// authority is in no container's operating-system trust store. Left on platform default trust the
+/// handler cannot fetch the key set at all, so every inbound token is refused for want of a key rather
+/// than on its merits - which reads to an operator as a token problem when it is a trust problem.
 /// </para>
 /// <para>
-/// THE VERBS ARE SPLIT DELIBERATELY, AND THE SPLIT IS THE HONEST PART. Connect, commit and execute
-/// FAIL, because each of them would otherwise report work that did not happen - and a commit that
-/// claims success is the single most damaging lie this type could tell. Disconnect and rollback SUCCEED,
-/// because they are idempotent unwinds and there is genuinely nothing left to unwind: failing them would
-/// make every cleanup path report an error it cannot act on, and the legacy tolerates a disconnect of
-/// something that never connected in exactly the same way.
+/// IT NARROWS TRUST; IT DOES NOT RELAX IT. The policy built here sets
+/// <see cref="X509ChainTrustMode.CustomRootTrust"/>, so the mounted anchor becomes the ONLY acceptable
+/// root and the machine's public roots stop being acceptable for internal traffic. Chain building, name
+/// validation and validity dates remain the platform's. There is no
+/// <c>RemoteCertificateValidationCallback</c>, no <c>ServerCertificateCustomValidationCallback</c> and
+/// no environment-conditional bypass anywhere in this service (constraint C-G).
 /// </para>
 /// <para>
-/// THE DIALECT ANSWER PRESERVES THE LEGACY CLASSIFICATION RATHER THAN ADDING AN ARM. Whatever descriptor
-/// the caller supplies is echoed back through <see cref="Dbms"/>, so the paging dispatcher sees the
-/// caller's own dialect string and classifies it exactly as the legacy does - anything that does not
-/// contain ORACLE is the SQL Server type, and there is no third arm and specifically none for SQLite.
+/// REVOCATION IS NOT CHECKED, AS A CONSEQUENCE OF THE TOPOLOGY. A local authority generated by two
+/// <c>openssl</c> invocations publishes no revocation list and runs no responder, so an online check has
+/// nothing to ask; the recipe's own 30-day certificate lifetime is the control that substitutes for it.
+/// A deployment whose authority does publish revocation information leaves this path unset and uses
+/// platform trust, where the platform's default revocation behaviour applies.
 /// </para>
 /// </remarks>
-internal sealed class UnprovisionedTransactionEngine : ITransactionEngine
+internal sealed class InternalTlsTrust
 {
-    /// <summary>The explanation carried on every failing SQL state this engine produces.</summary>
-    internal const string UnprovisionedText =
-        "No database engine is provisioned for the transaction-object path in this phase. The legacy "
-        + "path enumerates SQL Server and Oracle only, and neither has a schema, a connection string or "
-        + "any DDL in the repository, so connecting would require inventing a target. Register an engine "
-        + "implementation to enable this path; the evidenced SQLite storage path is unaffected and is "
-        + "reached through the storage seam.";
+    private readonly X509Certificate2Collection _anchors;
 
     /// <summary>
-    /// The database code carried on a failing state.
+    /// Loads the anchor bundle, or records that this deployment uses platform default trust.
     /// </summary>
+    /// <param name="options">The bound <c>InternalTls</c> section. A path, never material.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A path is configured but the bundle cannot be read or does not parse. Structural, and therefore
+    /// fatal - the fail-fast posture of <c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>.
+    /// </exception>
     /// <remarks>
-    /// The legacy's own not-implemented code, reused here rather than inventing a number. It cannot
-    /// collide with a genuine vendor code, and a caller that already recognises the unsupported-dialect
-    /// arm recognises this too.
+    /// The path is NOT echoed into the failure message. A trust anchor is public material, but a
+    /// container's secret mount layout is not something a startup record should publish, so the message
+    /// names the configuration key instead - the same rule
+    /// <c>Configuration/PersistenceOptions.cs</c> applies to its own validation messages.
     /// </remarks>
-    internal const long UnprovisionedDbCode = RetCode.E_NO_IMPLEMENTATION;
-
-    /// <inheritdoc/>
-    /// <remarks>Zero is the legacy's unconnected handle, and no connection is ever established here.</remarks>
-    public int DbHandle => 0;
-
-    /// <inheritdoc/>
-    public string Dbms { get; private set; } = string.Empty;
-
-    /// <inheritdoc/>
-    /// <remarks>
-    /// Stored and honoured as a SETTING rather than acted upon. The descriptor's auto-commit choice is
-    /// part of the session state a caller can read back, and losing it would make the descriptor round
-    /// trip lossily for no reason connected to the missing engine.
-    /// </remarks>
-    public bool AutoCommit { get; set; }
-
-    /// <inheritdoc/>
-    /// <remarks>
-    /// Only the dialect is retained, and deliberately only the dialect. The descriptor also carries the
-    /// server, the user, the connection parameters and the log password, and none of those has any use
-    /// on an engine that will not connect - so none is copied anywhere, which keeps the credential out
-    /// of this object's state entirely (constraint C-F).
-    /// </remarks>
-    public void ApplyConnectionFields(in TransactionData descriptor) => Dbms = descriptor.Dbms;
-
-    /// <inheritdoc/>
-    public SqlState Connect() => SqlState.Failed(UnprovisionedDbCode, UnprovisionedText);
-
-    /// <inheritdoc/>
-    /// <remarks>An idempotent unwind of a session that was never established - see the remarks above.</remarks>
-    public SqlState Disconnect() => SqlState.Succeeded();
-
-    /// <inheritdoc/>
-    public SqlState Commit() => SqlState.Failed(UnprovisionedDbCode, UnprovisionedText);
-
-    /// <inheritdoc/>
-    /// <remarks>Nothing was written, so there is nothing to undo - see the remarks above.</remarks>
-    public SqlState Rollback() => SqlState.Succeeded();
-
-    /// <inheritdoc/>
-    public SqlState Execute(string sqlCommand)
+    public InternalTlsTrust(InternalTlsTrustOptions options)
     {
-        // The statement is deliberately neither stored nor logged. It may carry interpolated literal
-        // values whenever the connection disabled bind variables, and an engine that cannot run it has
-        // no reason whatsoever to retain it (constraint C-F).
-        ArgumentNullException.ThrowIfNull(sqlCommand);
+        ArgumentNullException.ThrowIfNull(options);
 
-        return SqlState.Failed(UnprovisionedDbCode, UnprovisionedText);
+        if (!options.IsConfigured)
+        {
+            _anchors = [];
+
+            return;
+        }
+
+        try
+        {
+            X509Certificate2Collection loaded = [];
+
+            loaded.ImportFromPemFile(options.TrustedCaPath.Trim());
+
+            if (loaded.Count == 0)
+            {
+                throw new CryptographicException("The file carried no PEM-encoded certificate.");
+            }
+
+            _anchors = loaded;
+        }
+        catch (Exception failure) when (failure
+            is CryptographicException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                "The internal trust anchor named by "
+                    + $"'InternalTls:{nameof(InternalTlsTrustOptions.TrustedCaPath)}' could not be "
+                    + "loaded, so this deployment cannot verify the key set it validates every inbound "
+                    + "token against and the host will not start. Check that the file exists, that the "
+                    + "process can read it, and that it is a PEM-encoded certificate or chain of them. "
+                    + "The path is not reproduced here, because a startup record must not publish a "
+                    + "container's secret mount layout.",
+                failure);
+        }
     }
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Whether internal trust is pinned to a mounted anchor rather than left to the platform.
+    /// </summary>
+    public bool IsPinned => _anchors.Count > 0;
+
+    /// <summary>
+    /// Applies the pinned anchor to one outbound handler, or leaves platform trust in place.
+    /// </summary>
+    /// <param name="handler">The handler about to be used for internal traffic.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="handler"/> is <see langword="null"/>.</exception>
     /// <remarks>
-    /// Nothing unmanaged is held, because nothing was ever opened. Implemented rather than omitted
-    /// because the interface requires it and because the pool disposes every engine it creates.
+    /// A FRESH POLICY PER HANDLER, DELIBERATELY. <see cref="X509ChainPolicy"/> is not documented as
+    /// thread-safe and a handler may be used concurrently, so each handler receives its own instance
+    /// built over the SAME shared anchor collection - one file read, one policy per consumer.
     /// </remarks>
-    public void Dispose()
+    public void Apply(SocketsHttpHandler handler)
     {
+        ArgumentNullException.ThrowIfNull(handler);
+
+        if (!IsPinned)
+        {
+            return;
+        }
+
+        X509ChainPolicy policy = new()
+        {
+            TrustMode = X509ChainTrustMode.CustomRootTrust,
+            RevocationMode = X509RevocationMode.NoCheck,
+        };
+
+        policy.CustomTrustStore.AddRange(_anchors);
+
+        handler.SslOptions.CertificateChainPolicy = policy;
     }
 }
 
+// ==================================================================================================
+//  THE PROVISIONED TASK FACTORIES - THE PROXY PAIR, BUILT AND JOINED
+//
+//  READ THIS ONCE HERE RATHER THAN TWICE BELOW.
+//
+//  WHAT THESE FACTORIES REPLACED, AND WHY THE REPLACEMENT WAS NECESSARY
+//  An earlier revision of this file shipped six types that refused: a data-object runtime that resolved
+//  nothing, a carrier runtime that materialised nothing, a transaction surface that ran nothing, a
+//  transaction engine that connected to nothing, and two task factories that answered
+//  RetCode.E_NO_IMPLEMENTATION. They were defended as a documented gap rather than a stub, and the
+//  distinction they drew was real - none threw, each answered its own contract's defined negative. The
+//  defence still did not hold, for a reason that has nothing to do with how the refusals were spelled:
+//  the four capabilities behind them are the ones this service EXISTS to own. Persistence is the only
+//  service that generates or executes SQL and the only one holding a storage provider, and its four
+//  published contracts are Query, Update, Command and Transaction. A composition root that binds
+//  refusals to all four does not ship a documented gap; it ships a service that cannot do its job, and
+//  the mandatory acceptance checks for this file - a concurrency mismatch surfacing as Aborted with a
+//  populated ConflictDetail, and a database error whose statement text is proven redacted - are not
+//  reachable at all without a real graph.
+//
+//  WHERE EACH CAPABILITY WENT, so a reader looking for the old types finds the new ones:
+//    ITransactionEngine        -> Data/SqliteTransactionEngine.cs        (transient, one per pooled
+//                                                                        transaction, and the lifetime
+//                                                                        is load bearing)
+//    IDataObjectRuntime        -> Data/DataWindowRuntime.cs
+//    IQueryDataWindowRuntime   -> Data/DataWindowRuntime.cs
+//    IQueryTransactionSurface  -> Data/DataWindowRuntime.cs
+//    ISqlUpdateCarrierAdapter  -> Tasks/SqlUpdateCarrier.cs
+//    ISqlTaskProxyHost         -> Tasks/TaskProxies/PersistenceSqlTaskProxyHost.cs
+//  Each of those files carries, at its head, the constraint it could be misread as breaking and the
+//  reason it does not: C-E for the engine, because SQLite is the one storage engine this repository
+//  evidences and no SQL Server or Oracle connection is provisioned anywhere; C-D for the carrier
+//  runtime, because what DesignSystem owns is the RENDERING half and the DATA half already lives in
+//  this project's Buffers/ folder.
+//
+//  WHAT DID *NOT* CHANGE, AND MUST NOT
+//    * The dialect discriminator is still the caller's, and the classification over it still has two
+//      arms plus the legacy's not-implemented arm - anything not containing ORACLE is the SQL Server
+//      type, and there is no SQLite arm. Both paging rewriters remain pure string transforms held to
+//      byte-exact parity with no instance of either engine running.
+//    * The proxy pair is still a PAIR. Both factories below build a worker-side task AND a caller-side
+//      proxy and join them through a fault sink, because the legacy encodes thread affinity as a
+//      contract rather than as commentary. Flattening either into one async method is what the
+//      affinity contract forbids, and neither does.
+//    * Nothing here deletes, recreates or reseeds the database, and nothing issues a DROP. The
+//      paired-capture rule depends on that and is restated at each file that touches storage.
+// ==================================================================================================
+
 /// <summary>
-/// The shipped <see cref="IUpdateTaskFactory"/>: it creates no update task in this phase.
+/// The provisioned <see cref="IUpdateTaskFactory"/>: it builds an update proxy pair per session.
 /// </summary>
 /// <remarks>
 /// <para>
-/// An update task needs BOTH of the missing capabilities at once, which is why this factory refuses
-/// rather than constructing something that would fail later. Its carrier is a DataWindow with live
-/// buffers and per-item statuses - the update contract depends on the ORIGINAL value of every marked
-/// column, which only a carrier holds - and its statement execution needs the transaction-object path.
-/// Handing back a task that could not carry original values would be worse than refusing, because the
-/// concurrency check is the one thing this contract exists to get right and a task without original
-/// values would silently overwrite.
+/// THE SESSION IS RESOLVED FIRST AND A MISSING ONE IS THE ONLY REFUSAL. The contract's own documented
+/// negative for an unknown or ended session is <see cref="RetCode.E_INVALID_TRANSACTION"/>, and that arm
+/// stays reachable - it is a caller naming a session it does not have, which is a real state rather than
+/// an unimplemented capability.
 /// </para>
 /// <para>
-/// THE REFUSAL IS THE CONTRACT'S OWN. The interface returns a code with a null surface, the consumer
-/// already logs that and answers with the code in its response, and the code chosen is the legacy's own
-/// not-implemented value - so a caller receives a definite, machine-readable answer instead of a
-/// timeout, an exception or a task that misbehaves on first use.
+/// THE PAIR IS BUILT IN THE ORDER THE ORACLE BUILDS IT, and the order is load bearing. The worker-side
+/// host is constructed around the caller-side fault sink; the worker is constructed around that host;
+/// the caller-side substrate is constructed and joined to the worker; the proxy is constructed around the
+/// substrate; and only then is the worker told about its proxy. Building it in any other order leaves one
+/// half holding a null reference to the other, which the legacy avoids by the same sequencing.
 /// </para>
 /// </remarks>
-internal sealed class UnboundUpdateTaskFactory : IUpdateTaskFactory
+internal sealed class UpdateTaskFactory : IUpdateTaskFactory
 {
+    /// <summary>The worker class name the caller-side substrate registers.</summary>
+    /// <remarks>
+    /// The exact string the oracle's <c>event ongettaskclsname</c> answers, lower-cased when stored, and
+    /// contract rather than description: the substrate resolves a worker BY this name.
+    /// </remarks>
+    internal const string WorkerClassName = "n_cst_thread_task_sqlupdate";
+
+    /// <summary>Resolves per-task collaborators.</summary>
+    private readonly IServiceProvider _services;
+
+    /// <summary>The sessions an update task is created against.</summary>
+    private readonly TransactionSessionRegistry _sessions;
+
+    /// <summary>The shared transaction pool.</summary>
+    private readonly TransactionPool _transactionPool;
+
+    /// <summary>The shared datastore factory.</summary>
+    private readonly ISqlDataStoreFactory _dataStoreFactory;
+
+    /// <summary>The shared retrieval-hook activator.</summary>
+    private readonly ISqlRetrievalHookActivator _hookActivator;
+
+    /// <summary>The adapter that wraps a store as an update-capable carrier.</summary>
+    private readonly ISqlUpdateCarrierAdapter _carrierAdapter;
+
+    /// <summary>The conflict classifier.</summary>
+    private readonly ConflictDetector _conflictDetector;
+
+    /// <summary>The statement redactor the worker-side host logs through.</summary>
+    private readonly ISqlRedactor _redactor;
+
+    /// <summary>The injected clock.</summary>
+    private readonly TimeProvider _timeProvider;
+
+    /// <summary>Creates task and proxy loggers.</summary>
+    private readonly ILoggerFactory _loggerFactory;
+
+    /// <summary>Initializes the factory.</summary>
+    /// <param name="services">The container, used to resolve a fresh host per task.</param>
+    /// <param name="sessions">The transaction-session registry.</param>
+    /// <param name="transactionPool">The shared transaction pool.</param>
+    /// <param name="dataStoreFactory">The shared datastore factory.</param>
+    /// <param name="hookActivator">The shared retrieval-hook activator.</param>
+    /// <param name="carrierAdapter">The update-carrier adapter.</param>
+    /// <param name="conflictDetector">The conflict classifier.</param>
+    /// <param name="redactor">The statement redactor.</param>
+    /// <param name="timeProvider">The injected clock.</param>
+    /// <param name="loggerFactory">The factory task and proxy loggers are created from.</param>
+    public UpdateTaskFactory(
+        IServiceProvider services,
+        TransactionSessionRegistry sessions,
+        TransactionPool transactionPool,
+        ISqlDataStoreFactory dataStoreFactory,
+        ISqlRetrievalHookActivator hookActivator,
+        ISqlUpdateCarrierAdapter carrierAdapter,
+        ConflictDetector conflictDetector,
+        ISqlRedactor redactor,
+        TimeProvider timeProvider,
+        ILoggerFactory loggerFactory)
+    {
+        _services = services ?? throw new ArgumentNullException(nameof(services));
+        _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
+        _transactionPool = transactionPool ?? throw new ArgumentNullException(nameof(transactionPool));
+        _dataStoreFactory = dataStoreFactory ?? throw new ArgumentNullException(nameof(dataStoreFactory));
+        _hookActivator = hookActivator ?? throw new ArgumentNullException(nameof(hookActivator));
+        _carrierAdapter = carrierAdapter ?? throw new ArgumentNullException(nameof(carrierAdapter));
+        _conflictDetector = conflictDetector ?? throw new ArgumentNullException(nameof(conflictDetector));
+        _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
+    }
+
     /// <inheritdoc/>
     public long TryCreate(string sessionId, out IUpdateTaskSurface? task)
     {
         ArgumentNullException.ThrowIfNull(sessionId);
 
+        // ASSIGNED BEFORE ANY EARLY RETURN, so every refusal arm answers with no surface rather
+        // than with an unassigned one. A caller reads the code first, but a null out-parameter is
+        // what makes a refusal safe to ignore the code on.
         task = null;
 
-        return RetCode.E_NO_IMPLEMENTATION;
+        if (!_sessions.TryResolve(sessionId, out TransactionSession? session) || session is null)
+        {
+            // The contract's own code for an unknown or ended session. A caller learns the truth rather
+            // than receiving a task bound to nothing.
+            return RetCode.E_INVALID_TRANSACTION;
+        }
+
+        UpdateFaultCollector faults = new();
+
+        PersistenceSqlTaskHost workerHost = new(
+            _services.GetRequiredService<ILogger<PersistenceSqlTaskHost>>(),
+            _redactor,
+            faults,
+            parentTasking: null);
+
+        // THE PROXY IS BUILT FIRST, AND THAT ORDERING IS FORCED RATHER THAN CHOSEN. The worker publishes
+        // its identity blocks and its row counts INTO the caller-side proxy [:L243, :L247], and it takes
+        // that proxy at construction - so the proxy has to exist before the worker does. The substrate's
+        // worker reference is therefore assigned afterwards, which is exactly the sequence the oracle uses:
+        // its own init inserts the worker into the task list and only then assigns `_Task` [:L188].
+        PersistenceSqlTaskProxyHost proxyHost = new(WorkerClassName);
+
+        SqlUpdateTaskProxy proxy = new(
+            proxyHost,
+            _loggerFactory.CreateLogger<SqlUpdateTaskProxy>(),
+            _timeProvider);
+
+        SqlUpdateTask worker = new(
+            workerHost,
+            _transactionPool,
+            _dataStoreFactory,
+            _hookActivator,
+            _carrierAdapter,
+            _conflictDetector,
+            _timeProvider,
+            _loggerFactory.CreateLogger<SqlUpdateTask>(),
+            proxy);
+
+        proxyHost.Worker = worker;
+
+        // THE ORACLE'S ONE LIVE `#Running` GUARD, AND WITHOUT THIS LINE IT READS FALSE FOR EVER. Every
+        // other guard written against `#Running` in n_cst_thread_task_sqlbase is COMMENTED OUT in the
+        // oracle and carried across inert, but the two in n_cst_thread_task_sqlupdate are live [:L60] -
+        // they make of_Reset and the descriptor reset answer E_BUSY mid-run rather than clearing the
+        // inputs of a running update. The predicate is a seam precisely so the flag can live on the
+        // caller side, which is where the oracle keeps it [n_cst_threading_task.sru:L112]; leaving it
+        // unassigned makes both guards unreachable and a mid-run reset silently permitted.
+        worker.IsRunning = () => proxyHost.IsRunning;
+
+        // THE SEAM'S ORDERING OBLIGATION. Initialization borrows the worker's commit signal
+        // [n_cst_threading_task_sqlbase.sru:L218], and the committed notification signals only an ALREADY
+        // CREATED handle [n_cst_thread_task_sqlbase.sru:L100-L111]. Skipping it leaves every commit
+        // notification unobserved, so the code is checked rather than discarded.
+        long initialized = proxy.Initialize();
+
+        if (initialized != RetCode.OK)
+        {
+            proxyHost.Dispose();
+            worker.Dispose();
+
+            return initialized;
+        }
+
+        // ==========================================================================================
+        //  THE SESSION'S OWN DESCRIPTOR, AND WITHOUT IT THE TASK WRITES ON A DIFFERENT CONNECTION
+        //  ------------------------------------------------------------------------------------------
+        //  The pool keys its entries on WHOLE-DESCRIPTOR VALUE EQUALITY and appends a new one when
+        //  nothing matches [TransactionPool.AddRefCore, the port of :L136-L146]. A task whose stored
+        //  descriptor is still the default therefore leases a SECOND entry, with a second transaction
+        //  object over a second connection - and every consequence of that is silent:
+        //
+        //    * the update runs inside the second entry's transaction, so the `Commit` a caller sends on
+        //      C-08 against ITS session commits a transaction that never saw the write;
+        //    * on a file-backed store the two connections contend, and the loser cannot even open a
+        //      transaction - the write then fails with the provider's busy code for a reason that has
+        //      nothing to do with the caller's data;
+        //    * the identity round trip and the row counts are read back through the entry the task
+        //      holds, so they describe the wrong unit of work.
+        //
+        //  Applied AFTER the proxy's initialization and BEFORE the surface is published, because
+        //  SetTransData drops any pool reference already taken for a previous descriptor [:L121-L125]
+        //  and nothing may hold the surface across that drop. Its own code is checked rather than
+        //  discarded: a refusal here means the task is bound to no session's transaction, and handing
+        //  back a surface in that state would defer the fault to the first statement.
+        //
+        //  THE AUTO-COMMIT MEMBER IS ERASED BY SetTransData ITSELF [:L118-L119], so the stored
+        //  descriptor still compares equal to the session's and the two share one entry. A caller's
+        //  later SetAutoCommit therefore changes the borrowed transaction's mode rather than re-keying
+        //  the borrow, which is the oracle's own shape.
+        // ==========================================================================================
+        long applied = worker.SetTransData(session.Descriptor);
+
+        if (!Predicates.IsSucceeded(applied))
+        {
+            proxyHost.Dispose();
+            worker.Dispose();
+
+            return applied;
+        }
+
+        task = new UpdateTaskSurface(session, worker, proxy, proxyHost, faults);
+
+        return RetCode.OK;
     }
 }
 
 /// <summary>
-/// The shipped <see cref="ICommandTaskFactory"/>: it creates no command task in this phase.
+/// The provisioned <see cref="ICommandTaskFactory"/>: it builds a command proxy pair.
 /// </summary>
 /// <remarks>
-/// A command task is a PAIR - a worker-side task and its caller-side proxy - and the proxy's host is the
-/// calling-thread substrate object, which is the very thing a headless service does not have: there is
-/// no calling thread with a live worker attached to marshal against. Flattening the pair to avoid that
-/// is exactly what the affinity contract forbids, so the factory refuses with the contract's own code
-/// and null components rather than fabricating half a pair.
+/// A command task is a PAIR, and the caller-side half's substrate is what a headless service was
+/// previously argued not to have. It does have one - <c>Tasks/TaskProxies/PersistenceSqlTaskProxyHost.cs</c>
+/// is that substrate, ported as flags and a cancellation token rather than as Win32 handles, which is the
+/// substitution the migration records for the deliberately non-ported handle surface. So the pair is built
+/// in full and neither half is flattened into the other.
 /// </remarks>
-internal sealed class UnboundCommandTaskFactory : ICommandTaskFactory
+internal sealed class CommandTaskFactory : ICommandTaskFactory
 {
+    /// <summary>The worker class name the caller-side substrate registers.</summary>
+    internal const string WorkerClassName = "n_cst_thread_task_sqlcommand";
+
+    /// <summary>Resolves per-task collaborators.</summary>
+    private readonly IServiceProvider _services;
+
+    /// <summary>The shared transaction pool.</summary>
+    private readonly TransactionPool _transactionPool;
+
+    /// <summary>The shared datastore factory.</summary>
+    private readonly ISqlDataStoreFactory _dataStoreFactory;
+
+    /// <summary>The shared retrieval-hook activator.</summary>
+    private readonly ISqlRetrievalHookActivator _hookActivator;
+
+    /// <summary>The statement redactor the worker-side host logs through.</summary>
+    private readonly ISqlRedactor _redactor;
+
+    /// <summary>The injected clock.</summary>
+    private readonly TimeProvider _timeProvider;
+
+    /// <summary>Creates task and proxy loggers.</summary>
+    private readonly ILoggerFactory _loggerFactory;
+
+    /// <summary>Initializes the factory.</summary>
+    /// <param name="services">The container, used to resolve a fresh host per task.</param>
+    /// <param name="transactionPool">The shared transaction pool.</param>
+    /// <param name="dataStoreFactory">The shared datastore factory.</param>
+    /// <param name="hookActivator">The shared retrieval-hook activator.</param>
+    /// <param name="redactor">The statement redactor.</param>
+    /// <param name="timeProvider">The injected clock.</param>
+    /// <param name="loggerFactory">The factory task and proxy loggers are created from.</param>
+    public CommandTaskFactory(
+        IServiceProvider services,
+        TransactionPool transactionPool,
+        ISqlDataStoreFactory dataStoreFactory,
+        ISqlRetrievalHookActivator hookActivator,
+        ISqlRedactor redactor,
+        TimeProvider timeProvider,
+        ILoggerFactory loggerFactory)
+    {
+        _services = services ?? throw new ArgumentNullException(nameof(services));
+        _transactionPool = transactionPool ?? throw new ArgumentNullException(nameof(transactionPool));
+        _dataStoreFactory = dataStoreFactory ?? throw new ArgumentNullException(nameof(dataStoreFactory));
+        _hookActivator = hookActivator ?? throw new ArgumentNullException(nameof(hookActivator));
+        _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
+    }
+
     /// <inheritdoc/>
     public long Create(out CommandTaskComponents? components)
     {
         components = null;
 
-        return RetCode.E_NO_IMPLEMENTATION;
+        PersistenceSqlTaskHost workerHost = new(
+            _services.GetRequiredService<ILogger<PersistenceSqlTaskHost>>(),
+            _redactor,
+            faults: null,
+            parentTasking: null);
+
+        SqlCommandTask worker = new(
+            workerHost,
+            _transactionPool,
+            _dataStoreFactory,
+            _hookActivator,
+            _timeProvider,
+            _loggerFactory.CreateLogger<SqlCommandTask>());
+
+        PersistenceSqlTaskProxyHost proxyHost = new(WorkerClassName) { Worker = worker };
+
+        SqlCommandTaskProxy proxy = new(
+            proxyHost,
+            _loggerFactory.CreateLogger<SqlCommandTaskProxy>(),
+            _timeProvider);
+
+        // The same ordering obligation as the update pair - see UpdateTaskFactory.TryCreate.
+        long initialized = proxy.Initialize();
+
+        if (initialized != RetCode.OK)
+        {
+            proxyHost.Dispose();
+            worker.Dispose();
+
+            return initialized;
+        }
+
+        components = new CommandTaskComponents(proxy, worker);
+
+        return RetCode.OK;
+    }
+}
+
+/// <summary>
+/// Collects the framework errors an update task raises, on the caller's side of the pair.
+/// </summary>
+/// <remarks>
+/// The update path's worker-side host forwards its framework errors to a sink, exactly as the retrieval
+/// path's does, and this is that sink for an update. It stores rather than logs: the host has already
+/// recorded a redacted projection, and a second record here would be a second opportunity to disclose the
+/// same thing.
+/// </remarks>
+internal sealed class UpdateFaultCollector : IQueryFaultSink
+{
+    /// <summary>The last framework error code raised, or <see cref="RetCode.OK"/> when none was.</summary>
+    internal long ErrorCode { get; private set; } = RetCode.OK;
+
+    /// <summary>The last framework error text raised.</summary>
+    internal string ErrorText { get; private set; } = string.Empty;
+
+    /// <summary>The last database error raised, or the cleared payload when none was.</summary>
+    internal DbErrorData LastDbError { get; private set; } = DbErrorData.Empty;
+
+    /// <inheritdoc/>
+    public void OnError(long errCode, string errInfo)
+    {
+        ErrorCode = errCode;
+        ErrorText = errInfo ?? string.Empty;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Taken by <see langword="in"/> and stored, never logged. The statement field carries the complete
+    /// generated statement including any interpolated literal value, and the place that redacts it for a
+    /// log record is the task that raised it.
+    /// </remarks>
+    public void OnDbError(in DbErrorData error) => LastDbError = error;
+}
+
+/// <summary>
+/// The caller-side surface of one update task: the eleven contract operations, over the real pair.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A BRIDGE AND NOTHING MORE. Every member forwards to the worker, whose own implementation carries the
+/// ported protocol - the busy guards, the descriptor admission rules, the absence-must-survive-as-absence
+/// rule for the two nullable settings, and the {reset, prepare} asymmetry. Re-implementing any of it here
+/// would fork one rule into two places.
+/// </para>
+/// <para>
+/// THE SESSION IS HELD BUT NOT DRIVEN. It is retained so the task can be correlated with the session it
+/// was created against, which is what the log records that pair the two read; the session's own lifecycle
+/// belongs to the transaction service.
+/// </para>
+/// </remarks>
+internal sealed class UpdateTaskSurface : IUpdateTaskSurface
+{
+    /// <summary>The session this task was created against.</summary>
+    private readonly TransactionSession _session;
+
+    /// <summary>The worker-side task.</summary>
+    private readonly SqlUpdateTask _worker;
+
+    /// <summary>The caller-side proxy.</summary>
+    private readonly SqlUpdateTaskProxy _proxy;
+
+    /// <summary>The caller-side substrate.</summary>
+    private readonly PersistenceSqlTaskProxyHost _proxyHost;
+
+    /// <summary>The caller-side fault collector.</summary>
+    private readonly UpdateFaultCollector _faults;
+
+    /// <summary>Whether this surface has been disposed.</summary>
+    private bool _disposed;
+
+    /// <summary>Initializes the surface.</summary>
+    /// <param name="session">The session this task was created against.</param>
+    /// <param name="worker">The worker-side task.</param>
+    /// <param name="proxy">The caller-side proxy.</param>
+    /// <param name="proxyHost">The caller-side substrate.</param>
+    /// <param name="faults">The caller-side fault collector.</param>
+    internal UpdateTaskSurface(
+        TransactionSession session,
+        SqlUpdateTask worker,
+        SqlUpdateTaskProxy proxy,
+        PersistenceSqlTaskProxyHost proxyHost,
+        UpdateFaultCollector faults)
+    {
+        _session = session ?? throw new ArgumentNullException(nameof(session));
+        _worker = worker ?? throw new ArgumentNullException(nameof(worker));
+        _proxy = proxy ?? throw new ArgumentNullException(nameof(proxy));
+        _proxyHost = proxyHost ?? throw new ArgumentNullException(nameof(proxyHost));
+        _faults = faults ?? throw new ArgumentNullException(nameof(faults));
+    }
+
+    /// <summary>The session this task was created against.</summary>
+    internal TransactionSession Session => _session;
+
+    /// <inheritdoc/>
+    public long Reset() => _proxy.Reset();
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// REPLACEMENT, NOT TRIMMING, and separate from <see cref="Reset"/> precisely because a prepare must
+    /// not also discard the payload, the autocommit flag or the source.
+    /// </remarks>
+    public long ResetUpdatableTables() => _worker.Tables.Reset();
+
+    /// <inheritdoc/>
+    public long SetMultiTableUpdate(bool multiTable) => _proxy.SetMultiTableUpdate(multiTable);
+
+    /// <inheritdoc/>
+    public long AddUpdatableTable(
+        string name,
+        IEnumerable<string> updatableColumns,
+        IEnumerable<string> keyColumns,
+        string identityColumn,
+        long? updateWhere,
+        bool? updateKeyInPlace) =>
+        _proxy.AddUpdatableTable(
+            name,
+            [.. updatableColumns],
+            [.. keyColumns],
+            identityColumn,
+            updateWhere,
+            updateKeyInPlace);
+
+    /// <inheritdoc/>
+    public long AddUpdatableTable(
+        string name,
+        IEnumerable<string> updatableColumns,
+        IEnumerable<string> keyColumns,
+        string identityColumn) =>
+        _proxy.AddUpdatableTable(name, [.. updatableColumns], [.. keyColumns], identityColumn);
+
+    /// <inheritdoc/>
+    public long SetDataObject(string dataObject) => _proxy.SetDataObject(dataObject);
+
+    /// <inheritdoc/>
+    public long SetSqlSyntax(string sqlSyntax) => _proxy.SetSqlSyntax(sqlSyntax);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// A LOCAL, because the proxy's installer takes its payload by <c>ref</c> - the oracle's
+    /// <c>of_setupdatedata(ref blob, long)</c> - and an interface parameter is not addressable. The value
+    /// the installer may write back is deliberately discarded here: the contract's own signature passes
+    /// the payload IN, so a caller has nothing to read back.
+    /// </remarks>
+    public long SetUpdateData(CarrierState? updateData, long updateRows)
+    {
+        CarrierState? payload = updateData;
+
+        return _proxy.SetUpdateData(ref payload, updateRows);
+    }
+
+    /// <inheritdoc/>
+    public long SetAutoCommit(bool autoCommit) => _proxy.SetAutoCommit(autoCommit);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The run's outcome is assembled from the worker's own answer and the caller-side latches, which is
+    /// where the oracle reads each of them from: the code and the classification from the task, the three
+    /// counts and the identity blocks from the proxy's running totals, and the latched driver error from
+    /// the caller-side collector. Nothing is recomputed here.
+    /// </remarks>
+    public UpdateRunResult Execute(CancellationToken cancellationToken)
+    {
+        // RAISED BEFORE THE BODY AND LOWERED IN A GUARANTEED finally. The substrate raises its running
+        // flag as part of dispatching a task [n_cst_thread_task.sru:L164], and the guards that read it
+        // are only meaningful while it is up. The finally is not defensive tidying either: a body that
+        // threw would leave the flag raised, and every subsequent mutator on this task would then answer
+        // E_BUSY for the life of the handle.
+        _proxyHost.IsRunning = true;
+
+        long code;
+
+        try
+        {
+            code = _worker.OnDoTask(cancellationToken);
+        }
+        finally
+        {
+            _proxyHost.IsRunning = false;
+        }
+
+        // AN EMPTY LATCH IS NO DRIVER ERROR, AND PUBLISHING IT AS ONE IS NOT HARMLESS. The caller-side
+        // latch holds a default-valued payload until a driver error is actually raised into it, and the
+        // wire projection of that default is a fully-formed DbError whose every member happens to be
+        // empty or zero. A consumer cannot tell that apart from a genuine error carrying an unset code:
+        // the presence of the payload IS the signal. So the emptiness test is the same one the command
+        // path applies before it publishes, and a run with nothing latched publishes nothing.
+        DbErrorData captured = _proxy.GetLastDbErrorData();
+
+        return new UpdateRunResult
+        {
+            Code = code,
+            Outcome = _worker.LastOutcome,
+            Counts = new UpdateRowCounts(
+                Inserted: _proxy.GetRowsInserted(),
+                Updated: _proxy.GetRowsUpdated(),
+                Deleted: _proxy.GetRowsDeleted()),
+            Identity = _proxy.IdentityBlocks,
+            LastDbError = captured != DbErrorData.Empty ? _proxy.GetLastDbErrorForWire() : null,
+            ErrorText = _faults.ErrorText,
+        };
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Releases the pair in the reverse of the order it was built: the proxy's substrate, then the worker.
+    /// Idempotent, because the registry and the service may both release a task on a teardown path.
+    /// </remarks>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _proxyHost.Dispose();
+        _worker.Dispose();
     }
 }
 

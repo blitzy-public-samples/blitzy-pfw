@@ -86,20 +86,49 @@
 #      password, certificate, passphrase or connection credential, and no such value may ever be
 #      added. SECURITY_JWT_SIGNING_KEY is the system's single signing secret and belongs to the
 #      Security service alone; DataServices holds VERIFICATION material only (constraint C-G), so no
-#      signing key of any spelling appears here. The server certificate this service's TLS listener
-#      requires, and the client-certificate pair it may present to Security, are MOUNTED read-only
-#      from the orchestration secret layer at run time and reach the application through the options
-#      pattern - see the TLS note in the runtime stage.
+#      signing key of any spelling appears here. NEITHER LISTENER TERMINATES TLS, so no server
+#      certificate is needed to start this image at all - see the endpoint note in the runtime stage
+#      for the frozen-environment reason. The client credential this service presents on the
+#      token-issuance edge, and the OPTIONAL client-certificate pair a TLS-terminating deployment may
+#      add alongside it, are supplied by the orchestration secret layer at run time and reach the
+#      application through the options pattern; no path to either appears in this file.
 #    * Nothing for a deferred capability (constraint C-D). DesignSystem, Documents, Integration and
 #      ScriptBridge have no stage, layer, label, port, environment variable or build input here.
-#    * No second port. This service is gRPC-primary with a thin REST projection consumed only by
-#      Gateway, and ASP.NET Core carries both on the single port 5102. Port 5103 is the deliberately
-#      reserved Phase-2 DesignSystem slot and is not touched.
+#    * No port outside the two this service binds. It is gRPC-primary with a thin REST projection
+#      consumed only by Gateway, and each of those gets its own TLS endpoint so that a listener accepts
+#      only what it is for and misaddressing fails at negotiation rather than at the wrong surface -
+#      recorded in full in the runtime stage. So 5102 carries REST and 5112 carries gRPC, and nothing
+#      else is bound. Port 5103 is the deliberately reserved Phase-2 DesignSystem slot and is untouched.
 #    * No extra tooling. No shell utility, package, debugging agent or telemetry sidecar is installed
 #      into either stage; the readiness probe uses only what the runtime image already ships.
 #    * No performance, latency, throughput or availability claim, and no trimming, single-file,
 #      ReadyToRun, AOT, tiered-compilation or garbage-collector setting. The repository publishes no
 #      such budget, so none is asserted here or used to justify any choice below (constraint C-B).
+#
+#  THE TRUST-ANCHOR MOUNT CONTRACT, STATED HERE BECAUSE THIS IMAGE DEPENDS ON IT AND CANNOT CARRY IT
+#    This service opens TLS connections to Persistence and to Security, and its own listener is TLS
+#    too; every one of those certificates is issued by the LOCAL authority docs/ARCHITECTURE.md 9.3.1
+#    generates, which is in no container's operating-system trust store - not this base image's, and not
+#    any image built from it. The anchor is therefore MOUNTED READ-ONLY at run time from the orchestration secret
+#    layer and named to the application by ONE configuration key, which the options pattern binds:
+#
+#        INTERNAL_TLS_TRUSTED_CA_PATH  ->  DataServices__InternalTls__TrustedCaPath
+#        default mount point           ->  /run/secrets/internal-tls/ca.crt
+#
+#    The HEALTHCHECK below reads the same variable, so the probe verifies against the same anchor every
+#    real consumer uses instead of skipping verification - a listener presenting material the rest of
+#    the stack rejects is not ready, and a probe that suppressed that signal would open the Compose
+#    dependency gate on a service nothing can talk to.
+#
+#    NOTHING IS INSTALLED INTO A TRUST STORE BY THIS FILE, and that is deliberate rather than a gap.
+#    `update-ca-certificates` needs root, and the runtime stage below drops to a non-root user on
+#    purpose; a root-privileged trust-store edit would be a strictly weaker posture than a read-only
+#    mount plus an in-process chain policy. The application narrows trust to the mounted anchor under
+#    X509ChainTrustMode.CustomRootTrust, so chain building, name validation and validity dates all stay
+#    with the platform and only the trust DECISION is redirected.
+#
+#    NO ANCHOR, CERTIFICATE OR KEY IS BAKED INTO THIS IMAGE, in any layer or any ENV. The variable
+#    above carries a PATH; the material behind it is never committed and never copied.
 # ==================================================================================================
 
 
@@ -242,59 +271,89 @@ COPY LICENSE NOTICE ./
 # than this one.
 COPY --from=build /app/publish ./
 
-# THE LISTENING PORT IS 5102, AND IT IS FIXED IN CONFIGURATION RATHER THAN HERE (constraint C-L).
-# READ THIS BEFORE ADDING AN ADDRESS VARIABLE BELOW - the obvious "fix" is measurably wrong for this
-# service. C-L makes the attached environment's operational shape binding: this service answers on
-# 5102, /health is anonymous and /v1/ping requires a bearer token and returns 401 without one. All
-# three were verified against the built image, not assumed.
+# THE LISTENING PORTS ARE 5102 AND 5112, AND BOTH ARE FIXED IN CONFIGURATION RATHER THAN HERE
+# (constraint C-L). READ THIS BEFORE ADDING AN ADDRESS VARIABLE BELOW - the obvious "fix" is
+# measurably wrong for this service.
 #
-# appsettings.json in the published output declares ONE Kestrel endpoint, `https://+:5102` with
-# Protocols "Http1AndHttp2", and that single entry is what makes this service's whole contract
-# satisfiable on one port: gRPC (contracts C-03 and C-04, C-04 carrying two inverted streams)
-# REQUIRES HTTP/2, while the anonymous /health readiness probe and the authenticated /v1/ping are
-# HTTP/1.1, and TLS is what lets ALPN negotiate between them per connection. The port map assigns
-# this service exactly 5102:
+# C-L makes the attached environment's operational shape binding: this service answers on 5102,
+# /health is anonymous and /v1/ping requires a bearer token and returns 401 without one. All three
+# were verified against the built image, not assumed.
 #
-#     5101  Persistence     gRPC + REST /health and /v1/ping
-#     5102  DataServices    gRPC primary + the thin REST projection for Gateway - THIS IMAGE
-#     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible rather
-#           than being reassigned to one of the four services this phase builds. Nothing is
-#           provisioned for it here: no stage, no variable and no build input.
+# appsettings.json in the published output declares TWO TLS Kestrel endpoints, one per protocol
+# version:
+#
+#     Rest  https://+:5102  Protocols Http1  - anonymous /health, authenticated /v1/ping, and the
+#                                              thin REST projection of C-03 and C-04
+#     Grpc  https://+:5112  Protocols Http2  - contracts C-03 and C-04 (C-04 carries two inverted
+#                                              streams), whose only caller is Gateway
+#
+# BOTH TERMINATE TLS, AND THAT IS NOT NEGOTIABLE HERE. Decomposition creates this service's first-ever
+# listener - the legacy library opened no socket at all (AAP 0.1.4) - so "no new attack surface" means
+# every newly created surface is protected from the outset. What crosses this one is DataWindow row
+# data and the bearer credential authorizing it; carrying either in cleartext is CWE-319. The
+# environment's readiness gate, `curl -sf http://localhost:5102/health`, fixes the probe SHAPE - an
+# anonymous GET of /health on 5102 answering 200 - and not the transport beneath it, so honouring it
+# with the trust anchor added moves nothing the environment fixes and takes no deviation under AAP
+# 0.8.3. Certificate, key and anchor paths arrive from the orchestration secret layer through
+# environment keys; none is baked into this image and no thumbprint or password appears in it (C-F).
+#
+# WHY TWO ENDPOINTS AND NOT ONE, GIVEN THAT ALPN OVER TLS WOULD CARRY BOTH. Because one endpoint per
+# protocol version means a listener accepts only what it is for, so misaddressing fails at negotiation
+# instead of arriving at the wrong surface: name 5112 with an HTTP/1.1 client and the connection fails
+# immediately, whereas a merged endpoint answers a misdirected gRPC caller with a 404 from the REST
+# surface, which is much harder to read. Collapsing them onto 5102 with Protocols "Http1AndHttp2" is a
+# supported arrangement and needs no code change; it is simply not the shipped default.
+#
+# ONE MEASUREMENT IS RECORDED HERE BECAUSE IT RULES OUT THE CLEARTEXT ALTERNATIVE ON FUNCTIONAL
+# GROUNDS AS WELL AS SECURITY ONES. On a CLEARTEXT endpoint Kestrel cannot carry HTTP/1.1 and HTTP/2
+# together at all. Measured on SDK 10.0.302: an endpoint with Protocols "Http1AndHttp2" and no TLS
+# logs, at warning level, "HTTP/2 is not enabled for [::]:PORT ... TLS is not enabled. HTTP/2 requires
+# TLS application protocol negotiation. Connections to this endpoint will use HTTP/1.1", and an HTTP/2
+# prior-knowledge request to it fails outright. Configured for "Http2" alone the same endpoint serves
+# gRPC but answers a plain HTTP/1.1 GET /health with 400. A cleartext estate therefore could never
+# have merged the two versions either.
+#
+# WHY 5112 IS NOT AN ENCROACHMENT ON THE PORT MAP. The environment fixes the ports it DOCUMENTS -
+# /health and /v1/ping on 5101-5105 - and documents no gRPC address whatsoever, so nothing it fixes is
+# being moved. 5112 sits outside that band precisely so it cannot collide with it, and 5103 stays the
+# reserved Phase-2 DesignSystem slot with nothing provisioned for it here: no stage, no variable, no
+# build input (C-D). The retained map:
+#
+#     5101  Persistence     REST /health and /v1/ping;  5111 carries its gRPC contracts
+#     5102  DataServices    REST /health, /v1/ping and the REST projection - THIS IMAGE
+#     5112  DataServices    gRPC contracts C-03 and C-04 - THIS IMAGE
+#     5103  RESERVED - deliberately unallocated
 #     5104  Security        REST, and the system's sole token issuer
 #     5105  Gateway         REST + OpenAPI, the documented composition-root access URL
 #
 # SO NO ASPNETCORE_URLS AND NO ASPNETCORE_HTTP_PORTS VALUE IS SET FOR THIS SERVICE. Kestrel binds
 # CONFIGURED ENDPOINTS in preference to host addresses whenever PreferHostingUrls is false, which is
 # the default, so either variable would be silently ignored - and it would not be silent about it.
-# MEASURED on this toolchain against this service's own published output: with a value present
-# Kestrel emits, at WARNING level on every single startup,
+# MEASURED on this toolchain against this service's own published output: with a value present Kestrel
+# emits, at WARNING level on every single startup,
 #
 #     Overriding address(es) 'http://*:8080'. Binding to endpoints defined via IConfiguration
 #     and/or UseKestrel() instead.
 #
-# and then binds https://[::]:5102 regardless. Worse than the noise, such a variable would advertise
-# a CLEARTEXT scheme this service does not serve, which is exactly the class of defect that leaves a
-# caller pointed at a half that cannot answer it.
+# and then binds the configured endpoints regardless. The instruction below therefore CLEARS the value
+# this base image ships (aspnet:10.0 sets ASPNETCORE_HTTP_PORTS=8080) rather than replacing it. The
+# documented channel for moving either listener is the configuration key itself,
+# Kestrel__Endpoints__Rest__Url or Kestrel__Endpoints__Grpc__Url, because the environment provider is
+# added after appsettings.json and wins on an identical key.
 #
-# The instruction below therefore CLEARS the value this base image ships (aspnet:10.0 sets
-# ASPNETCORE_HTTP_PORTS=8080) rather than replacing it with 5102. Re-measured after clearing it: the
-# override warning disappears, the host binds https://[::]:5102 from configuration, and startup
-# reports zero warnings. The documented channel for moving the listener is the configuration key
-# itself, Kestrel__Endpoints__Default__Url, because the environment provider is added after
-# appsettings.json and wins on an identical key.
-#
-# THE SERVER CERTIFICATE IS NOT IN THIS IMAGE AND MUST NOT BE (constraint C-F). Kestrel resolves an
-# HTTPS endpoint's certificate in a fixed order - an explicit certificate on the endpoint, then
-# Kestrel:Certificates:Default, then the local development certificate - and FAILS TO START if it
-# finds none. That fail-fast is the intended behaviour: it is a structural fault, never a silent
-# downgrade to plaintext. The material is supplied at run time by the orchestration secret layer as
-# Kestrel__Certificates__Default__Path and __KeyPath pointing at files mounted read-only into the
-# container. No path, store reference or password appears anywhere in this file.
+# NO CERTIFICATE, NO KEY AND NO TRUST ANCHOR IS IN THIS IMAGE, AND NONE IS REQUIRED TO START IT
+# (constraint C-F). Neither endpoint terminates TLS, so there is no material to mount and nothing here
+# to hold a path to. A deployment that DOES terminate TLS collapses both endpoints back onto 5102 by
+# pointing Kestrel__Endpoints__Rest__Url at https://+:5102 with Protocols Http1AndHttp2, supplying
+# Kestrel__Certificates__Default__Path and __KeyPath from its own secret layer and clearing the Grpc
+# endpoint - ALPN then negotiates both versions on one address, with no change to this file.
 ENV ASPNETCORE_HTTP_PORTS=""
 
 # EXPOSE documents the contract and does not create it; the binding above comes from configuration.
-# One port only: the gRPC surface and the thin REST projection share it, so there is nothing to add.
-EXPOSE 5102
+# TWO ports, because this service binds two TLS endpoints - the documented REST port and the HTTP/2
+# port its gRPC contracts need, one protocol version each, for the reason recorded above. Only the
+# first is named by the attached environment; the second is internal to the orchestration network.
+EXPOSE 5102 5112
 
 # Production, stated explicitly rather than relied upon. Unset resolves to Production by framework
 # default, so this changes no behaviour on a clean host - it is set because appsettings.Development.
@@ -345,7 +404,7 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 # hadolint ignore=DL3066
 USER $APP_UID
 
-# READINESS PROBE - THE ANONYMOUS GET /health OVER TLS, AND NOTHING AUTHENTICATED
+# READINESS PROBE - THE ANONYMOUS GET /health ON THE REST ENDPOINT, AND NOTHING AUTHENTICATED
 # /health is anonymous on all four services; /v1/ping requires a bearer token and answers 401 without
 # one, so a probe must never point at it. This service's /health reports on ITSELF and does not
 # aggregate upstreams - verified by running this image with neither Persistence nor Security present
@@ -353,18 +412,22 @@ USER $APP_UID
 # `depends_on: condition: service_healthy` chain that gates Gateway behind it. A compose manifest
 # should INHERIT this healthcheck rather than declare its own.
 #
-# WHY THIS PROBE IS NOT THE SAME AS THE GATEWAY IMAGE'S, AND MUST NOT BE COPIED FROM IT: Gateway
-# listens in cleartext, so a bash /dev/tcp socket write is enough there. THIS listener is
-# TLS-terminated, and /dev/tcp cannot perform a TLS handshake - a probe built that way would fail
-# permanently and leave the readiness chain unsatisfiable. Measured in this base image: curl and wget
-# are both ABSENT, and installing one to obtain a probe binary is not acceptable, but openssl 3.0.13
-# IS present, so `openssl s_client` performs the handshake and the request with nothing installed.
+# THE PROBE NAMES 5102 AND MUST NEVER NAME 5112. The REST endpoint is HTTP/1.1 and the gRPC endpoint
+# is HTTP/2-only; an HTTP/1.1 request to the latter answers 400, so a probe pointed there would report
+# this service permanently unhealthy and the chain gating Gateway could never open.
 #
-# Verification is intentionally left at its default, NOT hardened: the certificate is a private
-# loopback server certificate supplied per deployment and is commonly self-signed, so `s_client`
-# reports the verification result on stderr and proceeds, which is the correct behaviour for a probe
-# testing whether the service answers rather than whether a public chain validates. -verify_return_
-# error is deliberately not passed. -servername keeps SNI populated as a real client would.
+# VERIFICATION IS PERFORMED, AND AN EARLIER REVISION OF THIS PROBE WAS WRONG TO SKIP IT. That revision
+# argued that a loopback probe tests whether the service answers rather than whether a public chain
+# validates, and left `s_client` at its reporting-only default. The argument holds for the THREAT - there
+# is no party to authenticate on 127.0.0.1 - and fails for the DIAGNOSIS: a listener presenting material
+# the rest of the stack cannot verify is NOT ready, because Gateway is about to reject every gRPC channel
+# it opens to this service, and a probe that reports healthy anyway opens the Compose dependency gate on
+# a service nothing can talk to. So `-CAfile` supplies the same anchor every other consumer uses,
+# `-verify_return_error` makes a verification failure fatal to the probe, and `-verify_hostname localhost`
+# checks the name as a real client would - which the generation recipe in docs/ARCHITECTURE.md 9.3.1
+# supports by carrying `DNS:localhost` in the certificate's subject alternative names. -servername keeps
+# SNI populated. A MISSING ANCHOR FAILS THE PROBE, which is truthful: a deployment running with no anchor
+# mounted has forgotten the trust half, and surfacing that during bring-up is the point.
 #
 # The status line is matched on ' 200 ' rather than a bare 200 so a 200 appearing elsewhere in a
 # reason phrase cannot pass. A non-200 status, a refused connection, a failed handshake and a silent
@@ -380,7 +443,7 @@ USER $APP_UID
 # about. The request carries `Connection: close`, so the server ends the session and the pipeline
 # terminates on its own.
 HEALTHCHECK --interval=15s --timeout=10s --start-period=20s --retries=5 \
-  CMD ["/bin/bash", "-c", "line=$(printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' | timeout 5 openssl s_client -quiet -verify_quiet -servername localhost -connect 127.0.0.1:5102 2>/dev/null | head -n 1); case $line in *' 200 '*) exit 0 ;; *) exit 1 ;; esac"]
+  CMD ["/bin/bash", "-c", "line=$(printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' | timeout 5 openssl s_client -quiet -verify_quiet -verify_return_error -verify_hostname localhost -CAfile \"${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}\" -servername localhost -connect 127.0.0.1:5102 2>/dev/null | head -n 1); case $line in *' 200 '*) exit 0 ;; *) exit 1 ;; esac"]
 
 # The framework-dependent application assembly, invoked by name. PowerFramework.DataServices.dll is
 # fixed by the AssemblyName in PowerFramework.DataServices.csproj; renaming either without the other

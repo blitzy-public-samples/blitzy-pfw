@@ -103,6 +103,8 @@ import {
   type ServiceKey,
 } from '../fixtures';
 
+import { probeStackAvailability } from '../fixtures/live-stack';
+
 /**
  * THE SINGLE EDIT POINT FOR HEALTHY-STATUS VOCABULARY.
  *
@@ -271,6 +273,39 @@ function readAggregateStatus(document: HealthDocument): string {
  * single volume and therefore genuinely do depend on order.
  */
 test.describe('Health and readiness (contract C-10)', () => {
+  // ---------------------------------------------------------------------------
+  // MISSING-STACK BEHAVIOUR, MADE UNIFORM AND EXPLICIT ACROSS ALL SIX SPECS
+  //
+  // This suite drives real HTTP against a running four-service stack, so three
+  // outcomes have to stay distinguishable: the contract holds (pass), the
+  // contract is violated (fail), and the stack is not up at all (neither).
+  // Without an explicit third state the last one arrives as a wall of transport
+  // errors that read exactly like the second - a false accusation against
+  // services that are merely absent - and the tempting remedy is to soften the
+  // assertions until they tolerate an unreachable host, which converts a real
+  // violation into a silent pass and destroys the suite's whole value.
+  //
+  // The probe is memoised per worker, so this costs one request per worker and
+  // not one per test.
+  //
+  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
+  // than a title match: several specs mix pure-fixture assertions in with HTTP
+  // ones, those assertions are exactly the part that still holds with nothing
+  // running, and skipping them would throw away the only coverage available
+  // before a bring-up. A tag is declarative and machine-read; a title substring
+  // would silently start skipping the moment someone reworded a test name, and
+  // two stack-free tests in this suite never carried the wording at all.
+  // ---------------------------------------------------------------------------
+  test.beforeEach(async ({}, testInfo) => {
+    if (testInfo.tags.includes('@no-stack')) {
+      return;
+    }
+
+    const availability = await probeStackAvailability();
+
+    test.skip(!availability.reachable, availability.reason);
+  });
+
   test('Gateway answers /health anonymously with 200', async ({ request }) => {
     const gateway = SERVICE_ENDPOINTS.gateway;
 

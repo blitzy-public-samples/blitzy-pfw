@@ -326,7 +326,11 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     /// <summary>The specification extension each reserved operation carries in the published contract.</summary>
     private const string DeferredServiceExtension = "x-deferred-service";
 
-    /// <summary>The published contract document, which is anonymous.</summary>
+    /// <summary>
+    /// The published contract document. Protected by the fallback policy - the AAP's anonymous
+    /// exceptions are enumerated (<c>/health</c> on all four, Security's key set and discovery document)
+    /// and this is not one of them.
+    /// </summary>
     private const string DocumentRoute = "/openapi/v1.json";
 
     // --------------------------------------------------------------------------------------------------
@@ -1016,7 +1020,8 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
-    /// The published document declares <c>501</c> for each reserved family, no success, and no request body.
+    /// The published document declares exactly <c>401</c> and <c>501</c> for each reserved family, no
+    /// success, and no request body.
     /// </summary>
     /// <param name="prefix">The reserved family's prefix.</param>
     /// <param name="deferredService">The deferred service the family names.</param>
@@ -1025,8 +1030,23 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     /// THE CONTRACT AS A GENERATED ARTIFACT, not merely as authored YAML. The runtime answer and the
     /// published description are two separate things a consumer relies on, and this asserts the second: a
     /// generated client must be unable to express a successful call to a reserved route, because there is
-    /// no success to express. So the declared response set is checked to contain the not-implemented status
-    /// and NO <c>2xx</c> at all, and the operations are checked to declare no request body.
+    /// no success to express, and it must be able to express the refusal it will actually meet.
+    /// </para>
+    /// <para>
+    /// THE SET IS ASSERTED AS EXACTLY <c>{401, 501}</c>, WHICH IS THE SAME SET
+    /// <c>shared/PowerFramework.Contracts.Tests/ReservedRouteMetadataTests.cs</c> PINS ON THE AUTHORED
+    /// DOCUMENT. Pinning both is the point: the authored YAML and the runtime-generated description are
+    /// two artifacts a consumer may fetch, and if they disagree about a response set then which contract
+    /// a client obeys depends on where it was generated from. An earlier revision of the runtime declared
+    /// <c>501</c> alone while the authored document declared both, and that divergence is exactly what
+    /// this exactness detects. <c>501</c> remains the only outcome any handler computes; <c>401</c> is the
+    /// pre-handler refusal the bearer requirement guarantees, and declaring it says nothing about the
+    /// route evaluating anything.
+    /// </para>
+    /// <para>
+    /// No <c>2xx</c> is separately asserted rather than being left implied by the exact set, because the
+    /// exactness could later be relaxed and the no-success rule may not be: a success response would say
+    /// part of a deferred service had been built, which constraint C-D forbids outright.
     /// </para>
     /// <para>
     /// The specification extension naming the destination is asserted too, so that the routing metadata and
@@ -1040,7 +1060,9 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
         string prefix,
         string deferredService)
     {
-        using HttpClient client = host.CreateAnonymousClient();
+        // Authenticated because the contract document is protected: it is not one of the AAP's
+        // enumerated anonymous exceptions, so an anonymous caller is answered 401 here.
+        using HttpClient client = host.CreateAuthenticatedClient();
 
         using HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, DocumentRoute);
 
@@ -1051,6 +1073,32 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
         JsonElement path = document.RootElement.GetProperty("paths").GetProperty(prefix + "/{path}");
 
         string[] declaredOperations = ["get", "post"];
+
+        // THE GENERATED PATH PARAMETER IS OPENAPI-CONFORMANT, AND SAYS WHAT IT MEANS IN A VENDOR
+        // EXTENSION. `allowReserved` is defined for `in: query` parameters only, so emitting it on this
+        // path parameter made the generated document invalid while still not expressing the catch-all
+        // matching it was reaching for. Both halves are pinned: the invalid field is absent, and the
+        // extension that actually carries the behaviour is present. Same shape as the authored contract's
+        // `x-catch-all` block, so the two descriptions read alike.
+        foreach (string operationName in declaredOperations)
+        {
+            JsonElement parameter = Assert.Single(
+                path.GetProperty(operationName).GetProperty("parameters").EnumerateArray());
+
+            Assert.Equal("path", parameter.GetProperty("in").GetString());
+
+            Assert.False(
+                parameter.TryGetProperty("allowReserved", out _),
+                "The generated reserved path parameter declares 'allowReserved'. OpenAPI 3.1 defines "
+                    + "that field for query parameters only, so the generated document fails 3.1 "
+                    + "validation - and it never expressed catch-all matching in any case.");
+
+            JsonElement catchAll = parameter.GetProperty("x-catch-all");
+
+            Assert.True(catchAll.GetProperty("capturesNestedSegments").GetBoolean());
+            Assert.True(catchAll.GetProperty("matchesEmptyRemainder").GetBoolean());
+            Assert.True(catchAll.GetProperty("matchesEveryHttpMethod").GetBoolean());
+        }
 
         foreach (string operationName in declaredOperations)
         {
@@ -1069,10 +1117,110 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
 
             Assert.True(responses.TryGetProperty("501", out _));
 
+            // THE REFUSAL THAT PRECEDES THE 501 IS DECLARED TOO. gateway.v1.yaml gives each of these eight
+            // operations exactly two responses, and the runtime metadata used to declare only one of them -
+            // so a caller reading the generated document saw a route that could only ever answer 501, while
+            // an untokened request actually got 401. Asserting it here is what keeps the projection and the
+            // authored contract from drifting apart again.
+            Assert.True(
+                responses.TryGetProperty("401", out _),
+                "A reserved route is authenticated, so its declared response set includes the challenge.");
+
+            // NO 403, and its absence is asserted rather than left implicit. These routes require
+            // authentication and NO SCOPE - they reach no capability by construction - so a scope would be
+            // a permission over a feature that does not exist, and requiring one would turn the published
+            // 501 into a 403 and hide the very shape these declarations exist to publish.
+            Assert.False(
+                responses.TryGetProperty("403", out _),
+                "A reserved route requires no scope, so it can never answer 403.");
+
+            // The complete set, so that a third status added later is a finding rather than a silent
+            // widening of what these declarations claim.
+            Assert.Equal(
+                ["401", "501"],
+                responses.EnumerateObject().Select(static declared => declared.Name).Order(StringComparer.Ordinal));
+
             Assert.DoesNotContain(
                 responses.EnumerateObject().Select(static declared => declared.Name),
                 static status => status.StartsWith('2'));
+
+            // EXACTLY {401, 501}, ordered so the comparison is stable whatever order the generator
+            // emitted them in. Matches the set ReservedRouteMetadataTests pins on the authored YAML, so
+            // the two artifacts a consumer may generate from cannot describe different contracts.
+            string[] declaredStatuses =
+                [.. responses.EnumerateObject()
+                    .Select(static declared => declared.Name)
+                    .Order(StringComparer.Ordinal)];
+
+            Assert.Equal(["401", "501"], declaredStatuses);
         }
+    }
+
+    /// <summary>
+    /// Every projected operation in the LIVE document declares the four statuses the failure map can
+    /// produce on any of them.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE AUTHORED CONTRACT AND THE LIVE DOCUMENT ARE TWO DIFFERENT ARTEFACTS, AND ONLY ONE OF THEM IS
+    /// WHAT A CONSUMER FETCHES. The sibling contracts suite reads
+    /// <c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml</c> and can prove what the contract
+    /// PROMISES; nothing there can see what this host actually serves, which is generated from the route
+    /// metadata. A declaration added to the authored file and not to the routes would leave the two
+    /// disagreeing, with the live document - the one a client generator consumes - being the wrong one.
+    /// </para>
+    /// <para>
+    /// The four statuses are the ones no projected operation can avoid. 429 is a capacity ceiling in a
+    /// handle registry refusing to hold more work; 502 is no gRPC response arriving at all; 503 is an
+    /// upstream answering that it is not currently serving; 504 is the outbound deadline elapsing, and
+    /// every outbound call carries one. All four were emitted while none was declared.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ThePublishedDocumentDeclaresEveryStatusTheProjectionCanProduce()
+    {
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, DocumentRoute);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using JsonDocument document = await ReadJsonAsync(response);
+
+        string[] required = ["429", "500", "502", "503", "504"];
+        int projected = 0;
+
+        foreach (JsonProperty path in document.RootElement.GetProperty("paths").EnumerateObject())
+        {
+            if (!path.Name.StartsWith("/v1/datawindow", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (JsonProperty operation in path.Value.EnumerateObject())
+            {
+                if (!operation.Value.TryGetProperty("responses", out JsonElement responses))
+                {
+                    continue;
+                }
+
+                projected++;
+
+                foreach (string status in required)
+                {
+                    Assert.True(
+                        responses.TryGetProperty(status, out _),
+                        $"{operation.Name.ToUpperInvariant()} {path.Name} must declare {status}: the "
+                            + "failure map can produce it on any projected operation.");
+                }
+            }
+        }
+
+        // The count is asserted so that a projection removed from the route table cannot make this pass by
+        // finding nothing to check. Thirty-nine is the contract's own figure: every unary and every
+        // server-streaming method of C-03 and C-04, and none of the three bidirectional ones.
+        Assert.Equal(39, projected);
     }
 
     // ==================================================================================================

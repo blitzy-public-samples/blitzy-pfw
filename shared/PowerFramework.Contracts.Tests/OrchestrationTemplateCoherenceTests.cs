@@ -46,6 +46,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Xunit;
 using Xunit.Sdk;
 
@@ -107,7 +108,7 @@ public sealed class OrchestrationTemplateCoherenceTests
         $"gateway-service/PowerFramework.Gateway/{DevelopmentSettingsFileName}",
     ];
 
-    /// <summary>The complete expected variable roster - twenty-two names, no twenty-third.</summary>
+    /// <summary>The complete expected variable roster - twenty-eight names, no twenty-ninth.</summary>
     /// <remarks>
     /// <para>
     /// Spelled out rather than derived, so that both an addition and a removal are findings. The
@@ -117,29 +118,68 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// </para>
     /// <para>
     /// The roster is four families, and reading it as one flat list hides why the count is what it is.
-    /// TEN are the service-shape variables an operator always sets: the environment name, the three
-    /// in-network base addresses, the two token-topology names, the signing secret, and the three
-    /// Persistence storage and pool settings. TWO are the shared server-certificate paths, which are
-    /// deliberately ONE pair for the whole stack rather than one pair per listener - every service
-    /// terminates TLS with the same default material at <c>Kestrel:Certificates:Default</c>. FIVE are
-    /// CLIENT-side mutual-TLS material, which is a different thing from the server pair and cannot be
-    /// folded onto it: the client certificate Gateway presents to Security, the one DataServices
-    /// presents to Security, and the issuer whose client certificates Security is willing to accept.
-    /// THREE are Gateway's health-probe addresses, which stay separate from its upstream call addresses
-    /// even where the values coincide, because one is what a caller dials and the other is what an
-    /// observer reads - and because C-10 bounds the aggregate at three upstreams while Gateway's call
-    /// roster has only two.
+    /// TWELVE are the service-shape variables an operator always sets: the environment name, the three
+    /// in-network REST addresses, the TWO gRPC addresses, the two token-topology names, the signing
+    /// secret, and the three Persistence storage and pool settings.
     /// </para>
     /// <para>
-    /// GATEWAY_LOCALE and GATEWAY_CAPABILITY_FLAGS are the twenty-first and twenty-second, and they are
-    /// the two that restate a preserved behavioural default rather than configuring anything new; the
-    /// pairing below holds them to the value the service itself declares.
+    /// THE TWO <c>_GRPC_URL</c> VARIABLES ARE WHY THE COUNT MOVED FROM TWENTY-TWO, and they are not a
+    /// duplication of the <c>_BASE_URL</c> pair. Persistence and DataServices each declare TWO endpoints,
+    /// one per PROTOCOL VERSION: one <c>Http1</c> endpoint on the documented port for <c>/health</c>,
+    /// <c>/v1/ping</c> and REST, and one <c>Http2</c> endpoint for the gRPC contracts. Both are
+    /// <c>https</c>, so ALPN could have carried both on one address - the split is kept because a caller
+    /// that dials the wrong one then fails at first use rather than reaching the wrong surface and being
+    /// answered: a gRPC channel against the <c>Http1</c> endpoint fails negotiation, and an HTTP/1.1 probe
+    /// against the <c>Http2</c> endpoint answers 400. Each is therefore named for what it carries rather
+    /// than sharing one variable.
+    /// </para>
+    /// <para>
+    /// TWO are the shared server-certificate paths, which are deliberately ONE pair for the whole stack
+    /// rather than one pair per listener. FIVE are CLIENT-side mutual-TLS material, which is a different
+    /// thing from the server pair and cannot be folded onto it: the client certificate Gateway presents
+    /// to Security, the one DataServices presents to Security, and the issuer whose client certificates
+    /// Security is willing to accept. All seven are empty in the TEMPLATE rather than optional in effect:
+    /// every listener in this estate is <c>https</c>, so the server pair has to be supplied for the
+    /// documented bring-up to start at all, and an example path is indistinguishable from a real one to a
+    /// reader. The five client-side paths are genuinely optional, because JWT is the standing mechanism
+    /// and mutual TLS is the documented per-pair fallback.
+    /// </para>
+    /// <para>
+    /// THREE are Gateway's health-probe addresses, which stay separate from its upstream call addresses
+    /// because one is what a caller dials and the other is what an observer reads - and because C-10
+    /// bounds the aggregate at three upstreams while Gateway's call roster has only two. Their values
+    /// additionally differ from the call addresses, since a probe is an HTTP/1.1 <c>GET</c> and must
+    /// therefore reach the <c>Http1</c> endpoint rather than the <c>Http2</c> one.
+    /// </para>
+    /// <para>
+    /// GATEWAY_LOCALE and GATEWAY_CAPABILITY_FLAGS are the last two, and they are the ones that restate a
+    /// preserved behavioural default rather than configuring anything new; the pairing below holds them to
+    /// the value the service itself declares.
+    /// </para>
+    /// <para>
+    /// THE LAST SIX ARE THE AUTHORIZATION FAMILY, and they are the only entries in the roster that are
+    /// not flat screaming-snake names. SECURITY_MTLS_CLIENT_REVOCATION_MODE belongs with the client-side
+    /// material above - it says how thoroughly a presented client certificate's revocation is checked, and
+    /// it is separate from the anchor because a deployment can trust an issuer without being able to reach
+    /// its revocation data. The other five are the end-to-end suite's row in Security's issuance
+    /// allowlist, spelled as SECTION-PATH variables because they address one element of an array of
+    /// objects and no flat name can express that shape.
+    /// </para>
+    /// <para>
+    /// THE INDEX 3 IS LOAD-BEARING AND MUST NOT BE CHANGED TO 0, 1 OR 2. Those three indices are authored
+    /// in the settings file, and the environment provider MERGES by index rather than replacing or
+    /// appending: naming an occupied index does not add a row and does not override the row either, it
+    /// produces a silently HYBRID row carrying the environment's value for the members it names and the
+    /// settings file's values for the rest, leaving the row count unchanged. That hybrid is not a
+    /// duplicate, so the validator's duplicate-pair guard does not fire on it either. 3 is the first free
+    /// index, which is why it is the one that appends a genuine fourth row.
     /// </para>
     /// </remarks>
     private static readonly string[] ExpectedVariableNames =
     [
         "ASPNETCORE_ENVIRONMENT",
         "DATASERVICES_BASE_URL",
+        "DATASERVICES_GRPC_URL",
         "DATASERVICES_MTLS_CERT_PATH",
         "DATASERVICES_MTLS_KEY_PATH",
         "GATEWAY_CAPABILITY_FLAGS",
@@ -149,7 +189,17 @@ public sealed class OrchestrationTemplateCoherenceTests
         "GATEWAY_LOCALE",
         "GATEWAY_MTLS_CERT_PATH",
         "GATEWAY_MTLS_KEY_PATH",
+
+        // The trust anchor every internal client verifies its peer against. Three consumers, one
+        // variable: Gateway__InternalTls__TrustedCaPath, DataServices__InternalTls__TrustedCaPath and
+        // Persistence's unprefixed InternalTls__TrustedCaPath. Its absence was the defect behind an
+        // entire class of unreachable-upstream failure - the documented topology issues every internal
+        // certificate from a LOCAL authority that no container's OS trust store carries, so without an
+        // anchor named to each service every internal channel refuses the certificate it is presented.
+        "INTERNAL_TLS_TRUSTED_CA_PATH",
+
         "PERSISTENCE_BASE_URL",
+        "PERSISTENCE_GRPC_URL",
         "PERSISTENCE_SQLITE_DATA_DIRECTORY",
         "PERSISTENCE_TRANSPOOL_KEEPALIVE",
         "PERSISTENCE_TRANSPOOL_KEEPALIVE_EXPIRE_SECONDS",
@@ -157,7 +207,28 @@ public sealed class OrchestrationTemplateCoherenceTests
         "SECURITY_JWT_AUDIENCE",
         "SECURITY_JWT_ISSUER",
         "SECURITY_JWT_SIGNING_KEY",
+
+        // THE ISSUANCE-ROSTER SECRETS - one per caller that may obtain a token. Required, and a missing
+        // one REFUSES THE HOST: Security resolves every secret its roster names at startup and reports
+        // the roster position of any that resolves to nothing. Three rather than five, because
+        // Persistence requests no token at all (it reads the published key set anonymously) and the third
+        // is the operator/end-to-end identity the Development overlay registers.
+        "SECURITY_CLIENT_SECRET_GATEWAY",
+        "SECURITY_CLIENT_SECRET_DATASERVICES",
+        "SECURITY_CLIENT_SECRET",
+
         "SECURITY_MTLS_CLIENT_CA_PATH",
+        "SECURITY_MTLS_CLIENT_REVOCATION_MODE",
+
+        // The end-to-end suite's row in the issuance allowlist. Index 3 appends a fourth row to the three
+        // the settings file authors; see the remarks above for why an occupied index would silently
+        // produce a hybrid row instead.
+        "Security__CallerAuthorizations__3__Audience",
+        "Security__CallerAuthorizations__3__Caller",
+        "Security__CallerAuthorizations__3__Scopes__0",
+        "Security__CallerAuthorizations__3__Scopes__1",
+        "Security__CallerAuthorizations__3__Scopes__2",
+
         "TLS_CERTIFICATE_KEY_PATH",
         "TLS_CERTIFICATE_PATH",
     ];
@@ -176,22 +247,49 @@ public sealed class OrchestrationTemplateCoherenceTests
         "SECURITY_JWT_SIGNING_KEY",
         "TLS_CERTIFICATE_PATH",
         "TLS_CERTIFICATE_KEY_PATH",
+
+        // THE FIVE CLIENT-SIDE MUTUAL-TLS PATHS BELONG HERE FOR A SECOND REASON BESIDES SECRECY, and it
+        // is the sharper of the two: Gateway and DataServices load their pair EAGERLY at startup with
+        // X509Certificate2.CreateFromPemFile and turn an IOException into a fail-fast host failure. A
+        // pre-filled mount point that no manifest provides therefore stops the documented bring-up dead,
+        // while reading as configured to anyone auditing the template. Both-empty is the supported state
+        // meaning "this deployment presents no client certificate", which is the estate's default because
+        // JWT is the standing mechanism and mutual TLS is the documented per-pair fallback - a deployment
+        // that wants it mounts the pair and fills these in.
+        "SECURITY_MTLS_CLIENT_CA_PATH",
+        "GATEWAY_MTLS_CERT_PATH",
+        "GATEWAY_MTLS_KEY_PATH",
+        "DATASERVICES_MTLS_CERT_PATH",
+        "DATASERVICES_MTLS_KEY_PATH",
     ];
 
     /// <summary>
     /// Configuration keys that legitimately have no settings-file declaration, with the reason.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Each is environment-only BY DESIGN: the two certificate paths and the two secrets must never
     /// appear in an authored settings file (C-F), and the signing key additionally binds as a FLAT key
     /// because <c>__</c> is the section separator and <c>SECURITY_JWT_</c> would otherwise be read as
     /// three nested sections.
+    /// </para>
+    /// <para>
+    /// <c>Jwt:MetadataAddress</c> is environment-only for a different reason, and it is a LIVE key
+    /// rather than an indulgence: Persistence reads it straight off its bearer section and, when it is
+    /// non-blank, assigns it to the handler
+    /// (<c>services/persistence-service/PowerFramework.Persistence/Program.cs:376</c> and <c>:391</c>).
+    /// Declaring it in the settings file would mean giving it a VALUE, and any value at all overrides
+    /// the discovery address - so the only way to express "left unset so discovery resolves from the
+    /// authority", which is the documented default, is to omit it. It is the same shape as
+    /// <c>Sqlite:Password</c>: real, read, and deliberately absent from every authored file.
+    /// </para>
     /// </remarks>
     private static readonly string[] EnvironmentOnlyConfigurationKeys =
     [
         "Kestrel:Certificates:Default:Path",
         "Kestrel:Certificates:Default:KeyPath",
         "Sqlite:Password",
+        "Jwt:MetadataAddress",
         "SECURITY_JWT_SIGNING_KEY",
     ];
 
@@ -199,26 +297,61 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// Key spellings the template mentions only in order to FORBID them.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The template tells a reader not to rename the flat signing-key variable into a section path, and
     /// naming the wrong spelling is how that instruction is made actionable. Without this allowance the
     /// resolvability check below would report the prohibition itself as the defect it exists to prevent.
+    /// </para>
+    /// <para>
+    /// <c>Jwt__JwksPath</c> is here for the neighbouring reason: it is named in order to record that it
+    /// USED to exist on Persistence, was read by nothing, and has been REMOVED. Documenting a withdrawn
+    /// key is worth more than deleting the sentence - an operator carrying it forward from an older
+    /// template needs to be told it is gone rather than left wondering why it has no effect - and the
+    /// resolvability check would otherwise report that explanation as an unresolvable key path, which is
+    /// the same category error as reporting a prohibition.
+    /// </para>
     /// </remarks>
-    private static readonly string[] DocumentedOnlyToBeForbidden = ["Security__SigningKey"];
+    private static readonly string[] DocumentedOnlyToBeForbidden =
+        ["Security__SigningKey", "Jwt__JwksPath"];
 
     /// <summary>Every port the map assigns, as it may appear inside a template VALUE.</summary>
     /// <remarks>
-    /// 5103 is absent deliberately: the map reserves it as a commented Phase-2 slot, so a value
-    /// naming it would be an address for a service that does not exist.
+    /// <para>
+    /// 5103 is absent deliberately: the map reserves it as a commented Phase-2 slot, so a value naming it
+    /// would be an address for a service that does not exist.
+    /// </para>
+    /// <para>
+    /// 5111 and 5112 are the gRPC endpoints of Persistence and DataServices. They sit OUTSIDE the
+    /// documented 5101-5105 band on purpose: the attached environment fixes <c>/health</c> addresses on
+    /// that band and documents no gRPC address at all, so an address it never named can be added without
+    /// moving one it did. Every documented port keeps exactly the meaning it was given.
+    /// </para>
     /// </remarks>
-    private static readonly int[] AssignedPorts = [5101, 5102, 5104, 5105];
+    private static readonly int[] AssignedPorts = [5101, 5102, 5104, 5105, 5111, 5112];
 
     /// <summary>Each address variable, the port it must name, and the scheme it must use.</summary>
+    /// <remarks>
+    /// EVERY SCHEME IS <c>https</c>, AND THAT IS ASSERTED RATHER THAN TOLERATED. The environment gates
+    /// each service's readiness on <c>curl -sf http://localhost:&lt;port&gt;/health</c>, which fixes the
+    /// probe SHAPE - an anonymous <c>GET</c> of <c>/health</c> on that port answering 200 - and not the
+    /// transport beneath it, so honouring it with a trust anchor added is not one of the deviations AAP
+    /// 0.8.3 governs. What a template naming an <c>http</c> listener WOULD describe is a stack carrying
+    /// bearer credentials and a verification key set in cleartext, which is CWE-319 on surfaces the
+    /// decomposition itself created (AAP 0.1.4). The issuer is held to the same scheme as the base address
+    /// because the two are compared byte for byte against the <c>iss</c> claim: a one-character divergence
+    /// rejects every token in the system, silently, until the first authenticated request.
+    /// </remarks>
     private static readonly AddressExpectation[] AddressExpectations =
     [
         new("PERSISTENCE_BASE_URL", 5101, Uri.UriSchemeHttps),
+        new("PERSISTENCE_GRPC_URL", 5111, Uri.UriSchemeHttps),
         new("DATASERVICES_BASE_URL", 5102, Uri.UriSchemeHttps),
+        new("DATASERVICES_GRPC_URL", 5112, Uri.UriSchemeHttps),
         new("SECURITY_BASE_URL", 5104, Uri.UriSchemeHttps),
         new("SECURITY_JWT_ISSUER", 5104, Uri.UriSchemeHttps),
+        new("GATEWAY_HEALTH_PROBE_PERSISTENCE_URL", 5101, Uri.UriSchemeHttps),
+        new("GATEWAY_HEALTH_PROBE_DATASERVICES_URL", 5102, Uri.UriSchemeHttps),
+        new("GATEWAY_HEALTH_PROBE_SECURITY_URL", 5104, Uri.UriSchemeHttps),
     ];
 
     /// <summary>
@@ -427,18 +560,60 @@ public sealed class OrchestrationTemplateCoherenceTests
                 + "produce material Security can import, or the first bring-up fails at startup with "
                 + "nothing to act on.");
 
-        Assert.DoesNotContain("openssl rand -base64", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("openssl rand -hex", text, StringComparison.Ordinal);
+        // ------------------------------------------------------------------------------------------
+        // `openssl rand` MUST NOT BE OFFERED FOR THE SIGNING KEY, AND MUST BE OFFERED FOR THE ROSTER
+        // SECRETS. The assertion is therefore per line rather than over the whole file.
+        //
+        // The distinction is real and getting it wrong costs a bring-up either way. The signing key is
+        // an ASYMMETRIC PRIVATE KEY that Security imports: random bytes cannot be imported at all, so
+        // an operator who reached for `openssl rand` gets a host that refuses to start. The issuance
+        // roster's secrets are SHARED SECRETS compared byte for byte and imported by nothing, so
+        // random bytes are exactly right - and an operator told nothing about how to produce one
+        // invents something weaker.
+        //
+        // An earlier form of this row banned the string outright, which was correct while the signing
+        // key was the only secret in the template and became wrong the moment the roster arrived. Per
+        // line keeps the original intent - no random-bytes recipe anywhere near the signing key - while
+        // admitting the recipe the roster needs.
+        // ------------------------------------------------------------------------------------------
+        string[] offendingLines =
+        [
+            .. text.Split('\n')
+                .Where(static line =>
+                    line.Contains("openssl rand", StringComparison.Ordinal)
+                    && line.Contains("SIGNING", StringComparison.Ordinal)),
+        ];
+
+        Assert.True(
+            offendingLines.Length == 0,
+            "The template offers a random-bytes recipe on a line naming the signing key. Random bytes "
+                + "cannot be imported as an asymmetric private key, so an operator who followed it "
+                + "would get a host that refuses to start.");
+
+        Assert.True(
+            text.Contains("openssl rand -base64 32", StringComparison.Ordinal),
+            "The template documents no way to generate an issuance-roster secret. Every roster entry "
+                + "that names a secret key must have one supplied or the host refuses to start, so an "
+                + "operator told nothing here either cannot bring the stack up or invents something "
+                + "weaker.");
+
+        // AND THE WARNING AGAINST CONFUSING THE TWO IS STILL PRESENT, which is the part a reader acts on
+        // when a startup refusal names the signing key.
+        Assert.True(
+            text.Contains("fails the startup usability check", StringComparison.Ordinal),
+            "The template no longer states that random material is rejected for the signing key at "
+                + "startup. That sentence is what turns a refusal an operator has already hit into an "
+                + "action.");
     }
 
     /// <summary>
     /// No variable exists for an absolute JWK-set address, because no verifier can read one.
     /// </summary>
     /// <remarks>
-    /// Gateway and DataServices reach the key set through the discovery document beneath their bearer
-    /// authority and expose no key-set setting; Persistence composes its own from
-    /// <c>Jwt:Authority</c> plus the RELATIVE <c>Jwt:JwksPath</c>. An absolute URL has nowhere to go in
-    /// any of the three shapes.
+    /// All three verifiers reach the key set through the discovery document beneath their bearer
+    /// authority and expose no key-set setting of their own. Persistence once declared a relative
+    /// <c>Jwt:JwksPath</c>, but nothing read it and it has been removed, so an absolute URL has nowhere
+    /// to go in any of the three shapes.
     /// </remarks>
     [Fact]
     public void TemplateDeclaresNoAbsoluteJwksAddressVariable()
@@ -470,6 +645,7 @@ public sealed class OrchestrationTemplateCoherenceTests
     public void EveryDocumentedConfigurationKeyPathResolvesToADeclaredOptionLeaf()
     {
         HashSet<string> declared = ReadAllDeclaredLeafPaths();
+        HashSet<string> shapes = ReadDeclaredShapesThroughArrays();
         List<string> failures = [];
 
         foreach (string token in HarvestDocumentedKeyPaths(ReadTemplateText()))
@@ -487,10 +663,12 @@ public sealed class OrchestrationTemplateCoherenceTests
                 continue;
             }
 
-            // An array is one authored leaf, so an indexed reference resolves through its parent.
-            string? parent = StripIndexSuffix(path);
-
-            if (parent is not null && declared.Contains(parent))
+            // An indexed reference addresses an ELEMENT, while the settings file authors a SHAPE, so the
+            // two are compared with indices normalized away at every depth. This resolves both array
+            // kinds - a scalar array such as Security:Audiences:0, and an array of objects such as
+            // Security:CallerAuthorizations:3:Caller - while still holding the member name after the
+            // index to the shape the element actually declares.
+            if (shapes.Contains(NormalizeAwayIndexes(path)))
             {
                 continue;
             }
@@ -521,6 +699,65 @@ public sealed class OrchestrationTemplateCoherenceTests
             address.Port == expectedPort,
             $"'{variableName}' names port {address.Port}, but the map assigns {expectedPort}. A caller "
                 + "pointed at a port nobody serves fails at first use, three layers from its cause.");
+    }
+
+    /// <summary>
+    /// The end-to-end suite's compiled-in fallback for each address variable names the same listener the
+    /// template does — same scheme, same port.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS CHECK IS HERE, IN A .NET TEST, READING TYPESCRIPT. There are two places a default address
+    /// for these services is written: the orchestration template, which an operator fills in, and
+    /// <c>tests/e2e/fixtures/service-endpoints.ts</c>, whose <c>resolveBaseUrl</c> fallbacks are what the
+    /// suite uses when no variable is set — which is the documented local run. Nothing else compares them.
+    /// The suite's own type check cannot: a string literal is a valid string whatever it names, and the
+    /// TypeScript has no access to the settings files that decide which listeners exist.
+    /// </para>
+    /// <para>
+    /// AND THE TWO HAD DIVERGED, WHICH IS WHY IT IS WORTH A TEST RATHER THAN A CONVENTION. The fixture
+    /// defaulted Security to an <c>http</c> address while Security declares exactly one listener and it
+    /// terminates TLS — so the documented default run could not bootstrap at all: a client certificate is
+    /// the only caller authentication <c>POST /v1/tokens</c> accepts, and a certificate cannot be
+    /// presented where no handshake happens. Seventy lines of commentary directly above the literal argued
+    /// correctly for <c>https</c>; the literal said otherwise, and no gate read either.
+    /// </para>
+    /// <para>
+    /// SCHEME AND PORT ONLY — the HOST is deliberately not compared. The template names container DNS
+    /// (<c>security-service</c>) because Compose resolves it; the fixture names <c>localhost</c> because a
+    /// developer runs it from the host. Those are the same listener reached from two places, so requiring
+    /// them to match would encode a topology assumption rather than a coherence rule. What must agree is
+    /// what an operator cannot override away: whether TLS is spoken, and which port answers.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(AllAddressExpectations))]
+    public void EndToEndFallbackAddressNamesTheSameListenerAsTheTemplate(
+        string variableName,
+        int expectedPort,
+        string expectedScheme)
+    {
+        string? fallback = ReadEndToEndFallback(variableName);
+
+        if (fallback is null)
+        {
+            // Not every template variable is an address the suite resolves - SECURITY_JWT_ISSUER is
+            // Security's own identity rather than an address a spec calls - so absence is not a failure.
+            // What would be a failure is a fallback that exists and names a different listener.
+            return;
+        }
+
+        Assert.True(
+            Uri.TryCreate(fallback, UriKind.Absolute, out Uri? address),
+            $"The end-to-end fallback for '{variableName}' is not an absolute address.");
+
+        Assert.Equal(expectedScheme, address!.Scheme);
+
+        Assert.True(
+            address.Port == expectedPort,
+            $"The end-to-end fallback for '{variableName}' names port {address.Port}, but the map assigns "
+                + $"{expectedPort}. The documented run uses this fallback, so a wrong port here fails the "
+                + "suite before any assertion in it is reached.");
     }
 
     /// <summary>No value names a port outside the assigned set.</summary>
@@ -773,33 +1010,154 @@ public sealed class OrchestrationTemplateCoherenceTests
     private static bool IsTokenCharacter(char character) =>
         char.IsAsciiLetterOrDigit(character) || character == '_';
 
-    /// <summary>Removes a trailing all-digit segment from a configuration path.</summary>
+    /// <summary>
+    /// Removes every all-digit segment from a configuration path, yielding the SHAPE the path
+    /// addresses rather than the particular element it addresses.
+    /// </summary>
     /// <param name="path">The colon-separated path.</param>
-    /// <returns>The parent path, or <see langword="null"/> when the last segment is not an index.</returns>
-    private static string? StripIndexSuffix(string path)
+    /// <returns>The path with all index segments removed.</returns>
+    /// <remarks>
+    /// <para>
+    /// The earlier form of this helper removed only a TRAILING index, which resolved an array of scalars
+    /// - <c>Security:Audiences:0</c> reduces to the one authored leaf <c>Security:Audiences</c> - but
+    /// could not resolve an array of OBJECTS, where the index sits in the middle. Security's issuance
+    /// allowlist is exactly that shape, so every one of its documented key paths read as unresolvable
+    /// while being perfectly correct.
+    /// </para>
+    /// <para>
+    /// Removing indices at ANY depth is strictly STRONGER than truncating at the array, which is the
+    /// other way this could have been fixed. Truncating would have accepted anything at all after the
+    /// index - <c>CallerAuthorizations:3:Typo</c> included - because the array's own existence would have
+    /// been the whole test. Normalizing both sides instead compares the member name against the element
+    /// shape the settings file actually authors, so a misspelled member inside an element is still a
+    /// finding. Indices are DROPPED rather than preserved because one element's shape describes every
+    /// element's: an environment file may legitimately address an index the settings file never authors,
+    /// which is precisely how a row gets appended.
+    /// </para>
+    /// </remarks>
+    private static string NormalizeAwayIndexes(string path) =>
+        string.Join(
+            ':',
+            path.Split(':')
+                .Where(static segment =>
+                    segment.Length == 0 || !segment.All(char.IsAsciiDigit)));
+
+    /// <summary>
+    /// Reads every declared path, descending THROUGH arrays so that the members of an array element
+    /// are declared shapes too, with index segments normalized away.
+    /// </summary>
+    /// <returns>The normalized declared shapes.</returns>
+    /// <remarks>
+    /// <see cref="Flatten"/> stops at an array because an array is one authored leaf, and the
+    /// exact-roster assertions depend on it continuing to do so. This is the additional, wider view used
+    /// only for resolving a documented key path, so the two coexist rather than one replacing the other.
+    /// </remarks>
+    private static HashSet<string> ReadDeclaredShapesThroughArrays()
     {
-        int separator = path.LastIndexOf(':');
+        HashSet<string> shapes = new(StringComparer.Ordinal);
 
-        if (separator <= 0)
+        foreach (string relativePath in SettingsFileRelativePaths)
         {
-            return null;
-        }
-
-        foreach (char character in path.AsSpan(separator + 1))
-        {
-            if (!char.IsAsciiDigit(character))
+            foreach (string path in FlattenThroughArrays(LoadSettings(relativePath), prefix: string.Empty))
             {
-                return null;
+                shapes.Add(NormalizeAwayIndexes(path));
             }
         }
 
-        return path[..separator];
+        return shapes;
+    }
+
+    /// <summary>Enumerates every path beneath a node, descending into arrays as well as objects.</summary>
+    /// <param name="node">The node to walk.</param>
+    /// <param name="prefix">The path accumulated so far.</param>
+    /// <returns>Every path the node contributes.</returns>
+    private static IEnumerable<string> FlattenThroughArrays(JsonNode? node, string prefix)
+    {
+        if (node is JsonObject owner)
+        {
+            foreach ((string name, JsonNode? value) in owner)
+            {
+                string path = prefix.Length == 0 ? name : $"{prefix}:{name}";
+
+                // An array is reported as a leaf in its own right - matching Flatten, so that a
+                // reference to the array itself still resolves - AND then descended into.
+                if (value is not JsonObject)
+                {
+                    yield return path;
+                }
+
+                foreach (string nested in FlattenThroughArrays(value, path))
+                {
+                    yield return nested;
+                }
+            }
+
+            yield break;
+        }
+
+        if (node is JsonArray elements)
+        {
+            foreach (JsonNode? element in elements)
+            {
+                // The index contributes nothing: the prefix is carried through unchanged so that every
+                // element describes the same shape.
+                foreach (string nested in FlattenThroughArrays(element, prefix))
+                {
+                    yield return nested;
+                }
+            }
+        }
     }
 
     /// <summary>Reads the template as lines, with line endings normalized away.</summary>
     /// <returns>The template's lines.</returns>
     private static string[] ReadTemplateLines() =>
         ReadTemplateText().Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+
+    /// <summary>
+    /// Reads the compiled-in fallback the end-to-end suite uses for one address variable.
+    /// </summary>
+    /// <param name="variableName">The variable name, as both artifacts spell it.</param>
+    /// <returns>
+    /// The fallback literal, or <see langword="null"/> when the fixture resolves no such variable.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// A TARGETED TEXT MATCH RATHER THAN A PARSE, and the shape it matches is the one the fixture actually
+    /// uses: <c>resolveBaseUrl('NAME', 'value')</c>, whether written on one line or across three. Parsing
+    /// TypeScript from a .NET test would need a parser this repository does not have and must not acquire
+    /// for a two-argument call.
+    /// </para>
+    /// <para>
+    /// A MISSING FIXTURE IS A FAILURE, NOT A SKIP. The suite is committed, so a check that quietly passed
+    /// when the file moved would be worth nothing — the one state it exists to catch is the fixture and the
+    /// template disagreeing, and a renamed fixture is indistinguishable from that until somebody looks.
+    /// </para>
+    /// </remarks>
+    private static string? ReadEndToEndFallback(string variableName)
+    {
+        string path = Path.Combine(
+            RequireRepositoryRoot(),
+            "tests",
+            "e2e",
+            "fixtures",
+            "service-endpoints.ts");
+
+        string text = File.Exists(path)
+            ? File.ReadAllText(path)
+            : throw FailException.ForFailure(
+                "'tests/e2e/fixtures/service-endpoints.ts' does not exist. It carries the addresses the "
+                    + "documented end-to-end run uses when no variable is set, so its absence is a finding "
+                    + "rather than a reason to skip a check.");
+
+        Match match = Regex.Match(
+            text,
+            @"resolveBaseUrl\(\s*'" + Regex.Escape(variableName) + @"'\s*,\s*'(?<fallback>[^']+)'",
+            RegexOptions.None,
+            TimeSpan.FromSeconds(5));
+
+        return match.Success ? match.Groups["fallback"].Value : null;
+    }
 
     /// <summary>Reads the whole template.</summary>
     /// <returns>The template text.</returns>

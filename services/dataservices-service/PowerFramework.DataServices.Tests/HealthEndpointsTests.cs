@@ -205,6 +205,18 @@ public sealed class HealthEndpointsTests
                 Assert.Equal(
                     PowerFramework.Shared.Kernel.RetCode.E_RETRY,
                     body.RootElement.GetProperty("retCode").GetInt64());
+
+                // AND THE VERDICT IS MACHINE-READABLE, WHICH IS THE HALF THAT ACTUALLY REACHES GATEWAY.
+                // The detail above is prose for a human, and prose is not something an aggregator can
+                // branch on; retCode is identical for both verdicts, so it separates nothing. Without a
+                // member of its own the distinction contract C-10 promises would exist only in a sentence,
+                // and Gateway would have to flatten every not-ready upstream into a failure. The token
+                // cannot live in `status` - RFC 9457 uses that name here for the integer HTTP status,
+                // asserted alongside so the two are visibly different members.
+                Assert.Equal(
+                    expectedWireStatus,
+                    body.RootElement.GetProperty("serviceStatus").GetString());
+                Assert.Equal(503, body.RootElement.GetProperty("status").GetInt32());
             }
         }
     }

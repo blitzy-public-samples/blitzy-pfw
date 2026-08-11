@@ -2936,4 +2936,3 @@ public sealed class ParseErrorValueEqualityTests
         Assert.Equal(28, sites.Length);
     }
 }
-

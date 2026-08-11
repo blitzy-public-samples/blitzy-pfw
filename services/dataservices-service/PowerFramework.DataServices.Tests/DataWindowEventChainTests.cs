@@ -3981,4 +3981,3 @@ public sealed class DataWindowEventChainTests
         Assert.Null(fixture.Observer.Last.AnyResult);
     }
 }
-

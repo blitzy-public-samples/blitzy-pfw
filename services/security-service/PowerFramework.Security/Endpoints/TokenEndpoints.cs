@@ -96,8 +96,12 @@
 //      here would defeat that seam and make a characterization recording irreproducible.
 // ==================================================================================================
 
+using System.Diagnostics.CodeAnalysis;
+using System.ComponentModel.DataAnnotations;
+using System.Net.Http.Headers;
 using System.Net.Mime;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -159,6 +163,28 @@ public static class TokenEndpoints
     private const string MutualTlsSchemeName = "mutualTls";
 
     /// <summary>
+    /// The security-scheme key the generated document declares the shared-secret credential under.
+    /// </summary>
+    /// <remarks>
+    /// Spelled exactly as the authored contract names the scheme in its component section, where it is
+    /// declared as HTTP <c>basic</c>. The operation declares BOTH this scheme and the mutual-TLS one as
+    /// ALTERNATIVES, which is what a list of two single-scheme requirements means in the specification -
+    /// either satisfies the operation - and which is exactly the behaviour the handler implements.
+    /// </remarks>
+    private const string ClientCredentialSchemeName = "clientCredential";
+
+    /// <summary>
+    /// The authentication-scheme token the credential is presented under, WITH ITS TRAILING SPACE.
+    /// </summary>
+    /// <remarks>
+    /// RFC 7617's scheme name. Matched case-INSENSITIVELY, because RFC 9110 section 11.1 makes the
+    /// scheme token case-insensitive - a caller presenting <c>basic</c> is conformant and refusing it
+    /// would be this service inventing a stricter protocol than the one it publishes. The credential
+    /// that follows is matched case-SENSITIVELY, because it is a credential.
+    /// </remarks>
+    private const string BasicSchemeToken = "Basic";
+
+    /// <summary>
     /// The credential type the response reports, fixed by the published response schema.
     /// </summary>
     /// <remarks>
@@ -199,11 +225,15 @@ public static class TokenEndpoints
     private const string OperationDescription =
         "Issues a short-lived service token from a caller identity, an intended audience and a "
         + "requested scope set. This service is the sole minter in the system; Gateway, DataServices "
-        + "and Persistence hold verification material only. CALLER IDENTITY COMES FROM THE TRANSPORT, "
-        + "NOT FROM THE BODY: the operation is protected by mutual TLS and by nothing else, because a "
-        + "caller cannot present a bearer token in order to obtain its first bearer token, so the "
-        + "request carries no credential of any kind and the subject member is a claim that is "
-        + "reconciled against the identity the presented client certificate establishes. This is not "
+        + "and Persistence hold verification material only. CALLER IDENTITY COMES FROM THE PRESENTED "
+        + "CREDENTIAL, NOT FROM THE BODY: the operation accepts a shared secret as an HTTP Basic "
+        + "credential or a client certificate, and no bearer token, because a caller cannot present a "
+        + "bearer token in order to obtain its first bearer token. The subject member is a CLAIM, "
+        + "reconciled ordinally against the identity the presented credential establishes, so a caller "
+        + "can only obtain a token whose subject is its own. WHAT A CALLER MAY ASK FOR IS DECIDED PER "
+        + "CALLER: this issuer holds a roster naming, for each registered identity, the audiences it may "
+        + "address and the scopes it may request, and a request outside that grant is refused rather "
+        + "than narrowed. This is not "
         + "an OAuth 2.0 grant request and does not pretend to be one - there is no grant-type "
         + "parameter, no authorization endpoint and no refresh credential anywhere in this contract - "
         + "while the RESPONSE does use the RFC 6749 section 5.1 member spellings so that a stock "
@@ -220,6 +250,21 @@ public static class TokenEndpoints
     /// a description of an authentication scheme is not a place to publish the configuration that
     /// implements it.
     /// </remarks>
+    private const string ClientCredentialSchemeDescription =
+        "A shared secret presented as an HTTP Basic credential, whose user-id is the caller's service "
+        + "identity and whose password is the secret this deployment injected for that identity. This "
+        + "is one of the two credentials this operation accepts, and it is the one available to a "
+        + "deployment whose TLS is terminated ahead of this service - a reverse proxy or a mesh sidecar "
+        + "strips the client certificate, so certificate identity cannot be relied on universally even "
+        + "though this service's own listener requests one. The identity is "
+        + "resolved against this service's configured issuance roster, which also decides which "
+        + "audiences and scopes that identity may request; a request presenting no credential, an "
+        + "unknown identity or an incorrect secret is refused identically and before any signing work "
+        + "is done, so the refusal cannot be used to discover which callers exist. Raw key material "
+        + "never crosses this boundary - the secret authenticates the caller and is not used as a "
+        + "cryptographic key by anything.";
+
+    /// <summary>The description published for the mutual-TLS security scheme.</summary>
     private const string MutualTlsSchemeDescription =
         "A client certificate presented during the TLS handshake, requested and validated by this "
         + "service, and accepted only if it chains to the configured trust anchor. This is the only "
@@ -306,10 +351,16 @@ public static class TokenEndpoints
     /// describe this service's trust configuration to an unauthenticated party.
     /// </remarks>
     private const string CredentialAbsentDetail =
-        "No client certificate was presented, or the certificate presented establishes no caller "
-        + "identity this service can use. Issuance is authenticated by the transport and by nothing "
-        + "else: there is no bearer-token alternative on this operation, and no member of the request "
-        + "carries a credential. No token was created and no signing material was read.";
+        "No usable caller credential was presented. This operation accepts a shared secret as an HTTP "
+        + "Basic credential, or a client certificate; a request presenting neither, one whose Basic "
+        + "credential is malformed, one naming an identity this service does not know, one presenting "
+        + "an incorrect secret, and one whose certificate establishes no usable identity are all "
+        + "refused identically - the response does not distinguish them, because telling an "
+        + "unauthenticated party which condition it hit would let it enumerate this deployment's "
+        + "callers one request at a time. There is no bearer-token alternative on this operation, "
+        + "because a caller cannot present a token in order to obtain its first token, and no member "
+        + "of the request body carries a credential. No token was created and no signing material was "
+        + "read.";
 
     /// <summary>
     /// Detail for a claimed identity that disagrees with the one the transport established.
@@ -320,9 +371,52 @@ public static class TokenEndpoints
     /// would turn a refusal into an identity oracle.
     /// </remarks>
     private const string SubjectMismatchDetail =
-        "The claimed subject is not the identity the presented client certificate establishes. The "
-        + "subject member is a claim; the identity honoured is the transport's. Neither the expected "
-        + "identity nor any part of this service's configuration is reported.";
+        "The claimed subject is not the identity the presented credential establishes. The subject "
+        + "member is a claim; the identity honoured is the credential's. Neither the expected identity "
+        + "nor any part of this service's configuration is reported.";
+
+    /// <summary>Detail for an authenticated caller with no entry in the issuance roster.</summary>
+    /// <remarks>
+    /// Reachable only by calling the issuer directly, since the issuance edge authenticates against the
+    /// same roster - but stated as its own sentence because the outcome is its own outcome, and a
+    /// response that described it as one of the others would be wrong.
+    /// </remarks>
+    private const string SubjectNotRegisteredDetail =
+        "The claimed subject has no entry in this issuer's roster, so it is permitted no audience and "
+        + "no scope. No token was created and no signature was computed. The roster is deliberately "
+        + "not enumerated.";
+
+    /// <summary>
+    /// Detail for an audience this deployment serves but this caller may not address.
+    /// </summary>
+    /// <remarks>
+    /// Distinguished from <see cref="AudienceNotPermittedDetail"/> so that an operator is sent to the
+    /// right configuration section - that one means the deployment serves no such audience, this one
+    /// means the caller's own roster entry does not grant it. Neither echoes the requested value nor
+    /// enumerates any roster.
+    /// </remarks>
+    private const string AudienceNotPermittedForSubjectDetail =
+        "This caller is not permitted to obtain a token for the requested audience. The audience is "
+        + "one this issuer serves, but it is not among those granted to the authenticated identity: "
+        + "both gates apply, and least privilege is stated per caller rather than per deployment. No "
+        + "token was created, no signature was computed and nothing was substituted - an audience a "
+        + "caller may not address is refused rather than replaced with one it may. Neither the "
+        + "requested value nor the granted set is reported.";
+
+    /// <summary>Detail for a scope set naming something this caller is not granted.</summary>
+    /// <remarks>
+    /// It names NEITHER the offending scope NOR the granted set, and that is what stops the refusal
+    /// being used to probe the roster one scope at a time. Which scope was refused is a fact the
+    /// caller's own operator can read from the caller's roster entry.
+    /// </remarks>
+    private const string ScopeNotPermittedForSubjectDetail =
+        "The requested scope set names at least one scope the authenticated identity is not granted. "
+        + "The request is REFUSED rather than narrowed: the published contract permits a granted set to "
+        + "be narrower than a requested one, but silently dropping a scope would hand back a usable "
+        + "token that lacks a capability the caller asked for, and the loss would surface at whichever "
+        + "service refuses the later call - far from the misconfiguration that caused it. No token was "
+        + "created and no signature was computed. Neither the offending scope nor the granted set is "
+        + "reported.";
 
     /// <summary>Detail for an audience this issuer does not serve.</summary>
     /// <remarks>
@@ -336,6 +430,50 @@ public static class TokenEndpoints
         + "with a default, because a token minted for an audience the caller did not ask for would be "
         + "valid somewhere it was never intended to be. The configured roster is deliberately not "
         + "enumerated.";
+
+    /// <summary>Detail for a caller that may not address the audience it asked for.</summary>
+    /// <remarks>
+    /// <para>
+    /// DELIBERATELY THE SAME SENTENCE AS <see cref="AudienceNotPermittedDetail"/>, AND THAT IS THE WHOLE
+    /// POINT OF DECLARING IT SEPARATELY RATHER THAN REUSING THAT CONSTANT. Two different decisions reach
+    /// this response - an audience on no roster at all, and an audience that exists but is not this
+    /// caller's - and a caller able to tell them apart could enumerate the deployment's audience
+    /// configuration by asking for candidates and reading which refusal came back. It gets one sentence
+    /// for both. The distinction an operator needs is preserved where it is safe to keep: two separate
+    /// log records at the issuer.
+    /// </para>
+    /// <para>
+    /// The constant is its own declaration so that a later edit to either sentence is a visible choice
+    /// about one of them rather than a silent change to both, with a comment at each site saying why they
+    /// currently agree.
+    /// </para>
+    /// </remarks>
+    private const string CallerNotPermittedDetail = AudienceNotPermittedDetail;
+
+    /// <summary>Detail for a request none of whose scopes this caller may carry to that audience.</summary>
+    /// <remarks>
+    /// <para>
+    /// A DISTINCT SENTENCE, UNLIKE THE PAIR ABOVE, AND FOR A REASON THAT IS ABOUT DISCLOSURE RATHER THAN
+    /// STYLE. A caller reaching this refusal IS authorized for the audience it named - it learns nothing
+    /// about a permission it does not hold - and the fault is in a set it chose, so telling it which part
+    /// of its request failed reveals nothing and is the difference between a request it can fix and one
+    /// it cannot. Answering the audience sentence here would send it to change the audience, which is the
+    /// one part of the request that was right.
+    /// </para>
+    /// <para>
+    /// IT STILL ENUMERATES NOTHING. The permitted set is not listed, because a caller that could read its
+    /// own permitted set from a refusal could read it from a refusal for every audience on the roster.
+    /// The sentence also states the contract's narrowing rule explicitly, because that rule is what makes
+    /// this refusal narrow: a request whose scopes are PARTLY permitted succeeds and returns the
+    /// permitted part, so reaching this response means nothing at all was permitted.
+    /// </para>
+    /// </remarks>
+    private const string ScopesNotPermittedDetail =
+        "No requested scope is permitted for this caller and audience, so there was nothing to grant. "
+        + "Note that a partly permitted request is NOT refused: it succeeds and the response reports the "
+        + "narrower granted set, which is why this response means that none of the requested scopes was "
+        + "permitted rather than that some were not. No token was created and no signature was computed. "
+        + "The permitted set is deliberately not enumerated.";
 
     /// <summary>Detail for an issuance outcome this build does not recognise.</summary>
     /// <remarks>
@@ -514,7 +652,7 @@ public static class TokenEndpoints
             .ProducesProblem(
                 StatusCodes.Status500InternalServerError,
                 MediaTypeNames.Application.ProblemJson)
-            .AddOpenApiOperationTransformer(DeclareMutualTlsRequirementAsync);
+            .AddOpenApiOperationTransformer(DeclareIssuanceCredentialRequirementAsync);
 
         return endpoints;
     }
@@ -591,10 +729,12 @@ public static class TokenEndpoints
         TokenIssuanceRequestBody? request,
         HttpContext httpContext,
         [FromServices] TokenIssuer issuer,
+        [FromServices] ClientCertificateTrust trust,
         [FromServices] ILoggerFactory loggerFactory)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(issuer);
+        ArgumentNullException.ThrowIfNull(trust);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         // ------------------------------------------------------------------------------------------
@@ -618,9 +758,10 @@ public static class TokenEndpoints
         string audience = request.Audience!;
 
         // ------------------------------------------------------------------------------------------
-        // 2. THE TRANSPORT'S IDENTITY, WHICH IS THE ONLY IDENTITY THIS OPERATION HONOURS.
+        // 2. THE PRESENTED CREDENTIAL'S IDENTITY, WHICH IS THE ONLY IDENTITY THIS OPERATION HONOURS.
         //
-        //    The route's authorization policy already refuses a connection with no certificate on it
+        //    TWO SCHEMES, AND THE ORDER BETWEEN THEM IS DELIBERATE - see ResolvePresentedIdentity. The
+        //    route's authorization policy already refuses a request carrying neither credential
         //    wherever it can see the connection, so in the ordinary case this arm is a second gate
         //    rather than the first. It is unconditional all the same, and that is the point: the
         //    security property of this operation does not depend on the policy's ability to reach the
@@ -631,8 +772,24 @@ public static class TokenEndpoints
         //    reconciliation below, because there is nothing to reconcile against - and it is refused
         //    with the SAME status and the SAME sentence as an absent certificate, so the response
         //    cannot be used to probe which of the two conditions was hit.
+        //
+        //    TRUST IS ESTABLISHED BEFORE THE IDENTITY IS EVEN READ, which is the ordering the published
+        //    401 depends on: that response's declared meaning is "no certificate was presented, OR the
+        //    certificate presented is not trusted", and the second half is only a behaviour if the
+        //    trust decision precedes the identity. Reading a common name first and validating
+        //    afterwards would mean honouring a name from a certificate whose issuer was never
+        //    established - and since the name IS the caller identity, that is the whole authentication
+        //    of this operation. All THREE non-trusted outcomes answer the same sentence for the same
+        //    reason the two conditions above do: the response is not a probe.
         // ------------------------------------------------------------------------------------------
-        string? callerIdentity = ResolveCallerIdentity(httpContext.Connection.ClientCertificate);
+        X509Certificate2? presented = httpContext.Connection.ClientCertificate;
+
+        if (trust.Evaluate(presented) != ClientCertificateTrustState.Trusted)
+        {
+            return Unauthenticated(loggerFactory);
+        }
+
+        string? callerIdentity = ResolveCallerIdentity(presented);
 
         if (callerIdentity is null)
         {
@@ -640,7 +797,7 @@ public static class TokenEndpoints
         }
 
         // ------------------------------------------------------------------------------------------
-        // 3. THE CLAIM RECONCILED AGAINST THE TRANSPORT. Ordinal, because an identity is compared
+        // 3. THE CLAIM RECONCILED AGAINST THE CREDENTIAL. Ordinal, because an identity is compared
         //    exactly everywhere else in this service - the issuer compares the audience ordinally
         //    against its roster and trims nothing, and the signing layer compares its configured key
         //    identifier the same way. Folding case here would honour a subject the certificate does
@@ -648,6 +805,10 @@ public static class TokenEndpoints
         //
         //    docs/ARCHITECTURE.md section 9.3.1 assigns this mapping to this file, and the refusal
         //    names neither the expected identity nor any part of the stored configuration.
+        //
+        //    THIS IS WHAT MAKES THE SUBJECT CLAIM UNFORGEABLE. The roster's subject IS the credential
+        //    identity, so a caller can only ever obtain a token whose subject is its own - there is no
+        //    arrangement of a well-formed request in which one registered caller mints for another.
         // ------------------------------------------------------------------------------------------
         if (!string.Equals(subject, callerIdentity, StringComparison.Ordinal))
         {
@@ -668,15 +829,22 @@ public static class TokenEndpoints
         // ------------------------------------------------------------------------------------------
         // 5. THE OUTCOME, SWITCHED EXPLICITLY AND NEVER TESTED FOR TRUTHINESS.
         //
-        //    The published outcome set is closed and has two cases, and both are named. The null-token
-        //    guard on the success case is not redundant defensiveness: the result type declares the
-        //    token nullable precisely so a consumer that reaches for it without checking is warned,
-        //    and with warnings treated as errors that warning is a build failure. Checking it here is
-        //    how that guarantee is honoured rather than suppressed.
+        //    The published outcome set is closed and every case is named. The null-token guard on the
+        //    success case is not redundant defensiveness: the result type declares the token nullable
+        //    precisely so a consumer that reaches for it without checking is warned, and with warnings
+        //    treated as errors that warning is a build failure. Checking it here is how that guarantee
+        //    is honoured rather than suppressed.
+        //
+        //    THREE REFUSALS, ONE STATUS, TWO SENTENCES. The audience and caller arms answer the SAME
+        //    sentence on purpose, so that a caller cannot tell an audience this deployment does not
+        //    serve from one it serves but this caller may not have - that difference is an audience
+        //    oracle, and it is kept in the issuer's log records instead, where an operator can read it
+        //    and a caller cannot. The scope arm answers its own sentence, because a caller reaching it
+        //    IS authorized for the audience and needs to know which part of its request failed.
         //
         //    An outcome this build does not recognise is answered as a fault of this service. It is
         //    fail-closed - nothing is returned that could be mistaken for a credential - and it is
-        //    mapped explicitly rather than left to fall through, so that a future third case is a
+        //    mapped explicitly rather than left to fall through, so that a future added case is a
         //    visible 500 rather than a silent success.
         // ------------------------------------------------------------------------------------------
         switch (result.Outcome)
@@ -688,6 +856,12 @@ public static class TokenEndpoints
 
             case TokenIssuanceOutcome.AudienceNotPermitted:
                 return AudienceRefused(loggerFactory);
+
+            case TokenIssuanceOutcome.CallerNotPermitted:
+                return CallerRefused(loggerFactory);
+
+            case TokenIssuanceOutcome.ScopesNotPermitted:
+                return ScopesRefused(loggerFactory);
 
             default:
                 return Faulted(loggerFactory);
@@ -788,6 +962,188 @@ public static class TokenEndpoints
     }
 
     /// <summary>
+    /// Reports the caller identity the request's presented credential establishes, under either of the
+    /// two schemes this operation accepts.
+    /// </summary>
+    /// <param name="httpContext">
+    /// The current request. TWO features of it are read and no others: the <c>Authorization</c> header,
+    /// and the client certificate the transport accepted.
+    /// </param>
+    /// <param name="clients">The issuance roster a presented shared secret is authenticated against.</param>
+    /// <returns>
+    /// The authenticated caller identity, or <see langword="null"/> when the request presents no usable
+    /// credential under either scheme.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE SHARED-SECRET SCHEME IS TRIED FIRST, AND THE ORDER IS LOAD BEARING RATHER THAN ARBITRARY. A
+    /// caller that took the trouble to send an <c>Authorization</c> header is asserting an identity
+    /// explicitly, so that assertion is the one answered - if it fails, the request is refused rather
+    /// than quietly re-authenticated as whatever identity a certificate on the connection happens to
+    /// establish. Trying the certificate first would mean a caller presenting a WRONG secret could still
+    /// be authenticated, and a deployment could not tell from the outside which credential had actually
+    /// been honoured.
+    /// </para>
+    /// <para>
+    /// THE CERTIFICATE PATH IS RETAINED, NOT VESTIGIAL. The attached environment fixes every listener in
+    /// this system to plain HTTP, so on the topology this repository actually runs no client certificate
+    /// can be presented at all and the secret scheme is the only reachable one. A deployment that
+    /// terminates TLS and issues client certificates - the shape the local certificate recipe in
+    /// docs/ARCHITECTURE.md section 9.3.1 describes - reaches the other path, and a roster entry that
+    /// names no secret configuration key is exactly such a caller. Removing the path would delete a
+    /// working credential scheme the published contract declares.
+    /// </para>
+    /// <para>
+    /// A CERTIFICATE IDENTITY IS NOT MATCHED AGAINST THE ROSTER HERE, deliberately, and the asymmetry is
+    /// worth stating because it looks like an omission. A shared secret has to be checked against the
+    /// roster because the roster is the only thing that knows it; a certificate has ALREADY been
+    /// validated by the transport against the configured trust anchor, which is a stronger check than
+    /// this file could perform, and the roster lookup that decides what the identity may ASK FOR still
+    /// happens - in the issuer, on every request, for both schemes. An unregistered certificate identity
+    /// is therefore refused by the issuer with its own outcome rather than being silently accepted.
+    /// </para>
+    /// <para>
+    /// NOTHING IS TRIMMED, CASE-FOLDED OR REPAIRED about a resolved identity, under either scheme. It is
+    /// compared ordinally against the claimed subject immediately afterwards, and it becomes the token's
+    /// subject claim if the two agree.
+    /// </para>
+    /// </remarks>
+    internal static string? ResolvePresentedIdentity(
+        HttpContext httpContext,
+        IssuanceClientRegistry clients)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentNullException.ThrowIfNull(clients);
+
+        if (TryReadBasicCredential(httpContext, out string? clientId, out string? secret))
+        {
+            // An asserted identity is answered on its own terms: a failure here is a refusal, never a
+            // fall-through to the certificate path.
+            return clients.Authenticate(clientId, secret)?.Subject;
+        }
+
+        return ResolveCallerIdentity(httpContext.Connection.ClientCertificate);
+    }
+
+    /// <summary>
+    /// Reads an HTTP Basic credential out of the request's <c>Authorization</c> header.
+    /// </summary>
+    /// <param name="httpContext">The current request.</param>
+    /// <param name="clientId">The presented user-id when one was read; otherwise <see langword="null"/>.</param>
+    /// <param name="secret">The presented password when one was read; otherwise <see langword="null"/>.</param>
+    /// <returns>
+    /// <see langword="true"/> when a syntactically valid Basic credential was read. A header that names
+    /// the Basic scheme but is malformed answers <see langword="true"/> with an EMPTY identity, so that
+    /// the caller refuses it rather than falling through to the other scheme - see the remarks.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="httpContext"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// A MALFORMED BASIC HEADER RETURNS TRUE, AND THAT IS THE ONE COUNTER-INTUITIVE LINE HERE. Returning
+    /// false would send a caller that presented a broken credential down the certificate path, where it
+    /// might be authenticated as a different identity than the one it asserted - so a garbled header
+    /// would become a silent identity substitution. Returning true with an empty identity makes the
+    /// roster lookup fail and the request be refused, which is the only correct outcome. The refusal is
+    /// the same status and the same sentence as every other authentication failure, so nothing is
+    /// disclosed by the distinction.
+    /// </para>
+    /// <para>
+    /// A HEADER NAMING A DIFFERENT SCHEME - a bearer token, say - RETURNS FALSE, because such a caller
+    /// has asserted nothing under this scheme. The certificate path is then tried, and if it too yields
+    /// nothing the request is refused. That matters because the document-level bearer requirement means
+    /// a caller may well have a token in hand; presenting it here must neither authenticate it nor
+    /// prevent it from presenting the credential this operation does accept.
+    /// </para>
+    /// <para>
+    /// THE PARSING IS RFC 7617's, DONE BY THE PLATFORM WHERE THE PLATFORM HAS IT. The header value is
+    /// split by the framework's own header parser rather than by hand, the base64 payload is decoded by
+    /// the platform decoder, and the user-id is taken as everything BEFORE THE FIRST COLON - the
+    /// specification is explicit that a colon may not appear in the user-id and that everything after
+    /// the first one is the password, so splitting on the last colon or on all of them would corrupt any
+    /// secret containing one. A payload with no colon at all is malformed.
+    /// </para>
+    /// <para>
+    /// THE PAYLOAD IS DECODED AS UTF-8. RFC 7617 leaves the charset to the server absent a parameter and
+    /// UTF-8 is the modern reading; the roster encodes its configured secrets the same way, so the two
+    /// sides agree byte for byte. A payload that is not valid base64 is malformed, and an
+    /// invalid-UTF-8 sequence is refused rather than replaced with a substitution character - a
+    /// substitution would let two distinct byte sequences compare equal.
+    /// </para>
+    /// </remarks>
+    internal static bool TryReadBasicCredential(
+        HttpContext httpContext,
+        [NotNullWhen(true)] out string? clientId,
+        [NotNullWhen(true)] out string? secret)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+
+        clientId = null;
+        secret = null;
+
+        string? header = httpContext.Request.Headers.Authorization.ToString();
+
+        if (string.IsNullOrWhiteSpace(header)
+            || !AuthenticationHeaderValue.TryParse(header, out AuthenticationHeaderValue? parsed)
+            || !string.Equals(parsed.Scheme, BasicSchemeToken, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // From here on the caller HAS asserted an identity under this scheme, so every exit reports
+        // true and lets the roster lookup refuse it. See the remarks for why falling through would be
+        // an identity substitution.
+        clientId = string.Empty;
+        secret = string.Empty;
+
+        if (string.IsNullOrEmpty(parsed.Parameter))
+        {
+            return true;
+        }
+
+        byte[] payload;
+
+        try
+        {
+            payload = Convert.FromBase64String(parsed.Parameter);
+        }
+        catch (FormatException)
+        {
+            return true;
+        }
+
+        string decoded;
+
+        try
+        {
+            // Throwing UTF-8, so an invalid sequence is refused rather than silently substituted.
+            decoded = new UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true).GetString(payload);
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+        finally
+        {
+            Array.Clear(payload);
+        }
+
+        int separator = decoded.IndexOf(':', StringComparison.Ordinal);
+
+        if (separator < 0)
+        {
+            return true;
+        }
+
+        clientId = decoded[..separator];
+        secret = decoded[(separator + 1)..];
+
+        return true;
+    }
+
+    /// <summary>
     /// Reports the caller identity a presented client certificate establishes.
     /// </summary>
     /// <param name="certificate">
@@ -819,10 +1175,18 @@ public static class TokenEndpoints
     /// </para>
     /// <para>
     /// NO PART OF THE CERTIFICATE IS RETAINED, LOGGED OR RETURNED beyond that one name. The thumbprint,
-    /// the issuer, the serial number, the validity window and the public key are never read here:
-    /// chain verification, validity and revocation are the transport's job, performed against the trust
-    /// anchor mounted into this service, and duplicating any of it here would put a second, weaker
-    /// implementation of a security check beside the framework's.
+    /// the issuer, the serial number, the validity window and the public key are never read here,
+    /// because this method answers ONE question - what identity does this certificate carry - and
+    /// nothing else.
+    /// </para>
+    /// <para>
+    /// IT DOES NOT ESTABLISH TRUST, AND MUST NOT BE CALLED BEFORE SOMETHING ELSE HAS. Chain
+    /// verification against the configured anchor, the validity window, revocation and key usage all
+    /// belong to <see cref="ClientCertificateTrust"/>, which the operation consults BEFORE this method
+    /// - because the name this method reads IS the caller identity, so reading it from a certificate
+    /// whose issuer was never established would be authentication by assertion. The two are separate
+    /// types precisely so that neither can be mistaken for the other: this one is a projection, that
+    /// one is a decision.
     /// </para>
     /// </remarks>
     internal static string? ResolveCallerIdentity(X509Certificate2? certificate)
@@ -838,13 +1202,13 @@ public static class TokenEndpoints
     }
 
     /// <summary>
-    /// Reports whether the connection this authorization decision is being made for carries a client
-    /// certificate.
+    /// Reports whether the request this authorization decision is being made for presents a credential
+    /// under either scheme this operation accepts.
     /// </summary>
     /// <param name="context">The authorization context the middleware built for the request.</param>
     /// <returns>
-    /// <see langword="true"/> when a certificate is present, or when this decision cannot see the
-    /// connection at all; otherwise <see langword="false"/>.
+    /// <see langword="true"/> when a Basic credential or a client certificate is present, or when this
+    /// decision cannot see the request at all; otherwise <see langword="false"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="context"/> is <see langword="null"/>.
@@ -867,19 +1231,34 @@ public static class TokenEndpoints
     /// therefore loses no security and costs no correctness - the check that matters still runs.
     /// </para>
     /// <para>
-    /// PRESENCE ONLY, DELIBERATELY. Whether the certificate establishes a usable identity, and whether
-    /// that identity matches the claimed subject, are CONTRACT decisions with their own declared
-    /// statuses and their own response bodies, so they belong to the operation rather than to a policy
-    /// that can only answer yes or no. Chain verification, validity and revocation belong to the
-    /// transport and are not repeated in either place.
+    /// PRESENCE ONLY, DELIBERATELY. Whether the certificate is TRUSTED, whether it establishes a usable
+    /// identity, and whether that identity matches the claimed subject are CONTRACT decisions with their
+    /// own declared statuses and their own response bodies, so they belong to the operation rather than
+    /// to a policy that can only answer yes or no. The trust decision in particular is
+    /// <see cref="ClientCertificateTrust"/>'s, is made before the identity is read, and is deliberately
+    /// NOT duplicated here: a policy that answered no for an untrusted certificate would produce a
+    /// bodiless challenge where the contract declares a problem document.
+    /// </para>
+    /// <para>
+    /// BOTH SCHEMES ARE ACCEPTED HERE BECAUSE THE OPERATION ACCEPTS BOTH, and getting this wrong is a
+    /// FUNCTIONAL outage rather than a weakening. This service's own listener requests a client
+    /// certificate, but a deployment that terminates TLS ahead of it - a reverse proxy, or a mesh
+    /// sidecar - presents none to the application. A predicate that DEMANDED a certificate would refuse
+    /// every caller under such a topology: the sole issuer would answer nothing at all, no service in
+    /// the system could obtain a credential, and the readiness probe would report healthy throughout.
     /// </para>
     /// </remarks>
-    internal static bool HasTransportCredential(AuthorizationHandlerContext context)
+    internal static bool HasIssuanceCredential(AuthorizationHandlerContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        return context.Resource is not HttpContext httpContext
-            || httpContext.Connection.ClientCertificate is not null;
+        if (context.Resource is not HttpContext httpContext)
+        {
+            return true;
+        }
+
+        return httpContext.Connection.ClientCertificate is not null
+            || TryReadBasicCredential(httpContext, out _, out _);
     }
 
     /// <summary>
@@ -939,8 +1318,9 @@ public static class TokenEndpoints
     /// <para>
     /// ONE REQUIREMENT, AND IT IS NOT AN AUTHENTICATED PRINCIPAL. Requiring one would demand a bearer
     /// token on the one operation whose whole purpose is to issue the caller's first token. The
-    /// requirement is instead the transport credential the published document declares for this
-    /// operation, which is the only credential a caller can have before it holds a token.
+    /// requirement is instead the presence of one of the two credentials the published document declares
+    /// for this operation - a shared secret presented as an HTTP Basic credential, or a client
+    /// certificate - which are the only credentials a caller can have before it holds a token.
     /// </para>
     /// <para>
     /// WHAT THE MIDDLEWARE DOES WITH A FAILURE, STATED SO IT IS NOT DISCOVERED AT A FAILING PROBE. A
@@ -958,7 +1338,7 @@ public static class TokenEndpoints
     {
         ArgumentNullException.ThrowIfNull(policy);
 
-        policy.RequireAssertion(HasTransportCredential);
+        policy.RequireAssertion(HasIssuanceCredential);
     }
 
     /// <summary>
@@ -1130,6 +1510,62 @@ public static class TokenEndpoints
             loggerFactory: loggerFactory);
 
     /// <summary>
+    /// Refuses an authenticated caller that is not authorized for the audience it asked for.
+    /// </summary>
+    /// <param name="loggerFactory">The logger factory the refusal is recorded through.</param>
+    /// <returns>A forbidden response carrying the access-denied return code.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE SAME STATUS AND THE SAME SENTENCE AS <see cref="AudienceRefused"/>, DELIBERATELY - see
+    /// <see cref="CallerNotPermittedDetail"/> for why the two responses are indistinguishable and where
+    /// the distinction is kept instead. This method exists as a separate one so that the mapping from
+    /// each outcome to its response is written once per outcome and a reader of the switch can see that
+    /// every case is named.
+    /// </para>
+    /// <para>
+    /// THE PUBLISHED DOCUMENT DECIDES THE STATUS, and its forbidden response covers an authenticated
+    /// caller that is not permitted the requested subject or audience - which is exactly this. The
+    /// decision costs no signature: the issuer consults its frozen matrix before it reads any signing
+    /// material at all.
+    /// </para>
+    /// </remarks>
+    private static ProblemHttpResult CallerRefused(ILoggerFactory loggerFactory) =>
+        ProblemResults.Create(
+            retCode: RetCode.E_ACCESS_DENIED,
+            detail: CallerNotPermittedDetail,
+            severity: ProblemSeverity.StopSign,
+            loggerFactory: loggerFactory);
+
+    /// <summary>
+    /// Refuses a request none of whose requested scopes this caller may carry to that audience.
+    /// </summary>
+    /// <param name="loggerFactory">The logger factory the refusal is recorded through.</param>
+    /// <returns>A forbidden response carrying the access-denied return code.</returns>
+    /// <remarks>
+    /// <para>
+    /// FORBIDDEN RATHER THAN BAD REQUEST, on the same reading that decides the audience arm: a scope set
+    /// that is well formed violates no published schema - the schema does not enumerate scopes - so its
+    /// refusal is a permission decision rather than a malformed request. And forbidden rather than a
+    /// narrowed success, because the published response's granted-scope member is REQUIRED: a 200 whose
+    /// granted set was empty would either omit a required member or report an empty one, and neither is a
+    /// response the document describes.
+    /// </para>
+    /// <para>
+    /// THIS ARM IS REACHED ONLY WHEN NOTHING WAS PERMITTED. A partly permitted request is issued with the
+    /// intersection, because the document states that the granted set may be narrower than the requested
+    /// one and that a caller must read it rather than assume its request was honoured in full - so
+    /// narrowing is the contract's own success path and refusing it here would contradict the document
+    /// this service publishes.
+    /// </para>
+    /// </remarks>
+    private static ProblemHttpResult ScopesRefused(ILoggerFactory loggerFactory) =>
+        ProblemResults.Create(
+            retCode: RetCode.E_ACCESS_DENIED,
+            detail: ScopesNotPermittedDetail,
+            severity: ProblemSeverity.StopSign,
+            loggerFactory: loggerFactory);
+
+    /// <summary>
     /// Reports an issuance outcome this build does not recognise.
     /// </summary>
     /// <param name="loggerFactory">The logger factory the fault is recorded through.</param>
@@ -1231,9 +1667,10 @@ public static class TokenEndpoints
     /// </para>
     /// <para>
     /// THE REQUIREMENT IS REPLACED RATHER THAN APPENDED, AND THAT IS THE WHOLE POINT OF THIS METHOD.
-    /// The authored contract applies the mutual-TLS scheme to this operation as an OVERRIDE of the
-    /// document-level bearer requirement; a document that listed BOTH would tell a consumer it may
-    /// present a token instead of a certificate, which is the one thing this operation cannot accept.
+    /// The authored contract applies the two credential schemes to this operation as an OVERRIDE of the
+    /// document-level bearer requirement; a document that also listed the bearer scheme would tell a
+    /// consumer it may present a token instead of a credential, which is the one thing this operation
+    /// cannot accept.
     /// The two sibling anonymous routes clear their requirement for the mirror-image reason, and the
     /// bearer-authenticated routes add theirs only when the operation carries none.
     /// </para>
@@ -1249,7 +1686,7 @@ public static class TokenEndpoints
     /// needs in order to present the certificate its own deployment gave it.
     /// </para>
     /// </remarks>
-    private static Task DeclareMutualTlsRequirementAsync(
+    private static Task DeclareIssuanceCredentialRequirementAsync(
         OpenApiOperation operation,
         OpenApiOperationTransformerContext context,
         CancellationToken cancellationToken)
@@ -1260,6 +1697,19 @@ public static class TokenEndpoints
         cancellationToken.ThrowIfCancellationRequested();
 
         OpenApiDocument? document = context.Document;
+
+        if (document is not null &&
+            document.Components?.SecuritySchemes?.ContainsKey(ClientCredentialSchemeName) != true)
+        {
+            IOpenApiSecurityScheme clientCredentialScheme = new OpenApiSecurityScheme
+            {
+                Type = SecuritySchemeType.Http,
+                Scheme = BasicSchemeToken.ToLowerInvariant(),
+                Description = ClientCredentialSchemeDescription,
+            };
+
+            document.AddComponent(ClientCredentialSchemeName, clientCredentialScheme);
+        }
 
         if (document is not null &&
             document.Components?.SecuritySchemes?.ContainsKey(MutualTlsSchemeName) != true)
@@ -1273,8 +1723,18 @@ public static class TokenEndpoints
             document.AddComponent(MutualTlsSchemeName, mutualTlsScheme);
         }
 
+        // TWO SINGLE-SCHEME REQUIREMENTS, NOT ONE REQUIREMENT NAMING TWO SCHEMES, and the difference is
+        // the whole meaning. A list of requirements is a DISJUNCTION - any one satisfies the operation -
+        // whereas two schemes inside one requirement is a CONJUNCTION demanding both at once, which
+        // would publish an operation no caller in this system can reach. The handler accepts either
+        // credential, so the document says either.
         operation.Security = new List<OpenApiSecurityRequirement>
         {
+            new()
+            {
+                [new OpenApiSecuritySchemeReference(ClientCredentialSchemeName, document)] =
+                    new List<string>(),
+            },
             new()
             {
                 [new OpenApiSecuritySchemeReference(MutualTlsSchemeName, document)] =
@@ -1339,6 +1799,7 @@ public sealed record TokenIssuanceRequestBody
     /// refused rather than honoured. It becomes the token's subject claim VERBATIM: nothing is trimmed,
     /// case-folded or otherwise repaired on the way through.
     /// </remarks>
+    [Required]
     [JsonPropertyName("subject")]
     public string? Subject { get; init; }
 
@@ -1352,6 +1813,7 @@ public sealed record TokenIssuanceRequestBody
     /// valid somewhere its holder did not intend it to be. It is compared against the configured roster
     /// exactly as given, and an audience that is not on it is refused rather than substituted.
     /// </remarks>
+    [Required]
     [JsonPropertyName("audience")]
     public string? Audience { get; init; }
 
@@ -1372,6 +1834,7 @@ public sealed record TokenIssuanceRequestBody
     /// caller reads back is recognisably its own request.
     /// </para>
     /// </remarks>
+    [Required]
     [JsonPropertyName("scopes")]
     public IReadOnlyList<string>? Scopes { get; init; }
 }

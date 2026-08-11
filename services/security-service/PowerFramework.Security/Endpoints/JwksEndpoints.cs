@@ -582,10 +582,6 @@ public static class JwksEndpoints
     /// <summary>
     /// Serves the discovery metadata a stock bearer handler self-configures from.
     /// </summary>
-    /// <param name="request">
-    /// The incoming request, read for its scheme, host and path base ONLY, so that both published
-    /// addresses are absolute and reachable by whoever asked.
-    /// </param>
     /// <param name="signingKeys">
     /// The signing-key layer. Its public-only projection supplies the advertised algorithm, which is
     /// how the advertised value and the published key can never disagree.
@@ -601,22 +597,26 @@ public static class JwksEndpoints
     /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
-    /// THE ADDRESSES ARE COMPOSED FROM THE INCOMING REQUEST, NEVER FROM A FIXED HOST AND NEVER BY
-    /// FETCHING ANYTHING. The scheme, host and path base of the request that arrived are joined to the
-    /// configured path with the framework's own absolute-address helper, which is what keeps the
-    /// document reachable through whatever address a consumer actually reached this service on -
-    /// container name, proxy name, or a test host - without this file knowing any of them. Nothing
-    /// outbound is called in order to build the document (constraint C-A), and no host appears in code
-    /// (constraint C-F).
+    /// EVERY MEMBER IS COMPOSED FROM CONFIGURATION, NEVER FROM THE REQUEST, AND NEVER BY FETCHING
+    /// ANYTHING. Both published addresses are the configured canonical issuer joined to a configured
+    /// path. Nothing outbound is called in order to build the document (constraint C-A), and no host
+    /// appears in code (constraint C-F).
     /// </para>
     /// <para>
-    /// THE ISSUER IS PUBLISHED FROM CONFIGURATION WHILE THE ADDRESSES ARE PUBLISHED FROM THE REQUEST,
-    /// and the asymmetry is deliberate. The issuer identifier is an IDENTITY: a consumer validates the
-    /// issuer claim of every inbound token against it byte for byte, so it must be the same value this
-    /// service stamps into a token no matter which address the document was fetched through. The other
-    /// two members are LOCATIONS, and a location that does not resolve for the caller that read it is
-    /// useless. Publishing the issuer as a location, or a location as the issuer, would break one of
-    /// the two.
+    /// THE EARLIER ASYMMETRY - IDENTITY FROM CONFIGURATION, LOCATIONS FROM THE REQUEST - WAS THE DEFECT,
+    /// AND IT IS WORTH STATING WHY IT LOOKED REASONABLE. Reflecting the request's scheme, host and path
+    /// base kept the document reachable through whatever address a consumer happened to arrive on -
+    /// container name, proxy name or test host - with no host named in code. But all three of those are
+    /// caller-controlled, so a request carrying a chosen Host header was answered with a document
+    /// directing every consumer to fetch this issuer's verification keys from that host, and a stock
+    /// bearer handler follows <c>jwks_uri</c> without question. A location and an identity that can
+    /// disagree is precisely the hazard: they are now the same configured value, so they cannot.
+    /// </para>
+    /// <para>
+    /// The consequence a deployment must know is that the issuer has to be the address consumers can
+    /// actually reach - including any proxy prefix. That is not a new burden: a consumer validates the
+    /// issuer claim of every token against the same value byte for byte, so a wrong issuer already fails
+    /// every validation. The change removes a way for a document to be reachable and forged at once.
     /// </para>
     /// <para>
     /// THE ADVERTISED ALGORITHM SET IS DERIVED FROM THE PUBLISHED KEYS THEMSELVES rather than from
@@ -641,12 +641,10 @@ public static class JwksEndpoints
     /// </para>
     /// </remarks>
     internal static IResult PublishProviderMetadata(
-        HttpRequest request,
         SigningKeyProvider signingKeys,
         IOptions<SecurityOptions> options,
         ILoggerFactory loggerFactory)
     {
-        ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(signingKeys);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loggerFactory);
@@ -669,8 +667,8 @@ public static class JwksEndpoints
         ProviderMetadataDocument metadata = new()
         {
             Issuer = security.Issuer,
-            JsonWebKeySetUri = BuildAbsoluteAddress(request, security.JwksPath),
-            TokenEndpoint = BuildAbsoluteAddress(request, security.TokenEndpointPath),
+            JsonWebKeySetUri = BuildAbsoluteAddress(security.Issuer, security.JwksPath),
+            TokenEndpoint = BuildAbsoluteAddress(security.Issuer, security.TokenEndpointPath),
             SigningAlgorithms =
             [
                 .. published.Keys
@@ -962,31 +960,49 @@ public static class JwksEndpoints
             loggerFactory: loggerFactory);
 
     /// <summary>
-    /// Joins a configured path to the address the request arrived on.
+    /// Joins a configured path to the configured canonical issuer.
     /// </summary>
-    /// <param name="request">The incoming request, read for scheme, host and path base only.</param>
+    /// <param name="issuer">
+    /// The validated canonical issuer. The caller has already established that it is present and
+    /// absolute.
+    /// </param>
     /// <param name="path">A rooted configured path.</param>
     /// <returns>The absolute address a consumer should fetch.</returns>
     /// <remarks>
     /// <para>
-    /// THE FRAMEWORK'S OWN HELPER IS USED RATHER THAN STRING CONCATENATION, because the details it
-    /// already handles are exactly the ones a hand-rolled version gets wrong: omitting a default port
-    /// for the scheme, keeping a non-default one, encoding an international host, and preserving a path
-    /// base when the service is hosted under one. A published address that is wrong in any of those ways
-    /// is an address a consumer cannot fetch.
+    /// COMPOSED FROM CONFIGURATION, NEVER FROM THE REQUEST, AND THAT IS AN INTEGRITY PROPERTY RATHER
+    /// THAN A STYLE CHOICE. This operation previously joined each path to the incoming request's scheme,
+    /// host and path base. Those three are all CALLER-CONTROLLED - a Host header, an
+    /// <c>X-Forwarded-*</c> header honoured by a proxy - so a request carrying a host of the caller's
+    /// choosing was answered with a discovery document telling every consumer to fetch this issuer's
+    /// verification keys from that host. A consumer's stock bearer handler follows <c>jwks_uri</c>
+    /// without question, which is the entire reason this document exists, so the document is exactly the
+    /// wrong place to reflect caller input back.
     /// </para>
     /// <para>
-    /// The path base is included so that a deployment behind a path-prefixing proxy publishes an address
-    /// that resolves through the same prefix the request arrived on.
+    /// THE ISSUER IS THE RIGHT SOURCE BECAUSE IT IS ALREADY THE ANCHOR OF THIS CONTRACT. It is the
+    /// <c>iss</c> claim of every minted token, the <c>issuer</c> member of this very document, and the
+    /// value all three consuming services validate every token against - so an address composed from it
+    /// cannot disagree with the identity the document is publishing. The options type states this
+    /// outright ("Absolute metadata addresses are composed from Issuer") and explains why no second base
+    /// address setting exists; the code had simply not been doing it.
     /// </para>
     /// <para>
-    /// The caller has already established that the path is rooted, which is what the address type
-    /// requires; the check lives in the consistency method so a violation becomes the contract's error
-    /// shape rather than an argument fault.
+    /// A PATH-PREFIXING PROXY IS THEREFORE A DEPLOYMENT CONFIGURATION MATTER, WHICH IS THE HONEST PLACE
+    /// FOR IT. Reflecting the request's path base made a prefixed deployment work without configuration
+    /// and made every deployment forgeable. An issuer that includes the prefix produces the same
+    /// published address with none of the exposure, and the issuer has to be correct for a consumer's
+    /// validation to pass regardless.
+    /// </para>
+    /// <para>
+    /// One trailing separator on the issuer is dropped before joining. Both spellings of an authority are
+    /// legitimate in configuration, and the joined address must not carry a doubled separator - the
+    /// issuer itself is never rewritten, because it is published verbatim and has to match the token
+    /// claim byte for byte.
     /// </para>
     /// </remarks>
-    private static string BuildAbsoluteAddress(HttpRequest request, string path) =>
-        UriHelper.BuildAbsolute(request.Scheme, request.Host, request.PathBase, new PathString(path));
+    private static string BuildAbsoluteAddress(string issuer, string path) =>
+        string.Concat(issuer.TrimEnd('/'), path);
 
     /// <summary>
     /// Requires a configured metadata path to be rooted and inside the well-known namespace.

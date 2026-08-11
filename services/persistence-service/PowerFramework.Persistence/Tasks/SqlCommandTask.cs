@@ -33,7 +33,8 @@
 //      * statement execution, positional `?` binding at the provider, multi-statement batch
 //        execution and error-text retrieval - all of these are the pooled transaction's `Exec` and
 //        `SQLErrText` [n_cst_thread_trans.sru:L219-L240], ported in Transactions/TransactionPool.cs
-//      * the leading-`@` mode - see "THE LEADING `@` IS NOT SQL" below
+//  DOES NOT CARRY AT ALL:
+//      * the leading-`@` prefix - see "THE LEADING `@` IS NOT SQL" below
 //      * the dialect resolver `of_GetDBType` [n_cst_thread_trans.sru:L356-L362], also in Transactions/
 //      * parameter storage, the placeholder scan and literal rendering - `SqlTaskBase.BindParams`
 //      * the DbError payload shape and its redaction - Errors/DbErrorData.cs, Errors/SqlRedactor.cs
@@ -83,14 +84,21 @@
 // -------------------------------------------------------------------------------------------------
 //  THE LEADING `@` IS NOT SQL  (constraint C-K)
 // -------------------------------------------------------------------------------------------------
-//  A leading `@` on a statement handed to the transaction NAMES A DATAWINDOW OBJECT and the rest of
-//  the string is that object's name - `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)`
-//  [n_cst_thread_trans.sru:L309]. Two things follow, and both are easy to get wrong:
-//      1. It lives in the QUERY path, not the command path. `of_Exec` [n_cst_thread_trans.sru:L219]
-//         has no such test, so a command statement beginning with `@` is passed to the provider
-//         verbatim and is not treated specially anywhere.
-//      2. Reading it as "a SQL prefix to strip" would synthesize a nonsensical statement. It is a
-//         DATA-OBJECT SELECTOR, and it is documented here rather than implemented here.
+//  The character carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and NEITHER is
+//  on the object this task drives:
+//      1. A DATAWINDOW-OBJECT SELECTOR, in the transaction object's RETRIEVE path - the rest of the
+//         string is that object's NAME rather than SQL:
+//         `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [n_cst_thread_trans.sru:L309].
+//      2. A STATEMENT-CACHING hint, on the SQLite binding's own Exec. The demonstration at
+//         ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398 is written "@INSERT INTO ..." and the
+//         comment above it at :L397 records that the prefix caches the statement to speed up
+//         re-parsing on a later execution. That object is n_sqlite, called DIRECTLY - not through the
+//         transaction object this task uses.
+//  This task drives `of_Exec` [n_cst_thread_trans.sru:L219-L238], whose whole body is
+//  `EXECUTE IMMEDIATE :sqlCmd USING this` with NO prefix test of any kind. So a command statement
+//  beginning with `@` is passed to the provider VERBATIM and fails there, exactly as in the legacy.
+//  Reading it as "a SQL prefix to strip" would synthesize a statement the legacy never runs, and
+//  reading it as a mode selector would promise a behaviour this verb does not have.
 //
 // -------------------------------------------------------------------------------------------------
 //  THE ARITY CEILINGS ARE RECORDED, NOT ENFORCED  (AAP §0.2.1.4 - constraints C-D, C-K)
@@ -232,17 +240,28 @@ internal sealed class SqlCommandTask : SqlTaskBase
     // ---------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// The character that, in the transaction's QUERY path, marks the rest of the string as a
+    /// The character that, in the transaction's RETRIEVE path, marks the rest of the string as a
     /// DataWindow object name rather than as SQL -
     /// <c>if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)</c>
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L309</c>].
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Documented, deliberately not implemented here (constraint C-K).</b> The command path
-    /// <c>of_Exec</c> [<c>n_cst_thread_trans.sru:L219</c>] carries no such test, so a command
-    /// statement beginning with this character is passed to the provider verbatim. The constant
-    /// exists so that a reader surfacing the mode for C-07 can find the correct semantic - a
-    /// DATA-OBJECT SELECTOR - instead of guessing that it is a prefix to strip.
+    /// <c>of_Exec</c> [<c>n_cst_thread_trans.sru:L219-L238</c>] is a plain
+    /// <c>EXECUTE IMMEDIATE :sqlCmd USING this</c> with no prefix test at all, so a command statement
+    /// beginning with this character is passed to the provider VERBATIM and fails there - which is
+    /// exactly what the legacy does with it.
+    /// </para>
+    /// <para>
+    /// <b>The same character means something ELSE on a third object, and conflating the two is the
+    /// mistake this constant exists to prevent.</b> On the SQLite binding's own <c>Exec</c> - n_sqlite,
+    /// called directly rather than through the transaction object - a leading <c>@</c> is a
+    /// STATEMENT-CACHING hint [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L397-L398</c>]. Neither
+    /// meaning reaches C-07, so the contract documents the prefix as carried verbatim rather than as a
+    /// mode, and a reader looking for "the leading-@ execution mode" on this verb will find this note
+    /// instead of a behaviour that is not there.
+    /// </para>
     /// </remarks>
     internal const char DataWindowObjectPrefix = '@';
 
@@ -693,7 +712,7 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// member, which would add a hook the oracle does not have.
     /// </para>
     /// </remarks>
-    internal long OnDoTask()
+    internal long OnDoTask(CancellationToken cancellationToken = default)
     {
         // -----------------------------------------------------------------------------------------
         // STEP 1 - [:L60] `call super::ondotask`. Reproduced as a no-op, with the evidence in the
@@ -799,6 +818,11 @@ internal sealed class SqlCommandTask : SqlTaskBase
             // yields it.
             sql = _sql ?? string.Empty;
 
+            // The statement in BOTH forms. Until the binder runs, the two are the same text with no
+            // parameters - which is exactly right for a parameterless statement: there is nothing to
+            // bind, so there is nothing for the two forms to differ about.
+            SqlBoundStatement bound = SqlBoundStatement.Unbound(sql);
+
             // [:L81] `if of_HasParams() then` - binding is skipped entirely when the collection is
             // empty, so a parameterless statement is never scanned or rewritten.
             if (HasParams())
@@ -808,7 +832,24 @@ internal sealed class SqlCommandTask : SqlTaskBase
                 // connection (constraint C-E), and its two arms are the oracle's only two:
                 // `if Pos(Upper(DBMS),"ORACLE") > 0 then DBT_ORACLE else DBT_MSSQL`
                 // [n_cst_thread_trans.sru:L356-L362], which is why SQLite classifies as DBT_MSSQL.
-                if (Predicates.IsFailed(BindParams(ref sql, (long)transaction.GetDbType())))
+                // THE DUAL-FORM BINDER, AND THE REASON IT IS THE DUAL ONE. The oracle interpolates
+                // rendered literals into the statement because PowerBuilder was configured not to bind -
+                // `DisableBind=1` means the runtime uses no bind variables
+                // [n_cst_thread_task_sqlbase.sru:L128-L129] - and that interpolation is the mechanical
+                // root of the injection exposure. The interpolated text is ALSO observable: it is what a
+                // SQL-preview hook sees and what a database-error payload carries. So both forms are
+                // produced from one pass, the observable one is preserved verbatim for every observer, and
+                // the PARAMETERIZED one is what actually executes (AAP 0.6.4, 0.7.2).
+                long bindCode = BindParams(
+                    sql,
+                    (long)transaction.GetDbType(),
+                    out bound);
+
+                // The observable form is written back so every later observer - the diagnostic below, the
+                // preview hook, the error payload - sees exactly the text the oracle would have produced.
+                sql = bound.ObservableText;
+
+                if (Predicates.IsFailed(bindCode))
                 {
                     // [:L83] the verbatim Chinese diagnostic again. The statement is deliberately NOT
                     // included: a half-bound statement is the most literal-dense form it ever takes,
@@ -848,7 +889,16 @@ internal sealed class SqlCommandTask : SqlTaskBase
             // all live behind this call, in Transactions/ - this task drives them, it does not
             // implement them. The SQLCode = 100 reading is already folded into the answer.
             // -------------------------------------------------------------------------------------
-            rtCode = transaction.Exec(sql);
+            // THE REQUEST'S TOKEN REACHES THE PROVIDER HERE, and this is the only place in this file
+            // where it can do anything: the statement has not been issued yet, so a caller that has
+            // gone gets CANCELLED and nothing is sent. Once it is issued it must run to completion -
+            // see PooledTransaction.ObserveCancellation for why the epilogues below take no token.
+            // THE BOUND STATEMENT, NOT THE INTERPOLATED STRING. `sql` now holds the OBSERVABLE text -
+            // the interpolated form every observer must keep seeing - and handing that to the provider
+            // as statement text is precisely the CWE-89 exposure the dual form exists to close. The
+            // bound overload carries both: the hooks and the error payload get the rendered text, the
+            // provider gets the placeholder text with the values bound (AAP 0.6.4, 0.7.2).
+            rtCode = transaction.Exec(bound, cancellationToken);
 
             // -------------------------------------------------------------------------------------
             // STEPS 8 AND 9 - [:L94-L112] the two epilogues.

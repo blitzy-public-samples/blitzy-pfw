@@ -36,6 +36,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -83,7 +84,13 @@ public sealed class HealthEndpointsTests
     [Fact]
     public async Task Health_answers_200_without_any_authorization_header()
     {
-        await using PersistenceHost host = PersistenceHost.Create();
+        // PROVISIONED, because readiness now requires the schema. Kept end-to-end on the REAL storage
+        // check rather than switched to a stub: what this case is about is that an anonymous request gets
+        // a 200 from the deployed composition, and a stub would move the assertion off that composition.
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        await using PersistenceHost host = PersistenceHost.Create(dataDirectory: directory.Path);
         using HttpClient client = host.CreateClient();
 
         using HttpResponseMessage response = await client.GetAsync(
@@ -100,7 +107,10 @@ public sealed class HealthEndpointsTests
     [Fact]
     public async Task Ping_still_answers_401_while_health_is_anonymous()
     {
-        await using PersistenceHost host = PersistenceHost.Create();
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        await using PersistenceHost host = PersistenceHost.Create(dataDirectory: directory.Path);
         using HttpClient client = host.CreateClient();
 
         using HttpResponseMessage health = await client.GetAsync(
@@ -125,7 +135,10 @@ public sealed class HealthEndpointsTests
     [Fact]
     public async Task Health_answers_200_even_when_an_unverifiable_credential_is_attached()
     {
-        await using PersistenceHost host = PersistenceHost.Create();
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        await using PersistenceHost host = PersistenceHost.Create(dataDirectory: directory.Path);
         using HttpClient client = host.CreateClient();
 
         using HttpRequestMessage request = new(HttpMethod.Get, HealthPath);
@@ -179,10 +192,17 @@ public sealed class HealthEndpointsTests
             .EnumerateArray()
             .Select(check => check.GetProperty("name").GetString() ?? string.Empty)];
 
-        // Exactly the two entries the composed service produces, in this order: the endpoint's own
-        // statement and the storage verdict. No third entry, because no other check is registered - and
-        // the projection folds any that were into ONE aggregated entry rather than naming them.
-        Assert.Equal(["self", "sqlite"], names);
+        // Exactly the three entries the composed service produces, in this order: the endpoint's own
+        // statement, the storage verdict, and whether the runtime seams the four published contracts are
+        // served through are bound. No fourth entry, because no other check is registered - and the
+        // projection folds any that were into ONE aggregated entry rather than naming them.
+        //
+        // THE RUNTIME ENTRY IS NAMED RATHER THAN FOLDED, AND THAT IS THE POINT OF ITS EXISTENCE. A
+        // composition missing one of those seams produces an instance that starts, answers 200 here,
+        // satisfies the Compose dependency condition and then fails every call on the affected contract.
+        // Folding it into the aggregated entry would report the not-ready state without saying which
+        // capability was affected; naming it is what an operator can act on.
+        Assert.Equal(["self", "sqlite", "runtime"], names);
 
         foreach (JsonElement check in root.GetProperty("checks").EnumerateArray())
         {
@@ -337,6 +357,13 @@ public sealed class HealthEndpointsTests
         // again - which is exactly what a readiness gate does.
         Assert.Equal(RetCode.E_RETRY, problem.GetProperty("retCode").GetInt64());
 
+        // AND THE VERDICT IS MACHINE-READABLE, WHICH IS THE HALF THAT ACTUALLY REACHES GATEWAY. The detail
+        // above is prose for a human, and retCode is identical for Degraded and Unhealthy alike, so neither
+        // separates the two verdicts contract C-10 promises to keep apart. The token cannot live in
+        // `status` - RFC 9457 uses that name here for the integer HTTP status, asserted above - so it has a
+        // member of its own, and Gateway's aggregator reads exactly this one.
+        Assert.Equal("Unhealthy", problem.GetProperty("serviceStatus").GetString());
+
         // The process did not terminate, which is the point of the case.
         using HttpResponseMessage second = await client.GetAsync(
             HealthPath,
@@ -404,6 +431,13 @@ public sealed class HealthEndpointsTests
         string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
 
         Assert.Contains("Degraded", body, StringComparison.Ordinal);
+
+        // NAMED RATHER THAN MERELY PRESENT SOMEWHERE IN THE BODY. A substring scan would pass on the
+        // prose alone, and prose is not what Gateway's aggregator reads: Degraded and Unhealthy are both
+        // answered 503, so the ONLY thing that keeps them apart on the wire is this member.
+        using JsonDocument document = JsonDocument.Parse(body);
+
+        Assert.Equal("Degraded", document.RootElement.GetProperty("serviceStatus").GetString());
     }
 
     /// <summary>
@@ -556,9 +590,13 @@ public sealed class HealthEndpointsTests
     /// exception in the body.
     /// </remarks>
     [Fact]
-    public async Task A_faulting_evaluator_answers_503_and_keeps_the_exception_out_of_the_body()
+    public async Task A_faulting_evaluator_answers_503_and_keeps_the_exception_off_both_channels()
     {
-        await using PersistenceHost host = PersistenceHost.Create(faultEvaluator: true);
+        RecordingLoggerProvider recorder = new();
+
+        await using PersistenceHost host = PersistenceHost.Create(
+            faultEvaluator: true,
+            recorder: recorder);
         using HttpClient client = host.CreateClient();
 
         using HttpResponseMessage response = await client.GetAsync(
@@ -572,6 +610,27 @@ public sealed class HealthEndpointsTests
         Assert.Contains("self", body, StringComparison.Ordinal);
         Assert.DoesNotContain("evaluator faulted", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Exception", body, StringComparison.OrdinalIgnoreCase);
+
+        // AND OFF THE OPERATOR CHANNEL TOO (constraint C-F). "It only goes to the operator log" is not a
+        // sufficient answer on an ANONYMOUS route: an unauthenticated caller decides how often the line
+        // runs, so a fault message naming the configured mount path would be published on demand. The
+        // exception object is therefore not passed at all - no message, no stack trace - and what remains
+        // is a fixed sentence plus the exception's type name, which is a constant of this codebase.
+        string record = Assert.Single(
+            recorder.Records,
+            candidate => candidate.Contains("Readiness evaluation failed", StringComparison.Ordinal));
+
+        Assert.DoesNotContain(
+            FaultingHealthCheckService.FaultMessagePathToken,
+            record,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("evaluator faulted", record, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("at PowerFramework", record, StringComparison.Ordinal);
+
+        // ...while the class of fault, the service and the verdict all survive.
+        Assert.Contains(nameof(InvalidOperationException), record, StringComparison.Ordinal);
+        Assert.Contains("persistence", record, StringComparison.Ordinal);
+        Assert.Contains("Unhealthy", record, StringComparison.Ordinal);
 
         // Still serving, which is the fail-fast nuance again: a probe reports, it does not terminate.
         using HttpResponseMessage second = await client.GetAsync(
@@ -631,9 +690,15 @@ public sealed class HealthEndpointsTests
     /// detect. This case is what proves the probe is not decorative.
     /// </remarks>
     [Fact]
-    public async Task The_probe_reports_healthy_against_a_reachable_engine()
+    public async Task The_probe_reports_healthy_against_a_reachable_and_provisioned_engine()
     {
         using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+
+        // THE REAL MIGRATIONS, because readiness now requires the schema as well as the engine. This is
+        // the case that proves the two halves agree: what `dotnet ef database update` produces is exactly
+        // what the probe accepts.
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
         await using SqliteConnectionFactory storage = CreateStorage(directory.Path);
 
         SqliteReachabilityHealthCheck check = new(storage, NullLogger<SqliteReachabilityHealthCheck>.Instance);
@@ -649,16 +714,79 @@ public sealed class HealthEndpointsTests
     }
 
     /// <summary>
+    /// Opening the database records which database was opened and not where this deployment keeps it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE RESOLVED PATH IS THE ONE VALUE IN THAT RECORD THAT IS ABOUT THE DEPLOYMENT RATHER THAN THE
+    /// DATABASE, and it used to be in three records plus the close record. A path is not itself a credential,
+    /// but it publishes where storage - and in a deployment that mounts one, where a secret volume - lives, to
+    /// every reader of a log that needed none of it in order to read the log.
+    /// </para>
+    /// <para>
+    /// WHAT REPLACES IT LOSES NOTHING AN OPERATOR USED. The bare file name answers "which database", and the
+    /// PARITY form of the legacy URI - the form a characterization recording carries - answers "what was the
+    /// engine asked", including the journal mode and the integrity-check state. The deployment form of the
+    /// URI, which does embed the directory, remains available on the factory for a caller that needs it and
+    /// is not written to a log.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Opening_records_the_database_name_and_not_the_resolved_path()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        RecordingLoggerProvider records = new();
+
+        await using SqliteConnectionFactory storage = CreateStorage(
+            directory.Path,
+            logger: (ILogger<SqliteConnectionFactory>)new TypedRecorder<SqliteConnectionFactory>(records));
+
+        long opened = await storage.OpenAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(RetCode.OK, opened);
+
+        string written = string.Join("\n", records.Records);
+
+        Assert.Contains("test.db", written, StringComparison.Ordinal);
+        Assert.Contains(storage.LegacyUri, written, StringComparison.Ordinal);
+        Assert.DoesNotContain(directory.Path, written, StringComparison.Ordinal);
+        Assert.DoesNotContain(storage.DatabasePath, written, StringComparison.Ordinal);
+        Assert.DoesNotContain(storage.LegacyResolvedUri, written, StringComparison.Ordinal);
+
+        // And the same rule holds for the close record, which is the one that is easiest to forget because it
+        // is written at debug.
+        await storage.DisposeAsync();
+
+        Assert.DoesNotContain(
+            directory.Path,
+            string.Join("\n", records.Records),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A data directory that cannot be created is reported as not ready rather than allowed to fault.
     /// </summary>
     /// <remarks>
-    /// The seam fails fast on a structural fault, which is correct where it lives - at startup. Reaching
-    /// that fault from a probe must not take the container with it, so the check converts it into the
-    /// registration's failure status. The directory is made uncreatable by placing an ordinary FILE
-    /// where its parent segment must be, which no filesystem will turn into a directory.
+    /// <para>
+    /// THE TWO HALVES OF THE F-13 SPLIT, ASSERTED SIDE BY SIDE ON ONE INPUT, which is the only way to
+    /// show they diverge deliberately rather than by accident. The same uncreatable location produces two
+    /// quite different behaviours depending on which path asks:
+    /// </para>
+    /// <para>
+    /// READINESS reports not-ready, quietly, creating nothing and naming nothing - because the caller is
+    /// anonymous. That half is asserted by the unusable-location case above.
+    /// </para>
+    /// <para>
+    /// THE RUNTIME OPEN throws, immediately, WITH THE CONFIGURED PATH IN ITS MESSAGE - because the caller
+    /// is the startup sequence, the fault is structural, and an operator cannot fix a mount they are not
+    /// told about. Fail-fast is the ported posture and softening it into a warning-and-continue would be
+    /// a behavioural change dressed as robustness (AAP 0.1.4). This half is what this case pins, and it is
+    /// the assertion that would fail if a future change routed the runtime open through the read-only
+    /// probe to make a test go green.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task An_uncreatable_data_directory_is_reported_as_not_ready()
+    public async Task The_runtime_open_still_fails_fast_where_readiness_merely_reports_not_ready()
     {
         using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
 
@@ -668,20 +796,21 @@ public sealed class HealthEndpointsTests
             "not a directory",
             TestContext.Current.CancellationToken);
 
-        await using SqliteConnectionFactory storage = CreateStorage(Path.Combine(blocker, "data"));
+        string unusable = Path.Combine(blocker, "data");
 
-        SqliteReachabilityHealthCheck check = new(storage, NullLogger<SqliteReachabilityHealthCheck>.Instance);
+        await using SqliteConnectionFactory storage = CreateStorage(unusable);
 
-        HealthCheckResult result = await check.CheckHealthAsync(
-            RegistrationContext(HealthStatus.Unhealthy),
-            TestContext.Current.CancellationToken);
+        InvalidOperationException fault = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await storage.OpenAsync(TestContext.Current.CancellationToken));
 
-        Assert.Equal(HealthStatus.Unhealthy, result.Status);
-        Assert.Equal("The storage reachability probe could not be completed.", result.Description);
+        // The path IS in the startup diagnostic, deliberately: this channel is the crash log, not an
+        // anonymous response, and the whole point of the message is to name the mount to repair.
+        Assert.Contains(unusable, fault.Message, StringComparison.Ordinal);
+        Assert.Contains("persistence-db", fault.Message, StringComparison.Ordinal);
 
-        // The reason is on the operator channel and nowhere else: it can name a path.
-        Assert.Null(result.Exception);
-        Assert.Empty(result.Data);
+        // And it still created nothing on the way to failing.
+        Assert.True(File.Exists(blocker));
+        Assert.False(Directory.Exists(unusable));
     }
 
     /// <summary>
@@ -808,6 +937,12 @@ public sealed class HealthEndpointsTests
         using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
 
         string databasePath = Path.Combine(directory.Path, "test.db");
+
+        // Provisioned by the real migrations FIRST - readiness requires the migration history table, so a
+        // hand-written CREATE TABLE alone would now be a mis-provisioned database - and only then seeded,
+        // so the row count below is a real invariant rather than a constant zero.
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
         long seededRows = await SeedCompanyTableAsync(databasePath);
         long lengthBeforeAnyProbe = new FileInfo(databasePath).Length;
 
@@ -870,6 +1005,8 @@ public sealed class HealthEndpointsTests
     {
         using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
 
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
         FrozenClock clock = new(new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero));
         await using SqliteConnectionFactory storage = CreateStorage(directory.Path, clock);
 
@@ -901,6 +1038,183 @@ public sealed class HealthEndpointsTests
 
         Assert.Equal(clock.GetUtcNow(), storage.LastReachabilityProbedAt);
         Assert.NotEqual(firstMeasurement, storage.LastReachabilityProbedAt);
+    }
+
+    /// <summary>
+    /// A wall-clock correction backward cannot extend the positive cache.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CASE THE MONOTONIC SWITCH EXISTS FOR, and the one the previous implementation got wrong. The
+    /// window used to be computed as the difference of two WALL-CLOCK reads. When the wall clock steps
+    /// backward - an NTP correction, a container resuming on a host whose clock moved, a manual change -
+    /// that difference goes NEGATIVE, a negative age is trivially within any window, and the cached
+    /// positive answer is served from then on. A bounded staleness silently became an unbounded one: this
+    /// service would keep reporting READY, and Gateway's gate would keep standing open, for as long as the
+    /// clock stayed behind - with storage already gone.
+    /// </para>
+    /// <para>
+    /// The double steps the two timelines INDEPENDENTLY here, which is what a real correction does: the
+    /// wall clock jumps back an hour while a couple of minutes of real time pass. Elapsed time therefore
+    /// says the window expired and wall-clock arithmetic says it has not, so the two answers differ and
+    /// the case can only pass if the seam reads the elapsed one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_wall_clock_correction_backward_does_not_extend_the_positive_cache()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        FrozenClock clock = new(new DateTimeOffset(2024, 1, 1, 12, 0, 0, TimeSpan.Zero));
+        await using SqliteConnectionFactory storage = CreateStorage(directory.Path, clock);
+
+        SqliteReachabilityHealthCheck check = new(
+            storage,
+            NullLogger<SqliteReachabilityHealthCheck>.Instance);
+
+        Assert.Equal(
+            HealthStatus.Healthy,
+            (await check.CheckHealthAsync(
+                RegistrationContext(HealthStatus.Unhealthy),
+                TestContext.Current.CancellationToken)).Status);
+
+        DateTimeOffset? firstMeasurement = storage.LastReachabilityProbedAt;
+        Assert.NotNull(firstMeasurement);
+
+        // The wall clock jumps back an hour; two minutes of real time pass while it does. Two minutes is
+        // comfortably past the window, so a fresh measurement is required - and an hour backward is what
+        // would have made the old arithmetic serve the cache indefinitely.
+        clock.CorrectWallClockBackward(TimeSpan.FromHours(1), TimeSpan.FromMinutes(2));
+
+        Assert.Equal(
+            HealthStatus.Healthy,
+            (await check.CheckHealthAsync(
+                RegistrationContext(HealthStatus.Unhealthy),
+                TestContext.Current.CancellationToken)).Status);
+
+        // RE-MEASURED: the stamp moved, and it moved to the corrected wall-clock instant - which is now
+        // EARLIER than the first one, proving the window decision did not come from comparing these two.
+        Assert.NotEqual(firstMeasurement, storage.LastReachabilityProbedAt);
+        Assert.Equal(clock.GetUtcNow(), storage.LastReachabilityProbedAt);
+        Assert.True(
+            storage.LastReachabilityProbedAt < firstMeasurement,
+            "The corrected instant must be earlier, or this case is not exercising a rollback at all.");
+    }
+
+    /// <summary>
+    /// The window serves the cache at exactly its boundary, and re-measures one tick past it.
+    /// </summary>
+    /// <remarks>
+    /// The comparison is <c>age &lt;= window</c>, so an age exactly equal to the window is INSIDE it. That
+    /// boundary is preserved from before the monotonic switch: only the quantity being compared changed,
+    /// not the comparison, and pinning it here is what would catch a change from <c>&lt;=</c> to
+    /// <c>&lt;</c> made incidentally while editing the arithmetic.
+    /// </remarks>
+    [Fact]
+    public async Task The_window_boundary_is_inclusive()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        FrozenClock clock = new(new DateTimeOffset(2024, 6, 1, 0, 0, 0, TimeSpan.Zero));
+        await using SqliteConnectionFactory storage = CreateStorage(directory.Path, clock);
+
+        TimeSpan window = TimeSpan.FromSeconds(5);
+
+        Assert.True(await storage.IsReachableAsync(window, TestContext.Current.CancellationToken));
+
+        DateTimeOffset? measured = storage.LastReachabilityProbedAt;
+
+        // EXACTLY the window: still inside, so the cached answer is served and the stamp does not move.
+        clock.Advance(window);
+
+        Assert.True(await storage.IsReachableAsync(window, TestContext.Current.CancellationToken));
+        Assert.Equal(measured, storage.LastReachabilityProbedAt);
+
+        // One tick past: re-measured.
+        clock.Advance(TimeSpan.FromTicks(1));
+
+        Assert.True(await storage.IsReachableAsync(window, TestContext.Current.CancellationToken));
+        Assert.NotEqual(measured, storage.LastReachabilityProbedAt);
+    }
+
+    /// <summary>
+    /// A failure is never cached, so a recovery is reported at the very next ask.
+    /// </summary>
+    /// <remarks>
+    /// The asymmetry is deliberate and is what bounds the cost of the window to one edge of a transition
+    /// only. This case drives the transition for real: an unprovisioned database, then the migrations, then
+    /// the same seam on a frozen clock - so if a failure WERE cached the second answer would still be
+    /// not-ready and this case would fail.
+    /// </remarks>
+    [Fact]
+    public async Task A_failure_is_not_cached_so_a_recovery_is_reported_immediately()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+
+        FrozenClock clock = new(new DateTimeOffset(2024, 6, 1, 0, 0, 0, TimeSpan.Zero));
+        await using SqliteConnectionFactory storage = CreateStorage(directory.Path, clock);
+
+        TimeSpan window = TimeSpan.FromMinutes(10);
+
+        // No database at all yet.
+        Assert.False(await storage.IsReachableAsync(window, TestContext.Current.CancellationToken));
+        Assert.Equal(StorageReadiness.Unreachable, storage.LastReadiness);
+
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        // THE CLOCK HAS NOT MOVED, and the window is ten minutes - so a cached failure would still be
+        // serving. It is not, because failures are never cached.
+        Assert.True(await storage.IsReachableAsync(window, TestContext.Current.CancellationToken));
+        Assert.Equal(StorageReadiness.Ready, storage.LastReadiness);
+    }
+
+    /// <summary>
+    /// When the runtime connection is already open, the probe BORROWS it and leaves it open.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE OTHER BRANCH OF THE READINESS PROBE, and the one where a mistake would be most damaging.
+    /// Borrowing is deliberate: the ambient connection is the handle requests actually run on, so proving
+    /// IT answers is a truer readiness statement than proving some other handle does, and it spends no
+    /// extra file descriptor per poll on a route an orchestrator polls continuously.
+    /// </para>
+    /// <para>
+    /// WHAT MUST NOT HAPPEN IS THE PROBE DISPOSING WHAT IT BORROWED. The disposal in that member is
+    /// scoped to the handle it opened ITSELF, and if it were not, an anonymous request would close the
+    /// connection every credentialled request depends on - a denial of service driven from an
+    /// unauthenticated surface, which is a worse outcome than the mutation the split was closing. The
+    /// catalogue call at the end is the assertion that actually proves it: that member throws outright if
+    /// the ambient connection is not open, so it cannot pass against a closed one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_probe_borrows_the_runtime_connection_when_one_is_open_and_leaves_it_open()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        await ProvisionSchemaAsync(directory.Path, TestContext.Current.CancellationToken);
+
+        await using SqliteConnectionFactory storage = CreateStorage(directory.Path);
+
+        // The RUNTIME open - credentialled, creative, and the thing readiness must never perform itself.
+        Assert.Equal(RetCode.OK, await storage.OpenAsync(TestContext.Current.CancellationToken));
+        Assert.True(storage.IsOpened);
+
+        for (int poll = 0; poll < 4; poll++)
+        {
+            Assert.True(
+                await storage.IsReachableAsync(TimeSpan.Zero, TestContext.Current.CancellationToken));
+        }
+
+        Assert.Equal(StorageReadiness.Ready, storage.LastReadiness);
+
+        // STILL OPEN after four probes.
+        Assert.True(storage.IsOpened);
+
+        // And genuinely usable, not merely flagged as open: this member throws if the ambient connection
+        // is closed, so it can only answer here if the borrow left it intact.
+        Assert.True(await storage.IsTableExistsAsync("COMPANY", TestContext.Current.CancellationToken));
     }
 
     // ==============================================================================================
@@ -1012,6 +1326,283 @@ public sealed class HealthEndpointsTests
     }
 
     // ==============================================================================================
+    //  ANONYMOUS READINESS DISCLOSES NOTHING  (constraint C-F)
+    // ==============================================================================================
+    //
+    //  THE THREAT IS THE CALLER, NOT THE SENSITIVITY OF ANY ONE VALUE. /health is anonymous on all four
+    //  services because the orchestrator's own probe has no credential, so an unauthenticated caller
+    //  decides how often the readiness path runs and therefore how often whatever it writes is emitted.
+    //  "It only goes to the operator channel" is not an answer for a line an anonymous caller can drive.
+    //
+    //  AND THE MESSAGES THAT ARRIVE HERE ARE PRECISELY THE ONES THAT NAME THINGS. The data-directory
+    //  fault embeds the CONFIGURED MOUNT PATH in its own message - deliberately, so an operator can fix
+    //  the volume - and a provider fault for a failed open names the database file almost every time.
+    //  A passed exception would also carry a stack trace naming internal types.
+    //
+    //  WHAT REPLACES IT IS STILL ACTIONABLE: a fixed sentence, the fault's TYPE NAME - a compile-time
+    //  constant of this codebase, never a configured value - and the numeric codes. The path is still
+    //  logged once on the SUCCESSFUL open, and the fail-fast startup path still surfaces the whole
+    //  exception, where no anonymous caller can reach it.
+
+    /// <summary>
+    /// A readiness probe against an unusable location reports not ready and discloses no path.
+    /// </summary>
+    /// <remarks>
+    /// TWO PROPERTIES AT ONCE, AND THE FIRST ONE IS WHY THE SECOND IS EASY. The readiness path no longer
+    /// attempts to create the data directory at all, so a location whose parent is an ordinary FILE - a
+    /// location no filesystem will turn into a directory - is simply unreachable rather than a structural
+    /// fault to be caught. That means the verdict comes from the seam's own recorded failure instead of
+    /// from an exception whose message embeds the configured path, which is the disclosure this case
+    /// exists to rule out either way.
+    /// </remarks>
+    [Fact]
+    public async Task An_unusable_location_reports_not_ready_and_logs_no_path()
+    {
+        using TemporaryDataDirectory parent = TemporaryDataDirectory.Create();
+        string blocker = Path.Combine(parent.Path, "blocker");
+        await File.WriteAllTextAsync(blocker, "not a directory", TestContext.Current.CancellationToken);
+
+        string unusable = Path.Combine(blocker, "pfw-secret-mount-name");
+
+        await using SqliteConnectionFactory storage = CreateStorage(unusable);
+
+        RecordingLogger<SqliteReachabilityHealthCheck> logger = new();
+        SqliteReachabilityHealthCheck check = new(storage, logger);
+
+        HealthCheckResult result = await check.CheckHealthAsync(
+            RegistrationContext(HealthStatus.Unhealthy),
+            TestContext.Current.CancellationToken);
+
+        // A structured not-ready rather than a thrown fault, so the gate can observe it.
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal(StorageReadiness.Unreachable, storage.LastReadiness);
+
+        // NOTHING WAS CREATED, which is the property F-13 is about: the blocker is still a file and no
+        // directory appeared beside or beneath it.
+        Assert.True(File.Exists(blocker), "The readiness path must not have replaced the blocking file.");
+        Assert.False(Directory.Exists(unusable), "The readiness path must not create the data directory.");
+
+        // THE ANONYMOUS BODY carries no path, and no exception travels with the verdict.
+        Assert.DoesNotContain(
+            "pfw-secret-mount-name",
+            result.Description ?? string.Empty,
+            StringComparison.Ordinal);
+        Assert.Null(result.Exception);
+
+        // THE OPERATOR RECORD carries no path, no directory component and no provider prose...
+        string record = Assert.Single(logger.Records);
+        Assert.DoesNotContain("pfw-secret-mount-name", record, StringComparison.Ordinal);
+        Assert.DoesNotContain(unusable, record, StringComparison.Ordinal);
+        Assert.DoesNotContain(parent.Path, record, StringComparison.Ordinal);
+
+        // ...and still says what happened, in which state, and with which provider code.
+        Assert.Contains("did not satisfy the read-only readiness probe", record, StringComparison.Ordinal);
+        Assert.Contains(nameof(StorageReadiness.Unreachable), record, StringComparison.Ordinal);
+        Assert.Contains("provider result code", record, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An anonymous probe against an EMPTY but usable location creates absolutely nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CENTRAL F-13 CASE. Before the split, readiness ran the RUNTIME open: it brought the data
+    /// directory into being, opened under the legacy <c>mode=rwc</c> grammar so the database FILE was
+    /// created, and set the journal mode - so an unauthenticated request to <c>/health</c> performed three
+    /// filesystem mutations and then reported READY against a database it had just invented. That is both
+    /// a mutation driven from an unauthenticated surface and a false positive: the gate Gateway hangs on
+    /// would open for a service with no data.
+    /// </para>
+    /// <para>
+    /// Asserting the directory listing is EMPTY rather than just checking for the database file is
+    /// deliberate - a journal, a write-ahead log or a shared-memory file would each be a mutation too,
+    /// and each has a different name.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_anonymous_probe_against_an_empty_location_creates_nothing_and_reports_not_ready()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+
+        string nested = Path.Combine(directory.Path, "not-yet-created");
+
+        await using SqliteConnectionFactory storage = CreateStorage(nested);
+
+        SqliteReachabilityHealthCheck check = new(
+            storage,
+            NullLogger<SqliteReachabilityHealthCheck>.Instance);
+
+        for (int poll = 0; poll < 3; poll++)
+        {
+            HealthCheckResult result = await check.CheckHealthAsync(
+                RegistrationContext(HealthStatus.Unhealthy),
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        }
+
+        // NO DIRECTORY, therefore no database file, no journal and no write-ahead log.
+        Assert.False(
+            Directory.Exists(nested),
+            "An anonymous readiness probe must not create the configured data directory.");
+
+        // And the parent is untouched: nothing was written beside the intended location either.
+        Assert.Empty(Directory.GetFileSystemEntries(directory.Path));
+
+        Assert.Equal(StorageReadiness.Unreachable, storage.LastReadiness);
+    }
+
+    /// <summary>
+    /// Storage that exists but has no schema is reported not ready, and distinctly so.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE F-14 CASE. A constant scalar passes just as happily against an empty database, so before the
+    /// schema check a service whose volume mounted correctly and whose migrations never ran reported
+    /// READY - and then failed every request it received. That is the worst shape of readiness bug: the
+    /// gate opens, traffic arrives, and nothing works.
+    /// </para>
+    /// <para>
+    /// The verdict is DISTINCT from unreachable rather than merely negative, because the two call for
+    /// different actions: this one means the storage is fine and the migrations have not been applied.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_engine_that_answers_without_a_schema_is_reported_not_ready()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+
+        // A real, openable, EMPTY database - exactly what a fresh volume with unrun migrations looks like.
+        SqliteConnectionStringBuilder builder = new()
+        {
+            DataSource = Path.Combine(directory.Path, "test.db"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+        };
+
+        await using (SqliteConnection seed = new(builder.ConnectionString))
+        {
+            await seed.OpenAsync(TestContext.Current.CancellationToken);
+        }
+
+        await using SqliteConnectionFactory storage = CreateStorage(directory.Path);
+
+        SqliteReachabilityHealthCheck check = new(
+            storage,
+            NullLogger<SqliteReachabilityHealthCheck>.Instance);
+
+        HealthCheckResult result = await check.CheckHealthAsync(
+            RegistrationContext(HealthStatus.Unhealthy),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal(StorageReadiness.SchemaIncomplete, storage.LastReadiness);
+
+        // A DISTINCT description, so an operator is not sent to check a mount that is already correct.
+        Assert.Equal(
+            "The storage engine answered but the required schema is not provisioned.",
+            result.Description);
+
+        // The seam's in-process diagnostic DOES name the table it looked for, which is a constant of this
+        // codebase rather than a configured value - and it is the authenticated half of the answer.
+        Assert.Contains("COMPANY", storage.SqlErrText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A schema created WITHOUT the migration tool is reported not ready.
+    /// </summary>
+    /// <remarks>
+    /// The application table alone is not a provisioned database. Migrations are the only provisioning
+    /// path this service has, and a database holding the table but no migration history is one the
+    /// migration tool would try to re-apply its first migration against, and fail. This case pins that
+    /// the probe rejects it rather than reporting ready on a half-provisioned schema - and it is the case
+    /// that would fail if a future change swapped <c>Migrate</c> for <c>EnsureCreated</c> anywhere.
+    /// </remarks>
+    [Fact]
+    public async Task A_schema_without_the_migration_history_is_reported_not_ready()
+    {
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+
+        // The legacy DDL shape, applied by hand: COMPANY exists, the history table does not.
+        _ = await SeedCompanyTableAsync(Path.Combine(directory.Path, "test.db"));
+
+        await using SqliteConnectionFactory storage = CreateStorage(directory.Path);
+
+        SqliteReachabilityHealthCheck check = new(
+            storage,
+            NullLogger<SqliteReachabilityHealthCheck>.Instance);
+
+        HealthCheckResult result = await check.CheckHealthAsync(
+            RegistrationContext(HealthStatus.Unhealthy),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal(StorageReadiness.SchemaIncomplete, storage.LastReadiness);
+        Assert.Contains("migration history", storage.SqlErrText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A failed RUNTIME open logs the preserved provider code and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// The runtime open is not an anonymous path - it runs at startup and on a credentialled request - but
+    /// its log arm is narrowed all the same, because a record naming the database file is of no more use
+    /// to an operator than the provider code and is of considerably more use to anyone else. The full
+    /// text is still available in process on the seam's own members.
+    /// </remarks>
+    [Fact]
+    public async Task A_failed_open_logs_the_provider_code_without_the_path_or_the_provider_message()
+    {
+        // The database FILE NAME is occupied by a directory, so the provider refuses the open with
+        // SQLITE_CANTOPEN and a message that names the file. The seam's own arm is what is under test.
+        using TemporaryDataDirectory directory = TemporaryDataDirectory.Create();
+        _ = Directory.CreateDirectory(Path.Combine(directory.Path, "test.db"));
+
+        RecordingLogger<SqliteConnectionFactory> logger = new();
+
+        await using SqliteConnectionFactory storage = new(
+            Options.Create(new PersistenceOptions
+            {
+                Sqlite = new SqliteOptions
+                {
+                    DataDirectory = directory.Path,
+                    DatabaseFileName = "test.db",
+                    Mode = "rwc",
+                    Journal = "DELETE",
+                },
+            }),
+            logger,
+            TimeProvider.System);
+
+        // THROUGH THE RUNTIME OPEN, not the readiness probe. The readiness path no longer goes anywhere
+        // near this arm - that is F-13's separation - so exercising it means calling the member that owns
+        // it. The arm is still worth pinning: it is the one an operator reads when a real deployment
+        // cannot open its database at startup.
+        Assert.NotEqual(
+            RetCode.OK,
+            await storage.OpenAsync(TestContext.Current.CancellationToken));
+
+        string record = Assert.Single(logger.Records);
+
+        // No path, no file name, no provider prose.
+        Assert.DoesNotContain(directory.Path, record, StringComparison.Ordinal);
+        Assert.DoesNotContain("test.db", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("unable to open", record, StringComparison.OrdinalIgnoreCase);
+
+        // The PRESERVED SQLITE_* constant is what locates the cause, and it distinguishes a missing file
+        // from a permission refusal from a corrupt header without naming any of them.
+        Assert.Contains("could not be opened", record, StringComparison.Ordinal);
+        Assert.Contains(
+            RetCode.SQLITE_CANTOPEN.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            record,
+            StringComparison.Ordinal);
+
+        // AND THE TEXT IS NOT LOST, only unlogged: the in-process readers still answer with it, which is
+        // what keeps an authenticated surface as diagnosable as it was.
+        Assert.NotEqual(string.Empty, storage.SqlErrText);
+        Assert.Equal(RetCode.SQLITE_CANTOPEN, storage.SqlDbCode);
+    }
+
+    // ==============================================================================================
     //  FIXTURES
     // ==============================================================================================
 
@@ -1024,7 +1615,8 @@ public sealed class HealthEndpointsTests
     /// <returns>A seam that has not yet opened anything.</returns>
     private static SqliteConnectionFactory CreateStorage(
         string dataDirectory,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        ILogger<SqliteConnectionFactory>? logger = null)
     {
         PersistenceOptions options = new()
         {
@@ -1039,8 +1631,57 @@ public sealed class HealthEndpointsTests
 
         return new SqliteConnectionFactory(
             Options.Create(options),
-            NullLogger<SqliteConnectionFactory>.Instance,
+            logger ?? NullLogger<SqliteConnectionFactory>.Instance,
             clock ?? TimeProvider.System);
+    }
+
+    /// <summary>
+    /// Provisions the real schema in a data directory by applying the real migrations.
+    /// </summary>
+    /// <param name="dataDirectory">The directory the database file should live in.</param>
+    /// <param name="cancellationToken">The test's token.</param>
+    /// <returns>A task that completes when the schema is present.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE REAL MIGRATIONS RATHER THAN HAND-WRITTEN DDL, deliberately. The readiness probe now requires
+    /// both the application table and the migration history table, and the only provisioning path this
+    /// service has is <c>dotnet ef database update</c> - so applying the migrations here is what proves
+    /// the DEPLOYED provisioning path satisfies the DEPLOYED readiness check. Hand-written
+    /// <c>CREATE TABLE</c> statements would satisfy the probe while proving nothing about that pairing,
+    /// and would silently keep passing if a future migration and the probe drifted apart.
+    /// </para>
+    /// <para>
+    /// <c>Migrate</c> and not <c>EnsureCreated</c>: the latter creates the schema WITHOUT writing the
+    /// history table, which is precisely the mis-provisioned state the probe exists to reject, so using
+    /// it here would make every readiness case fail for the right reason at the wrong time.
+    /// </para>
+    /// </remarks>
+    private static async Task ProvisionSchemaAsync(
+        string dataDirectory,
+        CancellationToken cancellationToken)
+    {
+        SqliteConnectionStringBuilder builder = new()
+        {
+            DataSource = Path.Combine(dataDirectory, "test.db"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+
+            // POOLING OFF, a TEST-HARNESS necessity and not a product concern.
+            // Microsoft.Data.Sqlite pools by connection string, so disposing the context returns its
+            // connection to the pool WITHOUT closing the underlying handle - and a later RUNTIME open
+            // would then block for its whole busy timeout trying to set the journal mode, which needs an
+            // exclusive lock. In production the migration tool is a separate PROCESS that exits, so no
+            // handle survives it and nothing needs disabling; here the two share one process.
+            Pooling = false,
+        };
+
+        DbContextOptions<PowerFrameworkDbContext> options =
+            new DbContextOptionsBuilder<PowerFrameworkDbContext>()
+                .UseSqlite(builder.ConnectionString)
+                .Options;
+
+        await using PowerFrameworkDbContext context = new(options);
+
+        await context.Database.MigrateAsync(cancellationToken);
     }
 
     /// <summary>
@@ -1204,19 +1845,68 @@ public sealed class HealthEndpointsTests
     /// </remarks>
     private sealed class FrozenClock : TimeProvider
     {
-        /// <summary>The current instant.</summary>
+        /// <summary>The wall-clock instant.</summary>
         private DateTimeOffset _now;
 
-        /// <summary>Initializes the clock.</summary>
-        /// <param name="start">The instant the clock starts at.</param>
-        internal FrozenClock(DateTimeOffset start) => _now = start;
+        /// <summary>
+        /// The MONOTONIC tick count, held INDEPENDENTLY of the wall-clock instant.
+        /// </summary>
+        /// <remarks>
+        /// <b>TWO SEPARATE TIMELINES, AND THE SEPARATION IS THE WHOLE VALUE OF THIS DOUBLE.</b> On a real
+        /// machine the two are independent in exactly one direction that matters: an NTP correction, a
+        /// resumed host or a manual change steps the WALL clock, in either direction, while the monotonic
+        /// clock keeps counting forward regardless. A double that derived one from the other could not
+        /// reproduce that, and so could not tell a window measured on elapsed time from one measured on
+        /// the difference of two wall-clock reads - which is the only distinction worth testing here.
+        /// </remarks>
+        private long _ticks;
+
+        /// <summary>Initializes the clock with both timelines at the same origin.</summary>
+        /// <param name="start">The instant the wall clock starts at.</param>
+        internal FrozenClock(DateTimeOffset start)
+        {
+            _now = start;
+            _ticks = start.UtcTicks;
+        }
 
         /// <inheritdoc/>
         public override DateTimeOffset GetUtcNow() => _now;
 
-        /// <summary>Moves the clock forward.</summary>
+        /// <inheritdoc/>
+        /// <remarks>One tick per tick, so a caller can reason in <see cref="TimeSpan"/> directly.</remarks>
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// <b>OVERRIDING THIS PAIR IS MANDATORY, NOT OPTIONAL, AND FORGETTING IT FAILS SILENTLY IN THE
+        /// WRONG DIRECTION.</b> The seam decides its cache window with
+        /// <see cref="TimeProvider.GetElapsedTime(long, long)"/>, which is computed from these two
+        /// members. A subclass overriding only <see cref="GetUtcNow"/> inherits the base implementation,
+        /// which reads the REAL machine timestamp - so the window would be measured on time the test does
+        /// not control while the test advanced only the instant, and a case asserting the window would
+        /// pass or fail on how long the test host happened to take.
+        /// </remarks>
+        public override long GetTimestamp() => _ticks;
+
+        /// <summary>Moves BOTH timelines forward, which is what ordinary time passing looks like.</summary>
         /// <param name="by">How far to advance.</param>
-        internal void Advance(TimeSpan by) => _now = _now.Add(by);
+        internal void Advance(TimeSpan by)
+        {
+            _now = _now.Add(by);
+            _ticks += by.Ticks;
+        }
+
+        /// <summary>
+        /// Steps the WALL clock backward while the monotonic timeline continues forward - an NTP
+        /// correction, precisely.
+        /// </summary>
+        /// <param name="wallClockStep">How far the wall clock jumps back.</param>
+        /// <param name="monotonicStep">How much real time passes while it does.</param>
+        internal void CorrectWallClockBackward(TimeSpan wallClockStep, TimeSpan monotonicStep)
+        {
+            _now = _now.Add(-wallClockStep);
+            _ticks += monotonicStep.Ticks;
+        }
     }
 
     /// <summary>
@@ -1270,6 +1960,38 @@ public sealed class HealthEndpointsTests
     /// provider abstraction exists to be implemented. Records are formatted eagerly and stored as strings,
     /// because a log state object is not guaranteed to outlive the call that produced it.
     /// </remarks>
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        /// <summary>The formatted records, in order.</summary>
+        internal List<string> Records { get; } = [];
+
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        /// <inheritdoc/>
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Only the FORMATTED record is kept. That is what a sink writes, so it is the thing a disclosure
+        /// claim has to be made about - asserting on the template alone would pass while the arguments
+        /// leaked.
+        /// </remarks>
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            Records.Add(formatter(state, exception));
+        }
+    }
+
+    /// <summary>A provider whose loggers record every formatted record.</summary>
     private sealed class RecordingLoggerProvider : ILoggerProvider
     {
         /// <summary>Every formatted record, in order.</summary>
@@ -1320,6 +2042,38 @@ public sealed class HealthEndpointsTests
     }
 
     /// <summary>
+    /// Presents an existing recording provider as a typed logger.
+    /// </summary>
+    /// <typeparam name="TCategory">The category the consumer asks for.</typeparam>
+    /// <param name="records">The provider every record is appended to.</param>
+    /// <remarks>
+    /// The provider already records everything; this exists only because a constructor asks for
+    /// <c>ILogger&lt;T&gt;</c> rather than <c>ILogger</c>, and adding a second recorder would give two places
+    /// for the capture rule to drift.
+    /// </remarks>
+    private sealed class TypedRecorder<TCategory>(RecordingLoggerProvider records) : ILogger<TCategory>
+    {
+        /// <summary>The untyped logger every call is forwarded to.</summary>
+        private readonly ILogger _inner = records.CreateLogger(typeof(TCategory).FullName!);
+
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => _inner.BeginScope(state);
+
+        /// <inheritdoc/>
+        public bool IsEnabled(LogLevel logLevel) => _inner.IsEnabled(logLevel);
+
+        /// <inheritdoc/>
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            _inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
+    /// <summary>
     /// An evaluator that faults, standing in for a readiness evaluation that cannot be completed at all.
     /// </summary>
     /// <remarks>
@@ -1329,13 +2083,22 @@ public sealed class HealthEndpointsTests
     /// </remarks>
     private sealed class FaultingHealthCheckService : HealthCheckService
     {
+        /// <summary>
+        /// A path-shaped fragment planted in the fault message. It stands for the configured mount path a
+        /// real options-binding fault would carry, and it is distinctive enough that a leak on either
+        /// channel is unmistakable.
+        /// </summary>
+        internal const string FaultMessagePathToken = "/mnt/pfw-secret-volume-name/test.db";
+
         /// <inheritdoc/>
         public override Task<HealthReport> CheckHealthAsync(
             Func<HealthCheckRegistration, bool>? predicate,
             CancellationToken cancellationToken = default)
             => throw new InvalidOperationException(
-                "The readiness evaluator faulted deliberately. Nothing about this message may reach the "
-                + "anonymous response body.");
+                "The readiness evaluator faulted deliberately at "
+                + FaultMessagePathToken
+                + ". Nothing about this message may reach the anonymous response body OR the operator "
+                + "log, because an unauthenticated caller decides how often both are written.");
     }
 
     /// <summary>

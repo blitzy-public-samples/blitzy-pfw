@@ -1339,6 +1339,7 @@ public sealed class DataServicesClient
     private readonly DataWindowService.DataWindowServiceClient _dataWindow;
     private readonly ColumnExpressionService.ColumnExpressionServiceClient _columnExpression;
     private readonly IServiceTokenProvider _tokenProvider;
+    private readonly OutboundDeadlines _deadlines;
     private readonly ILogger<DataServicesClient> _logger;
 
     /// <summary>
@@ -1355,6 +1356,11 @@ public sealed class DataServicesClient
     /// implementation; token acquisition is never duplicated here.
     /// </param>
     /// <param name="logger">The logger. Never receives a credential, a header or a statement text.</param>
+    /// <param name="deadlines">
+    /// The bounds every outbound call carries, supplied by the composition root from
+    /// <c>Gateway:Outbound</c>. Omitting it selects <see cref="OutboundDeadlines.Default"/>, so a
+    /// hand-constructed client still bounds its calls - "no deadline" is not a reachable state.
+    /// </param>
     /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
     /// <remarks>
     /// PERFORMS NO I/O. Nothing here connects, resolves, probes or warms anything up, which is what
@@ -1364,7 +1370,8 @@ public sealed class DataServicesClient
         DataWindowService.DataWindowServiceClient dataWindowClient,
         ColumnExpressionService.ColumnExpressionServiceClient columnExpressionClient,
         IServiceTokenProvider tokenProvider,
-        ILogger<DataServicesClient> logger)
+        ILogger<DataServicesClient> logger,
+        OutboundDeadlines? deadlines = null)
     {
         ArgumentNullException.ThrowIfNull(dataWindowClient);
         ArgumentNullException.ThrowIfNull(columnExpressionClient);
@@ -1374,6 +1381,7 @@ public sealed class DataServicesClient
         _dataWindow = dataWindowClient;
         _columnExpression = columnExpressionClient;
         _tokenProvider = tokenProvider;
+        _deadlines = deadlines ?? OutboundDeadlines.Default;
         _logger = logger;
     }
 
@@ -1422,7 +1430,9 @@ public sealed class DataServicesClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Stream,
+                cancellationToken)
             .ConfigureAwait(false);
 
         using AsyncServerStreamingCall<RetrieveChunk> call = _dataWindow.Retrieve(request, options);
@@ -1533,7 +1543,9 @@ public sealed class DataServicesClient
     /// </remarks>
     public async Task<DataWindowEventChannel> OpenEventChainAsync(CancellationToken cancellationToken)
     {
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Stream,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return new DataWindowEventChannel(_dataWindow.EventChain(options), _logger);
@@ -1596,7 +1608,9 @@ public sealed class DataServicesClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Unary,
+                cancellationToken)
             .ConfigureAwait(false);
 
         UpdateResponse response;
@@ -2452,7 +2466,9 @@ public sealed class DataServicesClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Stream,
+                cancellationToken)
             .ConfigureAwait(false);
 
         using AsyncServerStreamingCall<EventStreamResponse> call =
@@ -2520,7 +2536,9 @@ public sealed class DataServicesClient
     {
         ArgumentNullException.ThrowIfNull(handler);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Stream,
+                cancellationToken)
             .ConfigureAwait(false);
 
         using AsyncDuplexStreamingCall<InvokeMethodResponse, InvokeMethodRequest> call =
@@ -2609,7 +2627,9 @@ public sealed class DataServicesClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Stream,
+                cancellationToken)
             .ConfigureAwait(false);
 
         using AsyncDuplexStreamingCall<TraceChannelRequest, TraceRecord> call =
@@ -2646,14 +2666,36 @@ public sealed class DataServicesClient
     /// <summary>
     /// Obtains a bearer credential and packages it as the call options every outbound call uses.
     /// </summary>
+    /// <param name="callClass">
+    /// Which bound applies: a unary call is bounded by the point at which this caller abandons it, a
+    /// stream by the point at which the upstream would have reclaimed the session behind it.
+    /// </param>
     /// <param name="cancellationToken">Cancels the token acquisition and the call it is built for.</param>
-    /// <returns>Call options carrying the authorization header and the caller's cancellation token.</returns>
+    /// <returns>
+    /// Call options carrying the authorization header, the caller's cancellation token, and the
+    /// deadline for this class of call.
+    /// </returns>
     /// <remarks>
-    /// No deadline is set here. A deadline would be a duration this file invented, and the repository
-    /// publishes no budget from which one could be derived; the composition root is where any such
-    /// policy belongs, alongside the resilience pipeline it has to agree with.
+    /// <para>
+    /// THE DEADLINE COMES FROM THE COMPOSITION ROOT, WHICH IS WHAT MAKES IT LEGITIMATE. This file
+    /// previously set none, on the reasoning that a duration invented here would have no derivation and
+    /// that the policy belonged where the resilience pipeline is configured. Both halves of that were
+    /// right; what was missing was the policy. It now exists as <c>Gateway:Outbound</c>, the unary bound
+    /// is the same setting that configures the pipeline's total request timeout, and the stream bound is
+    /// derived from the upstream's own session idle lifetime - so no duration originates here.
+    /// </para>
+    /// <para>
+    /// WHY CANCELLATION ALONE WAS NOT ENOUGH, since it was already threaded through every member. A
+    /// cancellation token bounds THIS process's willingness to wait; it tells the upstream nothing. When
+    /// the caller goes away in a way the transport has not yet noticed - a half-open connection, a
+    /// container killed mid-request - the upstream keeps working and keeps the server-held session or
+    /// task alive, and only its own idle sweep eventually reclaims it. The deadline is what puts that
+    /// bound on the wire, where the upstream can act on it.
+    /// </para>
     /// </remarks>
-    private async Task<CallOptions> CreateAuthenticatedCallOptionsAsync(CancellationToken cancellationToken)
+    private async Task<CallOptions> CreateAuthenticatedCallOptionsAsync(
+        OutboundCallClass callClass,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -2685,7 +2727,10 @@ public sealed class DataServicesClient
             { AuthorizationHeaderName, string.Concat(token.TokenType, " ", token.AccessToken) },
         };
 
-        return new CallOptions(headers: headers, cancellationToken: cancellationToken);
+        return new CallOptions(
+            headers: headers,
+            deadline: _deadlines.DeadlineFor(callClass),
+            cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -2714,7 +2759,9 @@ public sealed class DataServicesClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        CallOptions options = await CreateAuthenticatedCallOptionsAsync(cancellationToken)
+        CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundCallClass.Unary,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return await operation(request, options).ConfigureAwait(false);

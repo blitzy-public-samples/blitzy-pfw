@@ -200,6 +200,15 @@ public sealed class SecurityClientTests
         DataServicesOptions options = new();
         options.Security.BaseAddress = configuredAddress;
 
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST HAVE AN IDENTITY TO PRESENT. Contract C-01
+        // authenticates the issuance endpoint with mutual TLS and with nothing else, so the client
+        // refuses to ask for a token when this deployment configures no certificate - a certificate-less
+        // request could only be refused, and the refusal would read like a Security fault rather than a
+        // missing setting here. PATHS ONLY: nothing below is opened or loaded, because the client checks
+        // only WHETHER an identity is configured and the composition root is what reads the material.
+        options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+
         MutableClock clock = new();
         SecurityClient client = new(
             httpClient,
@@ -758,9 +767,17 @@ public sealed class SecurityClientTests
             BaseAddress = new Uri(TestBaseAddress, UriKind.Absolute),
         };
 
+        // The identity is configured for the same reason CreateClient configures it: the client refuses
+        // to ask for a token when this deployment presents no certificate, because the issuance endpoint
+        // is authenticated by mutual TLS and by nothing else. Paths only; nothing is opened.
+        DataServicesOptions options = new();
+        options.Security.BaseAddress = TestBaseAddress;
+        options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+
         SecurityClient client = new(
             httpClient,
-            Options.Create(new DataServicesOptions()),
+            Options.Create(options),
             NullLogger<SecurityClient>.Instance);
 
         ServiceToken token = await client.GetTokenAsync(

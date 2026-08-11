@@ -8,24 +8,75 @@
     triple, the two paging rewriters, the SQLite URI grammar and the optimistic-concurrency
     contract are to be held to legacy parity.
 
-    WHAT IS HERE TODAY, AND WHAT IS NOT. Stated because "is where X is held to parity" reads as a
-    claim about existing coverage, and for three of those four it is not one yet.
-      PRESENT: buffer and item-status tests, the changeset and full-state codecs, the SELECT
-      statement model, UpdateWhereBuilder, IdentityColumnResolver, SqlRedactor, DbErrorData and
-      CompanyEntity - so parts of the update / concurrency contract are genuinely covered.
-      PLANNED, WITH NO TEST REFERENCING THEM: the two paging rewriters and PagingRewriteDispatcher
-      (docs/PARITY.md section 6.2 lists the eleven required matrix rows), and the SQLite URI
-      grammar - whose subject, Data/SqliteConnectionFactory, DOES NOT EXIST IN THE TREE at all.
-      NOT RUNNABLE AT PRESENT: this project does not build, because the application project it
-      references reports CS5001 for an entry point that has not been authored. NO TEST IN THIS
-      PROJECT HAS RUN, and there is no coverage report for this service.
+    WHAT IS HERE TODAY, AND HOW DEEPLY. Stated because "is where X is held to parity" reads as a
+    claim about existing coverage, so the claim is reported as measured rather than as intended.
+    Every figure below comes from the Cobertura report this project emits, counting the sequence
+    points that report calls lines; an earlier revision of this comment described a much earlier
+    state of the tree and is superseded in every particular.
 
-    THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE.
+      BUILD AND TEST STATUS, MEASURED: this project builds in Release with zero warnings and zero
+      errors, and its whole suite passes - 2439 tests across 33 of its 34 files, the thirty-fourth
+      being GlobalUsings.cs, with no failure and no skip. The application project it references
+      carries Program.cs and produces an entry point, so the CS5001 an earlier revision reported is
+      no longer reachable.
+
+      COVERAGE, MEASURED: PowerFramework.Persistence sits at 81.7 percent line coverage, which
+      clears the 80 percent per-service floor constraint C-H requires. Every production type in
+      the application project apart from the three EF-generated migration files is named by at
+      least one test file here, including the internal ItemStatusMachine in Buffers/ItemStatus.cs
+      and the internal PagedUniqueIndexColumnValidator in Sql/Paging/IPagingRewriter.cs, neither of
+      which has a file of its own.
+
+      DRIVEN THOROUGHLY: the three DataWindow buffers and the item-status machine; both transfer
+      codecs, changeset and full state, including their receive and transfer paths; the SELECT
+      statement model and its compound-select behaviour; ClauseModifier; the paged unique-index
+      column validator; UpdateWhereBuilder; IdentityColumnResolver; ConflictDetector; SqlRedactor;
+      DbErrorData; CompanyEntity; TransactionData and TransactionPool; SqlTaskBase and SqlQueryTask
+      with all three task proxies; the Command, Transaction and Update gRPC services; the health
+      and ping endpoints; and the composition root.
+
+      BOTH PAGING REWRITERS ARE COVERED, contrary to an earlier revision of this comment.
+      SqlServerPagingRewriterTests.cs carries 27 cases across the three SQL Server strategies and
+      PagingRewriterByteExactTests.cs carries 3 more, together with the dispatcher's
+      DBT_MSSQL / DBT_ORACLE selection and its E_NO_IMPLEMENTATION arm for anything else. These are
+      pure string transforms, so they need no database instance of either kind - which is exactly
+      why docs/PARITY.md section 6.2 treats them as byte-exact matrices.
+
+      REACHED ONLY SHALLOWLY, WITH THE MEASURED RATE, SO THE NEXT READER KNOWS WHERE TO WORK:
+      Grpc/QueryService at 5.7 percent, whose chunked server-streaming members are entered only by
+      the composition-root registration test; Tasks/SqlUpdateTask at 24.1 percent, driven today
+      through its proxy rather than directly; Data/SqliteConnectionFactory at 38.0 percent, where
+      the pure URI and option surface is exercised but the members that actually open a connection
+      are not; Tasks/TaskProxies/SqlTaskProxyBase at 58.0 percent; and
+      Configuration/PersistenceOptions at 59.6 percent, whose unreached half is its validation
+      failure arms.
+
+      NOT EXERCISED AT ALL, AND EACH FOR A STATED REASON: Data/PowerFrameworkDbContext together
+      with its design-time factory, and the three files under Data/Migrations. The migrations are
+      EF-generated and are meaningful only when applied against a database, so a unit test over
+      them would assert the generator's output rather than this service's behaviour; the schema
+      they create is instead pinned by CompanyEntityTests against the single DDL the legacy tree
+      publishes.
+
+    THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE, AND THE GATE IS NOW ENFORCED.
     Constraint C-H requires 80 percent line coverage per in-scope service, evaluated per service
-    so that one service's coverage cannot mask another's. The Cobertura report this project will
-    emit is the artifact that gate reads, which is why coverlet.collector below is load-bearing and
-    must never be trimmed as an unused reference. The gate itself is not enforced yet: the CI
-    workflow that would read the report is planned and absent.
+    so that one service's coverage cannot mask another's. The Cobertura report this project emits is
+    the artifact that gate reads, which is why coverlet.collector below is load bearing and must
+    never be trimmed as an unused reference.
+
+    .github/workflows/ci.yml enforces it, in this project's own matrix leg, and reads the report's
+    top level line rate directly. That rate is the number for this service alone because the
+    repository root coverage.runsettings scopes the report to the four service assemblies: without
+    it the report would also cover the shared libraries and the generated protobuf stubs in
+    PowerFramework.Contracts, and its top level rate would read 28.11 percent for this service
+    rather than 81.74. The gate additionally asserts that the report contains EXACTLY ONE package
+    and that it is PowerFramework.Persistence, so a filter that silently stopped matching fails the
+    leg instead of quietly changing the subject of the measurement.
+
+    Two consequences worth knowing before changing anything here. Removing or renaming
+    coverlet.collector, or dropping the settings file from the test command, makes the leg fail with
+    a structural error rather than a coverage number. And the leg does not fail fast against its
+    three siblings, so a shortfall here is reported alongside their verdicts rather than hiding them.
 
     HAND-AUTHORED ON PURPOSE, NOT TEMPLATED.
     `dotnet new xunit3` does not exist in SDK 10.0.302 (it exits 103 and suggests searching
@@ -57,14 +108,15 @@
 
     NO InternalsVisibleTo HERE EITHER.
     That attribute points the other way: the application project grants this assembly access, so
-    sibling test files CAN drive internal members - the internal SelectStatementModel and
-    ItemStatusMachine that present tests already drive, and, once the matrix of docs/PARITY.md
-    section 6.2 is written, the internal pfwPagedSQL_Tbl sentinel inside SqlServerPagingRewriter. It
-    will likewise let WebApplicationFactory bind to the implicitly generated internal Program class
-    with no `public partial` shim, once a Program exists to bind to. Two of those three are
-    capability rather than current fact, and the earlier wording did not distinguish them.
-    Note that Data/SqliteConnectionFactory, named in an earlier revision of this comment, is not in
-    the tree; its URI composition cannot be driven from here because there is nothing to drive.
+    sibling test files CAN drive internal members, and all three uses an earlier revision listed as
+    future are current fact. Tests here drive the internal SelectStatementModel and
+    ItemStatusMachine; SqlServerPagingRewriterTests.cs reaches the internal pfwPagedSQL_Tbl sentinel
+    inside SqlServerPagingRewriter; and WebApplicationFactory binds to the implicitly generated
+    internal Program class with no `public partial` shim, which is what CompositionRootTests.cs,
+    HealthEndpointsTests.cs and PingEndpointsTests.cs each depend on.
+    Data/SqliteConnectionFactory, which an earlier revision recorded as missing from the tree, is
+    present, and its URI and option composition is driven from here; what is not driven is the
+    subset of its members that open a connection.
 
     Validated command, from AAP section 0.8.3 and the attached environment's setup instructions,
     which must keep working with no extra argument (constraints C-I and C-L). The literal command

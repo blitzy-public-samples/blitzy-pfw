@@ -219,19 +219,25 @@
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.IO.Pipelines;
 using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+
+using PowerFramework.Gateway.Authorization;
 using Google.Protobuf;
+using Google.Protobuf.Reflection;
 using Grpc.Core;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.Gateway.Clients;
+using PowerFramework.Gateway.Configuration;
 using PowerFramework.Shared.Kernel;
 
 // ALIASED RATHER THAN IMPORTED, DELIBERATELY. PowerFramework.Contracts.Common.V1 publishes a `RetCode`
@@ -285,6 +291,36 @@ public static class DataServicesProxyEndpoints
     /// it.
     /// </summary>
     private const string DataWindowGroupPrefix = "/v1/datawindow";
+
+    /// <summary>
+    /// The scope an authenticated caller must have been granted to reach any operation in the C-03 and C-04 projection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DECLARED HERE, NEXT TO THE ROUTE THAT REQUIRES IT, and read by <c>Program.cs</c> when it builds
+    /// the policy. A route and its entitlement are one decision; a scope name spelled independently in
+    /// an authorization file and in a route file is the defect that enforces nothing while looking
+    /// correct in both places.
+    /// </para>
+    /// <para>
+    /// The spelling matches the grant the issuance roster hands the calling identity
+    /// (<c>orchestration/.env.example</c>, <c>Security:Clients</c>), because Security refuses a scope it
+    /// never granted rather than narrowing the request - so a mismatch here is not a smaller token, it
+    /// is no token at all.
+    /// </para>
+    /// </remarks>
+    internal const string RequiredScope = "datawindow";
+
+    /// <summary>
+    /// The authorization policy name carrying <see cref="RequiredScope"/>, so that the route and the
+    /// registration cannot drift apart.
+    /// </summary>
+    /// <remarks>
+    /// Composed from <see cref="RequiredScope"/> rather than written out, and prefixed with the service
+    /// name so that a policy name is never ambiguous in a log line that carries policies from more than
+    /// one service.
+    /// </remarks>
+    internal const string ScopePolicyName = "gateway:scope:" + RequiredScope;
 
     /// <summary>
     /// The nested prefix carrying C-04's operations, so that the contract's own
@@ -766,9 +802,23 @@ public static class DataServicesProxyEndpoints
     {
         ArgumentNullException.ThrowIfNull(endpoints);
 
-        // C-G. One call, applied to the parent group, inherited by every endpoint declared below including
-        // those declared on the nested expression group.
-        RouteGroupBuilder dataWindow = endpoints.MapGroup(DataWindowGroupPrefix).RequireAuthorization();
+        // C-G, AND THE SCOPE THIS SERVICE PUBLISHES A 403 FOR. One call, applied to the parent group,
+        // inherited by every endpoint declared below INCLUDING those on the nested expression group - and
+        // here that inheritance is exactly what is wanted, which is why the nesting stays.
+        //
+        // ONE SCOPE FOR BOTH PROJECTED CONTRACTS, WHICH IS NOT WHAT DATASERVICES DOES. DataServices splits
+        // C-03 and C-04 into two scopes because the two gRPC services version independently and a caller
+        // may hold one contract without the other; it therefore had to UN-nest its expression group, since
+        // an inherited convention cannot be removed. At the ingress the two are one capability area under
+        // one path prefix and the only consumer requests one name for all of it, so the ingress does not
+        // re-express an internal versioning boundary as an external permission. It gates what it
+        // publishes, and the projection presents its own downstream credential.
+        //
+        // The parameterless form used to stand here, which meant any token addressed to this service
+        // reached all thirty-nine projected operations whatever it was scoped to.
+        RouteGroupBuilder dataWindow = endpoints
+            .MapGroup(DataWindowGroupPrefix)
+            .RequireAuthorization(GatewayScopes.DataWindow);
         RouteGroupBuilder expression = dataWindow.MapGroup(ExpressionGroupPrefix);
 
         MapDataWindowOperations(dataWindow);
@@ -1517,10 +1567,37 @@ public static class DataServicesProxyEndpoints
             route.ProducesProblem(StatusCodes.Status409Conflict, MediaTypeNames.Application.ProblemJson);
         }
 
+        // THE FOUR STATUSES EVERY PROJECTED OPERATION CAN REALLY PRODUCE, declared unconditionally
+        // because none of them depends on which method is projected.
+        //
+        // 429 is a capacity ceiling refusing to take more work - the handle registries behind C-05..C-08
+        // answer the legacy E_BUSY code once a per-principal or global limit is reached, and that surfaces
+        // as ResourceExhausted on any call that needs a handle. 503 is an upstream answering that it is not
+        // currently serving, which is a different fact from 502: a 502 means no gRPC response arrived at
+        // all. 504 is the deadline this service sets on EVERY outbound call elapsing, so its expiry is an
+        // ordinary outcome of a slow upstream rather than a hypothetical.
+        //
+        // Two statuses the failure map also translates are deliberately NOT declared. AlreadyExists is
+        // produced by exactly one method in the estate - the macro channel reporting an existing
+        // attachment - and that method is bidirectional and unprojected, so no route here can return it.
+        // Unimplemented on a projected method would mean the upstream does not implement a method this
+        // projection publishes, which under explicitly versioned contracts is a deployment defect rather
+        // than an outcome; the 501 that this service does publish belongs to the reserved routes, which
+        // declare it themselves.
+        route.ProducesProblem(
+            StatusCodes.Status429TooManyRequests,
+            MediaTypeNames.Application.ProblemJson);
+
         route.ProducesProblem(
             StatusCodes.Status500InternalServerError,
             MediaTypeNames.Application.ProblemJson);
         route.ProducesProblem(StatusCodes.Status502BadGateway, MediaTypeNames.Application.ProblemJson);
+        route.ProducesProblem(
+            StatusCodes.Status503ServiceUnavailable,
+            MediaTypeNames.Application.ProblemJson);
+        route.ProducesProblem(
+            StatusCodes.Status504GatewayTimeout,
+            MediaTypeNames.Application.ProblemJson);
 
         route.AddOpenApiOperationTransformer((openApiOperation, context, _) =>
             ApplyContractMetadataAsync(openApiOperation, context, operation, protoRequest, protoResponse));
@@ -1555,7 +1632,7 @@ public static class DataServicesProxyEndpoints
 
             TResponse response = await invoke(client, request, cancellationToken).ConfigureAwait(false);
 
-            return Render(response);
+            return Render(httpContext, response);
         });
 
     /// <summary>
@@ -1574,7 +1651,9 @@ public static class DataServicesProxyEndpoints
         where TRequest : class, IMessage, new()
         where TResponse : class, IMessage, new()
         => ProjectAsync(httpContext, async (client, cancellationToken) =>
-            Render(await invoke(client, request, cancellationToken).ConfigureAwait(false)));
+            Render(
+                httpContext,
+                await invoke(client, request, cancellationToken).ConfigureAwait(false)));
 
     /// <summary>
     /// Binds the body, consumes the projected server stream in arrival order, and renders it as an ordered
@@ -1599,8 +1678,13 @@ public static class DataServicesProxyEndpoints
                 return RejectRequest(httpContext, bindingFailure);
             }
 
-            return await RenderStreamAsync(invoke(client, request, cancellationToken))
-                .ConfigureAwait(false);
+            return RenderStream(
+                invoke(client, request, cancellationToken),
+                httpContext.RequestServices
+                    .GetRequiredService<IOptions<GatewayOptions>>()
+                    .Value
+                    .RestProjection
+                    .MaxStreamedElements);
         });
 
     /// <summary>
@@ -1792,9 +1876,71 @@ public static class DataServicesProxyEndpoints
     /// discriminator therefore reach the caller exactly as the upstream produced them - this projection
     /// translates transport, not semantics.
     /// </remarks>
-    private static IResult Render(IMessage response) => Results.Text(
-        ResponseFormatter.Format(response),
-        MediaTypeNames.Application.Json);
+    private static IResult Render(HttpContext httpContext, IMessage response)
+    {
+        // ============ THE IN-BAND STATUS DECIDES THE HTTP STATUS (F-06) ============================
+        // An upstream gRPC method can complete SUCCESSFULLY and still answer a failure: the transport says
+        // OK and the message body says E_INVALID_ARGUMENT, E_BUSY or E_DB_ERROR. Rendering that as 200
+        // because no RpcException was raised is the most misleading thing an ingress can do, and it is
+        // worse HERE than one hop upstream: this is the SOLE PUBLIC SURFACE of the whole system, so a
+        // caller that branches on the status line - which is every HTTP client - would treat a rejected
+        // update as an applied one with nothing downstream left to correct it.
+        //
+        // THE BODY IS FORWARDED UNCHANGED EITHER WAY. On a failure the caller still receives the same
+        // upstream message: the in-band code, the diagnostic and any db_error, exactly as produced. Only
+        // the status LINE changes. This projection still translates transport rather than semantics
+        // (constraint C-B).
+        // ==========================================================================================
+        if (InBandStatus.TryProjectFailure(response, out StatusProjection failure))
+        {
+            return RenderInBandFailure(httpContext, response, failure);
+        }
+
+        return Results.Text(
+            ResponseFormatter.Format(response),
+            MediaTypeNames.Application.Json);
+    }
+
+    /// <summary>
+    /// Renders an upstream response whose in-band status reports a failure, under the mapped HTTP status.
+    /// </summary>
+    /// <param name="httpContext">The current request.</param>
+    /// <param name="response">The upstream message, attached unchanged as the problem's payload.</param>
+    /// <param name="failure">The projection the in-band code mapped to.</param>
+    /// <returns>A problem response carrying the mapped status and the upstream body.</returns>
+    /// <remarks>
+    /// THE UPSTREAM MESSAGE IS ATTACHED RATHER THAN SUMMARISED, because a caller of a failed operation
+    /// needs the contract's own answer and a paraphrase would force it to choose between the status line
+    /// and the contract. The <c>sqlsyntax</c> field of a relayed <c>db_error</c> is passed through as it
+    /// arrived - it is redacted before it reaches this gateway, nothing here re-interpolates it, and it
+    /// never reaches a log record or the <c>detail</c> member (constraint C-F).
+    /// </remarks>
+    private static IResult RenderInBandFailure(
+        HttpContext httpContext,
+        IMessage response,
+        StatusProjection failure)
+    {
+        ILogger logger = httpContext.RequestServices
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger(LoggerCategory);
+
+        // NUMERIC ONLY. The diagnostic belongs to the caller; it can quote a statement fragment.
+        logger.LogWarning(
+            "A projected upstream operation answered in-band failure {RetCode}, rendered as HTTP "
+                + "{HttpStatus} for {Method} {Route}. Correlation {CorrelationId}.",
+            failure.RetCode,
+            failure.HttpStatus,
+            httpContext.Request.Method,
+            DescribeRoute(httpContext),
+            ResolveCorrelationId(httpContext));
+
+        ProblemDetails problem = BuildProblem(httpContext, failure);
+
+        problem.Extensions[InBandStatus.ResponseExtensionMember] =
+            JsonNode.Parse(ResponseFormatter.Format(response));
+
+        return TypedResults.Problem(problem);
+    }
 
     /// <summary>
     /// Renders a projected server stream as a JSON array, in arrival order.
@@ -1807,28 +1953,122 @@ public static class DataServicesProxyEndpoints
     /// none of the per-element metadata the chunking and sequencing contracts depend on is flattened away.
     /// Order is arrival order and is never sorted.
     /// </remarks>
-    private static async Task<IResult> RenderStreamAsync<TResponse>(IAsyncEnumerable<TResponse> elements)
+    private static IResult RenderStream<TResponse>(
+        IAsyncEnumerable<TResponse> elements,
+        int maximumElements)
+        where TResponse : class, IMessage, new()
+        => new StreamedSequenceResult<TResponse>(elements, maximumElements);
+
+    /// <summary>
+    /// Forwards an upstream server stream to the response as one JSON array, element by element.
+    /// </summary>
+    /// <typeparam name="TResponse">The protobuf message each element carries.</typeparam>
+    /// <param name="elements">The upstream stream, consumed once.</param>
+    /// <param name="maximumElements">The configured bound on how many elements will be forwarded.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>NOTHING IS BUFFERED ANY MORE (F-15).</b> The previous implementation drained the entire upstream
+    /// stream into a <see cref="StringBuilder"/>, called <c>ToString</c> - a second complete copy - and
+    /// handed that to a text result, which encoded a third. For a large retrieval that is three
+    /// simultaneous representations of the whole result held in this gateway's memory, and the gateway is
+    /// the process every request in the system passes through. Each element is now formatted and written
+    /// straight to the response writer as it arrives, so one element is live at a time.
+    /// </para>
+    /// <para>
+    /// <b>THE GATEWAY CAN STREAM WHERE THE DATASERVICES PROJECTION CANNOT, AND THE ASYMMETRY IS
+    /// DELIBERATE.</b> That projection collects first so that a mid-stream failure can still produce a
+    /// clean problem body. Here the trade is made the other way round, because the buffering it buys costs
+    /// far more at the ingress: the consequence is recorded honestly below rather than glossed.
+    /// </para>
+    /// <para>
+    /// <b>A FAILURE AFTER THE FIRST ELEMENT CANNOT CHANGE THE STATUS LINE, AND THAT IS UNAVOIDABLE ONCE
+    /// STREAMING.</b> The status and headers are already sent, so an upstream fault mid-stream ends the
+    /// response body without a closing bracket rather than turning into a problem document. A caller
+    /// therefore detects it as malformed JSON, which is a detectable failure and not a silent one - a
+    /// truncated array that closed cleanly would be indistinguishable from a complete one, and that is the
+    /// outcome this deliberately does NOT produce. A failure BEFORE the first element still becomes a
+    /// proper problem response, because nothing has been written at that point.
+    /// </para>
+    /// <para>
+    /// The bound is enforced while forwarding rather than after, so an unbounded upstream cannot make this
+    /// gateway write an unbounded response. Exceeding it truncates the document WITHOUT a closing bracket,
+    /// for the same reason: the caller must be able to tell that it did not receive everything. It is a
+    /// resource bound and not a performance claim - no performance objective is asserted anywhere in this
+    /// refactor (AAP 0.8.5).
+    /// </para>
+    /// </remarks>
+    /// <remarks>
+    /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE STREAMING CLAIM IS
+    /// TESTABLE.</b> Two properties here are assertions about behaviour rather than shape - that the
+    /// sequence is never drained whole, and that exceeding the bound abandons the document WITHOUT a
+    /// closing bracket - and neither is observable from outside this assembly without an upstream that can
+    /// be made to overproduce on demand. Only this service's own test assembly sees it.
+    /// </remarks>
+    internal sealed class StreamedSequenceResult<TResponse>(
+        IAsyncEnumerable<TResponse> elements,
+        int maximumElements) : IResult
         where TResponse : class, IMessage, new()
     {
-        StringBuilder rendered = new();
-        rendered.Append('[');
+        private static readonly byte[] ArrayOpen = "["u8.ToArray();
+        private static readonly byte[] ArrayClose = "]"u8.ToArray();
+        private static readonly byte[] ElementSeparator = ","u8.ToArray();
 
-        bool first = true;
-
-        await foreach (TResponse element in elements.ConfigureAwait(false))
+        /// <inheritdoc/>
+        public async Task ExecuteAsync(HttpContext httpContext)
         {
-            if (!first)
+            ArgumentNullException.ThrowIfNull(httpContext);
+
+            CancellationToken cancellationToken = httpContext.RequestAborted;
+
+            httpContext.Response.StatusCode = StatusCodes.Status200OK;
+            httpContext.Response.ContentType = MediaTypeNames.Application.Json;
+
+            PipeWriter writer = httpContext.Response.BodyWriter;
+
+            await writer.WriteAsync(ArrayOpen, cancellationToken).ConfigureAwait(false);
+
+            int written = 0;
+
+            await foreach (TResponse element in elements
+                .WithCancellation(cancellationToken)
+                .ConfigureAwait(false))
             {
-                rendered.Append(',');
+                if (written >= maximumElements)
+                {
+                    // ABANDONED WITHOUT THE CLOSING BRACKET, deliberately - see the remarks. The bound is
+                    // recorded so an operator can see it was this gateway that stopped, not the upstream
+                    // that ended.
+                    httpContext.RequestServices
+                        .GetRequiredService<ILoggerFactory>()
+                        .CreateLogger(LoggerCategory)
+                        .LogWarning(
+                            "A projected upstream stream exceeded the configured bound of {Limit} elements "
+                                + "for {Method} {Route}; the response was abandoned without its closing "
+                                + "bracket so the caller detects it as incomplete. Correlation "
+                                + "{CorrelationId}.",
+                            maximumElements,
+                            httpContext.Request.Method,
+                            DescribeRoute(httpContext),
+                            ResolveCorrelationId(httpContext));
+
+                    return;
+                }
+
+                if (written > 0)
+                {
+                    await writer.WriteAsync(ElementSeparator, cancellationToken).ConfigureAwait(false);
+                }
+
+                // Encoded one element at a time, so the transient string is one element wide.
+                byte[] encoded = Encoding.UTF8.GetBytes(ResponseFormatter.Format(element));
+
+                await writer.WriteAsync(encoded, cancellationToken).ConfigureAwait(false);
+
+                written++;
             }
 
-            first = false;
-            rendered.Append(ResponseFormatter.Format(element));
+            await writer.WriteAsync(ArrayClose, cancellationToken).ConfigureAwait(false);
         }
-
-        rendered.Append(']');
-
-        return Results.Text(rendered.ToString(), MediaTypeNames.Application.Json);
     }
 
 
@@ -2595,7 +2835,262 @@ public static class DataServicesProxyEndpoints
     /// A specific title, or <see langword="null"/> to use the status code's reason phrase, which is what
     /// RFC 9457 recommends alongside its default type.
     /// </param>
-    private readonly record struct StatusProjection(
+    // ==================================================================================================
+    //  THE IN-BAND STATUS MAP - THE OTHER HALF OF THE PROJECTION (F-06)
+    // ==================================================================================================
+
+    /// <summary>
+    /// Reads the in-band outcome an upstream response carries and maps a failure onto its HTTP answer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS EXISTS.</b> The exception map below translates an upstream call that FAILED. This one
+    /// translates an upstream call that SUCCEEDED and answered a failure in its body, which the contract
+    /// does constantly: <c>OperationStatus.ret_code</c> and the bare <c>ret_code</c> fields carry the whole
+    /// <c>E_*</c> band on a perfectly healthy transport. Without this, every one of those left this
+    /// gateway as <c>200 OK</c>.
+    /// </para>
+    /// <para>
+    /// <b>IT MIRRORS THE DATASERVICES COPY DELIBERATELY, AND THAT IS ARCHITECTURAL RATHER THAN
+    /// DUPLICATION BY NEGLECT.</b> Both projections need the same translation. Putting one copy in the
+    /// contracts project would make it a shared-code back door - that project carries the boundary
+    /// DEFINITION and no behaviour - and putting it in a shared library would be behaviour crossing a
+    /// service boundary, which is precisely the coupling the decomposition forbids (AAP 0.7.2). What keeps
+    /// the two together is the published contract, not a reference; the mapping itself is stated in the
+    /// contract documentation.
+    /// </para>
+    /// </remarks>
+    /// <remarks>
+    /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE MAP ITSELF IS TESTABLE.</b>
+    /// The risk here is a code sent to the wrong status or a tri-state value misclassified as a failure,
+    /// and neither is observable from outside without a live upstream producing that exact code. Only this
+    /// service's own test assembly can see it; C-A forbids any other reaching in.
+    /// </remarks>
+    internal static class InBandStatus
+    {
+        /// <summary>The problem-body member the upstream response is attached under.</summary>
+        internal const string ResponseExtensionMember = "response";
+
+        /// <summary>The <c>OperationStatus</c>-shaped field name.</summary>
+        private const string StatusFieldName = "status";
+
+        /// <summary>The outcome field, both at message level and inside an <c>OperationStatus</c>.</summary>
+        private const string RetCodeFieldName = "ret_code";
+
+        /// <summary>The optional diagnostic beside an in-band outcome.</summary>
+        private const string ErrorTextFieldName = "error_text";
+
+        /// <summary>
+        /// Projects a failing in-band outcome onto its HTTP answer.
+        /// </summary>
+        /// <param name="response">The upstream response message.</param>
+        /// <param name="failure">The projection, when the message reports a failure.</param>
+        /// <returns>
+        /// <see langword="true"/> when the message carries a failing outcome; otherwise
+        /// <see langword="false"/>, and the message is forwarded as an ordinary success.
+        /// </returns>
+        /// <remarks>
+        /// <b>THE FAILURE TEST IS THE PORTED PREDICATE AND THE TRI-STATE HOLE IS PRESERVED (C-B).</b> The
+        /// legacy algebra tests failure as strictly less than zero WITH CANCELLED EXPLICITLY EXCLUDED
+        /// [<c>isfailed.srf:L11-L13</c>], so three outcomes are not failures and each for its own reason:
+        /// <c>OK</c> is zero, <c>PREVENT</c> is 1 and reads as a SUCCESS in that algebra, and
+        /// <c>CANCELLED</c> is -2 and is neither succeeded nor failed. Rendering a prevention or a
+        /// cancellation as an HTTP failure would be this gateway inventing a classification the contract
+        /// does not make - and inventing it at the system's only public surface.
+        /// </remarks>
+        internal static bool TryProjectFailure(IMessage response, out StatusProjection failure)
+        {
+            failure = default;
+
+            if (!TryReadOutcome(response, out long retCode, out string? errorText))
+            {
+                return false;
+            }
+
+            if (retCode >= RetCode.OK || retCode == RetCode.CANCELLED)
+            {
+                return false;
+            }
+
+            failure = Project(retCode, errorText);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Reads the outcome and its diagnostic from either in-band shape.
+        /// </summary>
+        /// <param name="response">The message to read.</param>
+        /// <param name="retCode">The outcome, when one is present.</param>
+        /// <param name="errorText">The diagnostic beside it, when one is present.</param>
+        /// <returns><see langword="true"/> when the message carries an in-band outcome at all.</returns>
+        /// <remarks>
+        /// BY DESCRIPTOR RATHER THAN BY TYPE SWITCH. Well over a hundred response messages are projected,
+        /// and a switch over them would be a list that silently stops covering new ones. The nested
+        /// <c>OperationStatus</c> shape is tried first because it is the richer form.
+        /// </remarks>
+        private static bool TryReadOutcome(IMessage response, out long retCode, out string? errorText)
+        {
+            retCode = RetCode.OK;
+            errorText = null;
+
+            MessageDescriptor descriptor = response.Descriptor;
+
+            if (descriptor.FindFieldByName(StatusFieldName) is { } statusField
+                && statusField.FieldType == FieldType.Message
+                && statusField.Accessor.GetValue(response) is IMessage status)
+            {
+                if (status.Descriptor.FindFieldByName(RetCodeFieldName) is not { } nestedCode)
+                {
+                    return false;
+                }
+
+                retCode = Convert.ToInt64(
+                    nestedCode.Accessor.GetValue(status),
+                    CultureInfo.InvariantCulture);
+
+                errorText = status.Descriptor.FindFieldByName(ErrorTextFieldName)
+                    ?.Accessor
+                    .GetValue(status) as string;
+
+                return true;
+            }
+
+            if (descriptor.FindFieldByName(RetCodeFieldName) is { } topLevelCode
+                && topLevelCode.FieldType == FieldType.Enum)
+            {
+                retCode = Convert.ToInt64(
+                    topLevelCode.Accessor.GetValue(response),
+                    CultureInfo.InvariantCulture);
+
+                errorText = descriptor.FindFieldByName(ErrorTextFieldName)
+                    ?.Accessor
+                    .GetValue(response) as string;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Maps one failing outcome onto its published HTTP status.
+        /// </summary>
+        /// <param name="retCode">The failing in-band outcome.</param>
+        /// <param name="errorText">The contract's own diagnostic, or <see langword="null"/>.</param>
+        /// <returns>The projection.</returns>
+        /// <remarks>
+        /// <para>
+        /// THE MAPPING MIRRORS THE EXCEPTION MAP BELOW so one condition cannot leave this gateway under two
+        /// different HTTP statuses depending on which channel reported it: a concurrency mismatch is
+        /// <c>409</c> whether it arrived as <see cref="StatusCode.Aborted"/> or as <c>E_RETRY</c> in a
+        /// body. It also matches the DataServices projection's own map, so a caller sees one answer
+        /// regardless of which surface it reached.
+        /// </para>
+        /// <para>
+        /// THE DEFAULT IS <c>500</c> AND NOT <c>400</c>: an unrecognised outcome is a contract this
+        /// projection has not been taught, which is a fault on this side of the boundary, and blaming the
+        /// caller would send it into a retry-with-different-input loop that can never succeed.
+        /// </para>
+        /// <para>
+        /// THE UPSTREAM DIAGNOSTIC IS CARRIED WHEN THERE IS ONE. It is the legacy text and is relayed
+        /// unchanged; the fixed prose is used only when the contract left it empty (constraint C-B).
+        /// </para>
+        /// </remarks>
+        private static StatusProjection Project(long retCode, string? errorText)
+        {
+            (int HttpStatus, string Detail) mapped = retCode switch
+            {
+                RetCode.E_INVALID_ARGUMENT or RetCode.E_INVALID_SQL =>
+                    (StatusCodes.Status400BadRequest, InBandInvalidArgumentDetail),
+
+                RetCode.E_OUT_OF_RANGE or RetCode.E_OUT_OF_BOUND =>
+                    (StatusCodes.Status400BadRequest, InBandOutOfRangeDetail),
+
+                RetCode.E_ACCESS_DENIED => (StatusCodes.Status403Forbidden, InBandAccessDeniedDetail),
+
+                RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND =>
+                    (StatusCodes.Status404NotFound, InBandNotFoundDetail),
+
+                RetCode.E_RETRY => (StatusCodes.Status409Conflict, InBandRetryDetail),
+
+                RetCode.E_BUSY => (StatusCodes.Status429TooManyRequests, InBandBusyDetail),
+
+                RetCode.E_TIME_OUT => (StatusCodes.Status504GatewayTimeout, InBandTimeoutDetail),
+
+                RetCode.E_NO_SUPPORT or RetCode.E_NO_IMPLEMENTATION =>
+                    (StatusCodes.Status501NotImplemented, InBandNotImplementedDetail),
+
+                RetCode.E_DB_ERROR or RetCode.E_INVALID_TRANSACTION =>
+                    (StatusCodes.Status502BadGateway, InBandDataPathDetail),
+
+                _ => (StatusCodes.Status500InternalServerError, InBandUnclassifiedDetail),
+            };
+
+            return new StatusProjection(
+                mapped.HttpStatus,
+                retCode,
+                string.IsNullOrWhiteSpace(errorText) ? mapped.Detail : errorText,
+                FromUpstream: true);
+        }
+    }
+
+    // --------------------------------------------------------------------------------------------------
+    //  IN-BAND FAILURE PROSE - used ONLY when the upstream left its own diagnostic empty
+    // --------------------------------------------------------------------------------------------------
+
+    /// <summary>Fallback prose for a rejected argument reported in band.</summary>
+    private const string InBandInvalidArgumentDetail =
+        "The upstream operation rejected an argument. Its own outcome code is on the retCode member.";
+
+    /// <summary>Fallback prose for an out-of-range or out-of-bound outcome reported in band.</summary>
+    private const string InBandOutOfRangeDetail =
+        "The upstream operation rejected a value outside its permitted range.";
+
+    /// <summary>Fallback prose for an access refusal reported in band.</summary>
+    private const string InBandAccessDeniedDetail = "The upstream operation refused this caller.";
+
+    /// <summary>Fallback prose for an unknown handle or missing object reported in band.</summary>
+    private const string InBandNotFoundDetail =
+        "The upstream operation could not resolve the handle or object named in the request.";
+
+    /// <summary>Fallback prose for a retryable conflict reported in band.</summary>
+    /// <remarks>
+    /// 409, the SAME status an Aborted receives, so a concurrency mismatch answers one way regardless of
+    /// which channel reported it. There is no silent overwrite on either path.
+    /// </remarks>
+    private const string InBandRetryDetail =
+        "The upstream operation was rejected and can be retried. When it carries a conflict, the current "
+        + "row state is on the relayed response and the caller implements an explicit retry-or-surface "
+        + "policy; this gateway performs no retry of its own.";
+
+    /// <summary>Fallback prose for a busy resource reported in band.</summary>
+    private const string InBandBusyDetail =
+        "The upstream resource is in use by an operation already in flight. The request was not applied "
+        + "and can be retried.";
+
+    /// <summary>Fallback prose for a timeout reported in band.</summary>
+    private const string InBandTimeoutDetail =
+        "The upstream operation did not complete within its budget.";
+
+    /// <summary>Fallback prose for an unsupported or unimplemented outcome reported in band.</summary>
+    private const string InBandNotImplementedDetail =
+        "The upstream operation is not supported for the arguments supplied.";
+
+    /// <summary>Fallback prose for a data-path failure reported in band.</summary>
+    /// <remarks>
+    /// 502 rather than 500: the failure is the data path BEHIND this gateway answering badly, not this
+    /// gateway faulting, and the two call for different investigations.
+    /// </remarks>
+    private const string InBandDataPathDetail =
+        "The data path reported a failure. Any driver-level detail travels on the relayed response.";
+
+    /// <summary>Fallback prose for an in-band outcome this projection does not classify.</summary>
+    private const string InBandUnclassifiedDetail =
+        "The upstream operation reported a failure this projection does not classify. Its own outcome code "
+        + "is on the retCode member.";
+
+    internal readonly record struct StatusProjection(
         int HttpStatus,
         long RetCode,
         string Detail,
@@ -2649,4 +3144,3 @@ public sealed record ProtoPayload
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? Members { get; init; }
 }
-

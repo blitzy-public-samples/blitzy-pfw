@@ -340,8 +340,16 @@ public sealed record RowSelectRejectionError
 /// host's event chain in order; concurrent use of a single instance is outside the contract, as it is
 /// in the oracle.
 /// </para>
+/// <para>
+/// IT IMPLEMENTS <see cref="IDataWindowRowSelectService"/>, WHICH IS ONE OF THE EVENT CHAIN'S FIVE
+/// ATTACHED-SERVICE CONTRACT. It adds one member beyond the two every attached service has -
+/// OnFiltered, the port of `RowSelect.Event OnFiltered()` [n_cst_dwsvc_rowselect.sru:L408-L409] -
+/// and this class already declares it public for exactly that raise, so satisfying the interface
+/// costs nothing and declaring it removes the need for an adapter between this model and an event
+/// chain.
+/// </para>
 /// </remarks>
-public sealed class RowSelectService : DataWindowServiceBase
+public sealed class RowSelectService : DataWindowServiceBase, IDataWindowRowSelectService
 {
     // ==========================================================================================
     //  CONSTANTS - :L17-L21, SPELLINGS PRESERVED VERBATIM

@@ -609,6 +609,280 @@ public sealed class SystemErrorObservabilityTests
     }
 
     // ----------------------------------------------------------------------------------------------
+    //  TERMINATION SURVIVES THE CALLER CHANNEL (DECISION 4 and DECISION 5).
+    //
+    //  The property every test in this section pins is one sentence long: the body write is best
+    //  effort and the halt is not. It needs a section of its own because the failure it guards against
+    //  is invisible from every angle except this one - the handler returns a boolean, the caller is
+    //  already gone, and the only observable difference between "terminated" and "carried on serving
+    //  requests in a state its own invariants call impossible" is whether the termination callback ran.
+    //
+    //  Four ways the caller channel can fail are exercised, because they take four different code
+    //  paths out of the write: it throws, it is cancelled, it declines because the response is already
+    //  on the wire, and it declines because the caller has gone. All four must terminate, and the
+    //  legacy is the reason - its halt follows the report unconditionally and has no equivalent
+    //  opportunity to be skipped [ws_objects/pfw.pbl.src/pfw.sra:L141-L143].
+    // ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A structural fault terminates even when writing the caller's body throws.
+    /// </summary>
+    /// <remarks>
+    /// THE ORIGINAL DEFECT, EXACTLY. With the write and the halt in sequence, an <c>IOException</c> from
+    /// a broken socket propagated out of the handler and carried the termination request away with it, so
+    /// a decoded assertion failure could leave the host running and the framework finalize step unrun.
+    /// The write fault is now recorded as its own secondary event and does not displace the primary one.
+    /// </remarks>
+    [Fact]
+    public async Task AStructuralFaultTerminatesEvenWhenTheBodyWriteThrows()
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+        HttpContext httpContext = CreateContextWithFailingBody();
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            CreateSevenFieldAssertion(),
+            TestContext.Current.CancellationToken);
+
+        // Not handled, because no body reached the caller - and NOT thrown, because rethrowing is what
+        // used to skip the halt.
+        Assert.False(handled);
+
+        Assert.Single(terminations);
+        Assert.NotEqual(0, terminations[0]);
+
+        // Both records exist and in this order: the primary fault first, the write failure second. The
+        // secondary record carries the write's type chain, never the write's message.
+        Assert.Equal(2, logger.Entries.Count);
+        Assert.Equal(LogLevel.Critical, logger.Entries[0].Level);
+        Assert.Equal(LogLevel.Warning, logger.Entries[1].Level);
+        Assert.Equal(
+            typeof(IOException).FullName,
+            logger.Entries[1].Property("WriteFaultTypes"));
+    }
+
+    /// <summary>
+    /// A structural fault terminates even when the write is cancelled mid-flight.
+    /// </summary>
+    /// <remarks>
+    /// A DIFFERENT PATH TO THE SAME PLACE, AND WORTH ITS OWN CASE. A cancelled write raises
+    /// <see cref="OperationCanceledException"/> rather than a transport fault, and a
+    /// <c>catch (IOException)</c>-shaped fix would have handled the case above while leaving this one
+    /// exactly as broken. The catch is therefore deliberately unrestricted by type.
+    /// </remarks>
+    [Fact]
+    public async Task AStructuralFaultTerminatesEvenWhenTheWriteIsCancelled()
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+        HttpContext httpContext = CreateHttpContext();
+
+        using CancellationTokenSource cancelled = new();
+        await cancelled.CancelAsync();
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            CreateSevenFieldAssertion(),
+            cancelled.Token);
+
+        Assert.False(handled);
+        Assert.Single(terminations);
+        Assert.NotEqual(0, terminations[0]);
+    }
+
+    /// <summary>
+    /// A structural fault terminates when the response is already on the wire and no body can be sent.
+    /// </summary>
+    [Fact]
+    public async Task AStructuralFaultTerminatesWhenTheResponseHasAlreadyStarted()
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+        HttpContext httpContext = new DefaultHttpContext
+        {
+            Features = { [typeof(IHttpResponseFeature)] = new StartedResponseFeature() },
+        };
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            CreateSevenFieldAssertion(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(handled);
+        Assert.Single(terminations);
+        Assert.NotEqual(0, terminations[0]);
+    }
+
+    /// <summary>
+    /// A structural fault on a request the caller has abandoned still terminates, and writes nothing.
+    /// </summary>
+    /// <remarks>
+    /// THE TWO CLASSIFICATIONS MEET HERE, AND THIS TEST FIXES WHICH ONE WINS. The request is aborted, so
+    /// the caller channel is refused; the fault is structural, so the halt is not. The alternative
+    /// reading - that an abandoned request makes the whole fault moot - would let any caller suppress a
+    /// halt by hanging up, which is the opposite of fail-fast.
+    /// </remarks>
+    [Fact]
+    public async Task AStructuralFaultOnAnAbandonedRequestStillTerminatesAndWritesNothing()
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+
+        using CancellationTokenSource abandoned = new();
+        HttpContext httpContext = CreateHttpContext();
+        httpContext.RequestAborted = abandoned.Token;
+        await abandoned.CancelAsync();
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            CreateSevenFieldAssertion(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(handled);
+        Assert.Single(terminations);
+        Assert.NotEqual(0, terminations[0]);
+
+        // Nothing was written, and the abandonment was recorded as its own distinct event rather than
+        // as an already-started response, which is a different cause with a different remedy.
+        Assert.Equal(0, httpContext.Response.Body.Length);
+        Assert.Equal(2, logger.Entries.Count);
+        Assert.Equal(LogLevel.Critical, logger.Entries[0].Level);
+        Assert.Equal(LogLevel.Warning, logger.Entries[1].Level);
+        Assert.Contains("abandoned", logger.Entries[1].Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An ordinary fault whose write throws is reported and NOT terminal.
+    /// </summary>
+    /// <remarks>
+    /// The other half of the property. Making the halt unconditional on the write's outcome must not make
+    /// it unconditional on the fault's KIND: terminating because a socket broke during an ordinary 500
+    /// would let any caller that disconnects at the right moment take the instance down.
+    /// </remarks>
+    [Fact]
+    public async Task AnOrdinaryFaultWhoseWriteThrowsIsNotTerminal()
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+        HttpContext httpContext = CreateContextWithFailingBody();
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            CreateHostileException(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(handled);
+        Assert.Empty(terminations);
+        Assert.Equal(2, logger.Entries.Count);
+        Assert.Equal(LogLevel.Error, logger.Entries[0].Level);
+        Assert.Equal(LogLevel.Warning, logger.Entries[1].Level);
+    }
+
+    // ----------------------------------------------------------------------------------------------
+    //  CANCELLATION IS NOT A SERVER FAULT (DECISION 2 and DECISION 5).
+    //
+    //  A caller that hangs up produces an OperationCanceledException on this path, and every one of
+    //  them used to be recorded at error and then handed to a body write against a socket that was no
+    //  longer there. The attribution test is the whole distinction, so both sides of it are pinned: a
+    //  cancellation either token can account for is the caller's, and a cancellation neither can
+    //  account for came from inside this process and IS a fault.
+    // ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A cancellation the caller's own abort token accounts for is recorded at debug, answered with no
+    /// body, and never terminal.
+    /// </summary>
+    /// <param name="viaRequestAbort">
+    /// Whether the request's abort token is the cancelled one; otherwise the handler's own token is.
+    /// </param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// BOTH TOKENS ARE EXERCISED BECAUSE EITHER CAN BE THE ONE THAT FIRES. The abort token is signalled
+    /// when the connection drops; the handler's token is the one the middleware supplies, and a fix
+    /// reading only one of the two would classify half of the real cancellations as server faults.
+    /// </remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACallerCancellationIsNotAServerFaultAndIsNotTerminal(bool viaRequestAbort)
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+        HttpContext httpContext = CreateHttpContext(routePattern: RoutePatternText);
+
+        using CancellationTokenSource cancelled = new();
+        await cancelled.CancelAsync();
+
+        if (viaRequestAbort)
+        {
+            httpContext.RequestAborted = cancelled.Token;
+        }
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            new OperationCanceledException("the caller hung up", cancelled.Token),
+            viaRequestAbort ? TestContext.Current.CancellationToken : cancelled.Token);
+
+        // Reported as handled so nothing downstream attempts a body of its own, and NOT terminal.
+        Assert.True(handled);
+        Assert.Empty(terminations);
+
+        // No body, and the status is left exactly as it was: a 500 written here would be a server-fault
+        // claim about a request nobody is waiting for.
+        Assert.Equal(0, httpContext.Response.Body.Length);
+        Assert.Equal(StatusCodes.Status200OK, httpContext.Response.StatusCode);
+
+        // ONE record, at DEBUG. The level is the substance: recorded at error, ordinary client behaviour
+        // becomes an error-rate signal and the service cannot be monitored.
+        RecordedLogEntry entry = logger.Single();
+        Assert.Equal(LogLevel.Debug, entry.Level);
+
+        // The route PATTERN, never the concrete path - the same allowlist the request-fault record uses.
+        Assert.Equal(RoutePatternText, entry.Property("RequestRoute"));
+        Assert.Equal(HttpMethods.Post, entry.Property("RequestMethod"));
+
+        // The exception is not handed to the logger, so an upstream message on it cannot be rendered
+        // into the record; only its type chain is named.
+        Assert.Null(entry.Exception);
+        Assert.Equal(
+            typeof(OperationCanceledException).FullName,
+            entry.Property("FaultTypes"));
+    }
+
+    /// <summary>
+    /// A cancellation neither token accounts for is an internal fault, answered as one.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// THE ATTRIBUTION TEST IS DELIBERATELY NOT "IS THIS AN OperationCanceledException". A cancellation
+    /// raised while nothing that could speak for the caller was signalled came from inside this process
+    /// abandoning its own work - an internal deadline, a linked token of our own - and reporting that as
+    /// a caller hanging up would hide a genuine defect behind a status nobody investigates.
+    /// </remarks>
+    [Fact]
+    public async Task ACancellationNeitherTokenAccountsForIsAnInternalFault()
+    {
+        RecordingLogger logger = new();
+        SystemErrorHandler handler = CreateHandler(logger, out List<int> terminations);
+        HttpContext httpContext = CreateHttpContext();
+
+        bool handled = await handler.TryHandleAsync(
+            httpContext,
+            new OperationCanceledException("nothing cancelled this"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(handled);
+        Assert.Empty(terminations);
+
+        // The generic path ran in full: an error record and a problem body carrying the published
+        // return code.
+        Assert.Equal(LogLevel.Error, logger.Single().Level);
+        Assert.Equal(StatusCodes.Status500InternalServerError, httpContext.Response.StatusCode);
+        Assert.NotEqual(0, httpContext.Response.Body.Length);
+    }
+
+    // ----------------------------------------------------------------------------------------------
     //  THE TYPE-CHAIN DESCRIBER, AS A PURE FUNCTION (C-H).
     // ----------------------------------------------------------------------------------------------
 
@@ -785,6 +1059,80 @@ public sealed class SystemErrorObservabilityTests
         return document.RootElement.TryGetProperty("traceId", out JsonElement traceId)
             ? traceId.GetString()
             : null;
+    }
+
+    /// <summary>
+    /// A request context whose response body faults on the first write.
+    /// </summary>
+    /// <returns>The context.</returns>
+    /// <remarks>
+    /// STANDS IN FOR THE ONE FAILURE THAT CANNOT BE STAGED ANY OTHER WAY WITHOUT A SOCKET. A caller that
+    /// disconnects mid-response makes the write throw from inside the framework's own serializer, and the
+    /// fault type is the one a broken connection really produces rather than an invented sentinel, so a
+    /// handler that special-cased some other type would not pass.
+    /// </remarks>
+    private static HttpContext CreateContextWithFailingBody()
+    {
+        DefaultHttpContext httpContext = new();
+        httpContext.Request.Method = HttpMethods.Post;
+        httpContext.Request.Path = "/v1/ping";
+        httpContext.Response.Body = new FailingResponseStream();
+
+        return httpContext;
+    }
+
+    /// <summary>
+    /// A write-only stream that faults on every write, as a severed connection does.
+    /// </summary>
+    private sealed class FailingResponseStream : Stream
+    {
+        /// <inheritdoc/>
+        public override bool CanRead => false;
+
+        /// <inheritdoc/>
+        public override bool CanSeek => false;
+
+        /// <inheritdoc/>
+        public override bool CanWrite => true;
+
+        /// <inheritdoc/>
+        public override long Length => throw new NotSupportedException();
+
+        /// <inheritdoc/>
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        /// <inheritdoc/>
+        public override void Flush()
+        {
+        }
+
+        /// <inheritdoc/>
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        /// <inheritdoc/>
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        /// <inheritdoc/>
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        /// <inheritdoc/>
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new IOException("the connection was reset by the peer");
+
+        /// <inheritdoc/>
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromException(new IOException("the connection was reset by the peer"));
+
+        /// <inheritdoc/>
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            Task.FromException(new IOException("the connection was reset by the peer"));
     }
 
     /// <summary>

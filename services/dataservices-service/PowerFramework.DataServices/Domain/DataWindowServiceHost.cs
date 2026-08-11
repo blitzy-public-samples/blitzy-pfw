@@ -779,6 +779,57 @@ public interface IDataWindowChild
     // ------------------------------------------------------------------------------------------
 
     /// <summary>
+    /// Applies a filter to the child, BINDING its literals rather than executing interpolated text - the
+    /// port of <c>dwc.SetFilter(sFilter)</c> (<c>n_cst_dwsvc_dropdownsearch.sru:L389</c>).
+    /// </summary>
+    /// <param name="filter">
+    /// The filter in both forms. <see cref="Services.BoundFilterExpression.ParameterizedText"/> plus
+    /// <see cref="Services.BoundFilterExpression.Parameters"/> is what an implementation must ALWAYS
+    /// execute; <see cref="Services.BoundFilterExpression.ObservableText"/> is for reporting and recording
+    /// and is never executed. <see cref="Services.BoundFilterExpression.Bindable"/> reports whether the
+    /// expression is CERTIFIED free of unbound caller values - it is NOT a switch selecting which form to
+    /// run, because an uncertified expression's parameterized text simply is its text.
+    /// </param>
+    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS CONTRACT CARRIES AN EXPRESSION AND NOT A STRING, AND WHY THERE IS NO STRING OVERLOAD
+    /// BESIDE IT.</b> The legacy composes its search filter by concatenating the user's typed text into
+    /// expression syntax with no escaping at all [<c>:L319</c>, <c>:L323</c>, <c>:L331</c>, <c>:L334</c>],
+    /// so a term carrying a quote, a parenthesis or the word <c>OR</c> changes the STRUCTURE of what runs -
+    /// CWE-94. A string-taking member cannot distinguish a value from syntax, so an implementer offered one
+    /// has no way to be safe; taking the expression makes the safe path the only path. A convenience
+    /// overload would silently become the one everybody called.
+    /// </para>
+    /// <para>
+    /// <b>AND AN IMPLEMENTATION THAT CANNOT BIND MUST SAY SO RATHER THAN SILENTLY INTERPOLATE.</b> There is
+    /// deliberately NO default interface implementation delegating to the rendered text: that default would
+    /// reinstate exactly the hole this member closes, in every implementer that had not thought about it,
+    /// invisibly. An implementer with no binding facility should execute the rendered text and DOCUMENT
+    /// that it does - a decision taken in the open.
+    /// </para>
+    /// <para>
+    /// <b>THE SAME TRAP IN MINIATURE: DO NOT BRANCH ON <c>Bindable</c> TO FALL BACK TO THE RENDERED TEXT.</b>
+    /// A conjunction of an application-supplied original filter and a user's bound search reports
+    /// uncertified - the original half's provenance is unknown - while still carrying the user's value as a
+    /// parameter. Falling back there would re-interpolate the one value that had been bound, on the one path
+    /// (the re-apply after an original-filter change) that a test of the first application never reaches.
+    /// </para>
+    /// <para>
+    /// <c>integer</c> RETURN, NOT <c>bool</c>: PowerBuilder's <c>SetFilter</c> answers <c>1</c> for success
+    /// and <c>-1</c> for failure, and mapping it onto a boolean would erase the null-argument outcome the
+    /// runtime also has.
+    /// </para>
+    /// <para>
+    /// SETTING AND APPLYING ARE TWO CALLS IN POWERBUILDER AND STAY TWO CALLS HERE. <c>:L389</c> sets and
+    /// <c>:L390</c> applies; merging them would change the observable sequence a characterization recording
+    /// captures, and would also make the no-op case - a filter set to the value it already had -
+    /// indistinguishable from a re-filter.
+    /// </para>
+    /// </remarks>
+    int SetFilter(Services.BoundFilterExpression filter);
+
+    /// <summary>
     /// Suspends or resumes the child's repainting - the port of <c>dwc.SetRedraw(enable)</c>
     /// (<c>n_cst_dwsvc_dropdownsearch.sru:L387</c>, <c>:L410</c>).
     /// </summary>
@@ -794,26 +845,6 @@ public interface IDataWindowChild
     /// site.
     /// </remarks>
     int SetRedraw(bool enable);
-
-    /// <summary>
-    /// Sets the child's filter expression WITHOUT applying it - the port of
-    /// <c>dwc.SetFilter(filter)</c> (<c>n_cst_dwsvc_dropdownsearch.sru:L389</c>).
-    /// </summary>
-    /// <param name="filter">
-    /// The filter expression, which may be the empty string to clear the filter. THE TEXT IS PASSED
-    /// THROUGH VERBATIM AND UNESCAPED - it is composed by
-    /// <c>n_cst_dwsvc_dropdownsearch.sru:L313-L344</c> from unescaped interpolation, which AAP 0.6.4
-    /// records as a known legacy defect to be documented rather than silently corrected
-    /// (constraint C-B).
-    /// </param>
-    /// <returns><c>1</c> on success, <c>-1</c> on failure.</returns>
-    /// <remarks>
-    /// SETTING AND APPLYING ARE TWO CALLS IN POWERBUILDER AND STAY TWO CALLS HERE. <c>:L389</c> sets
-    /// and <c>:L390</c> applies; merging them would change the observable sequence a
-    /// characterization recording captures, and would also make the no-op case - a filter set to the
-    /// value it already had - indistinguishable from a re-filter.
-    /// </remarks>
-    int SetFilter(string filter);
 
     /// <summary>
     /// Applies the filter expression, moving non-matching rows to the filter buffer - the port of

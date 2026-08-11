@@ -1007,9 +1007,13 @@ message NullableInt64 {
 //  Other call sites confirm the same five-positional shape, including the synthesized
 //  "no updatable table" error [n_cst_thread_task_sqlupdate.sru:L190] and the failing-command case
 //  [n_cst_thread_task_sqlcommand.sru:L110]. The structure is additionally passed as a `ref`
-//  out-parameter, `of_GetTransObject(ref transObject, ref dbErrData)` [sqlbase.sru:L187,
-//  sqlcommand.sru:L70, sqlquery.sru:L520, sqlupdate.sru:L292], so it is genuinely a carrier the
-//  caller reads back - which is exactly what makes it a response message here.
+//  out-parameter, `of_GetTransObject(ref transObject, ref dbErrData)`
+//  [n_cst_thread_task_sqlbase.sru:L187, n_cst_thread_task_sqlcommand.sru:L70,
+//  n_cst_thread_task_sqlquery.sru:L520, n_cst_thread_task_sqlupdate.sru:L292], so it is genuinely a
+//  carrier the caller reads back - which is exactly what makes it a response message here. The four
+//  locators are spelled in full rather than abbreviated: no file named `sqlbase.sru`, `sqlcommand.sru`,
+//  `sqlquery.sru` or `sqlupdate.sru` exists anywhere in ws_objects/, so a shortened form resolves to
+//  nothing.
 //
 //  ================= sqlsyntax : THE ONE FIELD THAT MUST BE REDACTED =========================
 //  SHAPE CHOSEN, EXPLICITLY (C-K). Two shapes were permitted: a single REDACTED field, or a

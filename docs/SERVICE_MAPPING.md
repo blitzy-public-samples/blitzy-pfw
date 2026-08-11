@@ -38,7 +38,7 @@ marked TBD.
 ## Current state of the artifacts this document references
 
 [`BUILD.md`](BUILD.md) §1 defines the four status labels this documentation set uses; the ones that apply
-here are **present and verified** and **planned — not yet present**.
+here are **present and verified**, **present but unexercised** and **planned — not yet present**.
 
 | Artifact | What it carries | State |
 | --- | --- | --- |
@@ -47,10 +47,24 @@ here are **present and verified** and **planned — not yet present**.
 
 Everything else this document references — the solution and project files, the shared libraries, the
 protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
-`orchestration/.env.example` and the read-only legacy tree — **is present in the tree today**. The
-artifacts this document does *not* reference but a reader may expect, and which are absent, are the four
-service `Dockerfile`s, `orchestration/docker-compose.yml`, `orchestration/README.md` and
-`.github/workflows/ci.yml`; [`BUILD.md`](BUILD.md) tracks those.
+`orchestration/.env.example` and the read-only legacy tree — **is present in the tree today**.
+
+**So are the four services themselves, which is worth stating precisely because this document assigns
+capabilities to them.** Each of Gateway, DataServices, Persistence and Security has an application project
+with an entry point, its handler and domain tree, and a sibling test project: all twenty projects in the
+solution build in Release with **0 warnings and 0 errors**, and all ten test projects pass — **18,603
+tests passing, 0 failing, 4 skipped by design**. Every service test drives its own service **in process**,
+so the assignments below are backed by running code rather than by a plan alone.
+
+What is still absent, and what a reader may expect to find:
+
+| Absent artifact | Consequence for this document |
+| --- | --- |
+| `orchestration/docker-compose.yml` and `orchestration/README.md` | All four container definitions **are present** and [`BUILD.md`](BUILD.md) §7.1 describes what each does, but nothing assembles them, so **no whole-stack bring-up has been performed** and no assignment here has been observed across a network boundary |
+| `characterization/**` | **No paired legacy and .NET recording has been captured**, so no assignment here has been checked for behavioural parity against the oracle |
+
+[`BUILD.md`](BUILD.md) §1.1 and §13 track all four, and [`PARITY.md`](PARITY.md) §1 states the parity
+position in full.
 
 ---
 

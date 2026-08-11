@@ -1686,17 +1686,39 @@ internal sealed class SqlQueryTask : SqlTaskBase
     /// C-05's hook-class field.
     /// </summary>
     /// <param name="hookClass">The class name; <see langword="null"/> is treated as empty.</param>
-    /// <returns><c>RetCode.OK</c> - the oracle has NO guard here.</returns>
+    /// <returns>
+    /// <c>RetCode.OK</c> for a blank name or a sanctioned one; <c>RetCode.E_INVALID_ARGUMENT</c> for a
+    /// non-blank name that names no sanctioned hook.
+    /// </returns>
     /// <remarks>
+    /// <para>
     /// <b>Constraint C-G.</b> The oracle writes <c>hook = Create Using _sHookClass</c> [<c>:L517</c>]
     /// with a name that arrived through this setter, so a name here is CALLER-CONTROLLED INPUT and
-    /// activating an arbitrary type from it would be a remote type-activation primitive. This setter
-    /// therefore only STORES the name; resolution goes through the base's restricted activator, which
-    /// validates it and fails cleanly rather than throwing into the request path. Nothing here
+    /// activating an arbitrary type from it would be a remote type-activation primitive. Resolution
+    /// therefore goes through the base's restricted activator, which is an ALLOWLIST. Nothing here
     /// transmits code, script or an expression to evaluate, so constraint C-D is untouched.
+    /// </para>
+    /// <para>
+    /// <b>AND AN UNSANCTIONED NAME IS REFUSED HERE RATHER THAN IGNORED LATER.</b> Because the activator
+    /// is an allowlist, an unregistered name can never produce a hook - so storing it and discovering
+    /// that at retrieval time means the retrieval runs with no hook and reports SUCCESS. A caller who
+    /// asked for a hook would be told its request succeeded while the behaviour it asked for silently did
+    /// not happen, which is the worst of the available answers. <c>E_INVALID_ARGUMENT</c> at the setter
+    /// is the truth, delivered while the caller can still act on it.
+    /// </para>
+    /// <para>
+    /// <b>Blank remains legal, and nothing is stored behind a refusal.</b> Blank means "no hook"
+    /// [<c>:L516</c>] and is the ordinary case (C-B). A refused name leaves the previously accepted value
+    /// in place, so a caller cannot half-change the task by sending a bad name.
+    /// </para>
     /// </remarks>
     internal long SetHookClass(string? hookClass)
     {
+        if (!IsAdmissibleHookClass(hookClass))
+        {
+            return RetCode.E_INVALID_ARGUMENT;
+        }
+
         _hookClass = hookClass ?? string.Empty;
 
         return RetCode.OK;
@@ -2848,10 +2870,17 @@ internal sealed class SqlQueryTask : SqlTaskBase
                     // [:L763] `data.Retrieve()` - the NO-ARGUMENT form. A plain statement has already had
                     // its parameters interpolated into it by the binder at [:L605], so passing them again
                     // here would bind them twice.
-                    ? store.Retrieve([])
+                    //
+                    // AWAITED, AND THE REQUEST'S TOKEN GOES WITH IT. This is the one provider call in the
+                    // whole SQL layer whose entire call chain was already asynchronous, so the retrieval
+                    // that used to block this continuation now yields it and observes the caller. The
+                    // oracle's own cancellation polls sit either side of this call [:L740, :L785] and both
+                    // remain exactly where they are; the token is strictly more responsive than they are,
+                    // because it can be seen DURING the retrieval rather than only after it.
+                    ? await store.RetrieveAsync([], cancellationToken).ConfigureAwait(false)
 
                     // [:L765] the parameterised retrieve, whose argument MATCHING belongs to the base.
-                    : RetrieveWithParams(store);
+                    : await RetrieveWithParamsAsync(store, cancellationToken).ConfigureAwait(false);
             }
 
             // [:L769] the after-retrieve notification, which fires BEFORE the defensive override below -
@@ -3199,6 +3228,18 @@ internal sealed class SqlQueryTask : SqlTaskBase
             // [:L604-L609] the FIRST of two distinct binding sites. Constraint C-F: after this call the
             // statement carries interpolated literal values, so it never reaches a log or a wire
             // unredacted.
+            //
+            // THE SINGLE-FORM BINDER HERE, DELIBERATELY, AND THE THREE CHANNELS ARE WHY. This path binds a
+            // caller-authored statement's own named parameters into that statement purely to DERIVE its
+            // result-set schema, and the derived grid syntax then carries the interpolated text as the
+            // data object's `retrieve=` attribute - which is observable through Describe and must stay
+            // byte-identical. Nothing third-party is spliced: a caller that supplies both the statement
+            // and its parameter values could have written the literal itself. The channel that DOES carry
+            // third-party data into a retrieval is the retrieve ARGUMENT list, and that is bound as
+            // provider parameters where the statement executes. The remaining splice - the raw
+            // where-clause setter - is the legacy's own documented defect, preserved observably and
+            // reported only through the redactor. The command path, whose values reach an Exec, uses the
+            // DUAL-form binder so what executes is parameterized.
             if (HasParams()
                 && Predicates.IsFailed(BindParams(ref sql, (long)transaction.GetDbType())))
             {
@@ -4114,4 +4155,3 @@ internal sealed class SqlQueryTask : SqlTaskBase
 
     #endregion
 }
-

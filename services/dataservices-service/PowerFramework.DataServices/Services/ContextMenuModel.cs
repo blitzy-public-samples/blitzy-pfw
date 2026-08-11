@@ -1119,8 +1119,15 @@ public sealed record ColumnAutoWidthPlan
 /// in the oracle. DECISION 5 makes the sequence explicit rather than implicit, which is the only reason a
 /// caller can now get it wrong at all - hence <see cref="ContextMenuLayout.AwaitingSelection"/>.
 /// </para>
+/// <para>
+/// IT IMPLEMENTS <see cref="IDataWindowContextMenuService"/>, WHICH IS ONE OF THE EVENT CHAIN'S
+/// FIVE ATTACHED-SERVICE CONTRACTS. It declares NO member of its own beyond the two every attached
+/// service has, so satisfying it costs nothing here - and DECLARING it is what lets the productive
+/// attached-service factory hand this model to an event chain without an adapter in between. An
+/// adapter would have been a type whose every member was a forward.
+/// </para>
 /// </remarks>
-public sealed class ContextMenuModel : DataWindowServiceBase
+public sealed class ContextMenuModel : DataWindowServiceBase, IDataWindowContextMenuService
 {
     // ==========================================================================================
     //  THE NINE RESERVED MENU IDENTIFIERS                     n_cst_dwsvc_contextmenu.sru:L37-L45
@@ -6893,4 +6900,3 @@ public sealed class ContextMenuModel : DataWindowServiceBase
         return plan;
     }
 }
-

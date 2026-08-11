@@ -719,6 +719,65 @@ public sealed class SystemErrorHandler : IExceptionHandler
         + "body could be written for this request. TraceId={TraceId}";
 
     /// <summary>
+    /// The operator-channel record for a response the caller has abandoned.
+    /// </summary>
+    /// <remarks>
+    /// DISTINCT FROM THE ALREADY-STARTED RECORD BECAUSE THE CAUSE IS DIFFERENT AND SO IS THE ACTION.
+    /// An already-started response is a pipeline-ordering fact about this service; an aborted request
+    /// is a fact about the caller, and the correct response to it is to write nothing at all rather
+    /// than to attempt a write that can only fault. Sharing one message would tell an operator that
+    /// their own pipeline had gone wrong when it had not.
+    /// </remarks>
+    private const string ResponseAbandonedLogMessage =
+        "The caller abandoned the request before the system-error handler could write a "
+        + "problem-details body, so none was written. TraceId={TraceId}";
+
+    /// <summary>
+    /// The operator-channel record for a caller-attributable cancellation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WRITTEN AT DEBUG, AND THE LEVEL IS THE POINT. A caller that hangs up is not a fault of this
+    /// service: it is an ordinary, expected event that a browser tab closing produces. Recording it
+    /// at error - which is what happened while every cancellation fell into the generic path -
+    /// manufactures a server-fault signal out of normal client behaviour, and a service whose error
+    /// rate tracks how often callers navigate away cannot be monitored.
+    /// </para>
+    /// <para>
+    /// Nothing derived from the exception is read. The record names the request's own method and
+    /// route PATTERN and nothing else, on the same allowlist reasoning as the request-fault record
+    /// (C-F): a cancellation can carry an arbitrary upstream message just as any other fault can.
+    /// </para>
+    /// </remarks>
+    private const string RequestCancelledLogMessage =
+        "The caller cancelled the request, so no problem-details body was written and the host was "
+        + "not asked to stop. TraceId={TraceId} Method={RequestMethod} Route={RequestRoute} "
+        + "FaultTypes={FaultTypes}";
+
+    /// <summary>
+    /// The operator-channel record for a body write that faulted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A WRITE FAILURE MUST NEVER DISPLACE THE FAULT THAT CAUSED IT. Before the structural-fault path
+    /// was made finally-safe, a fault here propagated out of the handler and took the termination
+    /// request with it, so an assertion failure could leave the host running - the write, which is a
+    /// best-effort courtesy to the caller, was able to cancel the one action that is not optional.
+    /// This record exists so the secondary failure is still visible without being confused for the
+    /// primary one.
+    /// </para>
+    /// <para>
+    /// The exception TYPE CHAIN is recorded rather than the exception, on the allowlist reasoning of
+    /// C-F: a transport fault's message can carry an address, and this record is written on both the
+    /// structural and the request path.
+    /// </para>
+    /// </remarks>
+    private const string ResponseWriteFailedLogMessage =
+        "Writing the problem-details body faulted, so the caller received no body for this request. "
+        + "The originating fault is recorded separately and is unaffected. TraceId={TraceId} "
+        + "WriteFaultTypes={WriteFaultTypes}";
+
+    /// <summary>
     /// The separator between links of the exception type chain the allowlisted record carries,
     /// pointing from the outermost type towards the innermost cause.
     /// </summary>
@@ -1457,6 +1516,48 @@ public sealed class SystemErrorHandler : IExceptionHandler
         // optimization.
         string correlationId = ResolveCorrelationId(httpContext);
 
+        // ---- CANCELLATION, CLASSIFIED BEFORE THE GENERIC PATH AND NOT INSIDE IT.
+        //
+        // A caller that hangs up produces an OperationCanceledException here, and every one of them
+        // used to fall through to the request-fault path: recorded at error as a server fault, and
+        // then handed to a body write against a socket that is no longer there. Both halves are wrong.
+        // A cancellation is not this service's fault, and a service whose error rate tracks how often
+        // callers navigate away cannot be monitored; and the write can only fault, which before the
+        // structural path was made finally-safe was enough to skip termination altogether.
+        //
+        // THE ATTRIBUTION TEST IS THE WHOLE DISTINCTION, and it is deliberately not "is this an
+        // OperationCanceledException". A cancellation with NEITHER the request's own abort token nor
+        // the handler's token signalled did not come from the caller - it came from something inside
+        // this process abandoning the work, an internal deadline or a linked token of our own - and
+        // that IS a fault worth a 500 and an operator record. Only a cancellation the caller can be
+        // held responsible for takes this arm.
+        //
+        // GUARDED ON !structuralFault FOR COMPLETENESS RATHER THAN NECESSITY. AssertionFailure is not
+        // an OperationCanceledException today, so the guard changes nothing now; it is here so that a
+        // future type which is both can never take the quiet arm, because a structural fault is
+        // terminal (DECISION 5) whatever else is true of it.
+        if (!structuralFault
+            && exception is OperationCanceledException
+            && (httpContext.RequestAborted.IsCancellationRequested
+                || cancellationToken.IsCancellationRequested))
+        {
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug(
+                    RequestCancelledLogMessage,
+                    correlationId,
+                    httpContext.Request.Method,
+                    DescribeRoute(httpContext),
+                    DescribeExceptionTypes(exception));
+            }
+
+            // REPORTED AS HANDLED, so nothing downstream attempts a body of its own. There is nobody
+            // left to receive one, and a middleware fallback writing to an abandoned socket produces
+            // a second, equally pointless fault. The host is NOT asked to stop: a caller hanging up is
+            // not a structural fault and never was.
+            return true;
+        }
+
         // ---- OPERATOR CHANNEL (DECISION 2), in one of its two forms.
         if (structuralFault)
         {
@@ -1521,20 +1622,52 @@ public sealed class SystemErrorHandler : IExceptionHandler
 
         // ---- CALLER CHANNEL: the redacted body (DECISION 2), carrying the SAME correlation
         // identifier that was just written to the operator record (DECISION 7).
-        bool handled = await WriteRedactedProblemAsync(
-                httpContext,
-                wireRetCode,
-                correlationId,
-                cancellationToken)
-            .ConfigureAwait(false);
+        //
+        // THE WRITE IS BEST EFFORT AND THE HALT IS NOT, WHICH IS WHY THEY ARE SEPARATED BY A finally.
+        // Until they were, the halt ran only if the write returned: a client disconnect mid-write, an
+        // IOException from a broken socket, or the write's own cancellation propagated out of this
+        // method and took the termination request with it, so a decoded assertion failure could leave
+        // the host running and the framework finalize step unrun. The legacy has no equivalent
+        // opportunity to skip its halt - the dialog it shows cannot fail in a way that skips the
+        // statement after it - so a write that can cancel the halt is a behaviour the refactor
+        // introduced and this removes.
+        bool handled = false;
 
-        // ---- THE HALT PATH [ws_objects/pfw.pbl.src/pfw.sra:L143]. Requested last, exactly as the
-        // legacy halts after its dialog, and requested even when the body could not be written: a
-        // structural fault is terminal regardless of what the caller did or did not receive
-        // (DECISION 5).
-        if (structuralFault)
+        try
         {
-            _requestProcessTermination(StructuralFaultExitCode);
+            handled = await WriteRedactedProblemAsync(
+                    httpContext,
+                    wireRetCode,
+                    correlationId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception writeFailure) when (!ReferenceEquals(writeFailure, exception))
+        {
+            // THE SECONDARY FAILURE IS RECORDED, NOT SWALLOWED, AND IT DOES NOT REPLACE THE FIRST.
+            // Rethrowing would restore exactly the defect being fixed on the structural path and would
+            // replace a diagnosed fault with a transport detail on the request path, so the caller's
+            // channel is abandoned - it is already unreachable, or the write would have succeeded -
+            // and `handled` stays false so the middleware can decide for itself what to do next.
+            //
+            // The `when` filter exists so that the ORIGINAL exception, if it somehow re-emerges from
+            // the write path, is not quietly reclassified as a write failure.
+            _logger.LogWarning(
+                ResponseWriteFailedLogMessage,
+                correlationId,
+                DescribeExceptionTypes(writeFailure));
+        }
+        finally
+        {
+            // ---- THE HALT PATH [ws_objects/pfw.pbl.src/pfw.sra:L143]. Requested last, exactly as the
+            // legacy halts after its dialog, and requested on EVERY path out of the write above: when
+            // it succeeded, when it declined because the response had started or been abandoned, and
+            // when it faulted. A structural fault is terminal regardless of what the caller did or did
+            // not receive (DECISION 5).
+            if (structuralFault)
+            {
+                _requestProcessTermination(StructuralFaultExitCode);
+            }
         }
 
         return handled;
@@ -1585,10 +1718,26 @@ public sealed class SystemErrorHandler : IExceptionHandler
         if (httpContext.Response.HasStarted)
         {
             // Nothing can be written once the response is on the wire. This is reported rather than
-            // swallowed, and it is the one path on which this method returns false. The correlation
-            // identifier is carried here too, because on this path the caller receives no body and
-            // therefore never learns it (DECISION 7).
+            // swallowed. The correlation identifier is carried here too, because on this path the
+            // caller receives no body and therefore never learns it (DECISION 7).
             _logger.LogWarning(ResponseAlreadyStartedLogMessage, correlationId);
+            return false;
+        }
+
+        if (httpContext.RequestAborted.IsCancellationRequested)
+        {
+            // THE SECOND WAY A RESPONSE STOPS BEING VIABLE, and it is not the same as the first. The
+            // response has not started, so nothing above would have refused - but the caller has gone,
+            // so the write below can only fault. Attempting it and catching the fault would produce
+            // identical behaviour with a worse record: an operator would see a transport failure and
+            // have to work out that it was expected. Refusing here says so directly.
+            //
+            // THIS IS NOT THE CANCELLATION CLASSIFICATION IN TryHandleAsync. That arm handles a fault
+            // that IS a cancellation; this one handles any fault at all arriving on a request the
+            // caller has since abandoned - a structural assertion failure on an abandoned request
+            // takes this path, is recorded in full on the operator channel, and still terminates the
+            // host, because the halt does not depend on the caller being there to hear about it.
+            _logger.LogWarning(ResponseAbandonedLogMessage, correlationId);
             return false;
         }
 

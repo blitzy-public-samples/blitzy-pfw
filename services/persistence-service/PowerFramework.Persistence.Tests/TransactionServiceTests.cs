@@ -41,9 +41,15 @@ using PowerFramework.Persistence.Transactions;
 using GeneratedBase =
     global::PowerFramework.Contracts.Persistence.V1.TransactionService.TransactionServiceBase;
 using Predicates = PowerFramework.Shared.Kernel.Predicates;
+using CommandTaskRegistry = PowerFramework.Persistence.Grpc.CommandTaskRegistry;
+using QueryTaskRegistry = PowerFramework.Persistence.Grpc.QueryTaskRegistry;
 using TransactionService = PowerFramework.Persistence.Grpc.TransactionService;
 using TransactionSession = PowerFramework.Persistence.Grpc.TransactionSession;
 using TransactionSessionRegistry = PowerFramework.Persistence.Grpc.TransactionSessionRegistry;
+using IUpdateTaskSurface = PowerFramework.Persistence.Grpc.IUpdateTaskSurface;
+using UpdateRunResult = PowerFramework.Persistence.Grpc.UpdateRunResult;
+using UpdateTaskEntry = PowerFramework.Persistence.Grpc.UpdateTaskEntry;
+using UpdateTaskRegistry = PowerFramework.Persistence.Grpc.UpdateTaskRegistry;
 
 namespace PowerFramework.Persistence.Tests;
 
@@ -65,7 +71,59 @@ public sealed class TransactionServiceTests
 
         public override DateTimeOffset GetUtcNow() => _now;
 
+        // ⚠ THE TIMESTAMP OVERRIDES ARE NOT OPTIONAL FOR A CLOCK THIS TEST CONTROLS. The base
+        // TimeProvider answers GetTimestamp() from Stopwatch, which a fake cannot influence, so a
+        // component measuring MONOTONIC elapsed time would silently escape this clock and every
+        // deterministic assertion below would become a race against real wall time. Answering from the
+        // same field GetUtcNow() reads keeps the two readings in lockstep, and a tick-resolution
+        // frequency keeps the elapsed conversion exact so the >= boundary lands on the same millisecond
+        // it did before.
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp() => _now.UtcTicks;
+
         internal void Advance(TimeSpan delta) => _now += delta;
+    }
+
+    /// <summary>
+    /// A server call context whose only interesting member is its cancellation token.
+    /// </summary>
+    /// <remarks>
+    /// Needed by exactly one RPC. <c>BeginSession</c> is the only handler on this contract that reads
+    /// its context - it observes the request's cancellation before issuing a connect, because that is
+    /// the only verb here that starts new work - so every other call below still passes a null context
+    /// deliberately, and that is the evidence those handlers consult nothing.
+    /// </remarks>
+    private sealed class FakeCallContext(CancellationToken cancellationToken) : ServerCallContext
+    {
+        private readonly CancellationToken _token = cancellationToken;
+
+        protected override string MethodCore => "/persistence.v1.TransactionService/BeginSession";
+
+        protected override string HostCore => "localhost:5101";
+
+        protected override string PeerCore => "ipv4:127.0.0.1:0";
+
+        protected override DateTime DeadlineCore => DateTime.MaxValue;
+
+        protected override Metadata RequestHeadersCore { get; } = [];
+
+        protected override CancellationToken CancellationTokenCore => _token;
+
+        protected override Metadata ResponseTrailersCore { get; } = [];
+
+        protected override Status StatusCore { get; set; }
+
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+
+        protected override AuthContext AuthContextCore { get; } =
+            new("fake", new Dictionary<string, List<AuthProperty>>(StringComparer.Ordinal));
+
+        protected override ContextPropagationToken CreatePropagationTokenCore(
+            ContextPropagationOptions? options) => throw new NotSupportedException();
+
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) =>
+            Task.CompletedTask;
     }
 
     private sealed class FakeEngine : ITransactionEngine
@@ -96,7 +154,7 @@ public sealed class TransactionServiceTests
 
         public void ApplyConnectionFields(in TransactionData descriptor) => DbmsValue = descriptor.Dbms;
 
-        public SqlState Connect()
+        public SqlState Connect(CancellationToken cancellationToken = default)
         {
             Handle = 1;
             return ConnectResult;
@@ -117,12 +175,17 @@ public sealed class TransactionServiceTests
             return RollbackResult;
         }
 
-        public SqlState Execute(string sqlCommand)
+        public SqlState Execute(string sqlCommand, CancellationToken cancellationToken = default)
         {
             ExecuteCalls++;
             _ = sqlCommand;
             return ExecuteResult;
         }
+
+        // The BOUND overload. It delegates to the rendered one so this double keeps recording exactly
+        // what it recorded before and every existing assertion on it still holds; what the overload adds
+        // is that the production seam's parameter-carrying shape is exercised as well.
+        public SqlState Execute(in SqlCommandText command, CancellationToken cancellationToken = default) => Execute(command.RenderedText);
 
         public void Dispose()
         {
@@ -177,9 +240,22 @@ public sealed class TransactionServiceTests
                 Clock,
                 new PooledTransactionActivator(() => Engine, Clock));
 
-            Registry = new TransactionSessionRegistry();
+            Registry = new TransactionSessionRegistry(Options.Create(options), Clock, Pool);
             QuerySurface = new FakeQuerySurface();
-            Service = new TransactionService(Pool, Registry, QuerySurface);
+
+            // The three task tables are REAL, because EndSession purges them: a task cannot outlive the
+            // session it was created against, so the service needs the tables to retire them from.
+            QueryTasks = new QueryTaskRegistry(Options.Create(options), Clock);
+            UpdateTasks = new UpdateTaskRegistry(Options.Create(options), Clock);
+            CommandTasks = new CommandTaskRegistry(Options.Create(options), Clock);
+
+            Service = new TransactionService(
+                Pool,
+                Registry,
+                QuerySurface,
+                QueryTasks,
+                UpdateTasks,
+                CommandTasks);
         }
 
         internal FakeClock Clock { get; }
@@ -188,12 +264,21 @@ public sealed class TransactionServiceTests
 
         internal TransactionPool Pool { get; }
 
+        internal QueryTaskRegistry QueryTasks { get; }
+
+        internal UpdateTaskRegistry UpdateTasks { get; }
+
+        internal CommandTaskRegistry CommandTasks { get; }
+
         internal TransactionSessionRegistry Registry { get; }
 
         internal FakeQuerySurface QuerySurface { get; }
 
         internal TransactionService Service { get; }
     }
+
+    /// <summary>The context every BeginSession below is called with unless it is testing cancellation.</summary>
+    private static readonly ServerCallContext Context = new FakeCallContext(CancellationToken.None);
 
     private static TransactionDescriptor Descriptor(string dbms = "SQLite") => new()
     {
@@ -212,7 +297,7 @@ public sealed class TransactionServiceTests
     {
         BeginSessionResponse response = await harness.Service.BeginSession(
             new BeginSessionRequest { Descriptor_ = Descriptor(dbms) },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.NotNull(response.Session);
@@ -344,7 +429,7 @@ public sealed class TransactionServiceTests
         string[] payloads =
         [
             (await harness.Service.BeginSession(
-                new BeginSessionRequest { Descriptor_ = Descriptor() }, null!)).ToString(),
+                new BeginSessionRequest { Descriptor_ = Descriptor() }, Context)).ToString(),
             (await harness.Service.GetTransactionData(
                 new GetTransactionDataRequest { Session = session }, null!)).ToString(),
             (await harness.Service.GetSessionState(
@@ -570,12 +655,19 @@ public sealed class TransactionServiceTests
         IPooledTransaction borrowed = SeedEntry(harness);
         Assert.Equal(1, harness.Pool.UpperBound);
 
-        foreach (int badIndex in new[] { 0, -1, harness.Pool.UpperBound + 1 })
+        // A LEASE RATHER THAN AN ORDINAL, so the forged values are the invalid handle and two identities
+        // the pool never issued. The guard's job is unchanged - a handle that names no live entry is out of
+        // bounds - but a lease can no longer be renumbered into naming somebody else's entry, which is the
+        // whole point of the change.
+        foreach (long badLease in new[] { 0L, -1L, long.MaxValue })
         {
-            TransactionSession forged = harness.Registry.Register(
-                badIndex,
+            TransactionSession? forged = harness.Registry.Register(
+                new PoolLease(badLease),
                 new TransactionData { Dbms = "SQLite" },
-                borrowed);
+                borrowed,
+                out _);
+
+            Assert.NotNull(forged);
 
             EndSessionResponse response = await harness.Service.EndSession(
                 new EndSessionRequest { Session = new SessionHandle { SessionId = forged.SessionId } },
@@ -593,8 +685,10 @@ public sealed class TransactionServiceTests
 
         Assert.True(harness.Registry.TryResolve(session, out TransactionSession? live));
 
-        // ONE-BASED: the first entry is 1, never 0.
-        Assert.Equal(1, live!.ReferenceIndex);
+        // The session holds a LIVE lease, and the pool still reports the one-based upper bound the oracle
+        // reports - the positional API and its renumbering are untouched.
+        Assert.True(live!.Lease.IsValid);
+        Assert.True(harness.Pool.IsLeaseLive(live.Lease));
         Assert.Equal(1, harness.Pool.UpperBound);
 
         EndSessionResponse end = await harness.Service.EndSession(
@@ -609,6 +703,123 @@ public sealed class TransactionServiceTests
             null!);
 
         Assert.Equal(WireRetCode.EInvalidTransaction, again.Status.RetCode);
+    }
+
+    /// <summary>
+    /// Ending a session RETIRES every task that was created against it.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// A TASK CANNOT OUTLIVE ITS SESSION, AND A SURVIVOR IS NOT MERELY UNTIDY. Every task holds the
+    /// session's borrowed transaction, so a task left in its table after the session ends names a
+    /// transaction the pool has already taken back - and the pool may hand that same transaction to a
+    /// different session as soon as its reference count drops, at which point a call on the stale handle
+    /// writes through somebody else's transaction. This case proves all three tables are purged.
+    /// </remarks>
+    [Fact]
+    public async Task EndSessionRetiresEveryTaskOwnedByTheSession()
+    {
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        Assert.True(harness.Registry.TryResolve(session, out TransactionSession? live));
+        Assert.NotNull(live);
+
+        UpdateTaskEntry? mineOrNull = harness.UpdateTasks.Register(
+            live!.SessionId,
+            new StubUpdateSurface(),
+            out string mineDiagnostic);
+        UpdateTaskEntry mine = Assert.IsType<UpdateTaskEntry>(mineOrNull);
+        Assert.Equal(string.Empty, mineDiagnostic);
+
+        UpdateTaskEntry? otherOrNull = harness.UpdateTasks.Register(
+            "a-different-session",
+            new StubUpdateSurface(),
+            out string otherDiagnostic);
+        UpdateTaskEntry other = Assert.IsType<UpdateTaskEntry>(otherOrNull);
+        Assert.Equal(string.Empty, otherDiagnostic);
+
+        Assert.True(harness.UpdateTasks.TryResolve(
+            new TaskHandle { TaskId = mine.TaskId },
+            out UpdateTaskEntry? resolved));
+        Assert.NotNull(resolved);
+
+        EndSessionResponse end = await harness.Service.EndSession(
+            new EndSessionRequest { Session = session },
+            null!);
+
+        Assert.Equal(WireRetCode.Ok, end.Status.RetCode);
+
+        // Purged AND disposed - the handle is gone from the table and the surface was torn down.
+        Assert.False(harness.UpdateTasks.TryResolve(
+            new TaskHandle { TaskId = mine.TaskId },
+            out UpdateTaskEntry? purged));
+        Assert.Null(purged);
+        Assert.True(Assert.IsType<StubUpdateSurface>(mine.Task).Disposed);
+
+        // ANOTHER SESSION'S TASK IS UNTOUCHED. Purging by session, not wholesale: a second session's
+        // handles must survive its neighbour ending.
+        Assert.True(harness.UpdateTasks.TryResolve(
+            new TaskHandle { TaskId = other.TaskId },
+            out UpdateTaskEntry? survivor));
+        Assert.NotNull(survivor);
+        Assert.False(Assert.IsType<StubUpdateSurface>(other.Task).Disposed);
+    }
+
+    /// <summary>An update surface that records only whether it was disposed.</summary>
+    /// <remarks>
+    /// Every member refuses, because these cases are about the TABLE's lifetime rather than about what an
+    /// update does. Refusing rather than pretending keeps a mis-wired purge visible.
+    /// </remarks>
+    private sealed class StubUpdateSurface : IUpdateTaskSurface
+    {
+        /// <summary>Whether the surface was disposed.</summary>
+        internal bool Disposed { get; private set; }
+
+        /// <inheritdoc/>
+        public long Reset() => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long ResetUpdatableTables() => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long SetMultiTableUpdate(bool multiTable) => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long AddUpdatableTable(
+            string name,
+            IEnumerable<string> updatableColumns,
+            IEnumerable<string> keyColumns,
+            string identityColumn,
+            long? updateWhere,
+            bool? updateKeyInPlace) => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long AddUpdatableTable(
+            string name,
+            IEnumerable<string> updatableColumns,
+            IEnumerable<string> keyColumns,
+            string identityColumn) => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long SetDataObject(string dataObject) => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long SetSqlSyntax(string sqlSyntax) => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long SetUpdateData(CarrierState? updateData, long updateRows) =>
+            RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public long SetAutoCommit(bool autoCommit) => RetCode.E_NO_IMPLEMENTATION;
+
+        /// <inheritdoc/>
+        public UpdateRunResult Execute(CancellationToken cancellationToken) =>
+            new() { Code = RetCode.E_NO_IMPLEMENTATION };
+
+        /// <inheritdoc/>
+        public void Dispose() => Disposed = true;
     }
 
     /// <summary>Creates one real pool entry and returns its borrowed transaction.</summary>
@@ -727,7 +938,7 @@ public sealed class TransactionServiceTests
                 // The string says DisableBind=1; the explicit flags claim otherwise.
                 Flags = new ConnectionParameterFlags { DisableBind = false, NcharBind = false },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
         Assert.Contains("disable_bind", response.Status.ErrorText, StringComparison.Ordinal);
@@ -755,7 +966,7 @@ public sealed class TransactionServiceTests
                     LivenessCacheWindowMs = 10_000,
                 },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.NotNull(response.Session);
@@ -772,7 +983,7 @@ public sealed class TransactionServiceTests
                 Descriptor_ = Descriptor(),
                 KeepAlive = new PoolKeepAliveSettings { LivenessCacheWindowMs = 0 },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
         Assert.Contains("liveness-cache window", response.Status.ErrorText, StringComparison.Ordinal);
@@ -785,7 +996,7 @@ public sealed class TransactionServiceTests
 
         BeginSessionResponse response = await harness.Service.BeginSession(
             new BeginSessionRequest(),
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
     }
@@ -1009,17 +1220,62 @@ public sealed class TransactionServiceTests
     {
         Harness harness = new();
 
-        Assert.Throws<ArgumentNullException>(() =>
-            new TransactionService(null!, harness.Registry, harness.QuerySurface));
+        Assert.Throws<ArgumentNullException>(() => new TransactionService(
+            null!,
+            harness.Registry,
+            harness.QuerySurface,
+            harness.QueryTasks,
+            harness.UpdateTasks,
+            harness.CommandTasks));
 
-        Assert.Throws<ArgumentNullException>(() =>
-            new TransactionService(harness.Pool, null!, harness.QuerySurface));
+        Assert.Throws<ArgumentNullException>(() => new TransactionService(
+            harness.Pool,
+            null!,
+            harness.QuerySurface,
+            harness.QueryTasks,
+            harness.UpdateTasks,
+            harness.CommandTasks));
 
-        Assert.Throws<ArgumentNullException>(() =>
-            new TransactionService(harness.Pool, harness.Registry, null!));
+        Assert.Throws<ArgumentNullException>(() => new TransactionService(
+            harness.Pool,
+            harness.Registry,
+            null!,
+            harness.QueryTasks,
+            harness.UpdateTasks,
+            harness.CommandTasks));
+
+        Assert.Throws<ArgumentNullException>(() => new TransactionService(
+            harness.Pool,
+            harness.Registry,
+            harness.QuerySurface,
+            null!,
+            harness.UpdateTasks,
+            harness.CommandTasks));
+
+        Assert.Throws<ArgumentNullException>(() => new TransactionService(
+            harness.Pool,
+            harness.Registry,
+            harness.QuerySurface,
+            harness.QueryTasks,
+            null!,
+            harness.CommandTasks));
+
+        Assert.Throws<ArgumentNullException>(() => new TransactionService(
+            harness.Pool,
+            harness.Registry,
+            harness.QuerySurface,
+            harness.QueryTasks,
+            harness.UpdateTasks,
+            null!));
 
         // The logger is optional so a unit test can construct the service with behaviour only.
-        Assert.NotNull(new TransactionService(harness.Pool, harness.Registry, harness.QuerySurface));
+        Assert.NotNull(new TransactionService(
+            harness.Pool,
+            harness.Registry,
+            harness.QuerySurface,
+            harness.QueryTasks,
+            harness.UpdateTasks,
+            harness.CommandTasks));
     }
 
     [Fact]
@@ -1028,7 +1284,7 @@ public sealed class TransactionServiceTests
         Harness harness = new();
 
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Service.BeginSession(null!, null!));
+            harness.Service.BeginSession(null!, Context));
 
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
             harness.Service.Rollback(null!, null!));
@@ -1050,7 +1306,8 @@ public sealed class TransactionServiceTests
         Assert.True(harness.Registry.TryResolve(second, out TransactionSession? b));
 
         Assert.NotEqual(a!.SessionId, b!.SessionId);
-        Assert.Equal(a.ReferenceIndex, b.ReferenceIndex);
+        // Two sessions opened with EQUAL descriptors share one pooled entry, so they share its lease.
+        Assert.Equal(a.Lease, b.Lease);
         Assert.Equal(1, harness.Pool.UpperBound);
         Assert.Same(a.Transaction, b.Transaction);
 
@@ -1063,11 +1320,248 @@ public sealed class TransactionServiceTests
 #pragma warning restore CS9216
     }
 
+    // ---------------------------------------------------------------------------------------------
+    //  16. THE CLOSING STATE - THE LIFECYCLE IS ATOMIC, NOT MERELY ORDERED
+    //
+    //  Retiring the handle from the registry is not on its own enough to make an end atomic: a request
+    //  that resolved the session a moment earlier is already past that lookup, and would otherwise enter
+    //  the session gate AFTER the release and operate on a transaction that has been handed back to the
+    //  pool - or, with keep-alive on, handed to somebody else. The closing flag is set inside the same
+    //  gate every other operation tests inside, so the two cannot interleave. A registered-but-closing
+    //  session is exactly the state that race produces, so the suite constructs it directly rather than
+    //  trying to win a race.
+    // ---------------------------------------------------------------------------------------------
+
     [Fact]
-    public void TheServerCallContextIsNeverDereferenced()
+    public async Task EveryOperationRefusesASessionThatIsAlreadyClosing()
     {
-        // Every handler is called above with a null context and none of them threw, which is the
-        // evidence that the context is not consulted. Asserted here so the intent is explicit.
-        Assert.Null(default(ServerCallContext));
+        Harness harness = new();
+        SessionHandle opened = await Open(harness);
+
+        Assert.True(harness.Registry.TryResolve(opened, out TransactionSession? live));
+
+        // The state an interleaved EndSession leaves behind: still resolvable, already retiring.
+        live!.MarkClosing();
+
+        SessionHandle session = opened;
+
+        string[] refusals =
+        [
+            (await harness.Service.GetTransactionData(
+                new GetTransactionDataRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.IsConnected(
+                new IsConnectedRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.GetDatabaseType(
+                new GetDatabaseTypeRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.SetAutoCommit(
+                new SetTransactionAutoCommitRequest { Session = session, Autocommit = true },
+                null!)).Status.RetCode.ToString(),
+            (await harness.Service.Commit(
+                new CommitRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.Rollback(
+                new RollbackRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.ClearState(
+                new ClearStateRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.GetSessionState(
+                new GetSessionStateRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.AutoCommit(
+                new AutoCommitRequest { Session = session }, null!)).Status.RetCode.ToString(),
+            (await harness.Service.SetBroken(
+                new SetBrokenRequest { Session = session }, null!)).Status.RetCode.ToString(),
+        ];
+
+        // ONE code for all ten, and it is the UNKNOWN-SESSION code: from the caller's point of view the
+        // handle it named is gone, so a closing session is indistinguishable from a retired one.
+        Assert.All(refusals, code => Assert.Equal(WireRetCode.EInvalidTransaction.ToString(), code));
+
+        // AND THE TRANSACTION WAS NEVER TOUCHED. The engine's rollback and commit counters are the proof:
+        // a refusal that had fallen through to the operation would have moved one of them.
+        Assert.Equal(0, harness.Engine.RollbackCalls);
+    }
+
+    [Fact]
+    public async Task AnEndReleasesExactlyOnceEvenWhenTheHandleIsPresentedTwice()
+    {
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        Assert.True(harness.Registry.TryResolve(session, out TransactionSession? live));
+        PoolLease lease = live!.Lease;
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.EndSession(
+                new EndSessionRequest { Session = session }, null!)).Status.RetCode);
+
+        // The lease is dead, so nothing that still holds it can reach an entry.
+        Assert.False(harness.Pool.IsLeaseLive(lease));
+        Assert.Equal(1, harness.Engine.DisconnectCalls);
+
+        Assert.Equal(
+            WireRetCode.EInvalidTransaction,
+            (await harness.Service.EndSession(
+                new EndSessionRequest { Session = session }, null!)).Status.RetCode);
+
+        // STILL EXACTLY ONE. A second end neither released again nor disconnected again.
+        Assert.Equal(1, harness.Engine.DisconnectCalls);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  17. THE REQUEST'S CANCELLATION - OBSERVED BY THE ONE VERB THAT ISSUES WORK, AND BY NO OTHER
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task OnlyBeginSessionReadsItsContextAndEveryOtherHandlerRunsWithoutOne()
+    {
+        // The twelve other handlers are called throughout this suite with a NULL context and none of
+        // them throws, which is the evidence that they consult nothing. Restated here as one explicit
+        // sweep so the property is asserted rather than merely implied by other tests passing.
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.GetTransactionData(
+                new GetTransactionDataRequest { Session = session }, null!)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.GetSessionState(
+                new GetSessionStateRequest { Session = session }, null!)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.IsConnected(
+                new IsConnectedRequest { Session = session }, null!)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.GetDatabaseType(
+                new GetDatabaseTypeRequest { Session = session }, null!)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.SetAutoCommit(
+                new SetTransactionAutoCommitRequest { Session = session, Autocommit = false },
+                null!)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.Commit(new CommitRequest { Session = session }, null!))
+                .Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.Rollback(new RollbackRequest { Session = session }, null!))
+                .Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.ClearState(new ClearStateRequest { Session = session }, null!))
+                .Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.GridSyntaxFromSql(
+                new GridSyntaxFromSqlRequest { Session = session, Sql = "SELECT 1" },
+                null!)).Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.SetBroken(new SetBrokenRequest { Session = session }, null!))
+                .Status.RetCode);
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Service.EndSession(new EndSessionRequest { Session = session }, null!))
+                .Status.RetCode);
+
+        // BeginSession is the exception, and it is a hard one: it reads the token, so a null context is
+        // a programming error there rather than a tolerated absence.
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            harness.Service.BeginSession(
+                new BeginSessionRequest { Descriptor_ = Descriptor() },
+                null!));
+    }
+
+    [Fact]
+    public async Task ACancelledRequestIsRefusedBeforeAConnectIsIssuedAndLeavesNoPoolReference()
+    {
+        Harness harness = new();
+
+        using CancellationTokenSource source = new();
+        await source.CancelAsync();
+
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest { Descriptor_ = Descriptor() },
+            new FakeCallContext(source.Token));
+
+        // CANCELLED, and NOT the E_INVALID_TRANSACTION a genuine connect failure answers - the two
+        // outcomes are distinct because their causes are.
+        Assert.Equal(WireRetCode.Cancelled, response.Status.RetCode);
+        Assert.Null(response.Session);
+
+        // THE THREE THINGS A CANCELLATION MUST NOT LEAVE BEHIND.
+        // No connect was issued at all: the engine's handle is still zero, which is what it would not be
+        // had Connect run [FakeEngine.Connect sets Handle = 1].
+        Assert.Equal(0, harness.Engine.Handle);
+
+        // No pool reference is pinned - the entry the acquisition took was released on this path exactly
+        // as on every other failure path.
+        Assert.Equal(0, harness.Pool.UpperBound);
+        Assert.False(harness.Pool.Exists(new TransactionData
+        {
+            Dbms = "SQLite",
+            ServerName = "server-1",
+            Database = "test.db",
+            LogId = "account-1",
+            LogPass = Password,
+            DbParm = "DisableBind=1,NCharBind=1",
+            Lock = "RU",
+            AutoCommit = true,
+            UserParm = UserParm,
+        }));
+
+        // And no session exists, so there is nothing the caller could end. The diagnostic says exactly
+        // that, and it quotes no descriptor field (constraint C-F).
+        Assert.Contains("no session was created", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain(Password, response.Status.ErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnUncancelledRequestConnectsExactlyAsBefore()
+    {
+        // The control for the test above: the same call with a live token is unaffected by the new arm,
+        // so the cancellation observation costs the ordinary path nothing.
+        Harness harness = new();
+
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest { Descriptor_ = Descriptor() },
+            new FakeCallContext(CancellationToken.None));
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.NotNull(response.Session);
+        Assert.Equal(1, harness.Engine.Handle);
+        Assert.Equal(1, harness.Pool.UpperBound);
+    }
+
+    [Fact]
+    public async Task ACancellationArrivingAfterTheConnectDoesNotUndoTheSession()
+    {
+        // A LIVE pooled transaction is NOT reconnected [:L173], so the cancellation arm - which sits
+        // inside that liveness gate - is not even reached on a second session over the same descriptor.
+        // This is the property that keeps a cancellation from tearing down work already completed: the
+        // observation is a refusal to START, never a rollback of something started.
+        Harness harness = new(keepAlive: true);
+
+        SessionHandle first = await Open(harness);
+        Assert.Equal(1, harness.Engine.Handle);
+
+        using CancellationTokenSource source = new();
+        await source.CancelAsync();
+
+        BeginSessionResponse second = await harness.Service.BeginSession(
+            new BeginSessionRequest { Descriptor_ = Descriptor() },
+            new FakeCallContext(source.Token));
+
+        // The pooled transaction is already connected, so no work is issued and the cancellation has
+        // nothing to refuse. The caller gets its session.
+        Assert.Equal(WireRetCode.Ok, second.Status.RetCode);
+        Assert.NotNull(second.Session);
+
+        // Both sessions are live over ONE pool entry, and the first is untouched by the second's token.
+        Assert.Equal(1, harness.Pool.UpperBound);
+        Assert.True(harness.Registry.TryResolve(first, out _));
+        Assert.True(harness.Registry.TryResolve(second.Session, out _));
     }
 }

@@ -93,12 +93,17 @@
 //  either a configuration KEY name or a diagnostic message.
 // ==================================================================================================
 
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
+using Polly;
 using PowerFramework.DataServices.Clients;
+using PowerFramework.DataServices.Authorization;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
 using PowerFramework.DataServices.Endpoints;
@@ -195,16 +200,83 @@ Assertions.Assert(
         + "through it [ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L355, :L357], so a "
         + "host without it is structurally faulty rather than partly working.");
 
+// Resolved eagerly so that a configured-but-unreadable trust anchor stops the host here rather than at
+// the first outbound call. A deployment that meant to pin internal trust and cannot has already lost
+// every authenticated call it would make: every one of the five internal channels would refuse the
+// certificate it is handed, so discovering it at startup is a failure to launch whereas discovering it
+// at the first token request is an outage that looks like an upstream problem. An UNSET anchor resolves
+// to platform default trust and is not a fault.
+_ = app.Services.GetRequiredService<InternalTlsTrust>();
+
+// THE OTHER HALF OF THE SAME HANDSHAKE, AND FOR THE SAME REASON. The anchor above says which authority
+// this service ACCEPTS; this says which certificate it PRESENTS. `POST /v1/tokens` is protected by
+// mutual TLS and by nothing else - a caller cannot present a bearer token in order to obtain its first
+// bearer token - so the identity is what makes every subsequent authenticated call reachable at all.
+// Resolved eagerly so a configured-but-unreadable PEM pair is a failure to launch rather than a 401
+// from the issuance edge that looks like an upstream problem. An UNCONFIGURED pair resolves to an empty
+// collection, which is not a fault here: it is a deployment that presents no identity, and
+// `SecurityClient` says so by name at the first token request rather than sending a request that can
+// only be refused.
+X509Certificate2Collection securityClientIdentity =
+    app.Services.GetRequiredService<X509Certificate2Collection>();
+
+if (securityClientIdentity.Count == 0)
+{
+    app.Logger.LogWarning(
+        "No client identity is configured at '{CertificateKey}' and '{KeyKey}', so this host presents "
+            + "no certificate on the token-issuance edge and cannot obtain a credential. Every "
+            + "authenticated outbound call - the four Persistence contracts and the crypto contract - "
+            + "will fail with a named configuration diagnostic on first use. Readiness reports the "
+            + "bootstrap as unavailable. Neither path is recorded here, because a startup log must not "
+            + "publish where key material is mounted.",
+        $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
+            + $":{nameof(SecurityClientOptions.MutualTls)}"
+            + $":{nameof(MutualTlsClientOptions.CertificatePath)}",
+        $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
+            + $":{nameof(SecurityClientOptions.MutualTls)}"
+            + $":{nameof(MutualTlsClientOptions.CertificateKeyPath)}");
+}
+
+// Resolved eagerly so a deadline pair that cannot be constructed - a non-positive duration that slipped
+// past validation - is a failure to launch rather than an exception on the first outbound call.
+_ = app.Services.GetRequiredService<OutboundDeadlines>();
+
+// FORCED HERE FOR THE SAME REASON, and this one matters more than it looks. The retry classification is
+// built from the contract descriptors in a static initializer, so a method name that no longer resolves
+// would otherwise throw at the first outbound FAILURE - the one moment when a second, unrelated fault is
+// hardest to diagnose. Touching it now turns a contract-versus-classification mismatch into a refusal to
+// start, which is the posture the legacy had when a structural fault terminated the application outright.
+_ = OutboundCallPolicy.Verify();
+
 // --------------------------------------------------------------------------------------------------
 // THE REQUEST PIPELINE
 //
-// Exactly two middleware components, in the only order that works: authentication establishes the
-// principal, authorization then decides. Nothing else is added. There is no CORS policy (no browser
-// reaches this service - Gateway is the sole ingress), no HTTPS redirection (the endpoint scheme is
-// the deployment's to choose and forcing a redirect here would break the cleartext HTTP/2 gRPC edge),
-// no response compression, no rate limiter and no exception-page middleware. Each of those would be a
-// feature this refactor was not asked for (constraint C-B).
+// Four middleware components, in the only order that works, and the two diagnostics ones come FIRST
+// because each works by observing what the middlewares beneath it produced - and the response they most
+// need to observe is the bearer challenge the authentication middleware writes. Authentication then
+// establishes the principal and authorization decides.
+//
+// THE TWO DIAGNOSTICS MIDDLEWARES ARE HERE FOR CONTRACT FIDELITY, NOT AS HARDENING, and that is what makes
+// them the narrow exception to the no-unrequested-middleware rule (constraint C-B). Without them the
+// framework answers a bare status with NO BODY on every path that never reaches this service's own code,
+// while this service's own routes declare ProducesProblem for 401, 403 and 404 and register the
+// problem-details service to write them - a promise the pipeline was not keeping. UseExceptionHandler
+// converts an unhandled REST fault into the same problem shape rather than an empty 500.
+//
+// NEITHER TOUCHES THE gRPC EDGE. A gRPC response always carries its own content type, and status-code pages
+// write only where a response has neither a body nor a content type; a gRPC handler's own faults are
+// converted to trailers by the hosting layer before they could reach an exception handler. An
+// UNAUTHENTICATED gRPC call does gain a problem body on its 401, which changes nothing a gRPC client
+// observes: the client maps the HTTP status before it ever looks at the content type.
+//
+// Nothing else is added. There is still no CORS policy (no browser reaches this service - Gateway is the
+// sole ingress), no HTTPS redirection (both shipped endpoints are already https, so a redirection
+// middleware would have nothing to redirect and would only add a hop that could rewrite an HTTP/2 gRPC
+// call into an HTTP/1.1 one), no response compression and no rate limiter.
 // --------------------------------------------------------------------------------------------------
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -301,10 +373,16 @@ internal static class DataServicesComposition
     /// "succeeded". The options type declares the nullable and this method does not flatten it.
     /// </para>
     /// <para>
-    /// NO SECRET AND NO KEY MATERIAL PASSES THROUGH HERE. Both groups carry addresses, audiences,
-    /// lifetimes, thresholds and preserved legacy defaults; neither declares a signing key, a
-    /// password, a token or a certificate, and the only credential-shaped members are the two mutual
-    /// TLS PATH settings, which are paths and not material (constraint C-F).
+    /// EXACTLY ONE SECRET PASSES THROUGH HERE, AND IT ARRIVES BY A DIFFERENT ROUTE FROM EVERY OTHER
+    /// SETTING. Both groups otherwise carry addresses, audiences, lifetimes, thresholds and preserved
+    /// legacy defaults; neither declares a signing key, a token or a certificate, and the only other
+    /// credential-shaped members are the two mutual-TLS PATH settings, which are paths and not material
+    /// (constraint C-F). The exception is this service's issuance secret, which
+    /// <see cref="ApplyIssuanceSecret"/> reads from the FLAT configuration key
+    /// <see cref="SecurityClientOptions.ClientSecretConfigurationKey"/> - not from the bound section,
+    /// because the environment-variable provider translates only a double underscore into the section
+    /// separator and that key contains none. It therefore appears in no settings file and in no
+    /// container definition; the settings document names the KEY and never the value.
     /// </para>
     /// </remarks>
     internal static IServiceCollection AddDataServicesOptions(
@@ -317,6 +395,12 @@ internal static class DataServicesComposition
         _ = services
             .AddOptions<DataServicesOptions>()
             .Bind(configuration.GetSection(DataServicesOptions.SectionName))
+            // APPLIED AFTER BINDING AND BEFORE VALIDATION, WHICH IS THE ONLY ORDER THAT WORKS. The
+            // validator's "this service can present no issuance credential at all" rule reads the
+            // secret, so applying it afterwards would fail every deployment that configured one; and
+            // binding cannot reach it, because the key is flat rather than sectioned. PostConfigure runs
+            // between the two.
+            .PostConfigure(options => ApplyIssuanceSecret(options, configuration))
             .ValidateOnStart();
 
         services.TryAddSingleton<IValidateOptions<DataServicesOptions>, DataServicesOptionsValidator>();
@@ -331,6 +415,55 @@ internal static class DataServicesComposition
                 JwtAuthenticationOptionsValidator>();
 
         return services;
+    }
+
+    /// <summary>
+    /// Copies this service's issuance secret from its flat configuration key onto the bound options.
+    /// </summary>
+    /// <param name="options">The bound options instance to complete.</param>
+    /// <param name="configuration">The host configuration to read the flat key from.</param>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS IS NOT ORDINARY SECTION BINDING. The secret's configuration key is
+    /// <c>SECURITY_CLIENT_SECRET_DATASERVICES</c>, a flat top-level key of exactly that spelling. The
+    /// environment-variable configuration provider maps a DOUBLE underscore, and only a double
+    /// underscore, onto the <c>:</c> section separator, so that name is not a path into the
+    /// <c>DataServices</c> section and binding the section will never populate the property however it
+    /// is bound. The name is fixed by Security's issuance roster and by
+    /// <c>orchestration/.env.example</c>, which declare it once for both sides of the edge, so it cannot
+    /// be renamed to a sectioned spelling and no alias may be added: two accepted spellings for one
+    /// input is two ways for a deployment to be half configured.
+    /// </para>
+    /// <para>
+    /// ABSENCE IS LEFT ALONE RATHER THAN DEFAULTED. A missing key leaves the property at its empty
+    /// initial value, and the validator then decides whether that is legal - it is, but only on a
+    /// deployment that configured the client-certificate pair instead. Substituting anything here would
+    /// pre-empt that decision and turn a startup refusal into an authentication failure on the first
+    /// call. Whitespace is treated as absent for the same reason a blank secret is: it cannot
+    /// authenticate, and accepting it would produce a <c>401</c> whose cause is invisible.
+    /// </para>
+    /// <para>
+    /// THE VALUE IS NEVER LOGGED HERE OR ANYWHERE. This method writes it to one property and returns;
+    /// no diagnostic records its presence, its length or its absence, because the validator's message
+    /// already names the KEY an operator must set and a log line about a secret is a log line
+    /// containing a secret's shape.
+    /// </para>
+    /// </remarks>
+    private static void ApplyIssuanceSecret(DataServicesOptions options, IConfiguration configuration)
+    {
+        string? configured = configuration[SecurityClientOptions.ClientSecretConfigurationKey];
+
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return;
+        }
+
+        // Null-conditional because binding a section that omits `Security` entirely leaves the group
+        // null, and the validator - not this method - is what reports that.
+        if (options.Security is not null)
+        {
+            options.Security.ClientSecret = configured;
+        }
     }
 
     /// <summary>
@@ -549,9 +682,25 @@ internal static class DataServicesComposition
 
         _ = services
             .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
-            .Configure<IOptions<JwtAuthenticationOptions>>(static (bearer, authentication) =>
+            .Configure<IOptions<JwtAuthenticationOptions>, InternalTlsTrust>(
+                static (bearer, authentication, trust) =>
             {
                 JwtAuthenticationOptions configured = authentication.Value;
+
+                // THE KEY-SET BACKCHANNEL IS AN INTERNAL CHANNEL TOO, AND IT IS THE MOST CONSEQUENTIAL
+                // ONE. The handler fetches Security's discovery document and published key set over its
+                // own HttpClient, built from this handler rather than from any client registration -
+                // so an anchor applied to every other channel and not here would leave the one channel
+                // that decides WHICH KEYS SIGN A VALID TOKEN unable to connect. Supplied only when an
+                // anchor is configured, so an unset anchor leaves the handler's default untouched.
+                if (trust.IsPinned)
+                {
+                    SocketsHttpHandler backchannel = new();
+
+                    trust.Apply(backchannel);
+
+                    bearer.BackchannelHttpHandler = backchannel;
+                }
 
                 bearer.Authority = configured.Authority;
                 bearer.Audience = configured.Audience;
@@ -565,14 +714,41 @@ internal static class DataServicesComposition
                     bearer.MetadataAddress = configured.MetadataAddress;
                 }
 
-                bearer.TokenValidationParameters.ValidateIssuer = configured.ValidateIssuer;
-                bearer.TokenValidationParameters.ValidateAudience = configured.ValidateAudience;
-                bearer.TokenValidationParameters.ValidateLifetime = configured.ValidateLifetime;
-                bearer.TokenValidationParameters.ValidateIssuerSigningKey =
-                    configured.ValidateIssuerSigningKey;
+                // ALL FOUR ARE ASSIGNED LITERALLY, NOT READ. Each removes an entire class of forgery,
+                // so none is a deployment choice: without issuer validation a token from any issuer is
+                // accepted; without audience validation a token minted for another service is replayable
+                // here; without lifetime validation Security's short lifetimes bound nothing; without
+                // signing-key validation the signature is not checked at all. Reading them left a
+                // configuration path that could disable a check while the host still reported healthy,
+                // which is an unauthenticated boundary wearing the shape of an authenticated one
+                // (constraint C-G). The bound properties SURVIVE so a deployment can still be audited by
+                // reading its settings file, and JwtAuthenticationOptionsValidator refuses a configured
+                // false outright - because ignoring one in silence would let an operator believe a switch
+                // took effect when it did not.
+                bearer.TokenValidationParameters.ValidateIssuer = true;
+                bearer.TokenValidationParameters.ValidateAudience = true;
+                bearer.TokenValidationParameters.ValidateLifetime = true;
+                bearer.TokenValidationParameters.ValidateIssuerSigningKey = true;
+
+                // CLOCK SKEW IS BOUNDED AND NOT CONFIGURABLE. The library's default is five minutes,
+                // which silently extends every token's usable life by that much; and an unbounded
+                // setting would let a deployment extend it without limit, which is lifetime validation
+                // switched off by another name. Thirty seconds absorbs ordinary clock drift between
+                // containers on one host - the topology the frozen environment describes - without
+                // meaningfully widening the window. Security mints with a truncated whole-second
+                // timestamp, so no sub-second allowance is required either.
+                bearer.TokenValidationParameters.ClockSkew = TimeSpan.FromSeconds(30);
+
+                // INBOUND CLAIM NAMES ARE NOT REMAPPED. The handler's default rewrites short JWT claim
+                // names onto long SOAP-era URIs, so `sub` arrives as a URI and a scope check written
+                // against the name the token actually carries finds nothing. Turning it off means every
+                // claim this service reads is spelled exactly as Security minted it and as the contract
+                // publishes it - one spelling on the wire, in a log record and in a characterization
+                // recording.
+                bearer.MapInboundClaims = false;
             });
 
-        return services.AddAuthorization(static options =>
+        services.AddAuthorization(static options =>
         {
             AuthorizationPolicy authenticated = new AuthorizationPolicyBuilder()
                 .RequireAuthenticatedUser()
@@ -580,7 +756,38 @@ internal static class DataServicesComposition
 
             options.DefaultPolicy = authenticated;
             options.FallbackPolicy = authenticated;
+
+            // AND AUTHENTICATION IS NOT AUTHORIZATION. The default and the fallback close the door on a
+            // route that declares nothing; deciding WHO may open it and for WHAT is the job of the two
+            // named policies, and those are registered in ONE place - Authorization/ScopeAuthorization.cs,
+            // reached through AddScopeAuthorization() below. Without them, any holder of any token minted
+            // for this audience could call both contracts and all thirty-nine projected routes: a
+            // credential obtained to read a DataWindow could drive the expression engine, and a credential
+            // minted for a caller with no business here could do either (CWE-862, CWE-863).
+            //
+            // ⚠ THEY ARE NOT REGISTERED HERE AS WELL, AND THAT IS THE POINT ⚠
+            //
+            // Two AddPolicy calls for one capability is not belt-and-braces: AddPolicy REPLACES a policy of
+            // the same name, and configuration callbacks run in registration order, so whichever ran last
+            // silently became the whole policy. Registering the pair here AND in ScopeAuthorization.cs -
+            // once with the caller roster and once without - meant the surviving policy depended on call
+            // order rather than on either author's intent. One registrar, carrying both requirements.
         });
+
+        // AUTHENTICATION IS NOT AUTHORIZATION, AND THE POLICIES ABOVE ONLY DELIVER THE FIRST. Gateway's
+        // own published contract declares a 403 on all thirty-nine of its /v1/datawindow/** operations
+        // whose description reads "The projected gRPC method returned PermissionDenied. The token is
+        // valid but does not carry the scope this operation requires" - a promise about THIS service,
+        // because Gateway's 403 there is a PROJECTION of a status this service was never producing.
+        // Until these policies existed nothing here read the scope claim, so C-03 and C-04 were both
+        // reachable by any token addressed to this service and the published 403 was unreachable through
+        // the whole chain.
+        //
+        // The mechanism, the reason the framework's own claim requirement cannot express it (the claim is
+        // ONE value carrying a SPACE-DELIMITED set, which is exactly what Gateway sends), the reason the
+        // two contracts get two independent scopes, and the reason it is duplicated per service rather
+        // than shared are all recorded in Authorization/ScopeAuthorization.cs.
+        return services.AddScopeAuthorization();
     }
 
     /// <summary>
@@ -626,29 +833,79 @@ internal static class DataServicesComposition
     /// the client's members carry one on every operation rather than flattening the affinity away.
     /// </para>
     /// <para>
-    /// THE TYPED CLIENT IS BUILT BY AN EXPLICIT FACTORY, WHICH IS LOAD BEARING AND NOT STYLE.
+    /// THE SECURITY CHANNEL IS A NAMED CLIENT AND THE CLIENT OBJECT IS SCOPED, WHICH IS LOAD BEARING AND
+    /// NOT STYLE. The generic typed-client overload registers the client type TRANSIENT, and that made
+    /// two things false at once: the credential store the client owned as a field was EMPTY on every
+    /// resolve, so the held-credential path was never reached across calls and this service asked Security
+    /// to mint a fresh token for every outbound call; and the two interface registrations below each
+    /// resolved their own client, so the claim that they are one object held for a single resolve and not
+    /// for a request. Splitting the registration - the name owns the address, handler and resilience
+    /// pipeline, a scoped registration owns the object, and a singleton owns the store - is what makes both
+    /// statements true.
+    /// </para>
+    /// <para>
+    /// THE CONSTRUCTOR IS NAMED RATHER THAN ACTIVATED, for a reason that survives that change.
     /// <see cref="SecurityClient"/> declares two constructors that BOTH accept an
-    /// <see cref="HttpClient"/> plus container-resolvable parameters. The typed-client factory calls
-    /// the activator with the <see cref="HttpClient"/> supplied, and the activator then demands
-    /// exactly one best match; two equal matches make it throw "Multiple constructors accepting all
-    /// given argument types have been found" on the first resolve - which is the first token request,
-    /// i.e. the first authenticated call this service makes. Naming the constructor removes the
-    /// ambiguity, and the one named is the four-argument overload so that the determinism seam
-    /// registered by <see cref="AddDataServicesDeterminismSeam"/> is genuinely engaged rather than
-    /// silently defaulted to the system clock.
+    /// <see cref="HttpClient"/> plus container-resolvable parameters. An activator handed the
+    /// <see cref="HttpClient"/> demands exactly one best match, and two equal matches make it throw
+    /// "Multiple constructors accepting all given argument types have been found" on the first resolve -
+    /// which is the first token request, i.e. the first authenticated call this service makes. Naming the
+    /// constructor removes the ambiguity, and the one named is the widest overload so that both the
+    /// determinism seam registered by <see cref="AddDataServicesDeterminismSeam"/> and the shared
+    /// credential store are genuinely engaged rather than silently defaulted.
     /// </para>
     /// <para>
     /// THE TWO INTERFACE REGISTRATIONS ARE THE SAME OBJECT, NOT TWO. <see cref="SecurityClient"/>
     /// implements both <see cref="IServiceTokenProvider"/> (C-01) and
-    /// <see cref="ICryptoServiceClient"/> (C-02), and both resolve THROUGH the typed client so that the
-    /// held credential is shared rather than re-minted per interface. Under C-02 raw key material never
-    /// crosses the wire from a caller - it passes an opaque reference that Security resolves on its own
-    /// side - and nothing here holds, forwards or logs any.
+    /// <see cref="ICryptoServiceClient"/> (C-02), and both resolve THROUGH the one scoped client so that
+    /// the held credential is shared rather than re-minted per interface -
+    /// <c>SecurityCredentialCompositionTests</c> asserts it against this composition rather than leaving
+    /// it as a claim. Under C-02 raw key material never crosses the wire from a caller - it passes an
+    /// opaque reference that Security resolves on its own side - and nothing here holds, forwards or logs
+    /// any.
+    /// </para>
+    /// <para>
+    /// AND THE CHANNEL PRESENTS A CLIENT CERTIFICATE, WHICH IS WHAT MAKES ANY OF THE ABOVE REACHABLE.
+    /// Contract C-01 authenticates <c>POST /v1/tokens</c> with mutual TLS and with nothing else, because
+    /// a caller cannot present a bearer token in order to obtain its first bearer token. The identity is
+    /// loaded once from <c>DataServices:Security:MutualTls</c> and attached by
+    /// <see cref="CreateSecurityChannelHandler"/>; an unreadable or half-configured pair ends the host,
+    /// and an unset pair is the documented "presents nothing" posture that the client reports by name at
+    /// the first token request.
     /// </para>
     /// </remarks>
     internal static IServiceCollection AddDataServicesClients(this IServiceCollection services)
     {
         ArgumentNullException.ThrowIfNull(services);
+
+        // THE TRUST ANCHOR EVERY CHANNEL BELOW VERIFIES ITS PEER AGAINST. Both upstreams terminate TLS
+        // with certificates issued by the local authority docs/ARCHITECTURE.md 9.3.1 generates, which is
+        // in no container's OS trust store - so without this, none of the five channels registered here
+        // can complete a handshake. A singleton because the handler factories recycle handlers on a
+        // schedule and the anchor must be read once rather than per rotation.
+        services.TryAddSingleton(static serviceProvider => new InternalTlsTrust(
+            serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>().Value.InternalTls));
+
+        // THE CLIENT IDENTITY THIS SERVICE PRESENTS, LOADED ONCE AND SHARED BY EVERY HANDLER ROTATION.
+        // The options group existed before this line did, and nothing consumed it: the Security channel
+        // was built with the trust anchor and no certificate, so `POST /v1/tokens` - which is protected
+        // by mutual TLS and by nothing else - refused every request this service made, and with no
+        // credential neither the four Persistence contracts nor the crypto contract were reachable. A
+        // SINGLETON rather than a per-handler load because the client factory recycles its primary
+        // handler on a schedule: reading the PEM pair inside that factory would open a fresh private-key
+        // handle per rotation and never close one, and it is the single load that lets the eager resolve
+        // after `Build()` turn an unreadable pair into a startup failure rather than a first-request one.
+        services.TryAddSingleton(static serviceProvider => LoadSecurityClientIdentity(
+            serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>().Value.Security.MutualTls));
+
+        // ONE CREDENTIAL STORE FOR THE WHOLE PROCESS, WHICH IS WHAT MAKES THE HELD CREDENTIAL REAL. A
+        // typed HTTP client is registered TRANSIENT by the framework, so the store `SecurityClient` used
+        // to own as a field was empty on every resolve - the "reuse a held token until it lapses" path
+        // documented on its token accessor was never reached across calls in a running host, and this
+        // service asked Security to mint a fresh token for every single outbound call. The store holds no
+        // connection and no handler, only short-lived tokens keyed by audience and scope, so unlike the
+        // client itself it is safe to keep for the life of the process.
+        services.TryAddSingleton<ServiceTokenCache>();
 
         _ = services
             // WHERE a Security request goes is stated HERE and read nowhere else, which keeps this
@@ -656,21 +913,36 @@ internal static class DataServicesComposition
             // bound setting for one purpose only - telling "not configured at all" apart from
             // "configured but registered without it" in a fail-fast diagnostic - and never to compose
             // an address.
-            .AddHttpClient<SecurityClient>(static (serviceProvider, httpClient) => httpClient
+            //
+            // A NAMED CLIENT RATHER THAN A TYPED ONE, AND THE LIFETIME IS THE WHOLE REASON. The generic
+            // overload registers the client type TRANSIENT, and with two interfaces forwarding to it
+            // each forwarder resolved its own instance - so the remark below about "the same object, not
+            // two" was false however the forwarders themselves were registered. Naming the client leaves
+            // this registration owning the address, the handler and the resilience pipeline, and lets the
+            // scoped registration further down own the object's lifetime, which is the only arrangement
+            // in which both interfaces genuinely reach one client. The name is an explicit constant
+            // rather than the framework's derived type name so nothing here depends on that convention.
+            .AddHttpClient(SecurityClient.HttpClientName, static (serviceProvider, httpClient) => httpClient
                 .BaseAddress = new Uri(
                     serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>()
                         .Value
                         .Security
                         .BaseAddress,
                     UriKind.Absolute))
-            // HOW the client is constructed is stated separately, and by an explicit factory for the
-            // constructor-ambiguity reason in this method's remarks.
-            .AddTypedClient(static (httpClient, serviceProvider) => new SecurityClient(
-                httpClient,
-                serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>(),
-                serviceProvider.GetRequiredService<ILogger<SecurityClient>>(),
-                serviceProvider.GetRequiredService<TimeProvider>()))
+            // HOW the peer is verified. Server-certificate validation is NARROWED here, never relaxed,
+            // and never by a callback: a forged Security service would be a forged token issuer for the
+            // whole system, so this handler pins the acceptable root to the anchor the deployment mounts
+            // and rejects every other root for internal traffic. Chain building, name validation and
+            // validity dates remain the platform's. With no anchor configured the platform's default
+            // trust decision stands unmodified (constraint C-G).
+            .ConfigurePrimaryHttpMessageHandler(CreateSecurityChannelHandler)
             .AddStandardResilienceHandler()
+            // THE ONE EDGE WITH A GENUINE READ/WRITE SPLIT TO MAKE. Security is reached over REST, so its
+            // methods are distinguishable: the verification-material fetch is a GET and is safely
+            // retryable, while token issuance is a POST and is not retried - minting a second token is
+            // not obviously harmful, but "not obviously harmful" is not a basis for replaying a
+            // credential-issuing request whose outcome is unknown. The predicate expresses exactly that
+            // distinction, so the configured attempt count still governs the GET.
             .Configure(static (resilience, serviceProvider) => ApplyResilience(
                 resilience,
                 serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>()
@@ -678,35 +950,110 @@ internal static class DataServicesComposition
                     .Resilience
                     .Security));
 
-        services.TryAddTransient<IServiceTokenProvider>(static serviceProvider =>
+        // THE CLIENT ITSELF IS SCOPED, AND THAT IS WHAT MAKES THE REMARK ABOVE TRUE. One registration of
+        // the concrete type means the two interface forwarders below reach ONE object within a request
+        // rather than each resolving its own - which is what "the same object, not two" has always
+        // claimed and what a transient typed client made false however the forwarders were registered.
+        // Scoped rather than singleton because the HttpClient handed to it is factory-managed and meant
+        // to be short lived, and scoped rather than transient because the request is the unit the
+        // credential is used within; it matches PersistenceClient's own lifetime for the same reason.
+        //
+        // THE CONSTRUCTOR IS NAMED RATHER THAN ACTIVATED. SecurityClient publishes two public
+        // constructors that both accept an HttpClient plus container-resolvable parameters, so the
+        // activator cannot choose between them; naming the widest one here also guarantees the
+        // determinism seam and the shared credential store are genuinely engaged rather than silently
+        // defaulted.
+        services.TryAddScoped(static serviceProvider => new SecurityClient(
+            serviceProvider.GetRequiredService<IHttpClientFactory>()
+                .CreateClient(SecurityClient.HttpClientName),
+            serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>(),
+            serviceProvider.GetRequiredService<ILogger<SecurityClient>>(),
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetRequiredService<ServiceTokenCache>()));
+
+        services.TryAddScoped<IServiceTokenProvider>(static serviceProvider =>
             serviceProvider.GetRequiredService<SecurityClient>());
 
-        services.TryAddTransient<ICryptoServiceClient>(static serviceProvider =>
+        services.TryAddScoped<ICryptoServiceClient>(static serviceProvider =>
             serviceProvider.GetRequiredService<SecurityClient>());
 
         // C-05 QueryService, C-06 UpdateService, C-07 CommandService, C-08 TransactionService. Four
         // separate clients rather than one, because the contract is four services so that the update
         // surface - the one carrying optimistic-concurrency semantics - can version independently of
         // the retrieval surface (AAP 0.3.4).
+        //
+        // ============ ALL FOUR GET THE NON-RETRYING PIPELINE, AND THAT IS A CORRECTNESS DECISION ======
+        // A transport failure does not tell a caller whether the server processed the request. Retrying
+        // is therefore only safe for an operation that can be applied twice with the same result, and
+        // NOT ONE RPC ON THESE FOUR CONTRACTS QUALIFIES - not even the ones that read:
+        //
+        //   * C-06 Update APPLIES ROWS. A retry after a failure that actually succeeded double-applies
+        //     an insert, and the second attempt's updatewhereclause then finds the row already changed
+        //     and reports a conflict for a change this caller itself made.
+        //   * C-07 Exec runs an arbitrary statement, which is the same argument with nothing bounding it.
+        //   * C-08 BeginSession takes a POOL REFERENCE. A retried begin leaks the first one, and the pool
+        //     is reference-counted, so the leak is permanent for the process. Commit and Rollback are
+        //     each once-only by definition.
+        //   * C-05 LOOKS retryable and is not. Alongside the streaming read it carries the task
+        //     lifecycle and the clause setters, and CreateQueryTask leaks a server-held task while
+        //     SetWhereClause under SQL_MS_APPEND appends the clause A SECOND TIME - which produces a
+        //     different statement, not a duplicate one.
+        //
+        // WHY AN OPERATION-SCOPED PREDICATE RATHER THAN MaxRetryAttempts = 0. Zeroing the attempt count
+        // records the CONSEQUENCE and loses the reason: it cannot distinguish a read from an Update, it
+        // cannot be relaxed for the one edge that does have a safe method, and it leaves nothing in the
+        // code saying why. Clients/OutboundCallPolicy.cs classifies by operation and reads the
+        // `grpc-status` a server-declared refusal arrives with - which an HTTP-level predicate cannot see
+        // at all, because such a refusal arrives as HTTP 200 - so the four contracts here retry the
+        // classified reads and idempotent teardowns and nothing else, and the configured attempt count
+        // stays meaningful on the Security edge below. The rest of the pipeline - the total request
+        // timeout and the circuit breaker - stays on all four, and that is the part the AAP added this
+        // package for: an in-process call could not fail in transit and a network call can (AAP 0.5.3).
+        // ==========================================================================================
         _ = services
             .AddGrpcClient<PersistenceQueryClient>(ConfigurePersistenceChannel)
+            .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
             .AddStandardResilienceHandler()
-            .Configure(ConfigurePersistenceResilience);
+            .Configure(ConfigureNonRetryingPersistenceResilience);
 
         _ = services
             .AddGrpcClient<PersistenceUpdateClient>(ConfigurePersistenceChannel)
+            .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
             .AddStandardResilienceHandler()
-            .Configure(ConfigurePersistenceResilience);
+            .Configure(ConfigureNonRetryingPersistenceResilience);
 
         _ = services
             .AddGrpcClient<PersistenceCommandClient>(ConfigurePersistenceChannel)
+            .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
             .AddStandardResilienceHandler()
-            .Configure(ConfigurePersistenceResilience);
+            .Configure(ConfigureNonRetryingPersistenceResilience);
 
         _ = services
             .AddGrpcClient<PersistenceTransactionClient>(ConfigurePersistenceChannel)
+            .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
             .AddStandardResilienceHandler()
-            .Configure(ConfigurePersistenceResilience);
+            .Configure(ConfigureNonRetryingPersistenceResilience);
+
+        // THE OUTBOUND DEADLINES, DERIVED FROM THE SAME GROUP THE FOUR PIPELINES ABOVE ARE CONFIGURED
+        // FROM. A gRPC call carrying no deadline lets Persistence keep working - and keep the query,
+        // update, command or transaction handle behind that work alive - for as long as the transport
+        // looks open, which includes every case where this caller has gone and the transport has not
+        // noticed. Those handles are bounded per principal and globally, so an abandoned call that is
+        // never told to stop consumes admission capacity a live caller then cannot get. A singleton
+        // because it holds two durations and a clock and nothing else.
+        services.TryAddSingleton(static serviceProvider =>
+        {
+            ClientResilienceOptions persistence = serviceProvider
+                .GetRequiredService<IOptions<DataServicesOptions>>()
+                .Value
+                .Resilience
+                .Persistence;
+
+            return new OutboundDeadlines(
+                persistence.RequestTimeout,
+                persistence.StreamDeadline,
+                serviceProvider.GetRequiredService<TimeProvider>());
+        });
 
         // SCOPED, deliberately. The client holds no cross-request state of its own, and a scoped
         // lifetime is what keeps its logger scope and its resolved gRPC clients aligned with the call
@@ -737,11 +1084,192 @@ internal static class DataServicesComposition
     }
 
     /// <summary>
+    /// Builds the primary handler for the four Persistence gRPC channels, with internal trust applied.
+    /// </summary>
+    /// <param name="serviceProvider">The provider the shared trust anchor is resolved from.</param>
+    /// <returns>A handler that verifies its peer against the mounted anchor when one is configured.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="serviceProvider"/> is <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// ONE FACTORY FOR FOUR CHANNELS, for the same reason <see cref="ConfigurePersistenceChannel"/> is
+    /// one method rather than four lambdas: all four demonstrably share the same trust decision, and a
+    /// channel that quietly kept platform default trust could not connect to the documented topology at
+    /// all.
+    /// </para>
+    /// <para>
+    /// <c>EnableMultipleHttp2Connections</c> is set explicitly because supplying a primary handler
+    /// replaces the one the gRPC client factory would otherwise build, and that one sets this property.
+    /// Leaving it at its default would cap concurrent streams at the peer's advertised limit and queue
+    /// calls behind it - a change to the transport that has nothing to do with trust.
+    /// </para>
+    /// </remarks>
+    private static HttpMessageHandler CreateInternalGrpcHandler(IServiceProvider serviceProvider)
+    {
+        ArgumentNullException.ThrowIfNull(serviceProvider);
+
+        SocketsHttpHandler handler = new() { EnableMultipleHttp2Connections = true };
+
+        serviceProvider.GetRequiredService<InternalTlsTrust>().Apply(handler);
+
+        return handler;
+    }
+
+    /// <summary>
+    /// Builds the primary handler for the Security REST channel, with internal trust applied.
+    /// </summary>
+    /// <param name="serviceProvider">The provider the shared trust anchor is resolved from.</param>
+    /// <returns>A handler that verifies Security against the mounted anchor when one is configured.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="serviceProvider"/> is <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// SEPARATE FROM THE gRPC FACTORY, because this channel carries the client certificate as well as
+    /// the anchor and the gRPC channels carry neither. Keeping them apart is what stops a later edit
+    /// from attaching this service's client identity to a channel that has no use for it.
+    /// </para>
+    /// <para>
+    /// AND THE CERTIFICATE IS THE HALF THAT WAS MISSING. Contract C-01 protects <c>POST /v1/tokens</c>
+    /// with mutual TLS and with nothing else, because a caller cannot present a bearer token in order to
+    /// obtain its first bearer token - so a channel carrying the anchor but no identity completes the
+    /// handshake, is refused at the endpoint, and leaves this service with no credential for any of the
+    /// four Persistence contracts or the crypto contract. The identity is resolved from the container
+    /// rather than loaded here for the reason recorded on its registration: the factory recycles this
+    /// handler on a schedule and the private key must be read once, not per rotation.
+    /// </para>
+    /// <para>
+    /// An EMPTY collection is the unconfigured pair, which is a legitimate deployment state rather than a
+    /// fault - it presents no identity and requests no token. The property is left alone in that case
+    /// rather than assigned an empty collection, because writing it would say less than not writing it.
+    /// </para>
+    /// </remarks>
+    private static HttpMessageHandler CreateSecurityChannelHandler(IServiceProvider serviceProvider)
+    {
+        ArgumentNullException.ThrowIfNull(serviceProvider);
+
+        SocketsHttpHandler handler = new();
+
+        serviceProvider.GetRequiredService<InternalTlsTrust>().Apply(handler);
+
+        X509Certificate2Collection identity =
+            serviceProvider.GetRequiredService<X509Certificate2Collection>();
+
+        if (identity.Count > 0)
+        {
+            handler.SslOptions.ClientCertificates = identity;
+        }
+
+        return handler;
+    }
+
+    /// <summary>
+    /// Loads the PEM client-certificate pair this service presents on the token-issuance edge, or an
+    /// empty collection when the deployment configures none.
+    /// </summary>
+    /// <param name="mutualTls">The bound <c>DataServices:Security:MutualTls</c> group.</param>
+    /// <returns>
+    /// The loaded identity, or an empty collection when neither path is configured.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="mutualTls"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The group is half configured, or the material it names cannot be read as a PEM certificate and
+    /// key.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// FAIL CLOSED ON HALF-CONFIGURED AND ON UNREADABLE, AND ONLY THOSE TWO. A certificate cannot
+    /// complete a handshake without its key and a key has nothing to present without its certificate, so
+    /// half a pair is unusable rather than merely weaker; and material that names a file the process
+    /// cannot read is a deployment that intended to authenticate and cannot. Both end the host, which is
+    /// the managed form of the legacy's own posture [ws_objects/pfw.pbl.src/pfw.sra:L143] - a structural
+    /// fault terminates rather than degrading. Neither path is echoed into either message: a path is not
+    /// itself a credential, but it names where one is mounted, and a startup log is exactly the wrong
+    /// place to publish that. The configuration key is what an operator needs and all they are given.
+    /// </para>
+    /// <para>
+    /// NEITHER IS AN EMPTY PAIR. That is the documented "this deployment presents no client certificate
+    /// and requests no token" state carried by the options group itself, and refusing to start on it
+    /// would make the shipped defaults unrunnable. The consequence is instead surfaced twice where it is
+    /// actionable: a named startup warning, and a named diagnostic from <see cref="SecurityClient"/> at
+    /// the first token request instead of a request that could only ever be refused.
+    /// </para>
+    /// </remarks>
+    private static X509Certificate2Collection LoadSecurityClientIdentity(
+        MutualTlsClientOptions mutualTls)
+    {
+        ArgumentNullException.ThrowIfNull(mutualTls);
+
+        if (!mutualTls.IsConfigured)
+        {
+            return [];
+        }
+
+        string certificatePath = mutualTls.CertificatePath.Trim();
+        string certificateKeyPath = mutualTls.CertificateKeyPath.Trim();
+
+        string certificateKey = string.Concat(
+            DataServicesOptions.SectionName,
+            ":",
+            nameof(DataServicesOptions.Security),
+            ":",
+            nameof(SecurityClientOptions.MutualTls),
+            ":",
+            nameof(MutualTlsClientOptions.CertificatePath));
+
+        string privateKeyKey = string.Concat(
+            DataServicesOptions.SectionName,
+            ":",
+            nameof(DataServicesOptions.Security),
+            ":",
+            nameof(SecurityClientOptions.MutualTls),
+            ":",
+            nameof(MutualTlsClientOptions.CertificateKeyPath));
+
+        if (certificatePath.Length == 0 || certificateKeyPath.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"'{certificateKey}' and '{privateKeyKey}' must be configured together or not at all. This "
+                    + "deployment is half configured: a certificate cannot complete a TLS handshake without "
+                    + "its key and a key has nothing to present without its certificate, so half a client "
+                    + "identity is unusable rather than merely weaker. Neither path is quoted here, because "
+                    + "a startup log must not record where key material is mounted.");
+        }
+
+        try
+        {
+            // Constructed straight into the collection so the certificate has no owning local: its
+            // lifetime is the returned collection's, which the container holds for the life of the
+            // process and hands to every rotation of the primary handler.
+            return new X509Certificate2Collection(
+                X509Certificate2.CreateFromPemFile(certificatePath, certificateKeyPath));
+        }
+        catch (Exception failure) when (failure
+            is CryptographicException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                $"The client certificate named by '{certificateKey}' and '{privateKeyKey}' could not be "
+                    + "loaded, so this host cannot authenticate to the token-issuance edge and will not "
+                    + "start. Check that both files exist, that the process can read them, and that each "
+                    + "is PEM encoded - the certificate in the first key and its private key in the "
+                    + "second. Neither path is reproduced here, because a startup log is the wrong place "
+                    + "to publish where a private key is mounted.",
+                failure);
+        }
+    }
+
+    /// <summary>
     /// Applies the configured Persistence resilience settings to a standard handler.
     /// </summary>
     /// <param name="resilience">The handler options being configured.</param>
     /// <param name="serviceProvider">The provider the bound options are read from.</param>
-    private static void ConfigurePersistenceResilience(
+    private static void ConfigureNonRetryingPersistenceResilience(
         HttpStandardResilienceOptions resilience,
         IServiceProvider serviceProvider) => ApplyResilience(
             resilience,
@@ -763,6 +1291,12 @@ internal static class DataServicesComposition
     /// written once so the two cannot diverge in shape.
     /// </para>
     /// <para>
+    /// THE RETRY PREDICATE IS THE CALLER'S DECISION AND IS NOT DEFAULTED. Both edges share the timeout
+    /// and circuit-breaker shape, and they differ on exactly one axis: whether an unsafe method may be
+    /// replayed. Making that a required argument means a future edge cannot acquire retries on a mutating
+    /// contract by omission - it has to say so.
+    /// </para>
+    /// <para>
     /// THE ATTEMPT TIMEOUT IS LEFT AT THE LIBRARY DEFAULT ON PURPOSE. The handler validates that the
     /// circuit-breaker sampling duration is at least double the attempt timeout and that the total
     /// request timeout is not shorter than a single attempt; overriding one of the three from
@@ -771,17 +1305,181 @@ internal static class DataServicesComposition
     /// AAP calls for and leaves the rest of the pipeline as published.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Builds the message handler the Security typed client sends through, attaching this service's
+    /// client certificate when the deployment configured one.
+    /// </summary>
+    /// <param name="serviceProvider">The provider the typed client was resolved from.</param>
+    /// <returns>The primary handler for the Security typed client.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The configured certificate pair cannot be loaded or is unusable as a client identity.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THIS EXISTS BECAUSE A DECLARED SETTING THAT NOTHING READS IS WORSE THAN NO SETTING AT ALL.
+    /// <c>DataServices:Security:MutualTls</c> is bound and validated as a pair, and C-01 publishes
+    /// <c>mutualTls</c> as one of the two credentials it accepts on <c>POST /v1/tokens</c>. Without this
+    /// registration the typed client carried only a base address and a resilience pipeline, so a
+    /// deployment that mounted a certificate pair and read the settings document would believe it had
+    /// configured a credential that was never presented - and the refusal would arrive as a
+    /// <c>401</c> from Security with nothing in it to suggest the certificate had been dropped on this
+    /// side. Consuming the setting is what makes the published alternative reachable.
+    /// </para>
+    /// <para>
+    /// NORMAL SERVER-CERTIFICATE VALIDATION IS RETAINED, and no callback is installed. The one thing a
+    /// client-certificate configuration must not do is quietly become a trust-everything switch: no
+    /// <c>RemoteCertificateValidationCallback</c>, no <c>DangerousAcceptAnyServerCertificate</c>, and no
+    /// revocation relaxation appears here or anywhere in this file, so the platform's own chain
+    /// validation applies exactly as it would without a client identity. The legacy tree contains the
+    /// opposite pattern - a test window that disables server- and host-certificate validation outright
+    /// with an inline note saying so - and reproducing that here would import a weakness from a surface
+    /// this refactor does not carry.
+    /// </para>
+    /// <para>
+    /// FAIL FAST, AND ON THE FIRST RESOLVE RATHER THAN ON THE FIRST HANDSHAKE. A handler factory runs
+    /// when the typed client is first resolved, which for this client is the first token request. A pair
+    /// of paths that names a missing file, an unreadable file, a mismatched key or material the platform
+    /// cannot use as a client identity is therefore reported as a configuration fault with the
+    /// configuration KEYS named, rather than as a TLS handshake failure whose message names neither. The
+    /// paths themselves are never quoted: a path is not a credential, but it names where one is mounted,
+    /// and a startup log is the wrong place to publish that.
+    /// </para>
+    /// <para>
+    /// WHEN NO PAIR IS CONFIGURED THIS RETURNS THE ORDINARY HANDLER UNCHANGED - it is not an error, and
+    /// it is a supported topology: wherever TLS is terminated ahead of Security by a reverse proxy or a
+    /// mesh sidecar, the client certificate never reaches the application, so the credential is the
+    /// <c>Basic</c> one this client writes onto the request instead. A deployment configuring NEITHER is
+    /// refused at startup by the options validator, so this method never has to represent that case.
+    /// </para>
+    /// </remarks>
+    private static HttpMessageHandler ConfigureSecurityTransport(IServiceProvider serviceProvider)
+    {
+        ArgumentNullException.ThrowIfNull(serviceProvider);
+
+        MutualTlsClientOptions mutualTls = serviceProvider
+            .GetRequiredService<IOptions<DataServicesOptions>>()
+            .Value
+            .Security
+            .MutualTls;
+
+        SocketsHttpHandler handler = new();
+
+        if (!mutualTls.IsConfigured)
+        {
+            return handler;
+        }
+
+        handler.SslOptions.ClientCertificates =
+        [
+            LoadClientCertificate(mutualTls.CertificatePath, mutualTls.CertificateKeyPath),
+        ];
+
+        return handler;
+    }
+
+    /// <summary>
+    /// Loads a PEM certificate and its PEM private key into one certificate usable as a client identity.
+    /// </summary>
+    /// <param name="certificatePath">Path to the PEM certificate.</param>
+    /// <param name="keyPath">Path to the PEM private key.</param>
+    /// <returns>The loaded certificate, carrying its private key.</returns>
+    /// <exception cref="InvalidOperationException">The pair cannot be loaded or is unusable.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE PKCS#12 ROUND TRIP IS NOT REDUNDANT. A certificate created from PEM files carries an
+    /// ephemeral key, and on Windows the TLS stack cannot use such a key for client authentication - the
+    /// handshake fails with an error that names neither the certificate nor the cause. Exporting to
+    /// PKCS#12 and re-importing produces a certificate whose key the platform will use, and it is
+    /// harmless where it was not required. It is done unconditionally rather than under an
+    /// operating-system test so that a deployment behaves the same way everywhere and this path is
+    /// exercised by every run rather than only by the platform that needs it.
+    /// </para>
+    /// <para>
+    /// EVERY FAILURE MODE IS TRANSLATED, AND NONE OF THEM QUOTES A PATH. A missing or unreadable file,
+    /// material that is not PEM, a key that does not match the certificate and a key algorithm the
+    /// platform will not accept all arrive as different exception types from three different APIs; each
+    /// becomes one <see cref="InvalidOperationException"/> naming the two configuration keys and
+    /// carrying the original as its inner exception for a diagnostic log. The inner exception is safe to
+    /// carry here precisely because it is the platform's own message about material, not a message this
+    /// code composed from a path.
+    /// </para>
+    /// </remarks>
+    private static X509Certificate2 LoadClientCertificate(string certificatePath, string keyPath)
+    {
+        try
+        {
+            using X509Certificate2 fromPem =
+                X509Certificate2.CreateFromPemFile(certificatePath, keyPath);
+
+            return X509CertificateLoader.LoadPkcs12(
+                fromPem.Export(X509ContentType.Pkcs12),
+                password: null,
+                X509KeyStorageFlags.EphemeralKeySet);
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or CryptographicException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                "The client certificate configured for the token-issuance edge could not be loaded as a "
+                + "usable client identity. Check that 'DataServices:Security:MutualTls:CertificatePath' "
+                + "and 'DataServices:Security:MutualTls:CertificateKeyPath' both name readable "
+                + "PEM-encoded files, that the key belongs to the certificate, and that its algorithm is "
+                + "one this platform accepts for client authentication. Neither path is quoted here, "
+                + "because a startup log must not record where key material is mounted.",
+                exception);
+        }
+    }
+
     private static void ApplyResilience(
         HttpStandardResilienceOptions resilience,
         ClientResilienceOptions configured)
     {
         resilience.Retry.MaxRetryAttempts = configured.MaxRetryAttempts;
         resilience.Retry.Delay = configured.RetryBaseDelay;
+
+        // THE SAFETY DECISION LIVES IN THE PREDICATE BELOW AND NOWHERE ELSE, WHICH IS A CORRECTION.
+        //
+        // A transport failure does not reveal whether the server processed the request, so replaying a
+        // non-idempotent operation can apply it twice, and there is no end-to-end idempotency key or
+        // request deduplication anywhere in this system. That reasoning is unchanged; what changed is
+        // where it is enforced. This method used to call `Retry.DisableForUnsafeHttpMethods()` here and
+        // then assign `Retry.ShouldHandle` a few lines below - and that assignment REPLACES whatever the
+        // verb gate installed, so the gate decided nothing at all while reading as though it were the
+        // safety mechanism. Two ways of expressing one decision, with the visible one inert, is worse
+        // than either alone.
+        //
+        // IT IS ALSO THE WEAKER OF THE TWO ON THREE OF THE FOUR EDGES. gRPC transports every call as an
+        // HTTP POST, so on the four Persistence contracts a verb gate is an all-or-nothing disable that
+        // cannot distinguish a read from an Update - and it cannot read a `grpc-status` either, which is
+        // the half of the problem that silently costs availability. Clients/OutboundCallPolicy.cs decides
+        // from the operation first and the gRPC status second, and it admits the RFC 9110 safe methods, so
+        // it reproduces the verb gate's decision exactly on the Security REST edge - the one edge where a
+        // verb genuinely distinguishes a read - while remaining correct on the three where it does not.
         resilience.CircuitBreaker.FailureRatio = configured.CircuitBreakerFailureRatio;
         resilience.CircuitBreaker.MinimumThroughput = configured.CircuitBreakerMinimumThroughput;
         resilience.CircuitBreaker.SamplingDuration = configured.CircuitBreakerSamplingDuration;
         resilience.CircuitBreaker.BreakDuration = configured.CircuitBreakerBreakDuration;
         resilience.TotalRequestTimeout.Timeout = configured.RequestTimeout;
+
+        // THE BACKOFF SHAPE IS WRITTEN DOWN RATHER THAN INHERITED. Both values match the package's
+        // defaults today, and that is precisely why they are stated: "bounded backoff with jitter" is a
+        // requirement of this policy, and a requirement that holds only because a dependency's default
+        // happens to satisfy it is not being enforced by anything.
+        resilience.Retry.BackoffType = DelayBackoffType.Exponential;
+        resilience.Retry.UseJitter = true;
+
+        // THE TWO PREDICATES ARE THE SUBSTANTIVE PART, because the stock ones cannot see this edge at
+        // all. A gRPC call the server refused arrives as HTTP 200 with the refusal in `grpc-status`, so
+        // the stock retry predicate never retried a server-declared Unavailable - while it happily
+        // REPLAYED a transport fault on an Update, an Exec or a Commit, none of which is idempotent.
+        // Clients/OutboundCallPolicy.cs decides from the operation first and the gRPC status second; the
+        // circuit-breaker predicate additionally distinguishes an upstream that cannot serve from one
+        // that is deliberately refusing, so a contested update or an exhausted quota cannot trip the
+        // breaker and take the read path down with it.
+        resilience.Retry.ShouldHandle = OutboundCallPolicy.ShouldRetryAsync;
+        resilience.CircuitBreaker.ShouldHandle = OutboundCallPolicy.ShouldBreakAsync;
     }
 
 
@@ -951,46 +1649,74 @@ internal static class DataServicesComposition
         });
 
         // ------------------------------------------------------------------------------------------
-        // THE THREE HOST-BINDING SEAMS
+        // THE THREE HOST-BINDING SEAMS - PROVISIONED
         //
         // All three answer the same question - "which concrete DataWindow does this handle name?" - and
-        // all three are REQUIRED dependencies of the published gRPC services, so they are registered
-        // rather than left out: a service composed without them is structurally faulty, and the AAP
-        // requires that stay fail-fast rather than soften. Registering them is what makes the two
-        // MapGrpcService calls real rather than decorative.
+        // all three are REQUIRED dependencies of the published gRPC services, so a service composed
+        // without them is structurally faulty and the startup gate keeps that fail-fast.
         //
-        // WHY THE SHIPPED IMPLEMENTATIONS BIND NO HANDLE, STATED AS A FINDING AND NOT AN OVERSIGHT.
-        // Binding a handle needs a concrete `DataWindowServiceHost`, and `se_cst_dw` DERIVES FROM
-        // `se_cst_datawindow` [se_cst_dw.sru:L4, :L10], which lives in `pfw.ui.controls.ext` - a
-        // DEFERRED DesignSystem library. That is a STRUCTURAL INHERITANCE EDGE, not a call, so no
-        // refactoring at a call site removes it, and AAP 0.2.1.3 Correction 3 resolves it by having
-        // DataServices declare its OWN abstract host contract and record the legacy parent as
-        // REFERENCE-only. Materialising a DataWindow is therefore DesignSystem's work, reserved behind
-        // the `/v1/design/**` extension point (AAP 0.4.4), and constraint C-D forbids implementing a
-        // deferred service even partially and even to stub it out. AAP 0.8.1 settles the choice: where
-        // it lies between a partial implementation and a documented gap, THE DOCUMENTED GAP WINS.
+        // WHAT THESE REPLACED, AND WHY THE REPLACEMENT WAS REQUIRED. An earlier revision registered three
+        // `Unbound*` implementations that bound no handle and returned null, defended on the ground that
+        // materialising a DataWindow needs the DesignSystem ancestry `se_cst_dw` inherits from
+        // `se_cst_datawindow` [se_cst_dw.sru:L4, :L10] and that constraint C-D forbids implementing a
+        // deferred service even partially. The inheritance fact is true of the LEGACY graph; the
+        // conclusion is not, and the AAP contradicts it in two places:
         //
-        // WHAT THE SHIPPED IMPLEMENTATIONS DO INSTEAD IS ANSWER EACH CONTRACT'S OWN DEFINED NEGATIVE.
-        // Every one of the three interfaces documents a null answer as its "this provider cannot serve
-        // the handle" result, and the services turn that into `RetCode.E_INVALID_HANDLE` for a model or
-        // chain request and into a failed open for an expression session. So a caller that names a
-        // handle learns that the handle names nothing - which is the contract - rather than receiving a
-        // second empty DataWindow, an exception, or a blanket `E_NO_IMPLEMENTATION`.
+        //   * AAP 0.2.1.3 Correction 3 resolves that exact edge by instructing DataServices to "define
+        //     its own abstract host contract carrying only the members se_cst_dw actually consumes from
+        //     its parent, IMPLEMENT AGAINST THAT, and record se_cst_datawindow as REFERENCE-only". The
+        //     contract is Domain/DataWindowServiceHost.cs; the implementation half was what was missing.
+        //   * AAP 0.3.5 splits every UI capability into "a headless half that SHIPS IN DATASERVICES and a
+        //     rendering half" that is deferred. A row and column model with buffers, item statuses,
+        //     selection and sort is the headless half by definition.
         //
-        // AND THE GAP IS NARROW, WHICH IS WHY THE SURFACE IS STILL WORTH PUBLISHING. The seams are
-        // reached by the eight headless-model read/apply operations, by C-03's bidirectional
-        // `EventChain` and by C-04's session open. Retrieve, Update - including the
-        // `updatewhereclause` conflict projected as Aborted and then 409 - the paired validation
-        // session, and the whole event-gate surface reach NONE of them, so the retrieval / validation /
-        // update triple works end to end today.
+        // The cost of the previous shape was not narrow: EIGHT of C-03's headless-model operations and
+        // the WHOLE of C-04 - session open, both inverted streams - were permanently unreachable, and
+        // the published surface answered a valid handle as though it named nothing.
         //
-        // REGISTERED WITH TryAdd SO SUBSTITUTION NEEDS NO EDIT HERE. A host that CAN materialise a
-        // DataWindow registers its own factory before this method runs, or replaces the descriptor in a
-        // test host, and the published surface then serves handles with no change to this file.
+        // THE DEFERRED BOUNDARY IS STILL RESPECTED, AND OBSERVABLY SO. Nothing under Domain/ computes,
+        // stores or answers a coordinate, a size, a colour, a font, a DPI conversion or a redraw; see
+        // the header of Domain/HeadlessDataWindowHost.cs, which states how a reader checks that by
+        // reading rather than by auditing call sites. Rendering stays behind `/v1/design/**`.
+        //
+        // THE NEGATIVE IS STILL REACHABLE. A handle no definition in Domain/DataWindowCatalogue.cs
+        // carries still resolves to null, and the services still turn that into
+        // `RetCode.E_INVALID_HANDLE` for a model or chain request and a failed open for an expression
+        // session. That is published contract, and it is now reached by the inputs that earn it - an
+        // unknown name - rather than by every input.
+        //
+        // REGISTERED WITH TryAdd SO SUBSTITUTION STILL NEEDS NO EDIT HERE. A deployment that materialises
+        // DataWindows another way registers its own factory before this method runs, or replaces the
+        // descriptor in a test host, and the published surface serves handles with no change to this file.
         // ------------------------------------------------------------------------------------------
-        services.TryAddSingleton<IDataWindowHostFactory, UnboundDataWindowHostFactory>();
-        services.TryAddSingleton<IDataWindowModelSetProvider, UnboundDataWindowModelSetProvider>();
-        services.TryAddSingleton<IDataWindowEventChainFactory, UnboundDataWindowEventChainFactory>();
+
+        // The catalogue and the host factory are SINGLETONS because both RETAIN: a definition registered
+        // once must be visible to every later resolve, and a host retained per name is what keeps an
+        // expression session's variables alive across two resolves of the same handle.
+        services.TryAddSingleton<DataWindowCatalogue>();
+        services.TryAddSingleton<HeadlessDataWindowHostFactory>();
+        services.TryAddSingleton<HeadlessDataWindowModelSetProvider>();
+
+        services.TryAddSingleton<IDataWindowHostFactory>(static serviceProvider =>
+            serviceProvider.GetRequiredService<HeadlessDataWindowHostFactory>());
+
+        services.TryAddSingleton<IDataWindowModelSetProvider>(static serviceProvider =>
+            serviceProvider.GetRequiredService<HeadlessDataWindowModelSetProvider>());
+
+        services.TryAddSingleton<IDataWindowEventChainFactory>(static serviceProvider =>
+            new HeadlessDataWindowEventChainFactory(
+                serviceProvider.GetRequiredService<HeadlessDataWindowModelSetProvider>()));
+
+        // THE UPDATE DESCRIPTOR SEAM, AND ITS ABSENCE IS NOT A HARMLESS DEFAULT. C-03's update path
+        // treats a null descriptor as the single-table fallback - name the data object and let the
+        // carrier's own definition govern - which is CORRECT for a definition that declares no update
+        // table and INDISTINGUISHABLE from a deployment that never bound the seam. Unbound, therefore,
+        // every update runs with whatever predicate the carrier defaulted to rather than the six-column
+        // one the evidenced definition declares [dw_sqlite.srd:L8-L14], reports success, and no test of
+        // the update path would notice.
+        services.TryAddSingleton<IDataWindowUpdateContractProvider>(static serviceProvider =>
+            new HeadlessDataWindowUpdateContractProvider(
+                serviceProvider.GetRequiredService<DataWindowCatalogue>()));
 
         return services;
     }
@@ -1025,6 +1751,16 @@ internal static class DataServicesComposition
     /// <c>depends_on: condition: service_healthy</c> chain oscillate rather than settle.
     /// </para>
     /// <para>
+    /// ONE COMPONENT CHECK IS ADDED, AND IT OPENS NO CHANNEL. <c>AddDataServicesHealthChecks</c>
+    /// registers the credential precondition of the token bootstrap: every outward call this service
+    /// makes carries a bearer token, the only way to obtain one is the issuance edge, and contract C-01
+    /// protects that edge with mutual TLS and nothing else. A deployment that mounts no client
+    /// certificate is a legitimate startup state - and one in which this service can serve nothing - so
+    /// it must not report READY. The check reads bound configuration only: no token is minted, no
+    /// handshake is attempted and no upstream is probed, so it is compatible with the paragraph above
+    /// rather than an exception to it.
+    /// </para>
+    /// <para>
     /// PROBLEM DETAILS so that the framework's own challenge and every error response answer
     /// <c>application/problem+json</c>, which is the error shape the authored contracts publish - and
     /// the shape the REST projection's own 409 conflict body extends.
@@ -1038,12 +1774,107 @@ internal static class DataServicesComposition
     {
         ArgumentNullException.ThrowIfNull(services);
 
-        _ = services.AddGrpc();
-        _ = services.AddHealthChecks();
-        _ = services.AddProblemDetails();
+        // ⚠ LOAD BEARING, AND IT IS ABOUT THE SHARED PORT. Left at its default, the gRPC hosting layer maps
+        // a CATCH-ALL route of the shape /{service}/{method} so that a call naming a service this server
+        // does not host answers the gRPC UNIMPLEMENTED status instead of falling through. That route is two
+        // parameter segments wide, so it matches ANY two-segment path - including this service's own REST
+        // routes /v1/ping and /health - and it answers them from the gRPC handler. The observable damage is
+        // precise and it is an error-contract defect: a request to a REST route is answered 404 by the gRPC
+        // handler with a gRPC content type, so it carries neither the problem body those routes declare nor
+        // the 405 that a rejected method on an existing route should produce. Since the port carries BOTH
+        // protocols by design, the REST surface's HTTP semantics must not be silently reshaped by a gRPC
+        // wildcard, so the catch-all is switched off - the same decision, for the same reason, that
+        // services/persistence-service's composition root records.
+        //
+        // WHAT THIS COSTS IS ALMOST NOTHING. An authenticated caller naming a service this server does not
+        // host now falls through to routing and receives HTTP 404, and every conforming gRPC client maps a
+        // 404 onto UNIMPLEMENTED, so the status it surfaces is unchanged. An unauthenticated caller receives
+        // 401 either way, because the fallback policy applies to a request that matched no endpoint just as
+        // it does to one that did. Unknown METHODS on a service that IS hosted are unaffected and keep
+        // answering a proper UNIMPLEMENTED status, because their route begins with a literal service name
+        // that cannot collide with a REST path.
+        _ = services.AddGrpc(static options => options.IgnoreUnknownServices = true);
+
+        _ = services.AddDataServicesHealthChecks();
+
+        // THE CUSTOMIZATION IS WHAT MAKES A FRAMEWORK-GENERATED BODY A CONTRACT-SHAPED ONE. The problem
+        // responses this service writes itself - every projection in Endpoints/RestProjectionEndpoints.cs -
+        // carry `retCode` and `traceId` because the code that writes them sets both. The bodies the
+        // FRAMEWORK writes carry neither: the bearer challenge, the authorization refusal, an unmatched
+        // route and a rejected method are all produced beneath any of this service's own code, and those
+        // same projection routes declare ProducesProblem for 401, 403 and 404. Filling both members here is
+        // what makes the declaration true of all of them rather than of the subset written by hand.
+        //
+        // The guard is not an optimization: a response this service composed itself has already resolved its
+        // own correlation identifier and forwarded the UPSTREAM's return code, which is more specific than
+        // anything derivable from a status, so overwriting either would replace a precise value with a
+        // derived one.
+        _ = services.AddProblemDetails(static options =>
+            options.CustomizeProblemDetails = static context =>
+            {
+                if (context.ProblemDetails.Extensions.ContainsKey(ProblemContractMembers.RetCode))
+                {
+                    return;
+                }
+
+                int status = context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode;
+
+                context.ProblemDetails.Extensions[ProblemContractMembers.RetCode] = ClassifyFailure(status);
+            });
+
         _ = services.AddOpenApi();
 
         return services;
+    }
+
+    /// <summary>
+    /// Classifies a framework-generated failure status as a legacy return code, so that a body this service
+    /// did not compose still carries the member its published routes declare.
+    /// </summary>
+    /// <param name="statusCode">The status the framework is answering with.</param>
+    /// <returns>
+    /// The legacy code for that status, and <see cref="RetCode.UNKNOWN"/> for anything unclassifiable.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// EVERY ARM IS WRITTEN OUT RATHER THAN DERIVED FROM A TRUTHINESS TEST, and each one agrees with the
+    /// projection's own vocabulary in <c>Endpoints/RestProjectionEndpoints.cs</c>: a malformed request is
+    /// <c>E_INVALID_ARGUMENT</c>, a refused caller is <c>E_ACCESS_DENIED</c> whether the refusal was
+    /// authentication or authorization, an unmatched route is <c>E_OBJECT_NOT_FOUND</c> and a rejected
+    /// method is <c>E_NO_SUPPORT</c>. The legacy algebra declares exactly one access code and draws no
+    /// distinction between "no credential" and "credential without permission"; the HTTP statuses stay
+    /// distinct so a caller can still tell them apart, and the code gains no member the oracle never had.
+    /// </para>
+    /// <para>
+    /// THE FINAL CHECK IS THE POINT OF THE GUARD. The algebra is tri-state with a documented hole -
+    /// <c>PREVENT</c> is 1 and reads as a SUCCESS through <c>IsSucceeded</c>
+    /// [<c>ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13</c>], <c>CANCELLED</c> is excluded from
+    /// <c>IsFailed</c> and so is NEITHER [<c>isfailed.srf:L11-L13</c>] - so an error body must never carry a
+    /// code from either class. The kernel predicate is consumed to enforce that rather than the comparison
+    /// being re-derived, so a future arm that violated it degrades to <c>UNKNOWN</c> instead of publishing a
+    /// failure a consumer's own predicate would read as a success.
+    /// </para>
+    /// </remarks>
+    private static long ClassifyFailure(int statusCode)
+    {
+        long classified = statusCode switch
+        {
+            StatusCodes.Status400BadRequest => RetCode.E_INVALID_ARGUMENT,
+            StatusCodes.Status401Unauthorized => RetCode.E_ACCESS_DENIED,
+            StatusCodes.Status403Forbidden => RetCode.E_ACCESS_DENIED,
+            StatusCodes.Status404NotFound => RetCode.E_OBJECT_NOT_FOUND,
+            StatusCodes.Status405MethodNotAllowed => RetCode.E_NO_SUPPORT,
+            StatusCodes.Status408RequestTimeout => RetCode.E_TIME_OUT,
+            StatusCodes.Status415UnsupportedMediaType => RetCode.E_INVALID_TYPE,
+            StatusCodes.Status429TooManyRequests => RetCode.E_BUSY,
+            StatusCodes.Status501NotImplemented => RetCode.E_NO_IMPLEMENTATION,
+            StatusCodes.Status503ServiceUnavailable => RetCode.E_BUSY,
+            StatusCodes.Status504GatewayTimeout => RetCode.E_TIME_OUT,
+            >= StatusCodes.Status500InternalServerError => RetCode.E_INTERNAL_ERROR,
+            _ => RetCode.UNKNOWN,
+        };
+
+        return Predicates.IsFailed(classified) ? classified : RetCode.UNKNOWN;
     }
 
     /// <summary>
@@ -1096,10 +1927,16 @@ internal static class DataServicesComposition
     {
         ArgumentNullException.ThrowIfNull(app);
 
-        // The published contract document, anonymous because a description of the surface is not part
-        // of the surface it describes, and every operation in it still states its own security
-        // requirement. Explicit rather than implicit, so it survives the fallback policy.
-        _ = app.MapOpenApi().AllowAnonymous();
+        // The published contract document, AUTHENTICATED like every other route here bar /health. It used
+        // to be anonymous on the argument that a description of a surface is not part of the surface, and
+        // that argument does not survive the AAP: the anonymous exceptions are ENUMERATED - `/health` on
+        // all four services (C-10) and Security's key set and discovery document (C-01) - and this is not
+        // among them. Nor is anything withheld by protecting it: a consumer learns this service's shape
+        // from the AUTHORED contracts in shared/PowerFramework.Contracts, which are files in the
+        // repository, and this route serves a generated projection of them. Security, the token issuer
+        // itself, already publishes its own document behind its own boundary. No AllowAnonymous call, so
+        // the fallback policy applies and an anonymous request is answered 401 (constraint C-G).
+        _ = app.MapOpenApi();
 
         _ = app.MapHealthEndpoints();
         _ = app.MapPingEndpoints();
@@ -1107,149 +1944,343 @@ internal static class DataServicesComposition
 
         // C-03: retrieval, the paired validation session, the update with its conflict status, the
         // event gate, the bidirectional event chain and the eight headless-model operations.
-        _ = app.MapGrpcService<DataWindowService>().RequireAuthorization();
+        _ = app.MapGrpcService<DataWindowService>()
+            .RequireAuthorization(CallerAuthorization.DataWindowPolicyName);
 
         // C-04: kept a SEPARATE service from C-03 so the expansion engine can version independently of
         // the event chain (AAP 0.4.3), and carrying the two inverted streams - the macro channel and
         // the trace channel - that a single-direction contract could not express.
-        _ = app.MapGrpcService<ColumnExpressionService>().RequireAuthorization();
+        _ = app.MapGrpcService<ColumnExpressionService>()
+            .RequireAuthorization(CallerAuthorization.ColumnExpressionPolicyName);
 
         return app;
     }
-}
 
-
-// ==================================================================================================
-//  THE THREE HOST-BINDING SEAM IMPLEMENTATIONS
-//  ------------------------------------------------------------------------------------------------
-//  These are COMPOSITION types, which is why they live in the composition root: each answers "which
-//  concrete DataWindow does this handle name?", and that is a wiring question rather than a
-//  behavioural one. Not one of them decides a veto, resolves an ordering discipline, classifies an
-//  item-change result, computes a gate or evaluates an expression - all of which stay in Domain/,
-//  Expressions/ and Services/ next to the `ws_objects/**` locators that authorise them.
-//
-//  WHY EACH BINDS NO HANDLE IN THIS REFACTOR, ONCE, RATHER THAN THREE TIMES BELOW.
-//  A binding needs a concrete `DataWindowServiceHost`. `se_cst_dw` derives from `se_cst_datawindow`
-//  [ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L4, :L10], which lives in
-//  `pfw.ui.controls.ext` - a DEFERRED DesignSystem library. AAP 0.2.1.3 Correction 3 resolves that
-//  structural inheritance edge by having DataServices declare its own ABSTRACT host contract and
-//  record the legacy parent as REFERENCE-only, which is exactly what Domain/DataWindowServiceHost.cs
-//  is. Materialising a DataWindow behind that contract is DesignSystem's work, reserved behind the
-//  `/v1/design/**` extension point (AAP 0.4.4), and constraint C-D forbids implementing a deferred
-//  service even partially and even to stub it out. AAP 0.8.1 settles the choice: between a partial
-//  implementation and a documented gap, THE DOCUMENTED GAP WINS.
-//
-//  WHAT THEY DO INSTEAD IS ANSWER THE CONTRACT'S OWN DEFINED NEGATIVE, WHICH IS NOT THE SAME AS A
-//  STUB. Each of the three interfaces documents its null answer as "this provider cannot serve the
-//  handle", and each consumer already turns that into a specific, published result:
-//  `RetCode.E_INVALID_HANDLE` for a model-set or chain request, and a failed session open for the
-//  expression host. So a caller learns that the handle names nothing - which is a true statement -
-//  rather than receiving a second empty DataWindow, an exception, or a blanket
-//  `E_NO_IMPLEMENTATION`. None of the three throws `NotImplementedException`, and none is reachable
-//  only from a test.
-//
-//  SUBSTITUTION NEEDS NO EDIT TO THIS FILE. All three are registered with `TryAdd`, so a host that
-//  can materialise a DataWindow registers its own implementation first, or replaces the descriptor,
-//  and the whole published surface then serves handles unchanged.
-// ==================================================================================================
-
-/// <summary>
-/// The shipped <see cref="IDataWindowHostFactory"/>: it binds no DataWindow name, because binding one
-/// requires the deferred DesignSystem ancestry recorded above.
-/// </summary>
-/// <remarks>
-/// C-04's <c>OpenExpressionSession</c> is the sole consumer. A null answer FAILS THE WHOLE OPEN rather
-/// than yielding a session with a hole in it - a partial open would BLOCK a foreign variable the caller
-/// had every reason to expect to resolve - so the refusal is total and immediate, which is the
-/// fail-fast posture rather than a softening of it. Every other C-04 operation, including
-/// <c>GetServiceState</c> and <c>CloseExpressionSession</c>, is unaffected.
-/// </remarks>
-internal sealed class UnboundDataWindowHostFactory : IDataWindowHostFactory
-{
-    /// <inheritdoc/>
-    public DataWindowServiceHost? Create(string dataWindowName)
+    /// <summary>
+    /// Reads the configured mutual-TLS client identity, or answers an empty collection when none is set.
+    /// </summary>
+    /// <param name="mutualTls">The bound pair of paths.</param>
+    /// <returns>
+    /// A collection holding the one certificate with its private key, or an EMPTY collection when this
+    /// deployment presents none. Empty rather than <see langword="null"/>, so the handler registration has one
+    /// shape to handle instead of two.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="mutualTls"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The pair is configured but the material cannot be read or does not parse. That is a structural fault and
+    /// it stops the host: a deployment that meant to authenticate to the issuer and cannot has already lost
+    /// every authenticated call it would make, so continuing would only defer the failure to first use. AAP
+    /// 0.1.4 requires the legacy's fail-fast posture survive as fail-fast rather than soften into
+    /// warning-and-continue.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// <b>NO PATH IS EVER ECHOED INTO A MESSAGE</b>, and the exceptions below name the two CONFIGURATION KEYS
+    /// instead. A path is not itself a credential, but it names the location of one, and a startup log is
+    /// exactly the wrong place to publish where a private key is mounted. The configuration key is sufficient
+    /// for an operator to find the setting, which is the rule <c>Configuration/DataServicesOptions.cs</c>
+    /// already applies to its own validation messages (constraint C-F).
+    /// </para>
+    /// <para>
+    /// HALF A PAIR SHOULD NOT REACH HERE. <see cref="MutualTlsClientOptions"/> validates the group as
+    /// both-or-neither and the options registration validates on start, so by the time this runs the pair is
+    /// either wholly present or wholly absent. The second check below is a guard against a future caller rather
+    /// than a reachable configuration state, and it is written as one rather than as an assumption.
+    /// </para>
+    /// <para>
+    /// The material is read from a PEM certificate and a separate PEM key, which is the shape the generation
+    /// recipe in <c>docs/ARCHITECTURE.md</c> produces and the shape the <c>*_MTLS_CERT_PATH</c> /
+    /// <c>*_MTLS_KEY_PATH</c> variables name. The resulting key is ephemeral, which is directly usable for TLS
+    /// client authentication on Linux - the target operating system for every container in this refactor.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY THE SAME SHAPE AS GATEWAY'S LOADER, down to the caught exception set and the wording of the
+    /// refusal. Two services solving one problem two ways is how one of them drifts, and a reader who has
+    /// understood either has understood both. It is not SHARED code, because AAP 0.4.3 permits exactly one
+    /// cross-service coupling - the published contracts - and a composition-root helper is not a contract.
+    /// </para>
+    /// </remarks>
+    internal static X509Certificate2Collection LoadMutualTlsClientIdentity(
+        MutualTlsClientOptions mutualTls)
     {
-        // The argument is validated even though the answer does not depend on it: a caller that
-        // supplied nothing has made a different mistake from one that supplied an unbound name, and
-        // collapsing the two would send a reader of the resulting diagnostic to the wrong place.
-        ArgumentNullException.ThrowIfNull(dataWindowName);
+        ArgumentNullException.ThrowIfNull(mutualTls);
 
-        return null;
+        if (!mutualTls.IsConfigured)
+        {
+            return [];
+        }
+
+        string certificatePath = mutualTls.CertificatePath.Trim();
+        string certificateKeyPath = mutualTls.CertificateKeyPath.Trim();
+
+        if (certificatePath.Length == 0 || certificateKeyPath.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"'{DataServicesOptions.SectionName}:Security:MutualTls' is half configured. A certificate "
+                    + "cannot complete a handshake without its key and a key has nothing to present without "
+                    + "its certificate, so set both "
+                    + $"'{nameof(MutualTlsClientOptions.CertificatePath)}' and "
+                    + $"'{nameof(MutualTlsClientOptions.CertificateKeyPath)}' or neither.");
+        }
+
+        try
+        {
+            // Constructed directly into the collection so the certificate has no owning local: its lifetime is
+            // the returned collection's, which the container holds as a singleton for the life of the process.
+            return new X509Certificate2Collection(
+                X509Certificate2.CreateFromPemFile(certificatePath, certificateKeyPath));
+        }
+        catch (Exception failure) when (failure
+            is CryptographicException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                "The client certificate named by "
+                    + $"'{DataServicesOptions.SectionName}:Security:MutualTls' could not be loaded, so this "
+                    + "deployment cannot authenticate to the token-issuance edge and the host will not start. "
+                    + "Check that both files exist, that the process can read them, and that each is PEM "
+                    + $"encoded - the certificate in '{nameof(MutualTlsClientOptions.CertificatePath)}' and "
+                    + $"its private key in '{nameof(MutualTlsClientOptions.CertificateKeyPath)}'. Neither path "
+                    + "is reproduced here, because a startup log is the wrong place to publish where a private "
+                    + "key is mounted.",
+                failure);
+        }
     }
 }
 
+
 /// <summary>
-/// The shipped <see cref="IDataWindowModelSetProvider"/>: it binds no DataWindow handle, because a
-/// model set is four services ATTACHED TO A HOST and no host can be materialised here.
+/// The trust anchor every outbound internal channel verifies its peer against, loaded once from the
+/// path <c>DataServices:InternalTls:TrustedCaPath</c> names.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The eight headless-model read and apply operations of contract C-03 are the consumers, and each
-/// turns a null answer into <c>RetCode.E_INVALID_HANDLE</c>. That is the contract's own answer for a
-/// handle it cannot bind, and it is emphatically NOT a silently created set: a caller that mistyped a
-/// handle must learn that rather than receive a second empty DataWindow whose applied state nobody
-/// will ever read back.
+/// WHAT THIS FIXES. Persistence and Security both terminate TLS with certificates issued by the LOCAL
+/// certificate authority the generation recipe in <c>docs/ARCHITECTURE.md</c> §9.3.1 creates, and that
+/// authority is in no container's operating-system trust store. Left on platform default trust, every
+/// outbound channel this service opens - the four Persistence gRPC channels, the Security token and
+/// crypto channel, and the bearer handler's key-set backchannel - rejects the certificate it is
+/// presented, so the service cannot obtain a token and cannot reach a single Persistence RPC.
 /// </para>
 /// <para>
-/// Retention is the other half of the interface's contract - an <c>Apply</c> followed by a <c>Get</c>
-/// MUST observe what was applied, because the legacy services live as long as their control does
-/// [<c>se_cst_dw.sru:L80-L84</c>]. There is nothing to retain while there is nothing to create, so
-/// this implementation holds no cache; the moment a host factory is substituted, retention belongs
-/// with the implementation that creates the sets.
+/// IT NARROWS TRUST; IT DOES NOT RELAX IT. The policy built here sets
+/// <see cref="X509ChainTrustMode.CustomRootTrust"/>, so the mounted anchor becomes the ONLY acceptable
+/// root for internal traffic and the machine's public roots stop being acceptable for it. Chain
+/// building, name validation and validity dates are still performed by the platform. There is no
+/// <c>RemoteCertificateValidationCallback</c>, no <c>ServerCertificateCustomValidationCallback</c>, no
+/// <c>DangerousAcceptAnyServerCertificate</c> and no environment-conditional bypass anywhere in this
+/// service (constraint C-G).
+/// </para>
+/// <para>
+/// REVOCATION IS NOT CHECKED, AS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN AS A RELAXATION. A local
+/// authority generated by two <c>openssl</c> invocations publishes no revocation list and runs no
+/// responder, so an online check has nothing to ask; the recipe's own <c>-days 30</c> lifetime is the
+/// control that substitutes for revocation. A deployment whose authority does publish revocation
+/// information leaves this path unset and uses platform trust, where the platform's default revocation
+/// behaviour applies.
+/// </para>
+/// <para>
+/// LOADED ONCE AND SHARED, because the handler factories recycle their primary handlers on a schedule
+/// and reading the anchor inside a factory would re-read the file on every rotation. A singleton is
+/// also what lets the eager resolve after <c>Build()</c> turn an unreadable anchor into a startup
+/// failure rather than a first-request one.
 /// </para>
 /// </remarks>
-internal sealed class UnboundDataWindowModelSetProvider : IDataWindowModelSetProvider
+/// <summary>
+/// The two authorization policies this service's contracts are served under: who may call, and what they
+/// may do.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS EXISTS. Both gRPC contracts and all thirty-nine projected REST routes used to be protected by
+/// "an authenticated user" and nothing more, so any holder of any token this issuer minted for this
+/// audience could call every operation on both - and a credential minted for a caller that has no business
+/// here at all could do the same (CWE-862, CWE-863). Both halves of the fix are here because either alone
+/// leaves a hole: scope without subject admits any caller the issuer serves as long as it holds the scope,
+/// and subject without scope lets the one permitted caller reach both contracts once it is in.
+/// </para>
+/// <para>
+/// THE SCOPE NAMES ARE NOT INVENTED HERE. Gateway requests exactly <c>dataservices.datawindow</c> and
+/// <c>dataservices.columnexpression</c> for this edge, and the split matches the contracts: C-03 is the
+/// DataWindow service and C-04 is the expression engine, kept separate precisely so the expansion engine
+/// can version independently (AAP 0.4.3). Stating them as constants keeps the receiver and the issuance
+/// roster spelling one thing.
+/// </para>
+/// <para>
+/// A SCOPE CLAIM IS SPACE-DELIMITED AND MUST BE SPLIT, WHICH IS WHY THIS IS AN ASSERTION AND NOT
+/// <c>RequireClaim</c>. RFC 6749 carries the granted set as ONE claim holding a space-delimited list, so
+/// <c>RequireClaim("scope", "dataservices.datawindow")</c> would demand a token whose ENTIRE scope claim is
+/// that one value - and would refuse the very credential Gateway obtains, which carries both scopes.
+/// </para>
+/// <para>
+/// THE SUBJECT IS READ FROM EITHER SPELLING. A bearer handler with inbound claim mapping on renames
+/// <c>sub</c> to the framework's name-identifier claim type, and with it off leaves <c>sub</c> alone; both
+/// are legitimate, and this service must not silently stop enforcing identity because of one. Whichever is
+/// present is compared ORDINALLY, matching how the issuer compares an identity everywhere else.
+/// </para>
+/// <para>
+/// A REFUSAL IS gRPC <c>PermissionDenied</c> RATHER THAN <c>Unauthenticated</c>, because the principal was
+/// established and found insufficient - and the REST projection in this service already publishes that as
+/// HTTP 403 against 401, "a valid-but-insufficient credential, distinct from none". Nothing about the wire
+/// contract changes; this is the code that makes the published 403 reachable.
+/// </para>
+/// </remarks>
+/// <summary>
+/// The extension-member names the published problem body declares.
+/// </summary>
+/// <remarks>
+/// SPELLED ONCE HERE BECAUSE THE COMPOSITION ROOT AND THE PROJECTION FILE BOTH WRITE THEM, and the
+/// customization in the composition root exists precisely to fill the member the projection did not. Two
+/// independent spellings would let a rename go half-applied, at which point a body would carry both the old
+/// member and the new one and a consumer would read whichever it happened to look for.
+/// </remarks>
+internal static class ProblemContractMembers
 {
-    /// <inheritdoc/>
-    public DataWindowModelSet? GetOrCreate(string dataWindowHandle)
-    {
-        ArgumentNullException.ThrowIfNull(dataWindowHandle);
-
-        return null;
-    }
+    /// <summary>The legacy return code carried by every problem body.</summary>
+    internal const string RetCode = "retCode";
 }
 
 /// <summary>
-/// The shipped <see cref="IDataWindowEventChainFactory"/>: it binds no DataWindow handle, because a
-/// chain IS a <see cref="DataWindowServiceHost"/> and no host can be materialised here.
+/// The names the two capability policies are registered and referenced under.
 /// </summary>
 /// <remarks>
 /// <para>
-/// C-03's bidirectional <c>EventChain</c> is the sole consumer, and it turns a null answer into
-/// <c>RetCode.E_INVALID_HANDLE</c> rather than opening a chain over a DataWindow that does not exist.
-/// Everything the paired validation session itself owns - the open, the correlation, the event-gate
-/// read and the two gate mutators - is reached without this seam and is unaffected, as are
-/// <c>Retrieve</c> and <c>Update</c>.
+/// ONE NAME PER CAPABILITY, AND IT IS THE PUBLISHED SCOPE NAME ITSELF. These aliases previously carried a
+/// second spelling of the same two decisions - <c>dataservices:datawindow</c> beside the published
+/// <c>dataservices.datawindow</c> - and each was registered separately, so the service ran with FOUR
+/// policies for TWO capabilities: the pair the endpoints named and a parallel pair nothing reached. Two
+/// spellings for one authorization decision is the shape in which a route ends up naming a policy that
+/// exists but enforces less than the one an author was editing, and the framework answers an unregistered
+/// name with an unexplained internal error rather than a refusal.
 /// </para>
 /// <para>
-/// THE CHAIN OWNS THE ORDER AND THIS FILE NEVER WILL. A chain built by any implementation of this
-/// interface brings with it the creation sequence at <c>se_cst_dw.sru:L570-L574</c>, the DIFFERENT
-/// initialisation sequence at <c>:L576-L580</c> with positions three and four swapped, the broker
-/// created before any service [<c>:L562</c>], the gate bit-tests, the tri-valued veto and the
-/// {0,1,2,3} item-change micro-protocol - and the teardown at <c>:L583-L589</c> that unsubscribes
-/// before it destroys. None of that is re-implemented, re-ordered or second-guessed on this boundary,
-/// and a substituted factory must preserve all of it because
-/// <c>Domain/DataWindowEventChain.cs</c> already does.
+/// THE SPELLING KEPT IS THE ONE THAT IS ALREADY ON THE WIRE. <c>DataServicesScopes</c> publishes these two
+/// values as the scopes Gateway requests and Security's grant matrix authorises, so the policy name, the
+/// scope claim and the issuance grant are one string in three files rather than a mapping that has to be
+/// maintained. These members remain as the names the endpoint files reference so the call sites read as
+/// authorization rather than as string literals.
 /// </para>
 /// </remarks>
-internal sealed class UnboundDataWindowEventChainFactory : IDataWindowEventChainFactory
+internal static class CallerAuthorization
 {
-    /// <inheritdoc/>
-    public DataWindowEventChain? Create(
-        ValidationSession session,
-        string dataWindowHandle,
-        IDataWindowEventObserver observer,
-        IDataWindowSemanticResponder responder)
-    {
-        // All four are validated because all four are required by the interface, and a null here is a
-        // caller defect rather than an unbound handle. Conflating the two would report a missing
-        // DataWindow when the real fault was a missing observer.
-        ArgumentNullException.ThrowIfNull(session);
-        ArgumentNullException.ThrowIfNull(dataWindowHandle);
-        ArgumentNullException.ThrowIfNull(observer);
-        ArgumentNullException.ThrowIfNull(responder);
+    /// <summary>The policy name C-03 - the DataWindow service - and its projected routes are mapped under.</summary>
+    internal const string DataWindowPolicyName = DataServicesScopes.DataWindow;
 
-        return null;
+    /// <summary>The policy name C-04 - the column-expression engine - and its routes are mapped under.</summary>
+    internal const string ColumnExpressionPolicyName = DataServicesScopes.ColumnExpression;
+}
+
+/// <summary>
+/// The reachable entry-point type for the in-process service tests.
+/// </summary>
+/// <remarks>
+/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile into an implicitly internal
+/// <c>Program</c> class, so without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the
+/// sibling <c>PowerFramework.DataServices.Tests</c> project cannot name the entry point, the
+/// service-level tests cannot boot this host at all, and the per-service coverage gate (constraint
+/// C-H) becomes unreachable for every line in this file. The <c>InternalsVisibleTo</c> item in this
+/// project's <c>.csproj</c> covers the seven internal registration groups above; the entry point
+/// itself is made <c>public</c> because the factory's generic constraint resolves it by name from
+/// outside.
+/// </remarks>
+internal sealed class InternalTlsTrust
+{
+    private readonly X509Certificate2Collection _anchors;
+
+    /// <summary>
+    /// Loads the anchor bundle, or records that this deployment uses platform default trust.
+    /// </summary>
+    /// <param name="options">
+    /// The validated <c>DataServices:InternalTls</c> group. A path, never material.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A path is configured but the bundle cannot be read or does not parse. Structural, and therefore
+    /// fatal.
+    /// </exception>
+    /// <remarks>
+    /// The path is NOT echoed into the failure message. A trust anchor is public material, but a
+    /// container's secret mount layout is not something a startup record should publish, so the message
+    /// names the configuration key instead - the same rule
+    /// <c>Configuration/DataServicesOptions.cs</c> applies to its own validation messages.
+    /// </remarks>
+    public InternalTlsTrust(InternalTlsTrustOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (!options.IsConfigured)
+        {
+            _anchors = [];
+
+            return;
+        }
+
+        try
+        {
+            X509Certificate2Collection loaded = [];
+
+            loaded.ImportFromPemFile(options.TrustedCaPath.Trim());
+
+            if (loaded.Count == 0)
+            {
+                throw new CryptographicException("The file carried no PEM-encoded certificate.");
+            }
+
+            _anchors = loaded;
+        }
+        catch (Exception failure) when (failure
+            is CryptographicException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException(
+                "The internal trust anchor named by "
+                    + $"'{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.InternalTls)}:"
+                    + $"{nameof(InternalTlsTrustOptions.TrustedCaPath)}' could not be loaded, so this "
+                    + "deployment cannot verify its upstreams' certificates and the host will not "
+                    + "start. Check that the file exists, that the process can read it, and that it is "
+                    + "a PEM-encoded certificate or chain of them. The path is not reproduced here, "
+                    + "because a startup record must not publish a container's secret mount layout.",
+                failure);
+        }
+    }
+
+    /// <summary>
+    /// Whether internal trust is pinned to a mounted anchor rather than left to the platform.
+    /// </summary>
+    public bool IsPinned => _anchors.Count > 0;
+
+    /// <summary>
+    /// Applies the pinned anchor to one outbound handler, or leaves platform trust in place.
+    /// </summary>
+    /// <param name="handler">The handler about to be used for internal traffic.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="handler"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// A FRESH POLICY PER HANDLER, DELIBERATELY. <see cref="X509ChainPolicy"/> is not documented as
+    /// thread-safe and a handler may be used concurrently, so each handler receives its own instance
+    /// built over the SAME shared anchor collection - one file read, one policy per consumer.
+    /// </remarks>
+    public void Apply(SocketsHttpHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+
+        if (!IsPinned)
+        {
+            return;
+        }
+
+        X509ChainPolicy policy = new()
+        {
+            TrustMode = X509ChainTrustMode.CustomRootTrust,
+            RevocationMode = X509RevocationMode.NoCheck,
+        };
+
+        policy.CustomTrustStore.AddRange(_anchors);
+
+        handler.SslOptions.CertificateChainPolicy = policy;
     }
 }
 
@@ -1279,4 +2310,3 @@ public partial class Program
     {
     }
 }
-

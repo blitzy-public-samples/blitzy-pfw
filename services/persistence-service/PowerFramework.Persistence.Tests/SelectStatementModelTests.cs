@@ -391,9 +391,12 @@ public sealed class SelectStatementModelTests
     /// The constants are CONSUMED from <c>PowerFramework.Shared.Kernel.Enums</c> and are deliberately
     /// not redeclared here. The reason is a scoping decision, and it is worth stating PRECISELY because
     /// the imprecise version of it is tempting and wrong. The repository-root <c>.editorconfig</c>
-    /// switches <c>CA1707</c> and <c>IDE1006</c> to <c>none</c> for twelve INDIVIDUALLY NAMED files on
-    /// its BAND 3 roster - the single source of truth for that list - and neither the model nor this
-    /// suite is among them. That roster is where a preserved SCREAMING_SNAKE spelling is sanctioned; a
+    /// switches <c>CA1707</c> and <c>IDE1006</c> to <c>none</c> for the INDIVIDUALLY NAMED files on its
+    /// BAND 3 roster - the single source of truth for that list, and the reason no count is restated
+    /// here: a number copied into a source comment is a second place for the roster to be wrong, and
+    /// every copy of it in this repository had silently drifted to a different value as files were
+    /// added. Neither the model nor this suite is on that roster. It is where a preserved
+    /// SCREAMING_SNAKE spelling is sanctioned; a
     /// file outside it declaring one is outside the sanctioned scope, and the roster's deliberate
     /// narrowness is what makes the exception auditable.
     /// </para>
@@ -2469,4 +2472,3 @@ public sealed class SelectStatementModelTests
         Assert.Equal("PowerFramework.Persistence", type.Assembly.GetName().Name);
     }
 }
-

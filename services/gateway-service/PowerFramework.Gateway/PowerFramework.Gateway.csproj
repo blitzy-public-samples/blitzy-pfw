@@ -154,4 +154,24 @@
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
   </ItemGroup>
 
+  <ItemGroup Label="Test visibility for the internal types this project's composition root declares">
+    <!--
+      ONE ASSEMBLY, NAMED EXACTLY, AND FOR A COVERAGE REASON RATHER THAN A CONVENIENCE ONE.
+      The composition root declares internal types that carry real decisions rather than wiring:
+      InternalTlsTrust decides which certificate authority every outbound internal channel accepts,
+      and Configuration/GatewayOptions.cs declares an internal address validator. Both are branch
+      rich, both are security relevant, and neither can be driven from outside without booting a
+      host - which would leave the per service line coverage gate unreachable for exactly the logic
+      that most needs asserting.
+
+      The alternative was to make those types public, which would publish them on this service's
+      surface for no consumer: nothing outside this assembly composes a Gateway host. Granting one
+      named test assembly visibility is the narrower change.
+
+      The sibling projects for DataServices, Persistence and Security already carry the same item for
+      the same reason, so this brings the four into line rather than introducing a new pattern.
+    -->
+    <InternalsVisibleTo Include="PowerFramework.Gateway.Tests" />
+  </ItemGroup>
+
 </Project>

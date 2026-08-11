@@ -650,6 +650,329 @@ public sealed class DropDownSearchModelTests
     }
 
     // ==========================================================================================
+    //  THE TWO-FORM CARRIAGE - CWE-94 CLOSED WITHOUT THE DEFECT BEING EDITED        [:L319-L334]
+    //  ----------------------------------------------------------------------------------------
+    //  These lock the property the whole device exists for: the RENDERED expression is byte-identical
+    //  to the oracle's, defects included, and the EXECUTED expression contains none of the caller's
+    //  text at all. Every assertion above this section reads GetFilter and passes unchanged, which is
+    //  itself the parity half of the proof - so what remains to be proved is the execution half.
+    // ==========================================================================================
+
+    /// <summary>
+    /// The rendered form is DERIVED from the executable one, so the two describe the same expression by
+    /// construction rather than by two compositions happening to agree.
+    /// </summary>
+    [Theory]
+    [InlineData("ab")]
+    [InlineData("AB CD")]
+    [InlineData("")]
+    [InlineData("zhang san")]
+    public void TheRenderedFormIsExactlyWhatTheOracleTextHasAlwaysBeen(string data)
+    {
+        (_, _, DropDownSearchModel service) = Focused(DropDownSearchModel.FILTER_ALL);
+
+        Assert.Equal(service.GetFilter(data), service.GetBoundFilter(data).ObservableText);
+    }
+
+    /// <summary>
+    /// Every caller-derived value reaches the executable text as a PLACEHOLDER and reaches the parameter
+    /// list as a value - across all three clauses at once.
+    /// </summary>
+    [Fact]
+    public void EveryCallerValueIsBoundAndNoneReachesTheExecutableText()
+    {
+        (_, _, DropDownSearchModel service) = Focused(
+            DropDownSearchModel.FILTER_ALL,
+            dataColType: "char(20)");
+
+        BoundFilterExpression bound = service.GetBoundFilter("ab");
+
+        // THREE CLAUSES, THREE BOUND VALUES: the display LIKE, the pinyin call and the data LIKE.
+        Assert.Equal(3, bound.Parameters.Count);
+        Assert.True(bound.Bindable);
+
+        // THE EXECUTABLE TEXT CARRIES NOT ONE CHARACTER OF THE TERM. This is the assertion that makes the
+        // difference: a term cannot alter a structure it never enters.
+        Assert.DoesNotContain("ab", bound.ParameterizedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("'", bound.ParameterizedText, StringComparison.Ordinal);
+
+        Assert.Equal(
+            [BoundFilterExpression.Placeholder(0),
+             BoundFilterExpression.Placeholder(1),
+             BoundFilterExpression.Placeholder(2)],
+            bound.Parameters.Select(literal => literal.Placeholder));
+
+        // The values themselves: the two LIKE clauses take the wildcarded text, the pinyin clause the
+        // merely lower-cased one - the asymmetry the oracle has at :L317 against :L323.
+        Assert.Equal("%ab%", bound.Parameters[0].Value);
+        Assert.Equal("ab", bound.Parameters[1].Value);
+        Assert.Equal("%ab%", bound.Parameters[2].Value);
+
+        // The column NAMES are still syntax, deliberately: they are identifiers read from the child's own
+        // Describe [:L207, :L209], and binding one would turn it into a string literal.
+        Assert.Contains("Lower(" + DispCol + ")", bound.ParameterizedText, StringComparison.Ordinal);
+        Assert.Contains(DataCol, bound.ParameterizedText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A term carrying filter SYNTAX still renders into the expression exactly as the oracle renders it -
+    /// DEFECT 2 preserved - while the expression that EXECUTES is structurally untouched by it.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS THE FINDING ITSELF, PINNED. The term below closes the oracle's own quote and appends a
+    /// disjunction, which in the rendered text changes the predicate's meaning - and the rendered text is
+    /// asserted to still contain it, because AAP 0.6.4 requires the defect documented rather than corrected
+    /// and constraint C-B forbids changing the observable expression. What changed is only WHICH string
+    /// runs.
+    /// </remarks>
+    [Theory]
+    [InlineData("a' OR 'x'='x")]
+    [InlineData("a') OR (1=1")]
+    [InlineData("a\u0027")]
+    public void ASearchTermCarryingSyntaxCannotChangeTheExecutedStructure(string hostile)
+    {
+        (_, _, DropDownSearchModel service) = Focused(DropDownSearchModel.FILTER_DISP);
+
+        BoundFilterExpression bound = service.GetBoundFilter(hostile);
+
+        // DEFECT 2 IS STILL THERE IN THE RENDERED TEXT, unescaped, exactly as the oracle leaves it.
+        Assert.Contains(
+            hostile.ToLowerInvariant().Replace(" ", "%", StringComparison.Ordinal),
+            bound.ObservableText,
+            StringComparison.Ordinal);
+
+        // AND THE EXECUTED TEXT IS ONE FIXED PREDICATE WITH ONE PLACEHOLDER IN IT.
+        Assert.Equal(
+            "((Lower(" + DispCol + ") LIKE " + BoundFilterExpression.Placeholder(0) + "))",
+            bound.ParameterizedText);
+
+        BoundFilterLiteral literal = Assert.Single(bound.Parameters);
+
+        // The hostile characters are all inside the VALUE, where they are inert.
+        Assert.Contains("'", literal.Value as string ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>:L334</c> - the numeric clause binds a NUMBER while its rendered fragment keeps the caller's raw
+    /// digits, which is why the fragment is carried rather than re-derived from the value.
+    /// </summary>
+    [Fact]
+    public void TheNumericClauseBindsANumberAndRendersTheRawArgument()
+    {
+        (_, _, DropDownSearchModel service) = Focused(
+            DropDownSearchModel.FILTER_DATA,
+            dataColType: "number");
+
+        BoundFilterExpression bound = service.GetBoundFilter("32.50");
+
+        BoundFilterLiteral literal = Assert.Single(bound.Parameters);
+
+        // BOUND AS A DOUBLE so the comparison is numeric rather than textual.
+        Assert.Equal(32.5d, Assert.IsType<double>(literal.Value));
+
+        // AND RENDERED AS THE RAW ARGUMENT, trailing zero included - a re-derivation from the double would
+        // report 32.5 and change the observable expression.
+        Assert.Equal("32.50", literal.ObservableLiteral);
+        Assert.Equal("( OR (" + DataCol + " = 32.50))", bound.ObservableText);
+    }
+
+    /// <summary>
+    /// <c>:L342</c> - a handler that REWRITES the filter makes it unbindable, because arbitrary syntax an
+    /// application composed has no placeholder image.
+    /// </summary>
+    [Fact]
+    public void AnApplicationRewriteMakesTheFilterUnbindableRatherThanSilentlyWrong()
+    {
+        (FakeDataWindowHost host, _, DropDownSearchModel service) = Focused(
+            DropDownSearchModel.FILTER_DISP);
+
+        host.DdsGetFilterHandler = (row, dwo, data, filter) => "dept = 'X'";
+
+        BoundFilterExpression rewritten = service.GetBoundFilter("ab");
+
+        Assert.False(rewritten.Bindable);
+        Assert.Empty(rewritten.Parameters);
+        Assert.Equal("dept = 'X'", rewritten.ObservableText);
+        Assert.Equal("dept = 'X'", rewritten.ParameterizedText);
+    }
+
+    /// <summary>
+    /// <c>:L342</c> - a handler that returns the composition UNCHANGED has expressed no opinion, so the
+    /// bindings survive it.
+    /// </summary>
+    [Fact]
+    public void AnUntouchedFilterKeepsItsBindingsAcrossTheEvent()
+    {
+        (FakeDataWindowHost host, _, DropDownSearchModel service) = Focused(
+            DropDownSearchModel.FILTER_DISP);
+
+        host.DdsGetFilterHandler = (row, dwo, data, filter) => filter;
+
+        BoundFilterExpression bound = service.GetBoundFilter("ab");
+
+        Assert.True(bound.Bindable);
+        _ = Assert.Single(bound.Parameters);
+    }
+
+    /// <summary>
+    /// The child receives the EXECUTABLE form; the rendered form is what is reported and recorded.
+    /// </summary>
+    [Fact]
+    public void TheChildIsHandedTheBoundExpressionAndNotTheRenderedText()
+    {
+        (FakeDataWindowHost host, FakeDataWindowChild child, DropDownSearchModel service) =
+            Focused(DropDownSearchModel.FILTER_DISP);
+
+        host.FocusedObject = host;
+
+        BoundFilterExpression composed = service.GetBoundFilter("ab");
+
+        Assert.Equal(RetCode.OK, service.UpdateDddwFilterBound(Column, composed));
+
+        Assert.NotNull(child.LastFilterExpression);
+        Assert.True(child.LastFilterExpression.Bindable);
+        Assert.Contains(
+            BoundFilterExpression.Placeholder(0),
+            child.LastFilterExpression.ParameterizedText,
+            StringComparison.Ordinal);
+
+        // AND THE RENDERED TEXT IS UNCHANGED, which is what every parity assertion and every
+        // characterization recording reads.
+        Assert.Equal("((Lower(" + DispCol + ") LIKE '%ab%'))", child.LastFilterSet);
+    }
+
+    /// <summary>
+    /// The user's half keeps its bindings across the RE-APPLY that a changed original filter triggers -
+    /// the path on which a text-only carriage would open the hole on the SECOND application.
+    /// </summary>
+    [Fact]
+    public void TheReapplyAfterAnOriginalFilterChangeKeepsTheBindings()
+    {
+        (FakeDataWindowHost host, FakeDataWindowChild child, DropDownSearchModel service) =
+            Focused(DropDownSearchModel.FILTER_DISP);
+
+        host.FocusedObject = host;
+
+        // First: the user's own search lands in the USER'S half, which is what _of_filter does [:L384].
+        service.ApplyFilter(1L, Dwo(host), service.GetBoundFilter("ab"), false);
+
+        Assert.Equal("((Lower(" + DispCol + ") LIKE '%ab%'))", service.EditContext.Dddw.InputFilter);
+
+        // Then: the application re-scopes the child's own filter underneath it, which RE-APPLIES the
+        // user's half [:L451]. This is the second application, and it is the one a text-only carriage
+        // would have quietly un-bound.
+        child.LastFilterExpression = null;
+        Assert.Equal(RetCode.OK, service.UpdateDddwFilter(Column, "dept = 'Z'", true));
+
+        Assert.NotNull(child.LastFilterExpression);
+
+        // THE BINDING SURVIVED, WHICH IS THE PROPERTY UNDER TEST. The user's term is still a bound value on
+        // the re-applied conjunction, so nothing re-interpolates it.
+        Assert.Equal("%ab%", Assert.Single(child.LastFilterExpression.Parameters).Value);
+        Assert.Contains(
+            BoundFilterExpression.Placeholder(0),
+            child.LastFilterExpression.ParameterizedText,
+            StringComparison.Ordinal);
+
+        // AND THE CONJUNCTION REPORTS UNCERTIFIED, CORRECTLY: the original half is text the application
+        // supplied, whose provenance this code cannot vouch for. That is a REPORT and not an instruction -
+        // falling back to the rendered text on it would re-interpolate the bound half above, which is
+        // precisely the trap the child contract's remarks warn about.
+        Assert.False(child.LastFilterExpression.Bindable);
+
+        // The conjunction is the oracle's asymmetric arm [:L376], with the ORIGINAL first - and it wraps the
+        // user's half in ITS OWN parentheses on top of the pair of_getfilter already added at :L340, so the
+        // doubled bracket is the oracle's and not a composition artefact.
+        Assert.Equal(
+            "(dept = 'Z') AND (((Lower(" + DispCol + ") LIKE '%ab%')))",
+            child.LastFilterSet);
+    }
+
+    /// <summary>
+    /// Renumbering survives ten or more parameters, which is where a naive ascending substitution corrupts
+    /// its own output because <c>:pfwArg1</c> is a prefix of <c>:pfwArg10</c>.
+    /// </summary>
+    [Fact]
+    public void PlaceholderRenumberingSurvivesTheTenthParameter()
+    {
+        List<BoundFilterLiteral> left = [];
+        List<BoundFilterLiteral> right = [];
+        string leftText = string.Empty;
+        string rightText = string.Empty;
+
+        for (int index = 0; index < 6; index++)
+        {
+            string placeholder = BoundFilterExpression.Placeholder(index);
+            left.Add(new BoundFilterLiteral(placeholder, "L" + index, "'L" + index + "'"));
+            leftText += (index == 0 ? string.Empty : " OR ") + "a = " + placeholder;
+        }
+
+        for (int index = 0; index < 6; index++)
+        {
+            string placeholder = BoundFilterExpression.Placeholder(index);
+            right.Add(new BoundFilterLiteral(placeholder, "R" + index, "'R" + index + "'"));
+            rightText += (index == 0 ? string.Empty : " OR ") + "b = " + placeholder;
+        }
+
+        BoundFilterExpression conjoined = BoundFilterExpression.Conjoin(
+            new BoundFilterExpression(leftText, left, true),
+            new BoundFilterExpression(rightText, right, true));
+
+        // TWELVE PARAMETERS, EACH ON ITS OWN NAME, IN ORDER - original half first.
+        Assert.Equal(12, conjoined.Parameters.Count);
+        Assert.Equal(
+            Enumerable.Range(0, 12).Select(BoundFilterExpression.Placeholder),
+            conjoined.Parameters.Select(literal => literal.Placeholder));
+
+        // AND THE RENDERED FORM STILL READS BACK CORRECTLY, which is what proves no placeholder was
+        // rewritten twice. THIS ASSERTION FOUND A REAL DEFECT: the first implementation renumbered with
+        // successive string replacements, so ":pfwArg1" matched inside the already-written ":pfwArg10" and
+        // the expression came back carrying "'R1'0". The single-pass scan in BoundFilterExpression.Rewrite
+        // is the fix, and this is the test that keeps it.
+        Assert.DoesNotContain(
+            BoundFilterExpression.PlaceholderPrefix,
+            conjoined.ObservableText,
+            StringComparison.Ordinal);
+
+        Assert.Equal(
+            "(a = 'L0' OR a = 'L1' OR a = 'L2' OR a = 'L3' OR a = 'L4' OR a = 'L5') AND "
+                + "(b = 'R0' OR b = 'R1' OR b = 'R2' OR b = 'R3' OR b = 'R4' OR b = 'R5')",
+            conjoined.ObservableText);
+    }
+
+    /// <summary>
+    /// Conjunction is bindable only when BOTH halves are, so one application-composed half makes the whole
+    /// unbindable rather than half-checked.
+    /// </summary>
+    [Fact]
+    public void UnbindabilityIsInfectiousAcrossAConjunction()
+    {
+        BoundFilterExpression bindable = new(
+            "a = " + BoundFilterExpression.Placeholder(0),
+            [new BoundFilterLiteral(BoundFilterExpression.Placeholder(0), "x", "'x'")],
+            true);
+
+        Assert.False(BoundFilterExpression
+            .Conjoin(BoundFilterExpression.Unbindable("dept = 'Z'"), bindable)
+            .Bindable);
+
+        Assert.False(BoundFilterExpression
+            .Conjoin(bindable, BoundFilterExpression.Unbindable("dept = 'Z'"))
+            .Bindable);
+
+        // AND THE THREE ARMS ARE STILL THE ORACLE'S: an empty user half RESTORES the original rather than
+        // clearing, and an empty original leaves the user half standing alone.
+        Assert.Same(
+            bindable,
+            BoundFilterExpression.Conjoin(BoundFilterExpression.Empty, bindable));
+        Assert.Equal(
+            "dept = 'Z'",
+            BoundFilterExpression
+                .Conjoin(BoundFilterExpression.Unbindable("dept = 'Z'"), BoundFilterExpression.Empty)
+                .ObservableText);
+    }
+
+    // ==========================================================================================
     //  SetFilterType - DEFECT 4                                                   [:L304-L305]
     // ==========================================================================================
 
@@ -2492,7 +2815,20 @@ public sealed class DropDownSearchModelTests
             BindingFlags.Public | BindingFlags.Instance);
 
         Assert.Equal(7, editContext.Length);
-        Assert.Equal(8, dddw.Length);
+
+        // EIGHT ORACLE FIELDS PLUS EXACTLY THREE EXECUTION-FORM COMPANIONS, AND NOT ONE MORE.
+        //
+        // The three companions are OrgFilterBinding, FilterBinding and InputFilterBinding, each paired
+        // one-to-one with the filter field beside it. Each pair stores ONE value - the companion - and
+        // derives the other, so the oracle field is a computed getter and the two can never disagree; see
+        // Services/BoundFilterExpression.cs for why the executable and rendered forms are both needed.
+        //
+        // THE INVARIANT THIS TEST GUARDS IS UNTOUCHED. Its concern is that nothing invented reaches a
+        // characterization recording - and DddwData reaches no recording at all: the wire message is
+        // DropDownSearchState, projected by DataWindowService, and none of the three companions appears in
+        // it. What DOES appear is the rendered text, unchanged byte for byte. The count is asserted as
+        // 8 + 3 rather than relaxed to "at least 8" so that a genuinely invented field still fails here.
+        Assert.Equal(8 + 3, dddw.Length);
 
         Assert.Equal(
             [
@@ -2512,9 +2848,12 @@ public sealed class DropDownSearchModelTests
                 nameof(DddwData.DataColName),
                 nameof(DddwData.DispColName),
                 nameof(DddwData.Filter),
+                nameof(DddwData.FilterBinding),
                 nameof(DddwData.Hwnd),
                 nameof(DddwData.InputFilter),
+                nameof(DddwData.InputFilterBinding),
                 nameof(DddwData.OrgFilter),
+                nameof(DddwData.OrgFilterBinding),
                 nameof(DddwData.RowHeight),
             ],
             dddw.Select(member => member.Name).Order(StringComparer.Ordinal));
@@ -3198,6 +3537,13 @@ public sealed class DropDownSearchModelTests
             typeof(DropDownSearchCompletion),
             typeof(DropDownSearchFilterPartition),
             typeof(EditContextData),
+
+            // THE FILTER EXPRESSION IS DATA AND SATISFIES THIS RULE RATHER THAN BEING EXEMPTED FROM IT. It
+            // is an immutable record of two strings, a list of name/value/rendering triples and a flag -
+            // no object handle, no window, no font, no live pointer, nothing a caller could reach a
+            // DataWindow through. That is precisely the property this test exists to enforce, so admitting
+            // it is applying the rule and not widening it.
+            typeof(BoundFilterExpression),
         ];
 
         int published = 0;

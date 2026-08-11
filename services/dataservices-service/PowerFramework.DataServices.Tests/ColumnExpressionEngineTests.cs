@@ -460,6 +460,161 @@ public sealed class ColumnExpressionEngineTests
     }
 
     // ==============================================================================================
+    //  1b. THE BOUND-VALUE EXECUTION PATH - CWE-94 ON A DYNAMICALLY EXPANDED VALUE      [:L2205-L2214]
+    //  ----------------------------------------------------------------------------------------------
+    //  of_addvar takes a VALUE and renders it with NO escaping [:L1094], so a caller forwarding untrusted
+    //  text through it hands the expression engine syntax. The dynamic path therefore substitutes a BOUND
+    //  PLACEHOLDER into the text that is EVALUATED, while the text that is REPORTED - the trace payload -
+    //  still carries the value spliced in exactly as the oracle splices it.
+    //
+    //  THE ONE PLACE THE OBSERVABLE RESULT CHANGES IS THE ONE PLACE INTERPOLATION WOULD HAVE INJECTED,
+    //  which is the trade AAP 0.1.5 endorses explicitly for the SQL layer: "the implementation may be safer
+    //  than the legacy where the change is unobservable". For every value that is plain data the bound and
+    //  the interpolated readings agree, and the tests below pin both halves of that.
+    // ==============================================================================================
+
+    /// <summary>
+    /// A plain value reads identically bound or interpolated, so binding costs nothing on the ordinary path.
+    /// </summary>
+    [Fact]
+    public async Task ABoundDynamicValueReadsExactlyAsTheInterpolatedOneDoesForPlainData()
+    {
+        ColumnExpressionEngine engine = CreateEngine(out FakeDataWindowHost host);
+
+        Assert.Equal(RetCode.OK, engine.AddVar("v", 7L));
+        Assert.True(engine.AddExp("n1", "$$v + 1") > 0);
+        Assert.Equal(RetCode.OK, await engine.CalcAsync(1L, Ct));
+
+        Assert.Equal(8m, host.GetItemDecimal(1L, "n1"));
+
+        // AND THE STORED TEXT STILL NAMES THE VARIABLE, which is what dynamic expansion means. The binding
+        // is an EXECUTION detail and changes nothing a caller can read.
+        Assert.Equal("$$v + 1", engine.GetExp(1));
+    }
+
+    /// <summary>
+    /// A value carrying expression SYNTAX is executed as one literal, so it cannot add a term.
+    /// </summary>
+    /// <remarks>
+    /// THE INTERPOLATED READING OF THIS VALUE IS <c>'a' + 'b'</c>, which the engine would have concatenated
+    /// to <c>ab</c> - the caller's data having become two literals and an operator. Bound, it is ONE string
+    /// whose content is the value itself. That difference is the mitigation working, and it is confined to
+    /// inputs that would have injected.
+    /// </remarks>
+    [Fact]
+    public async Task ABoundDynamicValueCarryingSyntaxIsOneLiteralAndCannotAddATerm()
+    {
+        ColumnExpressionEngine engine = CreateEngine(out FakeDataWindowHost host);
+
+        Assert.Equal(RetCode.OK, engine.AddVar("v", "a' + 'b"));
+        Assert.True(engine.AddExp("s1", "$$v") > 0);
+        Assert.Equal(RetCode.OK, await engine.CalcAsync(1L, Ct));
+
+        Assert.Equal("a' + 'b", host.GetItemString(1L, "s1"));
+    }
+
+    /// <summary>
+    /// The TRACE still reports the oracle's own preprocessed text, placeholders rendered back out.
+    /// </summary>
+    /// <remarks>
+    /// <c>oncolumnexptrace</c> [<c>se_cst_dw.sru:L32</c>] is a C-04 event a client consumes and a
+    /// characterization recording compares, so a placeholder reaching it would be an observable change. The
+    /// reported text is DERIVED from the executed one rather than composed a second time, because a second
+    /// preprocessing pass would invoke every macro again.
+    /// </remarks>
+    [Fact]
+    public async Task TheTraceReportsTheSplicedValueEvenThoughTheBoundOneWasExecuted()
+    {
+        RecordingTraceSink sink = new();
+        FakeDataWindowHost host = FakeDataWindowFixtures.CreateColumnExpressionFixture();
+        ColumnExpressionEngine engine = CreateEngineOver(host, session: NewSession(sink));
+
+        Assert.Equal(RetCode.OK, engine.AddVar("v", "x"));
+        Assert.True(engine.AddExp("s1", "$$v") > 0);
+        Assert.Equal(RetCode.OK, engine.SetTrace(true));
+
+        Assert.Equal(RetCode.OK, await engine.CalcAsync(1L, Ct));
+
+        string traced = Assert.Single(sink.Records).Expression;
+
+        // THE ORACLE'S OWN PREPROCESSED TEXT: the value spliced in, quoted, wrapped by the mandatory
+        // parenthesis pair at :L2213 - and no placeholder anywhere in it.
+        Assert.Equal("('x')", traced);
+        Assert.DoesNotContain(
+            DataWindowExpressionEvaluator.BoundValuePlaceholderPrefix,
+            traced,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Redefining a bound variable with an EXPRESSION drops its binding, so no stale value is executed.
+    /// </summary>
+    [Fact]
+    public async Task RedefiningABoundVariableWithAnExpressionDropsItsBinding()
+    {
+        ColumnExpressionEngine engine = CreateEngine(out FakeDataWindowHost host);
+
+        Assert.Equal(RetCode.OK, engine.AddVar("v", 1L));
+        Assert.True(engine.AddExp("n1", "$$v") > 0);
+        Assert.Equal(RetCode.OK, await engine.CalcAsync(1L, Ct));
+        Assert.Equal(1m, host.GetItemDecimal(1L, "n1"));
+
+        // NOW AN EXPRESSION: deliberate syntax, so it substitutes as syntax and the old bound 1 must not
+        // survive anywhere. A stale binding would have executed 1 while the reported text read "2 + 3".
+        Assert.Equal(RetCode.OK, await engine.SetVarExpAsync("v", "2 + 3", false, Ct));
+        Assert.Equal(RetCode.OK, await engine.CalcAsync(1L, Ct));
+
+        Assert.Equal(5m, host.GetItemDecimal(1L, "n1"));
+    }
+
+    /// <summary>
+    /// An unresolved placeholder is a LEXICAL ERROR rather than a silently empty value.
+    /// </summary>
+    /// <remarks>
+    /// A placeholder in the text with no value behind it can only mean the text and the bound table
+    /// disagree. Substituting nothing would evaluate a DIFFERENT expression and answer plausibly, which is
+    /// the class of defect that survives every assertion; the invalid-expression sentinel says so instead.
+    /// </remarks>
+    [Fact]
+    public void AnUnsuppliedBoundPlaceholderIsRefusedRatherThanReadAsEmpty()
+    {
+        FakeDataWindowHost host = FakeDataWindowFixtures.CreateColumnExpressionFixture();
+        DataWindowExpressionEvaluator evaluator = new(host);
+
+        Assert.Equal(
+            DataWindowExpressionEvaluator.InvalidExpressionSentinel,
+            evaluator.Evaluate(
+                DataWindowExpressionEvaluator.BoundValuePlaceholder(0) + " + 1",
+                1L,
+                null));
+
+        Dictionary<string, ExpressionValue> bound = new(StringComparer.Ordinal)
+        {
+            [DataWindowExpressionEvaluator.BoundValuePlaceholder(0)] = ExpressionValue.FromLong(3L),
+        };
+
+        // AND WITH THE VALUE SUPPLIED IT IS ONE PRIMARY.
+        Assert.Equal(
+            "4",
+            evaluator.Evaluate(
+                DataWindowExpressionEvaluator.BoundValuePlaceholder(0) + " + 1",
+                1L,
+                bound));
+
+        // ONE PRIMARY WHATEVER THE VALUE CONTAINS: a value that is itself expression syntax is compared as
+        // TEXT rather than executed, which is the whole property.
+        bound[DataWindowExpressionEvaluator.BoundValuePlaceholder(1)] =
+            ExpressionValue.FromString("a' + 'b");
+
+        Assert.Equal(
+            "1",
+            evaluator.Evaluate(
+                "if(" + DataWindowExpressionEvaluator.BoundValuePlaceholder(1) + " = 'a~' + ~'b', 1, 0)",
+                1L,
+                bound));
+    }
+
+    // ==============================================================================================
     //  2. MODE IS A PER-REFERENCE PROPERTY, NEVER PER-EXPRESSION
     // ==============================================================================================
 

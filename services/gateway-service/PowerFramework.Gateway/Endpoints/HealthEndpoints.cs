@@ -202,6 +202,7 @@
 // ======================================================================================================
 
 using System.Globalization;
+using System.Net;
 using System.Net.Mime;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -209,6 +210,7 @@ using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
+using PowerFramework.Gateway.Clients;
 using PowerFramework.Gateway.Composition;
 using PowerFramework.Gateway.Configuration;
 using PowerFramework.Shared.Kernel;
@@ -367,6 +369,28 @@ public static class HealthEndpoints
     private const string FrameworkCheckName = "framework";
 
     /// <summary>
+    /// The component entry naming whether Gateway holds the credential material its token bootstrap
+    /// requires.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY IT IS A COMPONENT OF READINESS AND NOT MERELY CONFIGURATION. Gateway forwards every proxied
+    /// operation to DataServices with a bearer token, and the only way to obtain one is Security's
+    /// issuance edge - which contract C-01 protects with MUTUAL TLS and nothing else, because a caller
+    /// cannot present a bearer token in order to obtain its first bearer token. A deployment that mounts
+    /// no client certificate is a legitimate startup state and deliberately not a startup failure, and it
+    /// is also a state in which every proxied operation is refused for want of a caller identity.
+    /// Reporting ready in that state is the readiness endpoint answering its own question wrongly.
+    /// </para>
+    /// <para>
+    /// Named individually rather than folded into <see cref="ComponentsCheckName"/> for the same reason
+    /// <see cref="FrameworkCheckName"/> is: an operator polling this route needs to know WHICH
+    /// precondition is unmet, and the aggregated entry deliberately says only that one is.
+    /// </para>
+    /// </remarks>
+    private const string CredentialsCheckName = "credentials";
+
+    /// <summary>
     /// The single aggregated component entry standing for every registered health check.
     /// </summary>
     /// <remarks>
@@ -391,7 +415,20 @@ public static class HealthEndpoints
     private const string FrameworkNotReadyDetail =
         "The framework lifecycle is not in its initialized state.";
 
-    /// <summary>The authored note on the aggregated component entry when every check is ready.</summary>
+    /// <summary>The detail for a Gateway holding the credential material it needs.</summary>
+    private const string CredentialsReadyDetail =
+        "The credential material needed to obtain a service token is configured.";
+
+    /// <summary>
+    /// The detail for a Gateway that cannot obtain a token. It names WHAT is missing in capability terms
+    /// and never a path, a certificate subject or a configuration key: this route is anonymous, and a path
+    /// names where private key material is mounted. The setting names go to the operator channel.
+    /// </summary>
+    private const string CredentialsNotReadyDetail =
+        "The credential material needed to obtain a service token is not configured, so every proxied "
+        + "operation would be refused.";
+
+    /// <summary>The detail for the aggregated component entry when every registered check is ready.</summary>
     private const string ComponentsReadyDetail = "Every registered component check reports ready.";
 
     /// <summary>The authored note on the aggregated component entry when any check is not.</summary>
@@ -439,6 +476,25 @@ public static class HealthEndpoints
 
     /// <summary>The evaluation-time member, carried onto the not-ready problem document.</summary>
     private const string CheckedAtExtensionMember = "checkedAt";
+
+    /// <summary>
+    /// The readiness-verdict member, carried onto the not-ready problem document.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A NAME OF ITS OWN, BECAUSE <c>status</c> IS ALREADY TAKEN AND IS A DIFFERENT TYPE. RFC 9457 uses
+    /// <c>status</c> for the integer HTTP status and the contract's schema types it that way, so the
+    /// verdict token cannot occupy that name on a problem document. Without a member of its own the
+    /// token would exist only inside the prose of <c>detail</c>, where the sole machine-readable member
+    /// left is <c>retCode</c> - and that carries <see cref="RetCode.E_RETRY"/> for
+    /// <c>Degraded</c> and for <c>Unhealthy</c> alike, so an aggregator could not tell them apart.
+    /// </para>
+    /// <para>
+    /// The same spelling is emitted by all four services, because C-10 publishes one readiness shape,
+    /// and <see cref="HttpUpstreamReadinessProbe"/> reads it off the three upstreams' not-ready bodies.
+    /// </para>
+    /// </remarks>
+    private const string ServiceStatusExtensionMember = "serviceStatus";
 
     /// <summary>
     /// The member an upstream's own readiness body carries its verdict in.
@@ -709,6 +765,12 @@ public static class HealthEndpoints
     /// would keep receiving traffic it is about to stop serving.
     /// </para>
     /// <para>
+    /// The credential entry is the second reachable cause of <c>Degraded</c>, and it is a readiness
+    /// question rather than a configuration one: every proxied operation is forwarded with a bearer token,
+    /// and a Gateway with no client certificate mounted cannot obtain one at all. It too is evaluated only
+    /// when there is something to evaluate - see <see cref="EvaluateCredentialReadiness"/>.
+    /// </para>
+    /// <para>
     /// <see cref="HealthCheckService"/> is likewise optional. The composition root registers it, but this
     /// probe must answer whether or not it did: requiring it would let a missing registration turn a
     /// readiness probe into a startup gate, which boundary note 1 forbids.
@@ -750,6 +812,13 @@ public static class HealthEndpoints
                     Status = ToWireStatus(frameworkStatus),
                     Detail = frameworkReady ? FrameworkReadyDetail : FrameworkNotReadyDetail,
                 });
+            }
+
+            if (EvaluateCredentialReadiness(services, logger) is (HealthStatus, ComponentHealthCheck)
+                credentials)
+            {
+                status = Worse(status, credentials.Item1);
+                checks.Add(credentials.Item2);
             }
 
             HealthCheckService? healthChecks = services.GetService<HealthCheckService>();
@@ -803,6 +872,103 @@ public static class HealthEndpoints
         }
 
         return (status, checks);
+    }
+
+    /// <summary>
+    /// Establishes whether Gateway holds the credential material its token bootstrap requires, without
+    /// requesting a token or performing any I/O at all.
+    /// </summary>
+    /// <param name="services">The request's service provider.</param>
+    /// <param name="logger">The operator channel, where the unmet setting names are recorded.</param>
+    /// <returns>
+    /// The entry and the status it contributes, or <see langword="null"/> when this file has nothing to
+    /// say - which is the case when a host supplied its own bootstrap or bound no options.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// NO I/O, AT ALL. No token is minted, no handshake is attempted, no metadata is fetched and no file
+    /// is opened. It reads two bound configuration values. A probe that minted a token would mutate the
+    /// client's credential cache and put load on the issuance edge from an anonymous, unauthenticated
+    /// route - and this endpoint is the one operation a caller holding no credential can cause to happen.
+    /// </para>
+    /// <para>
+    /// IT DOES NOT ASK WHETHER SECURITY IS REACHABLE. That is an upstream question, and the three upstream
+    /// entries already answer it; duplicating it here would make one outage produce two not-ready reasons.
+    /// This asks the purely local question: is the material here.
+    /// </para>
+    /// <para>
+    /// NOTHING IS REPORTED WHEN A HOST SUPPLIED ITS OWN <see cref="IServiceTokenProvider"/>, on exactly the
+    /// same terms as the framework entry when no initializer is registered. Such a host obtains credentials
+    /// by a mechanism whose preconditions this file cannot know, so a verdict about them would be a
+    /// fabrication - and an absent entry says "nothing to report" where a fabricated one would say
+    /// something false. Both halves - a bound options group AND the shipped client - are required before an
+    /// entry appears.
+    /// </para>
+    /// <para>
+    /// BOTH HALVES OF THE PAIR ARE REQUIRED, which is stricter than the options group's own
+    /// <c>IsConfigured</c> property. That property is an OR: it answers "did the operator intend to
+    /// configure an identity", so the startup validator can refuse a half-set pair as the typo it is.
+    /// Readiness asks whether a handshake can be completed, and a certificate without its key cannot be
+    /// loaded. The composition root already refuses to START on a half-set pair, so the two tests can only
+    /// disagree in a host that bypassed both the validator and the identity loader.
+    /// </para>
+    /// </remarks>
+    private static (HealthStatus Status, ComponentHealthCheck Entry)? EvaluateCredentialReadiness(
+        IServiceProvider services,
+        ILogger logger)
+    {
+        if (services.GetService<IServiceTokenProvider>() is not SecurityClient)
+        {
+            return null;
+        }
+
+        if (services.GetService<IOptions<GatewayOptions>>()?.Value is not GatewayOptions options)
+        {
+            return null;
+        }
+
+        GatewayOptions.MutualTlsClientOptions identity = options.MutualTls;
+
+        if (!string.IsNullOrWhiteSpace(identity.CertificatePath)
+            && !string.IsNullOrWhiteSpace(identity.CertificateKeyPath))
+        {
+            return (
+                HealthStatus.Healthy,
+                new ComponentHealthCheck
+                {
+                    Name = CredentialsCheckName,
+                    Status = StatusHealthy,
+                    Detail = CredentialsReadyDetail,
+                });
+        }
+
+        // NEITHER PATH IS REPRODUCED, not even on the operator channel. A path names where private key
+        // material is mounted, and a log is not exempt from that concern; the two SETTING NAMES are what an
+        // operator needs in order to act. Warning rather than error: the material has not failed, it has
+        // not arrived, and supplying it is an orchestration act.
+        logger.LogWarning(
+            "Gateway presents no client certificate, so it cannot obtain a service token: the issuance "
+                + "edge is authenticated by mutual TLS and by nothing else, and a certificate-less request "
+                + "can only be refused. Set both '{Certificate}' and '{Key}' to the material this "
+                + "deployment mounts. Reporting the {Check} component {Status}.",
+            $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
+                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath)}",
+            $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
+                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath)}",
+            CredentialsCheckName,
+            StatusDegraded);
+
+        // DEGRADED RATHER THAN UNHEALTHY: the material has not failed, it has not arrived, and the
+        // orchestration layer owns the mount. Both verdicts are answered 503, so the readiness gate behaves
+        // identically - the distinction is what an operator is told to do about it.
+        return (
+            HealthStatus.Degraded,
+            new ComponentHealthCheck
+            {
+                Name = CredentialsCheckName,
+                Status = StatusDegraded,
+                Detail = CredentialsNotReadyDetail,
+            });
     }
 
     /// <summary>
@@ -1009,12 +1175,16 @@ public static class HealthEndpoints
     /// STATUS. Both mean not ready, and the orchestration gate reads the status code.
     /// </para>
     /// <para>
-    /// <b>Why the aggregate verdict travels in <c>detail</c> and not in a <c>status</c> member.</b> RFC
-    /// 9457 - which is the shape the contract publishes for every error in this document - reserves
+    /// <b>Why the aggregate verdict travels in a <c>serviceStatus</c> member and not in <c>status</c>.</b>
+    /// RFC 9457 - which is the shape the contract publishes for every error in this document - reserves
     /// <c>status</c> for the integer HTTP status code, and the contract's own schema types it as an
-    /// integer. The verdict token therefore cannot occupy that name here, so it is stated in <c>detail</c>
-    /// together with the participants responsible, which is exactly what the contract's 503 description
-    /// says the response carries.
+    /// integer. The verdict token therefore cannot occupy that name here, so it travels in the
+    /// <see cref="ServiceStatusExtensionMember"/> extension member the contract declares for exactly this
+    /// purpose, and is ALSO stated in <c>detail</c> together with the participants responsible. Both
+    /// halves are needed and neither substitutes for the other: <c>detail</c> is prose for a human, and
+    /// prose is not something an aggregator can branch on. Stating the verdict only in <c>detail</c> is
+    /// what previously left <c>retCode</c> as the sole machine-readable member of this body - and
+    /// <c>retCode</c> is <see cref="RetCode.E_RETRY"/> for <c>Degraded</c> and <c>Unhealthy</c> alike.
     /// </para>
     /// <para>
     /// The per-upstream array, the component entries, the reporting service and the evaluation time ride
@@ -1081,6 +1251,7 @@ public static class HealthEndpoints
             title: NotReadyProblemTitle,
             extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
             {
+                [ServiceStatusExtensionMember] = wireStatus,
                 [RetCodeExtensionMember] = RetCode.E_RETRY,
                 [ServiceExtensionMember] = AggregateHealthReport.ReportingService,
                 [CheckedAtExtensionMember] = checkedAt,
@@ -1454,30 +1625,47 @@ public static class HealthEndpoints
         /// <inheritdoc />
         /// <remarks>
         /// <para>
-        /// The mapping, which is the whole of the probe's behaviour:
+        /// THE STATUS CODE SELECTS WHICH BODY SHAPE IS EXPECTED, AND THE BODY SUPPLIES THE VERDICT. The
+        /// contract declares exactly two responses on <c>GET /health</c> and a different schema for each,
+        /// so reading the body without first branching on the code would be reading an unknown shape.
         /// </para>
         /// <list type="bullet">
         /// <item>
-        /// a success status whose body carries a recognised verdict token yields that verdict, so a
-        /// <c>Degraded</c> upstream is reported as degraded rather than flattened into ready;
+        /// <c>200</c> - the body must be a <c>ServiceHealthReport</c>, and its <c>status</c> member
+        /// supplies the verdict. A recognised token yields that verdict, so a <c>Degraded</c> upstream is
+        /// reported as degraded rather than flattened into ready. Anything else - an absent, empty,
+        /// non-object, unparseable or truncated body, a missing or non-string member, or a token outside
+        /// the published vocabulary - yields <c>Unhealthy</c>. FAILING CLOSED IS THE POINT: a body that
+        /// cannot state its verdict is not a body whose verdict can be trusted, and reading such a
+        /// response as ready is what would let the readiness gate open onto an unusable service.
         /// </item>
         /// <item>
-        /// a success status whose body carries an UNRECOGNISED token yields <c>Unhealthy</c>, failing closed
-        /// on a vocabulary this file cannot interpret;
+        /// <c>503</c> - the body must be a problem document, and its <see cref="ServiceStatusExtensionMember"/>
+        /// extension member supplies the verdict. This is the arm that PRESERVES <c>Degraded</c>: both
+        /// not-ready verdicts are answered 503 by every service in the estate, so the code alone cannot
+        /// separate them and the only other machine-readable member of that body is <c>retCode</c>, which
+        /// is <see cref="RetCode.E_RETRY"/> for both. A <c>Healthy</c> token on a 503 is a contradiction
+        /// and is read as <c>Unhealthy</c> - the code is the statement the estate's own readiness gate
+        /// acts on, so it wins. Anything unreadable yields <c>Unhealthy</c>, as above.
         /// </item>
         /// <item>
-        /// a success status with no readable token yields <c>Healthy</c>, because the status code IS the
-        /// readiness signal and an upstream answering the shared framework's plain-text probe carries no
-        /// token at all;
-        /// </item>
-        /// <item>
-        /// any other status yields <c>Unhealthy</c> - the upstream answered, and said it was not ready; and
+        /// any OTHER status yields <c>Unhealthy</c> without the body being read at all. The contract
+        /// declares no third response on this path, so whatever answered is not answering this contract,
+        /// and a shape this file cannot name is not a shape it should parse.
         /// </item>
         /// <item>
         /// a transport failure, an expired budget or a cancellation yields <c>Unreachable</c>, which is the
         /// contract's token for "no verdict could be obtained at all".
         /// </item>
         /// </list>
+        /// <para>
+        /// NOTHING HERE READS THE PLAIN-TEXT SHAPE THE SHARED FRAMEWORK'S OWN <c>MapHealthChecks</c>
+        /// EMITS, and that is deliberate rather than an omission. This probe only ever addresses the three
+        /// upstreams named in <c>Gateway:HealthProbes</c>, all three of which publish C-10's JSON shapes
+        /// from their own hand-written endpoint; treating a bare <c>Healthy</c> string as ready would mean
+        /// treating any 200 with any body as ready, which is exactly the flattening this arm exists to
+        /// remove.
+        /// </para>
         /// </remarks>
         public async ValueTask<UpstreamReadiness> ProbeAsync(
             string participant,
@@ -1496,7 +1684,8 @@ public static class HealthEndpoints
                     .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
                     .ConfigureAwait(false);
 
-                if (!response.IsSuccessStatusCode)
+                if (response.StatusCode is not HttpStatusCode.OK
+                    and not HttpStatusCode.ServiceUnavailable)
                 {
                     // Recorded at debug level: a not-ready upstream during a cold start is the ORDINARY
                     // observation, and the aggregate's own warning already names the participant.
@@ -1504,7 +1693,8 @@ public static class HealthEndpoints
                     {
                         _logger.LogDebug(
                             "The {Participant} upstream answered its readiness probe with HTTP "
-                                + "{StatusCode}; reporting {Status}.",
+                                + "{StatusCode}, which contract C-10 does not declare on this path; "
+                                + "reporting {Status}.",
                             participant,
                             (int)response.StatusCode,
                             StatusUnhealthy);
@@ -1513,7 +1703,40 @@ public static class HealthEndpoints
                     return UpstreamReadiness.Unhealthy;
                 }
 
-                return await ReadReportedVerdictAsync(response, cancellationToken).ConfigureAwait(false);
+                bool ready = response.StatusCode is HttpStatusCode.OK;
+
+                UpstreamReadiness verdict = await ReadReportedVerdictAsync(
+                        response,
+                        ready ? ReportedStatusMember : ServiceStatusExtensionMember,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                // A 503 whose body claims Healthy is self-contradictory. The CODE is what the estate's
+                // own readiness gate acts on, so it decides: the response says not-ready, and a token
+                // saying otherwise is evidence the body cannot be trusted rather than evidence of health.
+                if (!ready && verdict is UpstreamReadiness.Healthy)
+                {
+                    _logger.LogWarning(
+                        "The {Participant} upstream answered its readiness probe with HTTP 503 while its "
+                            + "body reported {Reported}; the status code decides, so reporting {Status}.",
+                        participant,
+                        StatusHealthy,
+                        StatusUnhealthy);
+
+                    return UpstreamReadiness.Unhealthy;
+                }
+
+                if (verdict is not UpstreamReadiness.Healthy && _logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug(
+                        "The {Participant} upstream answered its readiness probe with HTTP {StatusCode}; "
+                            + "reporting {Status}.",
+                        participant,
+                        (int)response.StatusCode,
+                        ToWireStatus(verdict));
+                }
+
+                return verdict;
             }
             catch (OperationCanceledException)
             {
@@ -1558,27 +1781,44 @@ public static class HealthEndpoints
         }
 
         /// <summary>
-        /// Reads an upstream's own verdict token out of a successful readiness response.
+        /// Reads an upstream's own verdict token out of a readiness response whose shape the status code
+        /// has already established.
         /// </summary>
-        /// <param name="response">The successful response.</param>
+        /// <param name="response">The response, either the contract's <c>200</c> or its <c>503</c>.</param>
+        /// <param name="verdictMember">
+        /// Which member carries the token in the shape this status code declares:
+        /// <see cref="ReportedStatusMember"/> on the <c>200</c>'s report, or
+        /// <see cref="ServiceStatusExtensionMember"/> on the <c>503</c>'s problem document.
+        /// </param>
         /// <param name="cancellationToken">The probe budget.</param>
-        /// <returns>The reported verdict, or <see cref="UpstreamReadiness.Healthy"/> when none is readable.</returns>
+        /// <returns>
+        /// The reported verdict, or <see cref="UpstreamReadiness.Unhealthy"/> when no token could be read.
+        /// </returns>
         /// <remarks>
+        /// <para>
+        /// EVERY UNREADABLE OUTCOME IS <c>Unhealthy</c>, AND THERE IS NO ARM THAT ANSWERS <c>Healthy</c> BY
+        /// DEFAULT. An absent body, an empty body, a body that is not a JSON object, a missing member, a
+        /// member that is not a string, a token outside the published vocabulary, and a body that does not
+        /// parse at all are six distinct ways for a response to fail to state its verdict, and all six mean
+        /// the same thing: nothing was read. Reading any of them as ready is what makes a health aggregate
+        /// worse than no aggregate, because it converts silence into a positive assertion.
+        /// </para>
         /// <para>
         /// THE READ IS BOUNDED. At most <see cref="MaxProbeBodyBytes"/> are read, so a misbehaving or
         /// compromised upstream cannot make the one operation an unauthenticated caller can trigger allocate
         /// without limit. A readiness body is far smaller than that bound, so a truncated read means the
-        /// body was not a readiness body - and a truncated buffer simply fails to parse, which falls through
-        /// to the status-code reading.
+        /// body was not a readiness body - and a truncated buffer fails to parse, which now fails closed
+        /// rather than being read as ready.
         /// </para>
         /// <para>
-        /// The token is read only when it is a JSON STRING. RFC 9457 uses the same member name for the
-        /// integer HTTP status, so requiring a string is what keeps a problem document from being misread as
-        /// a verdict.
+        /// The token is read only when it is a JSON STRING. On the <c>503</c> that is what keeps RFC 9457's
+        /// own integer <c>status</c> member from being mistaken for a verdict, which is the same reason the
+        /// verdict needed an extension member of its own in the first place.
         /// </para>
         /// </remarks>
         private static async ValueTask<UpstreamReadiness> ReadReportedVerdictAsync(
             HttpResponseMessage response,
+            string verdictMember,
             CancellationToken cancellationToken)
         {
             byte[] buffer = new byte[MaxProbeBodyBytes];
@@ -1595,7 +1835,9 @@ public static class HealthEndpoints
 
                 if (read == 0)
                 {
-                    return UpstreamReadiness.Healthy;
+                    // No body at all. The contract declares a body on both of its responses, so this is a
+                    // response that cannot state its verdict.
+                    return UpstreamReadiness.Unhealthy;
                 }
 
                 try
@@ -1603,12 +1845,10 @@ public static class HealthEndpoints
                     using JsonDocument document = JsonDocument.Parse(buffer.AsMemory(0, read));
 
                     if (document.RootElement.ValueKind is not JsonValueKind.Object
-                        || !document.RootElement.TryGetProperty(
-                            ReportedStatusMember,
-                            out JsonElement reported)
+                        || !document.RootElement.TryGetProperty(verdictMember, out JsonElement reported)
                         || reported.ValueKind is not JsonValueKind.String)
                     {
-                        return UpstreamReadiness.Healthy;
+                        return UpstreamReadiness.Unhealthy;
                     }
 
                     return reported.GetString() switch
@@ -1617,18 +1857,16 @@ public static class HealthEndpoints
                         StatusDegraded => UpstreamReadiness.Degraded,
                         StatusUnhealthy => UpstreamReadiness.Unhealthy,
 
-                        // A success status carrying a token from outside the published vocabulary is not
-                        // trusted to mean ready. Failing closed here is the same choice the aggregate's
-                        // status-code mapping makes.
+                        // A token from outside the published vocabulary is not trusted to mean ready.
+                        // Failing closed here is the same choice every other arm of this method makes.
                         _ => UpstreamReadiness.Unhealthy,
                     };
                 }
                 catch (JsonException)
                 {
-                    // Not JSON, or truncated by the bound above. The success status is still a readiness
-                    // signal - the shared framework's own plain-text probe answers exactly this way - so it
-                    // is read as ready rather than discarded.
-                    return UpstreamReadiness.Healthy;
+                    // Not JSON, or truncated by the bound above. Either way no verdict was stated, and an
+                    // unstated verdict is not a ready one.
+                    return UpstreamReadiness.Unhealthy;
                 }
             }
         }
@@ -1894,4 +2132,3 @@ public sealed record ComponentHealthCheck
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Detail { get; init; }
 }
-

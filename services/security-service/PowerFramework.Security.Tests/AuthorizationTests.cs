@@ -197,6 +197,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Endpoints;
+using PowerFramework.Security.Tokens;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.Security.Tests;
@@ -410,18 +411,38 @@ public sealed class AuthorizationTests
 
     /// <summary>The subject every token minted by this suite is issued for.</summary>
     /// <remarks>
-    /// A caller identity and not a credential: it is stamped into the subject claim verbatim and grants
-    /// nothing on its own, because authority comes from the signature rather than from the name.
+    /// <para>
+    /// A REGISTERED CALLER IDENTITY AND NOT A CREDENTIAL. It is stamped into the subject claim verbatim
+    /// and grants nothing on its own, because authority comes from the signature rather than from the
+    /// name. It must nevertheless be an identity the deployment's issuance roster REGISTERS: the issuer
+    /// refuses a subject with no entry, so a self-describing conformance name would mint nothing and
+    /// every row in this file would fail before reaching the thing it asserts.
+    /// </para>
+    /// <para>
+    /// This is the one caller in the system that holds a token addressed to Security
+    /// [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs], so minting
+    /// as it keeps these rows on the production path.
+    /// </para>
     /// </remarks>
-    private const string TokenSubject = "authorization-conformance";
+    private const string TokenSubject = "powerframework-dataservices";
 
-    /// <summary>The single scope every token minted by this suite requests.</summary>
+    /// <summary>The scopes every token minted by this suite requests.</summary>
     /// <remarks>
-    /// One scope, because the issuance contract requires at least one and this suite asserts nothing
-    /// about scopes: no route on this service carries a scope-level policy, and inventing one to assert
-    /// would be adding a requirement the contract does not declare.
+    /// <para>
+    /// THE TWO SCOPES THIS SERVICE'S PROTECTED ROUTES REQUIRE, read from the routes' own declarations
+    /// rather than invented. Each protected route now carries a named scope policy, so a token that
+    /// carried an arbitrary scope would be authenticated and then FORBIDDEN - and every row in this file
+    /// asserting a successful authenticated call would fail with a 403 that has nothing to do with the
+    /// credential it was testing.
+    /// </para>
+    /// <para>
+    /// This file's subject is granted both by the settings file's roster entry for it, which is what
+    /// makes these requests succeed. Rows that assert a scope REFUSAL live with the issuance and route
+    /// tests, where the refusal is the subject of the assertion rather than a precondition of it.
+    /// </para>
     /// </remarks>
-    private const string TokenScope = "authorization-conformance";
+    private static readonly string[] TokenScopes =
+        [CryptoEndpoints.RequiredScope, PingEndpoints.RequiredScope];
 
     /// <summary>
     /// The member names the successful ping body is permitted to carry, in ordinal order.
@@ -1399,14 +1420,14 @@ public sealed class AuthorizationTests
                 new AuthenticationHeaderValue(
                     BearerScheme,
                     primary
-                        .IssueToken(TokenSubject, ResolveUnacceptedAudience(primary), [TokenScope])
+                        .IssueToken(TokenSubject, ResolveUnacceptedAudience(primary), TokenScopes)
                         .AccessToken),
 
             RejectedCredential.ForeignIssuer or RejectedCredential.DifferentSigningKey =>
                 new AuthenticationHeaderValue(
                     BearerScheme,
                     RequireCompanionHost(companion, credential)
-                        .IssueToken(TokenSubject, primary.ResolveInboundAudience(), [TokenScope])
+                        .IssueToken(TokenSubject, primary.ResolveInboundAudience(), TokenScopes)
                         .AccessToken),
 
             _ => throw new InvalidOperationException(
@@ -1467,7 +1488,7 @@ public sealed class AuthorizationTests
         primary.Clock.SetUtcNow(present - lifetime - ExpiryMargin);
 
         string expired = primary
-            .IssueToken(TokenSubject, primary.ResolveInboundAudience(), [TokenScope])
+            .IssueToken(TokenSubject, primary.ResolveInboundAudience(), TokenScopes)
             .AccessToken;
 
         primary.Clock.SetUtcNow(present);
@@ -1495,14 +1516,29 @@ public sealed class AuthorizationTests
     {
         string accepted = primary.ResolveInboundAudience();
 
-        string? unaccepted = primary.ResolveSecurityOptions().Audiences
+        // THE CANDIDATE MUST BE GRANTED TO THE MINTING SUBJECT, NOT MERELY SERVED BY THE DEPLOYMENT, and
+        // that is the whole of what changed here. The issuer applies two gates: the deployment-wide
+        // audience roster and then the caller's own entry. Taking the first audience the deployment
+        // serves would name one this file's subject may not address, and the issuer would refuse to mint
+        // at all - so the row would fail during its own SETUP, before reaching the replay it exists to
+        // assert. Reading the caller's granted set gives an audience that mints and that this host
+        // nevertheless refuses inbound, which is exactly the credential the row needs.
+        Assert.True(
+            primary.Services
+                .GetRequiredService<IssuanceClientRegistry>()
+                .TryResolveSubject(TokenSubject, out RegisteredIssuanceClient? registered),
+            $"This host's issuance roster registers no subject '{TokenSubject}', so no token can be "
+            + "minted for it at all.");
+
+        string? unaccepted = registered.PermittedAudiences
             .FirstOrDefault(candidate =>
                 !string.Equals(candidate, accepted, StringComparison.Ordinal));
 
         return unaccepted ?? throw new InvalidOperationException(
-            "This host's issuance roster carries no audience other than the one it accepts inbound, so "
-            + "the replay case cannot be constructed against it. Widen the roster through the factory's "
-            + "own audience override before the host starts. This message echoes no configured value.");
+            "This host's issuance roster grants the minting subject no audience other than the one this "
+            + "host accepts inbound, so the replay case cannot be constructed against it. Widen that "
+            + "caller's granted audiences before the host starts. This message echoes no configured "
+            + "value.");
     }
 
     /// <summary>

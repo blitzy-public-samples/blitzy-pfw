@@ -155,8 +155,10 @@
 //     Stopwatch. Every time value comes from the injected TimeProvider, which the host registers as
 //     the single determinism seam this service shares with the transaction pool's idle expiry.
 //   * NO SCREAMING_SNAKE IDENTIFIER IS DECLARED. The repository .editorconfig scopes its CA1707 and
-//     IDE1006 relaxations to eleven individually named files, of which the only two in this project
-//     are under Sql/; Data/ is outside every one of them, and warnings are errors. The journal-mode
+//     IDE1006 relaxations to individually named files and is the SOLE ROSTER of them - the count is
+//     deliberately not restated here, because a copied number is a second place for the roster to be
+//     wrong and it silently became wrong as files were added. In this project the named files are
+//     under Sql/; Data/ is outside every one of those sections, and warnings are errors. The journal-mode
 //     tokens and the pragma texts below are STRING LITERALS, not C# identifiers, so preserving their
 //     legacy spellings raises nothing.
 //
@@ -308,6 +310,40 @@ namespace PowerFramework.Persistence.Data
             + "WHERE \"schema\" = $schema AND name = $name AND type = 'table';";
 
         /// <summary>
+        /// The one evidenced application table, which a readiness verdict requires to be present.
+        /// </summary>
+        /// <remarks>
+        /// THE ONLY DDL IN THE ENTIRE LEGACY REPOSITORY creates this table
+        /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469</c>], and the sole updatable
+        /// DataWindow retrieves and updates it by this name
+        /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>]. The managed model maps to the same
+        /// name [<c>Data/PowerFrameworkDbContext.cs</c> - <c>company.ToTable("COMPANY")</c>], so this
+        /// spelling is a constant of this codebase rather than a configured value, and naming it in a
+        /// diagnostic discloses nothing (constraint C-F).
+        /// </remarks>
+        private const string RequiredApplicationTable = "COMPANY";
+
+        /// <summary>
+        /// EF Core's migration bookkeeping table, which a readiness verdict also requires.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// REQUIRED BECAUSE IT IS THE ONLY PROVISIONING PATH THIS SERVICE HAS. Nothing in this service
+        /// calls <c>EnsureCreated</c> or <c>Migrate</c> - deliberately, and both files say so at
+        /// length - so the schema arrives exclusively through <c>dotnet ef database update</c>, which
+        /// writes a row here for every migration it applies. A database holding the application table
+        /// but NOT this one is therefore not a hand-provisioned equivalent: it is a database the
+        /// migration tool would try to re-apply migration one against, and fail. Reporting it not-ready
+        /// is the actionable answer.
+        /// </para>
+        /// <para>
+        /// The name is EF Core's default and is not configured anywhere in this service, so like the
+        /// application table it is a constant rather than a value.
+        /// </para>
+        /// </remarks>
+        private const string RequiredMigrationHistoryTable = "__EFMigrationsHistory";
+
+        /// <summary>
         /// The schema name SQLite gives the database opened by the connection itself.
         /// </summary>
         /// <remarks>
@@ -368,7 +404,47 @@ namespace PowerFramework.Persistence.Data
         /// when it has not run. Stamped on every probe including a failed one, which is what keeps
         /// it an honest record of activity rather than a mirror of the cache.
         /// </summary>
+        /// <remarks>
+        /// OBSERVABILITY ONLY. The cache WINDOW is decided on
+        /// <see cref="_lastReachabilityTimestamp"/> instead, for the reason recorded there. This member
+        /// answers "when did a probe last run", which is a wall-clock question an operator asks; it must
+        /// not be used to answer "how long ago", which is an elapsed-time question.
+        /// </remarks>
         private DateTimeOffset? _lastReachabilityAt;
+
+        /// <summary>
+        /// The MONOTONIC timestamp of the last probe, or <see langword="null"/> when none has run.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// SEPARATE FROM THE WALL-CLOCK STAMP BECAUSE SUBTRACTING TWO WALL-CLOCK READS DOES NOT MEASURE
+        /// ELAPSED TIME. A wall clock can step in either direction - an NTP correction, a container
+        /// resuming from a suspended host, a manual change - and each direction breaks the window a
+        /// different way. A step FORWARD expires a window early, which merely costs an extra probe. A
+        /// step BACKWARD is the one that matters: the computed age goes negative, so the comparison keeps
+        /// reporting the cached positive answer, and a cached success can then outlive its window
+        /// indefinitely while the engine behind it is already unreachable.
+        /// </para>
+        /// <para>
+        /// <see cref="TimeProvider.GetTimestamp"/> and <see cref="TimeProvider.GetElapsedTime(long)"/>
+        /// are monotonic by contract and are still INJECTED, so this remains a determinism seam a
+        /// characterization run can mask from both the master and the candidate recording (AAP 0.6.7) -
+        /// which a raw <see cref="System.Diagnostics.Stopwatch"/> would not have been.
+        /// </para>
+        /// </remarks>
+        private long? _lastReachabilityTimestamp;
+
+        /// <summary>
+        /// Why the last readiness probe answered as it did.
+        /// </summary>
+        /// <remarks>
+        /// Present because a boolean cannot carry the distinction the operator most needs: "the engine
+        /// did not answer" and "the engine answered but there is no schema" call for completely
+        /// different actions - fix the mount or the provider in the first case, run the migrations in the
+        /// second - and a single false conflates them. It is a small closed enumeration rather than text,
+        /// so nothing configured and nothing from the provider can travel on it.
+        /// </remarks>
+        private StorageReadiness _lastReadiness = StorageReadiness.NotProbed;
 
         // ==========================================================================================
         //  CONSTRUCTION - WHERE EVERY STRUCTURAL FAULT IS REFUSED
@@ -519,8 +595,11 @@ namespace PowerFramework.Persistence.Data
             DatabasePath = Path.Combine(DataDirectory, fileName);
 
             // ------------------------------------------------------------------------------------
-            //  THE TWO PARITY ARTEFACTS. Both come from the same pure function, and both are safe to
-            //  log because no credential can be in either (RULING 1).
+            //  THE TWO PARITY ARTEFACTS. Both come from the same pure function, and neither can carry a
+            //  credential (RULING 1) - but only the first is written to a log. The RESOLVED form embeds
+            //  the data directory, and a log record that publishes where this deployment mounts its
+            //  storage discloses layout to every reader of the log without helping any of them; it is
+            //  kept as a property for a caller that genuinely needs the deployment form.
             //
             //    LegacyUri          `<DatabaseFileName>?mode=...` - the exact form n_sqlite.Open()
             //                       received at w_test_sqlite.srw:L456, which for the legacy defaults
@@ -740,6 +819,67 @@ namespace PowerFramework.Persistence.Data
         }
 
         /// <summary>
+        /// The open connection, or <see langword="null"/> when this factory holds none.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// EXPOSED FOR THE SAME REASON <see cref="AmbientTransaction"/> IS, AND WITH THE SAME
+        /// BOUNDARY. This file owns opening, closing and the connection-level state; the SQL layer
+        /// owns statements. A statement layer that opened its OWN connection would be a correctness
+        /// defect rather than a style choice: SQLite isolates connections, so work written inside this
+        /// factory's ambient transaction is INVISIBLE to any other connection until that transaction
+        /// commits. A retrieval issued on a second connection during an open transaction would
+        /// therefore answer the pre-transaction rows and report success - the failure mode contract
+        /// C-08 exists to prevent, and one no row-count assertion would catch.
+        /// </para>
+        /// <para>
+        /// IT IS DELIBERATELY NOT A "GET OR OPEN" ACCESSOR. Answering null while closed keeps opening
+        /// in exactly one place - <see cref="OpenAsync"/>, reached through the transaction contract's
+        /// own connect verb - so a caller that finds null has genuinely not connected and learns that
+        /// rather than silently acquiring a connection whose URI, pragmas and journal mode nobody
+        /// applied.
+        /// </para>
+        /// </remarks>
+        internal SqliteConnection? AmbientConnection
+        {
+            get
+            {
+                return IsOpened ? _connection : null;
+            }
+        }
+
+        /// <summary>
+        /// Detaches the ambient transaction and hands it to the caller, leaving this factory holding
+        /// none.
+        /// </summary>
+        /// <returns>The detached transaction, or <see langword="null"/> when none was held.</returns>
+        /// <remarks>
+        /// <para>
+        /// THE OTHER HALF OF THE BOUNDARY <see cref="AmbientTransaction"/> DESCRIBES. That property
+        /// lets the transaction layer REACH the transaction; this one lets it TAKE ownership, which is
+        /// what committing actually requires. Without it the field would go stale the instant someone
+        /// committed: the provider clears the transaction from the CONNECTION on commit - measured -
+        /// but nothing clears it from here, so <see cref="IsAutoCommit"/> would keep reporting false
+        /// for a transaction that no longer exists and <see cref="SetAutoCommitAsync"/> would refuse to
+        /// turn auto-commit on, citing a transaction that had already been resolved.
+        /// </para>
+        /// <para>
+        /// THE CALLER OWNS DISPOSAL AFTERWARDS, and that is the point of "take" rather than "resolve":
+        /// committing and rolling back are different verbs with different failure handling, and
+        /// deciding between them here would put the decision back in the file whose whole design is
+        /// that it does not make it.
+        /// </para>
+        /// <para>
+        /// The exchange is atomic so that two callers cannot both believe they hold the transaction -
+        /// the loser observes <see langword="null"/> and reports "nothing to commit", which is true.
+        /// </para>
+        /// </remarks>
+        internal SqliteTransaction? TakeAmbientTransaction()
+        {
+            return Interlocked.Exchange(ref _ambientTransaction, null);
+        }
+
+        /// <summary>
         /// The row count the last connection-level statement reported, reproducing
         /// <c>n_sqlite.SQLNRows()</c> [<c>n_sqlite.sru:L26</c>].
         /// </summary>
@@ -849,6 +989,24 @@ namespace PowerFramework.Persistence.Data
             get
             {
                 return _lastReachabilityAt;
+            }
+        }
+
+        /// <summary>
+        /// Why the last readiness probe answered as it did, or
+        /// <see cref="StorageReadiness.NotProbed"/> before the first probe.
+        /// </summary>
+        /// <remarks>
+        /// Read by the readiness check to choose between two fixed descriptions. It is a closed
+        /// enumeration by design: an anonymous response may carry it without carrying a path, a provider
+        /// message or a statement (constraint C-F). It is NOT reset when the connection closes, because
+        /// it records what the last probe found rather than the current state of a handle.
+        /// </remarks>
+        public StorageReadiness LastReadiness
+        {
+            get
+            {
+                return _lastReadiness;
             }
         }
 
@@ -1771,21 +1929,18 @@ namespace PowerFramework.Persistence.Data
                         + "open costs nothing.");
                 }
 
-                await using SqliteCommand command = connection.CreateCommand();
-                command.CommandText = TableExistsStatement;
-                command.Parameters.AddWithValue("$schema", db.Trim());
-                command.Parameters.AddWithValue("$name", table.Trim());
+                // Through the SHARED helper, so this member and the readiness probe ask the catalogue
+                // through one statement and one parameter binding rather than two that could drift. The
+                // trimming stays HERE because it belongs to this member's published contract, not to the
+                // helper - the probe's own inputs are compile-time constants with nothing to trim.
+                bool exists = await TableExistsOnAsync(
+                    connection,
+                    db.Trim(),
+                    table.Trim(),
+                    cancellationToken).ConfigureAwait(false);
 
-                object? scalar = await command
-                    .ExecuteScalarAsync(cancellationToken)
-                    .ConfigureAwait(false);
-
-                long matches = scalar is null or DBNull
-                    ? 0L
-                    : Convert.ToInt64(scalar, CultureInfo.InvariantCulture);
-
-                RecordSuccess(matches);
-                return matches > 0;
+                RecordSuccess(exists ? 1L : 0L);
+                return exists;
             }
             catch (SqliteException exception)
             {
@@ -1854,23 +2009,31 @@ namespace PowerFramework.Persistence.Data
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                // THE WINDOW IS DECIDED ON ELAPSED TIME, THE RECORD IS KEPT ON WALL TIME. Both reads
+                // happen here, once, so the two can never disagree about which probe they describe.
+                // The comparison boundary is unchanged - still `age <= maximumCacheAge`, so an age
+                // exactly equal to the window still serves the cached answer - and only the quantity
+                // being compared changed, from a difference of two wall-clock reads to a genuinely
+                // monotonic elapsed time.
                 DateTimeOffset now = _timeProvider.GetUtcNow();
+                long timestamp = _timeProvider.GetTimestamp();
 
                 if (maximumCacheAge > TimeSpan.Zero
                     && _lastReachability is true
-                    && _lastReachabilityAt is DateTimeOffset probedAt
-                    && now - probedAt <= maximumCacheAge)
+                    && _lastReachabilityTimestamp is long probedAtTimestamp
+                    && _timeProvider.GetElapsedTime(probedAtTimestamp, timestamp) <= maximumCacheAge)
                 {
                     return true;
                 }
 
-                bool reachable = await ProbeCoreAsync(cancellationToken).ConfigureAwait(false);
+                bool reachable = await ProbeReadinessCoreAsync(cancellationToken).ConfigureAwait(false);
 
                 // Only a success is remembered. A failure is deliberately not cached, so a service
                 // that has just recovered is reported healthy at the very next ask rather than at
                 // the end of somebody else's staleness budget.
                 _lastReachability = reachable ? true : null;
                 _lastReachabilityAt = now;
+                _lastReachabilityTimestamp = timestamp;
 
                 return reachable;
             }
@@ -1947,11 +2110,22 @@ namespace PowerFramework.Persistence.Data
                         outcome.ProviderCode,
                         outcome.Message);
 
+                    // C-F. NEITHER THE PATH NOR THE FILE NAME ON A FAILURE ARM, and the provider's reason
+                    // through the redactor. The success record beside this one DOES name the database,
+                    // because "which database opened" is what an operator reads it for and the name is
+                    // already in the settings file that chose it. A FAILURE record is different in who
+                    // ends up reading it: it is the record that gets quoted into a ticket, pasted into a
+                    // chat and shipped to a vendor, and against the provider code it adds nothing an
+                    // operator did not configure while adding storage layout for every other reader. This
+                    // deployment opens exactly ONE database, so omitting the name loses no ability to
+                    // tell two failures apart. The reason is composed BY the provider FROM the statement
+                    // or pragma it was executing, so it quotes values back; masking is
+                    // content-preserving for the diagnostic itself, so the code and the pragma name
+                    // survive while a quoted value does not. The full text stays available in process on
+                    // SqlErrText, so an authenticated surface is as diagnosable as it ever was.
                     _logger.LogError(
-                        "The SQLite database at {DatabasePath} opened but could not be configured: "
-                        + "{Reason}",
-                        DatabasePath,
-                        outcome.Message);
+                        "The SQLite database opened but could not be configured: {Reason}",
+                        SqlRedactor.Instance.Redact(outcome.Message));
 
                     return failed;
                 }
@@ -1962,12 +2136,16 @@ namespace PowerFramework.Persistence.Data
 
                 long failed = RecordProviderFailure(exception);
 
+                // C-F, on the same terms as the record above and for the same reasons. A failed open is
+                // also the record most likely to carry a path INSIDE the provider's own message -
+                // "unable to open database file" arrives with the data source attached - which the
+                // redactor masks along with any quoted value. What locates the cause is the PRESERVED
+                // SQLITE_* constant, which distinguishes a missing file from a permission refusal from a
+                // corrupt header without naming any of them.
                 _logger.LogError(
-                    "The SQLite database at {DatabasePath} could not be opened. Provider code "
-                    + "{SqlDbCode}: {SqlErrText}",
-                    DatabasePath,
+                    "The SQLite database could not be opened. Provider code {SqlDbCode}: {SqlErrText}",
                     _sqlDbCode,
-                    _sqlErrText);
+                    SqlRedactor.Instance.Redact(_sqlErrText));
 
                 return failed;
             }
@@ -1982,13 +2160,22 @@ namespace PowerFramework.Persistence.Data
             _connection = connection;
             RecordSuccess(0);
 
-            // The composed legacy URI is logged rather than the connection string, because the URI is
-            // the parity artefact and is the value a recording carries. Both are safe to log - no
-            // credential can be in either - and neither is a statement.
+            // The composed legacy URI is logged rather than the connection string, because the URI is the
+            // parity artefact and is the value a recording carries. Neither it nor the file name can carry
+            // a credential - the legacy password is the second argument of the open call rather than URI
+            // syntax [ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru:L18], and ComposeLegacyUri emits
+            // no password parameter in any form - and neither is a statement.
+            //
+            // THE RESOLVED PATH IS DELIBERATELY NOT HERE. It is the one value in this record that is about
+            // the deployment rather than about the database, and a startup log that publishes where storage
+            // is mounted tells a reader of the log something they did not need in order to read it. The
+            // PARITY form of the URI already carries the bare file name, so the identity survives; the
+            // deployment form, which does embed the directory, is available on the factory for a caller
+            // that genuinely needs it and is not written here.
             _logger.LogInformation(
-                "Opened SQLite at {DatabasePath} for legacy URI {LegacyUri}. Journal mode "
+                "Opened SQLite database {Database} for legacy URI {LegacyUri}. Journal mode "
                 + "{JournalMode}, integrity check {IntegrityCheck}, command timeout {TimeoutSeconds}s.",
-                DatabasePath,
+                DatabaseFileName,
                 LegacyUri,
                 _journalMode,
                 _check?.ToString() ?? "absent",
@@ -2022,49 +2209,97 @@ namespace PowerFramework.Persistence.Data
             }
 
             // A closed connection tells us nothing about reachability any more, so the cached
-            // positive answer is dropped. The probe timestamp is left alone: it records when a probe
-            // last ran, which remains true.
+            // positive answer is dropped. The WALL-CLOCK stamp is left alone - it records when a probe
+            // last ran, which remains true - but the MONOTONIC stamp goes with the answer it gates,
+            // because leaving a live stamp beside a cleared answer would be a pair that no longer
+            // describes the same thing.
             _lastReachability = null;
+            _lastReachabilityTimestamp = null;
 
             RecordSuccess(0);
 
-            _logger.LogDebug("Closed the SQLite connection to {DatabasePath}.", DatabasePath);
+            _logger.LogDebug("Closed the SQLite connection to {Database}.", DatabaseFileName);
 
             return RetCode.OK;
         }
 
         /// <summary>
-        /// Probes the engine, opening the connection first if necessary. The gate must be held.
+        /// Establishes readiness WITHOUT ALTERING ANYTHING. The gate must be held.
         /// </summary>
-        private async ValueTask<bool> ProbeCoreAsync(CancellationToken cancellationToken)
+        /// <param name="cancellationToken">The caller's token, already budget-bounded by the check.</param>
+        /// <returns>
+        /// <see langword="true"/> only when the engine answered AND the required schema is present.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THE READINESS PATH IS NOT THE RUNTIME PATH, AND THAT SEPARATION IS THE WHOLE POINT OF THIS
+        /// MEMBER.</b> The runtime open is deliberately creative: it brings the data directory into being
+        /// if it is absent, opens with the legacy <c>mode=rwc</c> grammar so the database FILE is created
+        /// on first run, sets the journal mode, and can run an integrity check - each of which is correct
+        /// for a service starting up, and none of which an ANONYMOUS caller may provoke. Reaching that
+        /// path from <c>/health</c> meant an unauthenticated request could create a directory, create a
+        /// database file and write a journal, which is a data mutation driven from an unauthenticated
+        /// surface. So readiness gets its own path that creates nothing.
+        /// </para>
+        /// <para>
+        /// <b>IT NEVER OPENS THE AMBIENT CONNECTION, AND IT NEVER CLOSES ONE EITHER.</b> When the runtime
+        /// has already opened, the probe borrows that connection: it is the handle requests actually run
+        /// on, so proving IT answers is a truer readiness statement than proving some other handle does,
+        /// and borrowing costs no file descriptor. When the runtime has NOT opened, the probe opens a
+        /// short-lived handle of its own in <see cref="SqliteOpenMode.ReadOnly"/> and disposes it before
+        /// returning - it is never stored in <c>_connection</c>, so a probe can never leave the ambient
+        /// connection in a state the runtime path did not choose. A read-only open of a database that
+        /// does not exist FAILS rather than creating it, which is exactly the answer wanted: no storage
+        /// means not ready, and nothing is brought into being by asking.
+        /// </para>
+        /// <para>
+        /// <b>WHY A CONSTANT SCALAR IS NOT ENOUGH ON ITS OWN.</b> <c>SELECT 1</c> proves the ENGINE
+        /// answered rather than merely that a file handle opened, which is why it is still issued first.
+        /// But it passes just as happily against an empty database, so a service whose volume mounted
+        /// correctly and whose migrations never ran would report READY and then fail every request. The
+        /// schema check is what closes that gap, and it is a read of SQLite's own catalogue through
+        /// <c>pragma_table_list</c> with both inputs BOUND, so it writes nothing and interpolates
+        /// nothing.
+        /// </para>
+        /// <para>
+        /// Every failure arm records its cause on <see cref="SqlCode"/>, <see cref="SqlDbCode"/> and
+        /// <see cref="LastError"/> for the in-process readers, and sets
+        /// <see cref="LastReadiness"/> so the caller can distinguish an unreachable engine from a
+        /// reachable one with no schema. Nothing is logged here: this path is anonymous, so what may be
+        /// recorded is decided by the arms in <c>OpenCoreAsync</c> and by the health check itself
+        /// (constraint C-F).
+        /// </para>
+        /// </remarks>
+        private async ValueTask<bool> ProbeReadinessCoreAsync(CancellationToken cancellationToken)
         {
-            if (!IsOpened)
-            {
-                long opened = await OpenCoreAsync(cancellationToken).ConfigureAwait(false);
-                if (opened != RetCode.OK)
-                {
-                    // OpenCoreAsync has already recorded the provider detail, so nothing is
-                    // re-recorded here and nothing is lost.
-                    return false;
-                }
-            }
+            SqliteConnection? borrowed = _connection is { State: ConnectionState.Open } ambient
+                ? ambient
+                : null;
 
-            if (_connection is not { State: ConnectionState.Open } connection)
-            {
-                // Defensive, and reachable only if the connection were closed between the open above
-                // and this line. It cannot be, because the gate is held throughout - but answering a
-                // reachability question with a null-forgiving dereference would be the wrong kind of
-                // confident, so the impossible case gets a recorded answer instead.
-                RecordFailure(
-                    RetCode.E_DB_ERROR,
-                    RetCode.SQLITE_MISUSE,
-                    "The connection was not open when the reachability probe ran.");
-
-                return false;
-            }
+            SqliteConnection? opened = null;
 
             try
             {
+                if (borrowed is null)
+                {
+                    // READ-ONLY, AND NOT THROUGH BuildConnectionString - that composer applies the
+                    // CONFIGURED open mode, which is the creative one. This is the single place in this
+                    // file that composes a connection string with a mode of its own, and it is confined
+                    // to this member so no other path can acquire a read-only handle by accident.
+                    SqliteConnectionStringBuilder builder = new()
+                    {
+                        DataSource = DatabasePath,
+                        Mode = SqliteOpenMode.ReadOnly,
+                        DefaultTimeout = GetTimeoutSeconds(),
+                    };
+
+                    opened = new SqliteConnection(builder.ConnectionString);
+
+                    await opened.OpenAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                SqliteConnection connection = borrowed ?? opened!;
+
                 string? answer = await ExecuteScalarTextAsync(
                     connection,
                     ReachabilityProbeStatement,
@@ -2077,17 +2312,112 @@ namespace PowerFramework.Persistence.Data
                         RetCode.SQLITE_ERROR,
                         "The reachability probe returned no value, so the engine did not answer.");
 
+                    _lastReadiness = StorageReadiness.Unreachable;
+
+                    return false;
+                }
+
+                // BOTH TABLES, AND THE APPLICATION ONE IS TESTED FIRST because it is the one an operator
+                // is most likely to be missing and therefore the more useful thing to name.
+                if (!await TableExistsOnAsync(
+                        connection,
+                        MainSchemaName,
+                        RequiredApplicationTable,
+                        cancellationToken).ConfigureAwait(false))
+                {
+                    RecordFailure(
+                        RetCode.E_DB_ERROR,
+                        RetCode.SQLITE_ERROR,
+                        "The storage engine answered but the "
+                        + RequiredApplicationTable
+                        + " table is absent, so the schema has not been provisioned. Apply the migrations "
+                        + "with `dotnet ef database update`.");
+
+                    _lastReadiness = StorageReadiness.SchemaIncomplete;
+
+                    return false;
+                }
+
+                if (!await TableExistsOnAsync(
+                        connection,
+                        MainSchemaName,
+                        RequiredMigrationHistoryTable,
+                        cancellationToken).ConfigureAwait(false))
+                {
+                    RecordFailure(
+                        RetCode.E_DB_ERROR,
+                        RetCode.SQLITE_ERROR,
+                        "The storage engine answered and the "
+                        + RequiredApplicationTable
+                        + " table is present, but the migration history table is absent, so the schema "
+                        + "was not applied by the migration tool and its version cannot be established.");
+
+                    _lastReadiness = StorageReadiness.SchemaIncomplete;
+
                     return false;
                 }
 
                 RecordSuccess(1);
+
+                _lastReadiness = StorageReadiness.Ready;
+
                 return true;
             }
             catch (SqliteException exception)
             {
                 RecordProviderFailure(exception);
+
+                _lastReadiness = StorageReadiness.Unreachable;
+
                 return false;
             }
+            finally
+            {
+                // ONLY EVER THE HANDLE THIS MEMBER OPENED. `borrowed` is the runtime's and is left
+                // exactly as it was found - disposing it here would close the connection every request
+                // runs on, from an anonymous route.
+                if (opened is not null)
+                {
+                    await opened.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reports whether a table exists, on a caller-supplied open connection.
+        /// </summary>
+        /// <param name="connection">An open connection. Not disposed here.</param>
+        /// <param name="schema">The schema name. Bound as a VALUE, never interpolated.</param>
+        /// <param name="table">The table name. Bound as a VALUE, never interpolated.</param>
+        /// <param name="cancellationToken">The caller's token.</param>
+        /// <returns><see langword="true"/> when exactly the named table exists in that schema.</returns>
+        /// <remarks>
+        /// Extracted so the public catalogue member and the readiness probe ask the question through ONE
+        /// statement and one parameter-binding, rather than through two that could drift. It takes the
+        /// connection as an argument precisely because the two callers hold different ones: the public
+        /// member uses the ambient connection, the probe may be using a short-lived read-only handle. It
+        /// acquires no gate and records nothing - both are the caller's business.
+        /// </remarks>
+        private static async ValueTask<bool> TableExistsOnAsync(
+            SqliteConnection connection,
+            string schema,
+            string table,
+            CancellationToken cancellationToken)
+        {
+            await using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = TableExistsStatement;
+            command.Parameters.AddWithValue("$schema", schema);
+            command.Parameters.AddWithValue("$name", table);
+
+            object? scalar = await command
+                .ExecuteScalarAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            long matches = scalar is null or DBNull
+                ? 0L
+                : Convert.ToInt64(scalar, CultureInfo.InvariantCulture);
+
+            return matches > 0;
         }
 
         /// <summary>
@@ -2187,6 +2517,18 @@ namespace PowerFramework.Persistence.Data
         /// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>]. The most likely cause in a container is
         /// a mount the image's non-root user cannot write, so the message says so.
         /// </remarks>
+        /// <summary>
+        /// Brings the configured data directory into being if it is absent.
+        /// </summary>
+        /// <remarks>
+        /// INTERNAL RATHER THAN PRIVATE so the transaction engine can call it on its own RUNTIME connect
+        /// path. The engine opens its own connection - <c>IPooledTransaction</c> deliberately publishes no
+        /// provider handle for it to borrow - and an otherwise correct deployment would fail on first run
+        /// without this, exactly as the factory's own open path would. It stays out of the READINESS path
+        /// on purpose: an anonymous probe must not create storage.
+        /// </remarks>
+        internal void EnsureDataDirectoryExistsForRuntimeConnect() => EnsureDataDirectoryExists();
+
         private void EnsureDataDirectoryExists()
         {
             try
@@ -2428,5 +2770,43 @@ namespace PowerFramework.Persistence.Data
             GC.SuppressFinalize(this);
         }
     }
-}
 
+    /// <summary>
+    /// What the last readiness probe established about the storage engine.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A CLOSED ENUMERATION RATHER THAN TEXT, because its whole purpose is to travel to a surface that
+    /// may disclose nothing: the readiness route is anonymous, so the caller-visible reason must be a
+    /// value this codebase authored, never a provider message and never a configured path (constraint
+    /// C-F). The provider's own detail stays on <c>SqlErrText</c> and <c>LastError</c> for the
+    /// in-process readers.
+    /// </para>
+    /// <para>
+    /// The two failure members are separate because they call for different actions and conflating them
+    /// wastes an operator's time: an unreachable engine means the mount or the provider is wrong, while
+    /// an incomplete schema means the storage is fine and the migrations have not been applied.
+    /// </para>
+    /// </remarks>
+    public enum StorageReadiness
+    {
+        /// <summary>No readiness probe has run yet.</summary>
+        NotProbed = 0,
+
+        /// <summary>The engine answered and the required schema is present.</summary>
+        Ready = 1,
+
+        /// <summary>
+        /// The engine could not be reached, or could be reached but did not answer. Includes the case
+        /// where no database exists at the configured location, because the readiness probe opens
+        /// read-only and therefore refuses rather than creating one.
+        /// </summary>
+        Unreachable = 2,
+
+        /// <summary>
+        /// The engine answered, but a required table is absent - so the volume is mounted and the
+        /// provider works, and the migrations have not been applied.
+        /// </summary>
+        SchemaIncomplete = 3,
+    }
+}

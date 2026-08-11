@@ -62,7 +62,7 @@ list of a 26-method service is a list that silently falls behind the schema. The
 | Contract | Surface | Count | Streaming shapes |
 | --- | --- | --- | --- |
 | C-01 `TokenService` | REST | 3 operations | — (one `mutualTls`, two anonymous) |
-| C-02 `CryptoService` | REST | 17 operations, covering all **63** legacy overloads | — (all `bearerAuth`) |
+| C-02 `CryptoService` | REST | 18 operations: 17 covering all **63** legacy overloads, plus one authored release operation | — (all `bearerAuth`) |
 | C-03 `DataWindowService` | gRPC | 16 methods | 1 server stream, 1 bidirectional |
 | C-04 `ColumnExpressionService` | gRPC | 26 methods | 1 server stream, 2 bidirectional (both **inverted**) |
 | C-05 `QueryService` | gRPC | 11 methods | 1 server stream |
@@ -72,7 +72,7 @@ list of a 26-method service is a list that silently falls behind the schema. The
 | C-09 `gateway.v1` | REST | see [§12.1](#121-c-09--gatewayv1-rest-ingress) | — |
 | C-10 Health and readiness | REST | 2 operations per service | — |
 
-The Security listener publishes **22 operations in total**: C-02's 17, C-01's 3, and C-10's 2.
+The Security listener publishes **23 operations in total**: C-02's 18, C-01's 3, and C-10's 2.
 
 ## Current state of the artifacts this document references
 
@@ -257,7 +257,7 @@ reference to an existing one.
 | ID | Contract | Transport | Served by | Consumed by | Shape that decided it |
 | --- | --- | --- | --- | --- | --- |
 | **C-01** | `security.v1.TokenService` | REST + JWKS over HTTPS; issuance is **mutual-TLS-only** | Security | Gateway, DataServices, Persistence | Stateless issuance; stock bearer handlers must self-configure over plain HTTP semantics, and the channel must be TLS because a client certificate cannot be presented without it |
-| **C-02** | `security.v1.CryptoService` | REST | Security | DataServices | 63 stateless cryptographic overloads across 17 operations, no ordering, nothing to stream |
+| **C-02** | `security.v1.CryptoService` | REST | Security | DataServices | 63 stateless cryptographic overloads across 17 operations, plus one authored release operation; no ordering, nothing to stream |
 | **C-03** | `dataservices.v1.DataWindowService` | gRPC (server + bidirectional streaming) | DataServices | Gateway | A 22-event ordered chain with a `ref string` out-parameter, an `any` return, and cross-event mutable state |
 | **C-04** | `dataservices.v1.ColumnExpressionService` | gRPC (two inverted streams) | DataServices | Gateway | A macro protocol the *application* implements, plus a seven-structure expression model containing a live object pointer |
 | **C-05** | `persistence.v1.QueryService` | gRPC (server streaming) | Persistence | DataServices | Progressive chunked recordset delivery; clause modification by raw string |
@@ -290,58 +290,102 @@ its expansion mode, and must invert two streams. They are given proportionately 
 
 | # | Operation | `operationId` | Auth | Purpose |
 | --- | --- | --- | --- | --- |
-| 1 | `POST /v1/tokens` | `issueToken` | **`mutualTls`** — a client certificate, chain-verified and mapped to a caller identity | Issues a short-lived service token from a caller identity, an audience, and a scope set |
+| 1 | `POST /v1/tokens` | `issueToken` | **`clientCredential` OR `mutualTls`** — an HTTP `Basic` credential naming a subject on the issuance roster, or a chain-verified client certificate. Either satisfies the operation; neither is optional | Issues a short-lived service token from a caller identity, an audience, and a scope set |
 | 2 | `GET /.well-known/jwks.json` | `getJsonWebKeySet` | **anonymous** | Publishes the verification material — public members only, never a private one |
 | 3 | `GET /.well-known/openid-configuration` | `getOpenIdConfiguration` | **anonymous** | Discovery metadata, so a consumer's stock bearer handler self-configures |
 
-**Row 1's listener is HTTPS, and that is a functional requirement rather than a hardening preference.**
-A client certificate cannot be presented on a plaintext listener at all, so published over `http` the
-token endpoint would be uncallable and no service could obtain its first token. `security.v1.yaml`
-therefore declares exactly one `servers` entry and it is `https`.
+**Row 1 accepts two schemes because the caller identity must not be contingent on how TLS is
+terminated.** A client certificate reaches the application only when the listener requests one and
+nothing between the caller and this service re-terminates the connection; a reverse proxy, a service mesh
+sidecar or an ingress controller that terminates TLS on this service's behalf leaves `mutualTls`
+unpresentable while the channel is still encrypted. Publishing `mutualTls` alone would therefore make the
+authentication of this boundary contingent on a deployment topology the contract cannot see, which is how
+an authenticated edge quietly becomes an unauthenticated one in the deployment that actually runs.
+`clientCredential` is a header the operation reads itself, so it works on every topology; `mutualTls` is
+published for the deployment that terminates TLS here, which is what this repository's own listener does.
+**A request presenting neither is refused, so there is no address on any topology at which a token is
+minted without a caller credential — and TLS is the channel, never the caller identity.**
 
 **The service declares exactly ONE listener, and every row above is published on it.**
-`https://+:5104`, `Http1AndHttp2`, `ClientCertificateMode` **`AllowCertificate`** — in the base
-settings file, so it applies to every environment including Development. `AllowCertificate` is what
-makes one listener sufficient: Kestrel *requests* a client certificate during the handshake and hands
-whatever it receives to the application **without demanding one**, so row 1 requires and validates it
-*per operation* while rows 2 and 3, `/health`, `/v1/ping` and all of C-02 stay reachable with no
-certificate at all. `RequireCertificate` at the listener was measured and rejected: it aborts the
-handshake for any client presenting none, which takes the anonymous `/health` probe with it so the
-readiness chain gating Gateway could never open. An earlier revision answered the same constraint with a
-second, cleartext endpoint carrying everything except row 1; that endpoint is **withdrawn**, because it
-contradicted the one-port-per-service map and placed an unauthenticated listener on the one service
-holding the system's signing key. The consequence that matters is unchanged: there is no address, on any
-topology, at which a token is minted without a client certificate.
+`https://+:5104`, `Http1`, in the base settings file, with the Development overlay overriding the same
+endpoint key rather than adding a second. `Http1` rather than `Http1AndHttp2` because Security publishes
+no gRPC contract, and because a listener that accepts only what it is for cannot be misaddressed
+silently. Two earlier revisions are recorded because both were withdrawn: one bound a
+cleartext endpoint beside a TLS one, carrying everything except row 1, which placed an unauthenticated
+listener on the one service holding the system's signing key; the other bound TLS alone and rewrote the
+documented readiness gate's scheme to match, which made the documented bring-up unable to start this
+service at all.
+
+**Where a deployment does terminate TLS here, `ClientCertificateMode` is `AllowCertificate`.** Kestrel
+then *requests* a client certificate during the handshake and hands whatever it receives to the
+application **without demanding one**, so row 1 validates it *per operation* while rows 2 and 3,
+`/health`, `/v1/ping` and all of C-02 stay reachable with no certificate at all. `RequireCertificate` at
+the listener was measured and rejected: it aborts the handshake for any client presenting none, which
+takes the anonymous `/health` probe with it so the readiness chain gating Gateway could never open.
 
 Rows 2 and 3 are the verification material every other service trusts, so a channel an attacker can
-rewrite would let that attacker choose the keys used to validate every token in the system. With one
-TLS-only listener that channel does not exist in any environment — the cleartext-loopback exposure an
-earlier revision accepted in development is withdrawn along with the listener that carried it, and
-`RequireHttpsMetadata` is correspondingly never relaxed against this authority. Anonymous does not mean
-unprotected: it means no credential is *required to read* material that is public by design.
-[`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 carries the listener map and §9.3.1 the certificate bootstrap.
+rewrite would let that attacker choose the keys used to validate every token in the system. **That is why
+this listener terminates TLS in every environment** — the exposure is closed rather than accepted, and
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 and §9.4 state what it would have cost so a later deployment
+cannot reintroduce it as a convenience. Anonymous does not mean unprotected: it means no credential is
+*required to read* material that is public by design, on a channel whose integrity is still guaranteed.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 carries the listener map and §9.3.1 the credential bootstrap.
 
 The issuance request carries the caller identity, the intended audience, and the requested scope
-set; the response carries the token, its type, its expiry, and the granted scope set — which may be
-narrower than the requested one. A caller must read the granted set rather than assume its request
-was honoured in full.
+set; the response carries the token, its type, its expiry, and the granted scope set. **On a `200`
+the granted set equals the requested set**, because a scope the caller may not have is *refused*
+rather than quietly dropped — see the refuse-don't-narrow rule below. A caller still reads the
+granted set rather than inferring it, because that is the set the token actually carries and the set
+every downstream route will be compared against.
 
-**Issuance is authenticated by the transport, and the request body carries no credential.** The
-schema declares a `mutualTLS` security scheme and applies it to `POST /v1/tokens` as an **override**
-of the document-level bearer requirement, because a caller cannot present a bearer token in order to
-obtain its first bearer token. The `subject` field names the identity the caller *claims*; the
-identity actually honoured is the one the presented **client certificate** establishes. The request
-schema sets `additionalProperties: false` and carries no `clientSecret`, `password`, `apiKey`,
-`assertion` or key material of any kind, so a credential cannot be smuggled in either. The two
-failure modes are part of the contract, not implementation detail:
+**A scope the roster does not grant is refused, never narrowed.** Narrowing is contract-legal and it
+was rejected on purpose: it hands back a `200` and a usable token that is missing one capability, so
+the caller proceeds, and the loss surfaces later as a `403` from whichever downstream route needed
+the dropped scope — at a service that did nothing wrong, in a request that no longer names the
+misconfiguration that caused it. Refusing at issuance puts the error where the wrong configuration
+is, names which scope was not permitted, and leaves no half-privileged token in circulation.
+
+**Issuance is authenticated by a credential the operation checks, and the request body carries none.**
+The schema declares `clientCredential` and `mutualTls` and applies them to `POST /v1/tokens` as an
+**override** of the document-level bearer requirement, because a caller cannot present a bearer token in
+order to obtain its first bearer token. The `subject` field names the identity the caller *claims*; the
+identity actually honoured is the one the presented credential establishes. The request schema sets
+`additionalProperties: false` and carries no `clientSecret`, `password`, `apiKey`, `assertion` or key
+material of any kind, so a credential cannot be smuggled into the **body** either — it travels in the
+`Authorization` header or in the handshake, where a proxy log records a header name rather than a body
+value. The two failure modes are part of the contract, not implementation detail:
+
+**Closure is enforced on the receiving side, and the generated document carries it.** Two properties
+make the paragraph above a rule rather than a description, and both are stated here because either one
+alone leaves the other unenforced. First, Security's JSON binder refuses an undeclared member instead
+of discarding it: a body carrying one — or a body that is not well-formed JSON — is answered `400`
+with the single published problem shape carrying `RetCode.E_INVALID_ARGUMENT`, and the detail is fixed
+prose that echoes no part of the body, because on this surface the body is plaintext, ciphertext or a
+key reference. This is disjoint from the absent-member refusal: a member that is *missing* still
+reaches its handler and is still named in its wire spelling, which is what the nullable request
+members exist for. Second, the document Security serves from `/openapi/v1.json` — the artifact a
+client generator actually reads — is brought back to the requiredness and the closure declared in
+`OpenApi/security.v1.yaml`, including `ProblemDetails` staying **open**, since RFC 9457 problem
+details are extensible by design and every error body here carries the `retCode` extension member.
 
 | Status | Meaning on `POST /v1/tokens` |
 | --- | --- |
-| `401` | No client certificate was presented, or the certificate presented is not trusted by Security. There is **no bearer-token alternative** on this operation to fall back to |
-| `403` | The certificate is trusted but the caller is not permitted the requested subject or audience — in particular the claimed `subject` does not match the identity the certificate establishes. The response names neither the expected identity nor any part of the stored configuration |
+| `401` | No credential was presented at all, or one this service does not hold — an unknown roster subject, a secret that does not match, or a certificate that does not chain to the configured issuer. There is **no bearer-token alternative** on this operation to fall back to, and the response does not distinguish which condition was hit |
+| `403` | The caller **was** authenticated but is not permitted what it asked for. Four distinct conditions share this status: the claimed `subject` does not match the identity the presented credential establishes; the requested `audience` is not one this deployment serves at all; the audience is served but is not among those the roster entry for that subject grants; or one of the requested scopes is not among those that entry grants. Each answers a different sentence, and none names the expected identity, the audiences the deployment serves, or any part of the stored configuration |
 
-The two anonymous publications and every C-02 operation return `401` under the ordinary bearer rule
-instead; only issuance is certificate-authenticated.
+**Issuance policy is per-caller, not deployment-wide, and both gates are checked before any clock read
+or signing operation.** Gate one is the set of audiences the deployment serves at all — one answer for
+every caller. Gate two is the issuance roster: for the authenticated subject, which of those audiences
+it may address and which scopes it may request. A deployment-wide list alone would mean every caller
+that can authenticate can mint for every audience with every scope, which makes one leaked credential
+a credential for the whole system rather than for one caller's edges. The roster is configuration, its
+shape is validated at startup, and a grant naming an audience the deployment does not serve is a
+**startup failure** rather than an unreachable permission that reads as if it were granted.
+
+The two anonymous publications are unauthenticated by design. Every C-02 operation and `/v1/ping`
+authenticate under the ordinary bearer rule instead of a caller credential — and additionally require
+a **scope**, which is [§5.1](#51-method-surface)'s subject for C-02 and stated with C-10 for
+`/v1/ping`. Only issuance is credential-authenticated.
 
 ### 4.2 Security is the sole token authority
 
@@ -359,14 +403,44 @@ This discharges C-G, and each clause of it is load-bearing:
   a *new unauthenticated surface* — precisely what the requirement exists to prevent. `/v1/ping` is
   the standing proof of the property on all four services: it requires a token and returns `401`
   without one (see [C-10](#12-c-09-and-c-10--the-ingress-and-readiness-contracts)).
+- **A token authenticates; a scope authorizes. Where an operation declares one, both are required.**
+  A bearer requirement alone makes every token this deployment issues equivalent at every protected
+  operation, so one caller's credential reaches capabilities that caller never needed. Each protected
+  operation on Security therefore declares the single scope it requires — `ping` on `/v1/ping`,
+  `security.crypto` on the whole C-02 group — and the composition root builds a named policy from the
+  name the *route* declares, so a policy nobody requires cannot sit registered and silently enforce
+  nothing. **`401` without a token is unchanged by this**; the scope check is reached only after a
+  token has been accepted, and its refusal is `403`.
+- **The ingress enforces it too, and it is the surface where enforcing it matters most.** Gateway
+  declares three scopes across the surface it publishes — `ping` on `/v1/ping`, `capabilities` on
+  `/v1/capabilities`, and `datawindow` on the whole C-03 and C-04 projection, applied to the parent
+  route group so no operation added beneath it can be added without one. Three distinct scopes rather
+  than one reused: three routes sharing a scope would be a single entitlement wearing three names,
+  which is what requiring only an authenticated principal already was. Both `/v1/ping` and
+  `/v1/capabilities` therefore declare `403` alongside `401` in
+  [`gateway.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml), because an
+  undeclared response on the ingress is an undocumented surface.
+- **The four reserved extension points deliberately require authentication and nothing further.**
+  Requiring a capability scope for a route that reaches no capability would invent an entitlement for
+  a service this phase must not implement even in metadata (C-D), and the issuance roster grants no
+  such scope to anyone — so every caller would be answered `403` and the reserved `501` would become
+  unreachable, which would defeat the one thing those routes exist for. Authenticated-only is the
+  whole requirement there: the reserved roster is not anonymously enumerable, and every authenticated
+  caller receives the same `501`.
 - **Mutual TLS is the per-pair fallback, and the token-issuance edge is that pair.** Where a token
   issuer is inappropriate for some service pair, mutual TLS applies **for that pair only**, adding
   certificate and key path settings for those two services rather than changing the system-wide
   model, and tokens remain the default on every other edge. That rule has exactly one instance in
-  this system and it is named rather than left abstract: **`POST /v1/tokens` is the single mutual-TLS
-  edge**, mandatory on that operation, for the structural reason in §4.1. Any certificate or key path
-  it needs points at material mounted from the orchestration secret layer — nothing is committed to
-  this repository and nothing is embedded in an image.
+  this system and it is named rather than left abstract: **`POST /v1/tokens`**, the one operation a
+  bearer token cannot protect, for the structural reason in §4.1. It is published there as one of **two**
+  accepted schemes rather than as the only one, because a client certificate reaches the application only
+  where the TLS handshake is terminated by this service itself — so the roster `clientCredential`
+  authenticates the edge on every topology, including one where a proxy or a mesh sidecar re-terminates
+  the connection, and `mutualTls` authenticates it wherever Security terminates TLS directly, which is
+  what this repository's own listener does. Any certificate or key path it needs points at
+  material mounted from the orchestration secret layer — nothing is committed to this repository and
+  nothing is embedded in an image, and every such variable defaults to empty so nothing looks configured
+  that is not.
 - **No signing, verification or mutual-TLS material is scaffolded for any deferred service.**
   Provisioning a credential for a service that does not exist creates an unowned secret.
 
@@ -380,15 +454,12 @@ that a consumer's **stock bearer handler** fetches `/.well-known/jwks.json` and 
 document with **zero bespoke code**. That keeps the security-critical retrieval path inside framework
 code rather than hand-written code, on three services rather than one.
 
-**"REST" here names HTTP semantics, not a scheme — and for this one contract the scheme is fixed.**
-The schema publishes exactly **one** canonical server entry, `https://localhost:5104`, with no scheme
-variable and no plaintext alternative, and the service's own listener is `https://+:5104` in every
-environment; a local bring-up changes only the host. That is deliberate rather than incidental: a
-second, plaintext entry would make `http` a *published, selectable* base URL for the whole API,
-including the token endpoint and the JWK set, which is precisely the exposure the next two bullets
-describe. A development plaintext listener, if one is ever bound at all, is scoped to the anonymous
-`/health` probe and is documented at the one place it is configured — never as a `servers` entry. Two
-consequences a deployment has to honour:
+**"REST" here names HTTP semantics, not a scheme, and the choice would hold on either.** The schema
+publishes exactly **one** canonical server entry, `https://localhost:5104`, matching the one listener the
+service binds; a local bring-up changes only the host. Exactly one entry rather than two is deliberate: a second entry in the other scheme would
+make both a *published, selectable* base URL for the whole API, and a caller picking the wrong one would
+be following the contract. The contract names the address the repository actually serves, and a deployment
+that serves another republishes it. Two consequences a deployment has to honour:
 
 - **The issuance path must not be terminated by an intermediary.** Mutual TLS authenticates the
   client to Security itself, so a proxy that terminates TLS on `POST /v1/tokens` either discards the
@@ -398,10 +469,14 @@ consequences a deployment has to honour:
 - **On plain HTTP, issuance would have no caller authentication at all**, because there would be no
   client certificate to present. That is why no configuration in this repository puts this service on
   plaintext, in any environment: consumers keep an https authority and `RequireHttpsMetadata` true in
-  base *and* development settings, and there is no `RequireHttpsMetadata: false` anywhere in the tree.
-  A deployment that genuinely does run Security on plaintext has to state that relaxation explicitly,
-  and gets a named startup failure until it does. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the
-  full model.
+  base *and* development settings, and **no deployed `appsettings.json` or `appsettings.Development.json`
+  anywhere in the tree sets `RequireHttpsMetadata: false`.** Test hosts are a deliberate exception and
+  are not deployed configuration: `Gateway.Tests` and `DataServicesTestHostFactory` set it to `false`
+  explicitly, because each stands up an isolated in-process plain-HTTP authority with no certificate,
+  and the option is mandatory there. That is the setting doing its job in the one topology it exists for,
+  not a relaxation with no consumer. A deployment that genuinely does run Security on plaintext has to
+  state that relaxation explicitly, and gets a named startup failure until it does.
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.4 carries the full model.
 
 **Rejected alternative — gRPC for Security** (recorded per C-K). Choosing gRPC here would force a
 custom key-set retrieval implementation into each of the three consuming services. That is a net
@@ -461,6 +536,7 @@ neither substitutes for the other:**
 | Projected overloads | **63** | Legacy overloads that have a landing site on the wire — every one of them |
 | Not projected | **0** | Nothing is excluded. Every overload family, the three `HashFile` declarations [`n_crypto.sru:L27-L29`] included, has a landing site |
 | Wire operations | **17** | The `POST /v1/crypto/**` operations they collapse onto |
+| Authored operations | **1** | `DELETE /v1/crypto/rsa/keys/{keyRef}`, which covers no legacy overload — see below |
 
 Overloads collapse onto operations because what varies across a legacy overload group — string versus
 blob payload, present versus absent initialization vector, present versus absent explicit mode — is
@@ -492,9 +568,20 @@ was projected; both are corrected, and only one inventory now exists.
 request/response with no ordering requirement between calls and nothing to stream. REST fits that
 shape without remainder.
 
-**The 17 operations, enumerated.** The table below is derived from `OpenApi/security.v1.yaml` itself,
+**THE ONE AUTHORED OPERATION, AND WHY IT DOES NOT DISTURB THE 63-TO-17 ARITHMETIC.**
+`DELETE /v1/crypto/rsa/keys/{keyRef}` covers **no legacy overload**, and that is not an accident of
+counting — the legacy has nothing for it to cover. `GenRSAKey` [`n_crypto.sru:L19-L20`] hands the
+private half straight back through a `ref` parameter, so the caller owns it from that moment and there
+is no store to release from. `generateRsaKey` **retains** the private half instead, which is what makes
+its response safe across a network boundary ([§5.2](#52-the-contract-level-secrets-rule)) — and a
+retained thing needs a way to be given back, or the only way a caller frees its share of the store is to
+wait out the retention lifetime. So the release operation is the *cost of the narrowing*, paid at the
+same place the narrowing was made. It is counted separately above for exactly that reason: 63 legacy
+overloads still land on 17 operations, and the 18th is authored.
+
+**The 18 operations, enumerated.** The table below is derived from `OpenApi/security.v1.yaml` itself,
 so it is what the document exposes rather than what it intends to, and every one of the 63 legacy
-overloads lands in exactly one row of it. A legacy *overload* becomes a request FIELD, not an
+overloads lands in exactly one of rows 1 to 17. A legacy *overload* becomes a request FIELD, not an
 operation, wherever the overloads differ only in argument shape — string versus blob, with or without
 an initialization vector, with or without an explicit mode — because those are PowerScript's way of
 expressing optional and alternative parameters and a JSON request expresses them directly.
@@ -518,17 +605,36 @@ expressing optional and alternative parameters and a JSON request expresses them
 | 15 | `POST /v1/crypto/encoding/string-to-blob` | `stringToBlob` | String to blob |
 | 16 | `POST /v1/crypto/encoding/blob-to-string` | `blobToString` | Blob to string |
 | 17 | `POST /v1/crypto/encoding/blob-reverse` | `reverseBlob` | Blob reversal |
+| 18 | `DELETE /v1/crypto/rsa/keys/{keyRef}` | `releaseRsaKey` | **None — authored.** Releases a key row 11 retained |
 
-All 17 require `bearerAuth`; none is anonymous. Two properties of the file operations are contract
+All 18 require `bearerAuth`; none is anonymous. Two properties of the file operations are contract
 rather than convenience: they take an **opaque server-resolved file reference**, never a
 caller-supplied path — the same rule `keyRef` follows in [§5.2](#52-the-contract-level-secrets-rule),
 for the same reason — and each has a **defined response for the case where the deployment resolves no
 such reference**, which is the narrow-with-a-defined-error rule of
 [§14.4](#144-narrow-with-a-defined-error-never-widen-with-a-guess) rather than a silent success.
 
-Counting the whole service rather than only C-02: `security.v1.yaml` publishes **22 operations** — the
-17 above, C-01's three ([§4.1](#41-method-surface)), and the two of C-10, `GET /health` (anonymous)
+Counting the whole service rather than only C-02: `security.v1.yaml` publishes **23 operations** — the
+18 above, C-01's three ([§4.1](#41-method-surface)), and the two of C-10, `GET /health` (anonymous)
 and `GET /v1/ping` (`bearerAuth`, 401 without a token).
+
+**THE RETAINED-KEY STORE IS BOUNDED IN THREE INDEPENDENT WAYS, AND ALL THREE ARE CONTRACT.** Retaining
+private key material is what makes row 11's response safe, so how much of it is retained, by whom, and
+for how long are properties a caller can rely on rather than implementation detail:
+
+- **A total cap**, reserved **before** a key is generated. Checking capacity afterwards would let an
+  authenticated caller drive unbounded RSA generation and have every pair discarded, which makes a full
+  store an amplifier rather than a limit. Unbounded growth on the service that holds the system's only
+  signing key would terminate authentication for Gateway, DataServices and Persistence at once.
+- **A per-caller allowance**, charged to the `sub` claim of the presented token. A total cap alone lets
+  one caller occupy the store and starve its peers using nothing but legitimate calls. A request with no
+  subject claim is charged to one shared bucket rather than exempted — the unattributable caller must not
+  be the one with no allowance.
+- **A retention lifetime**, after which a reference stops resolving and its slot returns. Row 18 is how
+  a caller frees a slot deliberately; the lifetime is the backstop for a caller that crashed.
+
+A caller at either bound receives `500` from row 11 **with no key generated**. Which bound is binding is
+deliberately not reported, because that would describe how much of the store other callers hold.
 
 ### 5.2 The contract-level secrets rule
 
@@ -600,6 +706,11 @@ The identifier sets that rule covers, verified value by value:
 | Hash type | `CRYPTO_HASH_MD5` = 0, `CRYPTO_HASH_SHA1` = 1, `CRYPTO_HASH_SHA256` = 2, `CRYPTO_HASH_SHA384` = 3, `CRYPTO_HASH_SHA512` = 4, `CRYPTO_HASH_CRC32` = 5 | `enums.sru:L928-L933` |
 | Symmetric cipher | `CRYPTO_SYMCRYPT_TYPE_DES` = 0, `..._3DES` = 1, `..._AES128` = 2, `..._AES192` = 3, `Enums.CRYPTO_SYMCRYPT_TYPE_AES256` = 4 | `enums.sru:L936-L940` |
 | Symmetric mode | `CRYPTO_SYMCRYPT_MODE_ECB` = 0, `..._CBC` = 1, `..._CFB` = 2, `..._DEFAULT` = ECB | `enums.sru:L943-L946` |
+| RSA padding | `CRYPTO_RSA_PADDING_PKCS1` = 0, `CRYPTO_RSA_PADDING_OAEP` = 1, `..._DEFAULT` = PKCS#1 | `enums.sru:L949-L951` |
+| Encoding | `CRYPTO_ENCODING_BASE64` = 0, `CRYPTO_ENCODING_HEX` = 1 | `enums.sru:L924-L925` |
+| Random-string classes | `CRYPTO_RNDSTRING_NUMBER` = 1, `..._ALPHABET` = 2, `..._SYMBOL` = 4, `..._DEFAULT` = number + alphabet | `enums.sru:L954-L957` |
+| GUID formatting | `CRYPTO_GUID_INCLUDE_BRACKET` = 1, `..._INCLUDE_SEPARATOR` = 2, `..._DEFAULT` = both | `enums.sru:L960-L962` |
+| RSA key size | `CRYPTO_RSA_BITS_1024` = 1024, `..._2048` = 2048, `..._4096` = 4096 | `enums.sru:L965-L967` |
 
 #### C-02 capability narrowings — declared by the legacy, not reproducible here
 
@@ -611,10 +722,22 @@ Linux container cannot execute the binary. Where a parameter cannot be observed,
 **narrowed with a defined error rather than widened with a guess**.
 
 | # | Cell | Missing evidence | Published as |
-|---|---|---|---|
-| N1 | `hmac`, `hmacFile`, `rsaSign`, `rsaVerify` with `CRYPTO_HASH_CRC32` | None needed — the construction itself does not exist. A checksum has no compression function for HMAC to key and no algorithm identifier for a signature scheme to name, so HMAC-CRC32 and RSA-over-CRC32 were never defined | `CryptoKeyedHashType` — the same identifiers minus the checksum. Refused at schema validation, and by the calling client at request construction |
-| N2 | Any mode `CRYPTO_SYMCRYPT_MODE_CFB` | The **feedback width**. The legacy publishes one unqualified CFB value with no feedback-size argument, and full-block versus 8-bit feedback produce entirely different ciphertext | `x-blocked-cells` on `CryptoSymCryptMode`, reason `SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE`. HTTP `501` |
-| N3 | `CRYPTO_SYMCRYPT_MODE_CBC` through one of the eight overloads that supply a mode but no vector [`n_crypto.sru:L31, L35, L39, L43, L47, L51, L55, L59`] | The **initialization vector** the binary substituted | `x-blocked-cells` on `CryptoSymCryptMode`, reason `SYMMETRIC_VECTOR_UNPROVABLE`. HTTP `501` |
+| --- | --- | --- | --- |
+| N1 | `hmac`, `hmacFile`, `rsaSign`, `rsaVerify` with `CRYPTO_HASH_CRC32` | None needed — the construction itself does not exist. A checksum has no compression function for HMAC to key and no algorithm identifier for a signature scheme to name, so HMAC-CRC32 and RSA-over-CRC32 were never defined | `CryptoKeyedHashType` — the same identifiers minus the checksum, on the **keyed** operations only. Refused at schema validation, and by the calling client at request construction. The unkeyed `hash` and `hash-file` operations keep the full `CryptoHashType`, CRC32 included |
+| N2 | Any mode `CRYPTO_SYMCRYPT_MODE_CFB` | The **feedback width**. The legacy publishes one unqualified CFB value with no feedback-size argument, and full-block versus 8-bit feedback produce entirely different ciphertext | `x-blocked-cells` on `CryptoSymCryptMode`, reason `SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE`. HTTP **`500`** with a `ProblemDetails` body carrying `retCode` `E_NO_IMPLEMENTATION` (−2001) and that reason |
+| N3 | `CRYPTO_SYMCRYPT_MODE_CBC` through one of the eight overloads that supply a mode but no vector [`n_crypto.sru:L31, L35, L39, L43, L47, L51, L55, L59`] | The **initialization vector** the binary substituted | `x-blocked-cells` on `CryptoSymCryptMode`, reason `SYMMETRIC_VECTOR_UNPROVABLE`. HTTP **`500`** with a `ProblemDetails` body carrying `retCode` `E_NO_IMPLEMENTATION` (−2001) and that reason |
+
+**Why the refusal is `500` and not `501`, and why `501` is reserved.** It is not `400`: the request is
+well-formed and would have succeeded, and the limitation is this port's rather than the caller's. It is
+not `501` either, and that is a constraint rather than a preference. **`501` belongs exclusively to
+Gateway's four deferred-capability routes** ([§13](#13-the-four-reserved-gateway-extension-points)),
+whose whole purpose is to declare that an entire capability area is unbuilt. A `501` on a Security
+operation would present this service the same way, when in fact 30 of the 32 symmetric cells are
+implemented and answer normally — so C-D forbids the status here, Security declares it on no operation,
+and the DataServices and Persistence contracts do not use it either. The legacy vocabulary carries the
+distinction the status cannot: `E_NO_IMPLEMENTATION` names the missing cell without demoting the surface
+hosting it. Each affected operation enumerates the `500` in its own `responses` block, so the status is
+readable from the machine-readable half of the contract and not only from prose.
 
 **Why refusing beats choosing.** Both symmetric guesses are undetectable by any test this repository can
 run: encrypt and decrypt under the same wrong assumption and the plaintext returns intact. The caller
@@ -639,12 +762,10 @@ assignment rather than encrypting. An OpenSSL-based implementation — which the
 zero bytes, an **empty** DES key and **any 3DES key shorter than 16 bytes** normalize into buffers this
 platform rejects, so a 3DES caller with a fifteen-character passphrase is refused here where the legacy
 would have encrypted. No workaround is applied and no key is substituted; the failure is loud, surfaces
-as HTTP `500`, and is published on the `CryptoSymCryptType` schema.
-| RSA padding | `CRYPTO_RSA_PADDING_PKCS1` = 0, `CRYPTO_RSA_PADDING_OAEP` = 1, `..._DEFAULT` = PKCS#1 | `enums.sru:L949-L951` |
-| Encoding | `CRYPTO_ENCODING_BASE64` = 0, `CRYPTO_ENCODING_HEX` = 1 | `enums.sru:L924-L925` |
-| Random-string classes | `CRYPTO_RNDSTRING_NUMBER` = 1, `..._ALPHABET` = 2, `..._SYMBOL` = 4, `..._DEFAULT` = number + alphabet | `enums.sru:L954-L957` |
-| GUID formatting | `CRYPTO_GUID_INCLUDE_BRACKET` = 1, `..._INCLUDE_SEPARATOR` = 2, `..._DEFAULT` = both | `enums.sru:L960-L962` |
-| RSA key size | `CRYPTO_RSA_BITS_1024` = 1024, `..._2048` = 2048, `..._4096` = 4096 | `enums.sru:L965-L967` |
+as HTTP `500`, and is published on the `CryptoSymCryptType` schema. It carries neither
+`E_NO_IMPLEMENTATION` nor a `SYMMETRIC_*_UNPROVABLE` reason, which is how a caller tells it apart from
+the two capability narrowings above that share its status: this one is a property of the **key material
+supplied**, those are properties of the **port**.
 
 ### 5.4 The random generators are determinism seams
 
@@ -942,6 +1063,32 @@ a consumer MAY buffer on and re-sort, because these events carry no cross-event 
 reads what a predecessor stashed. So the two patterns give the identical field two contradictory
 meanings — reorder on it under (a), fail the session on it under (b) — and a consumer cannot infer
 which applies from the token's shape.
+
+**On `EventChain` the consumer holding that authority is DataServices itself, and what it does with
+it is stated here rather than left to a client's guess.** It *enforces* the order rather than
+repairing it. The delivered behaviour:
+
+| Arriving pattern-(a) token | What the service does |
+|---|---|
+| **Above** the ordering mark, successor or not | Dispatched. A **gap is legitimate**: the sequence space is shared with the outbound direction, so the numbers the server consumed are numbers the client never sends |
+| **At or below** the ordering mark | Refused `FAILED_PRECONDITION` — a reversal or a duplicate. The events after that position have already been dispatched, so there is nowhere left to place it. Before this rule both were dispatched silently |
+| Absent (`0`) | Refused, on every discipline |
+
+**Why it does not buffer and re-sort, given that the pattern grants the authority to.** A
+hold-and-release buffer was built for this and then removed after measurement, and the measurement is
+the reason: **one dispatch of token 1 leaves the next expected token at 4**, because the chain's
+outcome report and the result write each take one from the same shared counter. A message held
+awaiting token 2 would wait for a number no client will ever send, so every hold would strand. It
+follows too that a client cannot know its *second* token without reading the *first* response — so it
+cannot pipeline — and one gRPC stream delivers a sender's messages in the order it wrote them.
+A displaced pattern-(a) arrival is therefore **a sender defect rather than a transport artifact**, and
+the predecessor a buffer would wait for does not exist. Narrowing the contract with a defined error is
+the honest answer and is what AAP §0.1.5 prescribes. Sound reordering would require contiguous inbound
+tokens, i.e. a separate sequence space per direction, which changes the published meaning of the token
+("strictly increasing within one stream") and is deliberately not done here.
+
+`DataServices:EventChain:StrictOrdering` governs whether an ordering violation fails the stream or is
+recorded while the message is processed in arrival order. **Neither mode ever reorders or buffers.**
 
 **Which is why the discipline travels as data rather than as prose.** The assignment in the table
 above is published on the wire as `dataservices.v1.OrderingDiscipline`, whose three members are
@@ -1683,12 +1830,22 @@ structure is `ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L3-L9`:
 | --- | --- | --- |
 | `sqldbcode` | `:L4` | The driver's own numeric code |
 | `sqlerrtext` | `:L5` | The driver's message text |
-| `sqlsyntax` | `:L6` | **Redacted or parameter-separated — see below** |
+| `sqlsyntax` | `:L6` | **One redacted string field — see below** |
 | `buffer` | `:L7` | The offending buffer selector: primary, delete, or filter |
 | `row` | `:L8` | The offending row number |
 
-> **The statement field is redacted or structurally split into statement plus parameters. It is
-> never echoed verbatim.**
+> **The statement field is a single redacted string. It is never echoed verbatim, and the wire carries
+> no separate parameter collection beside it.**
+
+**The shape is decided, not open.** Two shapes were permitted when this control was specified — one
+redacted field, or a statement plus a separate parameter collection — and **the single redacted field is
+the one implemented and published**: `Proto/common.v1.proto` declares `string sqlsyntax = 3` with the
+redaction rule stated on the field, and `Errors/SqlRedactor.cs` is the one component that produces it.
+There is no `parameters` member on `DbError` and none may be added without a contract revision. Earlier
+revisions of this section and of [`SECRETS.md`](SECRETS.md) §6.3 described the alternative as still open;
+that wording is withdrawn. The reason the single field won is that a parameter collection is itself the
+sensitive data — separating a literal from its statement moves it, it does not protect it — so splitting
+would have produced two fields to redact instead of one.
 
 The reason is specific rather than precautionary. The legacy places the **complete generated
 statement, including interpolated literal values, into that field** — visible directly at
@@ -1949,7 +2106,7 @@ which order each was collected in.
 `_of_Update` fires the identity callback at most once [`:L243`] — but the task that drives it calls it
 **once per table**:
 
-```
+```text
 if _bMultiTableUpdate then
     nCount = UpperBound(Tables)                    [:L358]
     for nIndex = 1 to nCount                       [:L364]
@@ -2037,11 +2194,11 @@ use.
 | 3 | `Reset` | `ResetCommandTaskRequest` → `ResetCommandTaskResponse` | unary | `of_reset` [`:L27`, `:L32-L38`]. **`E_BUSY` while running**, and **it restores `AC_OFF` on success** — so a reset task returns to the no-transaction-handling commit mode rather than keeping whatever was set |
 | 4 | `SetAutoCommit` | `SetCommandAutoCommitRequest` → `SetCommandAutoCommitResponse` | unary | `of_setautocommit` [`:L28`]. **Three-valued, not boolean** — see [§10.2](#102-the-commit-mode-is-three-valued-not-boolean) |
 | 5 | `SetSql` | `SetCommandSqlRequest` → `SetCommandSqlResponse` | unary | `of_setsql` [`:L29`]. **An empty statement is `E_INVALID_SQL`, and the legacy checks it twice** — the redundant second check is preserved rather than tidied away |
-| 6 | `Exec` | `ExecRequest` → `ExecResponse` | unary | Executes a command returning no result set, preserving positional `?` binding, the leading-`@` execution mode, batch execution and error-text retrieval — the four behaviours of [§10.1](#101-exec-and-the-four-behaviours-it-preserves) |
+| 6 | `Exec` | `ExecRequest` → `ExecResponse` | unary | Executes a command returning no result set, preserving positional `?` binding, batch execution and error-text retrieval — the three behaviours of [§10.1](#101-exec-and-the-three-behaviours-it-preserves). **The leading-`@` prefix is not a mode on this verb** — see the same section |
 
-### 10.1 `Exec` and the four behaviours it preserves
+### 10.1 `Exec` and the three behaviours it preserves
 
-`Exec` executes a command that returns no result set. The four behaviours the contract carries:
+`Exec` executes a command that returns no result set. The three behaviours the contract carries:
 
 - **Positional `?` binding.** Arguments are supplied positionally and substituted into the statement in
   order. The legacy demonstrates it directly:
@@ -2049,16 +2206,27 @@ use.
   `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398-L400`, and a single-placeholder update at
   `:L313`. Binding is applied before execution and a binding failure yields
   `RetCode.E_SQL_BIND_ARG_FAILED` [`n_cst_thread_task_sqlcommand.sru:L81-L86`].
-- **The leading-`@` prefix execution mode.** A statement whose first character is `@` selects the
-  statement-caching execution mode — the same call at `w_test_sqlite.srw:L398` is written
-  `"@INSERT INTO …"`, and the comment at `:L397` records what the prefix does. The prefix is part of the
-  statement string on the wire, exactly as in the legacy, because it is the statement text that selects
-  the mode.
 - **Multi-statement batch execution**, demonstrated at `w_test_sqlite.srw:L381-L392`, where a batch is
   submitted and rolled back as a unit on failure.
 - **Error-text retrieval.** The result carries the numeric code and the driver text, drawn from the
   accessors the legacy exposes for exactly this purpose [`n_sqlite.sru:L26-L29` — row count, code, driver
   code, and error text].
+
+**The leading-`@` prefix is deliberately NOT among them, and the reason is that it belongs to two other
+objects.** The character carries two unrelated legacy meanings, neither on the object this verb drives:
+
+- a **DataWindow-object selector**, in the transaction object's *retrieve* path —
+  `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [`n_cst_thread_trans.sru:L309`], where the rest
+  of the string is an object name rather than SQL; and
+- a **statement-caching hint** on the SQLite binding's own `Exec` — the demonstration at
+  `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L398` is written `"@INSERT INTO …"` and the comment at
+  `:L397` records that the prefix caches the statement to speed up re-parsing. That is `n_sqlite`,
+  reached directly, not through the transaction object.
+
+C-07's `Exec` drives `of_Exec` [`n_cst_thread_trans.sru:L219-L238`], whose body is a plain
+`EXECUTE IMMEDIATE :sqlCmd USING this` with no prefix test of any kind. A command statement beginning
+with `@` is therefore passed to the provider verbatim and fails there — exactly as in the legacy.
+Producers must not strip the character and must not treat it as a mode selector.
 
 ### 10.2 The commit mode is three-valued, not boolean
 
@@ -2314,16 +2482,34 @@ statuses back. The status mapping is the substantive part:
 | `Unauthenticated` | `401` | |
 | `PermissionDenied` | `403` | |
 | `Unimplemented` | `501` | Including the four reserved routes of [§13](#13-the-four-reserved-gateway-extension-points) |
-| `Unavailable` | `503` | |
-| `DeadlineExceeded` | `504` | |
+| `ResourceExhausted` | `429` | A capacity ceiling declining to take more work, carrying the legacy `E_BUSY` code. A refusal rather than a fault |
+| `Unavailable` | `503` | The upstream answered that it is not currently serving — distinct from `502`, where it answered nothing at all |
+| `DeadlineExceeded` | `504` | The deadline this service sets on the outbound call elapsed |
+| `AlreadyExists` | `409` | Translated but declared on no operation; see below |
 | `Internal` / `Unknown` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-one-field-that-must-be-redacted) |
 
 Each operation declares the responses it can **actually** produce rather than the whole table, because a
-status every generated client must branch on but no operation can return hides the real surface. In
-practice Gateway's own resilience policy converts an exhausted retry or an unreachable upstream into
-`502` — the one case the table cannot describe, because it is the case where **no gRPC response arrived
-at all** — and `503` additionally appears on `/health` on C-10's own account rather than from this
-mapping.
+status every generated client must branch on but no operation can return hides the real surface. That rule
+cuts both ways, and applying it honestly settles every row of the table above.
+
+**Four statuses are declared on every projected operation, because every projected operation can really
+produce them.** `429` when a handle registry behind [C-05](#8-c-05--persistencev1queryservice) through
+[C-08](#11-c-08--persistencev1transactionservice) refuses to hold more work — a real, reachable ceiling
+rather than a theoretical one. `503` when an upstream answers that it is not currently serving. `504` when
+the deadline this service sets on **every** outbound call elapses, which makes its expiry an ordinary
+outcome of a slow upstream rather than a hypothetical. And `502`, the one case the table cannot describe,
+because it is the case where **no gRPC response arrived at all**: an exhausted retry or an unreachable
+upstream, which is a failure mode decomposition itself creates.
+
+**Two rows are translated but declared nowhere, each for a checkable reason.** `AlreadyExists` is produced
+by exactly one method in the estate — the macro channel reporting that a channel is already attached — and
+that method is bidirectional and therefore **not projected**, so no REST operation can return it; the
+translation arm exists so a future projection could not fall through to `500`. `Unimplemented` from a
+projected method would mean an upstream does not implement a method the projection publishes, which under
+explicitly versioned contracts is a deployment defect rather than an outcome; the `501` that does appear
+belongs to the four reserved routes, which produce it deliberately. `503` additionally appears on `/health`
+on C-10's own account rather than from this mapping, and carries the aggregate report rather than a problem
+document.
 
 **Every unary and every server-streaming method of C-03 and C-04 is projected, and the three
 bidirectional ones are not.** That is thirty-nine projected operations: fifteen of C-03's sixteen and
@@ -2408,22 +2594,40 @@ Each is a named route returning **`501 Not Implemented`** with a **machine-reada
 the deferred service it will eventually reach and carrying the marker **"reserved for Phase 2"**.
 The body is structured rather than a text message so that a client can branch on it:
 
+The body carries **six** members, and `ReservedRouteBody` in
+[`gateway.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml) requires all six:
+
 | Body field | Content |
 | --- | --- |
-| `status` | `501` |
-| `deferredService` | `DesignSystem` \| `Documents` \| `Integration` \| `ScriptBridge` |
-| `marker` | `reserved for Phase 2` |
-| `route` | The matched route pattern |
+| `status` | `501` — a constant, repeated in the body so a logged body is self-describing |
+| `service` | The deferred service name, under the member spelling this contract published for `v1` **first** |
+| `deferredService` | The **same value** as `service`, under the unambiguous spelling: `DesignSystem` \| `Documents` \| `Integration` \| `ScriptBridge` |
+| `marker` | `reserved for Phase 2` — a constant, so a conformance test and a client can both match on it |
+| `route` | **The requested path**, exactly as received, with the query string excluded |
 | `retCode` | `E_NO_IMPLEMENTATION` = **-2001**, the legacy framework's own not-implemented code |
 
-The member is `deferredService` rather than `service` because `service` already means the *responding*
+**Two members name the deferred service and they carry the identical value. That is deliberate, and the
+reason is a wire-compatibility repair rather than an oversight.** `service` is the member `v1` published
+first. `deferredService` was added later for a real reason — `service` already means the *responding*
 service on the ping body and an *upstream* service on the health body, and a third meaning on the same
-word would make this body ambiguous in the one place a client branches on it. It also matches the
-`x-deferred-service` extension each reserved operation carries. `retCode` reuses the legacy vocabulary
-rather than inventing a parallel one, so a client that already branches on `retCode` handles a reserved
-route with the code it knows.
+word makes this body ambiguous in exactly the place a client branches on it — but the revision that
+introduced it also **removed** `service`, silently breaking every `v1` consumer reading that member under
+a version number promising nothing had changed. Both are therefore emitted. **New code should read
+`deferredService`**, which also matches the `x-deferred-service` extension each reserved operation
+carries; retiring `service` is a `v2` decision rather than a tidying one.
 
-**Each of the four declares `get` and `post`, and each operation declares exactly one response —
+**`route` echoes the requested path, never the route template.** The catch-all parameter's value "is
+echoed in the `route` field and is otherwise unused", so echoing the literal template would leave that
+value appearing nowhere in the body and make the statement false. The **query string is excluded** on two
+grounds: it is not part of a route, and a caller who mistakenly placed a credential in one must not have
+it reflected back.
+
+`retCode` reuses the legacy vocabulary rather than inventing a parallel one, so a client that already
+branches on `retCode` handles a reserved route with the code it knows. Its neighbour `E_NO_SUPPORT`
+(-2000) is a different statement — "this framework does not support that" rather than "this is not
+implemented here" — and is deliberately not used.
+
+**Each of the four declares `get` and `post`, and each operation declares two responses — `401` and
 `501`.** Declaring two methods makes "nothing here is implemented" cover more than one verb, and
 *every other* method on the route answers the same way, so no verb appears implemented. **Neither
 declares a request body**: a request schema would model a deferred capability, and modelling one is
@@ -2431,11 +2635,27 @@ precisely what the prohibition forbids. The four declarations are structurally i
 in the path segment and the service they name — an asymmetry between them would itself be the evidence
 that capability modelling had crept in.
 
-Each is nonetheless **authenticated**: none overrides the document-level bearer requirement, so an
-unauthenticated caller cannot enumerate the deferred roster. The `401` that caller receives comes from
-the authentication middleware and is deliberately **not** a declared response of the route, because the
-route's own response set is exactly `{501}` — it answers unconditionally, and a second declared status
-would suggest it evaluates something first.
+Each is **authenticated**: none overrides the document-level bearer requirement, so an unauthenticated
+caller cannot enumerate the deferred roster.
+
+**`401` and `501` are not two outcomes of one handler — they are the two things a caller can receive, and
+both are declared.** The `401` comes from the authentication middleware *before* any handler runs. The
+`501` is the only result the handler computes, and it computes it unconditionally: every method, every
+path remainder, nothing evaluated first. **That unconditionality is the property the compliance position
+of [§13.1](#131-the-compliance-note-stated-so-it-is-auditable-rather-than-argued) rests on, and declaring
+the pre-handler refusal beside it leaves it untouched.**
+
+An earlier revision of this section declared the set as exactly `{501}`, reasoning that a status the
+security scheme produces is not a response the *route* produces. That is right about the origin and wrong
+about the obligation: a client generated from a set omitting `401` is told these operations cannot return
+the status they demonstrably do return, and a conformance tool checking response coverage reports a
+violation against a correct server. The authored contract, the runtime-generated description, the contract
+tests and the end-to-end specs all now agree on `{401, 501}`.
+
+**What would still be a violation, stated so the line stays auditable:** any `2xx`, which would say part
+of a deferred service had been built; and any `4xx` **other** than that `401` — a `400`, a `404` or a
+`409` would each say the route inspects the request before answering. Neither appears on any of the eight
+operations.
 
 ### 13.1 The compliance note, stated so it is auditable rather than argued
 
@@ -2788,7 +3008,7 @@ this document, and each of those changed the schema, this document, or both:
 | 8 | Item-change `case 1` "falls through" to `case 2` | **It does not.** `case 1` is an EMPTY arm at `se_cst_dw.sru:L212` and PowerScript `choose case` does not fall through, so 1 returns with value and status **untouched** and the restore belongs to the validation-error handler it triggers. Four distinct arms — [§6.5](#65-the-item-change-alphabet-is-its-own-enumeration) |
 | 9 | The SQL Server paging arm has three strategies | **Four generated forms**, a two-by-two of unique-index columns against the native-paging flag, enumerated branch by branch with the property that betrays a collapsed branch — [§8.4](#84-paging-parity-is-byte-exact-generated-sql) |
 | 10 | C-02 maps 60 of the 63 legacy overloads onto 15 operations | **All 63 onto 17 operations.** The two file-hash forms were unpublished; they are now published, taking an opaque server-resolved reference exactly as `keyRef` does and never a caller-supplied path — [§5.1](#51-method-surface) |
-| 11 | The Security listener is published over plain HTTP | **The service has exactly ONE listener and it is HTTPS in every environment.** `https://+:5104`, `Http1AndHttp2`, `ClientCertificateMode` `AllowCertificate`, declared in the base settings file. Token issuance authenticates with a client certificate, which cannot be presented on a plaintext listener at all; `AllowCertificate` lets Kestrel request one without demanding it, so `POST /v1/tokens` enforces it **per operation** while `/health`, the key set and the discovery document stay anonymously reachable on the same port. There is no cleartext endpoint anywhere, so no address on any topology mints a token without a certificate — [§4.1](#41-method-surface) |
+| 11 | Encrypting the channel is enough, so issuance needs no credential | **Authentication on that operation is a per-operation credential, not a transport property.** The service has exactly ONE listener — `https://+:5104`, `Http1` — and TLS establishes that the channel is private, not who is on the other end of it. `POST /v1/tokens` therefore requires a caller credential regardless: an HTTP `Basic` credential naming a subject on the issuance roster, or a client certificate the listener's configured authority trusts. Presenting neither is `401`. So no address on any topology mints a token without a credential, and the transport is a necessary condition rather than a sufficient one — [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 and §9.4 — [§4.1](#41-method-surface) |
 | 12 | The topic contract carries three decomposed fields | **Every encoding is its own field**, including the namespace with explicit presence and the two *filter* negation flags — and the negated-namespace filter spares the named namespace rather than selecting it, the reverse of how it reads — [§6.7](#67-the-three-encoding-topic-string-and-why-naive-serialization-fails) |
 | 13 | The transaction response mirrors the nine-field descriptor with `logpass` removed | **Three slots are `reserved` on the response** — `logpass`, `dbparm` and `userparm` — with a typed flag allowlist carrying the one behaviourally significant value the parameter string held — [§11.2](#112-the-transaction-descriptor-mirrors-the-legacy-structure-field-for-field) |
 
@@ -2800,9 +3020,8 @@ Stated plainly, because a reference document that overclaims is worse than one w
   whether the readiness gate of [§12.2](#122-c-10--health-and-readiness) fires in the documented order,
   is asserted by container-definition and manifest review plus CI. See
   [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6, which records what was and was not exercised.
-- **It does not claim that any of these ten contracts has been *implemented*** — and that is a narrower
-  statement than an earlier draft of this list made, so it is worth separating the three states these
-  contracts are actually in:
+- **It does not claim that any of these ten contracts has been exercised across a live network
+  boundary.** Three states have to be separated, because they are three different amounts of evidence:
   - **Specified and expressed as a schema — all ten.** Five definition files exist —
     `Proto/common.v1.proto`, `Proto/dataservices.v1.proto`, `Proto/persistence.v1.proto`,
     `OpenApi/security.v1.yaml` and `OpenApi/gateway.v1.yaml` — carrying six gRPC services and two REST
@@ -2810,9 +3029,21 @@ Stated plainly, because a reference document that overclaims is worse than one w
     the ten contracts the schema is present and is the artifact this document's inventories are checked
     against ([§2.3](#23-where-the-definitions-live)). Where the two disagree, **the schema is
     authoritative for the wire** and this document is corrected to match it.
-  - **Not implemented, all ten.** A schema is a contract definition, not a running service. No service
-    implementation behind any of these contracts is asserted to exist or to work, and the four service
-    application projects are explicitly outside this document's evidence base.
+  - **Implemented in source and covered by tests — all ten.** An earlier revision of this list said
+    "not implemented, all ten", and that is no longer true. Gateway carries the C-09 REST ingress, the
+    `/v1/datawindow` projections with the gRPC-to-HTTP status translation, the C-10 health aggregation
+    and the four reserved families; Security carries C-01 token issuance, the JWKS and discovery
+    documents and the C-02 crypto surface; DataServices carries the two C-03/C-04 gRPC services;
+    Persistence carries the four C-05..C-08 gRPC services. All four applications build with zero
+    warnings, and each has a test project that exercises its handlers against an in-process host.
+  - **Not executed as a running four-service stack, and therefore not demonstrated end to end.** This is
+    the state that matters for a contract inventory and it is the one still open. All four container
+    definitions exist and so does `.github/workflows/ci.yml`, but no `orchestration/docker-compose.yml`
+    exists to assemble them — so no request has ever crossed a real network boundary between two of these
+    services, no aggregated `/health` has answered against three live upstreams,
+    and **no characterization parity result exists** ([`docs/PARITY.md`](PARITY.md)). Every statement in
+    this document about what happens *between* services is target semantics verified in-process, not an
+    observation of the deployed system.
 - **It does not claim byte-exact parity has been achieved anywhere.** It states where byte-exactness is
   the *criterion* — the paging output of [§8.4](#84-paging-parity-is-byte-exact-generated-sql) and the
   count wrapper of [§8.5](#85-the-count-wrapper-and-its-short-circuit) — and leaves the demonstration to

@@ -3768,4 +3768,3 @@ public class ProducerNameBindingTests
         Assert.True(evaluator.TryEvaluate(produced, 4L).IsNullValue);
     }
 }
-

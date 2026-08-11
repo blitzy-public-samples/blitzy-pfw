@@ -243,14 +243,19 @@
 // ==================================================================================================
 
 using System.Collections.Concurrent;
+using System.ComponentModel.DataAnnotations;
 using System.Globalization;
+using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
+using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
 using PowerFramework.Shared.Kernel;
@@ -286,6 +291,36 @@ public static class CryptoEndpoints
     private const string RouteGroupPrefix = "/v1/crypto";
 
     /// <summary>The tag the authored contract groups all 17 operations under.</summary>
+    /// <summary>The scope a caller must hold to reach any operation in this contract.</summary>
+    /// <remarks>
+    /// <para>
+    /// EVIDENCED BY THE ONLY CALLER IN THE REPOSITORY, NOT INVENTED HERE. DataServices requests exactly
+    /// this scope when it obtains a token addressed to this service
+    /// [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L1976],
+    /// and that request is the whole of the evidence for what this surface's scope is called. A name
+    /// chosen here instead would have refused the one caller the system has.
+    /// </para>
+    /// <para>
+    /// ONE SCOPE FOR ALL 17 OPERATIONS rather than one per operation. The published contract groups them
+    /// under a single tag and a single security requirement, the legacy surface they reproduce is one
+    /// object [ws_objects/pfw.crypto.pbl.src/n_crypto.sru], and no caller in this system needs a subset -
+    /// so a finer vocabulary would be scope names nothing requests, which is a permission model that
+    /// cannot be verified against anything.
+    /// </para>
+    /// </remarks>
+    internal const string RequiredScope = "security.crypto";
+
+    /// <summary>The authorization-policy name this contract's operations are gated by.</summary>
+    /// <remarks>
+    /// DECLARED HERE AND CONSUMED BY THE COMPOSITION ROOT, which is the inverse of the usual direction
+    /// and is deliberate. Program.cs builds the policy by reading this constant and
+    /// <see cref="RequiredScope"/>, so the route and its requirement have ONE spelling. A policy name
+    /// spelled independently in two files is the defect that matters most here: a route requiring a
+    /// policy nobody registered fails closed and loudly, but a policy registered under a name no route
+    /// requires silently enforces nothing at all.
+    /// </remarks>
+    internal static string ScopePolicyName => SecurityScopes.PolicyNameFor(RequiredScope);
+
     private const string TagName = "CryptoService";
 
     /// <summary>The security-scheme key the generated document declares the bearer requirement under.</summary>
@@ -327,6 +362,17 @@ public static class CryptoEndpoints
 
     /// <summary>Route of the RSA key-pair generation operation.</summary>
     private const string RsaKeysRoute = "/rsa/keys";
+
+    /// <summary>
+    /// The release route. The reference is a path segment because it NAMES the resource being deleted.
+    /// </summary>
+    /// <remarks>
+    /// A reference is drawn from a constrained character set - the same set the configured references are
+    /// validated against - so it is safe in a path segment, and no reference is ever logged, so it does
+    /// not reach a diagnostic through the request line either. Naming it in a body instead would make the
+    /// operation a POST that deletes, which is not what it is.
+    /// </remarks>
+    private const string RsaKeyReleaseRoute = "/rsa/keys/{keyRef}";
 
     /// <summary>Route of the random-bytes operation.</summary>
     private const string RandomBlobRoute = "/random/blob";
@@ -383,6 +429,20 @@ public static class CryptoEndpoints
 
     /// <summary>Operation identifier of the RSA key-pair generation operation.</summary>
     private const string GenerateRsaKeyOperation = "generateRsaKey";
+
+    /// <summary>The operation identifier of the release operation.</summary>
+    private const string ReleaseRsaKeyOperation = "releaseRsaKey";
+
+    /// <summary>
+    /// The subject claim name, which is the caller identity a retained key is charged to.
+    /// </summary>
+    /// <remarks>
+    /// The PROTOCOL spelling rather than the framework's mapped alias, because this service configures
+    /// <c>MapInboundClaims</c> false - so a claim arrives spelled exactly as the token spells it. It is
+    /// the same name <c>Tokens/TokenIssuer.cs</c> stamps, and it is a protocol identifier rather than a
+    /// value, which is why it is a literal at all.
+    /// </remarks>
+    private const string SubjectClaimName = "sub";
 
     /// <summary>Operation identifier of the random-bytes operation.</summary>
     private const string GenerateRandomBlobOperation = "generateRandomBlob";
@@ -1019,6 +1079,21 @@ public static class CryptoEndpoints
         + "configuration fault in this service rather than a defect in the request. Nothing about the "
         + "configured material is reported.";
 
+    /// <summary>
+    /// Detail for resolved material that is a usable RSA key of the WRONG KIND for the operation.
+    /// </summary>
+    /// <remarks>
+    /// A DISTINCT SENTENCE FROM THE UNUSABLE ONE, DELIBERATELY, because the two name different
+    /// deployment defects and an operator fixing either needs to know which it has: this one says the
+    /// configured value IS a key and is the wrong half of one, which is fixed by configuring the private
+    /// half rather than by re-encoding what is already there. Like its sibling it is a server fault, and
+    /// like its sibling it reports nothing about the material - a key kind is not a measurement of it.
+    /// </remarks>
+    private const string PublicOnlyKeyMaterialDetail =
+        "The material configured for this reference is an RSA public key, and this operation requires "
+        + "the private half. This is a configuration fault in this service rather than a defect in the "
+        + "request. Nothing about the configured material is reported.";
+
     /// <summary>Detail for a cryptographic refusal on an encrypting or signing path.</summary>
     private const string CryptographicRefusalDetail =
         "The platform refused the operation with the configured key material. This is a property of "
@@ -1056,12 +1131,46 @@ public static class CryptoEndpoints
 
     /// <summary>Detail for the retained-key store having no room for another pair.</summary>
     private const string GeneratedKeyStoreFullDetail =
-        "This service cannot retain another generated private key. The retained-key store is bounded "
-        + "deliberately: it grows only on request from an authenticated caller, and an unbounded store "
-        + "on the service that holds the system's only signing key would let that growth terminate "
-        + "authentication for the whole system. The pair that was generated has been discarded rather "
-        + "than returned, because a private key this service cannot retain must not be handed out "
-        + "instead.";
+        "This service cannot retain another generated private key, so no key was generated. The "
+        + "retained-key store is bounded deliberately, both in total and PER CALLER: it grows only on "
+        + "request from an authenticated caller, and an unbounded store on the service that holds the "
+        + "system's only signing key would let that growth terminate authentication for the whole "
+        + "system, while an unbounded per-caller share would let one caller starve its peers using "
+        + "nothing but legitimate calls. Release a key reference you no longer need, or wait for one to "
+        + "expire, and retry. Whether the total or your own share is the binding limit is deliberately "
+        + "not reported, because that would describe how much of the store other callers hold.";
+
+    /// <summary>Published summary of the retained-key release operation.</summary>
+    private const string ReleaseRsaKeySummary =
+        "Release a retained generated private key by its reference.";
+
+    /// <summary>Published description of the retained-key release operation.</summary>
+    private const string ReleaseRsaKeyDescription =
+        "Releases the private key this service retained under the given reference, freeing the caller's "
+        + "quota immediately. PART OF THE SAME NARROWING as the generation operation: because the "
+        + "private key is retained rather than returned, the caller needs a way to say it is finished "
+        + "with one - otherwise the only way a slot is freed is the expiry backstop, and a provisioning "
+        + "sequence longer than the per-caller quota would stall for no reason. A CALLER MAY RELEASE "
+        + "ONLY ITS OWN KEYS, identified by the subject claim of its token. A reference that names "
+        + "nothing retained and one that names another caller's key answer IDENTICALLY with 404, "
+        + "deliberately: distinguishing them would turn this operation into an oracle for which "
+        + "references exist, and a reference is a credential-like handle. Releasing is idempotent from "
+        + "the caller's point of view - a second release of the same reference answers 404. Retained "
+        + "keys also expire on their own, so a caller that crashes without releasing does not hold a "
+        + "slot for the life of the process.";
+
+    /// <summary>Detail reported when a release names no key this caller holds.</summary>
+    /// <remarks>
+    /// ONE MESSAGE FOR BOTH NEGATIVE CASES, and the wording is careful not to imply which applies. See
+    /// <see cref="CryptoReferenceResolver.TryReleaseGeneratedKey"/> for why they must be
+    /// indistinguishable.
+    /// </remarks>
+    private const string GeneratedKeyNotHeldDetail =
+        "No generated private key is retained under that reference for this caller. It may never have "
+        + "existed, it may already have been released, it may have expired, or it may belong to a "
+        + "different caller - these are deliberately indistinguishable, because telling them apart "
+        + "would report the existence of references this caller does not hold. This message never "
+        + "echoes the reference.";
 
     /// <summary>Detail prefix for a blocked symmetric cell.</summary>
     /// <remarks>
@@ -1171,7 +1280,7 @@ public static class CryptoEndpoints
         RouteGroupBuilder group = endpoints
             .MapGroup(RouteGroupPrefix)
             // ------------------------------------------------------------------------------------
-            // CONSTRAINT C-G, APPLIED ONCE AND UNCONDITIONALLY TO ALL 17 OPERATIONS.
+            // CONSTRAINT C-G, APPLIED ONCE AND UNCONDITIONALLY TO EVERY OPERATION IN THE GROUP.
             //
             // Not wrapped in an environment test, not paired with an anonymous fallback, and not
             // weakened by a configuration switch. Called EXPLICITLY rather than relying on the host's
@@ -1179,12 +1288,18 @@ public static class CryptoEndpoints
             // requirement satisfied by OMISSION is invisible at the declaration and would evaporate
             // silently if that policy were ever relaxed.
             //
-            // No policy name is supplied on purpose - the parameterless form requires an
-            // authenticated principal under the application's default policy, which is exactly the
-            // property being proved. None of this contract's operations is one of the service's three
-            // anonymous exemptions, so AllowAnonymous appears nowhere in this file.
+            // AND THE POLICY IS NAMED, WHICH IT DID NOT USED TO BE. The parameterless form required an
+            // authenticated principal and nothing more, so any holder of any token minted for this
+            // service's audience could drive all 17 cryptographic operations - keyed HMAC, symmetric
+            // encryption and decryption, RSA signing and RSA key generation among them - regardless of
+            // what that credential was obtained for and regardless of which caller it was minted for
+            // (CWE-862, CWE-863). Contract C-02 says who this surface is for: Security serves
+            // DataServices, and DataServices requests exactly `security.crypto` for it. The named policy
+            // requires that scope AND a configured permitted caller identity, because either alone
+            // leaves a hole. None of this contract's operations is one of the service's three anonymous
+            // exemptions, so AllowAnonymous appears nowhere in this file.
             // ------------------------------------------------------------------------------------
-            .RequireAuthorization()
+            .RequireAuthorization(CryptoCallerAuthorization.PolicyName)
             .WithTags(TagName);
 
         // The bearer requirement is declared on every operation of the group at once. The document
@@ -1192,6 +1307,32 @@ public static class CryptoEndpoints
         // declaring it would leave the published description claiming an anonymous surface while the
         // running service answers 401.
         group.AddOpenApiOperationTransformer(DeclareBearerRequirementAsync);
+
+        // THE FORBIDDEN STATUS IS DECLARED AT THE GROUP, BECAUSE THE SCOPE REQUIREMENT IS AT THE GROUP.
+        // Every operation here can now answer 403 for a reason that has nothing to do with its own
+        // parameters - a valid token that is not scoped `security.crypto` - so the status belongs to the
+        // group exactly as the requirement producing it does. The eleven keyRef-taking operations also
+        // declare it individually for their own second cause, an unpermitted reference; the generator
+        // keys a response by its status, so the two declarations describe one response rather than
+        // duplicating it. Declaring it here is what makes an operation added to this file inherit the
+        // status it will actually answer instead of having to remember it.
+        group.ProducesProblem(StatusCodes.Status403Forbidden);
+
+        // ------------------------------------------------------------------------------------------
+        // WHY EVERY OPERATION BELOW DECLARES 403, INCLUDING THE SEVEN THAT RESOLVE NO REFERENCE.
+        //
+        // The group's scope policy applies to all seventeen, so a token that is valid, addressed to
+        // this service and unexpired is still refused when its caller was never granted this
+        // contract's scope. That makes 403 reachable on EVERY operation - not only on the ten that
+        // resolve a caller-supplied reference and can refuse one.
+        //
+        // It is declared per operation rather than once on the group because the ten reference-bearing
+        // operations must ALSO keep their own 403, and a published document that under-declares a
+        // status the service produces is the specific defect this file's contract-conformance rows
+        // exist to catch. The authored document mirrors this: the reference-bearing ten point their
+        // 403 at the reference-refusal component, whose description covers both conditions, and the
+        // other seven point theirs at the scope-refusal component.
+        // ------------------------------------------------------------------------------------------
 
         // ------------------------------------------------------------------------------------------
         // THE DIGEST FAMILY - n_crypto.sru:L21-L29
@@ -1203,6 +1344,7 @@ public static class CryptoEndpoints
             .Produces<DigestResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         group.MapPost(HmacRoute, Hmac)
@@ -1325,6 +1467,20 @@ public static class CryptoEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
+        // The release operation is the generation operation's counterpart, and it is DELETE rather than
+        // POST because it removes the resource the generation operation named. It declares 204 for a
+        // release and 404 for a reference this caller does not hold; it declares no 400, because the
+        // only input is a path segment and any value of it is a well-formed request that simply names
+        // nothing - and no 500, because there is no configured material to fail to read.
+        group.MapDelete(RsaKeyReleaseRoute, ReleaseRsaKey)
+            .WithName(ReleaseRsaKeyOperation)
+            .WithSummary(ReleaseRsaKeySummary)
+            .WithDescription(ReleaseRsaKeyDescription)
+            .Produces(StatusCodes.Status204NoContent)
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound);
+
         // ------------------------------------------------------------------------------------------
         // THE RANDOM FAMILY - n_crypto.sru:L14-L18, the three determinism seams
         // ------------------------------------------------------------------------------------------
@@ -1335,6 +1491,7 @@ public static class CryptoEndpoints
             .Produces<BlobResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         group.MapPost(RandomStringRoute, GenerateRandomString)
@@ -1344,6 +1501,7 @@ public static class CryptoEndpoints
             .Produces<RndStringResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         group.MapPost(RandomGuidRoute, GenerateGuid)
@@ -1353,6 +1511,7 @@ public static class CryptoEndpoints
             .Produces<GuidResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         // ------------------------------------------------------------------------------------------
@@ -1365,6 +1524,7 @@ public static class CryptoEndpoints
             .Produces<BlobResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         group.MapPost(BlobToStringRoute, BlobToString)
@@ -1374,6 +1534,7 @@ public static class CryptoEndpoints
             .Produces<EncodedTextResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         group.MapPost(BlobReverseRoute, ReverseBlob)
@@ -1383,6 +1544,7 @@ public static class CryptoEndpoints
             .Produces<BlobReverseResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         return endpoints;
@@ -1944,6 +2106,20 @@ public static class CryptoEndpoints
         }
         catch (CryptographicException)
         {
+            // THE SYMMETRIC FAMILY HAS NOTHING TO SCREEN AHEAD OF THIS, AND THAT IS A PROPERTY OF THE
+            // PORTED RULE RATHER THAN AN OMISSION. Key and vector material of ANY length is accepted:
+            // DECISION D1 truncates or zero-pads both to exactly the cipher's length
+            // [LegacyDefaults.NormalizeKeyMaterial], so there is no size, structure or kind a screen
+            // could reject - unlike the asymmetric family, where a public key where a private one is
+            // needed is decidable and IS screened before the payload.
+            //
+            // The direction is therefore the only signal available, and it is a sound one on the
+            // encrypting side: encryption consumes the payload without interpreting it, so a refusal
+            // there is a property of the configured material and is answered as a server fault. On the
+            // decrypting side a wrong key, a wrong mode and a corrupt payload all raise the identical
+            // failure, because this surface has no authenticated encryption and so carries no integrity
+            // tag to separate them - a preserved legacy weakness the published contract states at the
+            // operation. That case is attributed to the payload.
             return encrypting
                 ? Reject(RetCode.E_INTERNAL_ERROR, CryptographicRefusalDetail, loggerFactory)
                 : Reject(RetCode.E_INVALID_DATA, UnprocessablePayloadDetail, loggerFactory);
@@ -2147,11 +2323,12 @@ public static class CryptoEndpoints
     /// of those become the same reference here.
     /// </para>
     /// <para>
-    /// THE TWO FAILURE CLASSES ARE DISTINGUISHED BY EXCEPTION TYPE RATHER THAN BY MESSAGE, which the
-    /// provider makes possible deliberately: it raises an ARGUMENT failure with one fixed,
-    /// value-free message when a key cannot be imported at all, and a CRYPTOGRAPHIC failure when the
-    /// key is usable but the payload is not. The first is a configuration fault in this deployment and
-    /// is answered 500; the second is the caller's payload and is answered 400.
+    /// THE CONFIGURED MATERIAL IS CLASSIFIED BEFORE THE PAYLOAD IS TOUCHED, so that a deployment fault
+    /// and a caller fault are separated by a DECISION rather than by which exception the platform
+    /// happened to raise. <see cref="RequireConfiguredRsaKey"/> answers 500 for material that is not an
+    /// RSA key and for a public key where the decrypt direction needs the private half; only what
+    /// survives that screen is attributed to the caller. What the screen cannot decide - a key of the
+    /// right kind that is simply the wrong key - is recorded at the arm that answers it.
     /// </para>
     /// </remarks>
     private static Results<Ok<PayloadResponse>, ProblemHttpResult> RsaCipherOperation(
@@ -2199,6 +2376,21 @@ public static class CryptoEndpoints
             return rejection;
         }
 
+        // The decrypt direction needs the private half; the encrypt direction is satisfied by either.
+        // Screened HERE, before the payload is decoded, so that a configured public key on a decrypt is
+        // the server fault it is rather than the unprocessable-payload verdict the platform's own
+        // failure would otherwise have produced.
+        rejection = RequireConfiguredRsaKey(
+            rsa,
+            keyMaterial,
+            privateHalfRequired: !encrypting,
+            loggerFactory);
+
+        if (rejection is not null)
+        {
+            return rejection;
+        }
+
         try
         {
             if (form == PayloadForm.STRING)
@@ -2240,10 +2432,23 @@ public static class CryptoEndpoints
             // The configured material is not an importable RSA key. A deployment fault the caller can
             // neither see nor fix, so it is a server fault - and nothing about the material is
             // reported, not its value, not a substring and not its length.
+            //
+            // RETAINED THOUGH THE SCREEN ABOVE NOW REACHES THIS FIRST, deliberately. It is the arm that
+            // holds if the screen is ever removed or the provider's accepted set ever diverges from the
+            // screen's, and an unreachable-looking arm that answers 500 is preferable to a reachable one
+            // that would answer 400 by falling through to the payload verdict below.
             return Reject(RetCode.E_INTERNAL_ERROR, UnusableKeyMaterialDetail, loggerFactory);
         }
         catch (CryptographicException)
         {
+            // THE RESIDUAL AMBIGUITY, AND IT IS IRREDUCIBLE HERE. The screen above has already ruled out
+            // material that is not a key and material of the wrong half, so what remains is either the
+            // caller's payload or a configured key that is simply the WRONG key - and those two produce
+            // the identical platform failure, because this surface has no authenticated encryption and
+            // therefore no integrity tag to tell them apart. That absence is a preserved legacy weakness
+            // [n_crypto.sru:L62-L69 declare no tag, no salt and no derivation], so the ambiguity cannot
+            // be resolved without changing behaviour. It is attributed to the payload, which is the
+            // arm the published contract declares for this operation.
             return Reject(RetCode.E_INVALID_DATA, UnprocessablePayloadDetail, loggerFactory);
         }
         catch (FormatException)
@@ -2308,6 +2513,21 @@ public static class CryptoEndpoints
         }
 
         rejection = references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+
+        if (rejection is not null)
+        {
+            return rejection;
+        }
+
+        // Signing needs the private half without exception, so a configured public key here is a
+        // deployment fault on every request this operation will ever receive - which makes screening it
+        // before the payload the difference between one clear server fault and a permanent stream of
+        // reports blaming callers' payloads.
+        rejection = RequireConfiguredRsaKey(
+            rsa,
+            keyMaterial,
+            privateHalfRequired: true,
+            loggerFactory);
 
         if (rejection is not null)
         {
@@ -2415,6 +2635,21 @@ public static class CryptoEndpoints
             return rejection;
         }
 
+        // Verification is satisfied by either half, so only unusable material is a fault here. Screened
+        // before the payload for a reason specific to THIS operation: it collapses a malformed signature
+        // into a FALSE VERDICT rather than raising, so material that is not a key at all would otherwise
+        // have to be distinguished from a legitimate negative answer after the fact.
+        rejection = RequireConfiguredRsaKey(
+            rsa,
+            keyMaterial,
+            privateHalfRequired: false,
+            loggerFactory);
+
+        if (rejection is not null)
+        {
+            return rejection;
+        }
+
         bool valid;
 
         try
@@ -2489,19 +2724,29 @@ public static class CryptoEndpoints
     /// The only size screening is what the platform itself will generate, asked of the platform.
     /// </para>
     /// <para>
+    /// <b>CAPACITY IS RESERVED BEFORE THE KEY IS GENERATED, AND THAT ORDER IS THE CONTRACT.</b> RSA
+    /// generation is the expensive half of this operation, so checking capacity afterwards let an
+    /// authenticated caller drive unbounded generation work and have every pair discarded - a full store
+    /// became an amplifier rather than a limit. The slot is taken first, atomically, and abandoned if
+    /// generation refuses the size, so no work is ever done for a request that could not be retained.
+    /// </para>
+    /// <para>
     /// ONE LIMITATION RECORDED RATHER THAN HIDDEN: the provider returns key text as STRINGS, and a
     /// string cannot be wiped. The generated private key therefore lives until the retained-key store
     /// releases it and the garbage collector reclaims it; nothing here can zero it, and pretending
-    /// otherwise would be worse than saying so.
+    /// otherwise would be worse than saying so. What CAN be bounded is how long it is held and how much
+    /// of it one caller may hold, and both now are - see <see cref="CryptoReferenceResolver"/>.
     /// </para>
     /// </remarks>
     internal static Results<Ok<GenRsaKeyResponse>, ProblemHttpResult> GenerateRsaKey(
         GenRsaKeyRequest request,
+        ClaimsPrincipal user,
         [FromServices] RsaProvider rsa,
         [FromServices] RandomProvider random,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory)
     {
+        ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(rsa);
         ArgumentNullException.ThrowIfNull(random);
@@ -2521,25 +2766,48 @@ public static class CryptoEndpoints
             return Reject(RetCode.E_INVALID_ARGUMENT, KeySizeOutOfDomainDetail, loggerFactory);
         }
 
-        string privateKey = string.Empty;
-        string publicKey = string.Empty;
-
-        bool generated = request.PemFormat is bool pemFormat
-            ? rsa.GenRSAKey((ushort)declaredBits, ref privateKey, ref publicKey, pemFormat)
-            : rsa.GenRSAKey((ushort)declaredBits, ref privateKey, ref publicKey);
-
-        if (!generated)
+        // RESERVED BEFORE GENERATION. A refusal here has cost nothing: no key exists yet.
+        if (!references.TryReserveGeneratedKeySlot(
+            OwnerOf(user),
+            random,
+            out GeneratedKeyReservation reservation))
         {
-            // The legacy reports an unusable size through its boolean return rather than by raising,
-            // and leaves both out-parameters untouched, so there is no partial key to discard here.
-            return Reject(RetCode.E_INVALID_ARGUMENT, KeySizeUnavailableDetail, loggerFactory);
+            // Either the global cap or this caller's own quota is met. Both answer identically, because
+            // distinguishing them would report how much of the store other callers hold.
+            return Reject(RetCode.E_INTERNAL_ERROR, GeneratedKeyStoreFullDetail, loggerFactory);
         }
 
-        if (!references.TryRetainGeneratedPrivateKey(privateKey, random, out string keyRef))
+        string privateKey = string.Empty;
+        string publicKey = string.Empty;
+        string keyRef;
+
+        try
         {
-            // The pair is discarded rather than returned. Handing out a private key this service
-            // cannot retain would defeat the whole indirection, so a full store is a refusal.
-            return Reject(RetCode.E_INTERNAL_ERROR, GeneratedKeyStoreFullDetail, loggerFactory);
+            bool generated = request.PemFormat is bool pemFormat
+                ? rsa.GenRSAKey((ushort)declaredBits, ref privateKey, ref publicKey, pemFormat)
+                : rsa.GenRSAKey((ushort)declaredBits, ref privateKey, ref publicKey);
+
+            if (!generated)
+            {
+                // The legacy reports an unusable size through its boolean return rather than by raising,
+                // and leaves both out-parameters untouched, so there is no partial key to discard here -
+                // but the RESERVED SLOT must be given back, or a caller could fill the store with
+                // refused sizes.
+                references.AbandonGeneratedKeySlot(reservation);
+
+                return Reject(RetCode.E_INVALID_ARGUMENT, KeySizeUnavailableDetail, loggerFactory);
+            }
+
+            keyRef = references.CommitGeneratedKey(reservation, privateKey);
+        }
+        catch
+        {
+            // Anything unexpected between reserving and committing releases the slot before it
+            // propagates. Without this the slot would leak on a fault, and the store would fill with
+            // reservations for keys that never existed.
+            references.AbandonGeneratedKeySlot(reservation);
+
+            throw;
         }
 
         // The record carries the modulus length only. Neither key half, nor the minted reference, is
@@ -2550,6 +2818,76 @@ public static class CryptoEndpoints
         return TypedResults.Ok(
             new GenRsaKeyResponse(publicKey, keyRef, declaredBits) { PemFormat = request.PemFormat });
     }
+
+    /// <summary>
+    /// Releases a retained generated private key at its owner's request.
+    /// </summary>
+    /// <param name="keyRef">The reference the caller was given by the generation operation.</param>
+    /// <param name="user">The authenticated caller, whose subject claim owns the key.</param>
+    /// <param name="references">The reference resolver, which owns the retained-key store.</param>
+    /// <param name="loggerFactory">The logger factory a rejection is recorded through.</param>
+    /// <returns>204 when the key was released, or 404 when this caller holds no such key.</returns>
+    /// <exception cref="ArgumentNullException">A collaborator is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// PART OF THE AUTHORED NARROWING RATHER THAN A LEGACY OPERATION. The legacy has no retained-key
+    /// store and therefore nothing to release: it hands the private half straight back through a
+    /// <c>ref</c> parameter [<c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20</c>]. Retaining the
+    /// key instead is what makes the generation response safe across a network boundary, and a retained
+    /// thing needs a way to be given back - otherwise the per-caller quota is only escapable by waiting
+    /// out the expiry.
+    /// </para>
+    /// <para>
+    /// OWNERSHIP IS ENFORCED, AND ITS FAILURE IS INDISTINGUISHABLE FROM ABSENCE. A caller may release
+    /// only keys charged to its own subject; a reference belonging to another caller answers exactly as
+    /// an unknown one does. See <see cref="CryptoReferenceResolver.TryReleaseGeneratedKey"/>.
+    /// </para>
+    /// <para>
+    /// NEITHER THE REFERENCE NOR ANY KEY MATERIAL IS LOGGED. The completion record carries the operation
+    /// name and nothing else, which is the same discipline every sibling handler follows.
+    /// </para>
+    /// </remarks>
+    internal static Results<NoContent, ProblemHttpResult> ReleaseRsaKey(
+        string keyRef,
+        ClaimsPrincipal user,
+        [FromServices] CryptoReferenceResolver references,
+        [FromServices] ILoggerFactory loggerFactory)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(references);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        if (!references.TryReleaseGeneratedKey(keyRef, OwnerOf(user)))
+        {
+            return Reject(RetCode.E_OBJECT_NOT_FOUND, GeneratedKeyNotHeldDetail, loggerFactory);
+        }
+
+        // No classifier at all: a release names no algorithm, mode or padding, and the reference is
+        // never recorded.
+        LogCompleted(loggerFactory, ReleaseRsaKeyOperation, algorithm: null, mode: null, padding: null);
+
+        return TypedResults.NoContent();
+    }
+
+    /// <summary>
+    /// Reads the caller identity a retained key is charged to.
+    /// </summary>
+    /// <param name="user">The authenticated caller.</param>
+    /// <returns>The subject claim, or the empty string when the token carries none.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE SUBJECT CLAIM IS THE ONLY CALLER IDENTITY THIS SURFACE HAS, and it is the same claim
+    /// <c>Tokens/TokenIssuer.cs</c> stamps. It is read by its PROTOCOL NAME rather than through the
+    /// framework's mapped alias, because this service configures <c>MapInboundClaims</c> false - so the
+    /// claim arrives spelled exactly as the token spells it and the mapped alias does not exist.
+    /// </para>
+    /// <para>
+    /// AN EMPTY ANSWER IS NOT AN EXEMPTION. The resolver charges it to one fixed shared bucket, so a
+    /// token carrying no subject cannot escape the quota by omitting a claim.
+    /// </para>
+    /// </remarks>
+    private static string OwnerOf(ClaimsPrincipal user) =>
+        user.FindFirst(SubjectClaimName)?.Value ?? string.Empty;
 
     // ==============================================================================================
     //  HANDLERS - THE RANDOM FAMILY, WHICH IS ALSO THE DETERMINISM SEAM
@@ -3073,6 +3411,65 @@ public static class CryptoEndpoints
     }
 
     /// <summary>
+    /// Screens the CONFIGURED key material behind a resolved reference before the caller's payload is
+    /// touched, so that a deployment fault is answered as one.
+    /// </summary>
+    /// <param name="rsa">The RSA provider, which owns the single import policy this screen consults.</param>
+    /// <param name="keyMaterial">The material the reference resolved to.</param>
+    /// <param name="privateHalfRequired">
+    /// Whether the operation needs the private half. True for decryption and for signing; false for
+    /// encryption and for signature verification, both of which the public half satisfies.
+    /// </param>
+    /// <param name="loggerFactory">The logger factory a rejection is recorded through.</param>
+    /// <returns><see langword="null"/> when the material suits the operation; otherwise the rejection.</returns>
+    /// <exception cref="ArgumentNullException">A collaborator is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// WHY IT RUNS BEFORE THE PAYLOAD AND NOT AFTER THE FAILURE. Without it, a configured public key on
+    /// a decrypt or a sign reaches the platform, which raises the SAME cryptographic failure an
+    /// unprocessable payload raises - so the boundary attributed a deployment defect to the caller and
+    /// answered 400. The caller supplied only an opaque reference and could neither see the material nor
+    /// fix it, so that status sent every such report to the wrong party. Screening first converts the
+    /// one part of that ambiguity that IS decidable into the server fault it always was.
+    /// </para>
+    /// <para>
+    /// WHAT REMAINS AMBIGUOUS IS STATED RATHER THAN PAPERED OVER. A configured key that imports, carries
+    /// the right half, and is simply the WRONG KEY still fails identically to a corrupt payload, because
+    /// this surface has no authenticated encryption at all - no integrity tag exists to tell the two
+    /// apart, which is a preserved legacy weakness rather than an omission here. That residual case is
+    /// answered as the caller's payload, and the contract says so at the operation.
+    /// </para>
+    /// <para>
+    /// THE MATERIAL IS IMPORTED TWICE ON A SUCCESSFUL REQUEST - once here and once inside the operation
+    /// - and that is accepted deliberately. The alternative is to thread a live key object through the
+    /// provider's overloads, whose signatures take key TEXT because the legacy declarations they
+    /// substitute do [n_crypto.sru:L62-L73]; changing them to carry an imported key would break the
+    /// parity those signatures exist to preserve. Nothing about this refactor asks for a performance
+    /// objective, and no repository artifact publishes one, so the trade is a fidelity choice rather
+    /// than a cost decision.
+    /// </para>
+    /// </remarks>
+    internal static ProblemHttpResult? RequireConfiguredRsaKey(
+        RsaProvider rsa,
+        string keyMaterial,
+        bool privateHalfRequired,
+        ILoggerFactory loggerFactory)
+    {
+        ArgumentNullException.ThrowIfNull(rsa);
+        ArgumentNullException.ThrowIfNull(keyMaterial);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        return rsa.ClassifyKey(keyMaterial) switch
+        {
+            RsaKeyKind.KeyPair => null,
+            RsaKeyKind.PublicOnly when !privateHalfRequired => null,
+            RsaKeyKind.PublicOnly =>
+                Reject(RetCode.E_INTERNAL_ERROR, PublicOnlyKeyMaterialDetail, loggerFactory),
+            _ => Reject(RetCode.E_INTERNAL_ERROR, UnusableKeyMaterialDetail, loggerFactory),
+        };
+    }
+
+    /// <summary>
     /// Decodes a blob-shaped member from its JSON transport encoding.
     /// </summary>
     /// <param name="data">The member's text, which carries base64 of the raw bytes.</param>
@@ -3511,14 +3908,63 @@ internal sealed class CryptoReferenceResolver
     /// store cannot become a liability.
     /// </para>
     /// <para>
-    /// The store does not expire entries, deliberately. An expiry clock would be a behaviour this
-    /// contract does not publish, and a caller holding a reference that silently stopped resolving
-    /// would see a 404 it could not explain. A deployment that needs more than the cap restarts the
-    /// service, which is the honest answer for a store that exists only to make the generation
-    /// operation's response safe.
+    /// THE GLOBAL CAP IS RESERVED ATOMICALLY AND BEFORE GENERATION, which is the half that matters
+    /// under load. A read of the entry count followed by an insertion is not atomic, so concurrent
+    /// callers could each observe room and collectively exceed the bound; worse, RSA generation is the
+    /// expensive part and it used to run BEFORE capacity was checked, so a caller could drive
+    /// unbounded key-generation work and have every pair discarded. Both are closed by reserving a
+    /// slot first - see <see cref="TryReserveGeneratedKeySlot"/>.
     /// </para>
     /// </remarks>
     internal const int MaximumRetainedGeneratedKeys = 64;
+
+    /// <summary>
+    /// The greatest number of generated private keys ONE CALLER may hold retained at a time.
+    /// </summary>
+    /// <remarks>
+    /// A GLOBAL CAP ALONE IS NOT A QUOTA. Without a per-caller bound, one authenticated caller can
+    /// occupy the whole store and every other caller's generation request then fails - a denial of
+    /// service against peers, delivered entirely through legitimate calls. Eight is far more than a
+    /// provisioning sequence needs and small enough that no single caller can crowd the others out.
+    /// The owner is the token's subject claim, which is the only caller identity this surface has.
+    /// </remarks>
+    internal const int MaximumRetainedGeneratedKeysPerCaller = 8;
+
+    /// <summary>How long a retained generated private key remains resolvable.</summary>
+    /// <remarks>
+    /// <para>
+    /// AN EXPIRY IS REQUIRED BECAUSE THE ALTERNATIVE IS UNBOUNDED RETENTION OF PRIVATE KEYS. An
+    /// earlier reading declined to expire entries on the grounds that a reference which silently
+    /// stopped resolving would be a 404 a caller could not explain. That trade was the wrong way round:
+    /// the store holds PRIVATE KEY MATERIAL, and material kept for the process lifetime because nobody
+    /// released it is a standing liability in the one service that also holds the system's only signing
+    /// key. A 404 after ten minutes is explainable - it is published on the operation, and the caller
+    /// can generate again - whereas an unbounded store is not recoverable at all without a restart.
+    /// </para>
+    /// <para>
+    /// TEN MINUTES IS SIZED AGAINST THE USE, not chosen for roundness: a reference exists so that a
+    /// caller can immediately use the generated key on one of the sibling operations, which is a
+    /// sequence of seconds. It is deliberately longer than the five-minute token lifetime this service
+    /// mints, so a caller does not lose its key reference and its credential in the same window.
+    /// </para>
+    /// <para>
+    /// EXPIRY IS SWEPT LAZILY, on reservation and on resolution, rather than by a timer. A timer would
+    /// be a background service whose only job is to delete map entries, and the sweep is O(entries)
+    /// over a map bounded at sixty-four.
+    /// </para>
+    /// </remarks>
+    internal static readonly TimeSpan RetainedGeneratedKeyLifetime = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// The same retention window under the name the ownerless retention path and its suite use.
+    /// </summary>
+    /// <remarks>
+    /// AN ALIAS AND NOT A SECOND POLICY, deliberately. Two window constants with two values in one type
+    /// would let a key be expired by one code path and live by the other, and every expiry assertion
+    /// would then be true of whichever constant it happened to read. There is one window;
+    /// <see cref="RetainedGeneratedKeyLifetime"/> is its definition and this is its other name.
+    /// </remarks>
+    internal static readonly TimeSpan GeneratedKeyRetention = RetainedGeneratedKeyLifetime;
 
     /// <summary>
     /// The prefix every minted reference carries.
@@ -3534,6 +3980,30 @@ internal sealed class CryptoReferenceResolver
 
     /// <summary>The separator between the ordinal and the random half of a minted reference.</summary>
     private const string GeneratedReferenceSeparator = "-";
+
+    /// <summary>
+    /// The single bucket every request carrying no subject claim is charged to.
+    /// </summary>
+    /// <remarks>
+    /// ONE SHARED BUCKET RATHER THAN AN EXEMPTION. A request with no attributable caller must not be the
+    /// one with no quota, or the quota is bypassable by omitting a claim. The value is not a legal
+    /// subject spelling, so it cannot collide with a real caller identity.
+    /// </remarks>
+    private const string UnattributedOwner = "<unattributed>";
+
+    /// <summary>
+    /// Reported when a reservation is committed twice or was never a reservation.
+    /// </summary>
+    /// <remarks>
+    /// Fixed at compile time and mentioning no reference and no key material, like every other message on
+    /// this surface. It describes a defect in THIS file rather than a request state, so it is raised
+    /// rather than answered as a rejection - an internal fault reported as a caller error is a bug that
+    /// hides itself.
+    /// </remarks>
+    private const string UncommittableReservationMessage =
+        "A generated-key slot was committed without a reservation, or its reservation was already " +
+        "filled. Reserve a slot before generating a key, and commit or abandon each reservation exactly " +
+        "once.";
 
     /// <summary>
     /// The flag combination used when minting the random half of a reference: neither braces nor
@@ -3555,8 +4025,24 @@ internal sealed class CryptoReferenceResolver
     private readonly IConfiguration _configuration;
 
     /// <summary>The private halves of key pairs generated through this service, by reference.</summary>
-    private readonly ConcurrentDictionary<string, string> _retained =
+    private readonly ConcurrentDictionary<string, RetainedGeneratedKey> _retained =
         new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The number of slots currently RESERVED, which is entries plus reservations in flight.
+    /// </summary>
+    /// <remarks>
+    /// Tracked separately from the map's own count because a slot is reserved BEFORE the key that will
+    /// occupy it exists. Counting the map would let a second caller reserve the same slot while the
+    /// first is still generating, which is precisely the race the reservation exists to remove.
+    /// </remarks>
+    private int _reservedSlots;
+
+    /// <summary>Reserved slots per owner, for the per-caller quota.</summary>
+    private readonly ConcurrentDictionary<string, int> _reservedPerOwner = new(StringComparer.Ordinal);
+
+    /// <summary>The clock every expiry decision is taken against.</summary>
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>The ordinal of the most recently minted reference.</summary>
     private int _mintOrdinal;
@@ -3573,13 +4059,24 @@ internal sealed class CryptoReferenceResolver
     /// configuration - the options type says so, and introducing an abstraction over it here would add
     /// a seam with nothing on the other side of it.
     /// </remarks>
-    public CryptoReferenceResolver(IOptions<SecurityOptions> options, IConfiguration configuration)
+    /// <param name="timeProvider">
+    /// The clock retained-key expiry is measured against. Injected rather than read from
+    /// <see cref="DateTimeOffset.UtcNow"/> so that a characterization run is reproducible: every
+    /// non-deterministic value must be maskable from BOTH the master and the candidate recording (AAP
+    /// 0.6.7), and an expiry clock is one. Optional so that a test constructing this type directly gets
+    /// the system clock without ceremony.
+    /// </param>
+    public CryptoReferenceResolver(
+        IOptions<SecurityOptions> options,
+        IConfiguration configuration,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(configuration);
 
         _options = options;
         _configuration = configuration;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -3641,11 +4138,15 @@ internal sealed class CryptoReferenceResolver
                 loggerFactory);
         }
 
+        // Expired entries are swept before the lookup, so an expired reference is answered as
+        // not-permitted rather than resolved from a map that had not been tidied yet.
+        SweepExpiredGeneratedKeys();
+
         // SCREEN ONE - a reference this service minted. Checked first because it cannot appear in the
         // configured set, and answered without consulting that set at all.
-        if (_retained.TryGetValue(reference, out string? retained))
+        if (_retained.TryGetValue(reference, out RetainedGeneratedKey? retained))
         {
-            material = retained;
+            material = retained.PrivateKey;
 
             return null;
         }
@@ -3817,51 +4318,314 @@ internal sealed class CryptoReferenceResolver
     }
 
     /// <summary>
-    /// Retains the private half of a generated key pair behind a freshly minted reference.
+    /// Reserves one slot in the retained store and mints the reference it will be filled under, BEFORE
+    /// any key is generated.
     /// </summary>
-    /// <param name="privateKey">The generated private key, in the form the provider emitted it.</param>
+    /// <param name="owner">The caller identity the slot is charged to - the token's subject.</param>
     /// <param name="random">The random provider, which holds the injected entropy seam.</param>
-    /// <param name="keyRef">
-    /// The minted reference, or the empty string when this method returns <see langword="false"/>.
-    /// </param>
+    /// <param name="reservation">The reservation, when this method returns <see langword="true"/>.</param>
     /// <returns>
-    /// <see langword="true"/> when the key was retained; <see langword="false"/> when the store is
-    /// full, in which case the caller discards the pair rather than returning it.
+    /// <see langword="true"/> when a slot was reserved; <see langword="false"/> when the global cap or
+    /// this owner's quota is already met, in which case NOTHING has been generated and nothing is
+    /// retained.
     /// </returns>
     /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
-    /// <b>THE PRIVATE KEY IS RETAINED SO THAT IT DOES NOT HAVE TO BE RETURNED.</b> The legacy hands
-    /// the private half back through a <c>ref</c> parameter
-    /// [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20]; the authored contract returns the public
-    /// half and a reference to the private one instead, which is the single highest-severity outbound
-    /// decision on this surface. The retained value is never logged, never echoed in an error body,
-    /// never placed in a document example and never returned by any operation.
+    /// <b>THE RESERVATION IS THE FIX, AND ITS ORDER IS THE WHOLE POINT.</b> Capacity used to be checked
+    /// by reading the entry count and then inserting, which is two operations and therefore not atomic:
+    /// concurrent callers each saw room and collectively exceeded the bound. And the check ran AFTER
+    /// generation, so a caller whose key was then discarded had still consumed the expensive work -
+    /// which makes a full store an amplifier rather than a limit. Reserving first closes both: the
+    /// counter is advanced with a single interlocked operation and rolled back on refusal, so the bound
+    /// holds exactly under any amount of concurrency, and no RSA key is generated for a request that
+    /// cannot be retained.
     /// </para>
     /// <para>
-    /// <b>IT CAN NEVER BE THIS SERVICE'S SIGNING KEY OR AN EXISTING STORE ENTRY.</b> Two independent
-    /// reasons. The value is whatever the provider just generated, so it is not read from
-    /// configuration at all and cannot be a store entry. And the reference is minted, not chosen, so it
-    /// cannot collide with a configured name in a way that would shadow one - the retained store is
-    /// consulted before the permitted set, so a minted reference that somehow matched a configured name
-    /// would resolve to the generated key rather than overwriting or exposing the configured value.
+    /// <b>THE PER-OWNER QUOTA IS RESERVED IN THE SAME WAY AND ROLLED BACK TOGETHER.</b> A global cap
+    /// alone lets one caller occupy the store and starve its peers using nothing but legitimate calls.
+    /// The owner comes from the bearer token's subject claim, which is the only caller identity this
+    /// surface has; a request carrying no subject is charged to a single fixed anonymous bucket rather
+    /// than being exempted, because an unattributable caller must not be the one with no quota.
     /// </para>
     /// <para>
-    /// <b>THE ORDINAL IS WHAT GUARANTEES UNIQUENESS, NOT THE ENTROPY.</b> The random half comes from
-    /// <see cref="RandomProvider"/> so that the injected entropy seam applies and a characterization
-    /// run is reproducible - but a deterministic double returns the SAME value every time, so entropy
-    /// alone would collide immediately under test. The interlocked ordinal makes every minted reference
-    /// distinct regardless of what the source returns, which is what lets the determinism seam be
-    /// honoured without making the store unusable in the very tests that honour it. The insertion is
-    /// still a <see cref="ConcurrentDictionary{TKey, TValue}.TryAdd"/> rather than an assignment, so a
-    /// collision could never silently replace an entry.
+    /// <b>THE REFERENCE IS MINTED HERE, WITH THE SLOT</b>, so that the ordinal that guarantees
+    /// uniqueness is drawn exactly once per reservation. The ordinal - not the entropy - is what makes
+    /// every reference distinct: the random half is drawn through <see cref="RandomProvider"/> so the
+    /// injected entropy seam applies, and a deterministic double returns the same value every time, so
+    /// entropy alone would collide immediately under test.
     /// </para>
     /// <para>
-    /// The capacity check is a read of <see cref="ConcurrentDictionary{TKey, TValue}.Count"/> before the
-    /// insertion, which under concurrency may admit a small number of entries beyond the cap. That is
-    /// the correct trade: the cap exists to keep an authenticated store from growing without limit, and
-    /// serialising every generation behind a lock to make the boundary exact would cost more than the
-    /// few entries it would save.
+    /// Expired entries are swept first, so a store that is full only of stale material admits the
+    /// request rather than refusing it.
+    /// </para>
+    /// </remarks>
+    internal bool TryReserveGeneratedKeySlot(
+        string owner,
+        RandomProvider random,
+        out GeneratedKeyReservation reservation)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentNullException.ThrowIfNull(random);
+
+        reservation = GeneratedKeyReservation.None;
+
+        SweepExpiredGeneratedKeys();
+
+        if (Interlocked.Increment(ref _reservedSlots) > MaximumRetainedGeneratedKeys)
+        {
+            _ = Interlocked.Decrement(ref _reservedSlots);
+
+            return false;
+        }
+
+        string chargedTo = owner.Length == 0 ? UnattributedOwner : owner;
+
+        if (_reservedPerOwner.AddOrUpdate(chargedTo, 1, static (_, held) => held + 1)
+            > MaximumRetainedGeneratedKeysPerCaller)
+        {
+            // Both counters are rolled back, in the reverse order they were taken, so a refusal leaves
+            // the store exactly as it was found.
+            ReleaseOwnerSlot(chargedTo);
+            _ = Interlocked.Decrement(ref _reservedSlots);
+
+            return false;
+        }
+
+        int ordinal = Interlocked.Increment(ref _mintOrdinal);
+
+        reservation = new GeneratedKeyReservation(
+            string.Concat(
+                GeneratedReferencePrefix,
+                ordinal.ToString(CultureInfo.InvariantCulture),
+                GeneratedReferenceSeparator,
+                random.GenGuid(BareIdentifierFlags)),
+            chargedTo);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Fills a reserved slot with the generated private key.
+    /// </summary>
+    /// <param name="reservation">A reservation obtained from <see cref="TryReserveGeneratedKeySlot"/>.</param>
+    /// <param name="privateKey">The generated private key, in the form the provider emitted it.</param>
+    /// <returns>The reference the key is retained under.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="privateKey"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// <paramref name="reservation"/> is not a reservation, or its slot was already filled. Both are
+    /// caller defects in this file rather than reachable request states, and neither may be tolerated:
+    /// silently overwriting a filled slot would strand the previous key beyond every release path.
+    /// </exception>
+    /// <remarks>
+    /// <b>THE RETAINED PRIVATE KEY IS NEVER LOGGED, ECHOED, DOCUMENTED OR RETURNED.</b> The legacy hands
+    /// the private half straight back through a <c>ref</c> parameter
+    /// [<c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20</c>]; the authored contract returns the
+    /// public half plus a reference to the private one instead, which is the single highest-severity
+    /// outbound decision on this surface. It also can never be this service's signing key or a
+    /// configured store entry: the value is whatever the provider just generated, so it is not read from
+    /// configuration at all, and the reference is minted rather than chosen.
+    /// </remarks>
+    internal string CommitGeneratedKey(GeneratedKeyReservation reservation, string privateKey)
+    {
+        ArgumentNullException.ThrowIfNull(privateKey);
+
+        if (!reservation.IsReserved)
+        {
+            throw new InvalidOperationException(UncommittableReservationMessage);
+        }
+
+        RetainedGeneratedKey entry = new(
+            privateKey,
+            reservation.Owner,
+            _timeProvider.GetUtcNow() + RetainedGeneratedKeyLifetime);
+
+        if (!_retained.TryAdd(reservation.Reference, entry))
+        {
+            throw new InvalidOperationException(UncommittableReservationMessage);
+        }
+
+        return reservation.Reference;
+    }
+
+    /// <summary>
+    /// Gives a reserved slot back without filling it.
+    /// </summary>
+    /// <param name="reservation">The reservation to abandon. A non-reservation is ignored.</param>
+    /// <remarks>
+    /// Called when generation fails after a slot was taken. Without it a refused size would leak a slot
+    /// per attempt and the store would fill with nothing in it, which is a denial of service assembled
+    /// entirely out of rejected requests.
+    /// </remarks>
+    internal void AbandonGeneratedKeySlot(GeneratedKeyReservation reservation)
+    {
+        if (!reservation.IsReserved)
+        {
+            return;
+        }
+
+        ReleaseOwnerSlot(reservation.Owner);
+        _ = Interlocked.Decrement(ref _reservedSlots);
+    }
+
+    /// <summary>
+    /// Releases a retained generated key at its owner's request.
+    /// </summary>
+    /// <param name="reference">The reference the caller was given.</param>
+    /// <param name="owner">The releasing caller's identity - the token's subject.</param>
+    /// <returns>
+    /// <see langword="true"/> when a key owned by that caller was released; <see langword="false"/> when
+    /// the reference names nothing retained OR names an entry belonging to a different caller.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="owner"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>THE TWO NEGATIVE CASES ARE DELIBERATELY INDISTINGUISHABLE.</b> "No such reference" and "not
+    /// yours" answer identically, because telling them apart would turn this operation into an oracle
+    /// for which references exist - and a reference is a credential-like handle. A caller learns only
+    /// about its own keys.
+    /// </para>
+    /// <para>
+    /// <b>EXPLICIT RELEASE IS WHAT MAKES THE QUOTA WORKABLE.</b> Without it a caller's only way to free
+    /// a slot is to wait out the expiry, so a provisioning sequence longer than the quota would stall
+    /// for no reason. With it, the expiry is a backstop for a caller that crashed rather than the only
+    /// mechanism.
+    /// </para>
+    /// <para>
+    /// THE VALUE ITSELF CANNOT BE WIPED. It is a <see cref="string"/>, and .NET strings are immutable,
+    /// so removal drops the last reference this service holds and nothing more. That residual belongs to
+    /// the preserved legacy signature, which returns key text rather than bytes
+    /// [<c>n_crypto.sru:L19-L20</c>], and it is recorded rather than hidden.
+    /// </para>
+    /// </remarks>
+    internal bool TryReleaseGeneratedKey(string? reference, string owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+
+        SweepExpiredGeneratedKeys();
+
+        if (string.IsNullOrEmpty(reference)
+            || !_retained.TryGetValue(reference, out RetainedGeneratedKey? entry))
+        {
+            return false;
+        }
+
+        string chargedTo = owner.Length == 0 ? UnattributedOwner : owner;
+
+        if (!string.Equals(entry.Owner, chargedTo, StringComparison.Ordinal))
+        {
+            // Not this caller's key. Answered exactly as an unknown reference is.
+            return false;
+        }
+
+        if (!_retained.TryRemove(reference, out _))
+        {
+            // Another release won the race. That caller's release freed the slot, so this one must not
+            // free it a second time.
+            return false;
+        }
+
+        ReleaseOwnerSlot(entry.Owner);
+        _ = Interlocked.Decrement(ref _reservedSlots);
+
+        return true;
+    }
+
+    /// <summary>Removes every retained key whose lifetime has elapsed.</summary>
+    /// <remarks>
+    /// Swept lazily from the reservation and resolution paths rather than by a timer: a background
+    /// service whose only job is deleting map entries would be more machinery than the problem needs,
+    /// and the sweep is O(entries) over a map bounded at
+    /// <see cref="MaximumRetainedGeneratedKeys"/>. Each removal releases the slot it held, so an expired
+    /// key frees both the global slot and its owner's quota.
+    /// </remarks>
+    private void SweepExpiredGeneratedKeys()
+    {
+        if (_retained.IsEmpty)
+        {
+            return;
+        }
+
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+
+        foreach (KeyValuePair<string, RetainedGeneratedKey> entry in _retained)
+        {
+            // THE BOUNDARY INSTANT IS INSIDE THE WINDOW, WHICH IS THE COMPARISON THE FIELD'S OWN CONTRACT
+            // STATES: RetainedGeneratedKey.ExpiresAt is documented as "the instant AFTER which the
+            // reference no longer resolves", so AT that instant it still does. A strictly-greater test
+            // here made the window exclusive at its end and closed it one tick early - invisible in
+            // production, where no caller lands on an exact tick, and a real off-by-one in a lifetime
+            // contract that the retention suite pins from both sides.
+            if (entry.Value.ExpiresAt >= now)
+            {
+                continue;
+            }
+
+            if (!_retained.TryRemove(entry.Key, out RetainedGeneratedKey? removed))
+            {
+                // Someone else removed it, and released its slot as part of doing so.
+                continue;
+            }
+
+            ReleaseOwnerSlot(removed.Owner);
+            _ = Interlocked.Decrement(ref _reservedSlots);
+        }
+    }
+
+    /// <summary>Gives one slot back to an owner's quota, removing the owner when it reaches zero.</summary>
+    /// <param name="owner">The owner whose count is decremented.</param>
+    /// <remarks>
+    /// The entry is REMOVED at zero rather than left holding a zero, so the per-owner map cannot grow
+    /// without bound across many short-lived callers - which would reintroduce the unbounded growth the
+    /// global cap exists to prevent, one map entry at a time.
+    /// </remarks>
+    private void ReleaseOwnerSlot(string owner)
+    {
+        while (_reservedPerOwner.TryGetValue(owner, out int held))
+        {
+            if (held <= 1)
+            {
+                if (_reservedPerOwner.TryRemove(new KeyValuePair<string, int>(owner, held)))
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            if (_reservedPerOwner.TryUpdate(owner, held - 1, held))
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Retains a generated private key in one step, for a caller this surface cannot attribute.
+    /// </summary>
+    /// <param name="privateKey">The provider's textual rendering of the private half.</param>
+    /// <param name="random">The entropy seam the reference's random half is drawn through.</param>
+    /// <param name="keyRef">The minted reference, or the empty string when the store refused.</param>
+    /// <returns><see langword="true"/> when the key was retained.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE GLOBAL CAP BINDS HERE AND THE PER-CALLER QUOTA DOES NOT, WHICH IS THE WHOLE DIFFERENCE FROM
+    /// <see cref="TryReserveGeneratedKeySlot"/>. A quota is a statement about one caller's share, and this
+    /// entry point has no caller to charge - so charging every ownerless retention to one bucket would cap
+    /// the whole surface at one caller's share, and exempting it from the global cap would leave the store
+    /// unbounded by the one route that names nobody. The global cap therefore applies and the quota does
+    /// not, and the entry is attributed to the same fixed anonymous owner the reservation path uses so a
+    /// release can still find it.
+    /// </para>
+    /// <para>
+    /// EXPIRED ENTRIES ARE RECLAIMED FIRST, so a store whose window has closed on its contents admits the
+    /// next retention instead of refusing it for the life of the process.
+    /// </para>
+    /// <para>
+    /// THE CAPACITY CLAIM AND THE CAP COMPARISON ARE ONE INTERLOCKED STEP, for the reason the reservation
+    /// path records: reading the map's count and then inserting is a check-then-act pair that every
+    /// concurrent caller passes, admitting as many entries beyond the cap as there are requests in flight.
+    /// A claim that overshoots is released immediately, and so is one whose insertion then fails.
     /// </para>
     /// </remarks>
     internal bool TryRetainGeneratedPrivateKey(
@@ -3874,7 +4638,9 @@ internal sealed class CryptoReferenceResolver
 
         keyRef = string.Empty;
 
-        if (_retained.Count >= MaximumRetainedGeneratedKeys)
+        SweepExpiredGeneratedKeys();
+
+        if (!TryReserveRetentionSlot())
         {
             return false;
         }
@@ -3887,8 +4653,18 @@ internal sealed class CryptoReferenceResolver
             GeneratedReferenceSeparator,
             random.GenGuid(BareIdentifierFlags));
 
-        if (!_retained.TryAdd(minted, privateKey))
+        RetainedGeneratedKey entry = new(
+            privateKey,
+            UnattributedOwner,
+            _timeProvider.GetUtcNow() + RetainedGeneratedKeyLifetime);
+
+        if (!_retained.TryAdd(minted, entry))
         {
+            // Unreachable while the interlocked ordinal is part of the reference, and released anyway:
+            // leaking the claim would shrink the usable store by one slot per collision, which is the same
+            // outage the cap exists to prevent arriving by another route.
+            ReleaseRetentionSlot();
+
             return false;
         }
 
@@ -3896,6 +4672,49 @@ internal sealed class CryptoReferenceResolver
 
         return true;
     }
+
+    /// <summary>
+    /// Claims one slot in the retained store without minting a reference for it.
+    /// </summary>
+    /// <returns><see langword="true"/> when a slot was claimed.</returns>
+    /// <remarks>
+    /// THE BARE HALF OF THE RESERVATION, for a caller that will decide later whether it has anything to
+    /// retain. Capacity is claimed by a single interlocked increment compared against the cap, so the
+    /// bound holds exactly however many callers arrive at once - taking capacity IS observing it, and no
+    /// window exists in which two callers both see the same room. A claim that overshoots is given back
+    /// immediately, leaving the counter exactly where it was.
+    /// </remarks>
+    internal bool TryReserveRetentionSlot()
+    {
+        if (Interlocked.Increment(ref _reservedSlots) <= MaximumRetainedGeneratedKeys)
+        {
+            return true;
+        }
+
+        _ = Interlocked.Decrement(ref _reservedSlots);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Releases a slot a caller reserved but did not fill.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called on every path that reserved a slot and retained nothing - an unusable key size, a generation
+    /// the provider refused, or a reference collision. Without it a refused request would consume capacity
+    /// permanently, so a service that had answered enough failures would refuse every subsequent
+    /// generation while holding no keys at all: a self-inflicted denial of service reachable by repeating
+    /// a request the service itself rejects.
+    /// </para>
+    /// <para>
+    /// It is deliberately NOT idempotent and NOT clamped at zero. Releasing a slot that was never reserved
+    /// is a defect in the caller's pairing, and clamping would hide it while quietly raising the effective
+    /// cap; the call sites pair reserve and release in a <c>try</c>/<c>finally</c> so the pairing is
+    /// structural rather than remembered.
+    /// </para>
+    /// </remarks>
+    internal void ReleaseRetentionSlot() => _ = Interlocked.Decrement(ref _reservedSlots);
 
     /// <summary>
     /// Determines whether a reference is one the deployment has published.
@@ -3961,10 +4780,11 @@ internal sealed class CryptoReferenceResolver
 /// the preserved-identifier rule that governs the <c>CRYPTO_</c> catalogue.
 /// </para>
 /// <para>
-/// THE INTEGER FORM IS REFUSED. The converter admits the two names only, so a caller cannot send
-/// <c>0</c> or <c>1</c> and cannot send a third name: the deserializer rejects the request before any
-/// handler runs. That matters because the selector governs which overload family executes, and a
-/// silently coerced selector would silently pick one.
+/// THE TWO DECLARED TOKENS ARE THE ONLY ACCEPTED FORMS, CHARACTER FOR CHARACTER. The converter admits
+/// <c>STRING</c> and <c>BLOB</c> and refuses everything else - a number, a third name, an empty string,
+/// and any other casing of either token - and it refuses them in the deserializer, before any handler
+/// runs. That matters because the selector governs which overload family executes, and a silently
+/// coerced selector would silently pick one.
 /// </para>
 /// </remarks>
 [JsonConverter(typeof(PayloadFormJsonConverter))]
@@ -3993,29 +4813,183 @@ public enum PayloadForm
 }
 
 /// <summary>
-/// Serializes <see cref="PayloadForm"/> as its declared name and refuses every other form.
+/// Reads and writes <see cref="PayloadForm"/> as exactly one of the two tokens the published document
+/// declares, and refuses every other form.
 /// </summary>
 /// <remarks>
-/// A named converter type rather than an inline attribute argument, so that the two settings are stated
-/// once and cannot drift between the operations that use them. It mirrors the converter the consuming
-/// service declares for the same enumeration, which is what keeps the two ends of this contract in
-/// agreement about the wire tokens.
+/// <para>
+/// HAND-WRITTEN RATHER THAN DERIVED FROM THE STOCK STRING-ENUM CONVERTER, AND THE REASON IS THE ONE
+/// SETTING THAT CONVERTER DOES NOT EXPOSE: it matches token names CASE-INSENSITIVELY by construction.
+/// Measured on this toolchain, a converter derived from it with a null naming policy and integer values
+/// refused still accepts <c>"string"</c>, <c>"Blob"</c> and <c>"sTRING"</c>. The published document
+/// declares <c>enum: [STRING, BLOB]</c>, so a document-validating client refuses all three, and
+/// accepting a token the document forbids is a divergence between this service and its own contract
+/// (CWE-20). An ordinal comparison against the two declared tokens is the only shape that closes it.
+/// </para>
+/// <para>
+/// A NAMED CONVERTER TYPE RATHER THAN AN INLINE ATTRIBUTE ARGUMENT, so the decision is stated once and
+/// cannot drift between the operations that use it, and so it holds for EVERY reader and writer of the
+/// enumeration - including one added later that does not reuse this service's configured serializer
+/// options. It mirrors the converter the consuming service declares for the same enumeration, which is
+/// what keeps the two ends of this contract in agreement about the wire tokens.
+/// </para>
+/// <para>
+/// THE GENERATED DOCUMENT'S SCHEMA FOR THIS TYPE IS RESTORED SEPARATELY, and that is a consequence of
+/// this choice rather than an oversight. The schema exporter can describe the stock enum converter and
+/// cannot describe a custom one, so it emits an UNCONSTRAINED schema for a type carrying this
+/// attribute. <see cref="PayloadFormSchemaTransformer"/> puts the two declared tokens back, so the
+/// generated document keeps saying what the authored one says.
+/// </para>
+/// <para>
+/// NULL IS NOT THIS CONVERTER'S CONCERN. Every request record models the member as nullable for the
+/// contract-fidelity reason recorded on those records, and the serializer's own nullable wrapper answers
+/// an absent or null member without reaching this type - so an absent selector remains the observable
+/// state the handlers answer with the contract's own bad-request body.
+/// </para>
 /// </remarks>
-internal sealed class PayloadFormJsonConverter : JsonStringEnumConverter<PayloadForm>
+internal sealed class PayloadFormJsonConverter : JsonConverter<PayloadForm>
 {
-    /// <summary>
-    /// Initializes a new instance of the <see cref="PayloadFormJsonConverter"/> class with the integer
-    /// form refused.
-    /// </summary>
+    /// <summary>The token that selects the string-shaped legacy overload family.</summary>
+    internal const string StringToken = nameof(PayloadForm.STRING);
+
+    /// <summary>The token that selects the blob-shaped legacy overload family.</summary>
+    internal const string BlobToken = nameof(PayloadForm.BLOB);
+
+    /// <summary>The refusal text, which names the accepted set and echoes nothing the caller sent.</summary>
     /// <remarks>
-    /// A <see langword="null"/> naming policy keeps the member names EXACTLY as declared - the web
-    /// defaults would otherwise camel-case them into <c>sTRING</c> and <c>bLOB</c>, which the published
-    /// document does not declare. <c>allowIntegerValues: false</c> is the half that closes the numeric
-    /// escape hatch.
+    /// The rejected token is deliberately NOT quoted back. A deserialization failure is answered as the
+    /// contract's bad request, and echoing caller-supplied bytes into a response body is the one habit
+    /// that turns a validation message into a reflection vector.
     /// </remarks>
-    public PayloadFormJsonConverter()
-        : base(namingPolicy: null, allowIntegerValues: false)
+    private const string RefusalMessage =
+        "The payload form must be the JSON string \"" + StringToken + "\" or \"" + BlobToken
+            + "\", spelled exactly as the contract declares it.";
+
+    /// <summary>Reads one of the two declared tokens.</summary>
+    /// <param name="reader">The reader positioned on the value.</param>
+    /// <param name="typeToConvert">The requested type, always <see cref="PayloadForm"/>.</param>
+    /// <param name="options">The serializer options, which this converter deliberately ignores.</param>
+    /// <returns>The selected overload family.</returns>
+    /// <exception cref="JsonException">
+    /// The value is not a JSON string, or is a string that is not one of the two declared tokens.
+    /// </exception>
+    /// <remarks>
+    /// The options are ignored ON PURPOSE. A naming policy, a case-insensitivity setting or a number
+    /// handling mode configured on the host would otherwise be able to change what this contract accepts,
+    /// and a contract whose accepted values depend on host configuration is not a contract.
+    /// </remarks>
+    public override PayloadForm Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
     {
+        if (reader.TokenType != JsonTokenType.String)
+        {
+            throw new JsonException(RefusalMessage);
+        }
+
+        string? token = reader.GetString();
+
+        if (string.Equals(token, StringToken, StringComparison.Ordinal))
+        {
+            return PayloadForm.STRING;
+        }
+
+        if (string.Equals(token, BlobToken, StringComparison.Ordinal))
+        {
+            return PayloadForm.BLOB;
+        }
+
+        throw new JsonException(RefusalMessage);
+    }
+
+    /// <summary>Writes the declared token for the value.</summary>
+    /// <param name="writer">The writer to write to.</param>
+    /// <param name="value">The overload family to write.</param>
+    /// <param name="options">The serializer options, which this converter deliberately ignores.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="writer"/> is <see langword="null"/>.</exception>
+    /// <exception cref="JsonException">
+    /// The value names no declared member, which .NET permits for any enumeration and which this
+    /// contract does not.
+    /// </exception>
+    /// <remarks>
+    /// THE UNDEFINED ARM THROWS RATHER THAN EMITTING A NUMBER. An enumeration in .NET does not restrict a
+    /// value to its declared members, and a numeric form on the wire is precisely what the read half
+    /// refuses - so emitting one would publish a value this contract's own reader would reject.
+    /// </remarks>
+    public override void Write(Utf8JsonWriter writer, PayloadForm value, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+
+        writer.WriteStringValue(value switch
+        {
+            PayloadForm.STRING => StringToken,
+            PayloadForm.BLOB => BlobToken,
+            _ => throw new JsonException(RefusalMessage),
+        });
+    }
+}
+
+/// <summary>
+/// Restores the two declared payload-form tokens on the generated contract document.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THIS EXISTS BECAUSE OF A TOOLCHAIN LIMIT RATHER THAN A DESIGN PREFERENCE, and the limit is worth
+/// stating so a later reader does not delete the transformer as redundant. The document generator builds
+/// each schema from the serializer's type information, and the exporter can only describe converters it
+/// recognises: a type carrying a CUSTOM converter is emitted as an unconstrained schema, because the
+/// exporter has no way to ask a converter what it accepts. Measured on this toolchain, replacing the
+/// stock string-enum converter with <see cref="PayloadFormJsonConverter"/> turns this member's generated
+/// schema from the two declared tokens into "anything".
+/// </para>
+/// <para>
+/// IT RESTATES THE AUTHORED DOCUMENT AND NOTHING ELSE.
+/// shared/PowerFramework.Contracts/OpenApi/security.v1.yaml declares this member as
+/// <c>type: string</c> with <c>enum: [STRING, BLOB]</c>; that file is authoritative, and if it and this
+/// transformer ever disagree, that file wins and this one is the defect. Nothing about the member's
+/// name, its requiredness or any other schema is touched, and no other type is inspected.
+/// </para>
+/// </remarks>
+internal sealed class PayloadFormSchemaTransformer : IOpenApiSchemaTransformer
+{
+    /// <summary>Applies the declared token set to the payload-form schema.</summary>
+    /// <param name="schema">The schema the generator produced.</param>
+    /// <param name="context">The generation context, which names the type the schema describes.</param>
+    /// <param name="cancellationToken">A token that cancels generation.</param>
+    /// <returns>A completed task; the work is synchronous and touches only an in-memory schema.</returns>
+    /// <remarks>
+    /// THE NULLABLE FORM IS MATCHED AS WELL AS THE BARE ONE, AND THAT IS NOT DEFENSIVE. Every request
+    /// record declares the selector as nullable, for the contract-fidelity reason recorded on those
+    /// records, so the type the generator describes is the NULLABLE one - measured on this toolchain, a
+    /// test against the bare type alone matches nothing at all and the component schema is emitted empty.
+    /// The bare arm is kept because the type is public and a later request record may declare it
+    /// non-nullable.
+    /// </remarks>
+    public Task TransformAsync(
+        OpenApiSchema schema,
+        OpenApiSchemaTransformerContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        ArgumentNullException.ThrowIfNull(context);
+
+        Type described = context.JsonTypeInfo.Type;
+
+        if ((Nullable.GetUnderlyingType(described) ?? described) != typeof(PayloadForm))
+        {
+            return Task.CompletedTask;
+        }
+
+        schema.Type = JsonSchemaType.String;
+
+        schema.Enum =
+        [
+            PayloadFormJsonConverter.StringToken,
+            PayloadFormJsonConverter.BlobToken,
+        ];
+
+        return Task.CompletedTask;
     }
 }
 
@@ -4089,14 +5063,17 @@ internal interface ISymmetricCipherRequest
 public sealed record HashRequest
 {
     /// <summary>The payload, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
     /// <summary>The overload-family selector.</summary>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
     /// <summary>The hash selector, from the six published members.</summary>
+    [Required]
     [JsonPropertyName("hashType")]
     public long? HashType { get; init; }
 }
@@ -4114,10 +5091,12 @@ public sealed record HashRequest
 public sealed record HmacRequest
 {
     /// <summary>The payload, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
     /// <summary>The overload-family selector, which also selects the resolved key's form.</summary>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
@@ -4129,10 +5108,12 @@ public sealed record HmacRequest
     /// which a key, a passphrase or a PEM block could be supplied instead - that is the contract-level
     /// secrets rule made structural rather than enforced by review.
     /// </remarks>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
     /// <summary>The hash selector, from the five published members a key applies to.</summary>
+    [Required]
     [JsonPropertyName("hashType")]
     public long? HashType { get; init; }
 }
@@ -4155,10 +5136,12 @@ public sealed record HashFileRequest
     /// operator names the path, so traversal and absolute-path escape are not caller-reachable
     /// conditions - there is no caller-controlled component of the path to traverse with.
     /// </remarks>
+    [Required]
     [JsonPropertyName("fileRef")]
     public string? FileRef { get; init; }
 
     /// <summary>The hash selector, from the six published members.</summary>
+    [Required]
     [JsonPropertyName("hashType")]
     public long? HashType { get; init; }
 }
@@ -4175,14 +5158,17 @@ public sealed record HashFileRequest
 public sealed record HmacFileRequest
 {
     /// <summary>An opaque handle to a file. See <see cref="HashFileRequest.FileRef"/>.</summary>
+    [Required]
     [JsonPropertyName("fileRef")]
     public string? FileRef { get; init; }
 
     /// <summary>An opaque handle to the key. See <see cref="HmacRequest.KeyRef"/>.</summary>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
     /// <summary>The hash selector, from the five published members a key applies to.</summary>
+    [Required]
     [JsonPropertyName("hashType")]
     public long? HashType { get; init; }
 }
@@ -4217,6 +5203,7 @@ public sealed record HmacFileRequest
 public sealed record SymEncryptRequest : ISymmetricCipherRequest
 {
     /// <summary>The plaintext, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
@@ -4224,10 +5211,12 @@ public sealed record SymEncryptRequest : ISymmetricCipherRequest
     /// The overload-family selector, which governs the payload's interpretation, the result's form, and
     /// the form the resolved key and vector are presented in.
     /// </summary>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
     /// <summary>An opaque handle to the key. See <see cref="HmacRequest.KeyRef"/>.</summary>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
@@ -4252,6 +5241,7 @@ public sealed record SymEncryptRequest : ISymmetricCipherRequest
     /// own; the boundary screens the value into the narrower domain and carries the discrepancy rather
     /// than tidying either side of it.
     /// </remarks>
+    [Required]
     [JsonPropertyName("cipherType")]
     public long? CipherType { get; init; }
 
@@ -4282,14 +5272,17 @@ public sealed record SymEncryptRequest : ISymmetricCipherRequest
 public sealed record SymDecryptRequest : ISymmetricCipherRequest
 {
     /// <summary>The ciphertext, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
     /// <summary>The overload-family selector. See <see cref="SymEncryptRequest.PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
     /// <summary>An opaque handle to the key. See <see cref="HmacRequest.KeyRef"/>.</summary>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
@@ -4298,6 +5291,7 @@ public sealed record SymDecryptRequest : ISymmetricCipherRequest
     public string? IvRef { get; init; }
 
     /// <summary>The cipher selector. See <see cref="SymEncryptRequest.CipherType"/>.</summary>
+    [Required]
     [JsonPropertyName("cipherType")]
     public long? CipherType { get; init; }
 
@@ -4328,6 +5322,7 @@ public sealed record SymDecryptRequest : ISymmetricCipherRequest
 public sealed record RsaCipherRequest
 {
     /// <summary>The payload, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
@@ -4339,6 +5334,7 @@ public sealed record RsaCipherRequest
     /// one of the 12 declarations at [n_crypto.sru:L62-L73], so the resolved material is used as text
     /// in both directions.
     /// </remarks>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
@@ -4348,6 +5344,7 @@ public sealed record RsaCipherRequest
     /// HALF A REFERENCE HOLDS IS THE OPERATOR'S CONFIGURATION RATHER THAN A MEMBER OF THIS SCHEMA, so
     /// there is no member here that could be used to ask this service for a private key.
     /// </remarks>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
@@ -4372,10 +5369,12 @@ public sealed record RsaCipherRequest
 public sealed record RsaSignRequest
 {
     /// <summary>The payload to sign, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
     /// <summary>The overload-family selector, which governs the signature's form.</summary>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
@@ -4387,10 +5386,12 @@ public sealed record RsaSignRequest
     /// resolved against the configured key store, which is a different setting from the issuer's
     /// signing material; no member of this schema addresses the latter.
     /// </remarks>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
     /// <summary>The hash selector, from the five published members a signature applies to.</summary>
+    [Required]
     [JsonPropertyName("hashType")]
     public long? HashType { get; init; }
 }
@@ -4408,10 +5409,12 @@ public sealed record RsaSignRequest
 public sealed record RsaVerifyRequest
 {
     /// <summary>The payload the signature covers, interpreted according to <see cref="PayloadForm"/>.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
     /// <summary>The overload-family selector, which governs BOTH the payload's and the signature's form.</summary>
+    [Required]
     [JsonPropertyName("payloadForm")]
     public PayloadForm? PayloadForm { get; init; }
 
@@ -4423,14 +5426,17 @@ public sealed record RsaVerifyRequest
     /// stands here as an ordinary member rather than behind a reference. It is nevertheless never echoed
     /// in a response or a log record, because it is caller data with no place in either.
     /// </remarks>
+    [Required]
     [JsonPropertyName("signature")]
     public string? Signature { get; init; }
 
     /// <summary>An opaque handle to the verification key.</summary>
+    [Required]
     [JsonPropertyName("keyRef")]
     public string? KeyRef { get; init; }
 
     /// <summary>The hash selector, from the five published members a signature applies to.</summary>
+    [Required]
     [JsonPropertyName("hashType")]
     public long? HashType { get; init; }
 }
@@ -4461,6 +5467,7 @@ public sealed record GenRsaKeyRequest
     /// convenience values sit inside it. IT IS NOT A CRYPTOGRAPHIC BOUND: a value the platform will not
     /// generate is refused by the platform, which is asked rather than second-guessed from a table.
     /// </remarks>
+    [Required]
     [JsonPropertyName("bits")]
     public long? Bits { get; init; }
 
@@ -4495,6 +5502,7 @@ public sealed record RandomBlobRequest
     /// caller cannot detect, and it is precisely the defect that survives every test and fails in
     /// production.
     /// </remarks>
+    [Required]
     [JsonPropertyName("size")]
     public long? Size { get; init; }
 }
@@ -4511,6 +5519,7 @@ public sealed record RandomBlobRequest
 public sealed record RndStringRequest
 {
     /// <summary>The number of characters to draw. See <see cref="RandomBlobRequest.Size"/>.</summary>
+    [Required]
     [JsonPropertyName("size")]
     public long? Size { get; init; }
 
@@ -4560,6 +5569,7 @@ public sealed record GuidRequest
 public sealed record StringToBlobRequest
 {
     /// <summary>The encoded text to decode.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
@@ -4570,6 +5580,7 @@ public sealed record StringToBlobRequest
     /// This is the LEGACY encoding argument and is not the JSON transport encoding. The two answer
     /// different questions, and the response carries its bytes as base64 whichever value is chosen here.
     /// </remarks>
+    [Required]
     [JsonPropertyName("encoding")]
     public long? Encoding { get; init; }
 }
@@ -4586,10 +5597,12 @@ public sealed record StringToBlobRequest
 public sealed record BlobToStringRequest
 {
     /// <summary>The bytes to encode, carried as base64 for JSON transport.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 
     /// <summary>The encoding selector. See <see cref="StringToBlobRequest.Encoding"/>.</summary>
+    [Required]
     [JsonPropertyName("encoding")]
     public long? Encoding { get; init; }
 }
@@ -4606,6 +5619,7 @@ public sealed record BlobToStringRequest
 public sealed record BlobReverseRequest
 {
     /// <summary>The bytes to reverse, carried as base64 for JSON transport.</summary>
+    [Required]
     [JsonPropertyName("data")]
     public string? Data { get; init; }
 }
@@ -4733,3 +5747,299 @@ public sealed record BlobReverseResponse(
     [property: JsonPropertyName("data")] string Data,
     [property: JsonPropertyName("succeeded")] bool Succeeded);
 
+/// <summary>
+/// The authorization policy the 17 cryptographic operations of contract C-02 are served under: who may
+/// call, and what they must hold.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS EXISTS. The group used to require an authenticated principal and nothing more, so any holder of
+/// any token minted for this service's audience could drive keyed HMAC, symmetric encryption and
+/// decryption, RSA signing and RSA key generation - regardless of what the credential was obtained for and
+/// regardless of which caller it was minted for. Combined with an issuer that granted every requested scope
+/// to any caller whose certificate chained to the configured authority, a credential obtained for one
+/// purpose reached the whole cryptographic surface (CWE-862, CWE-863).
+/// </para>
+/// <para>
+/// THE SCOPE NAME IS NOT INVENTED HERE. DataServices requests exactly <c>security.crypto</c> for this edge,
+/// and contract C-02 states who the surface is for: Security serves DataServices. Both halves are enforced
+/// because either alone leaves a hole - scope without subject admits any caller the issuer serves as long as
+/// it holds the scope, and subject without scope lets the permitted caller reach the surface with a
+/// credential obtained for something else entirely.
+/// </para>
+/// <para>
+/// A SCOPE CLAIM IS SPACE-DELIMITED AND MUST BE SPLIT, which is why this is an assertion rather than
+/// <c>RequireClaim</c>: RFC 6749 carries the granted set as ONE claim holding a space-delimited list, so a
+/// claim-equality requirement would demand a token whose entire scope claim is that single value.
+/// </para>
+/// <para>
+/// THE PERMITTED-CALLER ROSTER IS THE ISSUANCE ROSTER READ FROM THE OTHER SIDE. It is derived from the
+/// deployment's grant matrix - <c>Security:CallerAuthorizations</c> and <c>Security:Callers</c>, whose UNION
+/// is what the issuer enforces - by asking whether that matrix would have minted THIS caller THIS scope for
+/// the audience the caller is presenting. So the deployment states the topology ONCE and both the issuing
+/// decision and the receiving decision follow from it. A second, independently maintained list would be a
+/// second source of truth able to drift from the first, and a drift in this direction is silent: the issuer
+/// would mint a credential the receiver refuses. Reading only ONE of the two shapes is that same drift in
+/// miniature, which is why both are consulted.
+/// </para>
+/// <para>
+/// NOTHING HERE IS EXEMPT AND NOTHING IS CONFIGURABLE AWAY. There is no environment test, no anonymous
+/// fallback and no switch: a bypass that exists only in development is still a bypass, and it would make the
+/// local build disagree with the published contract.
+/// </para>
+/// </remarks>
+internal static class CryptoCallerAuthorization
+{
+    /// <summary>The scope contract C-02 is served under.</summary>
+    internal const string Scope = "security.crypto";
+
+    /// <summary>The policy name the cryptographic group is mapped under.</summary>
+    internal const string PolicyName = "security:crypto";
+
+    /// <summary>The claim RFC 6749 carries the granted scope set in.</summary>
+    private const string ScopeClaimName = "scope";
+
+    /// <summary>The claim the issuer stamps the caller identity into.</summary>
+    private const string SubjectClaimName = "sub";
+
+    /// <summary>The claim the issuer stamps the addressed audience into.</summary>
+    private const string AudienceClaimName = "aud";
+
+    /// <summary>
+    /// Requires an authenticated caller that this service's own issuance roster admits for its own
+    /// audience, and that holds the cryptographic scope.
+    /// </summary>
+    /// <param name="builder">The policy being built.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="builder"/> is <see langword="null"/>.</exception>
+    internal static void Configure(AuthorizationPolicyBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        _ = builder
+            .RequireAuthenticatedUser()
+            .RequireAssertion(static context =>
+                HoldsScope(context.User) && IsPermittedCaller(context.User, context.Resource));
+    }
+
+    /// <summary>
+    /// Reports whether the principal's scope claim carries the cryptographic scope.
+    /// </summary>
+    /// <param name="user">The established principal.</param>
+    /// <returns><see langword="true"/> when the scope is present.</returns>
+    /// <remarks>
+    /// Every scope claim is split, not just the first, because a token may legitimately carry the set as
+    /// several claims and a check reading only the first would refuse a credential the issuer considers
+    /// sufficient. Comparison is ORDINAL, because RFC 6749 scope tokens are case-sensitive.
+    /// </remarks>
+    private static bool HoldsScope(ClaimsPrincipal user)
+    {
+        foreach (Claim claim in user.FindAll(ScopeClaimName))
+        {
+            foreach (string granted in claim.Value.Split(
+                ' ',
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (string.Equals(granted, Scope, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reports whether this service's issuance roster grants the principal's subject the cryptographic
+    /// scope for the audience the presented token was minted for.
+    /// </summary>
+    /// <param name="user">The established principal.</param>
+    /// <param name="resource">The authorization resource, which is the HTTP context for an endpoint.</param>
+    /// <returns><see langword="true"/> when the caller is permitted.</returns>
+    /// <remarks>
+    /// <para>
+    /// AN UNRESOLVABLE ROSTER REFUSES. The resource is the HTTP context for every endpoint this service
+    /// maps, so the options are always reachable in production; a resource of another shape can only mean
+    /// the policy was evaluated outside a request, and refusing is the correct answer there rather than
+    /// admitting a caller whose permissions could not be read.
+    /// </para>
+    /// <para>
+    /// THE AUDIENCE COMES FROM THE TOKEN, NOT FROM A CONFIGURATION KEY, and that is a deliberate choice
+    /// with two consequences. First, the bearer handler has ALREADY established that the presented
+    /// audience is one this service accepts - re-reading the declared identity here would either restate
+    /// that check or, when a deployment relies on the documented roster fallback and declares no inbound
+    /// identity of its own, silently refuse the entire cryptographic surface while the authenticated ping
+    /// route kept answering. Second, it makes the question exact: not "is this caller known?" but "would
+    /// this service have minted THIS caller THIS scope for THE AUDIENCE it is presenting?" - which is the
+    /// issuance decision read from the receiving side, per (caller, audience) pair rather than per caller.
+    /// </para>
+    /// <para>
+    /// THE GRANT'S OWN SCOPE LIST IS CONSULTED AS WELL AS THE CLAIM. The claim check proves the credential
+    /// carries the scope; this proves the deployment ever permitted that pairing. They are not redundant:
+    /// a token minted before a grant was narrowed still carries what it was granted then, and the roster
+    /// is what the deployment means now.
+    /// </para>
+    /// </remarks>
+    private static bool IsPermittedCaller(ClaimsPrincipal user, object? resource)
+    {
+        if (resource is not HttpContext http)
+        {
+            return false;
+        }
+
+        string? subject = user.FindFirst(SubjectClaimName)?.Value
+            ?? user.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+
+        if (string.IsNullOrEmpty(subject))
+        {
+            return false;
+        }
+
+        SecurityOptions configured = http.RequestServices
+            .GetRequiredService<IOptions<SecurityOptions>>()
+            .Value;
+
+        // ------------------------------------------------------------------------------------------
+        // BOTH AUTHORING SHAPES ARE CONSULTED, BECAUSE THE ISSUER ENFORCES THEIR UNION.
+        //
+        // `Security:Callers` nests each caller's grants under its identity and `Security:CallerAuthorizations`
+        // states one flat (caller, audience, scopes) row at a time; TokenIssuer folds the two into ONE matrix
+        // and decides from that, so a deployment may author either or both. Reading only the nested shape -
+        // which this used to do - refused the ENTIRE cryptographic surface for every caller of any deployment
+        // that stated its matrix in flat rows, while that same deployment's issuer happily minted the
+        // credential being refused. That is the worst shape this drift can take: the issuing side and the
+        // receiving side disagree, the mint succeeds, the call is refused, and nothing names the cause.
+        //
+        // THE MATCH IS EXACT AND PER PAIR IN BOTH SHAPES. Subject compared ordinally against the row's
+        // caller, audience against an audience claim the token actually carries, and the cryptographic
+        // scope against the row's own permitted set - so the question stays "would this service have minted
+        // THIS caller THIS scope for THE AUDIENCE it is presenting".
+        // ------------------------------------------------------------------------------------------
+        foreach (SecurityCallerOptions caller in configured.Callers)
+        {
+            if (caller is null || !string.Equals(caller.Identity?.Trim(), subject, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            {
+                if (grant is not null && GrantAdmits(grant.Audience, grant.Scopes, user))
+                {
+                    return true;
+                }
+            }
+        }
+
+        foreach (CallerAuthorizationOptions row in configured.CallerAuthorizations)
+        {
+            if (row is null || !string.Equals(row.Caller?.Trim(), subject, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (GrantAdmits(row.Audience, row.Scopes, user))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reports whether one grant covers both an audience the principal presents and the cryptographic
+    /// scope.
+    /// </summary>
+    /// <param name="grantedAudience">The audience the grant under consideration permits.</param>
+    /// <param name="grantedScopes">The scopes that grant permits.</param>
+    /// <param name="user">The established principal.</param>
+    /// <returns><see langword="true"/> when the grant covers both.</returns>
+    /// <remarks>
+    /// Every audience claim is examined, because a token addressed to more than one audience carries one
+    /// claim per member. Comparison is ORDINAL throughout: an audience is an opaque protocol identifier
+    /// and a scope token is case-sensitive by RFC 6749, so folding either by case would admit a spelling
+    /// the deployment never wrote.
+    /// </remarks>
+    private static bool GrantAdmits(
+        string? grantedAudience,
+        IList<string> grantedScopes,
+        ClaimsPrincipal user)
+    {
+        string granted = grantedAudience?.Trim() ?? string.Empty;
+
+        if (granted.Length == 0)
+        {
+            return false;
+        }
+
+        bool addressed = false;
+
+        foreach (Claim claim in user.FindAll(AudienceClaimName))
+        {
+            if (string.Equals(claim.Value.Trim(), granted, StringComparison.Ordinal))
+            {
+                addressed = true;
+                break;
+            }
+        }
+
+        if (!addressed)
+        {
+            return false;
+        }
+
+        foreach (string scope in grantedScopes)
+        {
+            if (string.Equals(scope?.Trim(), Scope, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// One retained generated private key: the material, the caller it is charged to, and when it stops
+/// resolving.
+/// </summary>
+/// <param name="PrivateKey">The generated private key, in the form the provider emitted it.</param>
+/// <param name="Owner">The caller identity the slot is charged to - the token's subject.</param>
+/// <param name="ExpiresAt">The instant after which the reference no longer resolves.</param>
+/// <remarks>
+/// <para>
+/// A RECORD WITH NO CUSTOM RENDERING IS DELIBERATE HERE, AND SO IS THE FACT THAT IT IS INTERNAL. A
+/// positional record synthesizes a <c>ToString</c> that would print every member - including the private
+/// key - into any log or diagnostic that stringified it. That is acceptable ONLY because this type never
+/// leaves the resolver: it is internal, it is never returned from a public member, it is never bound to a
+/// response and it is never logged. Nothing in this file interpolates an instance of it.
+/// </para>
+/// <para>
+/// The owner is carried on the ENTRY rather than only in the per-owner counter, because a release must
+/// verify ownership before removing - and a counter cannot answer "whose is this?".
+/// </para>
+/// </remarks>
+internal sealed record RetainedGeneratedKey(string PrivateKey, string Owner, DateTimeOffset ExpiresAt);
+
+/// <summary>
+/// One reserved slot in the retained generated-key store: the reference the slot will answer to and the
+/// caller it is charged against.
+/// </summary>
+/// <param name="Reference">The opaque reference the committed key will resolve under.</param>
+/// <param name="Owner">The caller identity whose per-caller ceiling the slot counts against.</param>
+/// <remarks>
+/// RESERVED BEFORE THE KEY EXISTS, which is the point of separating the reservation from the key. RSA
+/// generation is the expensive step, so the capacity claim is made first and given back on every path that
+/// does not commit - a refusal then costs nothing, and the cap cannot be overshot by concurrent callers
+/// whose generations were already in flight.
+/// </remarks>
+internal readonly record struct GeneratedKeyReservation(string Reference, string Owner)
+{
+    /// <summary>The absence of a reservation.</summary>
+    public static GeneratedKeyReservation None { get; } = new(string.Empty, string.Empty);
+
+    /// <summary>Whether this value names a reserved slot.</summary>
+    public bool IsReserved => Reference.Length > 0;
+}

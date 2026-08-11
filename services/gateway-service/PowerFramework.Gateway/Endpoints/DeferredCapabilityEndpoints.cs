@@ -66,14 +66,20 @@
 //      machine-readable shape, and the schema at :L4524-L4585 fixes four of its five members as
 //      constants. The document is the wire authority, so the document is followed.
 //
-//  D2  CATCH-ALL TEMPLATE: the contract spells each path `/v1/<area>/{path}` with the ReservedPath
-//      parameter carrying `allowReserved: true` (:L2649-L2660), which is how OpenAPI expresses a
-//      path parameter whose value may itself contain '/'. The ASP.NET Core equivalent of that
-//      single OpenAPI parameter is a catch-all route parameter, so each template below is
-//      `/v1/<area>/{**path}`. This is a route FAMILY rather than a single route, which is what makes
+//  D2  CATCH-ALL TEMPLATE: the contract spells each path `/v1/<area>/{path}` and each template below
+//      is `/v1/<area>/{**path}`. This is a route FAMILY rather than a single route, which is what makes
 //      a Phase 2 consumer's eventual URL shape legible; it also means a nested path resolves here
 //      instead of falling through to a generic 404, and the bare prefix resolves here too because a
 //      catch-all segment matches the empty remainder.
+//      OPENAPI CANNOT DESCRIBE THAT, AND THE GAP IS DECLARED RATHER THAN FAKED. An OpenAPI path
+//      parameter matches a single segment, and there is no conformant field that widens it. An earlier
+//      revision set `allowReserved` on the ReservedPath parameter to stand in for the difference; that
+//      was INVALID - OpenAPI 3.1 defines `allowReserved` for `in: query` parameters only, so the
+//      document failed validation while still not expressing catch-all semantics. Both this file and
+//      gateway.v1.yaml therefore carry the behaviour in the `x-catch-all` vendor extension attached to
+//      the parameter, which states the route template, the nested-segment capture, the empty-remainder
+//      match and the every-method answer. A vendor extension is metadata about how the URL is
+//      templated; it is not a request schema, and no operation here declares one.
 //
 //  D3  GET AND POST ARE MAPPED SEPARATELY, AND EVERY OTHER METHOD IS MAPPED TOO. The contract
 //      declares two operations per path with DISTINCT operation identifiers - `reservedDesignSystem`
@@ -92,17 +98,23 @@
 //
 //  D4  THE HANDLER IS TYPED `IResult`, DELIBERATELY. A concrete JsonHttpResult<T> return type is an
 //      endpoint metadata provider and would contribute an inferred 200 response to the generated
-//      document. The set of responses these operations DECLARE is exactly {501} - a second declared
-//      status would suggest the route evaluates something before answering, and a 2xx would suggest
-//      a deferred service had been built. Returning IResult suppresses that inference, and the sole
-//      declared response is supplied explicitly by Produces<ReservedRouteBody>(501).
-//      "DECLARED" IS DOING WORK IN THAT SENTENCE, AND D5 IS WHY. The 401 an unauthenticated caller
-//      observably receives is NOT declared here and must not be: it is produced by the security
-//      scheme before this handler is reached, so declaring it would attribute to the route an
-//      outcome the route does not compute. gateway.v1.yaml publishes that 401 once, machine-readably,
-//      in its document-level `x-cross-cutting-responses` block, and states on each of the eight
-//      operations that 501 is the AUTHENTICATED outcome - so the difference between what is declared
-//      and what is observable is documented rather than left for a consumer to discover.
+//      document. NO 2xx MAY APPEAR: one would say a deferred service had been built. Returning IResult
+//      suppresses that inference, and every declared response is then supplied explicitly.
+//      THE DECLARED SET IS {401, 501}, WHICH IS WHAT gateway.v1.yaml AUTHORS AND WHAT THE CONTRACT
+//      TESTS ASSERT. 501 is supplied by Produces<ReservedRouteBody>(501) and 401 by
+//      ProducesProblem(401, application/problem+json), matching the shared Unauthorized response the
+//      authored document references. The two are not two outcomes of one handler: the 401 is the
+//      pre-handler refusal (D5) and the 501 is the only result the handler computes - unconditionally,
+//      for every method and every path remainder, with nothing evaluated first.
+//      AN EARLIER REVISION DECLARED {501} ALONE, on the reasoning that a status produced by the
+//      security scheme is not a response this ROUTE computes. That is right about the origin and wrong
+//      about the obligation: a client generated from a set that omits 401 is told these operations
+//      cannot return the status they demonstrably do return, and a conformance tool checking response
+//      coverage reports a violation against a correct server. Declaring the pre-handler refusal costs
+//      nothing about unconditionality, so it is declared.
+//      WHAT WOULD STILL BE A VIOLATION, so the line stays auditable: any 2xx, and any 4xx OTHER than
+//      that 401 - a 400, a 404 or a 409 would each say the route inspects the request before
+//      answering. Neither appears.
 //
 //  D5  AUTHENTICATED, WITH THE GUARD ANSWERING FIRST. gateway.v1.yaml sets a document-level bearer
 //      requirement that exactly one operation overrides - anonymous GET /health - and states that the
@@ -111,15 +123,14 @@
 //      means an anonymous request is answered 401 by the authentication middleware and never reaches
 //      the 501. That ordering is asserted from the outside by
 //      tests/e2e/specs/deferred-routes.spec.ts, which requires 401 and explicitly NOT 501 for an
-//      anonymous probe.
-//      THE 401 IS DELIBERATELY NOT A DECLARED RESPONSE OF THESE OPERATIONS - it is a cross-cutting
-//      concern of the security scheme rather than something the route produces - AND THE CONTRACT NOW
-//      SAYS SO IN A FORM A CONSUMER AND A GENERATOR CAN BOTH READ. gateway.v1.yaml carries an
-//      `x-cross-cutting-responses` declaration at document level naming the status, the scheme that
-//      produces it, the fact that it is evaluated before the route handler, and that the reserved
-//      families do not enumerate it. Without that declaration the contract asserted a single-status
-//      result set with nothing anywhere to reconcile it against the 401 this mapping guarantees, and a
-//      consumer could reasonably have concluded the status was impossible on these paths.
+//      anonymous probe, and from the inside by DeferredRouteTests.
+//      THE ORIGIN OF THAT 401 IS PUBLISHED SEPARATELY FROM ITS ENUMERATION, because the two say
+//      different things. gateway.v1.yaml carries an `x-cross-cutting-responses` declaration at document
+//      level naming the status, the scheme that produces it, and the fact that it is evaluated before
+//      any route handler; each guarded operation - these eight included - additionally enumerates the
+//      response so that its own set is complete. A consumer needs both: the enumeration to generate a
+//      client that can handle the status, and the origin declaration to know that receiving it says
+//      nothing about whether the operation evaluated anything.
 //
 //  D6  WHAT THE `route` MEMBER CARRIES: the request path, and never the query string. Two contract
 //      statements bear on it. The ReservedPath parameter says its value "is echoed in the `route`
@@ -151,6 +162,7 @@
 //  so none may be asserted.
 // ==============================================================================================
 
+using System.Net.Mime;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.OpenApi;
@@ -205,6 +217,14 @@ public static class DeferredCapabilityEndpoints
     /// </summary>
     private const string ReservedMediaType = "application/json";
 
+    /// <summary>The media type every refusal on this service carries.</summary>
+    /// <remarks>
+    /// Spelled here rather than taken from <c>MediaTypeNames.Application.ProblemJson</c> so that this file
+    /// keeps its existing four using directives and its media types read from one place; the value is the
+    /// same, and <c>gateway.v1.yaml</c>'s shared <c>Unauthorized</c> response declares exactly it.
+    /// </remarks>
+    private const string ProblemMediaType = "application/problem+json";
+
     /// <summary>
     /// Operation-identifier prefix, so that a stem composed with the deferred service name reproduces
     /// the contract's own spelling - for example <c>reserved</c> + <c>DesignSystem</c> + <c>Post</c>,
@@ -241,7 +261,17 @@ public static class DeferredCapabilityEndpoints
         "The remainder of the requested path. Present so that each reserved entry is a route FAMILY "
         + "rather than a single route, which is what makes the eventual URL shape of the deferred "
         + "service legible from this contract. Its value is echoed in the route field of the 501 body "
-        + "and is otherwise unused, because nothing exists behind the route to use it.";
+        + "and is otherwise unused, because nothing exists behind the route to use it. "
+        + "The server matches it as an ASP.NET Core catch-all route parameter, so the captured value "
+        + "may itself contain '/' and may be empty; OpenAPI 3.1 has no conformant way to declare that, "
+        + "so it is stated in the x-catch-all extension on this parameter rather than implied. Treat "
+        + "the value as an opaque remainder and do not encode its separators.";
+
+    /// <summary>
+    /// The specification-extension name carrying the catch-all matching behaviour OpenAPI 3.1 cannot
+    /// express on a path parameter. See decision D2.
+    /// </summary>
+    private const string CatchAllExtension = "x-catch-all";
 
     /// <summary>
     /// The two verbs the contract declares as operations on every reserved path, paired with the
@@ -402,12 +432,34 @@ public static class DeferredCapabilityEndpoints
             .WithSummary($"Reserved for the deferred {deferredService} service. Always 501.")
             .WithDescription(BuildOperationDescription(declaration))
 
-            // The ONLY declared response, and it is declared explicitly rather than inferred. See
-            // decision D4: no 2xx may appear, and a second status would suggest the route evaluates
-            // something before answering. No Accepts call appears anywhere in this file, so the
-            // operation declares no request body - a request schema would model a deferred
-            // capability, which is the one thing a routing declaration must not do.
+            // The two declared responses, both explicit rather than inferred. See decision D4: 501 is
+            // the only outcome the handler computes and 401 is the pre-handler refusal the bearer
+            // requirement below guarantees, so a generated client and a conformance tool both see a
+            // complete set. No 2xx and no other 4xx may appear. No Accepts call appears anywhere in
+            // this file, so the operation declares no request body - a request schema would model a
+            // deferred capability, which is the one thing a routing declaration must not do.
             .Produces<ReservedRouteBody>(StatusCodes.Status501NotImplemented, ReservedMediaType)
+            .ProducesProblem(StatusCodes.Status401Unauthorized, MediaTypeNames.Application.ProblemJson)
+
+            // AND THE REFUSAL THAT PRECEDES IT, which the authored contract has always declared and the
+            // runtime metadata omitted. gateway.v1.yaml gives each of these eight operations exactly two
+            // responses - `Unauthorized` and `ReservedForPhaseTwo` - so a document generated without this
+            // line disagreed with the specification it is meant to project, and a caller reading the
+            // generated document saw a route that could only ever answer 501 while an untokened request
+            // actually got 401.
+            //
+            // THIS IS NOT THE SECOND STATUS D4 WARNS ABOUT. D4's concern is a status that would imply the
+            // route EVALUATES something before answering; a 401 implies the opposite, because it is
+            // written by the authentication middleware and the handler is never reached - which is
+            // precisely the property decision D5 below exists to create, so declaring it makes the
+            // reserved roster's non-enumerability legible instead of leaving it to be inferred.
+            //
+            // A 403 IS DELIBERATELY NOT DECLARED, and its absence is asserted rather than assumed. These
+            // routes require authentication and NO SCOPE: they reach no capability by construction, so a
+            // scope would be a permission over a feature that does not exist, and requiring one would
+            // turn the published 501 into a 403 and hide the shape of the eventual system these routes
+            // exist to publish.
+            .ProducesProblem(StatusCodes.Status401Unauthorized, ProblemMediaType)
 
             // Specification extensions, so the generated document names the deferred service in the
             // same place and with the same spelling as the authored contract does.
@@ -566,6 +618,15 @@ public static class DeferredCapabilityEndpoints
     /// templated. It is not a request schema, which is the thing that would model a deferred capability,
     /// and no operation in this file declares one.
     /// </para>
+    /// <para>
+    /// THE CATCH-ALL BEHAVIOUR IS CARRIED BY A VENDOR EXTENSION, NOT BY <c>allowReserved</c>. An earlier
+    /// revision set <c>AllowReserved</c> here to stand in for the fact that the captured value may
+    /// contain <c>/</c>. That emitted <c>allowReserved</c> on an <c>in: path</c> parameter, which OpenAPI
+    /// 3.1 defines for <c>in: query</c> parameters only - so the generated document failed validation
+    /// while still not expressing catch-all semantics, because a path parameter matches a single segment
+    /// whatever that field says. The extension below states the behaviour instead, and matches the
+    /// <c>x-catch-all</c> block the authored contract carries on the same parameter. See decision D2.
+    /// </para>
     /// </remarks>
     private static void DeclareReservedPathParameter(OpenApiOperation operation)
     {
@@ -579,20 +640,42 @@ public static class DeferredCapabilityEndpoints
             return;
         }
 
-        operation.Parameters.Add(
-            new OpenApiParameter
+        OpenApiParameter parameter = new()
+        {
+            Name = ReservedPathParameter,
+            In = ParameterLocation.Path,
+            Required = true,
+            Description = ReservedPathParameterDescription,
+            Schema = new OpenApiSchema { Type = JsonSchemaType.String },
+            Extensions = new Dictionary<string, IOpenApiExtension>(StringComparer.Ordinal)
             {
-                Name = ReservedPathParameter,
-                In = ParameterLocation.Path,
-                Required = true,
+                [CatchAllExtension] = CatchAllExtensionValue(),
+            },
+        };
 
-                // The remainder may itself contain '/', which is how a single OpenAPI path parameter
-                // expresses the catch-all segment of decision D2.
-                AllowReserved = true,
-                Description = ReservedPathParameterDescription,
-                Schema = new OpenApiSchema { Type = JsonSchemaType.String },
-            });
+        operation.Parameters.Add(parameter);
     }
+
+    /// <summary>
+    /// Builds the <c>x-catch-all</c> extension value describing how the reserved templates actually
+    /// match, in the same shape the authored contract publishes.
+    /// </summary>
+    /// <returns>The extension value, ready to attach to the generated path parameter.</returns>
+    /// <remarks>
+    /// Four statements, each of which OpenAPI 3.1 leaves unsayable on a path parameter: the ASP.NET Core
+    /// route template, that the captured value spans nested segments, that it matches an empty
+    /// remainder so the bare prefix resolves here, and that every HTTP method answers identically even
+    /// though the described surface enumerates two. All four are facts about URL templating; none of
+    /// them describes a capability.
+    /// </remarks>
+    private static JsonNodeExtension CatchAllExtensionValue() =>
+        new(new JsonObject
+        {
+            ["routeTemplate"] = JsonValue.Create("/v1/{area}/{**" + ReservedPathParameter + "}"),
+            ["capturesNestedSegments"] = JsonValue.Create(true),
+            ["matchesEmptyRemainder"] = JsonValue.Create(true),
+            ["matchesEveryHttpMethod"] = JsonValue.Create(true),
+        });
 
     /// <summary>
     /// Wraps a non-null string as an OpenAPI specification extension value.

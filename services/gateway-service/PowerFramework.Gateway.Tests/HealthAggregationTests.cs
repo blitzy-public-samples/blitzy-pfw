@@ -171,6 +171,8 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Mime;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -179,6 +181,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using PowerFramework.Gateway.Clients;
 using PowerFramework.Gateway.Configuration;
 using PowerFramework.Gateway.Diagnostics;
 using PowerFramework.Gateway.Endpoints;
@@ -395,6 +398,9 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// <summary>The single aggregated entry standing for EVERY registered component check.</summary>
     private const string ComponentsCheckName = "components";
 
+    /// <summary>The component entry naming whether the token bootstrap's credential material is present.</summary>
+    private const string CredentialsCheckName = "credentials";
+
     /// <summary>The aggregate verdict member of the ready body, and the integer status of a problem body.</summary>
     private const string StatusMember = "status";
 
@@ -418,6 +424,18 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
 
     /// <summary>The legacy return-code extension member the contract publishes on its problem body.</summary>
     private const string RetCodeMember = "retCode";
+
+    /// <summary>
+    /// The readiness-verdict extension member the contract publishes on its problem body.
+    /// </summary>
+    /// <remarks>
+    /// It exists because the not-ready response is a problem document rather than a report, and RFC 9457
+    /// already uses <see cref="StatusMember"/> there for the integer HTTP status - so the verdict token
+    /// needs a name of its own or it exists only inside the prose of <see cref="DetailMember"/>. It is a
+    /// closed three-token vocabulary and therefore disclosure-safe by construction: it can carry nothing
+    /// but <c>Healthy</c>, <c>Degraded</c> or <c>Unhealthy</c>.
+    /// </remarks>
+    private const string ServiceStatusMember = "serviceStatus";
 
     /// <summary>
     /// The framework-generated correlation identifier the problem shape carries.
@@ -1216,6 +1234,7 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
                 DetailMember,
                 RetCodeMember,
                 ServiceMember,
+                ServiceStatusMember,
                 StatusMember,
                 "title",
                 TraceIdMember,
@@ -1223,6 +1242,16 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
                 UpstreamsMember,
             ],
             SortedMemberNames(notReadyBody));
+
+        // AND THE VERDICT MEMBER CARRIES A TOKEN FROM THE CLOSED VOCABULARY, not merely a member name. The
+        // set above pins the SHAPE; this pins the one member whose whole purpose is to be branched on, and
+        // the upstreams scripted above make Unhealthy the only correct aggregate - one of them answered
+        // Unhealthy, and the aggregate takes the worst of its participants.
+        using JsonDocument notReadyDocument = JsonDocument.Parse(notReadyBody);
+
+        Assert.Equal(
+            "Unhealthy",
+            notReadyDocument.RootElement.GetProperty(ServiceStatusMember).GetString());
 
         // The environment name is configuration and is withheld too, on both shapes.
         Assert.DoesNotContain(notReady.EnvironmentName, notReadyBody, StringComparison.OrdinalIgnoreCase);
@@ -1238,6 +1267,184 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
             GatewayTestHostFixture.ExpectedIssuer,
             readyBody,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+
+    /// <summary>
+    /// With the SHIPPED token bootstrap in place, the credential material's presence is reported as its own
+    /// component - ready when it is mounted, degraded when it is not, and the aggregate follows.
+    /// </summary>
+    /// <param name="mounted">Whether both halves of the client identity are configured.</param>
+    /// <param name="expectedStatus">The status the route must answer with.</param>
+    /// <param name="expectedEntry">The verdict the credential entry must carry.</param>
+    /// <remarks>
+    /// <para>
+    /// THE STATE THIS ROW PINS IS A REAL DEPLOYMENT STATE, NOT A CONTRIVED ONE. Gateway forwards every
+    /// proxied operation with a bearer token, the only way to obtain one is Security's issuance edge, and
+    /// contract C-01 protects that edge with mutual TLS and nothing else - so a Gateway with no client
+    /// certificate mounted can serve nothing. <c>orchestration/.env.example</c> records that leaving the
+    /// pair unset is legitimate and deliberately NOT a startup failure, which is precisely why readiness
+    /// has to be the thing that notices: an instance that starts and then refuses every request is exactly
+    /// what "not ready" means.
+    /// </para>
+    /// <para>
+    /// The fixture normally substitutes the bootstrap, so this row RESTORES the shipped client - which is
+    /// what makes it a test of the production path rather than of a double. Nothing is sent: the check
+    /// performs no I/O at all, and the fixture's own transport reaches no socket.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(true, HttpStatusCode.OK, HealthyToken)]
+    [InlineData(false, HttpStatusCode.ServiceUnavailable, DegradedToken)]
+    public async Task TheCredentialMaterialForTheTokenBootstrapIsItsOwnReportedComponent(
+        bool mounted,
+        HttpStatusCode expectedStatus,
+        string expectedEntry)
+    {
+        await using GatewayTestHostFixture host = CreateHostScriptedByParticipantName(
+            UpstreamReadiness.Healthy,
+            UpstreamReadiness.Healthy,
+            UpstreamReadiness.Healthy);
+
+        string certificate = string.Empty;
+        string key = string.Empty;
+
+        if (mounted)
+        {
+            // REAL MATERIAL ON DISK, because the composition root LOADS the pair eagerly at startup and
+            // refuses to start on one it cannot read. A path pointing at nothing would therefore fail the
+            // host build rather than exercise the readiness verdict - which is itself the correct
+            // behaviour, and is asserted by the options and startup suites rather than here.
+            (certificate, key) = WriteClientIdentityPem();
+
+            host.AdditionalSettings[
+                $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
+                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath)}"] = certificate;
+            host.AdditionalSettings[
+                $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
+                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath)}"] = key;
+        }
+
+        RestoreShippedTokenBootstrap(host);
+
+        using HttpClient client = host.CreateAnonymousClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri(ReadinessRoute, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(expectedStatus, response.StatusCode);
+
+        string raw = await ReadBodyAsync(response, TestContext.Current.CancellationToken);
+
+        using JsonDocument body = JsonDocument.Parse(raw);
+
+        Assert.Equal(
+            expectedEntry,
+            StateOf(ReadComponentStates(body.RootElement), CredentialsCheckName));
+
+        // Every upstream answered healthy, so the credential component is the ONLY thing that can have
+        // moved the aggregate - which is what makes the not-ready half attributable rather than incidental.
+        Assert.All(ReadUpstreamStates(body.RootElement), entry => Assert.Equal(HealthyToken, entry.Value));
+
+        if (!mounted)
+        {
+            Assert.Equal(
+                DegradedToken,
+                body.RootElement.GetProperty(ServiceStatusMember).GetString());
+        }
+
+        // NEITHER PATH REACHES THE ANONYMOUS BODY, on either verdict. A path names where private key
+        // material is mounted, and this route is world-readable by anything that can reach the port.
+        Assert.DoesNotContain(nameof(GatewayOptions.MutualTls), raw, StringComparison.OrdinalIgnoreCase);
+
+        if (!mounted)
+        {
+            return;
+        }
+
+        Assert.DoesNotContain(certificate, raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(key, raw, StringComparison.OrdinalIgnoreCase);
+
+        File.Delete(certificate);
+        File.Delete(key);
+    }
+
+    /// <summary>
+    /// Writes a freshly generated client certificate and its private key to two temporary PEM files.
+    /// </summary>
+    /// <returns>The certificate path and the key path, both of which the caller deletes.</returns>
+    /// <remarks>
+    /// GENERATED RATHER THAN COMMITTED. No certificate and no private key is committed to this repository
+    /// or embedded in any image, and a test fixture is not an exception to that: a key on disk in a
+    /// repository is a key, whatever it is labelled. The pair is produced fresh, used by one host, and
+    /// deleted.
+    /// </remarks>
+    private static (string Certificate, string Key) WriteClientIdentityPem()
+    {
+        using RSA key = RSA.Create(2048);
+
+        CertificateRequest request = new(
+            "CN=powerframework-gateway-readiness-test",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+
+        using X509Certificate2 identity = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-5),
+            DateTimeOffset.UtcNow.AddMinutes(30));
+
+        string certificatePath = Path.Combine(
+            Path.GetTempPath(),
+            $"blitzy_gateway_client_{Guid.NewGuid():n}.crt");
+        string keyPath = Path.Combine(
+            Path.GetTempPath(),
+            $"blitzy_gateway_client_{Guid.NewGuid():n}.key");
+
+        File.WriteAllText(certificatePath, identity.ExportCertificatePem());
+        File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+
+        return (certificatePath, keyPath);
+    }
+
+    /// <summary>
+    /// A host that supplies its own token bootstrap gets NO credential entry, rather than a fabricated
+    /// verdict about a mechanism this service does not own.
+    /// </summary>
+    /// <remarks>
+    /// THE SAME RULE THE FRAMEWORK ENTRY FOLLOWS, and for the same reason: a host that registered no
+    /// initializer simply has no framework entry. A bootstrap supplied by the host obtains credentials by
+    /// some other means, whose preconditions this file cannot know - so an absent entry says "nothing to
+    /// report" where a present one would say something false. The fixture's default IS that host, so this
+    /// row also pins down that every other test in this file is unaffected by the entry's existence.
+    /// </remarks>
+    [Fact]
+    public async Task AHostSuppliedTokenBootstrapReportsNoCredentialComponentAtAll()
+    {
+        await using GatewayTestHostFixture host = CreateHostScriptedByParticipantName(
+            UpstreamReadiness.Healthy,
+            UpstreamReadiness.Healthy,
+            UpstreamReadiness.Healthy);
+
+        using HttpClient client = host.CreateAnonymousClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri(ReadinessRoute, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using JsonDocument body = JsonDocument.Parse(
+            await ReadBodyAsync(response, TestContext.Current.CancellationToken));
+
+        List<KeyValuePair<string, string>> checks = ReadComponentStates(body.RootElement);
+
+        Assert.DoesNotContain(CredentialsCheckName, checks.Select(static entry => entry.Key));
+
+        // The two entries that DO belong are still there, so the row is asserting an absence rather than an
+        // empty list.
+        Assert.Equal(HealthyToken, StateOf(checks, SelfCheckName));
+        Assert.Equal(HealthyToken, StateOf(checks, FrameworkCheckName));
     }
 
 
@@ -1946,6 +2153,30 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// the readiness gate the orchestration relies on runs there.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Puts the SHIPPED token bootstrap back in place, undoing the fixture's own substitution.
+    /// </summary>
+    /// <param name="fixture">The host to configure.</param>
+    /// <remarks>
+    /// The fixture registers a refusing double for the bootstrap so that no authorisation outcome can
+    /// depend on the outbound edge. The credential component is decided from the registered provider's
+    /// IDENTITY, so the double suppresses it entirely - which is correct behaviour and is asserted in its
+    /// own row. Restoring the real client is what makes the production decision observable. It never sends:
+    /// the check performs no I/O, and the fixture's transport reaches no socket.
+    /// </remarks>
+    private static void RestoreShippedTokenBootstrap(GatewayTestHostFixture fixture)
+    {
+        ArgumentNullException.ThrowIfNull(fixture);
+
+        fixture.AdditionalServiceConfiguration.Add(static services =>
+        {
+            services.RemoveAll<IServiceTokenProvider>();
+            services.AddSingleton<IServiceTokenProvider>(static _ => new SecurityClient(
+                new HttpClient { BaseAddress = new Uri("https://security.invalid/", UriKind.Absolute) },
+                NullLogger<SecurityClient>.Instance));
+        });
+    }
+
     private static GatewayTestHostFixture CreateHostScriptedByParticipantName(
         UpstreamReadiness persistence,
         UpstreamReadiness dataServices,
@@ -2373,4 +2604,3 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
         return context;
     }
 }
-

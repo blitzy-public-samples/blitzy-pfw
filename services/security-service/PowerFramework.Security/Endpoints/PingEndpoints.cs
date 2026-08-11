@@ -118,6 +118,7 @@ using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
 using PowerFramework.Shared.Kernel;
+using PowerFramework.Security.Authorization;
 
 namespace PowerFramework.Security.Endpoints;
 
@@ -160,6 +161,31 @@ public static class PingEndpoints
     /// <c>HealthEndpoints</c> uses the same tag, so the two routes land together in the generated
     /// document rather than in two groups of one.
     /// </remarks>
+    /// <summary>The scope a caller must hold to reach the authenticated probe.</summary>
+    /// <remarks>
+    /// <para>
+    /// EVIDENCED BY THE ONE CALLER THAT PROBES THIS ROUTE. The end-to-end suite's declared minimum
+    /// scope set names it first, alongside the two Gateway surfaces it exercises
+    /// [tests/e2e/fixtures/auth.ts:L256-L260], and the name mirrors the path segment it authorises -
+    /// the only naming convention the repository evidences for a route-shaped scope. A different name
+    /// chosen here would have refused the only caller that probes this route.
+    /// </para>
+    /// <para>
+    /// EVERY SERVICE'S PROBE USES THE SAME SCOPE NAME, deliberately: the probe means the same thing on
+    /// all four, a caller that may prove one boundary is authenticated may prove any, and a per-service
+    /// spelling would make the suite hold four scopes to make one assertion four times.
+    /// </para>
+    /// </remarks>
+    internal const string RequiredScope = "ping";
+
+    /// <summary>The authorization-policy name this route is gated by.</summary>
+    /// <remarks>
+    /// Declared here and consumed by the composition root, so the route and its requirement have ONE
+    /// spelling. Composed from <see cref="RequiredScope"/> rather than written out, so the two cannot
+    /// drift: a policy registered under a name no route requires enforces nothing and looks correct.
+    /// </remarks>
+    internal static string ScopePolicyName => SecurityScopes.PolicyNameFor(RequiredScope);
+
     private const string TagName = "Health";
 
     /// <summary>
@@ -216,12 +242,23 @@ public static class PingEndpoints
             // is invisible at the route and would evaporate silently if that policy were ever
             // relaxed. Stating it here makes the guard local to the thing it guards.
             //
-            // No policy name is supplied on purpose: the parameterless form requires an
-            // authenticated principal under the application's default policy, which is precisely the
-            // property being proved. Naming a policy would couple this route to a definition it does
-            // not own and could silently weaken the requirement if that definition were relaxed.
+            // A NAMED SCOPE POLICY RATHER THAN THE PARAMETERLESS FORM. The parameterless form
+            // requires only an AUTHENTICATED principal, which every token this system mints
+            // satisfies - so the route proved that the boundary is authenticated and nothing about
+            // what the caller is entitled to. The policy below requires the scope named in this file
+            // IN ADDITION, so a token whose caller was never granted it is refused with 403.
+            //
+            // THIS DOES NOT WEAKEN THE 401 THE ATTACHED ENVIRONMENT DOCUMENTS (C-L). A request with
+            // no token is still challenged by the bearer handler and still receives 401, because
+            // authentication precedes authorization; the scope check can only ever turn an
+            // AUTHENTICATED request into a 403, which is a strictly narrower outcome than the
+            // documented one and is a declared response of this operation.
+            //
+            // The scope name is declared IN THIS FILE and consumed by Program.cs when it builds the
+            // policy. A route and its requirement are one decision, and a policy name spelled
+            // independently in two files is the defect that enforces nothing while looking correct.
             // --------------------------------------------------------------------------------------
-            .RequireAuthorization()
+            .RequireAuthorization(ScopePolicyName)
             .WithName(EndpointName)
             .WithTags(TagName)
             .WithSummary(OperationSummary)
@@ -237,6 +274,13 @@ public static class PingEndpoints
             // header - so this declaration describes the contract rather than a body this file
             // writes.
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            // THE SCOPE REFUSAL, DECLARED BECAUSE THE POLICY ABOVE MAKES IT REACHABLE. A token that is
+            // valid, addressed to this service and unexpired is still refused here when its caller was
+            // never granted this route's scope, so a document declaring only 401 would under-declare a
+            // status the service produces. It does NOT replace the 401: an anonymous request is still
+            // challenged and still answered 401, because authentication precedes authorization - the
+            // scope check can only narrow an already-authenticated request (C-L).
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .AddOpenApiOperationTransformer(DeclareBearerRequirementAsync);
 
         return endpoints;
@@ -1135,4 +1179,3 @@ internal static class ProblemResults
             IsIndeterminate(retCode));
     }
 }
-

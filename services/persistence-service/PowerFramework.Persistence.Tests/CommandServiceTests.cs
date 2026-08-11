@@ -18,6 +18,9 @@
 //        own, so its rollback count is ONE where every
 //        other mode's is TWO                                [:L105-L109] + base OnError rollback
 //      an empty statement is E_INVALID_SQL, twice            [:L45], [:L65-L68]
+//      and a DEBUG build reaches NEITHER of those two,
+//        because the proxy's preserved #IF DEFINED DEBUG
+//        assertion trips first                               [n_cst_threading_task_sqlcommand.sru:L36-L38]
 //      SQLCode = 100 reads as SUCCESS                        [n_cst_thread_trans.sru:L233]
 //      the ordered failure arms and their exact codes        [:L65], [:L70], [:L76], [:L82]
 //      a positional parameter IS the empty-NAMED case        [n_cst_threading_task_sqlbase.sru:L138]
@@ -47,6 +50,7 @@
 //  a realistic secret to prove it.
 // ==================================================================================================
 
+using Grpc.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -55,6 +59,7 @@ using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
+using PowerFramework.Shared.Diagnostics;
 
 // PowerFramework.Contracts.Persistence.V1 is a global using, and it contains a GENERATED static class
 // also called CommandService. These aliases make every bare name below unambiguous and name the type
@@ -71,6 +76,18 @@ public sealed class CommandServiceTests
 {
     private const string FakePassword = "not-a-real-password";
     private const string RedactionPlaceholder = SqlRedactor.DefaultPlaceholder;
+
+    /// <summary>
+    /// The call context every handler in this suite is invoked with.
+    /// </summary>
+    /// <remarks>
+    /// <b>A REAL CONTEXT RATHER THAN <c>null!</c>, BECAUSE THE HANDLERS NOW READ IT.</b> Every C-07 and
+    /// C-08 handler validates its context and threads <c>context.CancellationToken</c> into the provider
+    /// call, so passing null would fail the argument guard before reaching the behaviour under test - and
+    /// passing a non-cancellable stand-in would hide the fact that the token is threaded at all. One shared
+    /// instance is safe because it is immutable in every respect this suite observes.
+    /// </remarks>
+    private static ServerCallContext Context { get; } = new CallContext(CancellationToken.None);
 
     // ---------------------------------------------------------------------------------------------
     //  DOUBLES
@@ -117,6 +134,18 @@ public sealed class CommandServiceTests
 
         internal string LastStatement { get; private set; } = string.Empty;
 
+        /// <summary>The canonical statement of the most recent parameterized execution.</summary>
+        internal string LastCanonicalStatement { get; private set; } = string.Empty;
+
+        /// <summary>The bound parameters of the most recent parameterized execution, in order.</summary>
+        internal IReadOnlyList<object?> LastParameters { get; private set; } = [];
+
+        /// <summary>Signalled once execution has entered the provider. Null when unused.</summary>
+        internal ManualResetEventSlim? Entered { get; set; }
+
+        /// <summary>Blocks execution inside the provider until set. Null when unused.</summary>
+        internal ManualResetEventSlim? Gate { get; set; }
+
         /// <summary>
         /// Every write to the autocommit flag, in order. This is how the AC_NATIVE inversion is
         /// observed: the expected history for a native execution is true then false.
@@ -139,7 +168,7 @@ public sealed class CommandServiceTests
 
         public void ApplyConnectionFields(in TransactionData descriptor) => DbmsValue = descriptor.Dbms;
 
-        public SqlState Connect()
+        public SqlState Connect(CancellationToken cancellationToken = default)
         {
             if (ConnectResult.SqlCode == 0)
             {
@@ -167,10 +196,40 @@ public sealed class CommandServiceTests
             return RollbackResult;
         }
 
-        public SqlState Execute(string sqlCommand)
+        public SqlState Execute(string sqlCommand, CancellationToken cancellationToken = default)
         {
             ExecuteCalls++;
             LastStatement = sqlCommand;
+            return ExecuteResult;
+        }
+
+        /// <summary>
+        /// The parameterized execution seam, recording BOTH renderings.
+        /// </summary>
+        /// <param name="command">The canonical statement, its rendered form and its parameters.</param>
+        /// <param name="cancellationToken">The caller's token.</param>
+        /// <returns>The scripted outcome.</returns>
+        /// <remarks>
+        /// <b>THE RENDERED TEXT IS RECORDED AS THE PARITY ARTIFACT AND THE CANONICAL TEXT AS WHAT WOULD BE
+        /// EXECUTED.</b> The AAP requires parameterized SQL in the implementation "with the observable
+        /// generated statement preserved", so both must be observable from a test: the canonical form is
+        /// what a real provider binds parameters against, and the rendered form is what a characterization
+        /// recording compares byte for byte. Recording only one of the two would make half the requirement
+        /// untestable.
+        /// </remarks>
+        public SqlState Execute(in SqlCommandText command, CancellationToken cancellationToken = default)
+        {
+            ExecuteCalls++;
+            LastStatement = command.RenderedText;
+            LastCanonicalStatement = command.CanonicalText;
+            LastParameters = [.. command.Parameters];
+
+            // THE ONLY SEAM IN THIS SUITE THAT CAN HOLD AN OPERATION OPEN. The operation lease is taken
+            // before the provider is reached and released after, so a test can only observe a HELD lease
+            // from inside the provider call. Both handles are inert unless a test opts in.
+            Entered?.Set();
+            Gate?.Wait(cancellationToken);
+
             return ExecuteResult;
         }
 
@@ -429,11 +488,23 @@ public sealed class CommandServiceTests
                 Clock,
                 new PooledTransactionActivator(() => Engine, Clock));
 
-            Sessions = new TransactionSessionRegistry();
-            Tasks = new CommandTaskRegistry();
+            // The two registries now carry a ceiling and an idle window, so both take the bound settings
+            // and the harness's fake clock - which is what lets a test drive expiry without waiting.
+            IOptions<PersistenceOptions> handleOptions = Options.Create(new PersistenceOptions());
+
+            Sessions = new TransactionSessionRegistry(handleOptions, Clock, Pool);
+            Tasks = new CommandTaskRegistry(handleOptions, Clock);
             Factory = new FakeCommandTaskFactory(Pool, Clock);
 
-            Transactions = new TransactionService(Pool, Sessions, new UnusedQuerySurface());
+            // `Tasks` is the SAME table the command service uses, so a session ended through this
+            // service genuinely purges the command tasks these cases created.
+            Transactions = new TransactionService(
+                Pool,
+                Sessions,
+                new UnusedQuerySurface(),
+                new QueryTaskRegistry(handleOptions, Clock),
+                new UpdateTaskRegistry(handleOptions, Clock),
+                Tasks);
             Commands = new CommandService(
                 Sessions,
                 Tasks,
@@ -484,7 +555,7 @@ public sealed class CommandServiceTests
     {
         BeginSessionResponse response = await harness.Transactions.BeginSession(
             new BeginSessionRequest { Descriptor_ = Descriptor() },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.NotNull(response.Session);
@@ -498,7 +569,7 @@ public sealed class CommandServiceTests
 
         CreateCommandTaskResponse response = await harness.Commands.CreateCommandTask(
             new CreateCommandTaskRequest { Session = session },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.NotNull(response.Task);
@@ -552,17 +623,17 @@ public sealed class CommandServiceTests
             WireRetCode.Ok,
             (await harness.Commands.SetSql(
                 new SetCommandSqlRequest { Task = handle, Sql = "DELETE FROM t" },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.Ok,
             (await harness.Commands.SetAutoCommit(
                 new SetCommandAutoCommitRequest { Task = handle, Autocommit = AutoCommitMode.AcOn },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         ResetCommandTaskResponse reset = await harness.Commands.Reset(
             new ResetCommandTaskRequest { Task = handle },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, reset.Status.RetCode);
 
@@ -585,7 +656,7 @@ public sealed class CommandServiceTests
 
         SetCommandAutoCommitResponse response = await harness.Commands.SetAutoCommit(
             new SetCommandAutoCommitRequest { Task = handle, Autocommit = (AutoCommitMode)7 },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Equal((AutoCommitMode)7, Resolve(harness, handle).Worker.AutoCommitSetting);
@@ -608,7 +679,7 @@ public sealed class CommandServiceTests
 
         ExecResponse response = await harness.Commands.Exec(
             new ExecRequest { Task = handle, Sql = "DELETE FROM t WHERE id = 1" },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Equal(0, harness.Engine.CommitCalls);
@@ -639,7 +710,7 @@ public sealed class CommandServiceTests
                 Sql = "INSERT INTO t(id) VALUES(1)",
                 Autocommit = AutoCommitMode.AcOn,
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Equal(1, harness.Engine.CommitCalls);
@@ -666,7 +737,7 @@ public sealed class CommandServiceTests
                 Sql = "INSERT INTO t(id) VALUES(1)",
                 Autocommit = AutoCommitMode.AcOn,
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EDbError, response.Status.RetCode);
         Assert.Equal(1, harness.Engine.CommitCalls);
@@ -701,7 +772,7 @@ public sealed class CommandServiceTests
                 Sql = "INSERT INTO t(id) VALUES(1)",
                 Autocommit = AutoCommitMode.AcNative,
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Equal(new[] { true, false }, harness.Engine.AutoCommitWrites);
@@ -736,7 +807,7 @@ public sealed class CommandServiceTests
                 Sql = "INSERT INTO t(id) VALUES(1)",
                 Autocommit = AutoCommitMode.AcNative,
             },
-            null!);
+            Context);
 
         Harness offHarness = new();
         TaskHandle offHandle = await CreateTask(offHarness);
@@ -749,7 +820,7 @@ public sealed class CommandServiceTests
                 Sql = "INSERT INTO t(id) VALUES(1)",
                 Autocommit = AutoCommitMode.AcOff,
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EDbError, nativeResponse.Status.RetCode);
         Assert.Equal(WireRetCode.EDbError, offResponse.Status.RetCode);
@@ -770,22 +841,55 @@ public sealed class CommandServiceTests
     // ---------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// ⚠ An empty statement is <c>E_INVALID_SQL</c> and NOT <c>E_INVALID_ARGUMENT</c> [<c>:L45</c>] -
-    /// an empty statement is classified as a bad STATEMENT rather than as a bad argument, unlike most
-    /// other guards in the SQL layer. The setter's arm carries NO message.
+    /// PINNED SPLIT, at the adapter layer, matching
+    /// <c>SqlCommandTaskProxyTests.AnEmptyStatementBehavesDifferentlyInTheTwoBuilds</c> one layer down.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ In a <b>Release</b> build an empty statement is <c>E_INVALID_SQL</c> and NOT
+    /// <c>E_INVALID_ARGUMENT</c> [<c>:L45</c>] - an empty statement is classified as a bad STATEMENT
+    /// rather than as a bad argument, unlike most other guards in the SQL layer. The setter's arm
+    /// carries NO message.
+    /// </para>
+    /// <para>
+    /// ⚠ In a <b>Debug</b> build that arm is UNREACHABLE through this adapter. The proxy reproduces the
+    /// oracle's own <c>#IF DEFINED DEBUG THEN Assert(Len(sql) &gt; 0,"Len(sql) &lt;= 0") #END IF</c>
+    /// [<c>n_cst_threading_task_sqlcommand.sru:L36-L38</c>], which trips before the delegation at
+    /// [<c>:L40</c>], so <c>AssertionFailure</c> leaves the handler and the worker's guard is never
+    /// reached. That gating is preserved deliberately under C-B and is neither promoted to a runtime
+    /// guard nor removed - see the remarks on
+    /// <see cref="PowerFramework.Persistence.Tasks.TaskProxies.SqlCommandTaskProxy.SetSql"/>.
+    /// </para>
+    /// <para>
+    /// BOTH arms are asserted because both are shipped: the container image is built
+    /// <c>-c Release</c>, while the documented per-service gate's bare <c>dotnet test</c> builds Debug.
+    /// Asserting only the Release arm - as this row previously did - made the suite pass under the
+    /// whole-solution Release sweep and fail under the documented per-service command, for a
+    /// difference the port intends.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public async Task SetSqlRefusesAnEmptyStatementWithEInvalidSqlAndNoMessage()
+    public async Task SetSqlOnAnEmptyStatementBehavesDifferentlyInTheTwoBuilds()
     {
         Harness harness = new();
         TaskHandle handle = await CreateTask(harness);
 
+#if DEBUG
+        AssertionFailure failure = await Assert.ThrowsAsync<AssertionFailure>(
+            () => harness.Commands.SetSql(
+                new SetCommandSqlRequest { Task = handle, Sql = string.Empty },
+                null!));
+
+        // The oracle's own message text, verbatim, which is what a failing Debug build reports.
+        Assert.Contains("Len(sql) <= 0", failure.Message, StringComparison.Ordinal);
+#else
         SetCommandSqlResponse response = await harness.Commands.SetSql(
             new SetCommandSqlRequest { Task = handle, Sql = string.Empty },
             null!);
 
         Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
         Assert.Equal(string.Empty, response.Status.ErrorText);
+#endif
     }
 
     /// <summary>
@@ -802,7 +906,7 @@ public sealed class CommandServiceTests
 
         ExecResponse response = await harness.Commands.Exec(
             new ExecRequest { Task = handle },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
         Assert.Equal(SqlCommandTask.InvalidSqlMessage, response.Status.ErrorText);
@@ -831,7 +935,7 @@ public sealed class CommandServiceTests
 
         ExecResponse response = await harness.Commands.Exec(
             new ExecRequest { Task = handle, Sql = "DELETE FROM t WHERE id = 999" },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Equal(100L, response.SqlCode);
@@ -872,7 +976,7 @@ public sealed class CommandServiceTests
 
         ExecResponse response = await harness.Commands.Exec(
             new ExecRequest { Task = handle, Sql = "DELETE FROM t" },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidTransaction, response.Status.RetCode);
         Assert.Equal(0, harness.Engine.ExecuteCalls);
@@ -910,7 +1014,7 @@ public sealed class CommandServiceTests
                 Sql = "DELETE FROM t WHERE id = :id",
                 Parameters = { Positional(7L) },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Canceled, response.Status.RetCode);
 
@@ -940,7 +1044,7 @@ public sealed class CommandServiceTests
                 Sql = "UPDATE t SET a = :expected",
                 Parameters = { Named("unexpected", 1L) },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.ESqlBindArgFailed, response.Status.RetCode);
         Assert.Equal(SqlCommandTask.BindArgumentFailureMessage, response.Status.ErrorText);
@@ -975,7 +1079,7 @@ public sealed class CommandServiceTests
                 Sql = "UPDATE t SET a = :expected",
                 Parameters = { Positional(4242L) },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, positional.Status.RetCode);
 
@@ -991,7 +1095,7 @@ public sealed class CommandServiceTests
                 Sql = "UPDATE t SET a = :expected",
                 Parameters = { Named("unexpected", 4242L) },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.ESqlBindArgFailed, named.Status.RetCode);
     }
@@ -1023,7 +1127,7 @@ public sealed class CommandServiceTests
             request.Parameters.Add(Positional((index * 1000L) + index));
         }
 
-        ExecResponse response = await harness.Commands.Exec(request, null!);
+        ExecResponse response = await harness.Commands.Exec(request, Context);
 
         Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
         Assert.Equal(12, request.Parameters.Count);
@@ -1056,7 +1160,7 @@ public sealed class CommandServiceTests
                 Sql = "UPDATE t SET a = :expected",
                 Parameters = { new PositionalParameter { Name = string.Empty, Value = new AnyValue() } },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
         Assert.NotEqual(string.Empty, response.Status.ErrorText);
@@ -1129,7 +1233,7 @@ public sealed class CommandServiceTests
                     },
                 },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
         Assert.Equal(0, harness.Engine.ExecuteCalls);
@@ -1152,7 +1256,7 @@ public sealed class CommandServiceTests
                     },
                 },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.Ok, accepted.Status.RetCode);
         Assert.Equal(1, harness.Engine.ExecuteCalls);
@@ -1161,6 +1265,262 @@ public sealed class CommandServiceTests
     // ---------------------------------------------------------------------------------------------
     //  REGION 7 - E_BUSY ON EVERY MUTATOR WHILE A COMMAND IS IN FLIGHT
     // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The pooled transaction observes cancellation itself, after its argument guard and before any side
+    /// effect.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THIS IS THE SECOND OF TWO INDEPENDENT CANCELLATION GUARDS AND IT IS NOT
+    /// REDUNDANT.</b> The task layer checks the token before it asks for a transaction, and the transaction
+    /// checks again before it asks the provider - which mirrors the legacy's own habit of guarding one
+    /// condition on both sides of a boundary. Driven directly here because no seam exists between the two
+    /// checks through which a token could be cancelled, so the only way to reach the inner one on its own is
+    /// to call the inner surface.
+    /// </para>
+    /// <para>
+    /// THE ORDER OF THE TWO GUARDS IS ITSELF THE ASSERTION. An EMPTY statement answers
+    /// <c>E_INVALID_ARGUMENT</c> even when the token is already cancelled, because a malformed request is
+    /// malformed whether or not the caller is still there. A well-formed statement under a cancelled token
+    /// answers <c>CANCELLED</c> and leaves NO trace - no execution, no state change - because a statement
+    /// that is never issued must not look like one that was considered.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ThePooledTransactionObservesCancellationAfterItsArgumentGuardAndBeforeAnySideEffect()
+    {
+        Harness harness = new();
+
+        // The pool's own descriptor type, not the wire message: this test exercises the transaction
+        // surface directly rather than through the contract, so it speaks the surface's own vocabulary.
+        TransactionData descriptor = new() { Dbms = "SQLITE", Database = "pfw-cancellation-guard" };
+
+        int refIndex = harness.Pool.AddRef(descriptor);
+
+        Assert.Equal(RetCode.OK, harness.Pool.Get(refIndex, out IPooledTransaction? transaction));
+        Assert.NotNull(transaction);
+
+        using CancellationTokenSource cancelled = new();
+
+        cancelled.Cancel();
+
+        // THE ARGUMENT GUARD WINS over cancellation, because it is checked first.
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            transaction!.Exec(string.Empty, cancelled.Token));
+
+        // A well-formed statement under a cancelled token is CANCELLED - which is neither succeeded nor
+        // failed in the ported algebra - and the provider is never reached.
+        Assert.Equal(RetCode.CANCELLED, transaction.Exec("DELETE FROM t", cancelled.Token));
+        Assert.Equal(0, harness.Engine.ExecuteCalls);
+
+        // And an uncancelled call still runs, so the guard is the token's doing and not a latch.
+        Assert.Equal(RetCode.OK, transaction.Exec("DELETE FROM t", CancellationToken.None));
+        Assert.Equal(1, harness.Engine.ExecuteCalls);
+
+        _ = harness.Pool.RemoveRef(refIndex);
+    }
+
+    /// <summary>
+    /// Every verb refuses with <c>E_BUSY</c> while another operation genuinely HOLDS the lease.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THIS IS A DIFFERENT GUARD FROM THE ONE THE SIBLING TEST BELOW EXERCISES, AND BOTH
+    /// ARE NEEDED.</b> That test raises the caller-side proxy's own busy flag, which refuses BEFORE the
+    /// lease is ever reached [<c>n_cst_threading_task_sqlbase.sru:L57</c>]. This one holds the LEASE itself,
+    /// which is the guard the oracle does not have and cannot need: its caller is one thread, so nothing
+    /// there can interleave two requests against one task. Across an RPC boundary two requests can, and
+    /// without the lease the second would interleave its statement, parameter and autocommit writes with the
+    /// first request's execution - so the statement that runs belongs to one request and the values bound
+    /// into it to the other.
+    /// </para>
+    /// <para>
+    /// THE LEASE IS OBSERVED FROM INSIDE THE PROVIDER, which is the only place it is provably held: it is
+    /// taken before the provider call and released after, so any assertion made outside that window would
+    /// be racing the thing it is trying to measure.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryVerbRefusesWithEBusyWhileAnotherOperationHoldsTheLease()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        using ManualResetEventSlim entered = new(false);
+        using ManualResetEventSlim gate = new(false);
+
+        harness.Engine.Entered = entered;
+        harness.Engine.Gate = gate;
+
+        Task<ExecResponse> inFlight = Task.Run(
+            () => harness.Commands.Exec(
+                new ExecRequest { Task = handle, Sql = "DELETE FROM t" },
+                Context),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(
+            entered.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken),
+            "The execution never reached the provider, so the lease was never held and this test would "
+                + "have asserted nothing.");
+
+        try
+        {
+            Assert.Equal(
+                WireRetCode.EBusy,
+                (await harness.Commands.Reset(
+                    new ResetCommandTaskRequest { Task = handle },
+                    Context)).Status.RetCode);
+
+            Assert.Equal(
+                WireRetCode.EBusy,
+                (await harness.Commands.SetSql(
+                    new SetCommandSqlRequest { Task = handle, Sql = "SELECT 1" },
+                    Context)).Status.RetCode);
+
+            Assert.Equal(
+                WireRetCode.EBusy,
+                (await harness.Commands.SetAutoCommit(
+                    new SetCommandAutoCommitRequest { Task = handle, Autocommit = AutoCommitMode.AcOn },
+                    Context)).Status.RetCode);
+
+            Assert.Equal(
+                WireRetCode.EBusy,
+                (await harness.Commands.Exec(
+                    new ExecRequest { Task = handle, Sql = "SELECT 2" },
+                    Context)).Status.RetCode);
+
+            // NOTHING THE REFUSED REQUESTS CARRIED WAS INSTALLED. A refusal that had already written the
+            // statement would be worse than no guard at all, because the in-flight execution would then run
+            // the OTHER request's statement.
+            Assert.Equal(1, harness.Engine.ExecuteCalls);
+            Assert.Equal("DELETE FROM t", harness.Engine.LastStatement);
+        }
+        finally
+        {
+            gate.Set();
+        }
+
+        ExecResponse completed = await inFlight;
+
+        Assert.Equal(WireRetCode.Ok, completed.Status.RetCode);
+
+        // AND THE LEASE IS RELEASED AFTERWARDS, so a task is usable again once the execution finishes -
+        // a lease that leaked would make the task permanently busy, which is worse than not leasing.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await harness.Commands.Reset(
+                new ResetCommandTaskRequest { Task = handle },
+                Context)).Status.RetCode);
+    }
+
+    /// <summary>
+    /// The busy report is a DIAGNOSTIC read and tracks the lease.
+    /// </summary>
+    /// <remarks>
+    /// It is read for reporting only and never to decide whether to proceed - deciding on it would be
+    /// exactly the check-then-act the lease exists to remove, because the state can change between the read
+    /// and the act. Asserted in both directions so it cannot silently become constant.
+    /// </remarks>
+    [Fact]
+    public async Task TheBusyReportTracksTheLeaseAndIsClearOnceItIsReleased()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        using ManualResetEventSlim entered = new(false);
+        using ManualResetEventSlim gate = new(false);
+
+        harness.Engine.Entered = entered;
+        harness.Engine.Gate = gate;
+
+        Task<ExecResponse> inFlight = Task.Run(
+            () => harness.Commands.Exec(
+                new ExecRequest { Task = handle, Sql = "DELETE FROM t" },
+                Context),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+
+        try
+        {
+            Assert.True(harness.Tasks.TryResolve(handle, out CommandTask? held));
+            Assert.True(held!.IsRunning);
+        }
+        finally
+        {
+            gate.Set();
+        }
+
+        _ = await inFlight;
+
+        Assert.True(harness.Tasks.TryResolve(handle, out CommandTask? idle));
+        Assert.False(idle!.IsRunning);
+    }
+
+    /// <summary>
+    /// A release that races an in-flight operation defers disposal to the operation rather than pulling the
+    /// task out from under it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE RELEASE MUST NOT DISPOSE A TASK AN OPERATION IS STILL USING</b>, and it must
+    /// not simply refuse either, because a caller releasing a handle is entitled to have it gone. So the
+    /// release retires the handle immediately and the LAST party out disposes: here that is the execution,
+    /// which finds the task retired when it ends its operation.
+    /// </para>
+    /// <para>
+    /// AFTERWARDS THE HANDLE IS GONE RATHER THAN BUSY. A retired task answers <c>E_INVALID_HANDLE</c> and
+    /// not <c>E_BUSY</c> - the distinction matters because one tells a caller to retry and the other tells
+    /// it never to use this handle again.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AReleaseThatRacesAnInFlightOperationDefersDisposalAndRetiresTheHandle()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        using ManualResetEventSlim entered = new(false);
+        using ManualResetEventSlim gate = new(false);
+
+        harness.Engine.Entered = entered;
+        harness.Engine.Gate = gate;
+
+        Task<ExecResponse> inFlight = Task.Run(
+            () => harness.Commands.Exec(
+                new ExecRequest { Task = handle, Sql = "DELETE FROM t" },
+                Context),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+
+        ReleaseCommandTaskResponse released;
+
+        try
+        {
+            released = await harness.Commands.ReleaseCommandTask(
+                new ReleaseCommandTaskRequest { Task = handle },
+                Context);
+        }
+        finally
+        {
+            gate.Set();
+        }
+
+        Assert.Equal(WireRetCode.Ok, released.Status.RetCode);
+
+        // The execution still completes against the task it was already holding.
+        Assert.Equal(WireRetCode.Ok, (await inFlight).Status.RetCode);
+
+        // GONE, NOT BUSY.
+        Assert.Equal(
+            WireRetCode.EInvalidHandle,
+            (await harness.Commands.Reset(
+                new ResetCommandTaskRequest { Task = handle },
+                Context)).Status.RetCode);
+    }
 
     /// <summary>
     /// Every mutator refuses with <c>E_BUSY</c> while a command is in flight for that task. The oracle
@@ -1182,19 +1542,19 @@ public sealed class CommandServiceTests
             WireRetCode.EBusy,
             (await harness.Commands.SetSql(
                 new SetCommandSqlRequest { Task = handle, Sql = "DELETE FROM t" },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EBusy,
             (await harness.Commands.SetAutoCommit(
                 new SetCommandAutoCommitRequest { Task = handle, Autocommit = AutoCommitMode.AcOn },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EBusy,
             (await harness.Commands.Reset(
                 new ResetCommandTaskRequest { Task = handle },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         // Exec refuses at its first mutating step - the statement override - and again at the parameter
         // list, so neither a statement nor a value is installed while busy.
@@ -1202,13 +1562,13 @@ public sealed class CommandServiceTests
             WireRetCode.EBusy,
             (await harness.Commands.Exec(
                 new ExecRequest { Task = handle, Sql = "DELETE FROM t" },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EBusy,
             (await harness.Commands.Exec(
                 new ExecRequest { Task = handle, Parameters = { Positional(1L) } },
-                null!)).Status.RetCode);
+                Context)).Status.RetCode);
 
         Assert.Equal(0, harness.Engine.ExecuteCalls);
     }
@@ -1240,7 +1600,7 @@ public sealed class CommandServiceTests
                 Sql = "DELETE FROM ledger WHERE account = :account",
                 Parameters = { Positional(90210L) },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EDbError, response.Status.RetCode);
         Assert.NotNull(response.Status.DbError);
@@ -1295,7 +1655,7 @@ public sealed class CommandServiceTests
                 Sql = "DELETE FROM ledger WHERE account = :account",
                 Parameters = { Positional(90210L) },
             },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EDbError, response.Status.RetCode);
         Assert.NotEmpty(logger.Records);
@@ -1326,7 +1686,7 @@ public sealed class CommandServiceTests
 
         CreateCommandTaskResponse response = await harness.Commands.CreateCommandTask(
             new CreateCommandTaskRequest { Session = new SessionHandle { SessionId = "not-a-session" } },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidTransaction, response.Status.RetCode);
         Assert.Null(response.Task);
@@ -1346,7 +1706,7 @@ public sealed class CommandServiceTests
 
         CreateCommandTaskResponse response = await harness.Commands.CreateCommandTask(
             new CreateCommandTaskRequest { Session = session },
-            null!);
+            Context);
 
         Assert.Equal(WireRetCode.EInvalidObject, response.Status.RetCode);
         Assert.Null(response.Task);
@@ -1367,7 +1727,7 @@ public sealed class CommandServiceTests
 
         CreateCommandTaskResponse response = await harness.Commands.CreateCommandTask(
             new CreateCommandTaskRequest { Session = session },
-            null!);
+            Context);
 
         // The descriptor installer carries its own busy guard
         // [n_cst_threading_task_sqlbase.sru:L110], so a busy pair cannot be configured.
@@ -1410,33 +1770,33 @@ public sealed class CommandServiceTests
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.Reset(
-                new ResetCommandTaskRequest { Task = unknown }, null!)).Status.RetCode);
+                new ResetCommandTaskRequest { Task = unknown }, Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.SetAutoCommit(
-                new SetCommandAutoCommitRequest { Task = unknown }, null!)).Status.RetCode);
+                new SetCommandAutoCommitRequest { Task = unknown }, Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.SetSql(
-                new SetCommandSqlRequest { Task = unknown, Sql = "DELETE FROM t" }, null!)).Status.RetCode);
+                new SetCommandSqlRequest { Task = unknown, Sql = "DELETE FROM t" }, Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.Exec(
-                new ExecRequest { Task = unknown }, null!)).Status.RetCode);
+                new ExecRequest { Task = unknown }, Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.ReleaseCommandTask(
-                new ReleaseCommandTaskRequest { Task = unknown }, null!)).Status.RetCode);
+                new ReleaseCommandTaskRequest { Task = unknown }, Context)).Status.RetCode);
 
         // A blank handle is the same outcome as an unknown one.
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.Exec(
-                new ExecRequest { Task = new TaskHandle() }, null!)).Status.RetCode);
+                new ExecRequest { Task = new TaskHandle() }, Context)).Status.RetCode);
     }
 
     /// <summary>
@@ -1451,12 +1811,12 @@ public sealed class CommandServiceTests
         Assert.Equal(
             WireRetCode.Ok,
             (await harness.Commands.ReleaseCommandTask(
-                new ReleaseCommandTaskRequest { Task = handle }, null!)).Status.RetCode);
+                new ReleaseCommandTaskRequest { Task = handle }, Context)).Status.RetCode);
 
         Assert.Equal(
             WireRetCode.EInvalidHandle,
             (await harness.Commands.ReleaseCommandTask(
-                new ReleaseCommandTaskRequest { Task = handle }, null!)).Status.RetCode);
+                new ReleaseCommandTaskRequest { Task = handle }, Context)).Status.RetCode);
 
         Assert.False(harness.Tasks.TryResolve(handle, out CommandTask? resolved));
         Assert.Null(resolved);
@@ -1473,9 +1833,9 @@ public sealed class CommandServiceTests
         SessionHandle session = await OpenSession(harness);
 
         CreateCommandTaskResponse first = await harness.Commands.CreateCommandTask(
-            new CreateCommandTaskRequest { Session = session }, null!);
+            new CreateCommandTaskRequest { Session = session }, Context);
         CreateCommandTaskResponse second = await harness.Commands.CreateCommandTask(
-            new CreateCommandTaskRequest { Session = session }, null!);
+            new CreateCommandTaskRequest { Session = session }, Context);
 
         Assert.Equal(WireRetCode.Ok, first.Status.RetCode);
         Assert.Equal(WireRetCode.Ok, second.Status.RetCode);
@@ -1562,17 +1922,17 @@ public sealed class CommandServiceTests
         Harness harness = new();
 
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Commands.CreateCommandTask(null!, null!));
+            harness.Commands.CreateCommandTask(null!, Context));
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Commands.ReleaseCommandTask(null!, null!));
+            harness.Commands.ReleaseCommandTask(null!, Context));
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Commands.Reset(null!, null!));
+            harness.Commands.Reset(null!, Context));
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Commands.SetAutoCommit(null!, null!));
+            harness.Commands.SetAutoCommit(null!, Context));
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Commands.SetSql(null!, null!));
+            harness.Commands.SetSql(null!, Context));
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            harness.Commands.Exec(null!, null!));
+            harness.Commands.Exec(null!, Context));
     }
 
     /// <summary>
@@ -1621,5 +1981,39 @@ public sealed class CommandServiceTests
         Assert.Equal(0, (int)AutoCommitMode.AcOff);
         Assert.Equal(1, (int)AutoCommitMode.AcOn);
         Assert.Equal(2, (int)AutoCommitMode.AcNative);
+    }
+
+    /// <summary>A server call context whose only interesting member is its cancellation token.</summary>
+    /// <param name="cancellationToken">The token the handlers will observe.</param>
+    private sealed class CallContext(CancellationToken cancellationToken) : ServerCallContext
+    {
+        private readonly CancellationToken _token = cancellationToken;
+
+        protected override string MethodCore => "/persistence.v1.CommandService/Exec";
+
+        protected override string HostCore => "localhost:5101";
+
+        protected override string PeerCore => "ipv4:127.0.0.1:0";
+
+        protected override DateTime DeadlineCore => DateTime.MaxValue;
+
+        protected override Metadata RequestHeadersCore { get; } = [];
+
+        protected override CancellationToken CancellationTokenCore => _token;
+
+        protected override Metadata ResponseTrailersCore { get; } = [];
+
+        protected override Status StatusCore { get; set; }
+
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+
+        protected override AuthContext AuthContextCore { get; } =
+            new("fake", new Dictionary<string, List<AuthProperty>>(StringComparer.Ordinal));
+
+        protected override ContextPropagationToken CreatePropagationTokenCore(
+            ContextPropagationOptions? options) => throw new NotSupportedException();
+
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) =>
+            Task.CompletedTask;
     }
 }

@@ -136,7 +136,7 @@ internal sealed class RecordingUpdateTarget : IUpdateTarget
     public void ClearState() => ClearStateCalls++;
 
     /// <inheritdoc/>
-    public long Update(bool acceptText, bool resetFlag)
+    public long Update(bool acceptText, bool resetFlag, CancellationToken cancellationToken = default)
     {
         UpdateCalls.Add((acceptText, resetFlag));
 
@@ -1496,4 +1496,3 @@ public sealed class ConflictDetectorTests
 
     #endregion
 }
-

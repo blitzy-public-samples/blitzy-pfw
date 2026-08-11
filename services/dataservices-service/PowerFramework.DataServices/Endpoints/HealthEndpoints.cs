@@ -177,6 +177,9 @@
 
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Options;
+using PowerFramework.DataServices.Clients;
+using PowerFramework.DataServices.Configuration;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.DataServices.Endpoints;
@@ -244,6 +247,49 @@ public static class HealthEndpoints
     /// <see cref="ProjectChecks"/> for the full reasoning and
     /// <see cref="WriteOperatorRecord"/> for where the per-check detail goes instead.
     /// </remarks>
+    /// <summary>
+    /// The second member: whether this service holds the credential material its token bootstrap
+    /// requires. A fixed identifier authored in this file; it carries no path, no certificate subject, no
+    /// address and no configuration value of any kind.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IT HAS AN ENTRY OF ITS OWN RATHER THAN BEING FOLDED INTO <see cref="ComponentsCheckName"/>, FOR
+    /// THE SAME REASON THE CHECK EXISTS AT ALL. Every call this service makes outward - to Persistence
+    /// for contracts C-05..C-08, to Security for C-02 - carries a bearer token, and the only way to
+    /// obtain one is the issuance edge, which contract C-01 protects with MUTUAL TLS and nothing else,
+    /// because a caller cannot present a bearer token in order to obtain its first bearer token. A
+    /// deployment that mounts no client certificate therefore started, reported ready, satisfied the
+    /// Compose dependency gate, and then had every outward call refused for want of a caller identity.
+    /// Naming the entry is what lets the thing polling this route see which precondition is unmet rather
+    /// than only that something is.
+    /// </para>
+    /// <para>
+    /// Doubles as the REGISTRATION name of <see cref="TokenBootstrapHealthCheck"/>, which is what lets
+    /// <see cref="ProjectChecks"/> recognise that check by name and report it as its own entry while
+    /// every other registration is folded into <see cref="ComponentsCheckName"/>.
+    /// </para>
+    /// </remarks>
+    internal const string CredentialsCheckName = "credentials";
+
+    /// <summary>The tag the checks this file registers are grouped under.</summary>
+    private const string ReadinessTag = "ready";
+
+    /// <summary>The fixed prose for a service holding the credential material it needs.</summary>
+    private const string CredentialsReadyDescription =
+        "The credential material this service must present in order to obtain a service token is "
+        + "configured.";
+
+    /// <summary>
+    /// The fixed prose for a service that cannot obtain a token. It names WHAT is missing in capability
+    /// terms and never a path, a subject, an address or a configuration key: the route is anonymous, and
+    /// a path names where private key material is mounted. The configuration keys go to the operator
+    /// channel instead.
+    /// </summary>
+    private const string CredentialsNotReadyDescription =
+        "The credential material this service must present in order to obtain a service token is not "
+        + "configured, so every call that needs a token would be refused.";
+
     private const string ComponentsCheckName = "components";
 
     /// <summary>The public note on the aggregated entry when every component check is ready.</summary>
@@ -285,6 +331,28 @@ public static class HealthEndpoints
     /// return code, spelled as the authored contract spells it.
     /// </summary>
     private const string RetCodeExtensionMember = "retCode";
+
+    /// <summary>
+    /// The problem document extension member carrying the readiness verdict, spelled as the authored
+    /// contract spells it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A NAME OF ITS OWN, BECAUSE <c>status</c> IS ALREADY TAKEN AND IS A DIFFERENT TYPE. RFC 9457 uses
+    /// <c>status</c> for the integer HTTP status and the authored contract types it that way, so the
+    /// verdict token cannot occupy that name on a problem document. Without a member of its own the
+    /// token would exist only inside the prose of <c>detail</c>, leaving
+    /// <see cref="RetCodeExtensionMember"/> as the sole machine-readable member - and that carries
+    /// <c>E_RETRY</c> for <c>Degraded</c> and for <c>Unhealthy</c> alike, so Gateway's aggregator could
+    /// not tell a service still starting up from one whose dependency has failed and would flatten both
+    /// into a failure.
+    /// </para>
+    /// <para>
+    /// The same spelling is emitted by all four services, because contract C-10 publishes one readiness
+    /// shape across the estate and Gateway reads this member off each upstream's not-ready body.
+    /// </para>
+    /// </remarks>
+    private const string ServiceStatusExtensionMember = "serviceStatus";
 
     /// <summary>
     /// The problem document title for the 503. Stated explicitly rather than left to the framework's
@@ -336,9 +404,9 @@ public static class HealthEndpoints
         naming the not-ready component and the legacy PowerFramework return code.
 
         **The body is public, and is scoped accordingly.** Every value in it is authored by this
-        service: the component identifiers are a closed vocabulary - `self` and `components` - rather
-        than the names whatever registered a check chose for it, and component checks are aggregated
-        into one entry so that the number of them is not disclosed either. The body carries no upstream
+        service: the component identifiers are a closed vocabulary - `self`, `credentials` and
+        `components` - rather than the names whatever registered a check chose for it, and every other
+        component check is aggregated into one entry so that the number of them is not disclosed either. The body carries no upstream
         address, no credential, no connection string, no certificate, no configuration value, no host
         name, no other service's port, no exception text and no stack trace. The per-component detail
         is available to an operator through this service's own telemetry.
@@ -502,9 +570,11 @@ public static class HealthEndpoints
     /// </summary>
     /// <param name="report">The evaluated report.</param>
     /// <returns>
-    /// Two entries at most, both named from <see cref="SelfCheckName"/> and
-    /// <see cref="ComponentsCheckName"/>: this endpoint's own statement that the process is answering,
-    /// and - when any component check is registered - one aggregated entry standing for all of them.
+    /// Between one and three entries, named exclusively from <see cref="SelfCheckName"/>,
+    /// <see cref="CredentialsCheckName"/> and <see cref="ComponentsCheckName"/>: this endpoint's own
+    /// statement that the process is answering, whether the credential material the token bootstrap needs
+    /// is configured, and - when any OTHER component check is registered - one aggregated entry standing
+    /// for all of those.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -519,8 +589,11 @@ public static class HealthEndpoints
     /// file can enforce; a closed vocabulary declared here is.
     /// </para>
     /// <para>
-    /// The names are therefore two fixed constants, and their <c>Status</c> is the only thing that
-    /// varies. Aggregating every component check into one entry is deliberate: reporting the COUNT of
+    /// The names are therefore fixed constants, and their <c>Status</c> is the only thing that varies.
+    /// The credential entry is recognised BY NAME rather than by position, and its own description is
+    /// still not echoed: only its status is read, and the prose is chosen from the two constants above -
+    /// so the enforcement stays structural even for a check this file registers itself. Aggregating every
+    /// OTHER component check into one entry is deliberate: reporting the COUNT of
     /// registered checks, or one anonymous entry per check, would leak the shape of this service's
     /// dependency graph to an unauthenticated caller - which is the same disclosure in a different
     /// unit. The per-check detail is not lost; it goes to the operator channel through
@@ -533,36 +606,63 @@ public static class HealthEndpoints
     /// </remarks>
     private static IReadOnlyList<ServiceHealthCheck> ProjectChecks(HealthReport report)
     {
-        ServiceHealthCheck self = BuildSelfCheck(HealthStatus.Healthy);
+        List<ServiceHealthCheck> projected = [BuildSelfCheck(HealthStatus.Healthy)];
 
         if (report.Entries.Count == 0)
         {
-            return [self];
+            return projected;
         }
 
-        // The worst status across every registered check, computed here rather than taken from
-        // report.Status: the report's own aggregate can be shaped by a registration's result predicate,
-        // whereas this entry stands for the checks themselves and must say what they said.
-        HealthStatus worst = HealthStatus.Healthy;
+        HealthStatus? credentials = null;
+        HealthStatus? othersWorst = null;
 
         foreach (KeyValuePair<string, HealthReportEntry> entry in report.Entries)
         {
-            if (entry.Value.Status < worst)
+            // The shared framework keys its registry case-insensitively, so the recognition test is too -
+            // otherwise a differently-cased spelling would silently fall into the aggregated bucket
+            // instead of being reported as the credential entry.
+            if (string.Equals(entry.Key, CredentialsCheckName, StringComparison.OrdinalIgnoreCase))
             {
-                worst = entry.Value.Status;
+                // Worst-wins if the same name were somehow registered twice: the framework forbids it,
+                // but a probe must not depend on that guarantee to stay fail-closed.
+                credentials = credentials is HealthStatus known && known < entry.Value.Status
+                    ? known
+                    : entry.Value.Status;
+
+                continue;
             }
+
+            // The worst status across every OTHER registered check, computed here rather than taken from
+            // report.Status: the report's own aggregate can be shaped by a registration's result
+            // predicate, whereas this entry stands for the checks themselves and must say what they said.
+            othersWorst = othersWorst is HealthStatus worst && worst < entry.Value.Status
+                ? worst
+                : entry.Value.Status;
         }
 
-        return
-        [
-            self,
-            new ServiceHealthCheck(ComponentsCheckName, ToWireStatus(worst))
-            {
-                Description = worst == HealthStatus.Healthy
-                    ? ComponentsHealthyDescription
-                    : ComponentsNotReadyDescription,
-            },
-        ];
+        if (credentials is HealthStatus credentialStatus)
+        {
+            projected.Add(
+                new ServiceHealthCheck(CredentialsCheckName, ToWireStatus(credentialStatus))
+                {
+                    Description = credentialStatus == HealthStatus.Healthy
+                        ? CredentialsReadyDescription
+                        : CredentialsNotReadyDescription,
+                });
+        }
+
+        if (othersWorst is HealthStatus othersStatus)
+        {
+            projected.Add(
+                new ServiceHealthCheck(ComponentsCheckName, ToWireStatus(othersStatus))
+                {
+                    Description = othersStatus == HealthStatus.Healthy
+                        ? ComponentsHealthyDescription
+                        : ComponentsNotReadyDescription,
+                });
+        }
+
+        return projected;
     }
 
     /// <summary>
@@ -666,8 +766,11 @@ public static class HealthEndpoints
     /// <para>
     /// DEGRADED AND UNHEALTHY BOTH ARRIVE HERE AND ARE DISTINGUISHED IN THE BODY RATHER THAN IN THE
     /// STATUS. Both are answered 503, because both mean "not ready" and the orchestration gate reads
-    /// the status code; the <c>status</c> member of the report still separates them, so an operator
-    /// can tell a service still completing startup validation from one whose dependency has failed.
+    /// the status code. The verdict travels in <see cref="ServiceStatusExtensionMember"/> so that an
+    /// operator - and Gateway's aggregator, which reads that member off this body - can tell a service
+    /// still completing startup validation from one whose dependency has failed. It cannot travel in a
+    /// <c>status</c> member: RFC 9457 uses that name for the integer HTTP status, and this response IS
+    /// a problem document rather than a <see cref="ServiceHealthReport"/>.
     /// </para>
     /// </remarks>
     private static IResult BuildNotReadyProblem(
@@ -701,6 +804,7 @@ public static class HealthEndpoints
             title: UnavailableProblemTitle,
             extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
             {
+                [ServiceStatusExtensionMember] = wireStatus,
                 [RetCodeExtensionMember] = RetCode.E_RETRY,
             });
     }
@@ -723,6 +827,262 @@ public static class HealthEndpoints
         HealthStatus.Unhealthy => StatusUnhealthy,
         _ => StatusUnhealthy,
     };
+
+    // ==============================================================================================
+    //  REGISTRATION
+    // ==============================================================================================
+
+    /// <summary>
+    /// Registers the readiness evaluator and this service's own component checks.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <returns>The same collection, for chaining.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="services"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// IDEMPOTENT, AND GUARDED BY NAME. A second registration under one name makes the framework fault
+    /// while building its evaluator, and a probe that faults is worse than a probe that reports - so the
+    /// guard reads the existing registrations and stands aside for a host or a test that deliberately
+    /// substituted the verdict under this same name.
+    /// </para>
+    /// <para>
+    /// NO PACKAGE IS REQUIRED FOR ANY OF THIS. <see cref="HealthCheckService"/> and its registration
+    /// builder ship inside the <c>Microsoft.AspNetCore.App</c> shared framework, which is why the project
+    /// file carries no health-check package reference (AAP 0.5.3).
+    /// </para>
+    /// <para>
+    /// STILL NO COMPONENT CHECK FOR EITHER UPSTREAM, deliberately. C-10 gives the AGGREGATION to Gateway,
+    /// and a leaf service that reported itself unready because an upstream was slow would make the
+    /// Compose <c>depends_on: condition: service_healthy</c> chain oscillate rather than settle. The check
+    /// registered here reads BOUND CONFIGURATION ONLY and opens no channel to anything.
+    /// </para>
+    /// </remarks>
+    internal static IServiceCollection AddDataServicesHealthChecks(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        // Registers the evaluator and its infrastructure. Called for that effect only; the registration
+        // itself is added below so it can be guarded.
+        _ = services.AddHealthChecks();
+
+        services.Configure<HealthCheckServiceOptions>(static options =>
+        {
+            foreach (HealthCheckRegistration existing in options.Registrations)
+            {
+                if (string.Equals(
+                        existing.Name,
+                        CredentialsCheckName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            options.Registrations.Add(
+                new HealthCheckRegistration(
+                    CredentialsCheckName,
+
+                    // The same activation the framework's own typed registration uses: resolved from the
+                    // container when it is registered there, otherwise constructed with its dependencies
+                    // injected. Nothing is resolved statically or globally.
+                    static provider =>
+                        ActivatorUtilities.GetServiceOrCreateInstance<TokenBootstrapHealthCheck>(provider),
+
+                    // DEGRADED RATHER THAN UNHEALTHY, AND THE DISTINCTION IS THE POINT. Unhealthy means
+                    // "has failed"; an unmounted credential has not failed, it has not arrived. The
+                    // orchestration layer owns the mount, so this is precisely the "not ready, but not
+                    // failed" state Degraded exists for - and an operator reading it is told to supply
+                    // material rather than to investigate a fault. Both verdicts are answered 503, so the
+                    // readiness gate behaves identically either way.
+                    failureStatus: HealthStatus.Degraded,
+                    tags: [ReadinessTag]));
+        });
+
+        return services;
+    }
+}
+
+// ==================================================================================================
+//  THE ONE COMPONENT CHECK - CAN THIS SERVICE OBTAIN A TOKEN AT ALL
+// ==================================================================================================
+
+/// <summary>
+/// Reports whether this service holds the credential material its token bootstrap requires, without
+/// requesting a token, opening a channel or touching any state.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY IT EXISTS, STATED AS THE GAP IT CLOSES. Every outward call this service makes carries a bearer
+/// token: Persistence requires one on all four of its contracts, and so does each of Security's
+/// seventeen cryptographic operations. The only way to obtain one is <c>POST /v1/tokens</c>, which
+/// contract C-01 protects with MUTUAL TLS and with nothing else - because a caller cannot present a
+/// bearer token in order to obtain its first bearer token. A deployment that mounts no client
+/// certificate is a legitimate startup state and is deliberately not a startup failure, but it is a
+/// state in which this service cannot reach the issuance edge at all. Before this check, such an
+/// instance reported READY, satisfied the Compose dependency gate, let Gateway start behind it, and then
+/// refused every request it received. Readiness is exactly the question it was answering wrongly.
+/// </para>
+/// <para>
+/// IT IS NON-DESTRUCTIVE IN THE STRONGEST SENSE: IT PERFORMS NO I/O AT ALL. No token is minted, no
+/// handshake is attempted, no metadata is fetched, no file is opened and no cache is populated. It reads
+/// two bound configuration values and compares them against the two preconditions the shipped client
+/// itself enforces on every call. A probe that minted a token would mutate the client's credential cache
+/// and put load on the issuance edge from an anonymous, unauthenticated route.
+/// </para>
+/// <para>
+/// AND IT DOES NOT PROBE THE UPSTREAM, WHICH IS A SEPARATE DECISION FROM THE ONE ABOVE. Whether Security
+/// is reachable is an upstream question, and C-10 gives every upstream question to Gateway: a leaf that
+/// reported itself unready because an upstream was still starting would make the Compose dependency
+/// chain oscillate instead of settle. What this check asserts is entirely local - the material is here,
+/// or it is not.
+/// </para>
+/// <para>
+/// THE PRECONDITIONS BELONG TO THE SHIPPED CLIENT, SO THEY ARE ASSERTED ONLY WHEN THE SHIPPED CLIENT IS
+/// THE ONE REGISTERED. A host that supplies its own <see cref="IServiceTokenProvider"/> is asserting that
+/// it obtains credentials by its own means - a different mechanism with different preconditions, which
+/// this file cannot know and must not invent a verdict about. For such a host the entry reports ready and
+/// says so, which is truthful: the bootstrap this check knows how to evaluate is not the one in use.
+/// </para>
+/// </remarks>
+internal sealed class TokenBootstrapHealthCheck : IHealthCheck
+{
+    /// <summary>The fixed prose for a service holding the credential material it needs.</summary>
+    /// <remarks>
+    /// AUTHORED HERE AND ALSO IN <c>HealthEndpoints</c>, WHICH IS NOT AN OVERSIGHT: the projection never
+    /// echoes a check's own description, because a description is chosen by whatever registered the check
+    /// and this route is anonymous. Each side therefore authors its own prose.
+    /// </remarks>
+    private const string ReadyDescription =
+        "The credential material this service must present in order to obtain a service token is "
+        + "configured.";
+
+    /// <summary>The fixed prose for a service that cannot obtain a token.</summary>
+    private const string NotReadyDescription =
+        "The credential material this service must present in order to obtain a service token is not "
+        + "configured, so every call that needs a token would be refused.";
+
+    /// <summary>The fixed prose for a bootstrap this check cannot evaluate because a host supplied it.</summary>
+    private const string SubstitutedDescription =
+        "The service token bootstrap is supplied by the host rather than by this service's own client, so "
+        + "this service holds no credential precondition of its own.";
+
+    /// <summary>The bound options the two preconditions are read from.</summary>
+    private readonly IOptions<DataServicesOptions> _options;
+
+    /// <summary>The registered token bootstrap, whose IDENTITY decides whether the preconditions apply.</summary>
+    private readonly IServiceTokenProvider _tokens;
+
+    /// <summary>The operator channel, which is where the unmet setting is named.</summary>
+    private readonly ILogger<TokenBootstrapHealthCheck> _logger;
+
+    /// <summary>Creates the check.</summary>
+    /// <param name="options">The bound options.</param>
+    /// <param name="tokens">The registered token bootstrap.</param>
+    /// <param name="logger">The operator channel.</param>
+    /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
+    public TokenBootstrapHealthCheck(
+        IOptions<DataServicesOptions> options,
+        IServiceTokenProvider tokens,
+        ILogger<TokenBootstrapHealthCheck> logger)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(tokens);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        _options = options;
+        _tokens = tokens;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Establishes whether a service token could be obtained, without obtaining one.
+    /// </summary>
+    /// <param name="context">
+    /// The registration being evaluated. Its failure status is honoured rather than assumed, so a host
+    /// that registered this check as failing rather than degrading gets what it asked for.
+    /// </param>
+    /// <param name="cancellationToken">The evaluation's cancellation token.</param>
+    /// <returns>
+    /// A healthy result when a token could be obtained; otherwise a result carrying the registration's
+    /// failure status.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> is <see langword="null"/>.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// The caller cancelled - the request was aborted, so there is no longer a response to write.
+    /// </exception>
+    public Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_tokens is not SecurityClient)
+        {
+            return Task.FromResult(HealthCheckResult.Healthy(SubstitutedDescription));
+        }
+
+        HealthStatus failureStatus = context.Registration.FailureStatus;
+        SecurityClientOptions security = _options.Value.Security;
+
+        if (string.IsNullOrWhiteSpace(security.BaseAddress))
+        {
+            // The options validator requires this, so reaching it means the validator was bypassed or a
+            // host bound the group itself. The configuration KEY is named on the operator channel because
+            // it is what an operator acts on; it is a key rather than a value, and it still never reaches
+            // the anonymous response.
+            _logger.LogError(
+                "No address is configured for the token-issuance edge, so no service token can be "
+                    + "requested. Set '{Setting}'. Reporting the {Check} readiness check not ready.",
+                $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
+                    + $":{nameof(SecurityClientOptions.BaseAddress)}",
+                HealthEndpoints.CredentialsCheckName);
+
+            return Task.FromResult(new HealthCheckResult(failureStatus, NotReadyDescription));
+        }
+
+        // BOTH HALVES, WHICH IS STRICTER THAN THE CLIENT'S OWN `IsConfigured` TEST, DELIBERATELY. That
+        // property is an OR - it answers "did the operator intend to configure a client identity", which
+        // is the right question for a diagnostic, because it lets the client say "you set neither" rather
+        // than reporting an authentication failure. Readiness asks a different question: can a handshake
+        // actually be completed. A certificate without its key cannot be loaded, and a key with no
+        // certificate has nothing to present, so half a pair answers no. The composition root refuses to
+        // START on a half-set pair, so the two tests can only disagree in a host that bypassed both the
+        // options validator and the identity loader - and for such a host the stricter answer is the
+        // honest one.
+        if (string.IsNullOrWhiteSpace(security.MutualTls.CertificatePath)
+            || string.IsNullOrWhiteSpace(security.MutualTls.CertificateKeyPath))
+        {
+            // NEITHER PATH IS REPRODUCED, not even here. A path names where private key material is
+            // mounted, and a log is not exempt from that concern; the two SETTING NAMES are what an
+            // operator needs in order to act.
+            _logger.LogWarning(
+                "This host presents no client certificate, so it cannot obtain a service token: the "
+                    + "issuance edge is authenticated by mutual TLS and by nothing else, and a "
+                    + "certificate-less request can only be refused. Set both '{Certificate}' and "
+                    + "'{Key}' to the material this deployment mounts. Reporting the {Check} readiness "
+                    + "check not ready.",
+                $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
+                    + $":{nameof(SecurityClientOptions.MutualTls)}"
+                    + $":{nameof(MutualTlsClientOptions.CertificatePath)}",
+                $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.Security)}"
+                    + $":{nameof(SecurityClientOptions.MutualTls)}"
+                    + $":{nameof(MutualTlsClientOptions.CertificateKeyPath)}",
+                HealthEndpoints.CredentialsCheckName);
+
+            return Task.FromResult(new HealthCheckResult(failureStatus, NotReadyDescription));
+        }
+
+        // Trace level on the ready path, because the Compose health condition polls continuously and an
+        // information-level line per poll would drown the channel in records saying nothing happened.
+        _logger.LogTrace(
+            "The credential material the token bootstrap requires is configured for the {Check} readiness "
+                + "check.",
+            HealthEndpoints.CredentialsCheckName);
+
+        return Task.FromResult(HealthCheckResult.Healthy(ReadyDescription));
+    }
 }
 
 /// <summary>

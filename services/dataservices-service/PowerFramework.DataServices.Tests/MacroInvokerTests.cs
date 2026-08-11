@@ -2338,16 +2338,31 @@ public sealed class MacroInvokerTests
         // two have different causes - a caller that changed its mind versus a client that never answered
         // - and a caller that retries should only retry one of them.
         //
-        // Driven by letting the invoker's own timeout elapse while the client is still working, and then
-        // having the client report cancellation. The margin is twenty-fold, and a slower machine only
-        // makes the elapsed timeout MORE certain rather than less.
+        // ⚠ NO REAL WAITING, AND NOTHING ABOUT THE OUTCOME IS SUPPLIED BY THIS TEST ⚠
+        //
+        // The clock is substituted and its TIMERS are substituted with it, so the timeout is reached by
+        // advancing the clock rather than by elapsing. The client blocks ASYNCHRONOUSLY on the token the
+        // invoker handed it, so the OperationCanceledException that ends the wait is a CONSEQUENCE of the
+        // timeout firing rather than an exception this test injected. Both properties matter: an earlier
+        // form of this row slept synchronously for twenty times the timeout and separately set
+        // `channel.Fault` to a hand-built OperationCanceledException, which meant nothing ever observed the
+        // linked token and the row would have reported TimedOut even with the timeout linking removed from
+        // the production path entirely. It could not fail for the reason it exists.
         TimeSpan timeout = TimeSpan.FromMilliseconds(25);
 
-        ScriptedMacroChannel channel = new ScriptedMacroChannel().ScriptFormatPrice();
-        channel.OnInvoke = _ => Thread.Sleep(TimeSpan.FromMilliseconds(500));
-        channel.Fault = new OperationCanceledException("the client gave up waiting");
+        DeterministicTimeProvider clock = new();
 
-        MacroInvoker invoker = new(channel, timeout, invocationIdFactory: () => "inv-1");
+        // The client receives the request and never answers: it awaits the token it was handed and reports
+        // cancellation only when that token is signalled.
+        ScriptedMacroChannel channel = new ScriptedMacroChannel()
+            .ScriptFormatPrice()
+            .WaitForCancellation();
+
+        MacroInvoker invoker = new(
+            channel,
+            timeout,
+            timeProvider: clock,
+            invocationIdFactory: () => "inv-1");
 
         Assert.Equal(timeout, invoker.InvocationTimeout);
 
@@ -2357,14 +2372,50 @@ public sealed class MacroInvokerTests
             "$FormatPrice(n2, $" + PrecisionVariable + ");",
             caretPosition: 7L);
 
-        MacroInvocationResult result = await invoker.InvokeAsync(
+        // A caller token that is CANCELLABLE but never cancelled, so the discrimination below is a real
+        // choice rather than a foregone one: had the invoker attributed its own timeout to the caller, the
+        // outcome would be Cancelled and this row would fail.
+        using CancellationTokenSource callerSource = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        ValueTask<MacroInvocationResult> pending = invoker.InvokeAsync(
             Row,
             BoundColumn(),
             plan,
-            cancellationToken: Ct);
+            cancellationToken: callerSource.Token);
 
-        // TIMED OUT, not cancelled: the caller's token was never signalled, so the caller did not ask to
-        // stop - the client simply did not answer in time.
+        Task<MacroInvocationResult> inFlight = pending.AsTask();
+
+        // The invocation must have REACHED the client before the clock moves, or the test would be
+        // advancing past a timeout nobody was waiting on. The channel records the invocation synchronously
+        // before it awaits, so one issued invocation is the proof.
+        while (channel.InvocationCount == 0 && !inFlight.IsCompleted)
+        {
+            await Task.Yield();
+        }
+
+        Assert.Equal(1, channel.InvocationCount);
+        Assert.False(inFlight.IsCompleted);
+
+        // THE TOKEN THE CHANNEL WAS HANDED IS NOT THE CALLER'S, and it is not yet cancelled.
+        CancellationToken observed = channel.LastObservedToken;
+
+        Assert.True(observed.CanBeCanceled);
+        Assert.False(observed.IsCancellationRequested);
+
+        // One advance past the timeout. No sleep, no polling interval, no tolerance.
+        clock.Advance(timeout + TimeSpan.FromMilliseconds(1));
+
+        MacroInvocationResult result = await inFlight;
+
+        // THE TOKEN ITSELF IS THE ASSERTION. The token handed to the client ended up cancelled while the
+        // caller's own did not, which is precisely what makes this an invoker-imposed timeout rather than a
+        // caller cancellation - and it is the property the previous form of this row could not observe.
+        Assert.True(observed.IsCancellationRequested);
+        Assert.False(callerSource.Token.IsCancellationRequested);
+        Assert.False(Ct.IsCancellationRequested);
+
+        // TIMED OUT, not cancelled: the caller never asked to stop - the client simply did not answer in
+        // time.
         Assert.Equal(MacroInvocationOutcome.TimedOut, result.Outcome);
         Assert.Equal(RetCode.E_TIME_OUT, result.ReturnCode);
         Assert.NotEqual(RetCode.CANCELLED, result.ReturnCode);
@@ -2376,6 +2427,10 @@ public sealed class MacroInvokerTests
         Assert.Equal("inv-1", result.InvocationId);
         Assert.Equal(1L, result.Sequence);
         Assert.Equal(0, invoker.OutstandingCount);
+
+        // AND NOTHING WAS INJECTED. The channel scripted no fault, so the only OperationCanceledException
+        // in this scenario is the one the cancelled token produced.
+        Assert.Null(channel.Fault);
     }
 
     /// <summary>

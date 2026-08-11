@@ -61,6 +61,12 @@ public sealed class GatewayOptionsTests
             DataServices = "http://dataservices:5102",
             Security = "https://security:5104",
         },
+
+        // ONE OF THE TWO ISSUANCE SCHEMES, BECAUSE A DEPLOYMENT WITH NEITHER IS DELIBERATELY REFUSED.
+        // Gateway requests a token before every call it makes, so it must be able to present something
+        // on Security's issuance edge; the validator treats "neither" as a structural fault. A
+        // fixture-shaped value, never a real one - nothing here is presented to anything.
+        SecurityClientSecret = "an-issuance-secret-shaped-value",
     };
 
     // ==============================================================================================
@@ -163,39 +169,41 @@ public sealed class GatewayOptionsTests
     {
         var upstreams = new GatewayOptions().Upstreams;
 
-        // 5102 IS DATASERVICES AND 5104 IS SECURITY, per the port map in docs/ARCHITECTURE.md 4.1 and
-        // AAP 0.3.2.2, which fix the band at 5101-5105 with 5103 reserved and nothing outside it.
+        // 5112 IS DATASERVICES' gRPC ENDPOINT AND 5104 IS SECURITY, per the port map in
+        // docs/ARCHITECTURE.md 4.1. The documented band stays 5101-5105 with 5103 reserved, and 5112 is
+        // an ADDITIONAL address the attached environment never names rather than a reassignment of one it
+        // does - which is why adding it deviates from nothing the environment fixes.
         //
-        // THE SCHEME IS THE LOAD-BEARING HALF OF THE DATASERVICES ASSERTION. Both defaults are https:
-        // Security is the trust
-        // bootstrap whose published key set every service verifies against, and DataServices carries
-        // buffer state and conflict detail. The loopback plain-http topology the local bring-up
-        // publishes is an override in appsettings.Development.json, so it applies only when
-        // ASPNETCORE_ENVIRONMENT is Development and can never be inherited by a deployment that simply
-        // forgets to override something.
-        Assert.Equal("https://localhost:5102", upstreams.DataServices);
+        // BOTH HALVES ARE ASSERTED, AND EACH FOR ITS OWN REASON.
+        //
+        // THE SCHEME: every listener in this estate is TLS, and the DEFAULT is the part that matters. A
+        // deployment that binds this section supplies its own address; one that forgets gets this value,
+        // so a cleartext default fails silently in the one case where nobody is looking - and every
+        // request on both edges carries a bearer token (CWE-319).
+        //
+        // THE PORT: DataServices declares two endpoints, Http1 on 5102 and Http2 on 5112, so that a
+        // readiness probe and a gRPC channel each reach a listener that can answer it. Gateway calls
+        // C-03 and C-04 over gRPC, so it must name the HTTP/2 half.
+        Assert.Equal("https://localhost:5112", upstreams.DataServices);
         Assert.Equal("https://localhost:5104", upstreams.Security);
     }
 
     [Fact]
-    public void TheDataServicesUpstreamNeverNamesACleartextListener()
+    public void TheDataServicesUpstreamNeverNamesTheHttp11Endpoint()
     {
         // A REGRESSION GUARD WITH A SPECIFIC FAILURE IN MIND, NOT A RESTATEMENT OF THE TEST ABOVE.
         //
-        // `http://localhost:5102` is the value that looks correct from every angle except the one that
-        // matters: right service, right port, right band, and it is what the readiness gate probes. It
-        // is nonetheless unusable HERE, because Gateway reaches this upstream over gRPC and gRPC needs
-        // HTTP/2. DataServices declares ONE endpoint carrying both versions - https://+:5102 with
-        // Protocols Http1AndHttp2 - and that only works because ALPN selects the version per
-        // connection. ALPN exists only inside a TLS handshake, so on cleartext Kestrel disables HTTP/2
-        // outright and says so at startup.
+        // `https://localhost:5102` is the value that looks correct from every angle except the one that
+        // matters: right service, right host, inside the documented band, and it is exactly what the
+        // readiness gate probes. It is nonetheless unusable HERE, because Gateway reaches this upstream
+        // over gRPC and gRPC needs HTTP/2, while 5102 is declared `Http1`.
         //
-        // The failure the cleartext value produces is why this is asserted separately from the equality
-        // above: every call fails with the HTTP/2 error HTTP_1_1_REQUIRED during transport negotiation,
-        // BEFORE the request reaches DataServices. Nothing in DataServices logs it, so the symptom is a
-        // Gateway 502 on every /v1/datawindow route and the cause is four characters of scheme.
-        Assert.StartsWith("https://", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
-        Assert.DoesNotContain("http://", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+        // The failure that value produces is why this is asserted separately from the equality above:
+        // every call fails during transport negotiation, BEFORE the request reaches DataServices.
+        // Nothing in DataServices logs it, so the symptom is a Gateway 502 on every /v1/datawindow route
+        // and the cause is two characters of port.
+        Assert.EndsWith(":5112", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+        Assert.DoesNotContain(":5102", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -211,12 +219,14 @@ public sealed class GatewayOptionsTests
         Assert.Equal("https://localhost:5102", probes.DataServices);
         Assert.Equal("https://localhost:5104", probes.Security);
 
-        // THE PROBE AND THE CALL EDGE NAME THE SAME LISTENER, AND THAT IS THE CORRECT STATE RATHER THAN
-        // A DUPLICATION TO REMOVE. DataServices declares one endpoint on its assigned port carrying both
-        // protocol versions over ALPN, so the HTTP/1.1 probe and the HTTP/2 contract traffic share it.
-        // The two members stay separate because one authorises an anonymous GET /health for the C-10
-        // aggregate and the other carries C-03 and C-04 - a topology distinction, not an addressing one.
-        Assert.Equal(new GatewayOptions().Upstreams.DataServices, probes.DataServices);
+        // THE PROBE AND THE CALL EDGE NAME DIFFERENT ENDPOINTS OF THE SAME SERVICE, AND THAT IS THE
+        // POINT OF ASSERTING IT. A probe speaks HTTP/1.1, so it must reach DataServices' Http1 endpoint
+        // on 5102; Gateway's gRPC channel must reach the Http2 endpoint on 5112. Pointing either at the
+        // other's port fails - an HTTP/1.1 GET /health against an Http2 endpoint answers 400 and the
+        // readiness gate never opens, and a gRPC channel against an Http1 endpoint fails every call
+        // during negotiation. The two members were already separate types for a topology reason; they
+        // additionally carry different addresses, which is why neither can be aliased to the other.
+        Assert.NotEqual(new GatewayOptions().Upstreams.DataServices, probes.DataServices);
     }
 
     [Fact]
@@ -392,6 +402,19 @@ public sealed class GatewayOptionsTests
         // Security is the SOLE issuer and exactly one signing secret exists in the whole system. Gateway
         // holds verification material only, so a signing-key property here would be a second signing
         // authority - which is the specific thing the token topology forbids.
+        // EXACTLY ONE PROPERTY ON THE WHOLE SURFACE MAY CARRY A CREDENTIAL, AND IT IS NAMED HERE.
+        //
+        // The sweep below used to forbid every credential-shaped name outright, which read as "Gateway
+        // holds nothing sensitive" - and that is not what the token topology says. It says Gateway holds
+        // no SIGNING material: it validates tokens and never mints one. It must still AUTHENTICATE to
+        // the sole issuer to obtain a token at all, because POST /v1/tokens is the one operation a
+        // bearer token cannot protect, so an outbound client credential is required BY the contract.
+        //
+        // Naming the one permitted property rather than relaxing the marker list keeps the sweep sharp:
+        // a SECOND credential-shaped property, or a signing key under any spelling, still fails.
+        HashSet<string> permittedCredentialProperties =
+            [nameof(GatewayOptions.SecurityClientSecret)];
+
         foreach (Type type in (Type[])
             [
                 typeof(GatewayOptions),
@@ -403,15 +426,128 @@ public sealed class GatewayOptionsTests
         {
             foreach (var property in type.GetProperties())
             {
-                foreach (string marker in (string[])["SigningKey", "Secret", "PrivateKey", "Password", "Credential"])
+                // NO SIGNING MATERIAL, UNDER ANY SPELLING, WITH NO EXCEPTION. A signing key here would
+                // be a second signing authority, which is the specific thing the topology forbids.
+                foreach (string marker in (string[])["SigningKey", "PrivateKey", "Password"])
                 {
                     Assert.False(
                         property.Name.Contains(marker, StringComparison.OrdinalIgnoreCase),
                         $"{type.Name}.{property.Name} looks like signing material. Gateway validates "
                             + "tokens and never issues them; Security is the sole issuer.");
                 }
+
+                foreach (string marker in (string[])["Secret", "Credential"])
+                {
+                    if (!property.Name.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    // A BOOLEAN CANNOT CARRY MATERIAL, so a credential-shaped boolean name is a
+                    // PREDICATE about the configuration rather than a place to put a credential -
+                    // HasIssuanceCredential is the one that exists. Excluding the type rather than
+                    // listing the name keeps the check about what a property could hold.
+                    if (property.PropertyType == typeof(bool))
+                    {
+                        continue;
+                    }
+
+                    Assert.Contains(property.Name, permittedCredentialProperties);
+                }
             }
         }
+
+        // AND THE ONE PERMITTED PROPERTY IS EMPTY IN SOURCE AND HAS NO SETTINGS LEAF. The declaration
+        // is here; the material arrives through a flat environment key the section binder cannot reach,
+        // which is what keeps it out of every committed file (C-F).
+        Assert.Equal(string.Empty, new GatewayOptions().SecurityClientSecret);
+        Assert.Equal(
+            "SECURITY_CLIENT_SECRET_GATEWAY",
+            GatewayOptions.SecurityClientSecretConfigurationKey);
+        Assert.DoesNotContain(':', GatewayOptions.SecurityClientSecretConfigurationKey);
+    }
+
+    // ==============================================================================================
+    //  THE ISSUANCE CREDENTIAL - the disjunction, and the one state that is refused
+    // ==============================================================================================
+
+    [Fact]
+    public void EitherIssuanceSchemeAloneSatisfiesTheRequirementAndNeitherIsRefused()
+    {
+        // SCHEME ONE ALONE. The documented bring-up path.
+        GatewayOptions secretOnly = ValidOptions();
+        Assert.True(secretOnly.HasIssuanceCredential);
+        Assert.Empty(Validate(secretOnly));
+
+        // SCHEME TWO ALONE. A deployment that terminates TLS at Security and prefers certificates.
+        GatewayOptions certificateOnly = ValidOptions();
+        certificateOnly.SecurityClientSecret = string.Empty;
+        certificateOnly.MutualTls = new GatewayOptions.MutualTlsClientOptions
+        {
+            CertificatePath = "/run/secrets/gateway-client.pem",
+            CertificateKeyPath = "/run/secrets/gateway-client.key",
+        };
+        Assert.True(certificateOnly.HasIssuanceCredential);
+        Assert.Empty(Validate(certificateOnly));
+
+        // BOTH. Legitimate, and not a conflict: the client presents the Basic credential and the
+        // handler carries the certificate, and Security accepts either.
+        GatewayOptions both = ValidOptions();
+        both.MutualTls = certificateOnly.MutualTls;
+        Assert.True(both.HasIssuanceCredential);
+        Assert.Empty(Validate(both));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ADeploymentThatCanPresentNeitherSchemeIsRefusedNamingBothKeysAndQuotingNoValue(
+        string? secret)
+    {
+        GatewayOptions options = ValidOptions();
+        options.SecurityClientSecret = secret!;
+
+        Assert.False(options.HasIssuanceCredential);
+
+        ValidationResult[] results = Validate(options);
+
+        ValidationResult refusal = Assert.Single(results);
+        string message = refusal.ErrorMessage ?? string.Empty;
+
+        // BOTH KEYS ARE NAMED, so an operator can act on either.
+        Assert.Contains(GatewayOptions.SecurityClientSecretConfigurationKey, message, StringComparison.Ordinal);
+        Assert.Contains("Gateway:MutualTls", message, StringComparison.Ordinal);
+
+        // AND THE REFUSAL POINTS AT BOTH MEMBERS rather than only the one that happened to be read
+        // last, because either one being set would resolve it.
+        Assert.Contains(nameof(GatewayOptions.SecurityClientSecret), refusal.MemberNames);
+        Assert.Contains(nameof(GatewayOptions.MutualTls), refusal.MemberNames);
+    }
+
+    [Fact]
+    public void TheIssuanceDisjunctionIsComputedAndThereforeBindsNothing()
+    {
+        // A computed property has no setter, so no configuration key can assert "this deployment can
+        // authenticate" independently of whether it actually can.
+        System.Reflection.PropertyInfo? property =
+            typeof(GatewayOptions).GetProperty(nameof(GatewayOptions.HasIssuanceCredential));
+
+        Assert.NotNull(property);
+        Assert.False(property.CanWrite);
+    }
+
+    [Fact]
+    public void AnUnsetMutualTlsGroupIsNotTreatedAsAConfiguredOne()
+    {
+        // The disjunction reads MutualTls.IsConfigured, and a null group must answer "not configured"
+        // rather than faulting: the public setter makes null reachable, and a NullReferenceException
+        // inside a validator would be reported as a host crash rather than as a configuration error.
+        GatewayOptions options = ValidOptions();
+        options.SecurityClientSecret = string.Empty;
+        options.MutualTls = null!;
+
+        Assert.False(options.HasIssuanceCredential);
     }
 
     // ==============================================================================================
@@ -569,10 +705,12 @@ public sealed class GatewayOptionsTests
     [Fact]
     public void TwoBadUpstreamAddressesAreBothReportedRatherThanOnlyTheFirst()
     {
-        var options = new GatewayOptions
-        {
-            Upstreams = new GatewayOptions.UpstreamAddresses { DataServices = string.Empty, Security = "ftp://x" },
-        };
+        // STARTED FROM A VALID CONFIGURATION AND BROKEN IN EXACTLY TWO PLACES. Constructing a bare
+        // instance instead would also be missing the issuance credential, and the third result that
+        // produced would make this test pass or fail for a reason it is not about.
+        GatewayOptions options = ValidOptions();
+        options.Upstreams.DataServices = string.Empty;
+        options.Upstreams.Security = "ftp://x";
 
         ValidationResult[] results = Validate(options);
 

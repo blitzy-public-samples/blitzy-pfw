@@ -390,23 +390,32 @@ trim_trailing_whitespace = true
 # ==============================================================================================
 # THE ROSTER - THIS LIST IS THE SINGLE SOURCE OF TRUTH FOR "WHICH FILES ARE IN BAND 3"
 # ==============================================================================================
-# 15 SECTIONS, ALL 15 EFFECTIVE - every file named below exists in the tree.
+# 16 SECTIONS, ALL 16 EFFECTIVE - every file named below exists in the tree.
 #
 #      1  shared/PowerFramework.Shared.Kernel/RetCode.cs                                  effective
 #      2  shared/PowerFramework.Shared.Kernel/Enums.cs                                    effective
 #      3  shared/PowerFramework.Shared.Localization/Categories.cs                         effective
 #      4  .../PowerFramework.DataServices/Domain/DataWindowEventChain.cs                  effective
-#      5  .../PowerFramework.DataServices/Domain/EventGate.cs                             effective
-#      6  .../PowerFramework.DataServices/Domain/ItemChangeProtocol.cs                    effective
-#      7  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           effective
-#      8  .../PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs    effective
-#      9  .../PowerFramework.DataServices/Services/ColumnSortModel.cs                     effective
-#     10  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
-#     11  .../PowerFramework.DataServices/Services/ContextMenuModel.cs                    effective
-#     12  .../PowerFramework.DataServices/Services/DropDownSearchModel.cs                 effective
-#     13  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
-#     14  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
-#     15  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
+#      5  .../PowerFramework.DataServices/Domain/DataWindowServiceHost.cs                 effective
+#      6  .../PowerFramework.DataServices/Domain/EventGate.cs                             effective
+#      7  .../PowerFramework.DataServices/Domain/ItemChangeProtocol.cs                    effective
+#      8  .../PowerFramework.DataServices/Expressions/ColumnExpressionEngine.cs           effective
+#      9  .../PowerFramework.DataServices/Expressions/ExpressionVariableEnvironment.cs    effective
+#     10  .../PowerFramework.DataServices/Services/ColumnSortModel.cs                     effective
+#     11  .../PowerFramework.DataServices/Services/RowSelectService.cs                    effective
+#     12  .../PowerFramework.DataServices/Services/ContextMenuModel.cs                    effective
+#     13  .../PowerFramework.DataServices/Services/DropDownSearchModel.cs                 effective
+#     14  .../PowerFramework.Persistence/Sql/ClauseModifier.cs                            effective
+#     15  .../PowerFramework.Persistence/Sql/Paging/IPagingRewriter.cs                    effective
+#     16  .../PowerFramework.Security/Crypto/LegacyDefaults.cs                            effective
+#
+# ENTRY 5 WAS MISSING AND IS THE REASON THIS ROSTER IS AUDITED RATHER THAN TRUSTED. The roster claims
+# to be the single source of truth for band membership, and DataWindowServiceHost.cs - which declares
+# fourteen public SCREAMING_SNAKE constants - was absent from it while the twelve files around it were
+# present. A roster that is authoritative and incomplete is worse than one that is neither, because
+# nothing downstream re-derives it: the file's constants would have been reported by the naming
+# diagnostics the moment the analysis mode is raised, and the obvious repair under time pressure is a
+# broadened glob, which would suppress the diagnostic for files that have no exception to claim.
 #
 # ENTRY 7 WAS THE PENDING ONE AND IS NOW EFFECTIVE. ColumnExpressionEngine.cs was enumerated in the
 # target-structure specification before it was authored, and its section was carried inert on the
@@ -494,6 +503,27 @@ dotnet_diagnostic.IDE1006.severity = none
 # These spellings travel in serialized payloads, log records and characterization recordings, so a
 # rename would silently invalidate every stored comparison.
 [services/dataservices-service/PowerFramework.DataServices/Domain/DataWindowEventChain.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.IDE1006.severity = none
+
+# Preserved verbatim: the seven DataWindow presentation styles STYLE_DEFAULT=0 .. STYLE_RICHTEXT=7 and
+# the seven column types COL_TYPE_UNKNOWN=0 .. COL_TYPE_TIME=6, fourteen public constants declared on
+# the service base rather than in the framework-wide catalogue - a search of enums.sru for either
+# prefix returns nothing, so in the .NET tree they belong to this file.
+# Source: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L18-L24 for the styles, under the
+# comment at :L17 (数据源的风格, "the data source's style"), and :L26-L32 for the column types, under
+# the comment at :L25 (列类型, "column type").
+# These spellings travel in serialized payloads, log records and characterization recordings, so a
+# rename would silently invalidate every stored comparison.
+# THE STYLE SEQUENCE SKIPS SIX, AND THAT GAP IS LEGACY AND NOT A TRANSCRIPTION SLIP. STYLE_RICHTEXT is
+# 7 [:L24] and no constant carries the value 6; the legacy declares no name for it, so neither does
+# this file, and a reader must not close the gap by renumbering. STYLE_DEFAULT likewise covers FOUR
+# PowerBuilder styles at one value - form, group, query and tabular [:L18] - which is why it is named
+# for none of them and why no separate "tabular" constant exists to be added.
+# THE SCOPE OF THIS SECTION IS THIS ONE FILE, DELIBERATELY. The band's maintenance rule forbids
+# broadening the glob, and a Domain/ wildcard would suppress the naming diagnostics for every file in
+# a folder whose other members declare no preserved identifier at all.
+[services/dataservices-service/PowerFramework.DataServices/Domain/DataWindowServiceHost.cs]
 dotnet_diagnostic.CA1707.severity = none
 dotnet_diagnostic.IDE1006.severity = none
 

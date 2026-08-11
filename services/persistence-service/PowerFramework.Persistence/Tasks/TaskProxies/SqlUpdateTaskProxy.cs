@@ -570,6 +570,38 @@ internal sealed class SqlUpdateTaskProxy : SqlTaskProxyBase, ISqlUpdateTaskProxy
     protected override string WorkerTaskClassName => "n_cst_thread_task_sqlupdate";
 
     /// <summary>
+    /// Raises the proxy's init event - the port of the controller triggering <c>oninit</c> as it inserts
+    /// the task [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru</c>, <c>of_InsertTask</c>].
+    /// </summary>
+    /// <returns>
+    /// <c>RetCode.OK</c> once the worker task is attached and its commit signal resolved, or the host's
+    /// own refusal code.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Composition, not construction: the base's <c>OnInit</c> is <see langword="protected"/> because the
+    /// oracle declares it as an EVENT, and the controller - here the task factory - is what raises it.
+    /// Until it has run the proxy holds no worker reference, so every member that needs one throws
+    /// rather than silently doing nothing.
+    /// </para>
+    /// <para>
+    /// <b>No idempotence guard, deliberately (C-B),</b> matching the sibling command proxy: the oracle's
+    /// event has none, so raising it twice re-runs the substrate's insert exactly as re-triggering the
+    /// legacy event would.
+    /// </para>
+    /// <para>
+    /// <b>LOAD BEARING FOR THE COMMIT NOTIFICATION, WHICH IS WHY IT IS PUBLISHED AT ALL.</b> Attachment
+    /// borrows the worker's commit signal [<c>n_cst_threading_task_sqlbase.sru:L218</c>], and the committed
+    /// notification only ever signals an ALREADY CREATED handle
+    /// [<c>n_cst_thread_task_sqlbase.sru:L100-L111</c>]. A composition root that skips this call produces a
+    /// task whose every response reports "not committed" even after a real commit - a silent wrong answer
+    /// rather than a visible failure. The sibling command proxy publishes the same member for the same
+    /// reason, and publishing it on both is what lets a factory treat the two pairs identically.
+    /// </para>
+    /// </remarks>
+    internal long Initialize() => OnInit();
+
+    /// <summary>
     /// The accumulated inserted-row count - <c>of_getrowsinserted</c> [<c>:L214-L215</c>].
     /// </summary>
     /// <returns>The running total across every table of the run.</returns>
@@ -596,6 +628,23 @@ internal sealed class SqlUpdateTaskProxy : SqlTaskProxyBase, ISqlUpdateTaskProxy
     /// <returns>The running total across every table of the run.</returns>
     /// <remarks>No busy guard - see <see cref="GetRowsInserted"/>.</remarks>
     internal long GetRowsUpdated() => _rowsUpdated;
+
+    /// <summary>
+    /// The accumulated identity blocks, in the order the tables were declared.
+    /// </summary>
+    /// <value>
+    /// A read-only view over <c>IDCOLDATA _idColDatas[]</c> [<c>:L45</c>]. EMPTY means none was collected
+    /// and is never an error.
+    /// </value>
+    /// <remarks>
+    /// ⚠️ <b>ORDER IS CONTRACT AT TWO LEVELS AND BOTH BIND.</b> Position in the list IS table order, and
+    /// position within each block's two value arrays IS row correspondence - the <c>Primary!</c> buffer
+    /// walked FORWARD and the <c>Filter!</c> buffer walked BACKWARD, because the oracle's own comment
+    /// records that the filter buffer's row order is inverted relative to the source
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L235</c>]. Nothing that consumes this view may sort,
+    /// deduplicate, merge or reverse either level.
+    /// </remarks>
+    internal IReadOnlyList<ResolvedIdentityColumnData> IdentityBlocks => _idColDatas;
 
     /// <summary>
     /// The worker, narrowed to its actual type - the port of the private accessor

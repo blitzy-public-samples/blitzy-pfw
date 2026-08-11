@@ -90,14 +90,28 @@
 //      retrieval TIMING only. It is emphatically not permission to skip, relax or conditionally disable
 //      token validation anywhere, and no key set reachability check appears in this probe.
 //
-//   4. WHY THE PROBE TOUCHES STORAGE FOR REAL, AND WHY IT TOUCHES NOTHING ELSE.
+//   4. WHY THE PROBE TOUCHES STORAGE FOR REAL, WHY IT TOUCHES NOTHING ELSE, AND WHY IT CHANGES NOTHING.
 //      A liveness check that never reached storage would report healthy while the only storage provider
 //      in the entire system was unreachable, which is precisely the state the gate Gateway hangs on
 //      exists to detect. So the probe goes through Data/SqliteConnectionFactory.cs - the single seam in
-//      the system that opens a connection - and calls its reachability member, which executes one
-//      constant, parameterless statement so that the ENGINE is proven to answer rather than merely a
-//      file handle proven to open, and which reads no schema so it works against an empty database as
-//      well as a populated one.
+//      the system that opens a connection - and calls its readiness member, which does three things and
+//      no others: it opens READ-ONLY and NON-CREATING (borrowing the runtime's connection when one is
+//      already open, otherwise a short-lived read-only handle of its own that it disposes before
+//      returning), it executes one constant parameterless statement so the ENGINE is proven to answer
+//      rather than merely a file handle proven to open, and it reads SQLite's own catalogue to confirm
+//      the required schema is present.
+//
+//      THE NON-CREATING PART IS A SECURITY PROPERTY, NOT A TIDINESS ONE. This route is anonymous, so
+//      anything the probe does an unauthenticated caller can make it do. The runtime open is
+//      deliberately creative - it creates the data directory, creates the database file under the legacy
+//      `mode=rwc` grammar, and sets the journal mode - and every one of those is a data mutation that
+//      must not be reachable without a credential. Readiness therefore has its own path.
+//
+//      AND THE SCHEMA PART IS WHY A CONSTANT SCALAR IS NOT SUFFICIENT ALONE: `SELECT 1` passes just as
+//      happily against an empty database, so a service whose volume mounted correctly and whose
+//      migrations never ran would report READY and then fail every request it received. The two
+//      not-ready states are reported distinctly, because "fix the mount" and "run the migrations" are
+//      different instructions.
 //      It composes no URI, constructs no connection, and reads no configuration value of its own. URI
 //      composition is the factory's declared and matrix tested responsibility, and duplicating it would
 //      create two grammars that could drift (C-F). It resolves the seam through DI and never through a
@@ -211,6 +225,10 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using PowerFramework.Persistence.Data;
+using PowerFramework.Persistence.Grpc;
+using PowerFramework.Persistence.Runtime;
+using PowerFramework.Persistence.Tasks;
+using PowerFramework.Persistence.Transactions;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.Persistence.Endpoints;
@@ -283,7 +301,30 @@ public static class HealthEndpoints
     internal const string SqliteCheckName = "sqlite";
 
     /// <summary>
-    /// The third member: one aggregated entry standing for every OTHER registered check, so that
+    /// The third member: whether every runtime seam contracts C-05 through C-08 depend on is bound.
+    /// A fixed identifier authored in this file, naming capabilities the architecture already publishes,
+    /// carrying no type name, assembly name, provider name or configuration value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IT HAS AN ENTRY OF ITS OWN RATHER THAN BEING FOLDED INTO <see cref="ComponentsCheckName"/>, AND
+    /// THAT IS THE WHOLE REASON THE CHECK IS WORTH REGISTERING. The startup gate already refuses to
+    /// start when a seam is unbound, so a folded entry would add nothing an operator could act on. What
+    /// was missing is that the readiness SURFACE said nothing about it: an instance whose retrieval,
+    /// update, command and transaction contracts could not serve a single call still answered ready, and
+    /// the orchestration gate opened onto it. A named entry is what makes the state observable to the
+    /// thing that actually polls this route.
+    /// </para>
+    /// <para>
+    /// Doubles as the REGISTRATION name of <see cref="RuntimeSeamHealthCheck"/>, on the same terms as the
+    /// storage name above: <see cref="ProjectChecks"/> recognises it by name, still reads only its
+    /// status, and still chooses the prose from the two constants below.
+    /// </para>
+    /// </remarks>
+    internal const string RuntimeCheckName = "runtime";
+
+    /// <summary>
+    /// The fourth member: one aggregated entry standing for every OTHER registered check, so that
     /// neither a registration's chosen name nor the number of registrations reaches an unauthenticated
     /// caller (decision record item 2).
     /// </summary>
@@ -303,6 +344,28 @@ public static class HealthEndpoints
 
     /// <summary>The single extension member the problem document is permitted to carry.</summary>
     private const string RetCodeExtensionMember = "retCode";
+
+    /// <summary>
+    /// The problem document extension member carrying the readiness verdict, spelled as the authored
+    /// contract spells it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A NAME OF ITS OWN, BECAUSE <c>status</c> IS ALREADY TAKEN AND IS A DIFFERENT TYPE. RFC 9457 uses
+    /// <c>status</c> for the integer HTTP status and the authored contract types it that way, so the
+    /// verdict token cannot occupy that name on a problem document. Without a member of its own the
+    /// token would exist only inside the prose of <c>detail</c>, leaving
+    /// <see cref="RetCodeExtensionMember"/> as the sole machine-readable member - and that carries
+    /// <c>E_RETRY</c> for <c>Degraded</c> and for <c>Unhealthy</c> alike, so Gateway's aggregator could
+    /// not tell a service still starting up from one whose dependency has failed and would flatten both
+    /// into a failure.
+    /// </para>
+    /// <para>
+    /// The same spelling is emitted by all four services, because contract C-10 publishes one readiness
+    /// shape across the estate and Gateway reads this member off each upstream's not-ready body.
+    /// </para>
+    /// </remarks>
+    private const string ServiceStatusExtensionMember = "serviceStatus";
 
     /// <summary>The problem title for the not-ready verdict.</summary>
     private const string UnavailableProblemTitle = "Service Unavailable";
@@ -337,6 +400,19 @@ public static class HealthEndpoints
     /// </summary>
     private const string SqliteNotReadyDescription =
         "The storage engine did not answer a read-only reachability probe.";
+
+    /// <summary>The fixed prose for a fully bound runtime.</summary>
+    private const string RuntimeBoundDescription =
+        "Every runtime seam the retrieval, update, command and transaction contracts depend on is bound.";
+
+    /// <summary>
+    /// The fixed prose for a runtime with an unbound seam. It names WHICH CAPABILITY is affected and
+    /// never which type, interface, assembly or registration is missing: the route is anonymous, and a
+    /// type name is internal structure. The seam's own identifier goes to the operator channel instead.
+    /// </summary>
+    private const string RuntimeUnboundDescription =
+        "A runtime seam the retrieval, update, command and transaction contracts depend on is not bound, "
+        + "so calls on the affected contract cannot be served.";
 
     /// <summary>The fixed prose for the aggregated <c>components</c> entry when every other check is ready.</summary>
     private const string ComponentsHealthyDescription =
@@ -503,6 +579,35 @@ public static class HealthEndpoints
                     tags: [ReadinessTag]));
         });
 
+        services.Configure<HealthCheckServiceOptions>(static options =>
+        {
+            foreach (HealthCheckRegistration existing in options.Registrations)
+            {
+                // Guarded on the same terms as the storage registration above, for the same reason: a
+                // second registration under one name makes the framework fault while building its
+                // evaluator, and a probe that faults is worse than a probe that reports.
+                if (string.Equals(existing.Name, RuntimeCheckName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            options.Registrations.Add(
+                new HealthCheckRegistration(
+                    RuntimeCheckName,
+                    static provider =>
+                        ActivatorUtilities.GetServiceOrCreateInstance<RuntimeSeamHealthCheck>(provider),
+
+                    // UNHEALTHY RATHER THAN DEGRADED, AND THE DISTINCTION IS NOT COSMETIC. Degraded means
+                    // "not ready, but not failed" - a condition an orchestrator can usefully wait out. An
+                    // unbound seam is not a condition that resolves with time: it is a composition
+                    // defect, and every call on the affected contract fails identically until the
+                    // composition changes. Reporting it as a failure is what tells an operator to redeploy
+                    // rather than to wait.
+                    failureStatus: HealthStatus.Unhealthy,
+                    tags: [ReadinessTag]));
+        });
+
         return services;
     }
 
@@ -624,17 +729,28 @@ public static class HealthEndpoints
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             // Decision record item 6: the handler REPORTS rather than throws, because a probe that
-            // faulted would take the container with it and the readiness gate could never recover. The
-            // exception is logged HERE, where an operator can see it, and is deliberately NOT projected
-            // onto the anonymous response. OperationCanceledException is excluded on purpose: it means
-            // the caller disconnected, so there is no longer a response to write.
+            // faulted would take the container with it and the readiness gate could never recover.
+            // OperationCanceledException is excluded on purpose: it means the caller disconnected, so
+            // there is no longer a response to write.
+            //
+            // THE EXCEPTION OBJECT IS NOT PASSED, for the same reason as the storage check's own
+            // catch-all further down this file: THIS ENDPOINT IS ANONYMOUS, so an unauthenticated caller
+            // decides how often this line runs and whatever it writes is effectively published on demand.
+            // A fault escaping the evaluation itself can carry configured values in its message - a
+            // registration factory failing while binding options is the obvious case - and would bring a
+            // stack trace naming internal types with it. The exception's TYPE NAME is a compile-time
+            // constant of this codebase and never a configured value, so it is the part worth keeping;
+            // the component-level detail an operator needs is already written by the operator record
+            // above, which carries registration check names and this file's own closed status vocabulary
+            // and nothing else (constraint C-F).
             loggerFactory
                 .CreateLogger(LoggerCategoryName)
                 .LogError(
-                    exception,
-                    "Readiness evaluation failed for the {Service} service; reporting {Status}.",
+                    "Readiness evaluation failed for the {Service} service; reporting {Status}. Fault "
+                        + "type {FaultType}.",
                     ServiceIdentifier,
-                    StatusUnhealthy);
+                    StatusUnhealthy,
+                    exception.GetType().Name);
 
             status = HealthStatus.Unhealthy;
             checks = [BuildSelfCheck(HealthStatus.Unhealthy)];
@@ -672,11 +788,12 @@ public static class HealthEndpoints
     /// </summary>
     /// <param name="report">The evaluated report.</param>
     /// <returns>
-    /// Between one and three entries, named exclusively from <see cref="SelfCheckName"/>,
-    /// <see cref="SqliteCheckName"/> and <see cref="ComponentsCheckName"/>: this endpoint's own
-    /// statement that the process is answering, the storage engine's verdict when the storage check is
-    /// registered, and one aggregated entry standing for every other registered check when there is at
-    /// least one.
+    /// Between one and four entries, named exclusively from <see cref="SelfCheckName"/>,
+    /// <see cref="SqliteCheckName"/>, <see cref="RuntimeCheckName"/> and
+    /// <see cref="ComponentsCheckName"/>: this endpoint's own statement that the process is answering,
+    /// the storage engine's verdict when the storage check is registered, whether the runtime seams the
+    /// four published contracts are served through are bound, and one aggregated entry standing for every
+    /// other registered check when there is at least one.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -689,9 +806,9 @@ public static class HealthEndpoints
     /// registration, which this file cannot enforce; a closed vocabulary declared here is.
     /// </para>
     /// <para>
-    /// The storage entry is recognised BY NAME rather than by position or by index, and its own
-    /// description is still not echoed: only its status is read, and the prose is chosen from the two
-    /// constants above. That keeps the enforcement structural even for the one check this file registers
+    /// The storage and runtime entries are recognised BY NAME rather than by position or by index, and
+    /// their own descriptions are still not echoed: only the status is read, and the prose is chosen from
+    /// the constants above. That keeps the enforcement structural even for the one check this file registers
     /// itself, and it means a test that substitutes the storage verdict under the same name is reported
     /// through exactly the same path as the real one.
     /// </para>
@@ -713,6 +830,7 @@ public static class HealthEndpoints
         List<ServiceHealthCheck> projected = [BuildSelfCheck(HealthStatus.Healthy)];
 
         HealthStatus? storage = null;
+        HealthStatus? runtime = null;
         HealthStatus? othersWorst = null;
 
         foreach (KeyValuePair<string, HealthReportEntry> entry in report.Entries)
@@ -731,6 +849,15 @@ public static class HealthEndpoints
                 continue;
             }
 
+            if (string.Equals(entry.Key, RuntimeCheckName, StringComparison.OrdinalIgnoreCase))
+            {
+                runtime = runtime is HealthStatus bound && bound < entry.Value.Status
+                    ? bound
+                    : entry.Value.Status;
+
+                continue;
+            }
+
             othersWorst = othersWorst is HealthStatus worst && worst < entry.Value.Status
                 ? worst
                 : entry.Value.Status;
@@ -744,6 +871,17 @@ public static class HealthEndpoints
                     Description = storageStatus == HealthStatus.Healthy
                         ? SqliteHealthyDescription
                         : SqliteNotReadyDescription,
+                });
+        }
+
+        if (runtime is HealthStatus runtimeStatus)
+        {
+            projected.Add(
+                new ServiceHealthCheck(RuntimeCheckName, ToWireStatus(runtimeStatus))
+                {
+                    Description = runtimeStatus == HealthStatus.Healthy
+                        ? RuntimeBoundDescription
+                        : RuntimeUnboundDescription,
                 });
         }
 
@@ -872,7 +1010,11 @@ public static class HealthEndpoints
     /// </para>
     /// <para>
     /// DEGRADED AND UNHEALTHY BOTH ARRIVE HERE and are distinguished in the body rather than in the
-    /// status, because both mean not ready and the gate reads the status code (decision record item 7).
+    /// status code, because both mean not ready and the gate reads the code (decision record item 7).
+    /// The verdict travels in <see cref="ServiceStatusExtensionMember"/>, which is what Gateway's
+    /// aggregator reads off this body; it cannot travel in a <c>status</c> member, because RFC 9457
+    /// uses that name for the integer HTTP status and this response is a problem document rather than
+    /// a <see cref="ServiceHealthReport"/>.
     /// </para>
     /// </remarks>
     private static IResult BuildNotReadyProblem(
@@ -906,6 +1048,7 @@ public static class HealthEndpoints
             title: UnavailableProblemTitle,
             extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
             {
+                [ServiceStatusExtensionMember] = wireStatus,
                 [RetCodeExtensionMember] = RetCode.E_RETRY,
             });
     }
@@ -1003,6 +1146,18 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
     private const string StorageUnreachableDescription =
         "The storage engine did not answer a read-only reachability probe.";
 
+    /// <summary>
+    /// Fixed prose for an engine that answered but whose schema has not been provisioned.
+    /// </summary>
+    /// <remarks>
+    /// DISTINCT FROM UNREACHABLE BECAUSE IT CALLS FOR A DIFFERENT ACTION, and telling an operator to
+    /// check the mount when the mount is fine is worse than saying nothing. It names no table, no path
+    /// and no provider detail - the schema check's own diagnostic, which does name the table it looked
+    /// for, stays on the seam's in-process members where an authenticated reader can get it.
+    /// </remarks>
+    private const string StorageSchemaIncompleteDescription =
+        "The storage engine answered but the required schema is not provisioned.";
+
     /// <summary>Fixed prose for a probe that exceeded its own budget.</summary>
     private const string StorageProbeTimedOutDescription =
         "The storage reachability probe did not complete within its budget.";
@@ -1050,12 +1205,24 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
     /// any realistic interval with an answer measured after its previous one.
     /// </para>
     /// <para>
-    /// WHAT MAKES THE VALUE SAFE RATHER THAN MERELY CHOSEN: the seam caches ONLY a success and
-    /// deliberately never remembers a failure, so this window can never delay the reporting of an
-    /// unreachable engine. A service that has just failed is reported not-ready at the very next ask, and
-    /// one that has just recovered is reported ready at the very next ask. The window therefore trades
-    /// nothing away on either edge of a transition - it only bounds how often a repeated *positive*
-    /// answer is re-measured.
+    /// WHAT THE WINDOW ACTUALLY COSTS, STATED PRECISELY, because an earlier version of this note claimed
+    /// it cost nothing and that was not true. The seam caches ONLY a success and deliberately never
+    /// remembers a failure, and those two facts have DIFFERENT consequences on the two edges of a
+    /// transition:
+    /// </para>
+    /// <para>
+    /// RECOVERY IS REPORTED IMMEDIATELY. A failure was never cached, so there is nothing to serve from
+    /// and the very next ask measures afresh. Nothing is traded away on this edge.
+    /// </para>
+    /// <para>
+    /// A NEW FAILURE IS REPORTED LATE, BY UP TO THE WINDOW. If the last measurement succeeded and the
+    /// engine becomes unreachable a moment later, asks arriving inside the window are answered from the
+    /// cached success and this service reports READY while storage is already gone. That is the real
+    /// cost, it is bounded by the window and by nothing else, and it is accepted deliberately: the
+    /// alternative is letting an unauthenticated caller drive unbounded storage work. It is also why the
+    /// window is kept short, and why it is compared against MONOTONIC elapsed time inside the seam - a
+    /// wall-clock rollback would otherwise let a cached success outlive the bound indefinitely, turning a
+    /// bounded staleness into an unbounded one.
     /// </para>
     /// <para>
     /// The age is measured on the injected clock inside the seam, never on an ambient one, because every
@@ -1165,15 +1332,28 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
             // interpolated literal values [ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs]. A ported
             // return code and a provider result code are integers that locate the fault without
             // disclosing anything (constraint C-F).
+            // TWO DISTINCT NOT-READY STATES, DISCRIMINATED BY A CLOSED ENUMERATION. A probe that finds
+            // the engine answering but the schema absent has established something quite different from
+            // one that cannot reach the engine at all: the volume is mounted and the provider works, and
+            // the migrations have not been applied. The enumeration is a value this codebase authored, so
+            // reading it here adds no path, no provider text and no statement to an anonymous response
+            // (constraint C-F).
+            bool schemaIncomplete = _storage.LastReadiness == StorageReadiness.SchemaIncomplete;
+
             _logger.LogWarning(
-                "The storage engine did not answer a read-only reachability probe for the {Check} "
-                    + "readiness check. Ported return code {ReturnCode}, provider result code "
-                    + "{ProviderCode}.",
+                "The storage engine did not satisfy the read-only readiness probe for the {Check} "
+                    + "readiness check. Readiness state {ReadinessState}, ported return code "
+                    + "{ReturnCode}, provider result code {ProviderCode}.",
                 HealthEndpoints.SqliteCheckName,
+                _storage.LastReadiness,
                 _storage.SqlCode,
                 _storage.SqlDbCode);
 
-            return new HealthCheckResult(failureStatus, StorageUnreachableDescription);
+            return new HealthCheckResult(
+                failureStatus,
+                schemaIncomplete
+                    ? StorageSchemaIncompleteDescription
+                    : StorageUnreachableDescription);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -1195,16 +1375,316 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
             // posture is correct where it lives, at startup. Reaching it from a probe must not take the
             // container with it, or the readiness gate could never observe a structured not-ready state
             // and Gateway's aggregator would see a transport error instead of a verdict. So it is caught
-            // here and reported. The exception object goes to the operator channel ONLY; it is never
-            // projected onto the anonymous response, because its message can name a path or a setting.
+            // here and reported.
+            //
+            // THE EXCEPTION OBJECT IS DELIBERATELY NOT PASSED, and "it only goes to the operator
+            // channel" is not a sufficient answer for this one. THIS ENDPOINT IS ANONYMOUS: an
+            // unauthenticated caller decides how often this line runs, so whatever it writes is
+            // effectively published on demand. And the messages that arrive here are exactly the ones
+            // that name things - the data-directory fault embeds the CONFIGURED MOUNT PATH in its own
+            // message so an operator can fix the volume, and a provider fault names the database file.
+            // Passing the exception would also carry a stack trace naming internal types.
+            //
+            // WHAT REPLACES IT IS STILL ENOUGH TO ACT ON: a fixed sentence, the exception's TYPE NAME -
+            // a compile-time constant of this codebase, never a configured value - and the two numeric
+            // codes the seam recorded. Lowering the exception to a quieter level instead was rejected:
+            // a log level is not an access control, and the record would land in the same sink.
+            // Diagnosability is not lost, because the path is logged once on the successful open at
+            // startup and the fail-fast startup path still surfaces the whole exception, where no
+            // anonymous caller can reach it.
             _logger.LogError(
-                exception,
                 "The storage reachability probe for the {Check} readiness check failed; reporting not "
-                    + "ready.",
-                HealthEndpoints.SqliteCheckName);
+                    + "ready. Fault type {FaultType}, ported return code {ReturnCode}, provider result "
+                    + "code {ProviderCode}.",
+                HealthEndpoints.SqliteCheckName,
+                exception.GetType().Name,
+                _storage.SqlCode,
+                _storage.SqlDbCode);
 
             return new HealthCheckResult(failureStatus, StorageProbeFailedDescription);
         }
+    }
+}
+
+// ==================================================================================================
+//  THE SECOND COMPONENT CHECK - ARE THE C-05..C-08 RUNTIME SEAMS BOUND
+// ==================================================================================================
+
+/// <summary>
+/// Reports whether every runtime seam contracts C-05 through C-08 depend on is bound, without opening a
+/// connection, executing a statement or touching the storage volume.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY IT EXISTS, STATED AS THE GAP IT CLOSES. This service's four published contracts are served through
+/// seven injected seams: the data-object catalogue and runtime, the query carrier runtime and transaction
+/// surface, the update carrier adapter and task factory, the command task factory, and the transaction
+/// engine. A composition missing any one of them produces an instance that starts, answers
+/// <c>GET /health</c> with 200, satisfies the Compose <c>depends_on</c> health condition, lets Gateway
+/// start behind it - and then answers an internal error to every retrieval, update, command or
+/// transaction call that needed the missing seam. The readiness surface said nothing about it. This check
+/// is what makes it say something.
+/// </para>
+/// <para>
+/// IT IS NOT A DUPLICATE OF THE STARTUP GATE, AND THE DIFFERENCE IS WHICH AUDIENCE LEARNS. The startup
+/// gate resolves the same seven seams and terminates the process when one is missing, so in the shipped
+/// composition this check reports bound on every evaluation. The gate speaks to a log; this speaks to the
+/// thing that polls the port. A host assembled some other way - a test host, a future embedding, a
+/// composition that removes a registration after the gate has run - has a gate that never ran or no
+/// longer holds, and for those the readiness verdict is the only statement available.
+/// </para>
+/// <para>
+/// RESOLUTION IS THE WHOLE ASSERTION; NOTHING IS EXERCISED. Not one seam is invoked. Opening a connection
+/// would CREATE a database file, and for one workflow identifier the legacy-side and target-side
+/// characterization recordings must be captured against the same <c>persistence-db</c> volume state - so
+/// a probe that created, seeded or migrated anything would invalidate the comparison the parity model
+/// depends on. The transaction engine is resolved and disposed at once because it is registered TRANSIENT
+/// and the pool owns one per pooled transaction; disposing an unopened engine releases nothing and
+/// touches nothing.
+/// </para>
+/// <para>
+/// AN EMPTY CATALOGUE IS NOT A FAULT, deliberately and consistently with the startup gate. A deployment
+/// whose callers always supply a statement resolves no named definition, and reporting an unused
+/// capability as not-ready would hold the dependency gate shut over nothing. What IS refused - by the
+/// options validator, before any of this runs - is a definition that is internally inconsistent.
+/// </para>
+/// <para>
+/// THE ANONYMOUS BODY LEARNS ONLY THE VERDICT. The seam's own identifier is a type name, which is
+/// internal structure, so it goes to the operator channel and never onto the response; the projection
+/// chooses this entry's prose from two authored constants and reads only the status. That is the same
+/// discipline the storage check above follows.
+/// </para>
+/// </remarks>
+internal sealed class RuntimeSeamHealthCheck : IHealthCheck
+{
+    /// <summary>
+    /// The fixed prose for a fully bound runtime.
+    /// </summary>
+    /// <remarks>
+    /// AUTHORED HERE AND ALSO IN <c>HealthEndpoints</c>, WHICH IS NOT AN OVERSIGHT. The projection never
+    /// echoes a check's own description - a description is chosen by whatever registered the check, and
+    /// this route is anonymous - so it chooses its own prose from its own constants. The storage check
+    /// above follows the same split for the same reason.
+    /// </remarks>
+    private const string RuntimeBoundDescription =
+        "Every runtime seam the retrieval, update, command and transaction contracts depend on is bound.";
+
+    /// <summary>The fixed prose for a runtime with an unbound seam.</summary>
+    private const string RuntimeUnboundDescription =
+        "A runtime seam the retrieval, update, command and transaction contracts depend on is not bound, "
+        + "so calls on the affected contract cannot be served.";
+
+    /// <summary>
+    /// The seven seam types, in contract order, paired with the contract each belongs to.
+    /// </summary>
+    /// <remarks>
+    /// A DECLARED LIST RATHER THAN CONSTRUCTOR PARAMETERS, and that is the point of the design: a seam
+    /// injected as a constructor parameter would make THIS CHECK unresolvable when the seam is missing,
+    /// and the framework would then report the registration as faulted with an activation exception
+    /// instead of reporting the runtime as unbound. Naming the types and resolving them one at a time is
+    /// what turns a missing registration into a verdict.
+    /// </remarks>
+    private static readonly (Type Seam, string Contract)[] RequiredSeams =
+    [
+        (typeof(IDataObjectCatalog), "C-05"),
+        (typeof(IDataObjectRuntime), "C-05"),
+        (typeof(IQueryDataWindowRuntime), "C-05"),
+        (typeof(IQueryTransactionSurface), "C-05"),
+        (typeof(ISqlUpdateCarrierAdapter), "C-06"),
+        (typeof(IUpdateTaskFactory), "C-06"),
+        (typeof(ICommandTaskFactory), "C-07"),
+    ];
+
+    /// <summary>The provider the seams are resolved from.</summary>
+    private readonly IServiceProvider _services;
+
+    /// <summary>The operator channel, which is where the missing seam's identity is recorded.</summary>
+    private readonly ILogger<RuntimeSeamHealthCheck> _logger;
+
+    /// <summary>Creates the check.</summary>
+    /// <param name="services">The provider the seams are resolved from.</param>
+    /// <param name="logger">The operator channel.</param>
+    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    public RuntimeSeamHealthCheck(IServiceProvider services, ILogger<RuntimeSeamHealthCheck> logger)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        _services = services;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Establishes whether every required seam resolves.
+    /// </summary>
+    /// <param name="context">
+    /// The registration being evaluated. Its failure status is honoured rather than assumed, so a host
+    /// that registered this check as degrading rather than failing gets what it asked for.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// The evaluation's cancellation token. Honoured before the resolutions begin, and not threaded
+    /// through them because a container resolution is synchronous and unbreakable once started.
+    /// </param>
+    /// <returns>
+    /// A healthy result when all seven resolve; otherwise a result carrying the registration's failure
+    /// status.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> is <see langword="null"/>.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// The caller cancelled - the request was aborted, so there is no longer a response to write.
+    /// </exception>
+    public Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        HealthStatus failureStatus = context.Registration.FailureStatus;
+
+        foreach ((Type seam, string contract) in RequiredSeams)
+        {
+            if (!Resolves(seam, failureStatus, contract, out HealthCheckResult unbound))
+            {
+                return Task.FromResult(unbound);
+            }
+        }
+
+        // C-08's engine, resolved LAST and disposed at once. It is separated from the loop above because
+        // it is the only seam that is disposable, and treating it uniformly would either leak one per
+        // probe or force a disposal cast on seven seams that do not need it.
+        if (!Resolves(
+                typeof(ITransactionEngine),
+                failureStatus,
+                "C-08",
+                out HealthCheckResult engineUnbound,
+                out object? resolved))
+        {
+            return Task.FromResult(engineUnbound);
+        }
+
+        ((ITransactionEngine)resolved!).Dispose();
+
+        // Trace level on the ready path, because the Compose health condition polls continuously and an
+        // information-level line per poll would drown the channel in records saying nothing happened.
+        _logger.LogTrace(
+            "Every runtime seam resolved for the {Check} readiness check.",
+            HealthEndpoints.RuntimeCheckName);
+
+        return Task.FromResult(HealthCheckResult.Healthy(RuntimeBoundDescription));
+    }
+
+    /// <summary>
+    /// Resolves one seam, treating both "no registration" and "a registration that cannot be satisfied"
+    /// as unbound.
+    /// </summary>
+    /// <param name="seam">The seam type to resolve.</param>
+    /// <param name="failureStatus">The registration's own failure status.</param>
+    /// <param name="contract">The contract that seam serves.</param>
+    /// <param name="unbound">The not-ready result, when the seam did not resolve.</param>
+    /// <returns><see langword="true"/> when the seam resolved.</returns>
+    private bool Resolves(
+        Type seam,
+        HealthStatus failureStatus,
+        string contract,
+        out HealthCheckResult unbound) =>
+        Resolves(seam, failureStatus, contract, out unbound, out _);
+
+    /// <summary>
+    /// Resolves one seam and hands back the instance, treating both "no registration" and "a registration
+    /// that cannot be satisfied" as unbound.
+    /// </summary>
+    /// <param name="seam">The seam type to resolve.</param>
+    /// <param name="failureStatus">The registration's own failure status.</param>
+    /// <param name="contract">The contract that seam serves.</param>
+    /// <param name="unbound">The not-ready result, when the seam did not resolve.</param>
+    /// <param name="instance">The resolved instance, when the seam resolved.</param>
+    /// <returns><see langword="true"/> when the seam resolved.</returns>
+    /// <remarks>
+    /// <para>
+    /// TWO FAILURE SHAPES, ONE VERDICT, AND BOTH HAVE TO BE HANDLED HERE. A seam with no registration
+    /// resolves to <see langword="null"/>. A seam WITH a registration whose own dependency graph cannot be
+    /// satisfied - the shape a dropped transitive registration takes, and the shape the transaction engine
+    /// is most exposed to because it is built over the connection factory and the pool's activator -
+    /// THROWS out of the container instead. Reading only the null case would let the second shape escape
+    /// as a fault, and a faulting registration on this route is answered 500: the one status the
+    /// orchestration readiness gate cannot distinguish from a crashed container. The endpoint's own guard
+    /// would catch it, but it would then report the WHOLE evaluation as failed rather than reporting this
+    /// component, losing the one piece of information the check exists to publish.
+    /// </para>
+    /// <para>
+    /// <see cref="OperationCanceledException"/> IS NOT CAUGHT. It means the caller disconnected, so there
+    /// is no longer a response to write and a verdict would be work nobody reads - the same exclusion the
+    /// handler and the storage check both make.
+    /// </para>
+    /// </remarks>
+    private bool Resolves(
+        Type seam,
+        HealthStatus failureStatus,
+        string contract,
+        out HealthCheckResult unbound,
+        out object? instance)
+    {
+        try
+        {
+            instance = _services.GetService(seam);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // The exception object goes to the operator channel ONLY. Its message can name a type, an
+            // assembly or a configuration key, none of which belongs on an anonymous response.
+            _logger.LogError(
+                exception,
+                "The {Seam} runtime seam that contract {Contract} depends on is registered but could not "
+                    + "be constructed, so every call on that contract would fail. Reporting the {Check} "
+                    + "readiness check not ready.",
+                seam.Name,
+                contract,
+                HealthEndpoints.RuntimeCheckName);
+
+            instance = null;
+            unbound = new HealthCheckResult(failureStatus, RuntimeUnboundDescription);
+
+            return false;
+        }
+
+        if (instance is null)
+        {
+            unbound = Unbound(failureStatus, seam, contract);
+
+            return false;
+        }
+
+        unbound = default;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Records the unbound seam on the operator channel and returns the not-ready result.
+    /// </summary>
+    /// <param name="failureStatus">The registration's own failure status.</param>
+    /// <param name="seam">The seam that did not resolve.</param>
+    /// <param name="contract">The contract that seam serves.</param>
+    /// <returns>The not-ready result, carrying only this file's authored prose.</returns>
+    /// <remarks>
+    /// THE SEAM'S NAME GOES ONLY HERE. It is the one thing an operator needs in order to act and the one
+    /// thing an anonymous caller must not receive, so it is written to the log and the returned result
+    /// carries fixed prose with no data dictionary at all - the same split the storage check makes with
+    /// the provider's error text.
+    /// </remarks>
+    private HealthCheckResult Unbound(HealthStatus failureStatus, Type seam, string contract)
+    {
+        _logger.LogError(
+            "The {Seam} runtime seam that contract {Contract} depends on is not bound in this "
+                + "composition, so every call on that contract would fail. Reporting the {Check} "
+                + "readiness check not ready.",
+            seam.Name,
+            contract,
+            HealthEndpoints.RuntimeCheckName);
+
+        return new HealthCheckResult(failureStatus, RuntimeUnboundDescription);
     }
 }
 
@@ -1265,8 +1745,8 @@ public sealed record ServiceHealthReport(
 /// </summary>
 /// <param name="Name">
 /// The component's stable identifier, drawn from this service's own closed public vocabulary -
-/// <c>self</c>, <c>sqlite</c> or <c>components</c> - and never a registration-supplied check name, a
-/// file path, a provider type name or any other internal detail.
+/// <c>self</c>, <c>sqlite</c>, <c>runtime</c> or <c>components</c> - and never a registration-supplied
+/// check name, a file path, a provider type name or any other internal detail.
 /// </param>
 /// <param name="Status">This check's own verdict, using the same three tokens as the overall report.</param>
 public sealed record ServiceHealthCheck(

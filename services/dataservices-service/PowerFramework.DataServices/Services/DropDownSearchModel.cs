@@ -489,7 +489,21 @@ internal sealed record DddwData
     /// determine and the composition at <c>:L374-L380</c> must treat "no original filter" as empty
     /// rather than as the literal text <c>?</c>.
     /// </remarks>
-    public string OrgFilter { get; set; } = string.Empty;
+    public string OrgFilter => OrgFilterBinding.ObservableText;
+
+    /// <summary>
+    /// The original filter in both forms - <b>the single stored field; <see cref="OrgFilter"/> is derived.
+    /// </b>
+    /// </summary>
+    /// <remarks>
+    /// STORING ONE FIELD AND DERIVING THE OTHER MAKES DIVERGENCE UNREPRESENTABLE. Two settable fields could
+    /// be assigned independently, and a rendered text that disagreed with the expression it was supposed to
+    /// describe is the worst defect available here: each half looks correct on its own, so a test of either
+    /// passes. Normally unbindable, because this filter is read back from the child through <c>Describe</c>
+    /// [<c>:L216-L217</c>, <c>:L445</c>]; bindable when a caller supplied a composed search through the
+    /// bound arity of <c>of_UpdateDDDWFilter</c>.
+    /// </remarks>
+    public BoundFilterExpression OrgFilterBinding { get; set; } = BoundFilterExpression.Empty;
 
     /// <summary>
     /// The composed filter currently applied to the child - the port of <c>string filter</c>
@@ -501,7 +515,7 @@ internal sealed record DddwData
     /// they agree. Seeded from <see cref="OrgFilter"/> at <c>:L218</c> so that the first composition
     /// which reproduces the original filter is correctly recognised as no change.
     /// </remarks>
-    public string Filter { get; set; } = string.Empty;
+    public string Filter => FilterBinding.ObservableText;
 
     /// <summary>
     /// The user-derived half of the filter, without the original filter conjoined - the port of
@@ -514,7 +528,36 @@ internal sealed record DddwData
     /// underneath it [<c>:L451</c>] - which only works because the user's half was never merged into
     /// the composed expression.
     /// </remarks>
-    public string InputFilter { get; set; } = string.Empty;
+    public string InputFilter => InputFilterBinding.ObservableText;
+
+    /// <summary>
+    /// The EXECUTABLE form of <see cref="Filter"/> - the placeholder text plus its bound values.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS WHAT WAS HANDED TO THE CHILD; <see cref="Filter"/> IS WHAT IS REPORTED.</b> The two are
+    /// images of one another by construction - see <c>Services/BoundFilterExpression.cs</c> - and both are
+    /// retained because they answer different questions: parity and diagnostics need the rendered text, and
+    /// safe execution needs the form no caller value can reach as syntax.
+    /// </para>
+    /// <para>
+    /// NOT PART OF THE CHANGE GUARD. <c>:L382</c> compares the RENDERED expressions, so the guard behaves
+    /// exactly as the oracle's does; comparing bindings as well could make an identical expression look
+    /// changed because its placeholder numbering differed.
+    /// </para>
+    /// </remarks>
+    public BoundFilterExpression FilterBinding { get; set; } = BoundFilterExpression.Empty;
+
+    /// <summary>
+    /// The EXECUTABLE form of <see cref="InputFilter"/> - the user's own half, retained with its bindings.
+    /// </summary>
+    /// <remarks>
+    /// RETAINED FOR THE RE-APPLY PATH, WHICH IS THE WHOLE REASON THE USER'S HALF IS STORED SEPARATELY AT
+    /// ALL. <c>of_UpdateDDDWFilter</c> re-applies it after the ORIGINAL filter changes underneath it
+    /// [<c>:L451</c>]; re-applying only the TEXT there would silently un-bind a filter that had been bound
+    /// when the user typed it, so the hole would open on the second application rather than the first.
+    /// </remarks>
+    public BoundFilterExpression InputFilterBinding { get; set; } = BoundFilterExpression.Empty;
 
     /// <summary>
     /// The child DataWindow itself - the port of <c>datawindowchild object</c> (<c>:L28</c>).
@@ -963,6 +1006,27 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// The edit context - the port of <c>private EDITCONTEXTDATA _editCtx</c> (<c>:L62</c>).
     /// </summary>
     private readonly EditContextData _editCtx = new();
+
+    /// <summary>
+    /// The binding a bound <c>of_UpdateDDDWFilter</c> call is carrying, for the duration of that call only.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A CALL-SCOPED HANDOFF, NOT STATE.</b> The primary arity of <c>of_UpdateDDDWFilter</c> is the
+    /// oracle's and takes TEXT, because every one of its four guards and its change detector compares text.
+    /// The bound arity therefore parks its expression here, delegates, and clears it in a <c>finally</c>;
+    /// the assignment at <c>:L448</c> picks it up only after checking that its rendered form still matches
+    /// the text that arrived, so a mismatch degrades to unbindable rather than binding the wrong values.
+    /// </para>
+    /// <para>
+    /// THE SERVICE IS PER-DATAWINDOW AND ITS CALLS ARE SEQUENTIAL, which is why a field suffices: the
+    /// oracle's own services are instance members of one control [<c>se_cst_dw.sru:L80-L84</c>] and the
+    /// drop-down search capability area is assigned the strictly synchronous ordering discipline
+    /// (AAP 0.6.1.4) because its filter travels through a <c>ref string</c> out-parameter that has no
+    /// asynchronous representation.
+    /// </para>
+    /// </remarks>
+    private BoundFilterExpression? _pendingOriginalBinding;
 
     /// <summary>
     /// The Pinyin matching flags the composed clause emits - bound from
@@ -1587,9 +1651,9 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
         _editCtx.Dddw.Child = emptyChild;
         _editCtx.Dddw.DataColName = string.Empty;
         _editCtx.Dddw.DispColName = string.Empty;
-        _editCtx.Dddw.OrgFilter = string.Empty;
-        _editCtx.Dddw.Filter = string.Empty;
-        _editCtx.Dddw.InputFilter = string.Empty;
+        _editCtx.Dddw.OrgFilterBinding = BoundFilterExpression.Empty;
+        _editCtx.Dddw.FilterBinding = BoundFilterExpression.Empty;
+        _editCtx.Dddw.InputFilterBinding = BoundFilterExpression.Empty;
         _editCtx.Dddw.Hwnd = 0;
         _editCtx.Dddw.RowHeight = 0;
 
@@ -1673,16 +1737,23 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
                 _editCtx.Dddw.RowHeight = ParseLegacyLong(resolved.Describe(DetailHeightProperty));
 
                 // :L216-L217  capture the child's own filter, normalising the "?" sentinel
-                _editCtx.Dddw.OrgFilter = resolved.Describe(TableFilterProperty);
-                if (_editCtx.Dddw.OrgFilter == UndeterminableSentinel)
+                //             UNBINDABLE, AND CORRECTLY SO: this text is whatever the child was already
+                //             carrying, composed by something else entirely, so no placeholder image of it
+                //             can be derived.
+                string captured = resolved.Describe(TableFilterProperty);
+                if (captured == UndeterminableSentinel)
                 {
-                    _editCtx.Dddw.OrgFilter = string.Empty;
+                    captured = string.Empty;
                 }
+
+                _editCtx.Dddw.OrgFilterBinding = captured.Length == 0
+                    ? BoundFilterExpression.Empty
+                    : BoundFilterExpression.Unbindable(captured);
 
                 // :L218  _editCtx.dddw.filter = _editCtx.dddw.orgFilter
                 //        SEEDING THE CHANGE DETECTOR, which is what makes the first composition
                 //        that merely reproduces the original filter register as NO CHANGE at :L382.
-                _editCtx.Dddw.Filter = _editCtx.Dddw.OrgFilter;
+                _editCtx.Dddw.FilterBinding = _editCtx.Dddw.OrgFilterBinding;
 
                 // :L219-L221  A CHILD WITH NO SORT OF ITS OWN GETS ONE, ascending by display
                 //             column - which is what makes "first match wins" at :L111 predictable.
@@ -2011,10 +2082,60 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// is met with a faked host; see DECISION 8.
     /// </para>
     /// </remarks>
-    internal string GetFilter(in string data)
+    internal string GetFilter(in string data) => GetBoundFilter(data).ObservableText;
+
+    /// <summary>
+    /// Composes the search filter in BOTH forms - the executable placeholder form and the oracle's own
+    /// rendered form - from a single composition.
+    /// </summary>
+    /// <param name="data">The caller's text exactly as typed.</param>
+    /// <returns>
+    /// The filter. <see cref="BoundFilterExpression.Bindable"/> is <see langword="false"/> only when the
+    /// <c>OnDDSGetFilter</c> extension point rewrote the text, which no placeholder form can describe.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SPLICE SITES ARE STILL THE ORACLE'S, AND WHAT CHANGED IS ONLY WHAT GOES INTO THEM.</b> Every
+    /// clause below is composed at the same line, under the same guard, in the same order and with the same
+    /// fixed syntax as before; the difference is that a caller-derived value now enters as a PLACEHOLDER
+    /// and its rendered fragment is recorded beside it. <see cref="BoundFilterExpression.ObservableText"/>
+    /// substitutes those fragments back, so the reported and recorded expression is byte-identical to what
+    /// the oracle produces - including DEFECT 1's dangling <c>" OR "</c> and DEFECT 2's absent escaping.
+    /// </para>
+    /// <para>
+    /// <b>WHY THIS IS NOT A CORRECTION OF DEFECT 2.</b> Constraint C-B forbids correcting a legacy defect,
+    /// and nothing here does: the OBSERVABLE expression is unchanged, character for character, so every
+    /// parity comparison and every characterization recording is unaffected. What changed is which string
+    /// is EXECUTED - and the legacy had only one string, so there was no observable behaviour to preserve
+    /// in the choice. CWE-94 is closed without the defect being edited.
+    /// </para>
+    /// <para>
+    /// THE TWO COLUMN NAMES ARE STILL SPLICED AS SYNTAX, DELIBERATELY. Both come from the child's own
+    /// <c>Describe</c> [<c>:L207</c>, <c>:L209</c>] rather than from a caller, and a column name IS an
+    /// identifier in this grammar - binding it would make it a string literal and change what the
+    /// expression means. Only the three VALUES are bound.
+    /// </para>
+    /// </remarks>
+    internal BoundFilterExpression GetBoundFilter(in string data)
     {
         // PowerScript locals [:L313], strings initialised by the runtime to "".
+        // sFilter now holds the PARAMETERIZED composition; the observable one is derived from it.
         string sFilter = string.Empty;
+
+        List<BoundFilterLiteral> bound = [];
+
+        // Mints the next placeholder AND records its value and its rendered fragment in one operation, so
+        // a name can never be emitted without the value it stands for. The Persistence update carrier
+        // learned this the hard way: a mint-without-record helper there advanced no counter, so every value
+        // was bound to the same name.
+        string Bind(object? value, string observableLiteral)
+        {
+            string placeholder = BoundFilterExpression.Placeholder(bound.Count);
+
+            bound.Add(new BoundFilterLiteral(placeholder, value, observableLiteral));
+
+            return placeholder;
+        }
 
         // :L315  if data <> "" then
         if (data != string.Empty)
@@ -2030,8 +2151,12 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
             // :L318-L320  THE DISPLAY CLAUSE - THE ONLY ONE THAT ASSIGNS. See DEFECT 1.
             if (Bits.BitTest(FilterType, FILTER_DISP))
             {
-                // :L319
-                sFilter = "(Lower(" + _editCtx.Dddw.DispColName + ") LIKE '%" + sDataLike + "%')";
+                // :L319  sFilter = "(Lower(" + dispColName + ") LIKE '%" + sDataLike + "%')"
+                //        The caller's text is BOUND; the observable fragment reproduces the oracle's own
+                //        quoted-and-wildcarded splice exactly, wildcards included.
+                sFilter = "(Lower(" + _editCtx.Dddw.DispColName + ") LIKE "
+                    + Bind(SearchTextWildcard + sDataLike + SearchTextWildcard, "'%" + sDataLike + "%'")
+                    + ")";
             }
 
             // :L321-L325  THE PINYIN CLAUSE, DOUBLY GUARDED.
@@ -2048,8 +2173,9 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
                     //        The flags value comes from options, whose declared default reproduces the
                     //        oracle's hardcoded 7; DECISION 5 records why that 7 is unrelated to
                     //        FILTER_ALL's 7.
-                    sFilter += " OR " + PinyinFunctionName + "(" + _editCtx.Dddw.DispColName + ",'" + sData
-                        + "'," + _pinyinMatchFlags.ToString(CultureInfo.InvariantCulture) + ")";
+                    sFilter += " OR " + PinyinFunctionName + "(" + _editCtx.Dddw.DispColName + ","
+                        + Bind(sData, "'" + sData + "'") + ","
+                        + _pinyinMatchFlags.ToString(CultureInfo.InvariantCulture) + ")";
                 }
             }
 
@@ -2072,7 +2198,11 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
                     {
                         case CharColumnTypePrefix:
                             // :L331  a text data column matches like the display column does
-                            sFilter += " OR (Lower(" + _editCtx.Dddw.DataColName + ") LIKE '%" + sDataLike + "%')";
+                            sFilter += " OR (Lower(" + _editCtx.Dddw.DataColName + ") LIKE "
+                                + Bind(
+                                    SearchTextWildcard + sDataLike + SearchTextWildcard,
+                                    "'%" + sDataLike + "%'")
+                                + ")";
                             break;
 
                         case "numb":
@@ -2087,7 +2217,11 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
                                 // :L334  EQUALITY, NOT LIKE, and the RAW argument - neither lower-cased
                                 //        nor quoted. The one place a caller's text enters the expression
                                 //        completely untransformed.
-                                sFilter += " OR (" + _editCtx.Dddw.DataColName + " = " + data + ")";
+                                //        The VALUE is bound as a double so the comparison is numeric, while
+                                //        the observable fragment is the RAW ARGUMENT - so an input of
+                                //        "32.50" still reports as 32.50 rather than as the double's 32.5.
+                                sFilter += " OR (" + _editCtx.Dddw.DataColName + " = "
+                                    + Bind(ToNumber(data), data) + ")";
                             }
 
                             break;
@@ -2112,14 +2246,33 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
             sFilter = "(" + sFilter + ")";
         }
 
+        BoundFilterExpression composed = new(sFilter, bound, true);
+
         // :L342  #DataWindow.Event OnDDSGetFilter(_editCtx.row,_editCtx.dwo,data,ref sFilter)
         //        RAISED UNCONDITIONALLY - including on the empty-data path, which is the documented
         //        extension point described on InitCtxDddwFilter. The event is declared
         //        se_cst_dw.sru:L13 with a `ref string` out-parameter and no return type.
-        RequireHost().OnDDSGetFilter(_editCtx.Row, _editCtx.Dwo, data, ref sFilter);
+        //
+        //        THE EVENT SEES THE OBSERVABLE TEXT, NEVER THE PLACEHOLDER FORM. An application that
+        //        inspects or rewrites this string is entitled to the expression the legacy would have
+        //        handed it; showing it placeholders would break every existing handler and leak an
+        //        implementation detail of this boundary into a published extension point.
+        string rendered = composed.ObservableText;
+        string offered = rendered;
+
+        RequireHost().OnDDSGetFilter(_editCtx.Row, _editCtx.Dwo, data, ref offered);
 
         // :L344  return sFilter
-        return sFilter;
+        //
+        // AN UNTOUCHED FILTER STAYS BOUND; A REWRITTEN ONE CANNOT BE. The comparison is ordinal and exact:
+        // a handler that returned the identical string has expressed no opinion, so the bindings survive.
+        // A handler that changed so much as one character composed syntax of its own, and no placeholder
+        // image of that string can be derived - so it travels as unbindable text and its executor decides.
+        // See this file's BoundFilterExpression header for why that narrowing is recorded rather than
+        // refused.
+        return string.Equals(offered, rendered, StringComparison.Ordinal)
+            ? composed
+            : BoundFilterExpression.Unbindable(offered);
     }
 
     /// <summary>
@@ -2209,38 +2362,63 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// <c>internal</c> rather than the oracle's <c>private</c>; see DECISION 8.
     /// </para>
     /// </remarks>
-    internal void ApplyFilter(in long row, IDataWindowObject? dwo, in string filter, in bool show)
+    internal void ApplyFilter(in long row, IDataWindowObject? dwo, in string filter, in bool show) =>
+        ApplyFilter(row, dwo, BoundFilterExpression.Unbindable(filter), show);
+
+    /// <summary>
+    /// Composes and applies a BOUND filter - the executable overload, and the one every internal caller
+    /// reaches.
+    /// </summary>
+    /// <param name="row">The ONE-BASED row being edited, forwarded to the semantic event.</param>
+    /// <param name="dwo">The column being edited, forwarded to the semantic event. May be null.</param>
+    /// <param name="filter">
+    /// The USER-DERIVED filter half in both forms. An empty expression clears - which, per the third
+    /// composition arm, means RESTORING the original filter rather than wiping the child.
+    /// </param>
+    /// <param name="show">Whether to pop the drop-down open afterwards. CARRIED BUT NOT ACTED ON.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="filter"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>THE CHANGE GUARD STILL COMPARES RENDERED TEXT, AND THAT IS DELIBERATE.</b> <c>:L382</c> is what
+    /// stops every keystroke re-filtering the child, and it is a comparison of EXPRESSIONS. Comparing bound
+    /// forms instead would make two identical expressions differ whenever their placeholder numbering did,
+    /// re-filtering on a keystroke that changed nothing.
+    /// </para>
+    /// <para>
+    /// <b>WHAT REACHES THE CHILD IS THE BOUND FORM.</b> The rendered text is stored for reporting and for
+    /// the guard; <c>SetFilter</c> receives the expression, and an implementation that can bind does so
+    /// while one that cannot says so on its own contract. This is the single line that closes CWE-94 on the
+    /// search path, and everything else in this method is unchanged from the oracle.
+    /// </para>
+    /// <para>
+    /// Every other behaviour documented on the string overload holds here unchanged: the three asymmetric
+    /// composition arms, the count-and-event ordering, and the unconditional redraw suppression.
+    /// </para>
+    /// </remarks>
+    internal void ApplyFilter(
+        in long row,
+        IDataWindowObject? dwo,
+        BoundFilterExpression filter,
+        in bool show)
     {
-        // :L372  sFilter = filter
-        string sFilter = filter;
+        ArgumentNullException.ThrowIfNull(filter);
 
-        // :L374-L380  the three composition arms
-        if (filter != string.Empty)
-        {
-            // :L375-L377
-            if (_editCtx.Dddw.OrgFilter != string.Empty)
-            {
-                sFilter = "(" + _editCtx.Dddw.OrgFilter + ") AND (" + filter + ")";
-            }
-        }
-        else
-        {
-            // :L379  AN EMPTY FILTER RESTORES THE ORIGINAL, it does not clear the child.
-            sFilter = _editCtx.Dddw.OrgFilter;
-        }
+        // :L372-L380  the three composition arms, applied to BOTH forms at once so they cannot diverge.
+        BoundFilterExpression composed =
+            BoundFilterExpression.Conjoin(_editCtx.Dddw.OrgFilterBinding, filter);
 
-        // :L382  if sFilter <> _editCtx.dddw.filter then   - THE CHANGE GUARD
-        if (sFilter == _editCtx.Dddw.Filter)
+        // :L382  if sFilter <> _editCtx.dddw.filter then   - THE CHANGE GUARD, on rendered text.
+        if (composed.ObservableText == _editCtx.Dddw.Filter)
         {
             return;
         }
 
-        // :L383  _editCtx.dddw.filter = sFilter
-        _editCtx.Dddw.Filter = sFilter;
-
-        // :L384  _editCtx.dddw.inputFilter = filter   //保存当前录入的过滤条件
-        //        "save the filter condition currently entered" - the USER'S half, not the composed one.
-        _editCtx.Dddw.InputFilter = filter;
+        // :L383-L384  _editCtx.dddw.filter = sFilter / _editCtx.dddw.inputFilter = filter
+        //             //保存当前录入的过滤条件 - "save the filter condition currently entered", the USER'S
+        //             half rather than the composed one. Each is stored as its EXPRESSION and its rendered
+        //             text is derived, so the reported string and the executed one cannot disagree.
+        _editCtx.Dddw.FilterBinding = composed;
+        _editCtx.Dddw.InputFilterBinding = filter;
 
         IDataWindowChild child = RequireChild();
 
@@ -2248,8 +2426,8 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
         //             deferred and the bRedraw flag it fed goes with it. See the remarks.
         _ = child.SetRedraw(false);
 
-        // :L389-L391
-        _ = child.SetFilter(sFilter);
+        // :L389-L391  THE EXECUTION. The child receives the expression, not the rendered string.
+        _ = child.SetFilter(composed);
         _ = child.Filter();
         _ = child.Sort();
 
@@ -2423,8 +2601,16 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
         // :L447-L453  only a CHANGED original filter does anything
         if (_editCtx.Dddw.OrgFilter != filter)
         {
-            // :L448
-            _editCtx.Dddw.OrgFilter = filter;
+            // :L448  THE BINDING TRAVELS WITH IT WHEN THE CALLER SUPPLIED ONE. The bound arity records it
+            //         on _pendingOriginalBinding for exactly this assignment; a caller reaching the text
+            //         arity gets an unbindable original, which is the truth about text nothing composed here.
+            _editCtx.Dddw.OrgFilterBinding =
+                _pendingOriginalBinding is not null
+                    && string.Equals(_pendingOriginalBinding.ObservableText, filter, StringComparison.Ordinal)
+                    ? _pendingOriginalBinding
+                    : filter.Length == 0
+                        ? BoundFilterExpression.Empty
+                        : BoundFilterExpression.Unbindable(filter);
 
             // :L449-L452  //重新过滤数据 - "re-filter the data"
             //             RE-APPLIES THE USER'S OWN HALF, which is why input filter and composed filter
@@ -2432,7 +2618,10 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
             //             pop the drop-down open.
             if (doFilter)
             {
-                ApplyFilter(_editCtx.Row, _editCtx.Dwo, _editCtx.Dddw.InputFilter, show: false);
+                // THE BOUND HALF, NOT THE RENDERED ONE. Re-applying the text would silently un-bind a
+                // filter that was bound when the user typed it, opening the hole on the SECOND application
+                // rather than the first - which is exactly the kind of gap a test of the first never sees.
+                ApplyFilter(_editCtx.Row, _editCtx.Dwo, _editCtx.Dddw.InputFilterBinding, show: false);
             }
         }
 
@@ -2462,6 +2651,60 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     {
         // :L458  return of_UpdateDDDWFilter(colName,filter,true)
         return UpdateDddwFilter(colName, filter, true);
+    }
+
+    /// <summary>
+    /// The BOUND counterpart of <see cref="UpdateDddwFilter(in string, string?, in bool)"/>, for a caller
+    /// that composed its filter through <see cref="GetBoundFilter(in string)"/>.
+    /// </summary>
+    /// <param name="colName">The column whose drop-down filter changed.</param>
+    /// <param name="filter">The new original filter in both forms.</param>
+    /// <param name="doFilter">Whether to re-apply the user's search restriction immediately.</param>
+    /// <returns>Whatever the primary arity returns.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="filter"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY AN ARITY RATHER THAN A REPLACEMENT.</b> The four guards, the asymmetric column comparison and
+    /// DEFECT 5's divergent return code all belong to the primary overload and are not duplicated; this one
+    /// exists so that a filter composed with bindings keeps them across the call instead of being flattened
+    /// to text at the boundary. The rendered text is what the guards and the change detector compare, which
+    /// is why the primary arity is still reached with it.
+    /// </para>
+    /// <para>
+    /// THE ORIGINAL FILTER IS COMPARED AS RENDERED TEXT ON PURPOSE. Every one of the four guards and the
+    /// change detector at <c>:L447</c> compares TEXT, exactly as the oracle does, so the rendered form is
+    /// what the primary arity is reached with; the EXPRESSION is what gets stored, so the bindings survive
+    /// into the re-apply.
+    /// </para>
+    /// <para>
+    /// <b>A DISTINCT NAME RATHER THAN AN OVERLOAD, AND THAT IS NOT A STYLE CHOICE.</b> An overload taking a
+    /// reference type beside one taking <c>string?</c> makes <c>UpdateDddwFilter(col, null, false)</c>
+    /// ambiguous - and that exact call is the documented way to reach the re-read-from-the-child branch at
+    /// <c>:L443</c>. Forcing every such caller to cast would put a cast in front of the one behaviour the
+    /// one-argument overload exists to express, and a caller who guessed wrong would silently reach the
+    /// other method. The name states what differs instead.
+    /// </para>
+    /// </remarks>
+    public long UpdateDddwFilterBound(
+        in string colName,
+        BoundFilterExpression filter,
+        in bool doFilter = true)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+
+        _pendingOriginalBinding = filter;
+
+        try
+        {
+            return UpdateDddwFilter(colName, filter.ObservableText, doFilter);
+        }
+        finally
+        {
+            // CLEARED IN A finally SO ONE CALL CANNOT LEAK ITS BINDINGS INTO THE NEXT. A guard that returns
+            // early leaves the field set otherwise, and the next unbound call would then apply bindings its
+            // caller never supplied.
+            _pendingOriginalBinding = null;
+        }
     }
 
     /// <summary>
@@ -2704,6 +2947,35 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     {
         return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
     }
+
+    /// <summary>
+    /// Reads the numeric value of text the oracle's own <c>IsNumber</c> guard has already admitted.
+    /// </summary>
+    /// <param name="value">The text.</param>
+    /// <returns>The value, or <c>0</c> when the text is not numeric.</returns>
+    /// <remarks>
+    /// <para>
+    /// PAIRED WITH <see cref="IsNumber(string)"/> AND PARSED THE SAME WAY, deliberately: the same
+    /// <see cref="NumberStyles"/> and the same invariant culture, so a value the guard admits is a value
+    /// this reads. Two different parses would leave a window in which the guard passes and the read fails.
+    /// </para>
+    /// <para>
+    /// <b>THE FALLBACK IS UNREACHABLE FROM THE ONE CALL SITE AND IS STILL NOT AN EXCEPTION.</b> The numeric
+    /// clause is composed only inside <c>if IsNumber(data)</c> [<c>:L333</c>], so the parse cannot fail
+    /// there. Throwing on the impossible branch would turn a filter composition into a fault; answering
+    /// zero keeps the expression well-formed and matches the DataWindow's own coercion of unparseable text
+    /// in a numeric position.
+    /// </para>
+    /// <para>
+    /// INVARIANT CULTURE IS NOT A DETAIL. A comma-decimal culture would read <c>32.50</c> as three thousand
+    /// two hundred and fifty, so the filter would match a row no user asked for - and it would do so only
+    /// on hosts configured that way, which is the hardest class of defect to reproduce.
+    /// </para>
+    /// </remarks>
+    private static double ToNumber(string value) =>
+        double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed)
+            ? parsed
+            : 0d;
 
     /// <summary>
     /// The port of PowerScript's <c>Match(data, "[a-zA-Z]")</c>

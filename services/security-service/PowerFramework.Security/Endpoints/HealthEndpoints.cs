@@ -346,6 +346,28 @@ public static class HealthEndpoints
     private const string RetCodeExtensionMember = "retCode";
 
     /// <summary>
+    /// The problem document extension member carrying the readiness verdict, spelled as the authored
+    /// contract spells it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A NAME OF ITS OWN, BECAUSE <c>status</c> IS ALREADY TAKEN AND IS A DIFFERENT TYPE. RFC 9457 uses
+    /// <c>status</c> for the integer HTTP status and the authored contract types it that way, so the
+    /// verdict token cannot occupy that name on a problem document. Without a member of its own the
+    /// token would exist only inside the prose of <c>detail</c>, leaving
+    /// <see cref="RetCodeExtensionMember"/> as the sole machine-readable member - and that carries
+    /// <c>E_RETRY</c> for <c>Degraded</c> and for <c>Unhealthy</c> alike, so Gateway's aggregator could
+    /// not tell a service still starting up from one whose dependency has failed and would flatten both
+    /// into a failure.
+    /// </para>
+    /// <para>
+    /// The same spelling is emitted by all four services, because contract C-10 publishes one readiness
+    /// shape across the estate and Gateway reads this member off each upstream's not-ready body.
+    /// </para>
+    /// </remarks>
+    private const string ServiceStatusExtensionMember = "serviceStatus";
+
+    /// <summary>
     /// The problem document title for the 503. Stated explicitly rather than left to the framework's
     /// defaults table, which covers the common 4xx statuses and 500 but not 503, so an omitted title
     /// would simply be absent from the body.
@@ -790,8 +812,13 @@ public static class HealthEndpoints
     /// <para>
     /// DEGRADED AND UNHEALTHY BOTH ARRIVE HERE AND ARE DISTINGUISHED IN THE BODY RATHER THAN IN THE
     /// STATUS. Both are answered 503, because both mean "not ready" and the orchestration gate reads the
-    /// status code; the wire status token is written into the detail, so an operator can still tell a
-    /// service still completing startup validation from one whose component has failed.
+    /// status code. The wire status token is written into the detail for a human AND into
+    /// <see cref="ServiceStatusExtensionMember"/> for a machine, so an operator can tell a service still
+    /// completing startup validation from one whose component has failed - and so can Gateway's
+    /// aggregator, which reads that member off this body and would otherwise have only
+    /// <see cref="RetCodeExtensionMember"/>, which is identical for both verdicts. The token cannot
+    /// travel in a <c>status</c> member: RFC 9457 uses that name for the integer HTTP status, and this
+    /// response is a problem document rather than a <see cref="ServiceHealthReport"/>.
     /// </para>
     /// </remarks>
     private static IResult BuildNotReadyProblem(
@@ -825,6 +852,7 @@ public static class HealthEndpoints
             title: UnavailableProblemTitle,
             extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
             {
+                [ServiceStatusExtensionMember] = wireStatus,
                 [RetCodeExtensionMember] = RetCode.E_RETRY,
             });
     }
@@ -942,4 +970,3 @@ public sealed record ServiceHealthCheck(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Description { get; init; }
 }
-

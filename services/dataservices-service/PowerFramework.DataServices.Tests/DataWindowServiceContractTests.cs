@@ -64,12 +64,33 @@ using DomainContextMenuModel = PowerFramework.DataServices.Services.ContextMenuM
 using DomainEventGate = PowerFramework.DataServices.Domain.EventGate;
 using DomainItemChangeResult = PowerFramework.DataServices.Domain.ItemChangeResult;
 using EventId = PowerFramework.Contracts.DataServices.V1.EventId;
+using BeginSessionRequest = PowerFramework.Contracts.Persistence.V1.BeginSessionRequest;
+using TableUpdateContract = PowerFramework.Contracts.Persistence.V1.TableUpdateContract;
 using PersistenceCarrierBufferSegment = PowerFramework.Contracts.Persistence.V1.CarrierBufferSegment;
 using PersistenceCarrierState = PowerFramework.Contracts.Persistence.V1.CarrierState;
+using PersistenceBeginSessionResponse = PowerFramework.Contracts.Persistence.V1.BeginSessionResponse;
+using PersistenceCreateQueryTaskRequest =
+    PowerFramework.Contracts.Persistence.V1.CreateQueryTaskRequest;
+using PersistenceCreateQueryTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.CreateQueryTaskResponse;
+using PersistenceCreateUpdateTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskResponse;
+using PersistenceEndSessionResponse = PowerFramework.Contracts.Persistence.V1.EndSessionResponse;
 using PersistenceOperationStatus = PowerFramework.Contracts.Persistence.V1.OperationStatus;
+using PersistencePrepareUpdateRequest =
+    PowerFramework.Contracts.Persistence.V1.PrepareUpdateRequest;
+using PersistencePrepareUpdateResponse =
+    PowerFramework.Contracts.Persistence.V1.PrepareUpdateResponse;
+using PersistenceReleaseQueryTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.ReleaseQueryTaskResponse;
+using PersistenceReleaseUpdateTaskResponse =
+    PowerFramework.Contracts.Persistence.V1.ReleaseUpdateTaskResponse;
+using PersistenceSessionHandle = PowerFramework.Contracts.Persistence.V1.SessionHandle;
+using PersistenceTaskHandle = PowerFramework.Contracts.Persistence.V1.TaskHandle;
 using PersistenceQueryDataChunk = PowerFramework.Contracts.Persistence.V1.QueryDataChunk;
 using PersistenceQueryRequest = PowerFramework.Contracts.Persistence.V1.QueryRequest;
 using PersistenceQueryResponse = PowerFramework.Contracts.Persistence.V1.QueryResponse;
+using PersistenceQuerySpec = PowerFramework.Contracts.Persistence.V1.QuerySpec;
 using PersistenceUpdateCounts = PowerFramework.Contracts.Persistence.V1.UpdateCounts;
 using PersistenceUpdateRequest = PowerFramework.Contracts.Persistence.V1.UpdateRequest;
 using PersistenceUpdateResponse = PowerFramework.Contracts.Persistence.V1.UpdateResponse;
@@ -147,12 +168,26 @@ internal sealed class C03StreamWriter<T> : IServerStreamWriter<T>
         }
     }
 
+    /// <summary>
+    /// Runs after each message is recorded, so a row can act at a point only the stream reaches.
+    /// </summary>
+    /// <remarks>
+    /// THE ONLY SEAM THAT SITS BETWEEN THE ACQUISITION AND THE RELEASE. A row about what happens when a
+    /// caller cancels MID-STREAM cannot cancel before the call, because a token that is already cancelled
+    /// refuses the first upstream request and nothing is ever acquired - so there is nothing to release and
+    /// the row proves the opposite of what it names. Cancelling from here happens after the session and the
+    /// task exist and before the stream ends, which is the state the release obligation is about.
+    /// </remarks>
+    internal Action<T>? OnWrite { get; set; }
+
     public Task WriteAsync(T message)
     {
         lock (_written)
         {
             _written.Add(message);
         }
+
+        OnWrite?.Invoke(message);
 
         return Task.CompletedTask;
     }
@@ -176,18 +211,48 @@ internal sealed class C03RequestStream(params EventChainRequest[] messages)
 }
 
 /// <summary>A persistence client whose two consumed operations are scripted.</summary>
+/// <remarks>
+/// THE SIX HANDLE-LIFECYCLE OPERATIONS ARE DELIBERATELY NOT OVERRIDDEN. They travel the REAL client
+/// implementation down to the generated-stub doubles below, so every test in this suite exercises the
+/// production acquisition and release rather than a shortcut around them - and the stubs record what
+/// reached the wire, which is where the assertions about the create call read from. Overriding
+/// <c>OpenQueryScopeAsync</c> would have been shorter and would have verified nothing.
+/// </remarks>
 internal sealed class C03PersistenceClient : PersistenceClient
 {
     internal C03PersistenceClient()
-        : base(
+        : this(
             new FakeQueryServiceClient(),
             new FakeUpdateServiceClient(),
+            new FakeTransactionServiceClient())
+    {
+    }
+
+    private C03PersistenceClient(
+        FakeQueryServiceClient queryStub,
+        FakeUpdateServiceClient updateStub,
+        FakeTransactionServiceClient transactionStub)
+        : base(
+            queryStub,
+            updateStub,
             new FakeCommandServiceClient(),
-            new FakeTransactionServiceClient(),
+            transactionStub,
             new PersistenceStubTokenProvider(),
             new PersistenceRecordingLogger())
     {
+        QueryStub = queryStub;
+        UpdateStub = updateStub;
+        TransactionStub = transactionStub;
     }
+
+    /// <summary>The C-05 stub, retained so what reached the wire can be asserted.</summary>
+    internal FakeQueryServiceClient QueryStub { get; }
+
+    /// <summary>The C-06 stub, retained on the same terms.</summary>
+    internal FakeUpdateServiceClient UpdateStub { get; }
+
+    /// <summary>The C-08 stub, retained so session begin and end can be paired.</summary>
+    internal FakeTransactionServiceClient TransactionStub { get; }
 
     internal PersistenceQueryRequest? LastQuery { get; private set; }
 
@@ -206,10 +271,184 @@ internal sealed class C03PersistenceClient : PersistenceClient
         Identity = { new IdentityColumnData { IdentityColumnId = 1L } },
     };
 
+    /// <summary>
+    /// Every lifecycle and payload call this client received, in the order it received them.
+    /// </summary>
+    /// <remarks>
+    /// ORDER IS THE ASSERTION, not merely presence. C-05 and C-06 are task-scoped and a task is
+    /// session-scoped, so "the session was opened" and "the session was opened FIRST" are different claims
+    /// and only the second one is the contract.
+    /// </remarks>
+    internal List<string> Lifecycle { get; } = [];
+
+    /// <summary>The outcome <c>BeginSession</c> answers with.</summary>
+    internal WireRetCode BeginSessionOutcome { get; set; } = WireRetCode.Ok;
+
+    /// <summary>Whether <c>BeginSession</c> answers a success WITHOUT a handle.</summary>
+    internal bool BeginSessionWithoutHandle { get; set; }
+
+    /// <summary>The outcome task creation answers with, for both the query and the update contract.</summary>
+    internal WireRetCode CreateTaskOutcome { get; set; } = WireRetCode.Ok;
+
+    /// <summary>The outcome <c>PrepareUpdate</c> answers with.</summary>
+    internal WireRetCode PrepareOutcome { get; set; } = WireRetCode.Ok;
+
+    /// <summary>The specification the query task was created with.</summary>
+    internal PersistenceCreateQueryTaskRequest? LastCreateQueryTask { get; private set; }
+
+    /// <summary>The bind request the update task was prepared with.</summary>
+    internal PersistencePrepareUpdateRequest? LastPrepareUpdate { get; private set; }
+
+    /// <summary>The descriptor the session was opened from.</summary>
+    internal PowerFramework.Contracts.Persistence.V1.BeginSessionRequest? LastBeginSession
+    {
+        get;
+        private set;
+    }
+
+    // ==============================================================================================
+    //  THE LIFECYCLE OVERRIDES - RECORD, THEN DELEGATE
+    //  ---------------------------------------------------------------------------------------------
+    //  ⚠ EVERY OVERRIDE BELOW CALLS `base`, AND THAT IS THE WHOLE DESIGN RATHER THAN A DETAIL ⚠
+    //
+    //  Two things have to be observable at once and they are observable in two different places, so
+    //  neither may be substituted away.
+    //
+    //    1. THE ORDER OF THE CALLS ACROSS CONTRACTS. C-05 and C-06 are task-scoped and a task is
+    //       session-scoped, so "the session was opened" and "the session was opened FIRST" are
+    //       different claims and only the second is the contract. That ordering spans three separate
+    //       wire stubs, each of which records only its own calls, so it can only be observed here -
+    //       which is what `Lifecycle` is for.
+    //    2. WHAT ACTUALLY REACHED THE WIRE. PersistenceClient is shipped code: it composes the request
+    //       messages, attaches the credential, and chooses the cancellation token each release travels
+    //       under. An override that answered from here instead of delegating would replace all of that
+    //       with the test's own opinion of it, and every assertion against QueryStub, UpdateStub and
+    //       TransactionStub would read an empty collection - not because the service failed to call,
+    //       but because the call never got past this class.
+    //
+    //  So each member records what it was asked, then hands the request to the real client beneath it.
+    //  The outcome knobs short-circuit ONLY when a test has set one to something other than success:
+    //  that is how a refusal is scripted at a point the wire stubs cannot express, and leaving the
+    //  default alone means the stub's own scripting - FakeUpdateServiceClient.CreateTaskCode, for
+    //  instance - still decides. Both mechanisms therefore work, and neither hides the other.
+    // ==============================================================================================
+
+    public override async Task<PersistenceBeginSessionResponse> BeginSessionAsync(
+        PowerFramework.Contracts.Persistence.V1.BeginSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(BeginSessionAsync));
+        LastBeginSession = request;
+
+        if (BeginSessionOutcome != WireRetCode.Ok)
+        {
+            return new PersistenceBeginSessionResponse
+            {
+                Status = new PersistenceOperationStatus { RetCode = BeginSessionOutcome },
+            };
+        }
+
+        PersistenceBeginSessionResponse response =
+            await base.BeginSessionAsync(request, cancellationToken);
+
+        // A SUCCESS WITHOUT A HANDLE IS A SHAPE THE WIRE STUB CANNOT PRODUCE, and it is the one the
+        // service has to refuse rather than dereference: a producer that reports success and returns
+        // nothing to address is a contract breach, not a caller error.
+        if (BeginSessionWithoutHandle)
+        {
+            response.Session = null;
+        }
+
+        return response;
+    }
+
+    public override Task<PersistenceEndSessionResponse> EndSessionAsync(
+        PowerFramework.Contracts.Persistence.V1.EndSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(EndSessionAsync));
+
+        // ASSERTS THE CLEANUP TOKEN IS NOT THE CALLER'S. A session holds a reference-counted pool entry
+        // upstream, so a release that honoured the caller's cancellation would abandon the release on
+        // exactly the path that creates the leak. Checked here rather than in a test body because it must
+        // hold for EVERY test that ends a session, not only the one that remembers to look.
+        Assert.False(cancellationToken.CanBeCanceled);
+
+        return base.EndSessionAsync(request, cancellationToken);
+    }
+
+    public override Task<PersistenceCreateQueryTaskResponse> CreateQueryTaskAsync(
+        PersistenceCreateQueryTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(CreateQueryTaskAsync));
+        LastCreateQueryTask = request;
+
+        return CreateTaskOutcome == WireRetCode.Ok
+            ? base.CreateQueryTaskAsync(request, cancellationToken)
+            : Task.FromResult(new PersistenceCreateQueryTaskResponse
+            {
+                Status = new PersistenceOperationStatus { RetCode = CreateTaskOutcome },
+            });
+    }
+
+    public override Task<PersistenceReleaseQueryTaskResponse> ReleaseQueryTaskAsync(
+        PowerFramework.Contracts.Persistence.V1.ReleaseQueryTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(ReleaseQueryTaskAsync));
+
+        Assert.False(cancellationToken.CanBeCanceled);
+
+        return base.ReleaseQueryTaskAsync(request, cancellationToken);
+    }
+
+    public override Task<PersistenceCreateUpdateTaskResponse> CreateUpdateTaskAsync(
+        PowerFramework.Contracts.Persistence.V1.CreateUpdateTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(CreateUpdateTaskAsync));
+
+        return CreateTaskOutcome == WireRetCode.Ok
+            ? base.CreateUpdateTaskAsync(request, cancellationToken)
+            : Task.FromResult(new PersistenceCreateUpdateTaskResponse
+            {
+                Status = new PersistenceOperationStatus { RetCode = CreateTaskOutcome },
+            });
+    }
+
+    public override Task<PersistencePrepareUpdateResponse> PrepareUpdateAsync(
+        PersistencePrepareUpdateRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(PrepareUpdateAsync));
+        LastPrepareUpdate = request;
+
+        return PrepareOutcome == WireRetCode.Ok
+            ? base.PrepareUpdateAsync(request, cancellationToken)
+            : Task.FromResult(new PersistencePrepareUpdateResponse
+            {
+                Status = new PersistenceOperationStatus { RetCode = PrepareOutcome },
+            });
+    }
+
+    public override Task<PersistenceReleaseUpdateTaskResponse> ReleaseUpdateTaskAsync(
+        PowerFramework.Contracts.Persistence.V1.ReleaseUpdateTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        Lifecycle.Add(nameof(ReleaseUpdateTaskAsync));
+
+        Assert.False(cancellationToken.CanBeCanceled);
+
+        return base.ReleaseUpdateTaskAsync(request, cancellationToken);
+    }
+
     public override IAsyncEnumerable<PersistenceQueryResponse> QueryAsync(
         PersistenceQueryRequest request,
         CancellationToken cancellationToken)
     {
+        Lifecycle.Add(nameof(QueryAsync));
+
         LastQuery = request;
 
         return Replay(QueryScript, cancellationToken);
@@ -219,6 +458,8 @@ internal sealed class C03PersistenceClient : PersistenceClient
         PersistenceUpdateRequest request,
         CancellationToken cancellationToken)
     {
+        Lifecycle.Add(nameof(UpdateAsync));
+
         UpdateCalls++;
         LastUpdate = request;
 
@@ -323,7 +564,10 @@ internal sealed class C03ChainFactory : IDataWindowEventChainFactory
 /// <summary>The composed service under test.</summary>
 internal sealed class C03Fixture
 {
-    internal C03Fixture(IDataWindowModelSetProvider? models = null, DataServicesOptions? configured = null)
+    internal C03Fixture(
+        IDataWindowModelSetProvider? models = null,
+        DataServicesOptions? configured = null,
+        IDataWindowUpdateContractProvider? updateContracts = null)
     {
         Configured = configured ?? new DataServicesOptions();
         Registry = new ValidationSessionRegistry(Configured);
@@ -337,7 +581,9 @@ internal sealed class C03Fixture
             Registry,
             Chains,
             Models,
-            Persistence);
+            Persistence,
+            null,
+            updateContracts);
     }
 
     internal DataServicesOptions Configured { get; }
@@ -920,17 +1166,45 @@ public sealed class DataWindowServiceConversationTests
         conversation.AcceptInbound(3L, EventId.Ondwnitemchange, strictOrdering: false);
     }
 
+    /// <summary>
+    /// A sequenced group admits a GAP and refuses a REVERSAL.
+    /// </summary>
+    /// <remarks>
+    /// THIS ROW USED TO ASSERT THE DEFECT. It was called
+    /// <c>ASequencedGroupToleratesAnArrivalBehindTheHighWaterMark</c> and it required exactly the
+    /// behaviour that made the sequencing token decorative: an arrival behind the mark had to NOT throw,
+    /// justified as "reorder authority is the consumer's". The consumer on this boundary is this server,
+    /// and it was not reordering - it was dispatching in arrival order - so tolerating the reversal meant
+    /// delivering the chain out of order and calling it authority. What is admitted is a GAP, because both
+    /// directions draw from one counter and a client's token skips the numbers the server used.
+    /// </remarks>
     [Fact]
-    public void ASequencedGroupToleratesAnArrivalBehindTheHighWaterMark()
+    public void ASequencedGroupAdmitsAGapAndRefusesAReversal()
     {
         C03StreamWriter<EventChainResponse> writer = new();
         using DataWindowEventConversation conversation = new("s-1", writer);
         conversation.Bind(new DataWindowEventSequencer());
 
+        // A GAP: 5 rather than 1, which is what a client sends once the server has consumed tokens of its
+        // own. Admitted.
         conversation.AcceptInbound(5L, EventId.Ondwnsetfocus, strictOrdering: true);
 
-        // Reorder authority is the consumer's in a sequenced group, so this must NOT throw.
-        conversation.AcceptInbound(3L, EventId.Ondwnsetfocus, strictOrdering: true);
+        // A REVERSAL: 3 is behind the mark, so its position has already been dispatched past. Refused.
+        DataWindowEventSequenceException reversed =
+            Assert.Throws<DataWindowEventSequenceException>(() =>
+                conversation.AcceptInbound(3L, EventId.Ondwnsetfocus, strictOrdering: true));
+
+        Assert.Equal(OrderingDiscipline.Sequenced, reversed.Discipline);
+        Assert.Equal(3L, reversed.ActualSequence);
+        Assert.Equal(6L, reversed.ExpectedSequence);
+
+        // A duplicate of the mark itself is the same case.
+        _ = Assert.Throws<DataWindowEventSequenceException>(() =>
+            conversation.AcceptInbound(5L, EventId.Ondwnsetfocus, strictOrdering: true));
+
+        // AND RELAXED STRICTNESS RECORDS IT INSTEAD OF FAILING, without reordering anything - the dial
+        // moves who reports the anomaly, never whether the server rearranges the chain.
+        conversation.AcceptInbound(3L, EventId.Ondwnsetfocus, strictOrdering: false);
     }
 
     [Fact]
@@ -1168,9 +1442,26 @@ public sealed class DataWindowServiceContractTests
         // Nothing before the last is marked final, which is what "progressive" means.
         Assert.All(writer.Written.Take(2), chunk => Assert.False(chunk.Final));
 
-        // The handle IS the data object, and the chunk size travelled unchanged.
-        Assert.Equal("dw-1", fixture.Persistence.LastQuery?.Spec.DataObject);
-        Assert.Equal(2000L, fixture.Persistence.LastQuery?.Spec.ChunkSize);
+        // The handle IS the data object, and the chunk size travelled unchanged - ON THE CREATE CALL,
+        // which is where C-05 puts a task's initial configuration. It is deliberately NOT repeated on the
+        // run call: QueryRequest.spec merges over the state the task already has, and a clause setter
+        // carrying SQL_MS_APPEND applied twice would append the same fragment twice.
+        PersistenceQuerySpec spec = Assert.Single(fixture.Persistence.QueryStub.CreateTaskRequests).Spec;
+        Assert.Equal("dw-1", spec.DataObject);
+        Assert.Equal(2000L, spec.ChunkSize);
+        Assert.Null(fixture.Persistence.LastQuery?.Spec);
+
+        // AND THE RUN CALL NAMED THE TASK THE CREATE CALL ISSUED. A default handle is not a lenient
+        // default: Persistence refuses a blank one with E_INVALID_HANDLE before it reaches a statement.
+        Assert.Equal(PersistenceStubTaskIds.Query, fixture.Persistence.LastQuery?.Task.TaskId);
+
+        // AND WHAT IT TOOK, IT GAVE BACK. One session begun and one ended, one task created and one
+        // released - the leak assertion, which no assertion about the chunks above can make.
+        Assert.Single(fixture.Persistence.TransactionStub.BeginRequests);
+        Assert.Single(fixture.Persistence.TransactionStub.EndRequests);
+        Assert.Equal(
+            PersistenceStubTaskIds.Query,
+            Assert.Single(fixture.Persistence.QueryStub.ReleaseTaskRequests).Task.TaskId);
     }
 
     [Fact]
@@ -1272,7 +1563,7 @@ public sealed class DataWindowServiceContractTests
     }
 
     [Fact]
-    public async Task AFailingUpstreamStatusEndsTheStreamOnAFinalErrorChunk()
+    public async Task AFailingUpstreamStatusEndsTheStreamOnAFinalErrorChunkAndThenFailsTheCall()
     {
         C03Fixture fixture = new();
 
@@ -1281,17 +1572,26 @@ public sealed class DataWindowServiceContractTests
             Status = new PersistenceOperationStatus
             {
                 RetCode = WireRetCode.EDbError,
+                ErrorText = "no such table: COMPANY",
                 DbError = new DbError { Sqldbcode = -1L, Sqlsyntax = "SELECT * FROM COMPANY" },
             },
         });
 
         C03StreamWriter<RetrieveChunk> writer = new();
 
-        await fixture.Service.Retrieve(
-            new RetrieveRequest { DatawindowHandle = "dw-1" },
-            writer,
-            fixture.Context);
+        // THE CALL FAILS. It used to return normally after writing this chunk, which reported a FAILED
+        // retrieval as a successful empty one: RetrieveChunk declares no return-code and no error-text
+        // field, so a caller reading only the stream learned nothing at all about a non-database failure
+        // and read a database failure as "zero rows, here is an error you may ignore".
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Retrieve(
+                new RetrieveRequest { DatawindowHandle = "dw-1" },
+                writer,
+                fixture.Context));
 
+        // THE PAYLOAD IS WRITTEN FIRST AND THE STATUS RAISED AFTER IT, because gRPC delivers every message
+        // before the status - so a consumer reads the DbError and then learns the call failed. Raising
+        // first would discard the payload.
         RetrieveChunk terminal = Assert.Single(writer.Written);
         Assert.True(terminal.Final);
         Assert.Equal(0L, terminal.RowCount);
@@ -1299,6 +1599,68 @@ public sealed class DataWindowServiceContractTests
 
         // RELAYED to the caller, who is entitled to it. The redaction rule is about the LOG.
         Assert.Equal("SELECT * FROM COMPANY", terminal.Error.Sqlsyntax);
+
+        // AND THE TWO FACTS THAT HAVE NOWHERE TO LIVE ON THE CHUNK TRAVEL IN THE STATUS.
+        Assert.Contains(
+            RetCode.E_DB_ERROR.ToString(CultureInfo.InvariantCulture),
+            failure.Status.Detail,
+            StringComparison.Ordinal);
+
+        Assert.Contains("no such table: COMPANY", failure.Status.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARetrievalOpensASessionAndATaskAndReleasesBothInOrder()
+    {
+        C03Fixture fixture = new();
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            new C03StreamWriter<RetrieveChunk>(),
+            fixture.Context);
+
+        // A QueryRequest carries a TaskHandle as its FIRST field, so a retrieval sent without one reaches
+        // Persistence with no task to run on and is answered E_INVALID_HANDLE before it reads a row.
+        Assert.NotNull(fixture.Persistence.LastQuery?.Task);
+        Assert.Equal(PersistenceStubTaskIds.Query, fixture.Persistence.LastQuery.Task.TaskId);
+
+        // The session was opened, and the descriptor carries NO credential: the evidenced SQLite connection
+        // is a file URI with no user [w_test_sqlite.srw:L450-L456].
+        BeginSessionRequest opened = Assert.Single(fixture.Persistence.TransactionStub.BeginRequests);
+        Assert.NotNull(opened.Descriptor_);
+        Assert.Empty(opened.Descriptor_.Logid);
+        Assert.Empty(opened.Descriptor_.Logpass);
+
+        // BOTH acquisitions released, innermost first. An unreleased task or session holds a pooled
+        // transaction - and therefore a connection - until the process ends.
+        Assert.Contains(nameof(FakeQueryServiceClient.ReleaseQueryTaskAsync), fixture.Persistence.QueryStub.Calls);
+        Assert.Contains(
+            nameof(FakeTransactionServiceClient.EndSessionAsync),
+            fixture.Persistence.TransactionStub.Calls);
+    }
+
+    [Fact]
+    public async Task ARetrievalReleasesItsTaskAndSessionEVENWhenTheStreamFails()
+    {
+        C03Fixture fixture = new();
+
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = WireRetCode.EDbError },
+        });
+
+        _ = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Retrieve(
+                new RetrieveRequest { DatawindowHandle = "dw-1" },
+                new C03StreamWriter<RetrieveChunk>(),
+                fixture.Context));
+
+        // THE finally IS THE WHOLE POINT. A failure path that skips the release leaks exactly when the
+        // system is already under stress, which is the worst possible moment to start holding connections.
+        Assert.Contains(nameof(FakeQueryServiceClient.ReleaseQueryTaskAsync), fixture.Persistence.QueryStub.Calls);
+        Assert.Contains(
+            nameof(FakeTransactionServiceClient.EndSessionAsync),
+            fixture.Persistence.TransactionStub.Calls);
     }
 
     [Fact]
@@ -1326,11 +1688,13 @@ public sealed class DataWindowServiceContractTests
 
         await fixture.Service.Retrieve(request, new C03StreamWriter<RetrieveChunk>(), fixture.Context);
 
-        // Wire element 0 IS legacy args[1] - the one place a basis changes.
-        Assert.Equal("1", fixture.Persistence.LastQuery?.Spec.Parameters[0].Name);
-        Assert.Equal("first", fixture.Persistence.LastQuery?.Spec.Parameters[0].Value.StringValue);
-        Assert.Equal("2", fixture.Persistence.LastQuery?.Spec.Parameters[1].Name);
-        Assert.Equal("second", fixture.Persistence.LastQuery?.Spec.Parameters[1].Value.StringValue);
+        // Wire element 0 IS legacy args[1] - the one place a basis changes. Read from the CREATE call,
+        // which is where the specification travels.
+        PersistenceQuerySpec spec = Assert.Single(fixture.Persistence.QueryStub.CreateTaskRequests).Spec;
+        Assert.Equal("1", spec.Parameters[0].Name);
+        Assert.Equal("first", spec.Parameters[0].Value.StringValue);
+        Assert.Equal("2", spec.Parameters[1].Name);
+        Assert.Equal("second", spec.Parameters[1].Value.StringValue);
     }
 
     [Fact]
@@ -1343,7 +1707,8 @@ public sealed class DataWindowServiceContractTests
             new C03StreamWriter<RetrieveChunk>(),
             fixture.Context);
 
-        Assert.False(fixture.Persistence.LastQuery?.Spec.HasChunkSize);
+        Assert.False(
+            Assert.Single(fixture.Persistence.QueryStub.CreateTaskRequests).Spec.HasChunkSize);
     }
 
     [Fact]
@@ -1389,8 +1754,546 @@ public sealed class DataWindowServiceContractTests
         Assert.Equal(RetCode.E_DB_ERROR, trailer.RetCode);
     }
 
+    // =============================================================================================
+    //  F-02 - THE UPSTREAM LIFECYCLE. C-05 and C-06 are TASK-scoped and a task is SESSION-scoped, so a
+    //  retrieval and an update are each three or four upstream calls rather than one. These tests assert
+    //  the ORDER, the handle actually reaching the payload call, and the release running on every exit
+    //  path - the last of which is what separates a working orchestration from one that leaks a
+    //  reference-counted pool entry per request.
+    // =============================================================================================
+
+    /// <summary>
+    /// A retrieval opens a session, creates a task against it, runs, then releases both - in that order.
+    /// </summary>
+    /// <remarks>
+    /// THE HANDLE ON THE RUN CALL IS THE POINT. Before the lifecycle existed this method sent a task-less
+    /// QueryRequest, which C-05 rejects for the missing handle - so every retrieval failed upstream for a
+    /// task this contract never created. Asserting the handle is present AND is the one the create call
+    /// issued is what makes that unrepeatable.
+    /// </remarks>
     [Fact]
-    public async Task UpdateGroupsRowsByBufferPreservingOrderAndRelaysIdentityUnchanged()
+    public async Task RetrieveRunsTheFullUpstreamLifecycleInOrderAndCarriesTheTaskHandle()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+        });
+
+        C03StreamWriter<RetrieveChunk> stream = new();
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            stream,
+            fixture.Context);
+
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.BeginSessionAsync),
+                nameof(PersistenceClient.CreateQueryTaskAsync),
+                nameof(PersistenceClient.QueryAsync),
+                nameof(PersistenceClient.ReleaseQueryTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle);
+
+        Assert.Equal(PersistenceStubTaskIds.Query, fixture.Persistence.LastQuery!.Task.TaskId);
+
+        // ⚠ AND THE SPEC IS ON THE CREATE CALL ONLY, WHICH REPLACES WHAT THIS ROW FIRST ASSERTED ⚠
+        //
+        // It was written expecting the SAME spec instance on both calls, so that "a task cannot be created
+        // with one specification and run with another". That property is desirable and this is not the way
+        // to get it: repeating the spec on the run call is not a restatement, it is a SECOND APPLICATION.
+        // C-05 documents QueryRequest.spec as "merged over whatever the Set* calls already applied", and a
+        // clause setter is not idempotent - a WHERE clause carrying SQL_MS_APPEND applied twice appends the
+        // same fragment twice and changes the statement that executes. The sibling row
+        // ARetrievalOpensASessionAndATaskAndReleasesBothInOrder pins the correct shape directly, by
+        // asserting the run call carries NO spec at all; what this row keeps is the other half, that the run
+        // call names the handle the create call issued.
+        Assert.Equal("dw-1", fixture.Persistence.LastCreateQueryTask!.Spec.DataObject);
+        Assert.Null(fixture.Persistence.LastQuery.Spec);
+    }
+
+    /// <summary>
+    /// The session descriptor comes from configuration, and its password never returns.
+    /// </summary>
+    /// <remarks>
+    /// The descriptor is the reason a session exists: it is resolved ONCE by <c>BeginSession</c> so that its
+    /// log-password field does not travel on every later call. This asserts the configured values arrive and
+    /// that the two connection flags are carried, since Persistence parses them into the bind behaviour that
+    /// decides whether values are interpolated into the statement text at all.
+    /// </remarks>
+    [Fact]
+    public async Task RetrieveOpensTheSessionFromTheConfiguredDescriptorIncludingBothConnectionFlags()
+    {
+        DataServicesOptions configured = new()
+        {
+            PersistenceSession = new PersistenceSessionOptions
+            {
+                Dbms = "SQLite",
+                Database = "powerframework",
+                LogId = "operator",
+                LogPass = "not-echoed",
+                DbParm = "DisableBind=1",
+                DisableBind = true,
+                NCharBind = true,
+            },
+        };
+
+        C03Fixture fixture = new(configured: configured);
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = WireRetCode.Ok },
+        });
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            new C03StreamWriter<RetrieveChunk>(),
+            fixture.Context);
+
+        PowerFramework.Contracts.Persistence.V1.BeginSessionRequest opened =
+            fixture.Persistence.LastBeginSession!;
+
+        Assert.Equal("SQLite", opened.Descriptor_.Dbms);
+        Assert.Equal("powerframework", opened.Descriptor_.Database);
+        Assert.Equal("operator", opened.Descriptor_.Logid);
+        Assert.Equal("not-echoed", opened.Descriptor_.Logpass);
+        Assert.True(opened.Flags.DisableBind);
+        Assert.True(opened.Flags.NcharBind);
+    }
+
+    /// <summary>
+    /// A session that cannot be opened is a call failure and streams nothing.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE ALTERNATIVE IS THE DEFECT THIS CLOSES.</b> <c>RetrieveChunk</c> has no outcome field, so a
+    /// lifecycle failure written as a final chunk with no rows would be indistinguishable from a
+    /// legitimately empty retrieval - a failure to reach the database would read to every caller as "this
+    /// DataWindow has no rows". So it travels as the call status, and NO chunk is written.
+    /// </remarks>
+    [Fact]
+    public async Task RetrieveProjectsASessionFailureAsACallStatusAndWritesNoChunk()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.BeginSessionOutcome = WireRetCode.EInvalidTransaction;
+
+        C03StreamWriter<RetrieveChunk> stream = new();
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(() => fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            stream,
+            fixture.Context));
+
+        Assert.Equal(StatusCode.FailedPrecondition, failure.StatusCode);
+        Assert.Empty(stream.Written);
+
+        // No task was created, so nothing needed releasing; and no session was issued, so nothing was
+        // ended. The absence is the correct shape - a release of a handle that was never issued would be a
+        // second defect.
+        Assert.Equal([nameof(PersistenceClient.BeginSessionAsync)], fixture.Persistence.Lifecycle);
+
+        // THE OUTCOME IS NAMED NUMERICALLY, which identifies the refusal without carrying row data.
+        //
+        // This row previously asserted the status message contained the words "deliberately withheld",
+        // which is a phrase rather than a property: it passed only while one particular sentence was
+        // present, and it says nothing about what the message actually carries. What matters, and what is
+        // asserted instead, is that the DRIVER's own message never reaches a status. It cannot: the driver's
+        // text lives in DbError.sqlerrtext and no acquisition failure reads that field - the status carries
+        // the numeric outcome and, when the upstream supplied one, PERSISTENCE's own refusal diagnostic,
+        // which names which setting was refused and is the caller's to act on. That is the same division
+        // BuildUpstreamFailure applies and the same one the update path applies to the statement field:
+        // relayed to the caller, who is entitled to it, and never written to this service's own log.
+        Assert.Contains(
+            RetCode.E_INVALID_TRANSACTION.ToString(CultureInfo.InvariantCulture),
+            failure.Status.Detail,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A success answered without a handle is reclassified rather than carried forward.
+    /// </summary>
+    [Fact]
+    public async Task RetrieveRefusesAHandlelessSessionSuccessRatherThanSendingATasklessRequest()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.BeginSessionWithoutHandle = true;
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(() => fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            new C03StreamWriter<RetrieveChunk>(),
+            fixture.Context));
+
+        Assert.Equal(StatusCode.Internal, failure.StatusCode);
+        Assert.Equal([nameof(PersistenceClient.BeginSessionAsync)], fixture.Persistence.Lifecycle);
+    }
+
+    /// <summary>
+    /// A task that cannot be created ends the session it was created against.
+    /// </summary>
+    [Fact]
+    public async Task RetrieveEndsTheSessionWhenTheTaskCannotBeCreated()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.CreateTaskOutcome = WireRetCode.EBusy;
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(() => fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            new C03StreamWriter<RetrieveChunk>(),
+            fixture.Context));
+
+        // E_BUSY is retryable, so it must not arrive as a flat Internal.
+        Assert.Equal(StatusCode.ResourceExhausted, failure.StatusCode);
+
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.BeginSessionAsync),
+                nameof(PersistenceClient.CreateQueryTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle);
+    }
+
+    /// <summary>
+    /// A cancelled retrieval still releases its task and ends its session.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE PATH THAT MATTERS MOST.</b> Cancellation is the ordinary way a client abandons a stream, and
+    /// it is precisely where a cleanup that honoured the caller's token would abandon the release - pinning
+    /// a reference-counted pool entry per abandoned request until its idle expiry sweeps it. The recording
+    /// client asserts the token it receives cannot be cancelled, so this test proves both halves at once.
+    /// </remarks>
+    [Fact]
+    public async Task RetrieveReleasesTheTaskAndEndsTheSessionWhenTheCallerCancels()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            DataChunk = new PersistenceQueryDataChunk(),
+        });
+
+        // ⚠ CANCELLED MID-STREAM, NOT BEFORE THE CALL, AND THE DIFFERENCE IS THE WHOLE ROW ⚠
+        //
+        // This row used to cancel before calling, which cannot reach what it asserts: the very first
+        // upstream request travels under the caller's token, so an already-cancelled token refuses the
+        // session before it is opened and there is then no task and no session to release. The row would
+        // then be asserting a release on a path where nothing was ever acquired. Cancelling on the first
+        // written chunk puts the cancellation exactly where the finding was - after both handles exist and
+        // before the stream ends - so the release really is the thing under test.
+        C03StreamWriter<RetrieveChunk> stream = new();
+        stream.OnWrite = _ => fixture.Lifetime.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            stream,
+            fixture.Context));
+
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.ReleaseQueryTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle[^2..]);
+    }
+
+    /// <summary>
+    /// A failing terminal status that carried no database error is a call failure, not an empty result.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE DEFECT THIS CLOSES PRODUCED A BYTE-FOR-BYTE CORRECT-LOOKING ANSWER.</b>
+    /// <c>RetrieveChunk</c> can express a database error and nothing else, so a refusal that brought none -
+    /// a rejected clause, an invalid paging request, a bad chunk size - had no field to occupy and was
+    /// delivered as the plain final marker: identical to what a DataWindow with no matching rows produces.
+    /// No caller could tell a REFUSED query from an EMPTY one, which is the worst class of failure because
+    /// it needs no handling to look handled.
+    /// </remarks>
+    [Theory]
+    [InlineData(WireRetCode.EInvalidArgument, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EInvalidSql, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EBusy, StatusCode.ResourceExhausted)]
+    [InlineData(WireRetCode.EInvalidHandle, StatusCode.NotFound)]
+    public async Task AFailingTerminalStatusWithNoDatabaseErrorIsACallFailureAndNotAnEmptyResult(
+        WireRetCode outcome,
+        StatusCode expected)
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = outcome },
+        });
+
+        C03StreamWriter<RetrieveChunk> stream = new();
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(() => fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            stream,
+            fixture.Context));
+
+        Assert.Equal(expected, failure.StatusCode);
+
+        // NO FINAL MARKER WAS WRITTEN. Writing one would be the defect itself: a caller reading the stream
+        // would see a complete, empty, successful retrieval.
+        Assert.Empty(stream.Written);
+
+        // The lifecycle still unwinds - a refused query must not leak its task or its session.
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.ReleaseQueryTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle[^2..]);
+    }
+
+    /// <summary>
+    /// A failing terminal status that DID carry a database error travels on the error chunk AND fails the
+    /// call.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CONTRACT HAS A FIELD FOR THE PAYLOAD, SO THE PAYLOAD USES IT. The error chunk is the contract's
+    /// own encoding of "a failure the legacy would have surfaced through its error event", and the driver's
+    /// code and text inside it reach the caller, who is entitled to them. That is what this row pins, and it
+    /// is not covered by the status-only row above: a failure with a <c>DbError</c> must not lose the
+    /// <c>DbError</c> on its way to becoming a status.
+    /// </para>
+    /// <para>
+    /// ⚠ AND IT IS STILL A CALL FAILURE, WHICH IS A CORRECTION TO WHAT THIS ROW ORIGINALLY ASSERTED ⚠
+    /// </para>
+    /// <para>
+    /// It was first written expecting the call to COMPLETE, on the reasoning that the error chunk is a
+    /// sufficient encoding of the failure. It is not, for three reasons and the third alone decides it.
+    /// <c>RetrieveChunk</c> declares no return-code field and no error-text field, so completing normally
+    /// discards both - here, <c>E_DB_ERROR</c> and the driver's message. A caller's retry-or-surface policy
+    /// keys on the STATUS CODE, as every mapping in this service says at the point it maps one, and an OK
+    /// status tells that policy the retrieval succeeded. And the row above - a failing terminal status with
+    /// NO database error - already makes exactly this failure class a call failure, so completing this one
+    /// normally would make the same failure succeed or fail according to whether the driver happened to
+    /// attach a code, which is the "no caller could tell a refused query from an empty one" defect displaced
+    /// rather than closed. The payload claim survives; the outcome claim does not.
+    /// </para>
+    /// <para>
+    /// THE ORDER IS PART OF IT. gRPC delivers every message before the status, so the chunk is written first
+    /// and the status raised after it: a consumer reads the <c>DbError</c> and then learns the call failed.
+    /// Raising first would discard the payload this row exists to protect.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AFailingTerminalStatusCarryingADatabaseErrorStillTravelsOnTheErrorChunk()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus
+            {
+                RetCode = WireRetCode.EDbError,
+                DbError = new DbError { Sqldbcode = 19L, Sqlerrtext = "UNIQUE constraint failed" },
+            },
+        });
+
+        C03StreamWriter<RetrieveChunk> stream = new();
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Retrieve(
+                new RetrieveRequest { DatawindowHandle = "dw-1" },
+                stream,
+                fixture.Context));
+
+        RetrieveChunk terminal = Assert.Single(stream.Written);
+
+        Assert.True(terminal.Final);
+        Assert.Equal(19L, terminal.Error.Sqldbcode);
+        Assert.Equal("UNIQUE constraint failed", terminal.Error.Sqlerrtext);
+
+        // AND THE RETURN CODE, WHICH THE CHUNK CANNOT CARRY, IS IN THE STATUS.
+        Assert.Contains(
+            RetCode.E_DB_ERROR.ToString(CultureInfo.InvariantCulture),
+            failure.Status.Detail,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A non-failing terminal status still ends the stream with the final marker.
+    /// </summary>
+    /// <remarks>
+    /// THE TRI-STATE ALGEBRA REACHES HERE TOO (C-B). PREVENT = 1 satisfies the legacy success predicate, so
+    /// a prevented retrieval IS a success and must complete normally; CANCELLED = -2 is excluded from
+    /// failure by name and is likewise not an error. A "not zero means failure" test would turn both into
+    /// call failures and change observable behaviour.
+    /// </remarks>
+    [Theory]
+    [InlineData(WireRetCode.Ok)]
+    [InlineData(WireRetCode.Prevent)]
+    [InlineData(WireRetCode.Cancelled)]
+    public async Task ANonFailingTerminalStatusStillEndsTheStreamNormally(WireRetCode outcome)
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus { RetCode = outcome },
+        });
+
+        C03StreamWriter<RetrieveChunk> stream = new();
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1" },
+            stream,
+            fixture.Context);
+
+        RetrieveChunk terminal = Assert.Single(stream.Written);
+
+        Assert.True(terminal.Final);
+        Assert.Equal(0L, terminal.RowCount);
+    }
+
+    /// <summary>
+    /// An update opens a session, creates a task, binds the DataWindow to it, runs, then releases both.
+    /// </summary>
+    /// <remarks>
+    /// THE BIND STEP IS NOT OPTIONAL. C-06 applies the data object only from the prepare message, so an
+    /// update run without one submits rows against a task that does not know what it is updating. The
+    /// multi-table switch stays OFF and the descriptor array stays EMPTY, which is the legacy single-table
+    /// path where the carrier's own static definition governs
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L365 versus :L371</c>].
+    /// </remarks>
+    [Fact]
+    public async Task UpdateRunsTheFullUpstreamLifecycleInOrderAndBindsTheDataObject()
+    {
+        C03Fixture fixture = new();
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        WireUpdateResponse response = await fixture.Service.Update(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, response.RetCode);
+
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.BeginSessionAsync),
+                nameof(PersistenceClient.CreateUpdateTaskAsync),
+                nameof(PersistenceClient.PrepareUpdateAsync),
+                nameof(PersistenceClient.UpdateAsync),
+                nameof(PersistenceClient.ReleaseUpdateTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle);
+
+        Assert.Equal(PersistenceStubTaskIds.Update, fixture.Persistence.LastUpdate!.Task.TaskId);
+
+        PersistencePrepareUpdateRequest bind = fixture.Persistence.LastPrepareUpdate!;
+
+        Assert.Equal("dw-1", bind.DataObject);
+        Assert.False(bind.MultiTableUpdate);
+        Assert.Empty(bind.Tables);
+    }
+
+    /// <summary>
+    /// A bind failure is a projected failure and submits no rows.
+    /// </summary>
+    /// <remarks>
+    /// ZERO COUNTS WITH AN OK OUTCOME WOULD BE A WRONG ANSWER ABOUT DATA - it tells the caller its rows were
+    /// considered and none needed applying. The upstream outcome is relayed instead so the specific legacy
+    /// code survives, and the task created before the bind failed is still released.
+    /// </remarks>
+    [Fact]
+    public async Task UpdateProjectsABindFailureAsAFailureSubmitsNoRowsAndStillReleasesTheTask()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.PrepareOutcome = WireRetCode.EInvalidArgument;
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        WireUpdateResponse response = await fixture.Service.Update(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.RetCode);
+        Assert.Equal(0, fixture.Persistence.UpdateCalls);
+        Assert.Equal(0L, response.RowsInserted);
+
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.BeginSessionAsync),
+                nameof(PersistenceClient.CreateUpdateTaskAsync),
+                nameof(PersistenceClient.PrepareUpdateAsync),
+                nameof(PersistenceClient.ReleaseUpdateTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle);
+    }
+
+    /// <summary>
+    /// A session failure on an update is a projected failure and never an empty success.
+    /// </summary>
+    [Fact]
+    public async Task UpdateProjectsASessionFailureAsTheUpstreamOutcomeAndNeverAnEmptySuccess()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.BeginSessionOutcome = WireRetCode.EDbError;
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        WireUpdateResponse response = await fixture.Service.Update(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.EDbError, response.RetCode);
+        Assert.Equal(0, fixture.Persistence.UpdateCalls);
+        Assert.Equal([nameof(PersistenceClient.BeginSessionAsync)], fixture.Persistence.Lifecycle);
+    }
+
+    /// <summary>
+    /// A conflict releases the task and ends the session on its way out.
+    /// </summary>
+    /// <remarks>
+    /// A CONFLICT IS THE MOST LIKELY FAILURE ON THIS OPERATION, so it is the one that must not leak. It
+    /// propagates through both <c>finally</c> blocks and reaches the caller as <c>Aborted</c> unchanged -
+    /// surfaced, never retried, with no silent overwrite.
+    /// </remarks>
+    [Fact]
+    public async Task UpdateReleasesTheTaskAndEndsTheSessionWhenAConflictIsRaised()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.Conflict = new PersistenceConflictException(
+            new ConflictDetail { UpdateTable = "COMPANY" },
+            RetCode.E_DB_ERROR,
+            new RpcException(new Status(StatusCode.Aborted, "upstream")));
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(
+            () => fixture.Service.Update(request, fixture.Context));
+
+        Assert.Equal(StatusCode.Aborted, failure.StatusCode);
+
+        Assert.Equal(
+            [
+                nameof(PersistenceClient.ReleaseUpdateTaskAsync),
+                nameof(PersistenceClient.EndSessionAsync),
+            ],
+            fixture.Persistence.Lifecycle[^2..]);
+    }
+
+    /// <summary>
+    /// The carrier is ALWAYS three segments in canonical order, and row order inside each is the caller's.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS CASE PREVIOUSLY ASSERTED THE DEFECT. It expected TWO segments in first-appearance order, which
+    /// is what the implementation produced and what <c>persistence.v1.CarrierState</c> does not accept:
+    /// the receiving codec tests the segment COUNT against the canonical length and then requires segment
+    /// n to be buffer n [<c>Buffers/ChangesetCodec.cs</c>], so the payload this case was pinning would have
+    /// been rejected outright by the service it was addressed to. The expectation is corrected to the
+    /// contract rather than the implementation preserved to keep the expectation.
+    /// </para>
+    /// <para>
+    /// WHAT IS GENUINELY PRESERVED IS ROW ORDER WITHIN A SEGMENT, and that half of the original assertion
+    /// is kept and strengthened. The Filter buffer's rows arrive inverted relative to the source
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L235</c>] and the identity round trip reads that buffer
+    /// backwards because of it, so re-sorting here would pair identity values with the wrong rows - a
+    /// defect that returns the right COUNT of identities and survives every row-count assertion.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task UpdateEmitsAllThreeCanonicalSegmentsAndPreservesRowOrderWithinEach()
     {
         C03Fixture fixture = new();
 
@@ -1404,19 +2307,250 @@ public sealed class DataWindowServiceContractTests
         Assert.Equal(WireRetCode.Ok, response.RetCode);
         Assert.Equal(3L, response.RowsInserted);
 
-        // Segment order is FIRST APPEARANCE; row order inside a segment is the caller's, because the
-        // Filter buffer's order is inverted at source [n_cst_thread_task_sqlupdate.sru:L235].
-        Assert.Equal(2, fixture.Persistence.LastUpdate!.UpdateData.Segments.Count);
-        Assert.Equal(DwBuffer.Primary, fixture.Persistence.LastUpdate.UpdateData.Segments[0].Buffer);
-        Assert.Equal(DwBuffer.Filter, fixture.Persistence.LastUpdate.UpdateData.Segments[1].Buffer);
-        Assert.Equal(
-            [1L, 2L],
-            fixture.Persistence.LastUpdate.UpdateData.Segments[0].Rows.Select(row => row.Row));
+        PersistenceCarrierState carrier = fixture.Persistence.LastUpdate!.UpdateData;
+
+        // POSITIONAL, ALWAYS THREE: Primary, Delete, Filter - even though this request never mentioned the
+        // Delete buffer at all. Asserting the buffer tag at each index rather than merely the count is what
+        // catches a reordering, which a count alone would not.
+        Assert.Equal(3, carrier.Segments.Count);
+        Assert.Equal(DwBuffer.Primary, carrier.Segments[0].Buffer);
+        Assert.Equal(DwBuffer.Delete, carrier.Segments[1].Buffer);
+        Assert.Equal(DwBuffer.Filter, carrier.Segments[2].Buffer);
+
+        // Row order inside each segment is the caller's, untouched.
+        Assert.Equal([1L, 2L], carrier.Segments[0].Rows.Select(row => row.Row));
+        Assert.Empty(carrier.Segments[1].Rows);
+        Assert.Equal([9L], carrier.Segments[2].Rows.Select(row => row.Row));
+
         Assert.Equal(3L, fixture.Persistence.LastUpdate.UpdateRows);
 
         // The identity block is relayed element for element.
         IdentityColumnData identity = Assert.Single(response.Identity);
         Assert.Equal(1L, identity.IdentityColumnId);
+    }
+
+    /// <summary>
+    /// A request touching no buffer at all still sends the full three-segment shape.
+    /// </summary>
+    /// <remarks>
+    /// The degenerate case is the one a first-appearance grouping got most wrong: it produced ZERO segments,
+    /// which the receiving codec rejects on the count test before it looks at anything else. The shape is a
+    /// property of the encoding and not of the data.
+    /// </remarks>
+    [Fact]
+    public async Task UpdateWithNoRowsStillSendsThreeEmptySegments()
+    {
+        C03Fixture fixture = new();
+
+        WireUpdateResponse response = await fixture.Service.Update(
+            new WireUpdateRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, response.RetCode);
+
+        PersistenceCarrierState carrier = fixture.Persistence.LastUpdate!.UpdateData;
+
+        Assert.Equal(3, carrier.Segments.Count);
+        Assert.All(carrier.Segments, segment => Assert.Empty(segment.Rows));
+        Assert.Equal(
+            [DwBuffer.Primary, DwBuffer.Delete, DwBuffer.Filter],
+            carrier.Segments.Select(segment => segment.Buffer));
+        Assert.Equal(0L, fixture.Persistence.LastUpdate.UpdateRows);
+    }
+
+    /// <summary>
+    /// A row naming a buffer outside the canonical three is REFUSED, not silently dropped.
+    /// </summary>
+    /// <remarks>
+    /// With a fixed three-segment shape there is nowhere to put such a row, and the two available failure
+    /// modes are not equally bad: omitting it would submit an UPDATE missing a row the caller asked to
+    /// apply and then report success, which is data loss reported as a success. The upstream must not be
+    /// reached at all, which is the second assertion here and the more important one.
+    /// </remarks>
+    [Fact]
+    public async Task UpdateRefusesARowNamingAnUndeclaredBuffer()
+    {
+        C03Fixture fixture = new();
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+        request.Rows.Add(new DataWindowRow { Buffer = (DwBuffer)9999, Row = 2L });
+
+        WireUpdateResponse response = await fixture.Service.Update(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.RetCode);
+
+        // NOTHING WAS SENT. A partial carrier reaching Persistence is the outcome this refusal exists to
+        // prevent, so the absence of the call is the assertion that matters.
+        Assert.Equal(0, fixture.Persistence.UpdateCalls);
+    }
+
+    [Fact]
+    public async Task AnUpdateOpensASessionCreatesATaskPreparesItAndReleasesBothInOrder()
+    {
+        C03Fixture fixture = new();
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        _ = await fixture.Service.Update(request, fixture.Context);
+
+        // An UpdateRequest carries a TaskHandle as its FIRST field, so an update sent without one is
+        // answered E_INVALID_HANDLE before it can touch a row.
+        Assert.NotNull(fixture.Persistence.LastUpdate?.Task);
+        Assert.Equal(PersistenceStubTaskIds.Update, fixture.Persistence.LastUpdate.Task.TaskId);
+
+        // The session was opened once.
+        _ = Assert.Single(fixture.Persistence.TransactionStub.BeginRequests);
+
+        // PREPARE RAN, AND IT NAMES THE DATA OBJECT. C-06 refuses an update naming neither a data object
+        // nor a syntax string with E_INVALID_DATAOBJECT [n_cst_thread_task_sqlupdate.sru:L326-L330], so
+        // this call is required even when there is no descriptor to send with it.
+        PersistencePrepareUpdateRequest prepared =
+            Assert.Single(fixture.Persistence.UpdateStub.PrepareRequests);
+
+        Assert.Equal("dw-1", prepared.DataObject);
+        Assert.Equal(PersistenceStubTaskIds.Update, prepared.Task.TaskId);
+
+        // BOTH acquisitions released.
+        Assert.Contains(
+            nameof(FakeUpdateServiceClient.ReleaseUpdateTaskAsync),
+            fixture.Persistence.UpdateStub.Calls);
+        Assert.Contains(
+            nameof(FakeTransactionServiceClient.EndSessionAsync),
+            fixture.Persistence.TransactionStub.Calls);
+    }
+
+    [Fact]
+    public async Task TheUpdateDescriptorIsDerivedFromTheDefinitionAndMultiTableStaysOff()
+    {
+        DataWindowCatalogue catalogue = new();
+
+        C03Fixture fixture = new(
+            updateContracts: new HeadlessDataWindowUpdateContractProvider(catalogue));
+
+        WireUpdateRequest request = new()
+        {
+            DatawindowHandle = DataWindowCatalogue.SqliteFixtureName,
+        };
+
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        _ = await fixture.Service.Update(request, fixture.Context);
+
+        PersistencePrepareUpdateRequest prepared =
+            Assert.Single(fixture.Persistence.UpdateStub.PrepareRequests);
+
+        // OFF, unconditionally: C-03 publishes no way to request a multi-table update, and one definition
+        // declares one update table. Turning it on would apply a single-table descriptor under multi-table
+        // rules and change the generated statement for every existing caller.
+        Assert.False(prepared.MultiTableUpdate);
+
+        TableUpdateContract descriptor = Assert.Single(prepared.Tables);
+
+        // Transcribed from dw_sqlite.srd:L14 - the UPDATE half of the definition, which the retrieve half
+        // alone does not carry.
+        Assert.Equal("COMPANY", descriptor.Name);
+
+        // DECLARATION ORDER, NEVER SORTED: C-06 walks the array [:L111-L114].
+        Assert.Equal(
+            ["id", "name", "age", "address", "salary", "birth"],
+            descriptor.Updatablecolumns);
+
+        // id is the ONLY column marked key AND identity [dw_sqlite.srd:L8].
+        Assert.Equal(["id"], descriptor.Keycolumns);
+        Assert.Equal("id", descriptor.Identitycolumn);
+
+        // MODE 1 - "key and updateable columns" - carried as a long, not flattened to a flag. With all six
+        // columns marked updatewhereclause=yes the concurrency check spans all six original values.
+        Assert.True(descriptor.HasUpdatewhere);
+        Assert.Equal(1L, descriptor.Updatewhere);
+
+        // FALSE, and present rather than defaulted: an absent field means "leave the carrier's setting
+        // alone", so writing nothing here would silently discard the definition's own value.
+        Assert.True(descriptor.HasUpdatekeyinplace);
+        Assert.False(descriptor.Updatekeyinplace);
+    }
+
+    [Fact]
+    public async Task AnUpdateWithoutADescriptorProviderStillNamesItsDataObject()
+    {
+        C03Fixture fixture = new();
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        _ = await fixture.Service.Update(request, fixture.Context);
+
+        PersistencePrepareUpdateRequest prepared =
+            Assert.Single(fixture.Persistence.UpdateStub.PrepareRequests);
+
+        // NO DESCRIPTOR IS ORDINARY, NOT A FAULT. With multi-table off C-06 does not apply the array at all
+        // [:L365 against :L371] and the carrier's own static definition governs - the legacy single-table
+        // path exactly. What must still travel is the data object.
+        Assert.Empty(prepared.Tables);
+        Assert.Equal("dw-1", prepared.DataObject);
+    }
+
+    [Fact]
+    public void AHandleDeclaringNoUpdateTableYieldsNoDescriptor()
+    {
+        DataWindowCatalogue catalogue = new();
+
+        // A DERIVED DataWindow: columns but no update table, which is what a read-only definition looks
+        // like. The provider answers nothing rather than fabricating a table name.
+        DataWindowDefinition derived = new("dw-derived");
+        _ = derived.AddColumn("id", "number");
+
+        catalogue.Register(derived);
+
+        HeadlessDataWindowUpdateContractProvider provider = new(catalogue);
+
+        Assert.Null(provider.GetUpdateContract("dw-derived"));
+        Assert.Null(provider.GetUpdateContract("no-such-dw"));
+
+        // AND THE EVIDENCED DEFINITION STILL YIELDS ONE, with the six-column concurrency contract the
+        // oracle declares [dw_sqlite.srd:L8-L14] - the positive that makes the two negatives meaningful.
+        DataWindowUpdateContract evidenced = Assert.IsType<DataWindowUpdateContract>(
+            provider.GetUpdateContract(DataWindowCatalogue.SqliteFixtureName));
+
+        Assert.Equal("COMPANY", evidenced.TableName);
+        Assert.Equal(1L, evidenced.UpdateWhere);
+        Assert.False(evidenced.UpdateKeyInPlace);
+        Assert.Equal("id", evidenced.IdentityColumn);
+        Assert.Equal(["id"], evidenced.KeyColumns);
+        Assert.Equal(
+            ["id", "name", "age", "address", "salary", "birth"],
+            evidenced.UpdatableColumns);
+    }
+
+    [Fact]
+    public async Task AConflictStillReleasesItsTaskAndItsSession()
+    {
+        C03Fixture fixture = new();
+
+        fixture.Persistence.Conflict = new PersistenceConflictException(
+            new ConflictDetail { UpdateTable = "COMPANY" },
+            RetCode.E_DB_ERROR,
+            new RpcException(new Status(StatusCode.Aborted, "upstream")));
+
+        WireUpdateRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Rows.Add(new DataWindowRow { Buffer = DwBuffer.Primary, Row = 1L });
+
+        _ = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Update(request, fixture.Context));
+
+        // A conflict is the ONE failure a caller is most likely to react to by retrying, so a task leaked
+        // on this path leaks once per retry. The catch therefore sits OUTSIDE the task's finally.
+        Assert.Contains(
+            nameof(FakeUpdateServiceClient.ReleaseUpdateTaskAsync),
+            fixture.Persistence.UpdateStub.Calls);
+        Assert.Contains(
+            nameof(FakeTransactionServiceClient.EndSessionAsync),
+            fixture.Persistence.TransactionStub.Calls);
+
+        // STILL EXACTLY ONE ATTEMPT. Releasing is not retrying.
+        Assert.Equal(1, fixture.Persistence.UpdateCalls);
     }
 
     [Fact]
@@ -1817,6 +2951,99 @@ public sealed class DataWindowServiceContractTests
         Assert.Single(writer.Written);
     }
 
+    /// <summary>
+    /// THE REAL CONSUMER, ON A PATTERN-(a) REVERSAL: the service refuses it and dispatches nothing for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ROW THE FINDING ASKED FOR. Every other assertion about pattern (a) in this suite is made
+    /// against the sequencer in isolation, and the defect was precisely that the sequencer's answer reached
+    /// no consumer: production dispatched in arrival order, and the only reordering in the estate was a
+    /// sort inside a test. This drives the service's own <c>EventChain</c> and reads the RESULTS IT WROTE,
+    /// so it fails against an implementation that admits a reversal however the sequencer is written.
+    /// </para>
+    /// <para>
+    /// THE FIRST TOKEN IS A GAP AND THE SECOND IS A REVERSAL, in one stream, which is what makes the pair
+    /// diagnostic rather than merely a refusal: the gap proves the rule is not contiguity - it is admitted
+    /// and answered - and the reversal proves the rule is enforced. The reversal's token is chosen BELOW
+    /// the mark the first dispatch leaves, and that mark is above 1 because the chain's outcome report and
+    /// the result write each consume a token from the same counter.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EventChainRefusesAReversalInsideTheSequencedGroupAndDispatchesNothingForIt()
+    {
+        C03Fixture fixture = new();
+
+        OpenValidationSessionResponse opened = await fixture.Service.OpenValidationSession(
+            new OpenValidationSessionRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        C03StreamWriter<EventChainResponse> writer = new();
+
+        RpcException reversed = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.EventChain(
+                new C03RequestStream(
+                    // ADMITTED, though 7 is nowhere near the first token: a sequenced arrival need only be
+                    // above the mark.
+                    Notify(opened.SessionId, 7L),
+
+                    // REFUSED: 6 is behind the mark that dispatch left, so its position has been passed.
+                    Notify(opened.SessionId, 6L)),
+                writer,
+                fixture.Context));
+
+        Assert.Equal(StatusCode.FailedPrecondition, reversed.StatusCode);
+
+        // ONE RESULT, FOR THE ADMITTED MESSAGE ONLY. The reversal produced no dispatch and no answer -
+        // neither executed out of order nor buffered in the hope of a predecessor that cannot come.
+        EventChainResponse answered = Assert.Single(writer.Written);
+        Assert.Equal(EventChainResponse.PayloadOneofCase.Result, answered.PayloadCase);
+        Assert.Equal("7", answered.Result.CorrelationId);
+    }
+
+    /// <summary>
+    /// THE REAL CONSUMER, ON AN ASCENDING PATTERN-(a) RUN WITH GAPS: every message is dispatched, in the
+    /// order it was sent, and each is answered.
+    /// </summary>
+    /// <remarks>
+    /// THE POSITIVE COUNTERPART, WITHOUT WHICH THE REFUSAL ABOVE WOULD BE CONSISTENT WITH A SERVICE THAT
+    /// REFUSES EVERY SECOND MESSAGE. The tokens ascend and skip, which is exactly the shape a correct
+    /// client produces on a shared counter, and each arrival's token is chosen above the mark its
+    /// predecessor's dispatch left.
+    /// </remarks>
+    [Fact]
+    public async Task EventChainDispatchesAnAscendingSequencedRunWithGaps()
+    {
+        C03Fixture fixture = new();
+
+        OpenValidationSessionResponse opened = await fixture.Service.OpenValidationSession(
+            new OpenValidationSessionRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        C03StreamWriter<EventChainResponse> writer = new();
+
+        await fixture.Service.EventChain(
+            new C03RequestStream(
+                Notify(opened.SessionId, 10L),
+                Notify(opened.SessionId, 20L),
+                Notify(opened.SessionId, 30L)),
+            writer,
+            fixture.Context);
+
+        // THREE DISPATCHES, IN SEND ORDER, each answered on its own correlation identifier.
+        Assert.Equal(
+            ["10", "20", "30"],
+            writer.Written.Select(response => response.Result.CorrelationId));
+
+        // AND EVERY OUTBOUND TOKEN IS ABOVE THE INBOUND ONE IT ANSWERS, which is the shared-counter
+        // property a client relies on to compute its next token: one past the highest it has seen.
+        Assert.Equal(
+            [true, true, true],
+            writer.Written
+                .Zip((long[])[10L, 20L, 30L], (response, inbound) => response.Token.Sequence > inbound));
+    }
+
     [Fact]
     public async Task AnUnmatchedAnswerTravelsAsAStructuredErrorAndTheStreamSurvives()
     {
@@ -1835,7 +3062,14 @@ public sealed class DataWindowServiceContractTests
                     SessionId = opened.SessionId,
                     Result = new EventResult { CorrelationId = "never-asked" },
                 },
-                Notify(opened.SessionId, 1L)),
+                // TOKEN 2, NOT 1, AND THAT IS THE ONE-COUNTER RULE RATHER THAN AN ARBITRARY CHOICE. The
+                // refusal above is a real message on the stream and it carries token 1, so the ordering
+                // mark stands at 1 by the time this notification is read and the token expected next is 2.
+                // This row used to send 1 and passed only because the sequenced discipline accepted any
+                // positive token - the same over-permissiveness that let production ignore the token
+                // altogether. A client computes this value the way it computes it for the synchronous
+                // group: one past the highest token it has seen on the stream, in either direction.
+                Notify(opened.SessionId, 2L)),
             writer,
             fixture.Context);
 

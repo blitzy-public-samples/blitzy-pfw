@@ -114,9 +114,12 @@
 //      cost: both constants still hold byte-identical values to the legacy literals.
 //
 //  DECISION 4 - identifiers are PascalCase; the legacy spelling lives in the string VALUE.
-//      The repository-root .editorconfig carries file-scoped CA1707 and IDE1006 suppressions for
-//      exactly ten files that declare preserved SCREAMING_SNAKE or underscore-prefixed
-//      identifiers. THIS FILE IS NOT ONE OF THEM, .editorconfig is not this file's to change, and
+//      The repository-root .editorconfig carries file-scoped CA1707 and IDE1006 suppressions for the
+//      individually named files that declare preserved SCREAMING_SNAKE or underscore-prefixed
+//      identifiers, and that file is the SOLE ROSTER - no count is repeated here, because a number
+//      copied into a source header is a second place for the roster to be wrong and it silently
+//      became wrong as files were added.
+//      THIS FILE IS NOT ON THAT ROSTER, .editorconfig is not this file's to change, and
 //      Directory.Build.props promotes warnings to errors - so a member spelled `dwNvlDate` would
 //      be a build failure rather than a style debate. No member here needs the legacy spelling
 //      anyway: the contract is the emitted TEXT, which is preserved exactly in the constant value.

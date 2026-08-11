@@ -65,6 +65,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
 using PowerFramework.Security.Endpoints;
@@ -447,6 +448,16 @@ public sealed class HealthEndpointsTests
                 Assert.Equal(
                     RetCode.E_RETRY,
                     body.RootElement.GetProperty("retCode").GetInt64());
+
+                // AND THE VERDICT IS MACHINE-READABLE, WHICH IS THE HALF THAT ACTUALLY REACHES GATEWAY.
+                // The detail above is prose for a human and retCode is identical for both verdicts, so
+                // neither separates the two states contract C-10 promises to keep apart. The token cannot
+                // live in `status` - RFC 9457 uses that name here for the integer HTTP status - so it has a
+                // member of its own, and Gateway's aggregator reads exactly this one.
+                Assert.Equal(
+                    expectedWireStatus,
+                    body.RootElement.GetProperty("serviceStatus").GetString());
+                Assert.Equal(503, body.RootElement.GetProperty("status").GetInt32());
 
                 Assert.Equal(
                     "Service Unavailable",
@@ -1257,7 +1268,25 @@ internal sealed class SecurityHostFactory : WebApplicationFactory<Program>
         string signingKey = _signingKey;
 
         builder.ConfigureServices(services =>
-            services.Configure<SecurityOptions>(options => options.SigningKey = signingKey));
+            services.Configure<SecurityOptions>(options =>
+            {
+                options.SigningKey = signingKey;
+
+                // THIS HOST MINTS A TOKEN FOR ITS OWN IDENTITY, SO IT MUST PERMIT ITSELF. The issuer
+                // consults a permission matrix that decides which caller may address which audience with
+                // which scopes, and the shipped settings file grants only the service-to-service call
+                // graph - Gateway to DataServices, DataServices to Persistence and Security - because an
+                // unused permission is still a permission. A deployment that wants Security's own identity
+                // to reach Security's authenticated routes adds exactly the grant this installs.
+                //
+                // THE SUITE'S OWN MATRIX IS INSTALLED RATHER THAN A HAND-WRITTEN GRANT, so this host and
+                // every other host in the assembly authorise the same callers for the same scopes. A
+                // bespoke grant here would have to be revisited every time a row in this file asked for a
+                // scope it did not anticipate, and the failure would read as a permission defect rather
+                // than as a gap in the host's setup. It REPLACES both configured shapes, so no production
+                // grant leaks into a row that was not meant to be using one.
+                IssuanceFixture.PermitTestCallers(options);
+            }));
 
         // Applied AFTER the signing material so that a row poisoning a registration still observes a
         // bootable host, and after the composition root so that a row can poison what it installed.
@@ -1292,12 +1321,19 @@ internal sealed class SecurityHostFactory : WebApplicationFactory<Program>
     /// </remarks>
     public HttpClient CreateAuthenticatedClient()
     {
+        // TWO SCOPES, AND THE SECOND IS LOAD-BEARING. The C-02 group's authorization policy demands
+        // `security.crypto`, so a client carrying only the document-reading scope reaches every
+        // authenticated route in the service EXCEPT the cryptographic surface - where it is refused with
+        // the published 403. The request-binding rows in JsonContractStrictnessTests post to a digest
+        // operation through this helper, so it carries what they need. It is still not a wildcard: two
+        // named scopes, both members of the suite's declared set, so a row asserting a scope refusal
+        // mints its own narrower token rather than accidentally passing here.
         TokenIssuanceResult issued = Services
             .GetRequiredService<TokenIssuer>()
             .Issue(new TokenIssuanceRequest(
                 subject: SelfAudience,
                 audience: SelfAudience,
-                scopes: [DocumentScope]));
+                scopes: [DocumentScope, SecurityScopes.Crypto]));
 
         Assert.Equal(TokenIssuanceOutcome.Issued, issued.Outcome);
         Assert.NotNull(issued.Token);
@@ -1314,6 +1350,11 @@ internal sealed class SecurityHostFactory : WebApplicationFactory<Program>
     private const string SelfAudience = "powerframework-security";
 
     /// <summary>One scope, so that a request asks for something rather than for nothing.</summary>
+    /// <remarks>
+    /// A MEMBER OF THE SUITE'S OWN DECLARED SCOPE SET, so the harness matrix this host installs grants it.
+    /// The routes that require a scope declare it themselves, and this one is the document-reading scope
+    /// the contract rows use.
+    /// </remarks>
     private const string DocumentScope = "contract.read";
 }
 
@@ -1432,4 +1473,3 @@ internal sealed class RecordingLoggerProvider : ILoggerProvider
         }
     }
 }
-

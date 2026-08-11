@@ -198,6 +198,8 @@ using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
 
+using PowerFramework.Gateway.Authorization;
+
 namespace PowerFramework.Gateway.Endpoints;
 
 /// <summary>
@@ -227,6 +229,36 @@ public static class PingEndpoints
     /// of them undocumented, and an ingress with an undocumented surface is exactly what C-G forbids.
     /// </remarks>
     private const string RoutePattern = "/v1/ping";
+
+    /// <summary>
+    /// The scope an authenticated caller must have been granted to reach the authenticated liveness probe.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DECLARED HERE, NEXT TO THE ROUTE THAT REQUIRES IT, and read by <c>Program.cs</c> when it builds
+    /// the policy. A route and its entitlement are one decision; a scope name spelled independently in
+    /// an authorization file and in a route file is the defect that enforces nothing while looking
+    /// correct in both places.
+    /// </para>
+    /// <para>
+    /// The spelling matches the grant the issuance roster hands the calling identity
+    /// (<c>orchestration/.env.example</c>, <c>Security:Clients</c>), because Security refuses a scope it
+    /// never granted rather than narrowing the request - so a mismatch here is not a smaller token, it
+    /// is no token at all.
+    /// </para>
+    /// </remarks>
+    internal const string RequiredScope = "ping";
+
+    /// <summary>
+    /// The authorization policy name carrying <see cref="RequiredScope"/>, so that the route and the
+    /// registration cannot drift apart.
+    /// </summary>
+    /// <remarks>
+    /// Composed from <see cref="RequiredScope"/> rather than written out, and prefixed with the service
+    /// name so that a policy name is never ambiguous in a log line that carries policies from more than
+    /// one service.
+    /// </remarks>
+    internal const string ScopePolicyName = "gateway:scope:" + RequiredScope;
 
     /// <summary>
     /// The contract's <c>operationId</c>. Also the endpoint name, which is what the OpenAPI document
@@ -350,12 +382,25 @@ public static class PingEndpoints
 
         endpoints.MapGet(RoutePattern, Ping)
 
-            // C-G. The framework evaluates the default authorization policy and issues the challenge, so
+            // C-G. The framework evaluates the named authorization policy and issues the challenge, so
             // the 401 is produced by framework code rather than by hand-rolled header inspection. This
             // call is UNCONDITIONAL: there is no environment test and no configuration switch guarding
             // it, in this file or anywhere else, because a bypass that exists only in Development is
             // still a bypass and would make the local build disagree with the published contract.
-            .RequireAuthorization()
+            //
+            // IT NAMES A SCOPE, AND THIS IS THE ONLY PING PROBE IN THE SYSTEM THAT DOES. The three
+            // internal services' probes require authentication and no scope, because no consumer names a
+            // scope for them and their documents declare no 403 - inventing three names to look
+            // symmetrical would be an invention. This probe is different on both counts: the end-to-end
+            // suite requests `ping` by name as one of the surfaces it calls, and this is the INGRESS, so
+            // the probe is reachable by an external client rather than only by a sibling service that
+            // already holds every scope. The 401 for a caller presenting NO token is unchanged - the
+            // policy requires an authenticated principal as well as the scope, which is what keeps the
+            // absent-credential case a 401 rather than a 403.
+            .RequireAuthorization(GatewayScopes.Ping)
+
+            // The 403 the scope requirement can now answer.
+            .ProducesProblem(StatusCodes.Status403Forbidden)
 
             // Published metadata. WithName supplies the contract's operationId as well as the endpoint
             // name; the typed result below already declares the success payload, and the explicit
@@ -366,6 +411,12 @@ public static class PingEndpoints
             .WithDescription(OperationDescription)
             .Produces<PingResponse>(StatusCodes.Status200OK, MediaTypeNames.Application.Json)
             .ProducesProblem(StatusCodes.Status401Unauthorized, MediaTypeNames.Application.ProblemJson)
+
+            // AND THE 403 THE SCOPE POLICY ABOVE MAKES REACHABLE. Declared because it is now a genuine
+            // outcome of this operation: an authenticated caller whose issuance roster entry never granted
+            // this scope is refused here. An undeclared response on the ingress is an undocumented
+            // surface, which is what C-G forbids.
+            .ProducesProblem(StatusCodes.Status403Forbidden, MediaTypeNames.Application.ProblemJson)
 
             // The parts of the contract that endpoint metadata alone cannot express: the specification
             // extension, the two response descriptions and the bearer security requirement.

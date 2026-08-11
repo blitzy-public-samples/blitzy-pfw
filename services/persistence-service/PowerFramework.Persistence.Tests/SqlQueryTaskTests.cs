@@ -168,8 +168,18 @@ public sealed class SqlQueryTaskTests
     {
         using Harness harness = new();
 
+        // Registered FIRST, because an unsanctioned hook class is now refused at the setter rather than
+        // stored and silently ignored at retrieval - the activator is an allowlist, so a name it does not
+        // carry can never produce a hook.
+        _ = harness.HookActivator.Register(ProbeHookClass, static () => new DisposableProbeHook(RetCode.OK));
+
         // Move every settable field off its default.
-        Assert.Equal(RetCode.OK, harness.Task.SetHookClass("n_hook"));
+        Assert.Equal(RetCode.OK, harness.Task.SetHookClass(ProbeHookClass));
+
+        // And an unsanctioned name is an ARGUMENT error, not a stored value: the caller learns its hook
+        // was rejected while it can still act on that, instead of being told the retrieval succeeded.
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, harness.Task.SetHookClass("n_not_registered"));
+        Assert.Equal(ProbeHookClass, harness.Task.HookClass);
         Assert.Equal(RetCode.OK, harness.Task.SetSql(SomeSelect));
         Assert.Equal(RetCode.OK, harness.Task.SetSqlSyntax("release 12.5;"));
         Assert.Equal(RetCode.OK, harness.Task.SetDataObject(SomeDataObject));
@@ -2041,13 +2051,15 @@ public sealed class SqlQueryTaskTests
             Carrier.OnInit(parentTask);
         }
 
-        public long Retrieve(IReadOnlyList<object?> parameters)
+        public ValueTask<long> RetrieveAsync(
+            IReadOnlyList<object?> parameters,
+            CancellationToken cancellationToken)
         {
             Retrievals.Add([.. parameters]);
 
             long appended = Fill();
 
-            return RetrieveResult ?? appended;
+            return ValueTask.FromResult(RetrieveResult ?? appended);
         }
 
         /// <summary>
@@ -2386,7 +2398,7 @@ public sealed class SqlQueryTaskTests
             // Nothing to record: no case in this file asserts on stamped provider state.
         }
 
-        public long Connect()
+        public long Connect(CancellationToken cancellationToken = default)
         {
             if (_settings.ConnectFails)
             {
@@ -2411,7 +2423,10 @@ public sealed class SqlQueryTaskTests
 
         public long AutoCommitCheckpoint() => RetCode.OK;
 
-        public long Exec(string? sqlCommand) => RetCode.OK;
+        public long Exec(string? sqlCommand, CancellationToken cancellationToken = default) => RetCode.OK;
+
+        // The BOUND overload, delegating to the rendered one for the same reason the engine doubles do.
+        public long Exec(in SqlCommandText command, CancellationToken cancellationToken = default) => Exec(command.RenderedText);
 
         public bool IsConnected() => Connected;
 
@@ -2438,6 +2453,28 @@ public sealed class SqlQueryTaskTests
         public long ApplyTransactionData(in TransactionData descriptor) => RetCode.OK;
 
         public bool IsSqlFailed() => _settings.SqlFailed;
+
+        /// <summary>
+        /// Reports that this double routes to no transaction engine, so no engine capability is reachable
+        /// through it.
+        /// </summary>
+        /// <typeparam name="TCapability">The capability asked for; never satisfied here.</typeparam>
+        /// <param name="capability">Always <see langword="null"/>.</param>
+        /// <returns>Always <see langword="false"/>.</returns>
+        /// <remarks>
+        /// A DOUBLE HAS NO ENGINE TO PROBE, and answering the probe honestly is the whole point. A caller
+        /// that needs a provider-shaped capability - the SQLite command source, for instance - takes its
+        /// no-capability branch against this double, which is exactly the branch a pooled transaction over
+        /// a non-SQLite engine would drive it down in production.
+        /// </remarks>
+        public bool TryGetEngineCapability<TCapability>(
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TCapability? capability)
+            where TCapability : class
+        {
+            capability = null;
+            return false;
+        }
+
 
         public bool IsSqlSucceeded() => !_settings.SqlFailed;
 

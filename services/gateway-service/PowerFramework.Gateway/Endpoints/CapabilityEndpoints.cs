@@ -172,6 +172,7 @@
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.Extensions.Options;
+using PowerFramework.Gateway.Authorization;
 using PowerFramework.Gateway.Composition;
 using PowerFramework.Gateway.Configuration;
 using PowerFramework.Shared.Kernel;
@@ -206,6 +207,36 @@ public static class CapabilityEndpoints
     /// The contract declares one verb for it, <c>GET</c>, and no sub-resource.
     /// </remarks>
     private const string CapabilitiesRoute = "/v1/capabilities";
+
+    /// <summary>
+    /// The scope an authenticated caller must have been granted to reach the capability projection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DECLARED HERE, NEXT TO THE ROUTE THAT REQUIRES IT, and read by <c>Program.cs</c> when it builds
+    /// the policy. A route and its entitlement are one decision; a scope name spelled independently in
+    /// an authorization file and in a route file is the defect that enforces nothing while looking
+    /// correct in both places.
+    /// </para>
+    /// <para>
+    /// The spelling matches the grant the issuance roster hands the calling identity
+    /// (<c>orchestration/.env.example</c>, <c>Security:Clients</c>), because Security refuses a scope it
+    /// never granted rather than narrowing the request - so a mismatch here is not a smaller token, it
+    /// is no token at all.
+    /// </para>
+    /// </remarks>
+    internal const string RequiredScope = "capabilities";
+
+    /// <summary>
+    /// The authorization policy name carrying <see cref="RequiredScope"/>, so that the route and the
+    /// registration cannot drift apart.
+    /// </summary>
+    /// <remarks>
+    /// Composed from <see cref="RequiredScope"/> rather than written out, and prefixed with the service
+    /// name so that a policy name is never ambiguous in a log line that carries policies from more than
+    /// one service.
+    /// </remarks>
+    internal const string ScopePolicyName = "gateway:scope:" + RequiredScope;
 
     /// <summary>
     /// The published operation identifier, <c>getCapabilities</c>
@@ -281,7 +312,19 @@ public static class CapabilityEndpoints
                  .WithSummary(GetCapabilitiesSummary)
                  .WithDescription(GetCapabilitiesDescription)
                  .ProducesProblem(StatusCodes.Status401Unauthorized)
-                 .RequireAuthorization();
+
+                 // The 403 this route can now answer, declared where a reviewer diffing against the
+                 // published contract will look for it. The scope policy below is what produces it: a
+                 // valid token that does not carry `capabilities` is refused as INSUFFICIENT rather than
+                 // as absent, which is the distinction the contract's own two statuses exist to make.
+                 .ProducesProblem(StatusCodes.Status403Forbidden)
+
+                 // A NAMED POLICY RATHER THAN THE PARAMETERLESS FORM. The parameterless call used to
+                 // stand here, requiring only an authenticated principal - so any token addressed to this
+                 // service could read the capability gate's projection, which tells a caller which of the
+                 // framework's eight capability bits this deployment enabled. The named policy requires
+                 // the authenticated principal AND the `capabilities` scope.
+                 .RequireAuthorization(GatewayScopes.Capabilities);
 
         return endpoints;
     }

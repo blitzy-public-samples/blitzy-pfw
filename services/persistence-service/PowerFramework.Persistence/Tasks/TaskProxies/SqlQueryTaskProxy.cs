@@ -803,6 +803,29 @@ internal sealed class SqlQueryTaskProxy : SqlTaskProxyBase, IQueryResultSink
     /// </remarks>
     protected override string WorkerTaskClassName => "n_cst_thread_task_sqlquery";
 
+    /// <summary>
+    /// Raises the proxy's init event - the port of the controller triggering <c>oninit</c> as it inserts
+    /// the task [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru</c>, <c>of_InsertTask</c>].
+    /// </summary>
+    /// <returns>
+    /// <c>RetCode.OK</c> once the worker task is attached and its commit signal resolved, or the host's
+    /// own refusal code.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Composition, not construction: the base's <c>OnInit</c> is <see langword="protected"/> because the
+    /// oracle declares it as an EVENT, and the controller - here the task factory - is what raises it.
+    /// Until it has run the proxy holds no worker reference, so every member that needs one throws
+    /// rather than silently doing nothing.
+    /// </para>
+    /// <para>
+    /// <b>No idempotence guard, deliberately (C-B),</b> matching the sibling command proxy: the oracle's
+    /// event has none, so raising it twice re-runs the substrate's insert exactly as re-triggering the
+    /// legacy event would.
+    /// </para>
+    /// </remarks>
+    internal long Initialize() => OnInit();
+
     #endregion
 
     #region The four private-write properties [:L37-L40]
@@ -3046,4 +3069,3 @@ internal sealed class SqlQueryTaskProxy : SqlTaskProxyBase, IQueryResultSink
 }
 
 #endregion
-

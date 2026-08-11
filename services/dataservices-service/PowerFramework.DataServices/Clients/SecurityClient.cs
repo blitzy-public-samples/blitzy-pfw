@@ -173,19 +173,29 @@
 //    (h) THE TWO EDGES ARE AUTHENTICATED DIFFERENTLY, AND WHICH ONE APPLIES IS DECIDED BY THE
 //        OPERATION - NEVER BY A DEFAULT.
 //
-//        ISSUANCE (C-01, POST /v1/tokens) is authenticated BY THE TRANSPORT and carries no bearer
-//        credential. That operation declares the mutualTLS security scheme and OVERRIDES the
-//        document-level bearer requirement. The reason is structural rather than a preference: A
-//        CALLER CANNOT PRESENT A BEARER TOKEN IN ORDER TO OBTAIN ITS FIRST BEARER TOKEN. It is the
-//        single mutual-TLS edge in the entire system, and the one path that must not be terminated by
-//        an intermediary proxy.
+//        ISSUANCE (C-01, POST /v1/tokens) is authenticated BY A CALLER CREDENTIAL and carries no
+//        BEARER credential. That operation declares two security schemes - clientCredential and
+//        mutualTls - and OVERRIDES the document-level bearer requirement with them. The reason is
+//        structural rather than a preference: A CALLER CANNOT PRESENT A BEARER TOKEN IN ORDER TO OBTAIN
+//        ITS FIRST BEARER TOKEN.
 //
-//        Two consequences this file honours exactly on that edge. It attaches NO Authorization header
-//        to the issuance request - doing so would be meaningless on an operation that does not accept
-//        one. And it places NO credential in the request body: the schema carries no client secret,
-//        password, API key, assertion or key material, so the body this file sends has exactly the
-//        three members the schema declares. The client certificate is a transport concern configured
-//        on the message handler in the composition root.
+//        WHICH OF THE TWO THIS FILE PRESENTS IS DECIDED BY CONFIGURATION, NOT BY A DEFAULT. When an
+//        issuance secret is configured it sends an HTTP Basic credential whose user-id is TokenSubject
+//        below and whose password is that secret, because a client certificate exists only inside a TLS
+//        handshake and a proxy or sidecar terminating TLS ahead of Security strips it - so on such a
+//        documented topology Basic is the only scheme that can reach the service at all. When no secret
+//        is configured it sends no Authorization header and relies on the certificate the composition
+//        root attached to the primary handler, which is the mutualTls path for a deployment that
+//        terminates TLS at Security. Configuring neither is refused at startup by
+//        DataServicesOptions.cs's validator rather than discovered here, because a service that can
+//        obtain no token can reach nothing downstream.
+//
+//        Two consequences this file honours exactly on that edge whichever scheme applies. The
+//        credential travels in the Authorization HEADER or in the handshake, never in the body: the
+//        schema carries no client secret, password, API key, assertion or key material, so the body
+//        this file sends has exactly the three members the schema declares and a proxy log records a
+//        header name rather than a body value. And the secret is never logged, never echoed into a
+//        diagnostic and never included in any exception message.
 //
 //        THE SEVENTEEN C-02 CRYPTO OPERATIONS ARE THE OTHER EDGE, AND EVERY ONE OF THEM CARRIES A
 //        BEARER CREDENTIAL. They do not override the document-level security, so the bearer
@@ -1112,6 +1122,45 @@ public sealed class ServiceTokenRequest
 /// absent from the project file.
 /// </para>
 /// </remarks>
+/// <summary>
+/// The one credential store contract C-01's token provider and contract C-02's crypto operations share.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A NAMED TYPE FOR ONE DICTIONARY, AND IT EXISTS TO MAKE A GUARANTEE ASSERTABLE. Before this type,
+/// <see cref="SecurityClient"/> owned its cache as a field initialiser - and because a typed HTTP client
+/// is registered TRANSIENT, every resolve produced a client with an empty one. The composition root's
+/// comments promised that the token provider and the crypto client shared a credential; the wiring
+/// delivered two clients with two caches, each minting its own token on its first call. Extracting the
+/// cache lets the composition root register it as a SINGLETON and lets a composition test assert with
+/// <c>Assert.Same</c> that the sharing is real rather than intended.
+/// </para>
+/// <para>
+/// THE KEY SPACE IS BOUNDED BY CONSTRUCTION. Keys are composed from the subject, audience and scope set
+/// that this service's OWN call sites supply, never from external input, so it cannot grow without limit
+/// no matter what a caller of this service sends. There is deliberately no eviction policy: an entry is
+/// overwritten when its credential lapses and is otherwise reused, and a policy would be an invented
+/// duration on a value whose lifetime the issuer already fixes.
+/// </para>
+/// <para>
+/// NOTHING IS PERSISTED. There is no file, no database and no distributed cache behind it, so no
+/// credential outlives the process and constraint C-E stays true of this file. A held token is never
+/// logged, never echoed into a response and never written to a characterization recording.
+/// </para>
+/// <para>
+/// CONCURRENCY: the dictionary is the concurrent one, because a singleton is reached from every request
+/// at once. Last write wins on a refresh, and no ordering guarantee is required - both the value replaced
+/// and the value stored are valid credentials for the same key.
+/// </para>
+/// </remarks>
+public sealed class ServiceTokenCache
+{
+    /// <summary>
+    /// The held credentials, keyed by the subject, audience and scope set they were minted for.
+    /// </summary>
+    public ConcurrentDictionary<string, ServiceToken> Entries { get; } = new(StringComparer.Ordinal);
+}
+
 public sealed class ServiceToken
 {
     /// <summary>
@@ -1259,11 +1308,21 @@ public enum PayloadForm
 /// THAT WAY (CWE-20).
 /// </para>
 /// <para>
-/// The stock converter cannot be configured through the attribute, because the attribute needs a type
-/// with a parameterless constructor. Deriving one and fixing the setting there is the supported way to
-/// carry a non-default converter setting on a type, and it puts the setting ON THE TYPE rather than in
-/// one serializer-options instance - so it holds for every reader and writer of this enum, including
-/// any added later that forgets to reuse those options.
+/// WHY IT IS HAND-WRITTEN RATHER THAN DERIVED FROM THE STOCK ONE, WHICH IS A SECOND AND INDEPENDENT
+/// REASON. The stock converter matches token names CASE-INSENSITIVELY by construction and that setting
+/// is not exposed: measured on this toolchain, a converter derived from it with a null naming policy and
+/// integer values refused still accepts <c>"string"</c>, <c>"Blob"</c> and <c>"sTRING"</c>. The
+/// published contract declares <c>enum: [STRING, BLOB]</c>, so accepting any other casing accepts a
+/// response the document forbids - and this is the READING end of that document, which is exactly where
+/// a lenient reader turns a non-conforming upstream into a silently accepted one. An ordinal comparison
+/// against the two declared tokens is the only shape that closes both halves at once.
+/// </para>
+/// <para>
+/// A CUSTOM CONVERTER PUTS THE DECISION ON THE TYPE rather than in one serializer-options instance, so
+/// it holds for every reader and writer of this enum, including any added later that forgets to reuse
+/// those options. It is deliberately identical in behaviour to the converter the issuing service
+/// declares for the same enumeration; the two ends of this contract agreeing about the accepted tokens
+/// is the property that keeps them interoperable.
 /// </para>
 /// <para>
 /// This is the FIRST of two independent controls. The second is that every consumer of the value
@@ -1272,20 +1331,78 @@ public enum PayloadForm
 /// the value arriving through JSON, and the other holds however it arrives.
 /// </para>
 /// </remarks>
-internal sealed class PayloadFormJsonConverter : JsonStringEnumConverter<PayloadForm>
+internal sealed class PayloadFormJsonConverter : JsonConverter<PayloadForm>
 {
-    /// <summary>
-    /// Creates the converter with integer values REFUSED.
-    /// </summary>
+    /// <summary>The token that names the string-shaped legacy overload family.</summary>
+    internal const string StringToken = nameof(PayloadForm.STRING);
+
+    /// <summary>The token that names the blob-shaped legacy overload family.</summary>
+    internal const string BlobToken = nameof(PayloadForm.BLOB);
+
+    /// <summary>The refusal text, naming the accepted set and echoing nothing that was read.</summary>
     /// <remarks>
-    /// The naming policy is left null so the member identifiers travel exactly as declared. That is not
-    /// a default taken by omission: the published contract spells these values in upper case, and the
-    /// preserved identifier spellings appear in serialized payloads, log records and characterization
-    /// recordings, where a policy that recased them would invalidate every stored comparison.
+    /// The rejected token is deliberately NOT quoted back. This converter reads UPSTREAM bytes, and the
+    /// failure it raises is surfaced through this client's own exception type, whose message reaches a
+    /// log - so echoing upstream content into it would put unvalidated bytes into this service's records.
     /// </remarks>
-    public PayloadFormJsonConverter()
-        : base(namingPolicy: null, allowIntegerValues: false)
+    private const string RefusalMessage =
+        "The payload form must be the JSON string \"" + StringToken + "\" or \"" + BlobToken
+            + "\", spelled exactly as the contract declares it.";
+
+    /// <summary>Reads one of the two declared tokens.</summary>
+    /// <param name="reader">The reader positioned on the value.</param>
+    /// <param name="typeToConvert">The requested type, always <see cref="PayloadForm"/>.</param>
+    /// <param name="options">The serializer options, which this converter deliberately ignores.</param>
+    /// <returns>The overload family the upstream named.</returns>
+    /// <exception cref="JsonException">
+    /// The value is not a JSON string, or is a string that is not one of the two declared tokens - which
+    /// includes every integer form and every other casing of either token.
+    /// </exception>
+    public override PayloadForm Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
     {
+        if (reader.TokenType != JsonTokenType.String)
+        {
+            throw new JsonException(RefusalMessage);
+        }
+
+        string? token = reader.GetString();
+
+        if (string.Equals(token, StringToken, StringComparison.Ordinal))
+        {
+            return PayloadForm.STRING;
+        }
+
+        if (string.Equals(token, BlobToken, StringComparison.Ordinal))
+        {
+            return PayloadForm.BLOB;
+        }
+
+        throw new JsonException(RefusalMessage);
+    }
+
+    /// <summary>Writes the declared token for the value.</summary>
+    /// <param name="writer">The writer to write to.</param>
+    /// <param name="value">The overload family to write.</param>
+    /// <param name="options">The serializer options, which this converter deliberately ignores.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="writer"/> is <see langword="null"/>.</exception>
+    /// <exception cref="JsonException">
+    /// The value names no declared member. An enumeration in .NET does not restrict a value to its
+    /// declared members, and emitting a numeric form would send this contract a value its own reader
+    /// refuses.
+    /// </exception>
+    public override void Write(Utf8JsonWriter writer, PayloadForm value, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+
+        writer.WriteStringValue(value switch
+        {
+            PayloadForm.STRING => StringToken,
+            PayloadForm.BLOB => BlobToken,
+            _ => throw new JsonException(RefusalMessage),
+        });
     }
 }
 
@@ -1807,6 +1924,19 @@ public sealed class SecurityClientException : Exception
 public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
 {
     /// <summary>
+    /// The name this client's HTTP channel is registered and resolved under.
+    /// </summary>
+    /// <remarks>
+    /// AN EXPLICIT NAME, NOT A DERIVED ONE. The channel is registered by name so its lifetime can be owned
+    /// by a scoped registration rather than by the framework's transient typed-client descriptor, and the
+    /// name lives here - on the type that owns the channel - so the registration and the resolution cannot
+    /// drift apart and neither depends on the client factory's type-name convention. A resolution under an
+    /// UNREGISTERED name silently yields a default-configured client: no address, no pinned trust, no
+    /// client certificate and no resilience.
+    /// </remarks>
+    public const string HttpClientName = "security-rest";
+
+    /// <summary>
     /// The largest random size the published contract accepts, in bytes for the byte generator and in
     /// characters for the string generator.
     /// </summary>
@@ -1932,6 +2062,30 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         nameof(SecurityClientOptions.BaseAddress));
 
     /// <summary>
+    /// The configuration key naming the client certificate this service presents on the issuance edge.
+    /// </summary>
+    /// <remarks>
+    /// Composed the same way, and for the same reason, as <see cref="SecurityAddressConfigurationKey"/>.
+    /// This is the NAME of a setting and never its value: no path and no material appears here.
+    /// </remarks>
+    private static readonly string ClientCertificateConfigurationKey = string.Join(
+        ':',
+        DataServicesOptions.SectionName,
+        nameof(DataServicesOptions.Security),
+        nameof(SecurityClientOptions.MutualTls),
+        nameof(MutualTlsClientOptions.CertificatePath));
+
+    /// <summary>
+    /// The configuration key naming the private key for <see cref="ClientCertificateConfigurationKey"/>.
+    /// </summary>
+    private static readonly string ClientCertificateKeyConfigurationKey = string.Join(
+        ':',
+        DataServicesOptions.SectionName,
+        nameof(DataServicesOptions.Security),
+        nameof(SecurityClientOptions.MutualTls),
+        nameof(MutualTlsClientOptions.CertificateKeyPath));
+
+    /// <summary>
     /// The delimiter RFC 6749 uses for the granted scope set, and therefore the one this boundary uses.
     /// </summary>
     private const char ScopeSeparator = ' ';
@@ -1940,16 +2094,35 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     private const string BearerTokenType = "Bearer";
 
     /// <summary>
+    /// The authentication scheme token of the caller credential C-01 accepts on <c>POST /v1/tokens</c>:
+    /// <c>Basic</c>, as RFC 7617 spells it.
+    /// </summary>
+    /// <remarks>
+    /// Written with the canonical capitalisation even though RFC 9110 makes the scheme token
+    /// case-insensitive and Security compares it case-insensitively. Sending the canonical spelling
+    /// keeps this client interoperable with any intermediary that is stricter than the specification
+    /// requires, and costs nothing.
+    /// </remarks>
+    private const string BasicSchemeToken = "Basic";
+
+    /// <summary>
     /// The identity DataServices claims when it asks Security for a token to call Security's own
     /// cryptographic surface.
     /// </summary>
     /// <remarks>
     /// A NON-SECRET PROTOCOL IDENTIFIER, NOT A CREDENTIAL. It is a name, it authenticates nothing on its
     /// own, and it is deliberately not configurable: the identity actually honoured is the one the
-    /// transport establishes when Security issues the token - the contract states in as many words that
-    /// the subject is a claim checked against the presented client certificate and a mismatch is refused
-    /// - so a configurable value here could only ever disagree with the transport and be rejected.
+    /// presented credential establishes when Security issues the token - the contract states in as many
+    /// words that the subject is a claim checked against that identity and a mismatch is refused 403 -
+    /// so a configurable value here could only ever disagree with the credential and be rejected.
     /// Everything genuinely sensitive binds from environment configuration in the composition root.
+    /// <para>
+    /// IT IS ALSO THE USER-ID HALF OF THE BASIC ISSUANCE CREDENTIAL, which is why one constant serves
+    /// both. Security resolves the presented user-id against its issuance roster and then compares the
+    /// body's subject against the entry it resolved, so sending one value in the header and another in
+    /// the body would be refused by construction. Using the same constant for both makes that agreement
+    /// structural rather than remembered.
+    /// </para>
     /// </remarks>
     private const string TokenSubject = "powerframework-dataservices";
 
@@ -2022,14 +2195,20 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// without limit no matter what a caller of this service sends.
     /// </para>
     /// <para>
-    /// Reuse therefore spans the lifetime of this instance. That is stated rather than assumed because
-    /// the registration lifetime in the composition root is what decides how broadly a credential is
-    /// shared, and this type deliberately does not reach for static state to widen it. NOTHING IS
-    /// PERSISTED: there is no file, no database and no distributed cache behind this, which is also
-    /// what keeps constraint C-E true of this file.
+    /// REUSE SPANS THE LIFETIME OF THE INJECTED CACHE, NOT OF THIS INSTANCE, and that distinction was
+    /// a real defect before it was made explicit. This client is registered as a TYPED HTTP CLIENT,
+    /// which the framework registers TRANSIENT - so an instance-owned cache meant every resolve got an
+    /// empty one, and the two interfaces this type implements each minted their own credential on their
+    /// first call however carefully the composition root was written. The cache is therefore supplied
+    /// by the composition root as a SINGLETON and named on the constructor, so the sharing is a
+    /// property of the wiring rather than of a comment about the wiring.
+    /// </para>
+    /// <para>
+    /// NOTHING IS PERSISTED: there is no file, no database and no distributed cache behind it, which is
+    /// also what keeps constraint C-E true of this file.
     /// </para>
     /// </remarks>
-    private readonly ConcurrentDictionary<string, ServiceToken> _tokenCache = new(StringComparer.Ordinal);
+    private readonly ServiceTokenCache _tokenCache;
 
     /// <summary>
     /// The one token request every contract C-02 call is authenticated with.
@@ -2097,12 +2276,29 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// time to pass, which is what makes the behaviour reproducible rather than schedule-dependent.
     /// It is the ONLY clock this file reads.
     /// </param>
+    /// <param name="tokenCache">
+    /// The credential cache this client reads and writes. SUPPLIED BY THE COMPOSITION ROOT AS A
+    /// SINGLETON, which is what makes one credential genuinely shared by contract C-01's token provider
+    /// and contract C-02's seventeen crypto operations. Omitting it gives this instance a private cache,
+    /// which is the right default for a test that wants an isolated one and the WRONG state for a host -
+    /// so the composition root always names it.
+    /// </param>
     /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// WHY THE CACHE IS A PARAMETER RATHER THAN A FIELD INITIALISER, WHICH IS THE DEFECT THIS CLOSES.
+    /// This type is registered as a typed HTTP client, and the framework registers those TRANSIENT. An
+    /// instance-owned cache therefore meant a fresh empty cache on every resolve: the composition root's
+    /// two interface registrations each produced their own client on first use, each minted its own
+    /// credential, and the comment claiming they shared one was describing an intention rather than the
+    /// wiring. Naming the cache here moves the guarantee into the type system, where a composition test
+    /// can assert it.
+    /// </remarks>
     public SecurityClient(
         HttpClient httpClient,
         IOptions<DataServicesOptions> options,
         ILogger<SecurityClient> logger,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ServiceTokenCache? tokenCache = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentNullException.ThrowIfNull(options);
@@ -2113,6 +2309,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         _options = options;
         _logger = logger;
         _timeProvider = timeProvider;
+        _tokenCache = tokenCache ?? new ServiceTokenCache();
     }
 
     // ==============================================================================================
@@ -2133,7 +2330,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         // Strictly in the future. The comparison is deliberately exact, with no margin subtracted: any
         // margin would be an invented duration, and the contract's remedy for a credential that has
         // lapsed is simply to ask for another - which is the branch below.
-        if (_tokenCache.TryGetValue(cacheKey, out ServiceToken? held) && held.ExpiresAt > now)
+        if (_tokenCache.Entries.TryGetValue(cacheKey, out ServiceToken? held) && held.ExpiresAt > now)
         {
             _logger.LogTrace(
                 "Reusing the held service token for subject {Subject} and audience {Audience}; it "
@@ -2149,7 +2346,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
 
         // Last write wins. Both the value replaced and the value stored are valid credentials for the
         // same key, so no ordering guarantee is required here and none is claimed.
-        _tokenCache[cacheKey] = issued;
+        _tokenCache.Entries[cacheKey] = issued;
         return issued;
     }
 
@@ -2161,12 +2358,12 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <returns>The issued credential.</returns>
     /// <remarks>
     /// NO BEARER CREDENTIAL IS SENT, and that is why this is the ONE call in this client that goes
-    /// through <see cref="SendWithoutCredentialAsync{TRequest, TResponse}"/> rather than through the
-    /// authenticated sender. The operation is authenticated by the transport - a client certificate
-    /// presented during the handshake, configured on the message handler in the composition root -
-    /// because a caller cannot present a bearer token in order to obtain its first bearer token. No
-    /// <c>Authorization</c> header is attached, and the body carries exactly the three members the
-    /// schema declares.
+    /// through <see cref="SendWithIssuanceCredentialAsync{TRequest, TResponse}"/> rather than through
+    /// the authenticated sender: a caller cannot present a bearer token in order to obtain its first
+    /// bearer token. What it does send is the CALLER credential C-01 accepts - an HTTP <c>Basic</c>
+    /// credential when an issuance secret is configured, and otherwise nothing at all, leaving the
+    /// client certificate the composition root attached to the handler to authenticate the handshake.
+    /// The body carries exactly the three members the schema declares and no credential of any kind.
     /// <para>
     /// Routing this through the authenticated sender would not merely be wrong on the wire; it would
     /// recurse without bound, because acquiring the credential would call this operation again.
@@ -2176,6 +2373,13 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         ServiceTokenRequest request,
         CancellationToken cancellationToken)
     {
+        // ADDRESS BEFORE IDENTITY, deliberately. Both are configuration faults that make issuance
+        // unreachable, and reporting the more fundamental one first is what makes the message actionable:
+        // a host with no address configured has nothing to present a certificate TO, so naming the
+        // missing certificate there would send an operator to the wrong setting. The sender checks the
+        // address too; checking it here as well is what fixes the ORDER rather than duplicating a guard.
+        EnsureBaseAddress("issueToken");
+        EnsureClientIdentityConfigured();
         _logger.LogDebug(
             "Requesting a service token from Security for subject {Subject} and audience {Audience} "
             + "with {RequestedScopeCount} requested scope(s).",
@@ -2191,7 +2395,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         };
 
         (TokenIssuanceResponseBody payload, System.Net.HttpStatusCode statusCode) =
-            await SendWithoutCredentialAsync<TokenIssuanceRequestBody, TokenIssuanceResponseBody>(
+            await SendWithIssuanceCredentialAsync<TokenIssuanceRequestBody, TokenIssuanceResponseBody>(
                     TokenPath,
                     body,
                     "issueToken",
@@ -2200,9 +2404,12 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
 
         ServiceToken token = ToServiceToken(payload, statusCode);
 
-        // The granted scope set may be NARROWER than the requested one. That is a normal successful
-        // outcome under this contract, so it is recorded as an observation and never raised as a
-        // warning or an error. The token value itself is not logged, here or anywhere else.
+        // BOTH COUNTS ARE RECORDED RATHER THAN ASSUMED EQUAL. Security refuses a scope its roster does
+        // not grant rather than narrowing the set, so on a success the two counts agree - and recording
+        // both is what would make a disagreement visible if an issuer ever did narrow one, instead of
+        // that loss surfacing far downstream as an unexplained refusal by whichever service needed the
+        // dropped scope. It is an observation either way, never a warning: this client does not decide
+        // policy. The token value itself is not logged, here or anywhere else.
         _logger.LogDebug(
             "Security issued a service token for subject {Subject} and audience {Audience}; it expires "
             + "at {ExpiresAt:O} with {GrantedScopeCount} of {RequestedScopeCount} requested scope(s) "
@@ -2949,7 +3156,8 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     }
 
     /// <summary>
-    /// Sends one request with NO credential attached - the token-issuance path, and only that path.
+    /// Sends one request with the CALLER credential rather than a bearer credential - the
+    /// token-issuance path, and only that path.
     /// </summary>
     /// <typeparam name="TRequest">The request body type.</typeparam>
     /// <typeparam name="TResponse">The response body type.</typeparam>
@@ -2959,20 +3167,81 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <param name="cancellationToken">Cancels the request and the reading of its response.</param>
     /// <returns>The response body and the status it arrived with.</returns>
     /// <remarks>
-    /// The operation this exists for is authenticated BY THE TRANSPORT - a client certificate presented
-    /// during the handshake, configured on the message handler in the composition root - because a caller
-    /// cannot present a bearer token in order to obtain its first bearer token. So "no credential" here
-    /// means no BEARER credential, not an anonymous call.
+    /// <para>
+    /// The operation this exists for accepts a CALLER credential and not a bearer token, because a
+    /// caller cannot present a bearer token in order to obtain its first bearer token. C-01 publishes
+    /// two schemes for it and accepts either, so this method presents whichever one the deployment
+    /// configured: an HTTP <c>Basic</c> credential when an issuance secret is present, and otherwise no
+    /// header at all, leaving the client certificate on the primary handler to authenticate the
+    /// handshake. Presenting neither is not a state a started process can be in -
+    /// <c>Configuration/DataServicesOptions.cs</c>'s validator refuses such a deployment - so the null
+    /// case here is the certificate case rather than an anonymous call.
+    /// </para>
+    /// <para>
+    /// THE CREDENTIAL IS BUILT PER REQUEST AND NOT CACHED. It is two short strings and one base64
+    /// encode, so caching it would trade nothing measurable for a field holding a credential for the
+    /// lifetime of the client; and building it per request means a configuration reload is picked up on
+    /// the next issuance rather than at the next process start. It is written to the request message and
+    /// nowhere else - not to the client's default headers, which are instance-wide and would publish it
+    /// to all seventeen C-02 calls as well.
+    /// </para>
     /// </remarks>
     private Task<(TResponse Payload, System.Net.HttpStatusCode StatusCode)>
-        SendWithoutCredentialAsync<TRequest, TResponse>(
+        SendWithIssuanceCredentialAsync<TRequest, TResponse>(
             Uri path,
             TRequest body,
             string operationId,
             CancellationToken cancellationToken)
         where TRequest : class
         where TResponse : class =>
-        SendAsync<TRequest, TResponse>(path, body, operationId, credential: null, cancellationToken);
+        SendAsync<TRequest, TResponse>(
+            path,
+            body,
+            operationId,
+            BuildIssuanceCredential(),
+            cancellationToken);
+
+    /// <summary>
+    /// Builds the HTTP <c>Basic</c> issuance credential, or <see langword="null"/> when this deployment
+    /// authenticates the issuance edge with a client certificate instead.
+    /// </summary>
+    /// <returns>
+    /// A <c>Basic</c> credential naming <see cref="TokenSubject"/> and the configured secret, or
+    /// <see langword="null"/> when no secret is configured.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// RFC 7617's ENCODING, EXACTLY. The user-id and the password are joined by a single colon and the
+    /// result is base64 of its UTF-8 bytes. The user-id is <see cref="TokenSubject"/>, which contains no
+    /// colon - the specification forbids one there - so the receiver's split on the FIRST colon
+    /// recovers both halves even if the secret itself contains colons. UTF-8 is the charset Security
+    /// decodes with, so the two sides agree byte for byte and a non-ASCII secret survives the round
+    /// trip.
+    /// </para>
+    /// <para>
+    /// THE SECRET IS READ FROM OPTIONS AT THE MOMENT OF USE AND HELD IN NO FIELD. It arrives through the
+    /// flat configuration key <see cref="SecurityClientOptions.ClientSecretConfigurationKey"/>, applied
+    /// to the bound options by an explicit post-configure step in the composition root, so it appears in
+    /// no settings file and in no container definition. It is not logged here or anywhere else, and it
+    /// is not included in any exception message: a failure to authenticate is reported by Security as a
+    /// status, and repeating the secret into a diagnostic would put it in an operator's log.
+    /// </para>
+    /// </remarks>
+    private AuthenticationHeaderValue? BuildIssuanceCredential()
+    {
+        string secret = _options.Value.Security?.ClientSecret ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(secret))
+        {
+            // The certificate path. The handler carries the identity; nothing belongs in the header.
+            return null;
+        }
+
+        string parameter = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(string.Concat(TokenSubject, ":", secret)));
+
+        return new AuthenticationHeaderValue(BasicSchemeToken, parameter);
+    }
 
     /// <summary>
     /// The single transport step both senders share: build the request, send it, and project the
@@ -3096,6 +3365,48 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
             $"No base address is configured on the Security typed client, so the '{operationId}' "
             + $"operation cannot be reached. Set '{SecurityAddressConfigurationKey}' and register this "
             + $"typed client with that address in the composition root; {diagnosis}."));
+    }
+
+    /// <summary>
+    /// Refuses to ask for a token when this deployment configures no client identity to present,
+    /// naming the two settings an operator must supply.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// Neither <c>DataServices:Security:MutualTls:CertificatePath</c> nor its key sibling is set.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// NAME THE CAUSE, NOT THE SYMPTOM - THE SAME RULE <see cref="EnsureBaseAddress"/> FOLLOWS.
+    /// Contract C-01 protects the issuance endpoint with mutual TLS and with nothing else, because a
+    /// caller cannot present a bearer token in order to obtain its first bearer token. A request sent
+    /// with no client certificate therefore cannot succeed - it is refused for want of a caller
+    /// identity - and the refusal arrives as an ordinary authentication failure that reads like a
+    /// credential problem at Security rather than a missing setting here. Checking first turns that into
+    /// a message naming the two keys, which is the difference between an operator fixing configuration
+    /// and an operator investigating the wrong service.
+    /// </para>
+    /// <para>
+    /// This reads the bound options ONLY to decide whether an identity is configured. It does not open,
+    /// load or touch the material, and it never quotes either path: a path names where a private key is
+    /// mounted, and neither a log nor an exception message is a place to publish that. Loading and
+    /// validating the pair belongs to the composition root, which does it once at startup.
+    /// </para>
+    /// </remarks>
+    private void EnsureClientIdentityConfigured()
+    {
+        if (_options.Value.Security?.MutualTls.IsConfigured != false)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(string.Create(
+            CultureInfo.InvariantCulture,
+            $"This host presents no client certificate, so it cannot obtain a service token: the "
+            + $"issuance endpoint is authenticated by mutual TLS and by nothing else, and a "
+            + $"certificate-less request can only be refused. Set both "
+            + $"'{ClientCertificateConfigurationKey}' and '{ClientCertificateKeyConfigurationKey}' to "
+            + $"the material this deployment mounts. Neither path is reproduced in this message, "
+            + $"because a diagnostic must not record where key material is mounted."));
     }
 
     // ==============================================================================================

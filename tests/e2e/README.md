@@ -67,11 +67,11 @@ tracked paths. The second must print nothing at all. Both were run while authori
 held.
 
 **Note the scope carefully:** that fingerprint and the 170-path count belong to **the three read-only
-siblings**, not to the whole of `tests/`. A whole-`tests/` digest is not a usable baseline, because
-`tests/e2e/` is additive and still growing — see
-[§14.3](#143-two-discrepancies-found-and-reported-rather-than-absorbed), which records the measured
-figures for both scopes and explains why using the wrong one produces a false alarm rather than a
-finding.
+siblings**, not to the whole of `tests/`. A whole-`tests/` digest is not a usable baseline and no value
+for one is quoted anywhere in this file, because `tests/e2e/` is additive and still growing — and
+because this document is itself one of the paths such a digest would cover, so any value written here
+would be wrong the moment it was committed. [§14.3](#143-two-discrepancies-found-and-reported-rather-than-absorbed)
+records that reasoning in full.
 
 ---
 
@@ -146,6 +146,12 @@ services, and that path belongs to `orchestration/` — see [§4](#4-bring-up-an
 drives HTTP only; downloading Chromium here would add several hundred megabytes to no purpose and
 would imply a presentation surface that does not exist in this phase.
 
+**`openssl` is required for a full run, but not for the stack-free gates.**
+`npm run provision:identity` uses it to write the ephemeral client certificate the mutual-TLS
+issuance edge requires — see [§3.2](#32-the-full-run--this-one-needs-a-running-stack-and-an-issuance-identity).
+It is present on the environment's Linux container and on any host with a standard TLS toolchain;
+the script checks for it and fails naming it rather than part way through.
+
 ---
 
 ## 3. Install and run
@@ -183,11 +189,55 @@ Two things about this pair are worth knowing before relying on either:
 - **Neither needs a running stack.** The fixture modules are free of import-time side effects: they
   read the environment and nothing else, start nothing, and probe nothing while loading.
 
-### 3.2 The full run — this one needs a running stack
+### 3.2 The full run — this one needs a running stack **and an issuance identity**
+
+> ⚠️ **This command cannot pass in this repository today**, and that is a missing orchestration
+> manifest rather than a missing test: `orchestration/docker-compose.yml` does not exist, so nothing
+> assembles a stack for it to point at. §4.1 carries the full inventory of what is absent. Use §3.1
+> until it changes — those gates are runnable now and are the whole of what can be proven without a
+> stack.
 
 ```bash
-npm test              # playwright test
+npm run provision:identity     # once — writes an ephemeral client certificate/key
+eval "$(npm run --silent provision:identity -- --export-only)"
+npm test                       # playwright test
 ```
+
+**The identity step is not optional, and the suite says so rather than discovering it fifteen times
+over.** `POST /v1/tokens` on Security is authenticated by a **client certificate and by nothing
+else**, because a caller cannot present a bearer token in order to obtain its first bearer token —
+and Security declares that single TLS listener in its **base** settings file, so the requirement
+holds for Development too. With no certificate configured there is no address, local or deployed, at
+which a token is minted, so every authenticated assertion in the suite is unrunnable.
+
+`npm run provision:identity` writes a throwaway certificate authority and a client leaf whose
+subject common name is exactly the identity the suite claims (`pfw-e2e-suite`), into a **gitignored**
+`.mtls/` directory, with fresh material on every run. It prints three `export` lines: the two the
+runner needs, and `SECURITY_MTLS_CLIENT_CA_PATH`, which is what makes the **stack** trust the leaf.
+**Both halves are required** — point Security's `SECURITY_MTLS_CLIENT_CA_PATH` at that CA in
+`orchestration/.env` and bring the stack up (or restart Security) so it reloads the anchor.
+Presenting a certificate Security does not trust earns a `401`, which is the transport behaving
+correctly rather than a defect. See [§10](#10-secrets-never-replicate-document-rotate); no key
+material is ever printed, and none of it may be committed.
+
+**With no identity, a full run fails its setup.** Each authenticated group's first act is a
+`beforeAll` precondition, so the report says once — naming the two variables and the command — that
+the run was not a valid acceptance run. That is deliberate: a run that quietly omitted every
+authenticated workflow and still reported green would prove nothing about the one property this
+suite exists to demonstrate.
+
+**A deliberately partial run is supported, and has to be asked for by name:**
+
+```bash
+E2E_ALLOW_MISSING_ISSUANCE_IDENTITY=1 npm test
+```
+
+The token-dependent tests then **skip with a stated reason** and everything else runs — the
+readiness probes, the capability-table parity checks and the standing `401`-without-a-token
+assertion. The acknowledgement is an opt-in and is never inferred from the certificate's absence,
+because absence is precisely the state a misconfigured pipeline is in. Accepted values are `1` and
+`true`; anything else set is reported as a configuration error rather than quietly ignored. The
+whole policy lives in one module, `fixtures/token-issuance.ts`.
 
 **Use `npm test`, not `npx playwright test`, and the difference is a supply-chain one.** The `test`
 script runs the `playwright` binary that `npm ci` just installed from the lockfile at the pinned
@@ -217,9 +267,18 @@ Each of those overrides a decision taken for a correctness or a secrets reason �
 
 ## 4. Bring-up and readiness
 
-### 4.1 There is exactly one bring-up path, and it is not this suite
+### 4.1 There is exactly one bring-up path, it is not this suite, and it does not exist yet
 
-The four services are brought up **only** by `orchestration/docker-compose.yml`. This suite starts
+> ⚠️ **PLANNED, NOT AVAILABLE.** `orchestration/docker-compose.yml` **does not exist in this
+> repository**, and neither does `orchestration/README.md`; `orchestration/` holds only `.env.example`.
+> `services/persistence-service/Dockerfile` is absent too, so even the definitions cannot be fully
+> assembled. **There is therefore no way to bring a stack up today, and every live-stack assertion in
+> this suite is unrunnable until that changes.** Everything in this section describes the intended
+> path so the suite's design is legible — it is not a runbook that can be followed now. What *can* be
+> run today is [§3](#3-install-and-run)'s install, type check and collection pass, which need no
+> stack.
+
+The four services are to be brought up **only** by `orchestration/docker-compose.yml`. This suite starts
 nothing: `playwright.config.ts` deliberately carries **no `webServer` block** and no global setup or
 teardown, so it points at an already-running stack and does nothing else. Two independent reasons:
 
@@ -229,10 +288,12 @@ teardown, so it points at an already-running stack and does nothing else. Two in
   legacy-side and a target-side recording for one workflow are comparable only when taken against
   the same unrecreated `persistence-db` volume state.
 
-For the bring-up commands, the environment file and the readiness gates, see
-[`../../orchestration/README.md`](../../orchestration/README.md) and
-[`../../orchestration/docker-compose.yml`](../../orchestration/docker-compose.yml). Those are the
-authority; this document does not restate their commands as a second one.
+The bring-up commands, the environment file and the readiness gates will be the authority of
+`orchestration/README.md` and `orchestration/docker-compose.yml` once those files exist — they are
+**named without links here, deliberately, because a link to an absent file is a broken link**. This
+document will not restate their commands as a second copy. Until then,
+[`../../docs/BUILD.md`](../../docs/BUILD.md) §8 carries the intended command and states at its own point
+of use that it cannot be run.
 
 ### 4.2 The readiness chain
 
@@ -249,20 +310,28 @@ assert on — so an unhealthy answer is a result, not a reason to retry.
 
 ### 4.3 Port map
 
-| Service | Port | Transport | Token role |
-| --- | ---: | --- | --- |
-| `PowerFramework.Persistence` | 5101 | gRPC (C-05..C-08), plus REST `/health` and `/v1/ping` | verification only |
-| `PowerFramework.DataServices` | 5102 | gRPC (C-03, C-04), plus a thin REST projection consumed only by Gateway | verification only |
-| *(reserved)* | 5103 | — | commented-out DesignSystem Phase-2 slot |
-| `PowerFramework.Security` | 5104 | REST + `/.well-known/jwks.json` + OIDC discovery | **SOLE ISSUER** |
-| `PowerFramework.Gateway` | **5105** | REST + OpenAPI | verification only |
+| Service | Port | Scheme | Transport | Token role |
+| --- | ---: | --- | --- | --- |
+| `PowerFramework.Persistence` | 5101 | `http`, HTTP/1.1 | REST `/health` and `/v1/ping` — **the documented readiness address** | verification only |
+| `PowerFramework.Persistence` | 5111 | `http`, HTTP/2 | gRPC (C-05..C-08) | verification only |
+| `PowerFramework.DataServices` | 5102 | `http`, HTTP/1.1 | REST `/health`, `/v1/ping`, and the thin projection consumed only by Gateway | verification only |
+| `PowerFramework.DataServices` | 5112 | `http`, HTTP/2 | gRPC (C-03, C-04) | verification only |
+| *(reserved)* | 5103 | — | — | commented-out DesignSystem Phase-2 slot |
+| `PowerFramework.Security` | 5104 | `https`, HTTP/1.1 | REST + `/.well-known/jwks.json` + OIDC discovery | **SOLE ISSUER** |
+| `PowerFramework.Gateway` | **5105** | `https`, HTTP/1.1 | REST + OpenAPI | verification only |
 
-Two notes that belong with the table rather than inside it:
+Three notes that belong with the table rather than inside it:
 
-- **Scheme.** Persistence, DataServices and Security publish TLS listeners; Gateway's published
-  ingress is the plaintext `http://localhost:5105` the environment documents. Security's listener is
-  TLS in *every* environment, so its readiness probe is `https://localhost:5104/health` rather than
-  `http`. The listener configuration and the reasoning are in
+- **Scheme.** All four services publish TLS listeners, in *every* environment: each declares its
+  Kestrel endpoint in its **base** settings file and the Development overlay restates rather than
+  relaxes it. Every default in the table below is therefore `https`, including Gateway's. Two earlier
+  versions of this suite defaulted `SECURITY_BASE_URL` and then `GATEWAY_BASE_URL` to plain `http`,
+  and each meant the same thing: every request the suite made addressed a listener that does not
+  exist, and on the issuance edge the configured client certificate could never be presented at all,
+  because a certificate only exists inside a TLS handshake.
+  `02-authentication.spec.ts` now asserts that default against Security's own OpenAPI server entry
+  and its Kestrel endpoint, so the two cannot drift apart again without a test failing. The listener
+  configuration and the reasoning are in
   [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §4; this suite reads each address from
   the environment (§4.4) rather than hardcoding a scheme.
 - **5103 is reserved, not reassigned.** The attached environment had allocated it to a design
@@ -279,7 +348,7 @@ The endpoints this suite touches, and nothing besides these:
 | `GET /v1/capabilities` | through Gateway | JWT |
 | `/v1/datawindow/**` | through Gateway | JWT |
 | `/v1/design/**`, `/v1/documents/**`, `/v1/integration/**`, `/v1/scripting/**` | through Gateway | reserved routes, `501` |
-| `POST /v1/tokens` | Security | mutual TLS (C-01) |
+| `POST /v1/tokens` | Security | **caller credential required — `Basic` roster credential *or* client certificate (C-01)** |
 | `GET /.well-known/jwks.json` | Security | anonymous |
 | `GET /.well-known/openid-configuration` | Security | anonymous |
 
@@ -289,7 +358,7 @@ table above exists only so a reader can see the whole surface this suite exercis
 ### 4.4 Base URL, and the environment this suite reads
 
 **Gateway on 5105 is the suite's sole functional base URL.** `playwright.config.ts` sets
-`use.baseURL` from `GATEWAY_BASE_URL`, defaulting to `http://localhost:5105`, and validates it
+`use.baseURL` from `GATEWAY_BASE_URL`, defaulting to `https://localhost:5105`, and validates it
 structurally before the run rather than degrading: an empty, malformed, non-`http(s)`,
 credential-bearing, query-bearing or fragment-bearing value **fails the run immediately, naming the
 variable at fault.** That fail-fast posture is deliberate and mirrors the framework being migrated,
@@ -300,27 +369,108 @@ may be added to it:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GATEWAY_BASE_URL` | `http://localhost:5105` | The sole functional base URL |
-| `SECURITY_BASE_URL` | `http://localhost:5104` | Token issuance, JWKS and OIDC discovery |
+| `GATEWAY_BASE_URL` | `https://localhost:5105` | The sole functional base URL |
+| `SECURITY_BASE_URL` | `https://localhost:5104` | Token issuance, JWKS and OIDC discovery |
 | `DATASERVICES_BASE_URL` | `https://localhost:5102` | Anonymous `/health` probe only |
 | `PERSISTENCE_BASE_URL` | `https://localhost:5101` | Anonymous `/health` probe only |
 | `SECURITY_MTLS_CERT_PATH` | *(unset)* | Client-certificate **path** for the issuance edge |
 | `SECURITY_MTLS_KEY_PATH` | *(unset)* | Client-key **path** for the issuance edge |
 | `SECURITY_MTLS_KEY_PASSPHRASE` | *(unset)* | Read only if the key needs one |
+| `E2E_ALLOW_MISSING_ISSUANCE_IDENTITY` | *(unset)* | `1` or `true` acknowledges a deliberately partial run; token-dependent tests then skip with a reason |
 | `CI` | *(unset)* | When set, a stray `test.only` fails the run instead of narrowing it |
 
-The three mutual-TLS variables exist because token issuance is a **mutual-TLS edge** —
-[`../../docs/CONTRACTS.md`](../../docs/CONTRACTS.md) C-01 — so a client certificate must be
-presented to mint a token. The suite reads **filesystem paths**, never inline material; the
-certificate and key themselves live outside the repository and are supplied by the environment.
+**Every default in that table names the address the repository actually binds.** That agreement is
+the point of stating them: an earlier form of this table defaulted two of them to `https` while the
+settings files bound `http`, so the table named listeners nobody had configured, and a reader
+following it reached a refused connection rather than a service.
+
+**Five variables, two credentials, one requirement.** `POST /v1/tokens` is the one operation a bearer
+token cannot protect — a caller cannot present a token in order to obtain its first token — so
+[`../../docs/CONTRACTS.md`](../../docs/CONTRACTS.md) C-01 publishes two schemes for it and accepts
+**either**:
+
+- `SECURITY_CLIENT_ID` + `SECURITY_CLIENT_SECRET` — an HTTP `Basic` credential naming a subject on
+  Security's issuance roster. **This is the primary path**, because it works on every topology - a
+  header the operation reads itself needs no cooperation from whatever terminates TLS. The subject is
+  not a free
+  label: it resolves to the roster entry deciding which audiences and scopes that caller may request,
+  so a request naming one the entry does not permit is refused `403` even though the caller
+  authenticated. `fixtures/auth.ts` attaches the header to the issuance request **and to nothing
+  else** — never through `extraHTTPHeaders`, which would send Security's issuance secret to Gateway,
+  DataServices and Persistence as well.
+- The three `SECURITY_MTLS_*` variables — a client certificate, which exists only inside a TLS
+  handshake and so is reachable only against a deployment that terminates TLS at Security. That is
+  the mutual-TLS fallback the AAP describes for that one pair. The suite reads **filesystem paths**,
+  never inline material; the certificate and key live outside the repository.
+
+A request presenting **neither** is refused with `401`, on every topology. That is a contract outcome
+[`specs/02-authentication.spec.ts`](specs/02-authentication.spec.ts) asserts on directly, and it is
+what keeps this newly created boundary authenticated (C-G).
+
+Each pair is resolved all-or-nothing and **a half-configured pair fails the run immediately, naming
+the variable that is missing.** Neither half set is the ordinary case and yields `undefined` — a spec
+needing a token skips itself and says so, and `playwright test --list` collects with no stack running
+and nothing configured. Exactly one half set is a mistake every time, and merging it into "no
+credential" would send an operator to debug a `401` at Security that a typo in one variable name
+caused.
+
+**Scope is a third gate, and it is why a `403` can arrive after a token was issued.** The token
+Security returns carries a `scope` claim holding exactly the space-delimited scopes the request asked
+for and the roster granted — nothing is added and nothing is silently dropped, because a request for
+a scope the entry does not grant is *refused* rather than narrowed. `fixtures/auth.ts` requests
+`ping capabilities datawindow`, the three its Gateway requests need, and the roster subject it
+authenticates as grants exactly those three, so the minted token carries all three.
+
+A protected route then reads that claim. Each one declares the single scope it requires, and an
+authenticated caller whose token does not carry it is answered **`403`, not `401`** — the two are
+different facts and this suite treats them as such. `401` means no usable credential reached the
+service. `403` means one did, was accepted, and does not carry this capability.
+
+**Both services this suite talks to enforce it.** Security's `/v1/ping` requires `ping` and its
+`/v1/crypto/**` group requires `security.crypto` — a scope this suite never requests, because it makes
+no cryptographic call and a grant nobody needs is a permission nobody should hold. Gateway requires
+`ping` on `/v1/ping`, `capabilities` on `/v1/capabilities`, and `datawindow` on the whole
+`/v1/datawindow/**` projection. Those three are exactly what `fixtures/auth.ts` requests, which is why
+the request list above is a requirement rather than a convenience: drop one and the corresponding spec
+starts failing with `403` while every credential in play is perfectly valid.
+
+**The four reserved `/v1/{design,documents,integration,scripting}` families are the deliberate
+exception, and `04-deferred-routes.spec.ts` depends on it.** They require authentication and no scope
+at all, so the default token reaches them and receives `501`. Requiring a capability scope there would
+invent an entitlement for a service Phase 1 must not implement, and since the roster grants no such
+scope the reserved answer would become unreachable for every caller alike.
+
+So **no request this suite makes is expected to see a route-level `403`.** If one appears, it is a
+real failure rather than a configuration wrinkle to retry around: either the token was minted with a
+narrower scope set than the route wants, or the roster entry behind `SECURITY_CLIENT_ID` was widened
+in one place and not the other. The fix is a corrected grant on Security's roster, never a relaxed
+assertion here.
 
 One detail in that table needs saying out loud rather than being left to be discovered at run time:
-**`SECURITY_BASE_URL` defaults to a plain-`http` address, while Security's actual listener is TLS.**
-The default is deliberately permissive — nothing in the suite restricts the scheme — so against a
-real stack it must be overridden to the `https` address, and a client certificate must be configured
-for issuance to succeed. The authoritative listener configuration is in
+**all four defaults are `https`.** Each service declares its TLS listener in its *base* settings file,
+so the scheme applies in every environment including Development: `https://+:5101`, `https://+:5102`,
+`https://+:5104` and `https://+:5105`. Gateway is the published ingress and serves REST only, which
+changes what its edge carries but not how it is reached.
+
+An earlier version of this table defaulted `SECURITY_BASE_URL` to a plain-`http` address and told the
+reader to override it, which meant **the documented default run could not bootstrap**: a client
+certificate is the only caller authentication `POST /v1/tokens` accepts, and a certificate cannot be
+presented on a listener that terminates no TLS. The default now names the listener the repository
+actually declares. Nothing in the suite restricts the scheme, so a deployment that genuinely
+terminates TLS elsewhere still states that in one variable and changes no code.
+
+Two consequences of the `https` defaults for a local run. The listeners present the local ASP.NET
+Core development certificate unless the orchestration layer mounts one, so trust it once with
+`dotnet dev-certs https --trust`; `playwright.config.ts` keeps `ignoreHTTPSErrors` **false**
+deliberately, because an untrusted certificate is a real finding rather than noise. And a handshake
+happening is not the same as a certificate being presented: Security is configured
+`AllowCertificate` rather than `RequireCertificate`, so with no `SECURITY_MTLS_*` variables set the
+handshake still completes, the anonymous `/health` probe and the key-set read still work, and only
+the mutual-TLS issuance call is out of reach.
+
+The authoritative listener configuration is in
 [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §4; treat it, not this table, as the
-source of truth for the address, and treat this row as a default rather than as a claim about the
+source of truth for the address, and treat these rows as defaults rather than as claims about a
 deployment.
 
 ### 4.5 Topology — layered, acyclic, and asserted as such
@@ -336,6 +486,41 @@ be able to obtain a token and a consumer must be able to fetch a key set — plu
 `/health` probes that C-10 declares on all four services. **No spec talks to DataServices or
 Persistence functionally**; doing so would test a boundary no external caller has and would prove
 nothing about the ingress.
+
+### 4.6 The client identity this suite presents, and the one it must not
+
+`POST /v1/tokens` is authenticated by a **client certificate and by nothing else** — a caller cannot
+present a bearer token in order to obtain its first bearer token. So the suite needs an identity of its
+own, and two things about it are easy to get wrong in ways that surface as a `403` rather than as a
+configuration error.
+
+**The identity must match the `subject` the suite requests.** Security establishes the caller identity
+from the certificate and then reconciles the request body's `subject` against it, refusing a mismatch with
+`403` — deliberately, because a caller that could name any subject it liked would make the certificate
+decorative. The suite requests `pfw-e2e-suite` by default, and **the recipe in
+[`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §9.3.1 generates a client certificate for that
+identity alongside Gateway's and DataServices'.** An earlier form of that recipe generated only the two
+service identities, on the reasoning that only the two services call the issuance endpoint — which
+overlooked that this suite is a third caller of it.
+
+If a deployment's certificate establishes some other name, **override `E2E_TOKEN_SUBJECT` rather than
+editing a spec**: the subject is read from that variable and defaults to `pfw-e2e-suite`, so aligning the
+two needs no code change.
+
+**Do not point the suite at `SECURITY_MTLS_CERT_PATH` expecting it to work by coincidence.** The suite
+reads that name, and `../../orchestration/.env.example` uses the same name to record where Security's
+**server** certificate went. The two are opposite halves of one handshake: the server certificate
+identifies Security to its callers, a client certificate identifies a caller to Security. Handing the
+suite the server pair produces a completed handshake, an established identity of `security-service`, and a
+`403` on the subject reconciliation — a refusal that is entirely correct and looks nothing like the
+mistake that caused it. The orchestration template does not *set* those two variables (it declares
+neither; the server half is supplied once through `TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH`),
+so an operator following the template leaves them unset and the authenticated specs **skip** with that
+reason rather than failing — which is why this hazard only bites someone who fills them in by hand.
+
+**With no certificate configured at all, the authenticated specs skip and say so.** That is the intended
+posture rather than a gap: `GET /v1/ping` answering `401` without a token is the property C-G actually
+requires, and it is provable with no certificate at all.
 
 ---
 
@@ -530,33 +715,47 @@ Every path below was checked before being listed here.
 
 | Child | Role |
 | --- | --- |
-| `package.json` | The manifest: four scripts, three exactly-pinned dev dependencies, the Node floor and the npm `packageManager` pin. Private, so it can never be published |
+| `package.json` | The manifest: five scripts, three exactly-pinned dev dependencies, the Node floor and the npm `packageManager` pin. Private, so it can never be published |
 | `package-lock.json` | The npm-generated lockfile. **Committed deliberately** — `npm ci` requires it and fails without it, and it is what makes an install reproducible |
 | `playwright.config.ts` | The runner configuration, and the file that records each of the decisions in [§9](#9-technology-and-boundary-decisions) at its point of effect |
 | `tsconfig.json` | The type-check gate: `strict` plus the additional checks, and `noEmit` so nothing is ever written beside the sources |
 | `.gitignore` | Nested ignore rules for this directory's generated output. See [§9](#9-technology-and-boundary-decisions) for why it is nested rather than a root change |
-| `fixtures/` | The shared surface every spec imports through one barrel: the four base URLs and the endpoint table, the verified `COMPANY` schema with its deterministic row builders, the eight capability constants, run-time token acquisition, and a stack-availability probe |
-| `specs/` | The workflow suites — the six assertion groups of [§5](#5-what-the-suite-covers), one area per file |
+| `fixtures/` | The shared surface every spec imports through one barrel: the four base URLs and the endpoint table, the verified `COMPANY` schema with its deterministic row builders, the eight capability constants, run-time token acquisition, and a stack-availability probe. Beside them, on its own import path, `token-issuance.ts` — the one place that decides what a run does when no mutual-TLS identity is provisioned |
+| `specs/` | The workflow suites — the six assertion groups of [§5](#5-what-the-suite-covers), one area per file. Twelve files are present and **six are the suite**; see the note below |
+| `scripts/` | `provision-e2e-client-identity.sh`, which writes the ephemeral client identity of [§3.2](#32-the-full-run--this-one-needs-a-running-stack-and-an-issuance-identity). It provisions only: it starts nothing, contacts nothing, prints no key material, and writes exclusively into the gitignored `.mtls/` |
 
 `fixtures/index.ts` is a pure barrel and holds no value of its own, which is both why it can carry no
-credential and why loading it cannot start, probe or fail on anything. The stack-availability probe
-keeps its own import path and is deliberately not re-exported through the barrel.
+credential and why loading it cannot start, probe or fail on anything. The stack-availability probe and
+the token-issuance precondition each keep their own import path and are deliberately not re-exported
+through the barrel — the probe because it performs I/O, the precondition because it imports the runner's
+`test` object, and the barrel stays a pure re-export of runner-independent data.
 
 Generated directories — `node_modules/`, `test-results/` and any report directory — are ignored and
 **must never be committed**. See [§9](#9-technology-and-boundary-decisions); the trace and report
 rules in particular are a secrets control rather than housekeeping.
 
-> **Observed discrepancy in `specs/`, recorded rather than quietly resolved.** At the time this file
-> was written, `specs/` held **twelve** spec files: the numbered set `01-health-readiness`,
-> `02-authentication`, `03-capability-gating`, `04-deferred-routes`, `05-datawindow-workflow` and
-> `06-concurrency-conflict`, **plus an earlier unnumbered set covering the same six areas**
-> (`readiness`, `authentication`, `capability-projection`, `deferred-routes`,
-> `datawindow-workflow`, `concurrency-conflict`). Because `playwright.config.ts` declares
-> `testDir: './specs'` with no `testMatch` or `testIgnore`, **all twelve are collected** — 103 tests.
-> The numbered set is the one the file plan names. The two generations should be reconciled to one;
-> until they are, expect the mutating workflows to be exercised twice in a single run, which the
-> serialized execution of [§9](#9-technology-and-boundary-decisions) makes orderly but does not make
-> redundant. Measured figures are in [§14.3](#143-two-discrepancies-found-and-reported-rather-than-absorbed).
+> **`specs/` holds exactly the six numbered files, and discovery is constrained to exactly those.**
+> The suite is `01-health-readiness`, `02-authentication`, `03-capability-gating`, `04-deferred-routes`,
+> `05-datawindow-workflow` and `06-concurrency-conflict`. An earlier unnumbered generation covering the
+> same six areas (`readiness`, `authentication`, `capability-projection`, `deferred-routes`,
+> `datawindow-workflow`, `concurrency-conflict`) once sat beside them and **has been deleted**.
+>
+> `playwright.config.ts` had declared `testDir: './specs'` with no `testMatch`, so all twelve were
+> collected — **103 tests in 12 files**. That was not merely untidy: both generations write `COMPANY`
+> rows in the same single `persistence-db` volume, so the row state the optimistic-concurrency
+> assertion depends on was being changed by files nobody had reviewed for that purpose, and every
+> pass, fail and skip total covered twice as many files as this document described. The two
+> generations also disagreed about an absent stack — the superseded ones probed and skipped, the
+> numbered ones failed — so a run with nothing up produced a confusing partial result instead of one
+> answer, and nothing selected which of the two was authoritative.
+>
+> **Both halves of the remedy are in place.** The superseded six were deleted, and the config names the
+> six survivors explicitly and **verifies that inventory against the directory before the run**, so a
+> renamed or deleted spec stops the run rather than quietly shrinking it. Adding a spec is a deliberate
+> two-part act: create the file and add it to `SUITE_SPECS`. `fixtures/live-stack.ts` was trimmed with
+> the deletions — its token-acquisition half duplicated `fixtures/auth.ts`, which is the path the
+> canonical specs use — and its live-stack probe survives and guards all six canonical specs. Measured
+> figures are in [§14.3](#143-two-discrepancies-found-and-reported-rather-than-absorbed).
 
 ---
 
@@ -575,13 +774,13 @@ is a preference dressed as a rule.
 | **`forbidOnly` when `CI` is set** | A stray `test.only` silently narrows a run to one test while still reporting green |
 | **No browser binaries, and no `playwright install`** | The suite drives HTTP only. There is no presentation surface in this phase, so a browser download would be several hundred megabytes serving nothing and would imply a UI that does not exist |
 | **No `webServer` block, and no global setup or teardown** | The single bring-up path is the Compose manifest under `orchestration/`, whose health-condition chain is what makes Gateway report healthy only after its upstreams. A second bring-up path would bypass that gate; a seeding hook would break the paired-capture rule |
-| **No `testMatch` or `testIgnore` glob** | The built-in spec pattern is evaluated relative to `testDir`, so discovery is contained by construction. A glob added here would be the one way to widen that surface — and reach a read-only sibling — by accident |
+| **`testMatch` is an explicit six-file inventory, verified against the directory at config load** | `testMatch` entries resolve relative to `testDir`, so a list of leaf filenames **narrows** discovery and cannot reach outside `tests/e2e/` — the read-only siblings stay structurally undiscoverable either way. Naming the files is what excludes the six superseded specs that a bare sweep collected, which had been running twelve files and mutating shared `COMPANY` state from two generations at once. The inventory is checked both ways: every named file must exist, and the count is asserted, so a rename fails the run instead of silently covering less |
 | **Console reporter only; artifact capture off; slowest-test ranking suppressed** | Defence in depth on two fronts. A trace records request and response bodies, which for this suite means a bearer token written verbatim into an artifact; not generating the artifact is the control and the ignore rule is the safety net. And a duration report would read as a performance signal this project does not sanction |
 | **No coverage tooling in this npm project** | The 80 % line-coverage gate is a per-service .NET obligation, measured from each service's own `coverage.cobertura.xml` and enforced per service so one service cannot mask another. It is **not** measured from this suite, and wiring a JavaScript coverage tool here would produce a second, meaningless number. See [`../../docs/PARITY.md`](../../docs/PARITY.md) and [`../../docs/BUILD.md`](../../docs/BUILD.md) |
 | **No local `.dockerignore`** | The repository-root `.dockerignore` already excludes `node_modules/` anywhere in the tree, the three read-only legacy directories, and `tests/e2e/` itself. The container build context is the repository root, so the root file is the one that applies; a local copy would be a second authority that could drift |
 | **No root `.gitignore` change; the ignore rules are nested here instead** | The plan records that no root `.gitignore` change is required, and that file is left exactly as the legacy repository has it. `tests/e2e/` is a directory this refactor creates, so the rules for what it generates belong inside it — where they apply to this directory alone and cannot suppress a same-named path elsewhere. Either way, `node_modules/`, `test-results/` and any report directory must simply never be committed |
 | **Nothing added to `PowerFramework.slnx`** | This is an npm and Playwright project, not an MSBuild one. The root solution correctly enumerates exactly **twenty** .NET projects and excludes this suite, mentioning it only in a comment noting that it is driven by its own tooling |
-| **`npm test` rather than `npx playwright test` in the documented path** | A supply-chain reason, recorded in [§3.2](#32-the-full-run--this-one-needs-a-running-stack): `npx` will acquire a package when no local binary is present, which is exactly the state a failed install leaves behind |
+| **`npm test` rather than `npx playwright test` in the documented path** | A supply-chain reason, recorded in [§3.2](#32-the-full-run--this-one-needs-a-running-stack-and-no-stack-can-be-brought-up-yet): `npx` will acquire a package when no local binary is present, which is exactly the state a failed install leaves behind |
 | **A separate `typecheck` script** | `--list` collects without type-checking, so the type check has to be its own gate. `npm run verify` runs both and is everything that can be verified with no stack running |
 
 ---
@@ -625,6 +824,14 @@ with it. What replaces it is structural rather than cosmetic —
   which is also what makes the standing `401`-without-a-token assertion possible to write at all.
 - **Mutual-TLS material is read as filesystem paths from the environment**, never inline — see
   [§4.4](#44-base-url-and-the-environment-this-suite-reads).
+- **The client identity this suite presents is EPHEMERAL and generated, never committed.**
+  `npm run provision:identity` writes a throwaway authority and leaf into the gitignored `.mtls/`,
+  fresh on every run, with the private keys `0600` inside a `0700` directory. It prints **paths only**
+  — no key, no certificate body, no passphrase — and neither the script nor any fixture message ever
+  echoes a value; variable names and fixed prose are all any of them carry. Nothing it produces is
+  reused between environments, so there is nothing there worth keeping and everything there worth not
+  committing. This is site 1's anti-pattern inverted: generated and disposable rather than authored
+  and tracked.
 - **The base URL may not embed credentials.** The configuration rejects such a value outright,
   because Playwright records request URLs in failure messages and artifacts, so a credential in the
   base address would be a credential written into every artifact of the run.
@@ -702,8 +909,13 @@ attributed rather than copied.
 | [`../../docs/SECRETS.md`](../../docs/SECRETS.md) | Every hardcoded-secret locator, value-free, with severity and required action |
 | [`../../docs/DEFERRED.md`](../../docs/DEFERRED.md) | The deferred roster and the four reserved routes |
 | [`../../docs/BUILD.md`](../../docs/BUILD.md) | The .NET build, the per-service commands, and the coverage gate |
-| [`../../orchestration/README.md`](../../orchestration/README.md) | Bring-up, the environment file, and the readiness gates |
-| [`../../orchestration/docker-compose.yml`](../../orchestration/docker-compose.yml) | The four services, the `persistence-db` volume, and the health-condition chain |
+| `../../orchestration/README.md` — **absent; named, not linked** | Bring-up, the environment file, and the readiness gates — *once it exists*. Until then [`../../docs/BUILD.md`](../../docs/BUILD.md) §8 is the nearest authority |
+| `../../orchestration/docker-compose.yml` — **absent; named, not linked** | The four services, the `persistence-db` volume, and the health-condition chain — *once it exists* |
+
+**The last two rows carry no link on purpose.** Both files are absent from this repository, and a link
+to an absent path is a broken link that a documentation check reports and a reader wastes time on — so
+each is named in plain text and marked absent instead. When either file is authored, converting its name
+back into a link is the whole of the change needed here.
 
 The legacy sources this suite's fixtures were derived from — `dw_sqlite.srd`, `w_test_sqlite.srw` and
 `enums.sru` — are cited by path and line in [§6](#6-preserved-defects-a-spec-must-not-correct) and
@@ -728,19 +940,36 @@ unexercised*, and *Planned — not yet present*.
 | `npm -v` | **`11.18.0`** |
 | `npm ci` | **Succeeded**, exit 0 — *"added 6 packages, and audited 7 packages"*, *"found 0 vulnerabilities"* |
 | `npm run typecheck` (`tsc --noEmit`) | **Succeeded**, exit 0, **zero errors** |
-| `npm run test:list` (`playwright test --list`) | **Succeeded**, exit 0 — **`Total: 103 tests in 12 files`** |
-| `npm test` (`playwright test`) | **Failed**, exit 1 — **17 failed, 38 passed, 40 skipped, 8 did not run** |
+| `npm run test:list` (`playwright test --list`) | **Succeeded**, exit 0 — six files, and only the six numbered ones |
+| `npx playwright test --list --grep "@no-stack"` | **Succeeded**, exit 0 — the stack-free subset, three files |
+| `npm test` (`playwright test`), no identity, no stack | **Failed**, exit 1 — the token-issuance `beforeAll` refuses the run for the five authenticated groups, which is what a genuine setup failure should do |
+| `E2E_ALLOW_MISSING_ISSUANCE_IDENTITY=1 npm test`, no stack | **Succeeded**, exit 0 — the token-dependent tests decline themselves with the stated reason, the reachability probe skips everything that needs a live endpoint, and the `@no-stack` assertions pass |
+| `npm run provision:identity` | **Succeeded**, exit 0 — wrote `.mtls/` 0700 with the two key files 0600, and printed three `export` lines and no key material. `openssl x509 -noout -subject` reports **`subject=CN=pfw-e2e-suite`**, the extended key usage is **TLS Web Client Authentication**, and `openssl verify -CAfile` reports **OK** |
+| A renamed spec, as a negative control on the inventory | **Failed at config load**, naming the absent file — the run stops rather than quietly covering five files |
 | The three-sibling digest — the first of the two untouched-proof commands near the top of this file | `e9de966fe49b982b30aea135c6381f0901bba498c31a181704e027066cdb84b8`, over **170** tracked paths |
 | `git status --porcelain tests/blink tests/sciter tests/webview` | **Empty** — the read-only siblings are untouched |
 | `find tests -maxdepth 1 -mindepth 1 -type f` | **Printed nothing** — no file exists at `tests/` level |
 
-**The `npm test` failure is fully explained, and it is not a defect in the system under test.** Every
-one of the 17 failures is a transport error against an **absent stack** — connection failures to
-`5105`, `5101` and `5104`, including the token request that could not reach Security. The 40 skips
-come from the earlier unnumbered spec generation, which probes for a live stack first and skips with
-an explicit reason; the numbered set has no such guard and therefore fails rather than skips. The 38
-passes are the stack-free assertions: the capability-table parity checks, the endpoint-table checks
-and the pure helper checks.
+**The two preconditions are distinct, and keeping them distinct is the point.** An **absent issuance
+identity** is a setup fault: `POST /v1/tokens` on Security is authenticated by a client certificate and
+by nothing else, so without one no authenticated assertion is runnable, and the five authenticated
+groups fail their **setup** with one clear statement per group rather than letting fifteen token calls
+fail one at a time with transport errors that never say why. An **absent stack** is a third state that
+is neither pass nor fail, so it is reported as an explicit SKIP whose reason names what was probed and
+the exact bring-up command.
+
+**Nothing was softened to achieve either.** No assertion tolerates an unreachable host, and a stack
+that IS up and violates a contract still fails the run; the distinction is drawn once, before the
+assertions, rather than inside them — which is the only way to keep "absent" and "broken" from looking
+alike. A run that declares itself partial with `E2E_ALLOW_MISSING_ISSUANCE_IDENTITY` has its
+token-dependent tests decline themselves with the reason stated, and acknowledgement is never inferred
+from the certificate's absence.
+
+The passes with nothing running are the stack-free assertions, which still run because they carry the
+`@no-stack` tag that exempts them from the reachability guard: the capability-table parity checks, the
+`COMPANY` column contract check and the Security base-URL coherence check. A tag rather than a title
+match, deliberately — two of those tests never carried the `(no stack)` wording, so a substring rule
+would have skipped exactly the coverage that is available before a bring-up.
 
 ### 14.2 Whether the stack was brought up, and whether the suite was executed
 
@@ -756,13 +985,16 @@ assumptions:
   `orchestration/docker-compose.yml`** and **no `orchestration/README.md`** in this clone, and the
   Compose manifest is the only sanctioned bring-up path. Both are *Planned — not yet present*, which
   is also how the sibling build and parity documents label them.
-- **Three of the four container definitions are absent.** Only `services/gateway-service/Dockerfile`
-  exists; DataServices, Persistence and Security have none yet. All four `Program.cs` entry points do
-  exist.
+- **All four container definitions now exist.** `services/gateway-service/Dockerfile`,
+  `services/dataservices-service/Dockerfile`, `services/security-service/Dockerfile` and
+  `services/persistence-service/Dockerfile` are all present, all four `Program.cs` entry points exist, and
+  all four services build and test independently in Release with zero warnings. What has **not** been
+  observed is any of those images *running*: no container has been started here, so nothing about their
+  layers, their `HEALTHCHECK`s or their non-root switches has been exercised against a live process.
 
-Consequently the two links in [§13](#13-cross-references) that point into `orchestration/` currently
-resolve to planned files rather than present ones. They are named because that is where the
-corresponding work belongs, and they are the paths the plan declares.
+Consequently the two `orchestration/` rows in [§13](#13-cross-references) are **named in plain text
+rather than linked**: they are the paths the plan declares and where the corresponding work belongs, and
+a link to a file that is not there is a broken link rather than a forward reference.
 
 **What the consistency check could and could not compare.** The port map, the endpoint list and the
 install-and-run commands in this document were checked line by line against
@@ -777,25 +1009,39 @@ and this document does not claim one.
 
 ### 14.3 Two discrepancies, found and reported rather than absorbed
 
-**Discrepancy 1 — the scope of the `tests` fingerprint.** The baseline
-`e9de966fe49b982b30aea135c6381f0901bba498c31a181704e027066cdb84b8` over **170** tracked paths is the
-digest of **`tests/blink` + `tests/sciter` + `tests/webview`**, and it reproduces exactly. It is *not*
-the digest of the whole of `tests/`: measured immediately before this file was committed,
-`git ls-files -s tests | sha256sum` was
-`5a8d7097109d303a0334bbe04e6cb024d055b234da37fb04d25f7da7d2a241d9` over **193** tracked paths — the
-same 170 legacy paths plus 23 additive `tests/e2e/` paths.
+**Discrepancy 1 — the scope of the `tests` fingerprint, and why only one digest is quoted.** The
+baseline `e9de966fe49b982b30aea135c6381f0901bba498c31a181704e027066cdb84b8` over **170** tracked paths
+is the digest of **`tests/blink` + `tests/sciter` + `tests/webview`**, and it reproduces exactly. It is
+*not* the digest of the whole of `tests/`, and the distinction is the whole point of quoting a scoped
+one.
 
-**Committing this very README then moved it**, to a different digest over **194** paths, while the
-three-sibling digest did not budge. That is a demonstration rather than an argument: a whole-`tests/`
-digest changes every time this directory gains a file, so using it as the untouched check would raise
-a false alarm over the perfectly legitimate addition of a document. The three-sibling digest is the
-one to use, exactly as the untouched proof near the top of this file states it.
+**An earlier revision of this section also quoted a whole-`tests/` digest and a path count. Both are
+removed, and no whole-tree digest is quoted anywhere in this file any more.** The reason is that such a
+digest **cannot be quoted correctly in the file it covers**: `tests/e2e/README.md` is itself one of the
+tracked paths inside `tests/`, so every edit to this document changes the value written in it, and the
+figure is stale the instant it is committed. The earlier revision demonstrated exactly that — it quoted
+a value and a count, and committing the README moved both — which is the demonstration that the figure
+does not belong here at all rather than an argument for keeping it with a caveat.
 
-**Discrepancy 2 — two spec generations coexist.** Recorded in
-[§8](#8-layout) with the measured breakdown: the numbered set contributes 32 collected tests
-(3 + 4 + 10 + 4 + 5 + 6) and the earlier unnumbered set 71 (10 + 12 + 17 + 16 + 8 + 8), which is the
-103 that `--list` reports. They should be reconciled to one set. This is reported rather than
-silently resolved here, because deleting spec files is not this document's to do.
+**The three-sibling digest has none of that problem, which is why it is the untouched check.** It covers
+only the three read-only legacy directories, so it is invariant under every addition this refactor makes
+to `tests/e2e/` and it changes if — and only if — an oracle asset is touched. That is precisely the
+property an untouched proof needs, and it is what the proof near the top of this file states.
+Reproduce it with:
+
+```bash
+git ls-files -s tests/blink tests/sciter tests/webview | sha256sum
+git ls-files tests/blink tests/sciter tests/webview | wc -l
+```
+
+**Discrepancy 2 — two spec generations coexisted. RESOLVED, by both halves of the remedy.** The measured
+breakdown at the time was: the numbered set contributed 32 collected tests (3 + 4 + 10 + 4 + 5 + 6) and
+the earlier unnumbered set 71 (10 + 12 + 17 + 16 + 8 + 8), together the 103 that `--list` reported across
+12 files. The unnumbered six were **deleted**, and `playwright.config.ts` now names the six numbered files
+and **verifies that inventory against the directory** at config load, so a rename stops the run instead of
+quietly shrinking it. `--list` now reports six files and nothing else; the total is a collected-test count,
+so the four reserved deferred routes in `04-deferred-routes` appear as four parameterised tests from one
+declaration, and `02-authentication` contributes the Security base-URL coherence assertion it gained.
 
 ### 14.4 Residual risk
 
@@ -822,20 +1068,26 @@ Two further limits worth stating, so nobody infers more from a green `npm run ve
 ### 14.5 One expected hit in the secret sweep, cleared explicitly
 
 A credential sweep over this file — searching for key and certificate block markers, credential-shaped
-assignments and long encoded runs — matches only **one kind of value**: the two distinct
-64-character hexadecimal SHA-256 digests, quoted at four places between the untouched proof near the
-top and [§14.3](#143-two-discrepancies-found-and-reported-rather-than-absorbed). A long-hexadecimal
+assignments and long encoded runs — matches only **one kind of value**: a **single** 64-character
+hexadecimal SHA-256 digest — the three-sibling untouched proof, which occurs three times: in the proof
+near the top of this file, in the table at
+[§14.1](#141-commands-that-were-run-and-what-they-printed) and at
+[§14.3](#143-two-discrepancies-found-and-reported-rather-than-absorbed). A long-hexadecimal
 pattern
 cannot distinguish a digest from an encoded key, so the match is expected by construction and is
 cleared here rather than left for a reader to worry about. Every narrower pattern — key and
 certificate block markers, provider-specific key prefixes, bearer-token shapes and credentials
 embedded in a URL — returns nothing at all.
 
-Both values are **content fingerprints of tracked files**, produced by `git ls-files -s` piped
-through `sha256sum`, and both are reproducible by anyone holding this repository. Neither is a key, a
-token, a certificate or a credential of any kind, and neither carries any secret: a digest of a file
+That is **one distinct** value: the whole-`tests/` digest an earlier revision also quoted has been
+removed for the reason §14.3 gives, so this clearance covers one digest at three occurrences rather than
+two digests at four.
+
+It is a **content fingerprint of tracked files**, produced by `git ls-files -s` piped
+through `sha256sum`, and it is reproducible by anyone holding this repository. It is not a key, a
+token, a certificate or a credential of any kind, and it carries no secret: a digest of a file
 listing is a *checksum over paths, modes and blob identifiers*, which is exactly why it works as an
-untouched proof. They are quoted deliberately, because a proof nobody can reproduce is not a proof.
+untouched proof. It is quoted deliberately, because a proof nobody can reproduce is not a proof.
 
 The words "password" and "passphrase" appear here only where a credential is being **forbidden**, or
 as the *name* of an environment variable in the table at
