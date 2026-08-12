@@ -70,6 +70,7 @@ using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
+using PowerFramework.Shared.Diagnostics;
 
 // PowerFramework.Contracts.Persistence.V1 is a global using and it contains GENERATED static classes
 // also called CommandService and TransactionService. These aliases make every bare name below
@@ -897,6 +898,19 @@ public sealed class CommandAndTransactionServiceTests
     /// <para>
     /// Nothing is trimmed on either path. A blank statement is REFUSED, never silently rewritten.
     /// </para>
+    /// <para>
+    /// <b>THE EMPTY-STRING HALF IS SPLIT BY BUILD, and the split is the port's intent rather than a
+    /// defect.</b> The blank statement is declined at the BOUNDARY, before the proxy is entered, so it
+    /// answers identically in both configurations. The empty string is not: it passes the boundary and
+    /// reaches <c>SqlCommandTaskProxy.SetSql</c>, which reproduces the oracle's own
+    /// <c>#IF DEFINED DEBUG</c> assertion verbatim
+    /// [<c>n_cst_threading_task_sqlcommand.sru:L36-L38</c>], so an <see cref="AssertionFailure"/> leaves
+    /// the handler before the worker's message-free guard is ever reached in a Debug build. Both arms are
+    /// asserted because both are shipped - the container image is built <c>-c Release</c> while the
+    /// documented per-service gate's bare <c>dotnet test</c> builds Debug - which is the same treatment
+    /// <see cref="CommandServiceTests.SetSqlStillAnswersTheWorkersMessageFreeRefusalForTheEmptyStatement"/>
+    /// already gives the identical condition.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task TheWireRefusesABlankStatementWithADiagnosticAndTheEmptyStringWithout()
@@ -911,6 +925,15 @@ public sealed class CommandAndTransactionServiceTests
         Assert.Equal(WireRetCode.EInvalidSql, blank.Status.RetCode);
         Assert.NotEmpty(blank.Status.ErrorText);
 
+#if DEBUG
+        AssertionFailure failure = await Assert.ThrowsAsync<AssertionFailure>(
+            () => harness.Commands.SetSql(
+                new SetCommandSqlRequest { Task = handle, Sql = string.Empty },
+                Context));
+
+        // The oracle's own message text, verbatim - what a Debug build reports in place of the code.
+        Assert.Contains("Len(sql) <= 0", failure.Message, StringComparison.Ordinal);
+#else
         SetCommandSqlResponse empty = await harness.Commands.SetSql(
             new SetCommandSqlRequest { Task = handle, Sql = string.Empty },
             Context);
@@ -919,6 +942,7 @@ public sealed class CommandAndTransactionServiceTests
 
         // The oracle's setter raises no message at all, and that silence is preserved.
         Assert.Empty(empty.Status.ErrorText);
+#endif
 
         // Neither path installed anything: the statement is still the constructor's empty string.
         Assert.Equal(string.Empty, Resolve(harness, handle).Worker.Sql);

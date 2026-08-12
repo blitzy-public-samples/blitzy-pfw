@@ -1,49 +1,189 @@
 # ==================================================================================================
-#  .github/workflows/ci.yml - CONTINUOUS INTEGRATION FOR THE POWERFRAMEWORK .NET 10 DECOMPOSITION
-#  ------------------------------------------------------------------------------------------------
-#  WHAT THIS WORKFLOW IS FOR, AND THE ONE THING IT MUST GET RIGHT
+#  .github/workflows/ci.yml
+#  CONTINUOUS INTEGRATION FOR THE POWERFRAMEWORK .NET 10 DECOMPOSITION
 #
-#  Constraint C-H of the Agent Action Plan requires 80 percent LINE coverage PER IN-SCOPE SERVICE,
-#  "evaluated per service rather than repository-wide so that one service's coverage cannot mask
-#  another's". That sentence is the whole design of the `service` job below: four independent matrix
-#  legs, four independent Cobertura reports, four independent verdicts, and no aggregation step
-#  anywhere. There is deliberately no repository-wide coverage number computed, published or gated on
-#  in this file, because computing one would invite gating on it.
+#  This is the ONLY workflow in the repository, and .github/workflows holds no other file. There is no
+#  second workflow, no reusable or called workflow, no composite action and no committed helper script.
+#  Everything the coverage gate needs is an inline `run:` step below, for exactly that reason.
+# --------------------------------------------------------------------------------------------------
 #
-#  AAP section 0.5.4.3 additionally specifies the shape: a four-service matrix running restore, a
-#  Release build, and test with coverage collection, enforcing the gate from the Cobertura report,
-#  then building one container image per in-scope service per build. Each of those is a job below.
+#  1. WHAT THIS WORKFLOW ASSERTS, AND THE ONLY NUMBER IT IS ALLOWED TO ASSERT
 #
-#  WHY `fail-fast: false` ON BOTH MATRICES IS PART OF THE REQUIREMENT RATHER THAN A CONVENIENCE
-#  With the default fail-fast, the first service to fall below the floor cancels the other three legs
-#  before they measure anything - so a run would report one failure and three unknowns, and a second
-#  service silently below the floor would stay invisible until the first was fixed. That is masking by
-#  another route. Disabling it makes every run produce all four verdicts.
+#  Four in-scope services, each restored, built in Release and tested with coverage collection in its
+#  own directory; a per-service 80 percent line-coverage gate read from that service's own Cobertura
+#  report; then one container image per in-scope service per build. Those four steps are the shape the
+#  Agent Action Plan specifies, and each is a job below.
 #
-#  THE FOUR IN-SCOPE SERVICES, AND ONLY THOSE
-#  gateway, dataservices, persistence, security. The four DEFERRED services - DesignSystem, Documents,
-#  Integration and ScriptBridge - appear nowhere in this file: no matrix entry, no job, no image, no
-#  environment variable and no secret. They have no project to build and no test to run, and adding a
-#  placeholder leg for one would be the partial implementation the requirements forbid.
+#  80 percent line coverage is the ONLY quantitative non-functional requirement in the entire brief.
+#  The repository publishes no service-level agreement, no latency budget, no throughput target and no
+#  availability commitment anywhere, so this file asserts none of those: there is no benchmark step, no
+#  timing assertion and no performance threshold. The `timeout-minutes` values are runaway-job guards,
+#  not performance budgets, and nothing here may be read as one.
 #
-#  WHAT IS DELIBERATELY ABSENT FROM THIS FILE
-#    * No repository-wide coverage aggregate. See above; this is the point of the file.
+#  2. PER SERVICE, NEVER REPOSITORY-WIDE - CONSTRAINT C-H IS THE DESIGN OF THIS FILE
+#
+#  C-H requires the gate be "evaluated per service rather than repository-wide so that one service's
+#  coverage cannot mask another's". That sentence is the whole design of the `service` job: four
+#  independent matrix legs, four independent Cobertura reports, four independent verdicts, and no
+#  aggregation step anywhere. There is deliberately no repository-wide coverage number computed,
+#  published or gated on in this file, because computing one would invite gating on it - and a
+#  repository aggregate would clear 80 percent while hiding a service with no tests at all, which is
+#  the exact outcome the requirement exists to prevent.
+#
+#  `fail-fast: false` on both matrices is part of that requirement rather than a convenience. With the
+#  default, the first service to fall below the floor cancels its siblings before they measure
+#  anything, so a run reports one failure and three unknowns and a second service below the floor
+#  stays invisible until the first is fixed. That is masking by another route.
+#
+#  3. THE FOUR IN-SCOPE SERVICES, AND ONLY THOSE - CONSTRAINT C-D
+#
+#  gateway-service, dataservices-service, persistence-service, security-service. Each name is
+#  simultaneously a matrix entry, the directory under services/ that holds it, the stem of the single
+#  .slnx in that directory, and the directory in the Dockerfile path. They are used verbatim below.
+#
+#  The four DEFERRED services - DesignSystem, Documents, Integration and ScriptBridge - appear nowhere
+#  in this file: no matrix entry, no job, no step, no image, no artifact, no environment variable and
+#  no secret. They have no project to build and no test to run, and a placeholder leg marked "ready for
+#  a later phase" would be precisely the partial implementation C-D forbids. The reserved port that the
+#  orchestration manifest leaves commented for one of them is likewise absent here: a reserved port is
+#  a comment in that manifest, not a CI concern.
+#
+#  4. THE LEGACY BUILD DEFINITIONS ARE REFERENCE FOR INTENT ONLY, AND NEITHER IS USABLE
+#
+#  This workflow's declared sources are the two PowerBuilder project objects,
+#  ws_objects/pfw.pbl.src/project.srj and ws_objects/pfw.pbl.src/p_pfw.srj. They were read for build
+#  intent and then set aside, because measurement shows neither would build as written:
+#
+#    * They disagree on library count. project.srj declares 29 `PBD:` lines and includes
+#      pfw.utility.sqlite.pbl; p_pfw.srj declares 28 and omits it. The 28 shared lines are otherwise
+#      byte-identical and identically ordered, so one is a stale copy of the other rather than a
+#      variant with a purpose.
+#    * They disagree on vendor. project.srj carries `COM:Appeon` with a matching `DES:`; p_pfw.srj
+#      carries `COM:Sybase, Inc.`. A build system cannot adjudicate that, and neither can this file.
+#    * BOTH end by declaring pfw.utility.imgcodec.pbl, which exists nowhere in the repository - a
+#      full-depth search returns zero matches. Each project object therefore names a library that
+#      cannot be found, which is why "neither would build as written" is a finding and not an opinion.
+#    * p_pfw.srj additionally embeds three developer-workstation absolute paths under a Windows drive
+#      letter, one of them naming a retired library that also exists nowhere in the repository.
+#
+#  Four rulings follow, and all four are binding on this file:
+#
+#    a. NO VERSION SCHEME IS DERIVED. The `1.0.0.1` literals in both project objects are meaningless
+#       here, and independently the repository carries ZERO Git tags across its entire history, so no
+#       release is marked anywhere. Image tags below are therefore derived ONLY from CI-provided
+#       values - the commit SHA, the run number and the ref name. No semantic version is invented, no
+#       version is read out of the legacy tree, and there is no `latest` tag: a moving pointer that
+#       names no CI coordinate is not a CI-provided value, and the orchestration manifest builds its
+#       images locally rather than pulling any tag from a registry, so nothing needs one.
+#    b. NO VENDOR OR COMPANY STRING IS DERIVED. The two project objects contradict each other, and
+#       assembly and product metadata belong to Directory.Build.props, which sets it once from the
+#       root LICENSE. This file sets none and must not.
+#    c. NO `LibList` OR `PBD:` ORDERING ANALOGUE EXISTS. PowerBuilder resolved one flat global
+#       namespace by library-list order; the .slnx format has no equivalent, and the .NET tree uses
+#       explicit namespaces with ProjectReference edges instead. So no ordering semantics carry into
+#       the solution or into this file: the order of the matrix legs below is presentational, the legs
+#       are independent, and nothing may be inferred from their sequence.
+#    d. EVERY PATH HERE IS REPOSITORY-ROOT-RELATIVE AND LINUX-APPROPRIATE. The drive-lettered paths in
+#       p_pfw.srj are the warning: they are why that project object stopped being buildable on any
+#       machine but one. No path in this file is absolute, carries a drive letter, or uses a backslash
+#       separator.
+#
+#  5. TOOLCHAIN FACTS THAT BREAK THE BUILD IF A READER MISSES THEM
+#
+#    * .NET 10 emits the XML `.slnx` solution format, and legacy `.slnf` solution FILTERS are
+#      incompatible with it: a hand-authored `.slnf` pointing at a `.slnx` fails with MSB4014 during
+#      restore, build AND test. There is no `.slnf` in this repository and none may be added. Build
+#      scoping is done by the per-service `.slnx` files, and EXACTLY ONE of them sits in each service
+#      directory - which is what lets the bare `dotnet restore`, `dotnet build` and `dotnet test`
+#      verbs below resolve it with no `-p`, `--project` or `-s` argument, and what makes each service
+#      genuinely buildable and testable on its own from a clean checkout (constraint C-I).
+#    * A BARE `dotnet test` BUILDS DEBUG even immediately after `dotnet build -c Release`. That is a
+#      documented nuance of the toolchain rather than a defect, and Directory.Build.props deliberately
+#      declines to paper over it so the documented per-service command behaves identically everywhere.
+#      Coverage measured against a Debug build is not coverage of the artifact the job just produced,
+#      so every test step below states `-c Release` explicitly.
+#    * TWO PACKAGE PINS IN Directory.Packages.props ARE WHAT MAKE `dotnet restore` WARNING-FREE, and
+#      the restore step below depends on both. Microsoft.OpenApi is pinned to 2.11.0 because the 2.0.0
+#      that Microsoft.AspNetCore.OpenApi pulls transitively raises the NU1903 vulnerability advisory,
+#      while moving to the current major line breaks compilation inside the SDK's own generated
+#      OpenAPI support; and SQLitePCLRaw.bundle_e_sqlite3 is pinned to 3.0.5 because the native
+#      library the EF Core SQLite provider pulls transitively raises NU1903 as well. Warnings are
+#      errors repository-wide, so an unpinned tree fails restore outright.
+#      THE RULE THAT FOLLOWS FROM THAT: if this workflow ever needs `NoWarn`, an audit suppression or
+#      a restore-skipping trick to go green, the PINS are wrong and the pins get fixed - never this
+#      file. Nothing here suppresses a warning, and `-warnaserror` is deliberately not passed either,
+#      because TreatWarningsAsErrors already lives in Directory.Build.props and restating it here
+#      would be a second declaration of one policy that could later disagree with the first.
+#    * NO PACKAGE FEED IS ADDED OR CONFIGURED. Every .NET package resolves from nuget.org and the one
+#      npm package from npmjs.org, so no feed credential exists in this project or is needed here.
+#
+#  6. THE CONTAINER BUILD CONTEXT IS THE REPOSITORY ROOT, AND THAT IS STRUCTURAL
+#
+#  Every image below is built with `.` as its context and `-f services/<service>/Dockerfile`. This is
+#  mandatory rather than stylistic: each service project reaches the shared libraries by
+#  ProjectReference, and MSBuild finds global.json, Directory.Build.props and Directory.Packages.props
+#  by walking up to the repository root. A service-directory context can reach none of those, and each
+#  Dockerfile copies all three by root-relative path. The orchestration manifest expresses the same
+#  thing as `context: ..` with `dockerfile: services/<service>/Dockerfile` because it sits one level
+#  down; this workflow runs at the root, so the equivalent is `.`.
+#
+#  The repository-root .dockerignore is what keeps that context honest. It excludes the read-only
+#  legacy tree, every compiled PowerBuilder library, the seven root native binaries, the frozen 12.5
+#  target, the redistribution libraries, the resource and sample trees and the legacy browser harness -
+#  tens of megabytes that no .NET build reads. It doubles as a secrets control, because most of the
+#  repository's in-source hardcoded-credential sites live inside regions it excludes.
+#
+#  7. WHAT IS DELIBERATELY ABSENT FROM THIS FILE
+#
+#    * No repository-wide coverage aggregate. See section 2; its absence is the point of the file.
 #    * No branch or method coverage threshold. C-H names a line-coverage floor and nothing else.
-#    * No secret of this project's own. The signing key, the mutual-TLS material and every
-#      credential live in the orchestration secret layer and reach a service through the options
-#      pattern; nothing here needs any of them, because nothing here starts a service. The only
-#      credential used is the automatically provisioned GITHUB_TOKEN, for the container registry.
-#    * No `docker compose up`. The compose bring-up and its health gates belong to a deployment
-#      check, and this environment's own record notes that the bring-up could not be exercised where
-#      this work was authored; asserting it here would be claiming a verification that has not
-#      happened. Container correctness is asserted by BUILDING each image, which this file does do.
-#    * No step that touches the read-only legacy tree. Nothing here restores, compiles, lints or
-#      rewrites ws_objects/**, a *.pbl, *.pbt, *.pbw, *.pbr, *.pbd or *.pbg file, or any of the seven
-#      root native binaries. The legacy tree is the behavioural oracle, never a build input.
-#    * No Playwright job. tests/e2e requires all four services running and a provisioned client
-#      identity; it is run against a deployed stack, and its documented install-and-run path lives in
-#      tests/e2e/README.md.
-#    * No performance, latency or throughput assertion. The repository publishes no such budget.
+#    * No secret of this project's own, and no secret literal of any kind. The signing key and every
+#      other credential live in the orchestration secret layer and reach a service through the
+#      options pattern; nothing here starts a service, so nothing here needs any of them. The only
+#      credential used at all is the automatically provisioned GITHUB_TOKEN, for the registry. The
+#      repository's known in-source hardcoded-secret sites are catalogued in docs/SECRETS.md, are
+#      read-only legacy oracle content, and no value from any of them appears here in any form.
+#    * No secret-scanning step. It could only be scoped by exempting the legacy sites it would
+#      otherwise flag on every run, and a scanner that has to be taught to ignore the oracle teaches
+#      readers to ignore the scanner. The catalogue in docs/SECRETS.md is the control instead.
+#    * No `docker compose up`, and no health probing. Bringing the stack up is a deployment check;
+#      asserting it here would claim a verification this workflow does not perform. What it does
+#      perform is BUILDING each image, which is what proves each container definition.
+#    * No step that touches the read-only legacy tree. Nothing here restores, compiles, lints, moves,
+#      cleans or rewrites the exported PowerBuilder sources, any compiled library or target file, or
+#      any root native binary, and no PowerBuilder toolchain is invoked - the .NET tree depends on
+#      none of it. The legacy tree is the behavioural oracle, never a build input.
+#    * No step that writes to the repository. Nothing commits, pushes back, edits a tracked file or
+#      alters .gitignore - which, verified, does not ignore bin, obj or TestResults, so build output
+#      must never reach a commit. All writing is confined to the runner's ephemeral workspace.
+#    * No Playwright or end-to-end job. It needs all four services running and a provisioned client
+#      identity, so it belongs against a deployed stack; its documented install-and-run path lives
+#      with the specs themselves.
+#    * No `continue-on-error` and no swallowed exit code anywhere. Every failure is loud.
+#
+#  8. HONEST LIMITATION, STATED RATHER THAN LEFT TO BE DISCOVERED
+#
+#  This workflow has not run on a GitHub-hosted runner. Rather than leave that as a blanket caveat,
+#  here is exactly which of its parts have been executed and which have only been read.
+#
+#  EXERCISED DIRECTLY, on a real SDK 10.0.302 host, by running these steps' own commands:
+#    * The per-service path for all four services - restore, Release build, coverage-collecting test -
+#      each reporting 0 Warning(s) and 0 Error(s), every test passing, and a coverage.cobertura.xml
+#      produced under a collector-chosen subdirectory that the gate then found by search.
+#    * The coverage gate itself, extracted verbatim from this file and run against all four real
+#      reports plus constructed ones. It passes for all four services and fails correctly when the
+#      floor is raised above a measured rate, when handed an unfiltered report, when handed a report
+#      for the wrong assembly, when handed two reports at once, and when handed none.
+#    * The solution job's whole-tree Release build and every shared and contracts test suite.
+#    * The container build this file performs for ALL FOUR services - `docker build` with the
+#      repository root as the context and each service's own Dockerfile - all four producing an image.
+#    * The restore steps, confirmed to emit no NuGet audit warning at all, which is what makes the
+#      no-suppression rule in section 5 a fact about this build rather than an aspiration.
+#
+#  READ AND REVIEWED BUT NOT EXECUTED: the registry authentication and the image push, the artifact
+#  upload, and the behaviour of the pinned action versions on a hosted runner. Those remain the least
+#  proven part of this file, which is why their failure is made loud, why the verdict job inspects
+#  each leg's RESULT rather than trusting `needs`, and why no step assumes an image step succeeded.
 # ==================================================================================================
 
 name: CI
@@ -55,10 +195,12 @@ on:
   pull_request:
     branches:
       - master
-  # Manual runs, so the gate can be re-measured without a commit.
+  # Manual runs, so the gate can be re-measured without a commit. Nothing here runs on a schedule:
+  # there is no periodic assertion this workflow makes that a push does not.
   workflow_dispatch:
 
-# Read-only by default. The one job that needs more says so for itself.
+# Read-only by default, at the floor. The single job that needs more raises it for itself, and only
+# for itself.
 permissions:
   contents: read
 
@@ -76,20 +218,27 @@ env:
   # source paths embedded in every assembly. GitHub Actions sets CI itself; it is restated here so the
   # behaviour is legible from this file rather than inherited invisibly.
   CI: 'true'
-  # The single source of truth for the gate. C-H says 80 percent; it is written once, here.
+  # The single source of truth for the gate. C-H says 80 percent; it is written once, here, and read
+  # by all four service legs so they cannot drift apart.
   COVERAGE_MINIMUM_LINE_RATE: '0.80'
 
 jobs:
 
   # ================================================================================================
-  #  THE ROOT LEG - the whole solution, and the ten test projects the per-service gate does not cover
+  #  THE SOLUTION LEG - the whole tree, and the shared test projects the per-service gate does not
+  #  measure
   #
-  #  The service gate deliberately measures ONLY the four service assemblies, so the six shared
-  #  libraries and the generated contracts project are outside it. They are not therefore unchecked:
-  #  this job builds every project in the repository solution and runs the six shared test projects
-  #  and the contracts test project. Holding a service's coverage number hostage to a shared
-  #  library's would be the masking C-H forbids, in the other direction - but leaving those projects
-  #  unbuilt and untested would be worse.
+  #  The per-service gate deliberately measures ONLY the four service assemblies (see the `service`
+  #  job), so the six shared libraries and the published contracts project fall outside it. They are
+  #  not thereby unchecked: this job builds every project in the repository solution and runs the
+  #  shared and contracts test suites, which no per-service .slnx enumerates.
+  #
+  #  It does NOT replace the per-service legs and its coverage substitutes for none of theirs. C-I
+  #  requires each service be provably buildable and testable ON ITS OWN from a clean checkout, and a
+  #  root build proves the opposite of that - it proves the tree builds when everything is present.
+  #  Holding a service's coverage number hostage to a shared library's would also be the masking C-H
+  #  forbids, in the other direction; leaving those projects unbuilt and untested would be worse than
+  #  either.
   # ================================================================================================
   solution:
     name: Solution build and shared library tests
@@ -103,22 +252,28 @@ jobs:
       - name: Install the pinned .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          # Read from global.json rather than restated, so the SDK cannot drift from the pin the
-          # repository already declares.
+          # Read from global.json rather than restated, so the SDK version cannot drift from the pin
+          # the repository already declares. No version literal appears anywhere in this file.
           global-json-file: global.json
 
+      # This is the audit gate. Warnings are errors repository-wide, so an advisory against any
+      # resolved package fails HERE - which is the behaviour the two pins recorded in section 5 of the
+      # header exist to keep clean. Nothing downstream suppresses it.
       - name: Restore the repository solution
         run: dotnet restore PowerFramework.slnx
 
-      # Warnings are errors repository-wide through Directory.Build.props, so a warning fails here.
-      # Directory.Build.props also carries the PFW0001 assertion target, which fails the build if any
-      # referenced project output arrives from a configuration other than the one being built - so
-      # this step additionally proves no Release artifact consumes a Debug assembly.
+      # `--no-restore` is not a workaround and suppresses nothing: the step above performed a full
+      # restore whose warnings already had to be clean for the job to reach here, and skipping the
+      # redundant second restore keeps that gate in exactly one place. Directory.Build.props also
+      # carries a build assertion that fails if any referenced project output arrives from a
+      # configuration other than the one being built, so this step additionally proves no Release
+      # artifact consumes a Debug assembly.
       - name: Build the repository solution in Release
-        run: dotnet build PowerFramework.slnx --configuration Release --no-restore
+        run: dotnet build PowerFramework.slnx -c Release --no-restore
 
-      # The six shared test projects plus the contracts test project, named individually rather than
-      # discovered, so that a project silently dropped from the solution cannot silently stop running.
+      # Named individually rather than discovered, so a project silently dropped from the solution
+      # cannot silently stop being tested. `--no-build` guarantees these run against exactly the
+      # Release assemblies built above.
       - name: Test the shared libraries and the published contracts
         run: |
           set -euo pipefail
@@ -130,25 +285,43 @@ jobs:
             shared/PowerFramework.Shared.Containers.Tests \
             shared/PowerFramework.Contracts.Tests ; do
             echo "::group::${project}"
-            dotnet test "${project}" --configuration Release --no-build
+            dotnet test "${project}" -c Release --no-build
             echo "::endgroup::"
           done
 
   # ================================================================================================
   #  THE PER-SERVICE LEG - four independent builds, four independent coverage gates
   #
-  #  Each leg runs the documented per-service command shape from AAP section 0.8.3 and the attached
-  #  environment's setup instructions, which must keep working with no extra argument: change into the
-  #  service directory, restore, build in Release, test with the coverage collector. Exactly one
-  #  .slnx sits in each service directory, which is what lets the bare commands resolve it and is what
-  #  makes each service genuinely buildable and testable on its own (constraint C-I).
+  #  Each leg runs the documented per-service command shape, which the attached environment's setup
+  #  instructions make a binding operational constraint (C-L) and which must keep working with no
+  #  extra argument: change into the service directory, restore, build in Release, test with the
+  #  coverage collector. Exactly one .slnx sits in each service directory, which is what lets those
+  #  bare verbs resolve it with no `-p`, `--project` or `-s`, and is what makes each service genuinely
+  #  buildable and testable on its own (C-I).
   #
-  #  The only addition to that shape is `--settings`, pointing at the repository-root
-  #  coverage.runsettings. That file scopes the report to the four service assemblies; without it the
-  #  report also covers the shared libraries and the thousands of generated protobuf sequence points
-  #  in PowerFramework.Contracts, and the top-level line rate reads between 13 and 51 percent for
-  #  services whose own assemblies are all above 88. The file itself carries those measurements and
-  #  the full reasoning.
+  #  THE LEG ORDER BELOW CARRIES NO MEANING. The legs are independent and run concurrently; ruling (c)
+  #  in section 4 of the header applies - there is no library-list ordering analogue to preserve, so
+  #  nothing may be inferred from the sequence.
+  #
+  #  COVERAGE MEASUREMENT SCOPE, DECIDED ONCE AND IDENTICAL ACROSS ALL FOUR LEGS: the gate measures
+  #  THE SERVICE'S OWN ASSEMBLY, filtered from the report, and not the whole report as produced. The
+  #  filter is applied at collection time by the repository-root coverage.runsettings, which scopes the
+  #  collector to the four service assemblies and excludes the test assemblies; the gate then asserts
+  #  that what came back is that one assembly and nothing else.
+  #
+  #  WHY THAT SCOPE AND NOT THE WHOLE REPORT. Each per-service .slnx lists only the application and its
+  #  test project, but the shared libraries and the generated protocol stubs arrive transitively by
+  #  ProjectReference, so an unscoped collector instruments those too. Measured, not reasoned about:
+  #  scoped to its own assembly every one of the four services reads comfortably above the floor, while
+  #  the SAME gateway-service run collected without the settings file reports five packages and 23.91
+  #  percent overall - against that service's own 88.83 percent - because the four extra packages are
+  #  shared and generated code that no gateway test exercises and that the lowest of them covers under
+  #  3 percent of. An unscoped gate would therefore fail all four services over code none of them owns,
+  #  while saying nothing at all about the code they do own. Those excluded projects are not left
+  #  unchecked: the `solution` job above builds and tests every one of them.
+  #
+  #  Whichever way the scope is drawn, the gate stays PER SERVICE: it is computed from one service's
+  #  own run and never aggregated with another's.
   # ================================================================================================
   service:
     name: ${{ matrix.service }} build, test and coverage gate
@@ -156,19 +329,19 @@ jobs:
     timeout-minutes: 40
 
     strategy:
-      # Never cancel a sibling leg. See the header: cancelling turns three verdicts into unknowns and
-      # lets a second service below the floor hide behind the first.
+      # Never cancel a sibling leg. See section 2 of the header: cancelling turns three verdicts into
+      # unknowns and lets a second service below the floor hide behind the first.
       fail-fast: false
       matrix:
         include:
-          - service: persistence-service
-            assembly: PowerFramework.Persistence
-          - service: dataservices-service
-            assembly: PowerFramework.DataServices
-          - service: security-service
-            assembly: PowerFramework.Security
           - service: gateway-service
             assembly: PowerFramework.Gateway
+          - service: dataservices-service
+            assembly: PowerFramework.DataServices
+          - service: persistence-service
+            assembly: PowerFramework.Persistence
+          - service: security-service
+            assembly: PowerFramework.Security
 
     steps:
       - name: Check out the repository
@@ -179,23 +352,28 @@ jobs:
         with:
           global-json-file: global.json
 
+      # The audit gate for this leg, for the reason given on the solution job's restore step.
       - name: Restore ${{ matrix.service }}
         working-directory: services/${{ matrix.service }}
         run: dotnet restore
 
       - name: Build ${{ matrix.service }} in Release
         working-directory: services/${{ matrix.service }}
-        run: dotnet build --configuration Release --no-restore
+        run: dotnet build -c Release --no-restore
 
-      # Release, not the default Debug. A bare `dotnet test` builds Debug even immediately after a
-      # Release build - a documented nuance of the toolchain rather than a defect - and coverage
-      # measured against a Debug build is not coverage of the artifact this job just produced.
-      # --no-build then guarantees the tests run against exactly the assemblies built above.
+      # `-c Release` is stated because a bare `dotnet test` builds Debug even immediately after a
+      # Release build - the toolchain nuance recorded in section 5 of the header - and coverage
+      # measured against a Debug build is not coverage of the artifact this leg just produced.
+      # `--no-build` then guarantees the tests run against exactly the assemblies built above rather
+      # than triggering a second, differently configured compilation.
+      # `--settings` carries the measurement scope decided in the job header. `--results-directory`
+      # puts the report at a known root-relative location per service; the collector still writes it
+      # into a GUID-named subdirectory of its own, which the gate discovers rather than assumes.
       - name: Test ${{ matrix.service }} with coverage collection
         working-directory: services/${{ matrix.service }}
         run: |
           dotnet test \
-            --configuration Release \
+            -c Release \
             --no-build \
             --settings "${GITHUB_WORKSPACE}/coverage.runsettings" \
             --collect:"XPlat Code Coverage" \
@@ -204,13 +382,19 @@ jobs:
       # THE GATE. Three things are checked, and the second and third are what make the first
       # trustworthy rather than merely plausible:
       #   1. the report's line rate is at or above the floor;
-      #   2. the report contains EXACTLY ONE package, which proves the runsettings filter applied -
-      #      an unfiltered report would carry five to seven packages and a much lower rate;
-      #   3. that package is this service's own assembly, which proves the leg measured the service
-      #      it claims to.
-      # Without 2 and 3, a filter that silently stopped matching would turn the gate into a pass for
-      # whatever happened to be measured instead.
+      #   2. the report contains EXACTLY ONE package, which proves the scope filter applied - an
+      #      unscoped report carries several packages instead of one and a far lower rate;
+      #   3. that package is this service's own assembly, which proves the leg measured the service it
+      #      claims to.
+      # Without 2 and 3 a filter that silently stopped matching would turn the gate into a pass for
+      # whatever happened to be measured instead. The report is located by search rather than by a
+      # hardcoded path, because the collector names its own subdirectory with a fresh GUID every run.
+      # The matrix values reach the script through the environment rather than by template expansion
+      # into its source, so the script cannot be rewritten by what it is asked to measure.
       - name: Enforce the 80 percent line coverage floor for ${{ matrix.assembly }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          ASSEMBLY: ${{ matrix.assembly }}
         run: |
           set -euo pipefail
           python3 - <<'PYTHON'
@@ -237,7 +421,7 @@ jobs:
                   f'one was expected, so it is ambiguous which one the gate should read: {reports}')
 
           root = ElementTree.parse(reports[0]).getroot()
-          packages = [package.get("name") for package in root.iter("package")]
+          packages = [package.get('name') for package in root.iter('package')]
 
           if packages != [assembly]:
               sys.exit(
@@ -260,12 +444,14 @@ jobs:
 
           print(f'{service}: coverage gate PASSED')
           PYTHON
-        env:
-          SERVICE: ${{ matrix.service }}
-          ASSEMBLY: ${{ matrix.assembly }}
 
       # Kept whatever the verdict, because the report is the evidence for it. `if: always()` means a
-      # failing gate still publishes the numbers that explain the failure.
+      # failing gate still publishes the numbers that explain the failure. It is not
+      # `continue-on-error`: the gate's own exit status still decides the leg.
+      # `if-no-files-found: warn` swallows nothing either. A missing report is already FATAL, at the
+      # gate step above, which fails the leg before this step runs; the only way to reach here with no
+      # file is a leg that failed earlier still, and turning that into a second failure here would
+      # report an upload problem where the real fault was the build or the tests.
       - name: Publish the ${{ matrix.service }} coverage report
         if: always()
         uses: actions/upload-artifact@v4
@@ -276,27 +462,35 @@ jobs:
           retention-days: 14
 
   # ================================================================================================
-  #  THE IMAGE LEG - one container image per in-scope service per build
+  #  THE IMAGE LEG - exactly one container image per in-scope service per build
   #
-  #  Four images, four Dockerfiles, no shared image and no combined one: the fused single-executable
-  #  artifact the legacy PowerBuilder project objects declare is exactly what this decomposition
-  #  replaces.
+  #  Four images, four Dockerfiles, no shared image and no combined one. The single fused executable
+  #  that both legacy project objects declare is precisely what this decomposition replaces, so a
+  #  combined artifact here would undo the thing being built. Each Dockerfile owns the multi-stage
+  #  SDK-to-ASP.NET-runtime shape and the non-root user; this job's job is to build it and publish it.
   #
-  #  The build context is the REPOSITORY ROOT for every one of them, which is structural rather than
-  #  stylistic: each service project references the shared projects three levels up and MSBuild finds
-  #  Directory.Build.props, Directory.Packages.props and global.json by walking up to the root. The
-  #  repository-root .dockerignore is what keeps the legacy tree, the native binaries and every bin/
-  #  and obj/ directory out of that context.
+  #  One image does not mean one tag. Each build below produces ONE image and gives it several names,
+  #  all of them derived only from CI-provided values, per ruling (a) in section 4 of the header.
+  #
+  #  THE BUILD CONTEXT IS THE REPOSITORY ROOT for every one of them, for the structural reason set out
+  #  in section 6 of the header, and the repository-root .dockerignore is what keeps that context from
+  #  carrying the legacy tree.
   #
   #  PUBLISHING USES THE AUTOMATICALLY PROVISIONED TOKEN AND NO DECLARED SECRET. Images go to the
-  #  GitHub container registry authenticated with GITHUB_TOKEN, which is why this job raises
-  #  `packages: write` and the rest of the workflow stays read-only. A push happens only for a push
-  #  event on the default branch: for a pull request the token is not writable for a fork, so those
-  #  runs BUILD every image - which is the part that verifies the Dockerfile - and push none.
+  #  GitHub container registry authenticated with GITHUB_TOKEN, which is why this job - and only this
+  #  job - raises `packages: write` while the rest of the workflow stays read-only. A push happens only
+  #  for a push event: on a pull request from a fork that token cannot write, so those runs BUILD every
+  #  image, which is the assertion that matters for a change under review, and push none.
   #
-  #  It depends on `service` so that an image is only produced for a service whose tests and coverage
-  #  gate have already passed. Publishing an image that failed its own gate would be worse than
-  #  publishing nothing.
+  #  THE THIRD-PARTY ACTIONS BELOW ARE PINNED TO A COMMIT, not to a tag, because a tag can be moved to
+  #  point at different code after review. The first-party `actions/*` steps elsewhere in this file are
+  #  referenced at a fixed major version, which is their supported contract. Each pin carries the
+  #  release it resolves to in a trailing comment so the intent stays readable.
+  #
+  #  It depends on `service`, so an image is only produced for a service whose tests and coverage gate
+  #  have already passed. Publishing an image that failed its own gate would be worse than publishing
+  #  nothing. This is also the least-proven part of the workflow - see section 8 of the header - so
+  #  nothing here is allowed to fail quietly and no later step assumes it succeeded.
   # ================================================================================================
   image:
     name: ${{ matrix.service }} container image
@@ -311,52 +505,85 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The same four in-scope services, in the same presentational order, carrying no ordering
+        # semantics for the reason given on the `service` job.
         service:
-          - persistence-service
-          - dataservices-service
-          - security-service
           - gateway-service
+          - dataservices-service
+          - persistence-service
+          - security-service
 
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Authenticate to the container registry
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # The repository name is lowercased because a registry reference must be, while a GitHub
-      # repository name need not be.
-      - name: Compute the image reference
+      # Every value written here comes from the run itself: the repository, the ref name and the run
+      # number. Nothing is read from the legacy tree and no version is invented - the repository
+      # carries zero Git tags, so there is no version to read.
+      - name: Compute the image reference and its CI-derived tags
         id: reference
+        env:
+          SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
-          owner_and_repo="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
-          echo "image=ghcr.io/${owner_and_repo}/${{ matrix.service }}" >> "${GITHUB_OUTPUT}"
+
+          # A registry reference must be lowercase; a GitHub repository name need not be.
+          repository="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${repository}/${SERVICE}"
+
+          # A container tag admits only [A-Za-z0-9_.-] and may not begin with a dot or a dash, while a
+          # Git ref name may contain a slash and much else. Every character outside the admitted set
+          # becomes a dash, and a disallowed first character is PREFIXED rather than stripped so that
+          # two different refs cannot collapse onto one tag.
+          ref_tag="$(printf '%s' "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9_.-' '-')"
+          case "${ref_tag}" in
+            [A-Za-z0-9_]*) ;;
+            *) ref_tag="ref-${ref_tag}" ;;
+          esac
+          ref_tag="${ref_tag:0:100}"
+
+          {
+            echo "image=${image}"
+            echo "ref_tag=${ref_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "${image} will be tagged ${GITHUB_SHA}, ${ref_tag}, ${ref_tag}-${GITHUB_RUN_NUMBER}"
 
       - name: Build and publish the ${{ matrix.service }} image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
-          # The repository root, for the reason recorded in the job header and in each Dockerfile.
+          # The repository root, for the reason recorded in section 6 of the header and in each
+          # Dockerfile. The orchestration manifest expresses the identical context as `..` because it
+          # sits one directory down.
           context: .
           file: services/${{ matrix.service }}/Dockerfile
           # Build always; push only where the token can write. A pull-request run still proves the
           # Dockerfile builds, which is the assertion that matters for a change under review.
           push: ${{ github.event_name == 'push' }}
+          # One image, three names, all of them CI coordinates: the commit that produced it, the ref
+          # it was produced from, and that ref qualified by the run number so repeated runs of one
+          # commit stay distinguishable. No `latest`, and no semantic version - see ruling (a).
           tags: |
             ${{ steps.reference.outputs.image }}:${{ github.sha }}
-            ${{ steps.reference.outputs.image }}:latest
+            ${{ steps.reference.outputs.image }}:${{ steps.reference.outputs.ref_tag }}
+            ${{ steps.reference.outputs.image }}:${{ steps.reference.outputs.ref_tag }}-${{ github.run_number }}
           # Provenance and SBOM attestation are left at their defaults rather than switched on: no
           # requirement in this refactor asks for either, and enabling them changes what is published.
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          # No build cache is configured either. A cache is a build-time optimization, this refactor
+          # asserts no performance property, and adding a cache backend to the one job whose behaviour
+          # on a hosted runner is reviewed rather than exercised would put an unproven dependency
+          # inside an unproven step. Correct and legible beats fast here.
 
   # ================================================================================================
   #  THE VERDICT - one required status for the whole workflow
@@ -364,7 +591,8 @@ jobs:
   #  A branch protection rule can require this single job instead of enumerating every matrix leg,
   #  which matters because `fail-fast: false` means a failing leg does not stop the others: without
   #  this job a run could finish with a red leg and still present a green overall picture to anything
-  #  that only watches for completion.
+  #  that only watches for completion. That is the same masking C-H forbids, arriving through the
+  #  status API instead of through a coverage number.
   #
   #  It inspects the RESULT of each dependency rather than relying on `needs` alone, because a
   #  cancelled or skipped dependency is not a success and `needs` on its own would let one through.
@@ -381,17 +609,21 @@ jobs:
 
     steps:
       - name: Require every leg to have succeeded
+        env:
+          SOLUTION_RESULT: ${{ needs.solution.result }}
+          SERVICE_RESULT: ${{ needs.service.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
         run: |
           set -euo pipefail
-          solution_result='${{ needs.solution.result }}'
-          service_result='${{ needs.service.result }}'
-          image_result='${{ needs.image.result }}'
 
-          echo "solution=${solution_result}  service=${service_result}  image=${image_result}"
+          echo "solution=${SOLUTION_RESULT}  service=${SERVICE_RESULT}  image=${IMAGE_RESULT}"
 
           failed=0
-          for pair in "solution:${solution_result}" "service:${service_result}" "image:${image_result}" ; do
-            name="${pair%%:*}"
+          for pair in \
+            "solution build:${SOLUTION_RESULT}" \
+            "per-service build, test and coverage gate:${SERVICE_RESULT}" \
+            "container image:${IMAGE_RESULT}" ; do
+            name="${pair%:*}"
             result="${pair##*:}"
             if [ "${result}" != "success" ]; then
               echo "::error::The ${name} leg reported '${result}' rather than 'success'."
