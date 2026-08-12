@@ -11,8 +11,9 @@
 //  WHY THIS FILE EXISTS AT ALL. TransactionData.cs states, in the remarks on the type itself, that
 //  "verification of the write-only rule is mandatory and must be a test rather than a claim", and
 //  then enumerates the assertions the sibling test project must make. That obligation is discharged
-//  here and nowhere else. The six suites below are, in the type's own order:
+//  here and nowhere else. The seven suites below are, in the type's own order:
 //
+//    0  The cleared state, the NINE-MEMBER CENSUS and the DECLARATION ORDER that is a wire contract.
 //    1  ToString() never discloses the password - directly, and after the operation that MOVES it.
 //    2  System.Text.Json carries neither the NAME nor the VALUE of the three ignored members.
 //    3  A member can participate FULLY in equality and NOT AT ALL in rendering, simultaneously.
@@ -20,28 +21,102 @@
 //    5  The four-cell veto-and-diagnostic matrix, including the cell that proves 2 does not veto.
 //    6  The DBParm flag matrix, including the nesting case that makes NCharBind=1 alone inert.
 //
-//  EVERY VALUE IN THIS FILE IS SYNTHETIC AND IS INVENTED HERE (C-F). Not one password, account
-//  name, host name, connection string or parameter fragment is copied from the legacy tree, from
-//  any of the eight catalogued in-source secret sites, or from any real system. The password-shaped
-//  constants below are deliberately spelled so that they could not be mistaken for a credential and
-//  so that a search of the repository finds them only in this file. They exist to be searched FOR in
-//  rendered and serialized output - a test that asserts a secret is absent needs a distinctive
-//  needle, and inventing the needle is the only way to have one without importing a real secret.
+//  ================ THE NINE-MEMBER ORDER IS A WIRE CONTRACT, NOT A STYLE CHOICE (C-K) =============
+//  THE OBLIGATION THIS FILE CARRIES, STATED SO IT CANNOT BE MISREAD AS COSMETIC. The oracle declares
+//  nine fields in one specific sequence [transactiondata.srs:L4-L12] and contract C-08 mirrors that
+//  sequence POSITIONALLY, declaring `dbms = 1` through `userparm = 9` in exactly the same order
+//  [shared/PowerFramework.Contracts/Proto/persistence.v1.proto, message TransactionDescriptor]. A
+//  protobuf field number IS the wire identity of a field: renumber it and every previously encoded
+//  message decodes into the wrong slot. So REORDERING THE PORTED TYPE'S MEMBERS - alphabetically, or
+//  by grouping the credential-bearing ones, or by moving the lone boolean last where a C# author
+//  would naturally put it - DESYNCHRONIZES the type, the wire contract and the oracle at once, and
+//  NOTHING IN THE BUILD WOULD NOTICE, because C# resolves members by name and never by position.
 //
-//  NO DATABASE, NO CONNECTION, NO DataWindow AND NO NETWORK IS INVOLVED ANYWHERE IN THIS FILE. The
-//  subject is an immutable value type; the two accessors take hooks, which are supplied here as
-//  local delegates. That is the whole environment these suites need.
+//  Suite 0 is therefore the only mechanism that can catch it, and it asserts the correspondence in
+//  BOTH available directions: reflectively over the C# type's own declaration order, and against the
+//  generated descriptor's field numbers. The sibling TransactionServiceTests pins the PROTO order on
+//  its own; what is pinned HERE is the CORRESPONDENCE between the ported type and that order, which
+//  is the claim TransactionData.cs makes in its FIELD-ORDER AUDIT block and which no other test in
+//  the repository covers.
+//  ==========================================================================================
 //
-//  THE ORACLE'S DEFECTS ARE ASSERTED AS BEHAVIOUR, NOT FLAGGED AS BUGS (C-B). Three of them are
-//  pinned below on purpose and must not be "fixed" in the subject to make a test read better: the
-//  veto test is a literal equality against 1 so a deep prevention of 2 does NOT veto; a vetoed
-//  inbound call reports SUCCESS while writing nothing; and the parameterless outbound overload
-//  DISCARDS the return code so a failure is invisible through it.
+//  EVERY VALUE IN THIS FILE IS SYNTHETIC, AND WITH ONE DOCUMENTED EXCEPTION IS INVENTED HERE (C-F).
+//  Not one password, account name, host name, connection string or parameter fragment is copied from
+//  the legacy tree, from any of the eight catalogued in-source secret sites, or from any real system.
+//  The password-shaped constants below are deliberately spelled so that they could not be mistaken
+//  for a credential and so that a search of the repository finds them only in this file. They exist
+//  to be searched FOR in rendered and serialized output - a test that asserts a secret is absent
+//  needs a distinctive needle, and inventing the needle is the only way to have one without
+//  importing a real secret. The single exception is the DBMS identifier, immediately below, and it is
+//  an exception in the opposite direction: it is not invented BECAUSE it must not be.
+//
+//  THE ONE DELIBERATE EXCEPTION TO "INVENTED HERE" IS THE DBMS IDENTIFIER, AND IT IS AN EXCEPTION
+//  BECAUSE C-E REQUIRES IT. No fabricated database means no fabricated DIALECT either, so the two
+//  DBMS identifiers below are not invented: they are read off the generated contract enum members
+//  for the ONLY TWO database types the repository evidences - DBT_MSSQL and DBT_ORACLE
+//  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61; persistence.v1.proto, enum
+//  DatabaseType]. Reading them off the generated members rather than typing them out also discharges
+//  AAP 0.7.2's instruction for this file - declare no SCREAMING_SNAKE identifier here, reference the
+//  generated DBT_* / AC_* members instead - so this file declares no such identifier of its own.
+//
+//  NO DATABASE, NO CONNECTION, NO DataWindow AND NO NETWORK IS INVOLVED ANYWHERE IN THIS FILE (C-E).
+//  The subject is an immutable value type; the two accessors take hooks, which are supplied here as
+//  local delegates. That is the whole environment these suites need. A DBMS identifier is only ever
+//  a value the descriptor CARRIES - nothing here composes a connection string, selects a provider,
+//  resolves a dialect or performs any I/O, and the dialect-resolution rule the identifier feeds is
+//  deliberately implemented one layer away, under Sql/Paging/.
+//
+//  NO PERFORMANCE PROPERTY IS ASSERTED ANYWHERE IN THIS FILE (AAP 0.8.5). There is no timing, no
+//  throughput and no allocation assertion, because the repository publishes no latency budget, no
+//  throughput target and no availability commitment against which such a claim could be made.
+//
+//  THE ORACLE'S DEFECTS AND ODDITIES ARE ASSERTED AS BEHAVIOUR, NOT FLAGGED AS BUGS (C-B). Six are
+//  pinned below on purpose and none may be "fixed" in the subject to make a test read better:
+//
+//    * the veto test is a LITERAL EQUALITY against 1, so a deep prevention of 2 does NOT veto, even
+//      though the very next function in the same legacy object uses the prevention predicate [:L429];
+//    * a vetoed inbound call reports SUCCESS while writing nothing, so a caller cannot tell a vetoed
+//      call from a completed one by its return value alone [:L343];
+//    * the diagnostic slot is inspected TWICE, once inside the veto arm and once after it, and
+//      collapsing them changes the outcome for a hook that vetoes AND reports [:L405, :L408];
+//    * the parameterless outbound overload DISCARDS the return code, so a failure is invisible
+//      through it [:L397];
+//    * NCharBind is NESTED inside DisableBind, so NCharBind=1 alone is legal and entirely inert -
+//      see the C-B block on suite 6 [n_cst_thread_task_sqlbase.sru:L127-L132];
+//    * the two flag patterns are UNANCHORED and their comparison is TEXTUAL against "1", so a longer
+//      keyword still matches and "=10" is true while "=2" is false.
+//
+//  Each is annotated at the point it is asserted, with the oracle line it came from, so that a future
+//  reader cannot mistake any of them for a defect in this suite.
+//
+//  RULES POSITION
+//  --------------------------------------------------------------------------------------------
+//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
+//  governs this file. That is a FINDING, not latitude: nothing is invented or back-filled from
+//  convention in its place, no assertion here exists because a coding guideline demanded it, and the
+//  absence is not treated as permission to test less. The enterprise-standard baseline applies
+//  instead - nullable reference types on, warnings as errors in test code exactly as in application
+//  code, no secret in source, every claim deterministic and reproducible with no clock, no network
+//  and no database - and the binding constraints are the refactor plan's own non-rule inventory, of
+//  which C-B, C-E, C-F, C-H and C-K bite on this file and are each discharged at the point they are
+//  cited above. The sibling GlobalUsings.cs, TransactionData.cs and persistence-service.slnx record
+//  the identical position, and this file states it too rather than relying on theirs, because a
+//  reader auditing THIS file should not have to open another to learn which rules applied.
+//
+//  ORACLE STATUS
+//  --------------------------------------------------------------------------------------------
+//  Every ws_objects/** path named in this file is READ ONLY (constraint C-C). Each was read as
+//  specification and is cited by locator; nothing here copies, reformats, moves, edits or deletes any
+//  of them, and no test in this file loads, parses or executes any legacy artifact. The legacy tree
+//  is the only statement of intended behaviour that exists for this structure, which is why every
+//  behavioural expectation below carries the :L line reference it was taken from.
 // ==============================================================================================
 
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+
+using Google.Protobuf.Reflection;
 
 using PowerFramework.Persistence.Transactions;
 
@@ -75,8 +150,39 @@ public sealed class TransactionDataTests
     /// <summary>The user parameter needle.</summary>
     private const string SyntheticUserParm = "NEEDLE-userparm-R2T6-synthetic";
 
-    /// <summary>A synthetic DBMS identifier. Deliberately not any real provider's spelling.</summary>
-    private const string SyntheticDbms = "SYNTHETIC-DBMS-A1";
+    /// <summary>
+    /// The DBMS identifier used throughout, and the ONE value in this file that is NOT invented here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// C-E FORBIDS FABRICATING A DATABASE, AND THAT EXTENDS TO FABRICATING A DIALECT. The repository
+    /// evidences exactly two database types and no more - <c>DBT_MSSQL = 0</c> and
+    /// <c>DBT_ORACLE = 1</c> [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61] - and
+    /// the published contract mirrors that with a two-member enum and no third value. So rather than
+    /// invent a provider spelling, this fixture takes the identifier from the generated contract
+    /// member for the first of the two, through <see cref="EvidencedDatabaseTypeName"/>.
+    /// </para>
+    /// <para>
+    /// It also discharges AAP 0.7.2's instruction for this file: declare no SCREAMING_SNAKE
+    /// identifier, reference the generated <c>DBT_*</c> / <c>AC_*</c> members instead. The text
+    /// <c>DBT_MSSQL</c> appears in this assembly's output only because the generated member carries
+    /// it, never because this file declared it.
+    /// </para>
+    /// <para>
+    /// NOTHING RESOLVES A DIALECT FROM IT HERE. The legacy selector is a substring test on the
+    /// upper-cased identifier [<c>:L356-L361</c>], and the port deliberately implements that one layer
+    /// away under <c>Sql/Paging/</c> rather than on the descriptor, so this value is only ever
+    /// carried, rendered and compared. No connection is opened.
+    /// </para>
+    /// </remarks>
+    private static readonly string EvidencedDbms = EvidencedDatabaseTypeName(DatabaseType.DbtMssql);
+
+    /// <summary>
+    /// The OTHER evidenced database type, used to prove that a descriptor distinguishes the two
+    /// dialects the repository actually has - and that there is no third one to exercise.
+    /// </summary>
+    private static readonly string EvidencedOtherDbms =
+        EvidencedDatabaseTypeName(DatabaseType.DbtOracle);
 
     /// <summary>A synthetic server name.</summary>
     private const string SyntheticServerName = "synthetic-host-B2.invalid";
@@ -100,7 +206,7 @@ public sealed class TransactionDataTests
     /// <returns>The populated descriptor.</returns>
     private static TransactionData FullyPopulated() => new()
     {
-        Dbms = SyntheticDbms,
+        Dbms = EvidencedDbms,
         ServerName = SyntheticServerName,
         Database = SyntheticDatabase,
         LogId = SyntheticLogId,
@@ -125,6 +231,86 @@ public sealed class TransactionDataTests
     };
 
     /// <summary>
+    /// A descriptor whose ALL NINE members differ from <see cref="FullyPopulated"/>'s, so that every
+    /// one of the nine is independently discriminating in a transfer audit.
+    /// </summary>
+    /// <returns>The all-distinct descriptor.</returns>
+    /// <remarks>
+    /// STRICTLY STRONGER THAN <see cref="ReceiverWithOnlyTheTwoSet"/> FOR COUNTING PURPOSES, and that
+    /// is the only reason it exists. Against a receiver whose seven are CLEARED, a member that was
+    /// erased and a member that was correctly overwritten are indistinguishable afterwards, so a fold
+    /// that cleared rather than copied would still pass. Every member here holds a distinct non-empty
+    /// value - the credential included, which is what makes the outbound direction's "the caller keeps
+    /// its OWN" assertion mean something.
+    /// </remarks>
+    private static TransactionData ReceiverWithAllNineDistinct() => new()
+    {
+        // The OTHER evidenced dialect, so this member differs without a third one being invented (C-E).
+        Dbms = EvidencedOtherDbms,
+        ServerName = "synthetic-host-Y7.invalid",
+        Database = "SYNTHETIC_CATALOGUE_Z8",
+        LogId = "synthetic-account-Q1",
+        LogPass = "NEEDLE-receiver-logpass-T5B3-synthetic-not-a-credential",
+        DbParm = "DisableBind=0,Probe=NEEDLE-receiver-dbparm-J2L4-synthetic",
+        Lock = "SYNTHETIC ISOLATION H6",
+        AutoCommit = false,
+        UserParm = "NEEDLE-receiver-userparm-W9Z1-synthetic",
+    };
+
+    /// <summary>
+    /// The nine oracle members of one descriptor as a name-to-value map, with the credential read
+    /// through its named door because the property has no getter.
+    /// </summary>
+    /// <param name="descriptor">The descriptor to project.</param>
+    /// <returns>The nine values, keyed by member name, in the oracle's declaration order.</returns>
+    /// <remarks>
+    /// A <see cref="Dictionary{TKey, TValue}"/> preserves insertion order for a map that is only ever
+    /// added to, which is what lets the transfer audits report the members they found in the oracle's
+    /// own order rather than in an arbitrary one. The audits assert the key sequence against the
+    /// shared nine-member declaration before relying on it, so the two cannot drift apart.
+    /// </remarks>
+    private static IReadOnlyDictionary<string, object?> ProjectTheNine(TransactionData descriptor) =>
+        new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            [nameof(TransactionData.Dbms)] = descriptor.Dbms,
+            [nameof(TransactionData.ServerName)] = descriptor.ServerName,
+            [nameof(TransactionData.Database)] = descriptor.Database,
+            [nameof(TransactionData.LogId)] = descriptor.LogId,
+
+            // THROUGH THE NAMED DOOR. There is no getter to read, which is the write-only rule's
+            // structural half - see the census suite. The test assembly reaches this internal member
+            // only because the application project grants InternalsVisibleTo.
+            [nameof(TransactionData.LogPass)] = descriptor.RevealLogPassForConnect(),
+            [nameof(TransactionData.DbParm)] = descriptor.DbParm,
+            [nameof(TransactionData.Lock)] = descriptor.Lock,
+            [nameof(TransactionData.AutoCommit)] = descriptor.AutoCommit,
+            [nameof(TransactionData.UserParm)] = descriptor.UserParm,
+        };
+
+    /// <summary>
+    /// The names of the members of <paramref name="result"/> whose values came from
+    /// <paramref name="source"/>, in the oracle's declaration order.
+    /// </summary>
+    /// <param name="result">The descriptor produced by a transfer.</param>
+    /// <param name="source">The descriptor the transfer took its fields from.</param>
+    /// <returns>The moved member names, in declaration order.</returns>
+    /// <remarks>
+    /// Only meaningful when every one of the nine differs between the source and the descriptor the
+    /// transfer was applied to - otherwise a member that never moved would be counted as moved because
+    /// it happened to agree already. Every caller establishes that precondition with an assertion
+    /// before using the result, rather than assuming it.
+    /// </remarks>
+    private static string[] MembersTakenFromSource(TransactionData result, TransactionData source)
+    {
+        IReadOnlyDictionary<string, object?> resultValues = ProjectTheNine(result);
+        IReadOnlyDictionary<string, object?> sourceValues = ProjectTheNine(source);
+
+        return [.. TheNineInOracleOrder()
+            .Select(member => member.Name)
+            .Where(name => Equals(resultValues[name], sourceValues[name]))];
+    }
+
+    /// <summary>
     /// Every public instance property the type declares, keyed by name. Used by the reflection-based
     /// audits so each one states its expectation against a single shared reading of the surface.
     /// </summary>
@@ -134,8 +320,94 @@ public sealed class TransactionDataTests
             .GetProperties(BindingFlags.Instance | BindingFlags.Public)
             .ToDictionary(property => property.Name, StringComparer.Ordinal);
 
+    /// <summary>
+    /// The nine oracle members in the oracle's own declaration order, each paired with the type
+    /// <c>transactiondata.srs</c> declares for it and with the C-08 field number that mirrors it.
+    /// </summary>
+    /// <returns>The nine expectations, in order.</returns>
+    /// <remarks>
+    /// ONE DECLARATION SHARED BY EVERY SUITE-0 AUDIT, so the census, the ordering audit, the
+    /// field-number correspondence and the string-versus-boolean audit cannot disagree with one
+    /// another about what the contract is. The order of this array IS the assertion the ordering
+    /// audits make - see the wire-contract block in this file's header for why that is not cosmetic.
+    /// </remarks>
+    private static (string Name, Type Type, int FieldNumber)[] TheNineInOracleOrder() =>
+    [
+        // #  transactiondata.srs   persistence.v1.proto TransactionDescriptor
+        // 1  string  dbms       L4    string dbms       = 1
+        (nameof(TransactionData.Dbms), typeof(string), 1),
+
+        // 2  string  servername L5    string servername = 2
+        (nameof(TransactionData.ServerName), typeof(string), 2),
+
+        // 3  string  database   L6    string database   = 3
+        (nameof(TransactionData.Database), typeof(string), 3),
+
+        // 4  string  logid      L7    string logid      = 4
+        (nameof(TransactionData.LogId), typeof(string), 4),
+
+        // 5  string  logpass    L8    string logpass    = 5   <- FIFTH, and write-only
+        (nameof(TransactionData.LogPass), typeof(string), 5),
+
+        // 6  string  dbparm     L9    string dbparm     = 6
+        (nameof(TransactionData.DbParm), typeof(string), 6),
+
+        // 7  string  lock       L10   string lock       = 7
+        (nameof(TransactionData.Lock), typeof(string), 7),
+
+        // 8  boolean autocommit L11   bool   autocommit = 8   <- the boolean is EIGHTH, not last
+        (nameof(TransactionData.AutoCommit), typeof(bool), 8),
+
+        // 9  string  userparm   L12   string userparm   = 9
+        (nameof(TransactionData.UserParm), typeof(string), 9),
+    ];
+
+    /// <summary>
+    /// The three members the type derives rather than stores - the presence flag and the two
+    /// <c>DBParm</c> flags. Named here so the census below can prove there is no TENTH oracle member
+    /// hiding among them.
+    /// </summary>
+    /// <returns>The three derived member names.</returns>
+    private static string[] TheThreeDerivedMembers() =>
+    [
+        nameof(TransactionData.HasCredential),
+        nameof(TransactionData.IsBindDisabled),
+        nameof(TransactionData.IsNCharBindingEnabled),
+    ];
+
+    /// <summary>
+    /// The PROTOCOL-DEFINITION name of one of the two evidenced database types, read off the
+    /// generated enum member's own <see cref="OriginalNameAttribute"/>.
+    /// </summary>
+    /// <param name="databaseType">The evidenced database type to name.</param>
+    /// <returns>
+    /// The identifier exactly as the protocol definition spells it - which for the two evidenced
+    /// types is the same spelling the oracle uses
+    /// [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61].
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// WHY READ IT RATHER THAN TYPE IT. Two constraints meet on this one line. C-E forbids inventing
+    /// a dialect, so the identifier has to come from the two the repository evidences; AAP 0.7.2
+    /// forbids this file declaring a SCREAMING_SNAKE identifier and directs the generated
+    /// <c>DBT_*</c> / <c>AC_*</c> members be referenced instead. Reading the name off the generated
+    /// member satisfies both at once, and it cannot drift: rename the member in the protocol
+    /// definition and this returns the new spelling rather than a stale copy of the old one.
+    /// </para>
+    /// <para>
+    /// The lookup is non-nullable-asserted on both steps because a missing member or a missing
+    /// attribute would mean the generated enum no longer matches the protocol definition, which is a
+    /// contract fault worth failing loudly on rather than degrading around.
+    /// </para>
+    /// </remarks>
+    private static string EvidencedDatabaseTypeName(DatabaseType databaseType) =>
+        typeof(DatabaseType)
+            .GetField(databaseType.ToString(), BindingFlags.Public | BindingFlags.Static)!
+            .GetCustomAttribute<OriginalNameAttribute>()!
+            .Name;
+
     // ==========================================================================================
-    //  SUITE 0 - THE CLEARED STATE, WHICH EVERY OTHER SUITE RESTS ON
+    //  SUITE 0 - THE CLEARED STATE, THE NINE-MEMBER CENSUS AND THE ORDER THAT IS A WIRE CONTRACT
     // ==========================================================================================
 
     /// <summary>
@@ -224,20 +496,11 @@ public sealed class TransactionDataTests
         IReadOnlyDictionary<string, PropertyInfo> properties = PublicInstanceProperties();
 
         // transactiondata.srs:L4-L12, in the oracle's own declaration order.
-        (string Name, Type Type)[] expected =
-        [
-            (nameof(TransactionData.Dbms), typeof(string)),
-            (nameof(TransactionData.ServerName), typeof(string)),
-            (nameof(TransactionData.Database), typeof(string)),
-            (nameof(TransactionData.LogId), typeof(string)),
-            (nameof(TransactionData.LogPass), typeof(string)),
-            (nameof(TransactionData.DbParm), typeof(string)),
-            (nameof(TransactionData.Lock), typeof(string)),
-            (nameof(TransactionData.AutoCommit), typeof(bool)),
-            (nameof(TransactionData.UserParm), typeof(string)),
-        ];
+        (string Name, Type Type, int FieldNumber)[] expected = TheNineInOracleOrder();
 
-        foreach ((string name, Type type) in expected)
+        Assert.Equal(9, expected.Length);
+
+        foreach ((string name, Type type, int _) in expected)
         {
             Assert.Contains(name, properties.Keys);
             Assert.Equal(type, properties[name].PropertyType);
@@ -248,13 +511,264 @@ public sealed class TransactionDataTests
         // reopens the credential-exposure finding. Every other member reads; this one does not.
         Assert.False(properties[nameof(TransactionData.LogPass)].CanRead);
 
-        foreach ((string name, Type _) in expected)
+        foreach ((string name, Type _, int _) in expected)
         {
             if (name != nameof(TransactionData.LogPass))
             {
                 Assert.True(properties[name].CanRead, name);
             }
         }
+    }
+
+    /// <summary>
+    /// THE ORDER, ASSERTED REFLECTIVELY OVER THE TYPE'S OWN MEMBERS. The nine appear in the C# type
+    /// in the oracle's declaration order [<c>transactiondata.srs</c>:L4-L12], which contract C-08
+    /// mirrors positionally as <c>dbms = 1</c> through <c>userparm = 9</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A REORDERING HERE IS A WIRE-CONTRACT BREAK, NOT A COSMETIC CHANGE, which is the whole reason
+    /// this test exists - see the wire-contract block in this file's header. C# resolves members by
+    /// name and never by position, so nothing else in the build can detect a reordering: the type
+    /// would keep compiling, every other test in the repository would keep passing, and only the
+    /// three-way correspondence between the oracle, this type and the field numbers would have
+    /// silently come apart.
+    /// </para>
+    /// <para>
+    /// WHY <see cref="MemberInfo.MetadataToken"/> AND NOT THE REFLECTION ORDER. The order in which
+    /// <see cref="Type.GetProperties()"/> returns members is explicitly unspecified by the runtime,
+    /// so relying on it would make this test's meaning depend on an implementation detail. Metadata
+    /// tokens, by contrast, are assigned by the compiler as it emits members, so ordering by token
+    /// recovers the DECLARATION order from the assembly itself. The three derived members are
+    /// filtered out first, because they are declared interleaved with the nine - the presence flag
+    /// sits between the credential and the parameter string, and the two flag properties sit after
+    /// the transfer folds - and their positions are deliberately not contract.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheNineAppearInTheOraclesDeclarationOrder()
+    {
+        string[] expected = [.. TheNineInOracleOrder().Select(member => member.Name)];
+
+        string[] declared = [.. typeof(TransactionData)
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Where(property => !TheThreeDerivedMembers().Contains(property.Name, StringComparer.Ordinal))
+            .OrderBy(property => property.MetadataToken)
+            .Select(property => property.Name)];
+
+        Assert.Equal(expected, declared);
+    }
+
+    /// <summary>
+    /// The three-way correspondence: the ported type's declaration order, position for position,
+    /// against the GENERATED DESCRIPTOR's field numbers for contract C-08's
+    /// <c>TransactionDescriptor</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE ASSERTION THAT MAKES THE WIRE CONTRACT CHECKABLE (C-K). The two sides are read
+    /// from two independent artifacts - the C# metadata of the ported type, and the descriptor
+    /// protobuf itself compiles into the contracts assembly - so agreement between them cannot be an
+    /// artefact of one file being copied from the other. The oracle is the third side, and it is
+    /// pinned by the comments in <see cref="TheNineInOracleOrder"/>, each carrying the
+    /// <c>transactiondata.srs</c> line the member came from.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY COMPLEMENTARY TO, NOT A DUPLICATE OF, the sibling suite for contract C-08, which
+    /// pins the descriptor's own field order in isolation. What is asserted here is the
+    /// CORRESPONDENCE - that member <c>n</c> of this type is field <c>n</c> on the wire - which no
+    /// other test in the repository covers and which is the claim <c>TransactionData.cs</c> makes in
+    /// its own FIELD-ORDER AUDIT block.
+    /// </para>
+    /// <para>
+    /// The field numbers are asserted to be exactly 1 through 9 with no gap, because a gap would mean
+    /// a slot had been reserved or retired and the positional mirror would no longer hold.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheNineMirrorTheContractsFieldNumbersPositionForPosition()
+    {
+        (string Name, Type Type, int FieldNumber)[] expected = TheNineInOracleOrder();
+
+        // The C-08 descriptor, in field-number order, straight out of the generated contract.
+        IList<FieldDescriptor> wireFields = TransactionDescriptor.Descriptor.Fields.InFieldNumberOrder();
+
+        Assert.Equal(expected.Length, wireFields.Count);
+
+        for (int position = 0; position < expected.Length; position++)
+        {
+            // 1..9 with no gap: the positional mirror only holds while the numbering is contiguous.
+            Assert.Equal(position + 1, expected[position].FieldNumber);
+            Assert.Equal(expected[position].FieldNumber, wireFields[position].FieldNumber);
+
+            // The protocol definition spells its fields in the oracle's lower-case, so the comparison
+            // is case-insensitive on purpose: `logpass` and `LogPass` are the same field, and the
+            // difference is a naming convention rather than a contract difference. `servername`
+            // against `ServerName` is the case that makes this necessary.
+            Assert.Equal(
+                expected[position].Name,
+                wireFields[position].Name,
+                ignoreCase: true);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="TransactionData.LogPass"/> is member FIVE - asserted on its own rather than only as
+    /// one row of the ordering audit, because its position is the one that carries an obligation.
+    /// </summary>
+    /// <remarks>
+    /// Field 5 is the slot contract C-08's RESPONSE-side view keeps permanently
+    /// <c>reserved</c> so no future field can be numbered into a credential's place. Pinning the
+    /// position here is what ties the write-only rule to a specific wire slot rather than to a name
+    /// that could be moved.
+    /// </remarks>
+    [Fact]
+    public void TheCredentialIsMemberFive()
+    {
+        (string Name, Type Type, int FieldNumber)[] nine = TheNineInOracleOrder();
+
+        // FIVE, one-based, exactly as the oracle declares it [transactiondata.srs:L8] and exactly as
+        // the contract numbers it.
+        Assert.Equal(nameof(TransactionData.LogPass), nine[4].Name);
+        Assert.Equal(5, nine[4].FieldNumber);
+        Assert.Equal(
+            5,
+            TransactionDescriptor.Descriptor.FindFieldByName("logpass").FieldNumber);
+    }
+
+    /// <summary>
+    /// <see cref="TransactionData.AutoCommit"/> is the ONLY non-string member of the nine, it is a
+    /// <see cref="bool"/>, and it is EIGHTH rather than last.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EIGHT STRINGS AND ONE BOOLEAN, WITH THE BOOLEAN EIGHTH. That is the one detail of the layout a
+    /// C# author is most likely to get wrong, because a trailing boolean is the more natural
+    /// arrangement and moving it there costs nothing at compile time and breaks the positional mirror
+    /// completely.
+    /// </para>
+    /// <para>
+    /// A BOOLEAN, NOT THE THREE-VALUED COMMAND-LEVEL MODE. The oracle declares
+    /// <c>boolean autocommit</c> [transactiondata.srs:L11] and C-08 mirrors it as a
+    /// <c>bool</c>, so the descriptor carries two states. The THREE-valued autocommit mode - the
+    /// generated <c>AC_OFF</c> / <c>AC_ON</c> / <c>AC_NATIVE</c> member set - is a per-statement
+    /// concern belonging to contract C-07 and is deliberately NOT this descriptor's member. Its zero
+    /// value is referenced below rather than spelled out, per AAP 0.7.2, and it lines up with the
+    /// cleared descriptor's <see langword="false"/>: the legacy task layer defaults to the same
+    /// off state and then ERASES the descriptor's flag outright
+    /// [n_cst_thread_task_sqlbase.sru:L118-L119], which is why the two live at different levels.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AutoCommitIsTheOnlyNonStringMemberAndIsTheEighth()
+    {
+        (string Name, Type Type, int FieldNumber)[] nine = TheNineInOracleOrder();
+
+        string[] nonString = [.. nine
+            .Where(member => member.Type != typeof(string))
+            .Select(member => member.Name)];
+
+        string[] expectedNonString = [nameof(TransactionData.AutoCommit)];
+
+        Assert.Equal(expectedNonString, nonString);
+        Assert.Equal(9, nine.Length);
+
+        // EIGHTH, one-based - and userparm, not the boolean, is the one that comes last.
+        Assert.Equal(nameof(TransactionData.AutoCommit), nine[7].Name);
+        Assert.Equal(typeof(bool), nine[7].Type);
+        Assert.Equal(nameof(TransactionData.UserParm), nine[8].Name);
+
+        // The reflected member agrees with the declaration, and the wire field agrees with both.
+        Assert.Equal(
+            typeof(bool),
+            PublicInstanceProperties()[nameof(TransactionData.AutoCommit)].PropertyType);
+        Assert.Equal(
+            FieldType.Bool,
+            TransactionDescriptor.Descriptor.FindFieldByName("autocommit").FieldType);
+
+        // The cleared descriptor's flag is the off state, which is the state the generated C-07 mode
+        // spells as its zero member. Referenced rather than re-declared (AAP 0.7.2).
+        Assert.False(TransactionData.Empty.AutoCommit);
+        Assert.Equal(0, (int)AutoCommitMode.AcOff);
+    }
+
+    /// <summary>
+    /// THE FIXTURE INTEGRITY CHECK FOR C-E. The two DBMS identifiers this file uses really are the
+    /// two evidenced database types, they are distinct, and neither is empty.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WITHOUT THIS, TWO OTHER SUITES COULD PASS VACUOUSLY. Several assertions elsewhere are of the
+    /// form "the rendered output CONTAINS the DBMS identifier", and
+    /// <see cref="string.Contains(string)"/> is trivially true for the empty string - so a fixture
+    /// that silently resolved to nothing would turn those positive controls into no-ops while still
+    /// reporting green. Asserting the fixture is non-empty is what keeps them honest.
+    /// </para>
+    /// <para>
+    /// It is also the auditable statement of the C-E position: exactly two dialects are exercised in
+    /// this file, they are the two the repository evidences, and their spellings come from the
+    /// generated contract members rather than from anything typed here.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheOnlyTwoDialectsExercisedAreTheTwoTheRepositoryEvidences()
+    {
+        Assert.NotEmpty(EvidencedDbms);
+        Assert.NotEmpty(EvidencedOtherDbms);
+        Assert.NotEqual(EvidencedDbms, EvidencedOtherDbms);
+
+        // The generated enum has exactly two members and no third dialect to reach for.
+        Assert.Equal(2, Enum.GetValues<DatabaseType>().Length);
+
+        // And the identifiers are the protocol definition's own spellings, which are also the
+        // oracle's [n_cst_thread_trans.sru:L60-L61]. Asserted through the same accessor the fixtures
+        // use, so a change to the generated member cannot leave the fixtures and this check disagreeing.
+        Assert.Equal(EvidencedDatabaseTypeName(DatabaseType.DbtMssql), EvidencedDbms);
+        Assert.Equal(EvidencedDatabaseTypeName(DatabaseType.DbtOracle), EvidencedOtherDbms);
+
+        // A descriptor CARRIES either one without preferring or resolving either: no dialect selection
+        // happens on this type, and no connection is opened anywhere in this file (C-E).
+        TransactionData mssql = new() { Dbms = EvidencedDbms };
+        TransactionData oracle = new() { Dbms = EvidencedOtherDbms };
+
+        Assert.Equal(EvidencedDbms, mssql.Dbms);
+        Assert.Equal(EvidencedOtherDbms, oracle.Dbms);
+        Assert.NotEqual(mssql, oracle);
+    }
+
+    /// <summary>
+    /// THERE IS NO TENTH MEMBER. The public instance surface is exactly the nine oracle members plus
+    /// the three the type DERIVES, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CENSUS IS EXACT RATHER THAN A LOWER BOUND, and that is the point: a "contains all nine"
+    /// assertion cannot detect an ADDED member, and an added member is the realistic failure. A
+    /// connection timeout, a retry policy, a port, an application name or an encryption toggle would
+    /// each look like an obvious improvement on a connection descriptor and each would be a NEW
+    /// capability rather than a port, which C-B forbids. It would also break the positional mirror
+    /// the moment anyone numbered it onto the wire.
+    /// </para>
+    /// <para>
+    /// THE THREE DERIVED MEMBERS ARE NAMED, NOT PATTERN-MATCHED. Filtering by a naming convention -
+    /// anything beginning with "Is" or "Has" - would let a tenth stored member slip in under a
+    /// conforming name. Naming them means a fourth derived member is a deliberate edit to this test.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ThePublicSurfaceIsTheNineOracleMembersPlusExactlyThreeDerivedOnes()
+    {
+        string[] expected = [.. TheNineInOracleOrder()
+            .Select(member => member.Name)
+            .Concat(TheThreeDerivedMembers())
+            .Order(StringComparer.Ordinal)];
+
+        string[] actual = [.. PublicInstanceProperties()
+            .Keys
+            .Order(StringComparer.Ordinal)];
+
+        Assert.Equal(expected, actual);
+        Assert.Equal(12, actual.Length);
     }
 
     // ==========================================================================================
@@ -327,7 +841,7 @@ public sealed class TransactionDataTests
     {
         string expected =
             $"{nameof(TransactionData)} {{ " +
-            $"{nameof(TransactionData.Dbms)} = {SyntheticDbms}, " +
+            $"{nameof(TransactionData.Dbms)} = {EvidencedDbms}, " +
             $"{nameof(TransactionData.ServerName)} = {SyntheticServerName}, " +
             $"{nameof(TransactionData.Database)} = {SyntheticDatabase}, " +
             $"{nameof(TransactionData.LogId)} = {SyntheticLogId}, " +
@@ -426,7 +940,7 @@ public sealed class TransactionDataTests
         string json = JsonSerializer.Serialize(FullyPopulated());
 
         Assert.Contains(nameof(TransactionData.Dbms), json, StringComparison.Ordinal);
-        Assert.Contains(SyntheticDbms, json, StringComparison.Ordinal);
+        Assert.Contains(EvidencedDbms, json, StringComparison.Ordinal);
         Assert.Contains(nameof(TransactionData.ServerName), json, StringComparison.Ordinal);
         Assert.Contains(SyntheticServerName, json, StringComparison.Ordinal);
         Assert.Contains(nameof(TransactionData.Database), json, StringComparison.Ordinal);
@@ -451,7 +965,7 @@ public sealed class TransactionDataTests
         TransactionData revived =
             JsonSerializer.Deserialize<TransactionData>(JsonSerializer.Serialize(original));
 
-        Assert.Equal(SyntheticDbms, revived.Dbms);
+        Assert.Equal(EvidencedDbms, revived.Dbms);
         Assert.Equal(SyntheticServerName, revived.ServerName);
         Assert.Equal(SyntheticDatabase, revived.Database);
         Assert.Equal(SyntheticLogId, revived.LogId);
@@ -624,6 +1138,180 @@ public sealed class TransactionDataTests
         Assert.NotEqual(lower, upper);
     }
 
+    /// <summary>
+    /// A FAILED EQUALITY COMPARISON DISCLOSES NOTHING EITHER. The two descriptors that differ only in
+    /// the password are compared with a deliberately failing assertion, and the resulting report -
+    /// the closest thing to a "printed diff" this type can appear in - carries neither the value nor
+    /// the member's name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS CLOSES THE LAST RENDERING ROUTE, AND IT IS A REAL ONE RATHER THAN A THEORETICAL ONE. The
+    /// preceding tests prove that <see cref="TransactionData.ToString"/> is silent; this one proves
+    /// that the DIFF a comparison failure produces goes THROUGH that method rather than around it.
+    /// The distinction matters because a test framework's value formatter has two strategies: use the
+    /// type's own <see cref="object.ToString"/> when it overrides one, or fall back to reflecting over
+    /// the type's public properties and printing them. On the fallback strategy every readable
+    /// credential-capable member would be printed into the failure report of any test that happened to
+    /// compare two descriptors - which is a disclosure into CI logs, from an assertion whose author
+    /// never mentioned the member at all.
+    /// </para>
+    /// <para>
+    /// The type is protected against both strategies at once, which is why the assertion below can be
+    /// unconditional: it overrides <see cref="TransactionData.ToString"/>, so the first strategy is
+    /// redacted, and it removed the credential's GETTER, so the second strategy has nothing to read
+    /// even if it were taken. Nothing in this file depends on knowing which strategy is in use.
+    /// </para>
+    /// <para>
+    /// The report is inspected as a message AND as the whole rendered exception, so a formatter that
+    /// attached the values somewhere other than the message would still be caught. The
+    /// member-NAME check is applied to the message only: the full rendering includes a stack trace,
+    /// and a stack trace legitimately contains the names of the methods in it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AFailedComparisonReportDisclosesNeitherValueNorMemberName()
+    {
+        TransactionData first = FullyPopulated();
+        TransactionData second = first with { LogPass = SyntheticPassword + "-VARIANT" };
+
+        // The two ARE unequal, so this assertion really does fail and really does produce a report.
+        Exception? report = Record.Exception(() => Assert.Equal(first, second));
+
+        Assert.NotNull(report);
+
+        // Not the value, not the variant of it, and not the member's name.
+        Assert.DoesNotContain(SyntheticPassword, report.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            nameof(TransactionData.LogPass),
+            report.Message,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(SyntheticPassword, report.ToString(), StringComparison.Ordinal);
+
+        // The other two withheld members are covered on the same footing, since the formatter treats
+        // all readable properties alike and these two ARE readable.
+        Assert.DoesNotContain(SyntheticDbParm, report.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SyntheticUserParm, report.Message, StringComparison.Ordinal);
+
+        // POSITIVE CONTROL: the report is a real one about these descriptors, so the three absences
+        // above are absences from something rather than from nothing.
+        Assert.Contains(nameof(TransactionData), report.Message, StringComparison.Ordinal);
+        Assert.Contains(EvidencedDbms, report.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// NO OPERATION ON THIS TYPE RAISES AN EXCEPTION AT ALL, so there is no exception message for a
+    /// withheld member to escape through. Every public operation is driven over a descriptor holding
+    /// all three needles, and each is asserted not to throw.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY "IT NEVER THROWS" IS THE RIGHT SHAPE FOR THIS OBLIGATION. The write-only rule has to hold
+    /// across every channel a value can leave by, and an exception message is one of them - a
+    /// validation failure that helpfully quotes the offending input is exactly how credentials reach
+    /// log aggregators. The type closes that channel structurally rather than by careful wording: it
+    /// performs no argument validation, has no failure path, and therefore constructs no message that
+    /// could quote anything. The accessors report through RETURN CODES, which is the oracle's own
+    /// contract [n_cst_thread_trans.sru:L343-L419] and not a choice made for this purpose.
+    /// </para>
+    /// <para>
+    /// THE HOSTILE INPUTS ARE INCLUDED DELIBERATELY, because "does not throw on the happy path" would
+    /// be a weak claim. Nulls into every string member, a malformed parameter string, a descriptor
+    /// used as its own transfer source, hashing the cleared value, and a hook that vetoes are all
+    /// driven here, and none of them produces an exception either.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoPublicOperationOnANeedleBearingDescriptorRaisesAnException()
+    {
+        TransactionData subject = FullyPopulated();
+
+        List<(string Operation, Exception? Thrown)> outcomes = [];
+
+        void Probe(string operation, Action body) => outcomes.Add((operation, Record.Exception(body)));
+
+        // Construction, including every string member set to null, which the members accept.
+        Probe("construct-with-nulls", () => _ = new TransactionData
+        {
+            Dbms = null,
+            ServerName = null,
+            Database = null,
+            LogId = null,
+            LogPass = null,
+            DbParm = null,
+            Lock = null,
+            UserParm = null,
+        });
+
+        // Every readable member, plus the two named doors onto the credential.
+        Probe(nameof(TransactionData.Dbms), () => _ = subject.Dbms);
+        Probe(nameof(TransactionData.ServerName), () => _ = subject.ServerName);
+        Probe(nameof(TransactionData.Database), () => _ = subject.Database);
+        Probe(nameof(TransactionData.LogId), () => _ = subject.LogId);
+        Probe(nameof(TransactionData.HasCredential), () => _ = subject.HasCredential);
+        Probe("RevealLogPassForConnect", () => _ = subject.RevealLogPassForConnect());
+        Probe(nameof(TransactionData.DbParm), () => _ = subject.DbParm);
+        Probe(nameof(TransactionData.Lock), () => _ = subject.Lock);
+        Probe(nameof(TransactionData.AutoCommit), () => _ = subject.AutoCommit);
+        Probe(nameof(TransactionData.UserParm), () => _ = subject.UserParm);
+
+        // The rendering, the hashing and both equality forms, on a needle-bearing value and on the
+        // cleared one whose every backing field is null.
+        Probe(nameof(TransactionData.ToString), () => _ = subject.ToString());
+        Probe("Empty.ToString", () => _ = TransactionData.Empty.ToString());
+        Probe(nameof(TransactionData.GetHashCode), () => _ = subject.GetHashCode());
+        Probe("Empty.GetHashCode", () => _ = TransactionData.Empty.GetHashCode());
+        Probe("Equals(TransactionData)", () => _ = subject.Equals(TransactionData.Empty));
+        Probe("Equals(object)", () => _ = subject.Equals((object)TransactionData.Empty));
+        Probe("Equals(null)", () => _ = subject.Equals(null));
+
+        // The two derived flags over MALFORMED and over absent parameter text.
+        Probe("flags-malformed", () =>
+        {
+            TransactionData malformed = subject with { DbParm = "DisableBind=,NCharBind" };
+            _ = malformed.IsBindDisabled;
+            _ = malformed.IsNCharBindingEnabled;
+            malformed.ResolveDbParmFlags(out _, out _);
+        });
+        Probe("flags-cleared", () => TransactionData.Empty.ResolveDbParmFlags(out _, out _));
+
+        // Both transfer folds, including the aliased case where a descriptor is its own source.
+        Probe(nameof(TransactionData.WithConnectionFieldsFrom), () =>
+            _ = TransactionData.Empty.WithConnectionFieldsFrom(subject));
+        Probe(nameof(TransactionData.WithConnectionFieldsFromExcludingCredential), () =>
+            _ = TransactionData.Empty.WithConnectionFieldsFromExcludingCredential(subject));
+        Probe("fold-aliased", () => _ = subject.WithConnectionFieldsFrom(in subject));
+
+        // Both accessors, with no hook and with a vetoing hook.
+        Probe(nameof(TransactionData.SetTransactionData), () =>
+        {
+            TransactionData receiver = TransactionData.Empty;
+            _ = TransactionData.SetTransactionData(ref receiver, subject);
+        });
+        Probe("SetTransactionData-vetoed", () =>
+        {
+            TransactionData receiver = TransactionData.Empty;
+            _ = TransactionData.SetTransactionData(
+                ref receiver,
+                subject,
+                (in TransactionData data) => RetCode.PREVENT);
+        });
+        Probe(nameof(TransactionData.GetTransactionData), () =>
+        {
+            TransactionData caller = TransactionData.Empty;
+            string diagnostic = string.Empty;
+            _ = subject.GetTransactionData(ref caller, ref diagnostic);
+        });
+        Probe("GetTransactionData-convenience", () => _ = subject.GetTransactionData());
+
+        // NOT ONE of them throws, so no message exists that could quote a withheld member. Reported as
+        // a named list so a future failure identifies WHICH operation started throwing.
+        Assert.All(outcomes, outcome => Assert.Null(outcome.Thrown));
+
+        // And the probe list really did exercise the surface rather than silently doing nothing.
+        Assert.Equal(27, outcomes.Count);
+    }
+
     // ==========================================================================================
     //  SUITE 4 - THE SEVEN-OF-NINE TRANSFER, AUDITED IN BOTH DIRECTIONS
     //  ----------------------------------------------------------------------------------------
@@ -727,7 +1415,9 @@ public sealed class TransactionDataTests
         Assert.Equal(connection.DbParm, empty.DbParm);
 
         // 2. A caller holding its own keeps exactly that, rather than being overwritten or cleared.
-        const string callersOwn = "caller-supplied-value-not-the-connections";
+        // Needle-shaped like every other synthetic value in this file, so a search of the repository
+        // finds it here and only here, and so it could not be mistaken for a credential (C-F).
+        const string callersOwn = "NEEDLE-callers-own-logpass-M7X2-synthetic-not-a-credential";
         TransactionData own = ReceiverWithOnlyTheTwoSet() with { LogPass = callersOwn };
 
         Assert.Equal(RetCode.OK, connection.GetTransactionData(ref own, ref diagnostic));
@@ -800,6 +1490,154 @@ public sealed class TransactionDataTests
         TransactionData subject = FullyPopulated();
 
         Assert.Equal(subject, subject.WithConnectionFieldsFrom(in subject));
+    }
+
+    /// <summary>
+    /// THE COUNT AUDIT. Exactly SEVEN of the nine move inbound and exactly SIX move outbound - counted
+    /// over the nine rather than checked member by member, so an ADDED or REMOVED member changes the
+    /// count and fails here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY A COUNT AS WELL AS THE MEMBER-BY-MEMBER AUDITS. The per-member helpers state which member
+    /// should hold which value; they cannot state HOW MANY moved, so a fold that grew a tenth
+    /// assignment would satisfy every one of them. The count is the assertion that catches the shape
+    /// of the change rather than its content, and the two together are what make "seven of nine" and
+    /// "six of nine" checkable claims instead of descriptions.
+    /// </para>
+    /// <para>
+    /// THE RECEIVER HAS ALL NINE MEMBERS SET, WHICH IS STRICTLY STRONGER THAN THE CLEARED RECEIVER the
+    /// neighbouring tests use. Against a cleared receiver, "moved" and "cleared then overwritten" look
+    /// identical for a string member, and a fold that ERASED a member instead of copying it would
+    /// still pass. Against a receiver whose nine all differ from the source's nine, every one of the
+    /// nine is independently discriminating in both directions - which the first assertion below
+    /// proves before relying on it.
+    /// </para>
+    /// <para>
+    /// The expected member lists are derived from the shared nine-member declaration rather than typed
+    /// out again, so this audit cannot disagree with the census about what the nine are.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheInboundFoldMovesExactlySevenOfTheNineAndTheOutboundExactlySix()
+    {
+        TransactionData source = FullyPopulated();
+        TransactionData receiver = ReceiverWithAllNineDistinct();
+
+        // PRECONDITION, asserted rather than assumed: not one of the nine already agrees, so every
+        // "moved" verdict below is a real observation.
+        Assert.Empty(MembersTakenFromSource(receiver, source));
+
+        // The nine the projection covers really are the nine the census declares.
+        Assert.Equal(
+            [.. TheNineInOracleOrder().Select(member => member.Name)],
+            [.. ProjectTheNine(source).Keys]);
+
+        // INBOUND: the seven connection fields, in the oracle's own assignment order
+        // [n_cst_thread_trans.sru:L345-L351].
+        string[] expectedInbound =
+        [
+            nameof(TransactionData.Dbms),
+            nameof(TransactionData.ServerName),
+            nameof(TransactionData.Database),
+            nameof(TransactionData.LogId),
+            nameof(TransactionData.LogPass),
+            nameof(TransactionData.DbParm),
+            nameof(TransactionData.Lock),
+        ];
+
+        string[] inboundMoved =
+            MembersTakenFromSource(receiver.WithConnectionFieldsFrom(source), source);
+
+        Assert.Equal(7, inboundMoved.Length);
+        Assert.Equal(expectedInbound, inboundMoved);
+
+        // OUTBOUND: the same seven LESS the credential, which this port deliberately does not echo
+        // [the oracle's own `data.LogPass = LogPass` at :L414 is the one line not reproduced].
+        string[] expectedOutbound = [.. expectedInbound
+            .Where(name => name != nameof(TransactionData.LogPass))];
+
+        string[] outboundMoved = MembersTakenFromSource(
+            receiver.WithConnectionFieldsFromExcludingCredential(source),
+            source);
+
+        Assert.Equal(6, outboundMoved.Length);
+        Assert.Equal(expectedOutbound, outboundMoved);
+
+        // AND THE COMPLEMENTS ARE THE MEMBERS THE RECEIVER KEPT: two inbound, three outbound.
+        Assert.Equal(
+            2,
+            TheNineInOracleOrder().Length - inboundMoved.Length);
+        Assert.Equal(
+            3,
+            TheNineInOracleOrder().Length - outboundMoved.Length);
+    }
+
+    /// <summary>
+    /// THE EXCLUDED TWO ARE EXCLUDED IN BOTH DIRECTIONS, driven through the REAL ACCESSORS rather than
+    /// the folds, and asserted as RETENTION of the prior value rather than merely as inequality with
+    /// the source's.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY RETENTION RATHER THAN INEQUALITY. "Not the source's value" is satisfied by a member that
+    /// was cleared, and clearing is a different bug with the same symptom. Asserting the member still
+    /// holds EXACTLY what it held before the call is the claim the oracle actually makes: it never
+    /// writes these two, so whatever was there stays there
+    /// [n_cst_thread_trans.sru:L345-L351 inbound, :L410-L416 outbound].
+    /// </para>
+    /// <para>
+    /// WHY IT MATTERS THAT AUTOCOMMIT IN PARTICULAR DOES NOT TRAVEL. A descriptor is the transaction
+    /// pool's reference-counting KEY [n_cst_thread_trans_pool.sru:L138], so the members that make it
+    /// up define a connection IDENTITY. Autocommit is a SESSION control, not part of that identity -
+    /// the legacy says so itself by erasing it from a stored descriptor immediately, under a comment
+    /// that reads "erase parameters irrelevant to the connection target"
+    /// [n_cst_thread_task_sqlbase.sru:L118-L119]. A transfer that carried it would therefore change
+    /// per-statement commit behaviour on POOL REUSE: a caller taking a reference to an existing
+    /// connection would silently inherit whichever commit policy the previous holder had set. The user
+    /// parameter is excluded on exactly the same footing.
+    /// </para>
+    /// <para>
+    /// The two directions are asserted separately and both are asserted, because an asymmetric port -
+    /// carrying them one way and not the other - would be the most plausible way to get this wrong.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheTwoExcludedMembersAreRetainedInBothDirections()
+    {
+        // Distinguishable in both directions: the connection and the caller disagree on both members.
+        TransactionData connection = FullyPopulated();
+        TransactionData party = ReceiverWithAllNineDistinct();
+
+        Assert.NotEqual(connection.AutoCommit, party.AutoCommit);
+        Assert.NotEqual(connection.UserParm, party.UserParm);
+
+        // APPLY-ONTO. of_settransdata writes the seven onto the receiver in place and never touches
+        // these two, so the receiver's own values survive the call unchanged.
+        TransactionData receiver = party;
+
+        Assert.Equal(RetCode.OK, TransactionData.SetTransactionData(ref receiver, connection));
+        Assert.Equal(party.AutoCommit, receiver.AutoCommit);
+        Assert.Equal(party.UserParm, receiver.UserParm);
+
+        // ...and the seven really did arrive, so the retention above is not the result of a transfer
+        // that did nothing at all.
+        Assert.Equal(connection.Dbms, receiver.Dbms);
+        Assert.Equal(connection.RevealLogPassForConnect(), receiver.RevealLogPassForConnect());
+
+        // READ-FROM. of_gettransdata fills the caller's descriptor from the connection and likewise
+        // never touches these two.
+        TransactionData caller = party;
+        string diagnostic = string.Empty;
+
+        Assert.Equal(RetCode.OK, connection.GetTransactionData(ref caller, ref diagnostic));
+        Assert.Equal(party.AutoCommit, caller.AutoCommit);
+        Assert.Equal(party.UserParm, caller.UserParm);
+
+        // ...with the six arriving, and the caller's OWN credential retained rather than replaced -
+        // the third exclusion, which belongs to this direction only.
+        Assert.Equal(connection.Dbms, caller.Dbms);
+        Assert.Equal(party.RevealLogPassForConnect(), caller.RevealLogPassForConnect());
     }
 
     /// <summary>
@@ -1016,7 +1854,9 @@ public sealed class TransactionDataTests
 
         TransactionData hookSupplied = new()
         {
-            Dbms = "SYNTHETIC-DBMS-FROM-THE-HOOK",
+            // The OTHER evidenced dialect, so the value visibly differs from the connection's own
+            // without inventing a third one (C-E).
+            Dbms = EvidencedOtherDbms,
             UserParm = "NEEDLE-hook-userparm-F3H8-synthetic",
         };
 
@@ -1218,7 +2058,138 @@ public sealed class TransactionDataTests
     //  "1", so "=2" matches nothing at all while "=10" captures a "1" and is true; and matching is
     //  case-insensitive. Changing any of them would change which DBParm strings are recognised, which
     //  is exactly the silent behavioural change C-B forbids.
+    //
+    //  ============== C-B: THE NESTING IS PRESERVED, NOT CORRECTED. DO NOT FLATTEN IT. ==============
+    //  TWO INDEPENDENT FLAGS WOULD BE THE MORE SENSIBLE DESIGN, AND THAT IS EXACTLY WHY THE
+    //  TEMPTATION EXISTS. National-character binding reads like a property of the connection in its
+    //  own right, and a flat `disableBind && ncharBind` computes the same answer for three of the four
+    //  cells - which is what makes the fourth so easy to lose. The oracle nests the second test inside
+    //  the first at [n_cst_thread_task_sqlbase.sru:L128-L132] and therefore NEVER CONSULTS the second
+    //  key outside the first key's branch. Honouring it independently would change generated
+    //  statements for every caller who set the second flag without the first. It is preserved legacy
+    //  behaviour with its locator, and the `DisableBind=0,NCharBind=1` row below is the single row a
+    //  naive independent-flags port gets wrong.
+    //  ==========================================================================================
+    //
+    //  ====== C-K: WHY THIS PARSE IS WORTH A TEST AT ALL - THE SECURITY CONSEQUENCE, RECORDED ======
+    //  `DisableBind=1` MEANS THE RUNTIME DOES NOT USE BIND VARIABLES. Values are INTERPOLATED INTO
+    //  THE STATEMENT TEXT AS LITERALS instead of being bound, and that is THE MECHANICAL ROOT OF THE
+    //  SQL-INJECTION EXPOSURE the migration plan analyses (AAP 0.2.1.4, which establishes that the
+    //  legacy `regexpfind` binding is satisfied by the BCL and is not a library dependency to port,
+    //  and AAP 0.6.4, which traces the exposure from this flag to the raw clause spliced in by the
+    //  C-05 clause setters and to the unescaped filter interpolation in the drop-down search service).
+    //  With binding disabled there is no bind boundary for a value to stay behind, so the generated
+    //  statement carries live row data.
+    //
+    //  THE .NET IMPLEMENTATION PARAMETERIZES INTERNALLY WHILE PRESERVING THE OBSERVABLE GENERATED
+    //  STATEMENT UNCHANGED. That combination is deliberate and is what AAP 0.1.5 permits: the safer
+    //  mechanism is UNOBSERVABLE, so adopting it is allowed, while the statement text a caller can see
+    //  must still match the oracle byte for byte. The legacy defect is DOCUMENTED, NOT CORRECTED (C-B).
+    //
+    //  WHAT THIS SUITE IS RESPONSIBLE FOR, AND WHAT IT IS NOT. It pins THE FLAG PARSE - the one signal
+    //  that tells the layer above whether a published statement can contain data at all. The
+    //  REDACTION obligation that follows from the flag is asserted by the sibling suite for
+    //  Errors/SqlRedactor.cs, not here, because that is where the masking lives; splitting them this
+    //  way keeps each suite's subject to one file. Neither obligation is optional and neither covers
+    //  the other.
+    //  ==========================================================================================
     // ==========================================================================================
+
+    /// <summary>
+    /// THE FLAG MATRIX, as member data. Every row is a connection parameter string paired with the two
+    /// flag values the oracle's nested parse yields for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EXPRESSED AS MEMBER DATA RATHER THAN AS A LOOP INSIDE A SINGLE TEST, DELIBERATELY. A loop
+    /// reports one result for the whole matrix, stops at the first failure and names no case, so a
+    /// regression in one cell tells you only that "the matrix" broke. As member data each row is a
+    /// separately named, separately reported case, every row still runs when one fails, and the
+    /// failure message identifies the exact parameter string. That matters most for the one row a
+    /// naive independent-flags port gets wrong, which would otherwise be indistinguishable from any
+    /// other cell going red.
+    /// </para>
+    /// <para>
+    /// <see cref="TheoryData{T1, T2, T3}"/> rather than
+    /// <c>IEnumerable&lt;object[]&gt;</c> so the row shape is checked at COMPILE time: a row with the
+    /// wrong arity or a transposed pair of booleans is a build error here, not a confusing runtime
+    /// failure. The rows are grouped and commented by the property each group pins.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<string, bool, bool> DbParmFlagMatrix() => new()
+    {
+        // ---- ABSENT KEYS. Nothing to find, so both flags are false. -------------------------------
+        { string.Empty, false, false },
+        { "Probe=NEEDLE-no-flags-here", false, false },
+
+        // ---- THE FOUR REQUIRED COMBINATIONS [:L128-L132] ----------------------------------------
+        // 1. BOTH SET - the ONLY combination that enables national-character binding.
+        { "DisableBind=1,NCharBind=1", true, true },
+
+        // 2. OUTER SET, INNER ZERO - the inner key is reached and refused.
+        { "DisableBind=1,NCharBind=0", true, false },
+
+        // 3. OUTER ZERO, INNER SET - FALSE. ***THE ROW A NAIVE INDEPENDENT-FLAGS PORT GETS WRONG.***
+        //    The oracle never reaches the inner test at all, so the inner key is INERT rather than
+        //    merely overridden. Preserved, not corrected (C-B).
+        { "DisableBind=0,NCharBind=1", false, false },
+
+        // 4. NEITHER PRESENT - covered by the absent-keys group above, and again here explicitly so
+        //    the four required combinations read as four rows in one place.
+        { "CommitOnDisconnect=0", false, false },
+
+        // ---- THE OUTER KEY ALONE, BOTH VALUES ----------------------------------------------------
+        { "DisableBind=1", true, false },
+        { "DisableBind=0", false, false },
+
+        // ---- THE NESTING CASE ISOLATED: the inner key ALONE is legal and entirely inert. ----------
+        { "NCharBind=1", false, false },
+        { "NCharBind=0", false, false },
+
+        // ---- ORDER IS IRRELEVANT: the parse searches, it does not read positionally. --------------
+        { "NCharBind=1,DisableBind=1", true, true },
+
+        // ---- WHITESPACE, from the oracle's own \s* on BOTH sides of the '='. ----------------------
+        { "DisableBind = 1 , NCharBind = 1", true, true },
+        { "DisableBind\t=\t1,NCharBind\t=\t1", true, true },
+        { "DisableBind   =1,NCharBind=   1", true, true },
+
+        // ---- CASE INSENSITIVITY, which is the specified port behaviour. ---------------------------
+        { "disablebind=1,ncharbind=1", true, true },
+        { "DISABLEBIND=1", true, false },
+        { "DISABLEBIND = 1", true, false },
+        { "DiSaBleBiNd=1,nChArBiNd=1", true, true },
+
+        // ---- UNANCHORED ON PURPOSE: a longer keyword ending in the same text still matches. -------
+        { "XDisableBind=1", true, false },
+        { "DisableBind=1,MyNCharBind=1", true, true },
+
+        // ---- TEXTUAL comparison against "1", not a numeric or boolean parse. ----------------------
+        // "=2" captures nothing, because the pattern's group is (0|1)...
+        { "DisableBind=2", false, false },
+
+        // ...while "=10" captures the LEADING "1" and IS true, and "=01" captures the leading "0".
+        { "DisableBind=10", true, false },
+        { "DisableBind=01", false, false },
+
+        // ---- MALFORMED OR TRUNCATED TEXT IS NOT AN ERROR CONDITION - it simply is not "1". --------
+        { "DisableBind=", false, false },
+        { "DisableBind", false, false },
+        { "DisableBind=true", false, false },
+
+        // ---- REALISTIC PARAMETER STRINGS CARRYING OTHER, UNRELATED PARAMETERS. --------------------
+        // The keys have to be found IN CONTEXT, not only when they are the whole string. Both rows
+        // carry unrelated parameters on both sides of the flags, and neither contains any credential,
+        // account name or secret-shaped keyword (C-F) - a connection parameter string is exactly the
+        // place a real one would hide, which is why these are synthetic and deliberately austere.
+        { "ConnectString='DSN=SYNTHETIC',DisableBind=1,CommitOnDisconnect=0", true, false },
+        {
+            "ConnectString='DSN=SYNTHETIC',CommitOnDisconnect=0,DisableBind=1,"
+                + "NCharBind=1,Probe=NEEDLE-context-dbparm-C8V3-synthetic",
+            true,
+            true
+        },
+    };
 
     /// <summary>
     /// The flag matrix. Both flags are asserted for every input, because the second one's value is
@@ -1228,40 +2199,7 @@ public sealed class TransactionDataTests
     /// <param name="expectedBindDisabled">The expected <c>DisableBind</c> result [:L128].</param>
     /// <param name="expectedNCharBinding">The expected <c>NCharBind</c> result [:L129-L130].</param>
     [Theory]
-    // Absent keys.
-    [InlineData("", false, false)]
-    [InlineData("Probe=NEEDLE-no-flags-here", false, false)]
-    // The outer key alone, both values.
-    [InlineData("DisableBind=1", true, false)]
-    [InlineData("DisableBind=0", false, false)]
-    // THE NESTING CASE: the inner key alone is legal and INERT.
-    [InlineData("NCharBind=1", false, false)]
-    // ...and it stays inert when the outer key is present but zero.
-    [InlineData("DisableBind=0,NCharBind=1", false, false)]
-    // Both set - the only combination that enables national-character binding.
-    [InlineData("DisableBind=1,NCharBind=1", true, true)]
-    [InlineData("NCharBind=1,DisableBind=1", true, true)]
-    [InlineData("DisableBind=1,NCharBind=0", true, false)]
-    // The oracle's own whitespace tolerance, from the \s* on both sides of the '='.
-    [InlineData("DisableBind = 1 , NCharBind = 1", true, true)]
-    [InlineData("DisableBind\t=\t1,NCharBind\t=\t1", true, true)]
-    // Case insensitivity, which is the specified port behaviour.
-    [InlineData("disablebind=1,ncharbind=1", true, true)]
-    [InlineData("DISABLEBIND=1", true, false)]
-    // UNANCHORED ON PURPOSE: a longer keyword ending in the same text still matches. Both keys.
-    [InlineData("XDisableBind=1", true, false)]
-    [InlineData("DisableBind=1,MyNCharBind=1", true, true)]
-    // TEXTUAL comparison against "1": "=2" matches nothing, so the flag is false...
-    [InlineData("DisableBind=2", false, false)]
-    // ...while "=10" matches the leading "1" and IS true, and "=01" matches the leading "0".
-    [InlineData("DisableBind=10", true, false)]
-    [InlineData("DisableBind=01", false, false)]
-    // Malformed or truncated text is not an error condition - it simply is not "1".
-    [InlineData("DisableBind=", false, false)]
-    [InlineData("DisableBind", false, false)]
-    [InlineData("DisableBind=true", false, false)]
-    // A realistic longer parameter string, to show the keys are found in context.
-    [InlineData("ConnectString='DSN=SYNTHETIC',DisableBind=1,CommitOnDisconnect=0", true, false)]
+    [MemberData(nameof(DbParmFlagMatrix))]
     public void TheDbParmFlagMatrix(
         string dbParm,
         bool expectedBindDisabled,

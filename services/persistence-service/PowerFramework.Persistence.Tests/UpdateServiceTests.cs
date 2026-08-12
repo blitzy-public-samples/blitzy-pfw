@@ -30,6 +30,65 @@
 //      a concurrency mismatch raised as ABORTED with a POPULATED ConflictDetail AAP 0.6.3.8, constraint C-K
 //      the in-process algebra and the generated wire enum agreeing VALUE FOR    ws_objects/pfw.shared.pbl.src/retcode.sru,
 //        VALUE - the review invariant with no compile-time enforcement           AAP 0.4.5.3
+//      the ONE-BASED table ordinal reaching the refusal diagnostic              [:L86], OneBasedIndex.FirstIndex
+//      the after-update hook seeing the UNRECONCILED result                     [:L206] before [:L208-L210]
+//      THIS TYPE BEING THE SOLE Aborted THROW SITE IN THE WHOLE SERVICE         constraint C-K
+//      no C-06 message carrying a credential-shaped member, LogPass included    constraint C-F
+//      every DbError statement reaching the wire THROUGH THE REDACTOR           constraint C-F
+//      the SORT DROPPED BEFORE the changeset is applied, so rows commit in      [:L333-L334, :L336]
+//        COPY ORDER
+//      a SetChanges of -1 with a ZERO row count being SUCCESS-WITH-NO-DATA,     [:L339] versus [:L343-L345]
+//        and the same -1 with a NON-ZERO count being a failure
+//      the transaction attached BEFORE the branch                               [:L350] before [:L356]
+//      the multi-table path preparing ONCE PER TABLE, IN ORDER, EACH BEFORE     [:L364-L369]
+//        ITS OWN EXECUTION
+//      the SINGLE-TABLE path executing with NO PREPARE AT ALL                   [:L370-L372]
+//      the commit epilogue, the rollback epilogue, and the LAST-ERROR           [:L385-L401], [:L389, :L397]
+//        DE-DUPLICATION guard that reports an identical code only once
+//      finalize releasing the large payload DETERMINISTICALLY                   [:L406-L408]
+//      reset guarding on the running flag, clearing every input, and CHAINING   [:L58-L72], [:L60], [:L71]
+//        TO THE BASE LAST
+//      the fixture's own updatekeyinplace=no driving the DELETE-THEN-INSERT     ws_objects/pfw.tests.pbl.src/
+//        key refresh, which is the MAINLINE case and not a rare branch            dw_sqlite.srd:L14, [:L151-L167]
+//
+//  ------------------------------------------------------------------------------------------------
+//  THE PRODUCE / THROW / MAP DIVISION OF RESPONSIBILITY (constraint C-K, and it is THREE types)
+//
+//  A conflict travels through three owners and no one of them does another's job. Recording the split
+//  here is the point: a reader who assumes any single type owns the whole thing will put a fix in the
+//  wrong place, and two of the three boundaries have no compiler to stop them.
+//
+//    1. Concurrency/ConflictDetector.cs  PRODUCES.  It measures the mismatch, builds the
+//       common.v1.ConflictDetail from the current and original row state, redacts the statement, and
+//       returns it as DATA on an UpdateOutcome whose Kind is Conflict. It throws NOTHING, and it names
+//       no transport: a classifier that threw would decide the wire on its caller's behalf and would
+//       bypass the multi-table loop's own inspection of the returned code [:L366, :L368]. Its own suite
+//       is ConflictDetectorTests.
+//    2. Grpc/UpdateService.cs - THIS FILE'S SUBJECT - THROWS.  It is the DESIGNATED and, as asserted
+//       below, the ONLY Aborted throw site in the service. It consumes the projection whole and raises
+//       it; it builds no status, chooses no code and assembles no payload.
+//    3. Program.cs  MAPS.  The status interceptor owns the central exception-to-status mapping for the
+//       whole service and deliberately passes an already-chosen status THROUGH UNTOUCHED - rewriting it
+//       would strip the trailers and turn a 409 carrying evidence into a bare 500. Pinned in
+//       CompositionRootTests.AChosenStatusPassesThroughUntouched.
+//
+//  Downstream, Gateway projects Aborted onto HTTP 409 (AAP 0.1.5, 0.6.3.8). NO PATH ANYWHERE YIELDS A
+//  SUCCESS RESPONSE FOR A MISMATCH, and the theory below walks the four outcomes to say so.
+//
+//  ------------------------------------------------------------------------------------------------
+//  WHY ABSENT-VERSUS-DEFAULT IS A WIRE-LEVEL DISTINCTION AND NOT A STYLE CHOICE (constraint C-K)
+//
+//  updatewhere and updatekeyinplace are proto3 `optional` fields, which is what gives them explicit
+//  presence - HasUpdatewhere and HasUpdatekeyinplace - on the generated message. The oracle needs
+//  exactly that: it applies each setting ONLY when the field is not null [:L131, :L135], and its
+//  caller-side four-argument overload reaches that state by SetNull-ing both locals before forwarding
+//  [n_cst_threading_task_sqlupdate.sru:L227-L234]. So "unset" and "zero" are DIFFERENT REQUESTS.
+//  Collapsing absent into the proto3 default would write `DataWindow.Table.UpdateWhere = '0'` into the
+//  modification script for a caller who never asked for a concurrency mode - silently imposing the
+//  key-columns-only mode in place of whatever the DataWindow's own definition declared. That is a
+//  changed WHERE clause on every generated UPDATE, which is precisely the class of defect the
+//  updatewhereclause contract exists to prevent, and no test on either side of the wire alone would
+//  see it.
 //
 //  WHY THE VALUE-FOR-VALUE TEST IS LOAD-BEARING. PowerFramework.Contracts declares zero
 //  ProjectReference - deliberately none to Shared.Kernel - so the numeric agreement between the
@@ -52,13 +111,38 @@
 //  NO CREDENTIAL APPEARS ANYWHERE BELOW (constraint C-F). The conflict fixture carries column values
 //  because the contract requires a conflict to report current and original row state, and those values
 //  are obvious non-secrets that match no provider credential pattern.
+//
+//  ------------------------------------------------------------------------------------------------
+//  RULES POSITION, STATED RATHER THAN LEFT IMPLICIT
+//  No user rules were provided for this project: the rules document contains exactly one line saying
+//  so, and re-reading it returns the same. Nothing is invented or back-filled from convention in
+//  their place. What governs this file is therefore the enterprise-standard baseline of AAP 0.7.2 -
+//  nullable and warnings-as-errors inherited by test code too, no secret in source, no unused
+//  coupling - together with the named non-rule constraints C-A, C-B, C-D, C-E, C-F, C-G, C-H and
+//  C-K, each cited below at the point it applies, as C-K requires. This mirrors the position
+//  GlobalUsings.cs states for the assembly as a whole.
 // ==================================================================================================
+// System.Globalization is imported locally rather than globally, exactly as GlobalUsings.cs prescribes for
+// the minority of files that need it: the ordinal diagnostics below are composed culture-invariantly, so a
+// machine's locale cannot change what a test asserts.
+//
+// System.Reflection is deliberately NOT imported. The one member that reflects
+// - TheServiceDerivesFromTheGeneratedBaseAndOverridesEveryDeclaredRpc - qualifies BindingFlags in full, and
+// an import used by a single expression would make reflection read as this file's norm when it is its
+// exception. The architectural assertion that once used reflection now reads source instead; see
+// ThisTypeIsTheSoleAbortedThrowSiteInTheService for the measurement that drove the change.
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using Google.Protobuf.Reflection;
 using Grpc.Core;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Tasks;
+using PowerFramework.Persistence.Transactions;
 
 // The adapter and the generated contract wrapper share the simple name UpdateService, exactly as
 // GlobalUsings.cs anticipates for this folder. An alias directive is resolved ahead of the namespace
@@ -71,8 +155,14 @@ namespace PowerFramework.Persistence.Tests;
 
 /// <summary>
 /// Characterization coverage for <c>Grpc/UpdateService.cs</c>, the C-06 adapter and the designated
-/// <see cref="RpcException"/>/<see cref="StatusCode.Aborted"/> throw site for this service.
+/// <see cref="RpcException"/>/<see cref="StatusCode.Aborted"/> throw site for this service, together with
+/// the <see cref="SqlUpdateTask"/> orchestration beneath it.
 /// </summary>
+[SuppressMessage(
+    "Reliability",
+    "CA2000:Dispose objects before losing scope",
+    Justification = "Every disposable the orchestration harness creates is owned by the harness and "
+        + "released by its own Dispose.")]
 public sealed class UpdateServiceTests
 {
     private sealed class FakeCallContext(CancellationToken cancellationToken) : ServerCallContext
@@ -131,6 +221,57 @@ public sealed class UpdateServiceTests
 
         internal long AddResult { get; set; } = RetCode.OK;
 
+        /// <summary>
+        /// A per-position answer for successive adds, consumed in order; <see cref="AddResult"/> answers
+        /// every position once this list is exhausted.
+        /// </summary>
+        /// <remarks>
+        /// The seam the one-based-ordinal matrix needs: refusing the SECOND or THIRD descriptor rather than
+        /// the first is the only way to show the reported ordinal tracks the array position instead of
+        /// being fixed at one.
+        /// </remarks>
+        internal IReadOnlyList<long> AddResultsInOrder { get; set; } = [];
+
+        /// <summary>
+        /// When set, every add is forwarded to a REAL descriptor collection and its answer is returned, so
+        /// the oracle's own admission arms decide rather than <see cref="AddResult"/>.
+        /// </summary>
+        /// <remarks>
+        /// Null by default, which keeps every other case on the steered answer. See
+        /// <see cref="TheThreeArmAdmissionTestSurfacesThroughTheRpcAgainstTheRealCollection"/> for why one
+        /// matrix needs the provisioned collection.
+        /// </remarks>
+        internal UpdatableTableCollection? RealTables { get; set; }
+
+        /// <summary>Answers one add, honouring the per-position list, the collection and the busy flag.</summary>
+        /// <param name="descriptor">The descriptor as recorded, forwarded when a real collection is set.</param>
+        /// <returns>The code this add answers.</returns>
+        private long AnswerAdd(RecordedAddCall descriptor)
+        {
+            if (Busy)
+            {
+                return RetCode.E_BUSY;
+            }
+
+            if (RealTables is { } tables)
+            {
+                return tables.AddUpdatableTable(
+                    descriptor.Name,
+                    descriptor.UpdatableColumns,
+                    descriptor.KeyColumns,
+                    descriptor.IdentityColumn,
+                    descriptor.UpdateWhere,
+                    descriptor.UpdateKeyInPlace);
+            }
+
+            // The recorded call is already appended by the caller, so its ordinal is the count.
+            int position = _adds.Count;
+
+            return position <= AddResultsInOrder.Count
+                ? AddResultsInOrder[position - OneBasedIndex.FirstIndex]
+                : AddResult;
+        }
+
         internal bool? AutoCommitSeen { get; private set; }
 
         internal CarrierState? PayloadSeen { get; private set; }
@@ -179,16 +320,19 @@ public sealed class UpdateServiceTests
             bool? updateKeyInPlace)
         {
             _calls.Add("AddUpdatableTable6");
-            _adds.Add(new RecordedAddCall(
+
+            RecordedAddCall recorded = new(
                 name,
                 [.. updatableColumns],
                 [.. keyColumns],
                 identityColumn,
                 updateWhere,
                 updateKeyInPlace,
-                SixArgumentForm: true));
+                SixArgumentForm: true);
 
-            return Busy ? RetCode.E_BUSY : AddResult;
+            _adds.Add(recorded);
+
+            return AnswerAdd(recorded);
         }
 
         public long AddUpdatableTable(
@@ -198,16 +342,19 @@ public sealed class UpdateServiceTests
             string identityColumn)
         {
             _calls.Add("AddUpdatableTable4");
-            _adds.Add(new RecordedAddCall(
+
+            RecordedAddCall recorded = new(
                 name,
                 [.. updatableColumns],
                 [.. keyColumns],
                 identityColumn,
                 UpdateWhere: null,
                 UpdateKeyInPlace: null,
-                SixArgumentForm: false));
+                SixArgumentForm: false);
 
-            return Busy ? RetCode.E_BUSY : AddResult;
+            _adds.Add(recorded);
+
+            return AnswerAdd(recorded);
         }
 
         public long SetDataObject(string dataObject)
@@ -338,21 +485,60 @@ public sealed class UpdateServiceTests
                 new UpdateTaskPublication(default, isSessionRetiring: PublicationRetiring));
         }
     }
+    /// <summary>
+    /// Captures the formatted text of every log record, so the diagnostics that travel to an OPERATOR
+    /// rather than to a caller can be asserted.
+    /// </summary>
+    /// <typeparam name="TCategory">The logger's category type.</typeparam>
+    /// <remarks>
+    /// The adapter's logger is an OPTIONAL constructor dependency, so most cases below leave it null and
+    /// assert only the response. This exists for the cases where the two halves of one diagnostic are
+    /// deliberately split - the terse caller-facing text and the fuller operator-facing record.
+    /// </remarks>
+    private sealed class RecordingLogger<TCategory> : ILogger<TCategory>
+    {
+        private readonly List<string> _messages = [];
+
+        /// <summary>The formatted text of every record, in the order they were written.</summary>
+        internal IReadOnlyList<string> Messages => _messages;
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            _messages.Add(formatter(state, exception));
+        }
+    }
+
     private static readonly ServerCallContext Context = new FakeCallContext(CancellationToken.None);
 
     private static (UpdateService Service, FakeTaskFactory Factory, UpdateTaskRegistry Registry)
-        CreateService()
+        CreateService(ILogger<UpdateService>? logger = null)
     {
         FakeTaskFactory factory = new();
         UpdateTaskRegistry registry = new(Options.Create(new PersistenceOptions()), TimeProvider.System);
 
-        return (new UpdateService(factory, registry, new DataObjectDefinitionRegistry()), factory, registry);
+        return (
+            new UpdateService(factory, registry, new DataObjectDefinitionRegistry(), logger),
+            factory,
+            registry);
     }
 
     private static async Task<(UpdateService Service, FakeTaskSurface Surface, TaskHandle Handle,
-        UpdateTaskRegistry Registry)> CreateTaskAsync()
+        UpdateTaskRegistry Registry)> CreateTaskAsync(ILogger<UpdateService>? logger = null)
     {
-        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
+        (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) =
+            CreateService(logger);
 
         CreateUpdateTaskResponse created = await service.CreateUpdateTask(
             new CreateUpdateTaskRequest { Session = new SessionHandle { SessionId = "s-1" } },
@@ -607,6 +793,115 @@ public sealed class UpdateServiceTests
         Assert.False(add.UpdateKeyInPlace);
     }
 
+    /// <summary>
+    /// 🔴 All four presence combinations land on <see cref="UpdatableTableDescriptor"/>'s
+    /// <see langword="long"/>? and <see langword="bool"/>? members with presence intact, asserted against the
+    /// REAL descriptor collection rather than a recording of the call.
+    /// </summary>
+    /// <param name="stateMode">Whether the request states the concurrency mode.</param>
+    /// <param name="stateKeyInPlace">Whether it states the key-in-place setting.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE CASE THAT CLOSES THE LOOP.</b> The three cases above assert what the ADAPTER PASSED,
+    /// which is the adapter's own responsibility; this one asserts what the DESCRIPTOR HOLDS, which is what
+    /// the prepare later reads when it decides whether to emit each setting at all [<c>:L131, :L135</c>].
+    /// A mapping that passed null correctly into a collection that then defaulted it would satisfy the three
+    /// above and still write a concurrency mode the caller never asked for.
+    /// </para>
+    /// <para>
+    /// <b>ZERO AND FALSE ARE ASSERTED AS PRESENT, WHICH IS THE OTHER HALF OF THE DISTINCTION.</b> The failure
+    /// this guards against is symmetric: an implementation that treated the proto3 default as absence would
+    /// DROP an explicit <c>updatewhere = 0</c> - a caller asking for the key-columns-only mode - just as
+    /// surely as one that treated absence as the default would invent it. Both directions are covered here,
+    /// which is why the values chosen are exactly the defaults rather than convenient non-defaults.
+    /// </para>
+    /// <para>
+    /// The two settings are varied INDEPENDENTLY because the oracle tests the two nulls separately
+    /// [<c>:L131</c> versus <c>:L135</c>], so a caller may legitimately state one and omit the other and the
+    /// four combinations are four genuinely different requests.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task EveryPresenceCombinationLandsOnTheRealDescriptorWithPresenceIntact(
+        bool stateMode,
+        bool stateKeyInPlace)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        surface.RealTables = new UpdatableTableCollection();
+
+        TableUpdateContract descriptor = new()
+        {
+            Name = DwSqliteFixture.UpdateTableName,
+            Identitycolumn = DwSqliteFixture.IdentityColumnName,
+        };
+
+        descriptor.Updatablecolumns.AddRange(DwSqliteFixture.ColumnNames);
+        descriptor.Keycolumns.AddRange(DwSqliteFixture.KeyColumnNames);
+
+        if (stateMode)
+        {
+            // THE PROTO3 DEFAULT, DELIBERATELY. Stating zero is the case an implementation that confused
+            // absence with default would silently drop.
+            descriptor.Updatewhere = 0L;
+        }
+
+        if (stateKeyInPlace)
+        {
+            descriptor.Updatekeyinplace = false;
+        }
+
+        // The generated message's own presence, asserted before the call so the request's shape is not in
+        // doubt when the descriptor is read back.
+        Assert.Equal(stateMode, descriptor.HasUpdatewhere);
+        Assert.Equal(stateKeyInPlace, descriptor.HasUpdatekeyinplace);
+
+        PrepareUpdateResponse response = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { descriptor },
+                DataObject = EvidencedDataObject,
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+
+        UpdatableTableDescriptor recorded =
+            surface.RealTables.DescriptorAt(OneBasedIndex.FirstIndex);
+
+        // ABSENT SURVIVES AS ABSENT - null, and never 0 or false.
+        if (stateMode)
+        {
+            Assert.Equal(0L, recorded.UpdateWhere);
+        }
+        else
+        {
+            Assert.Null(recorded.UpdateWhere);
+        }
+
+        if (stateKeyInPlace)
+        {
+            Assert.False(recorded.UpdateKeyInPlace);
+        }
+        else
+        {
+            Assert.Null(recorded.UpdateKeyInPlace);
+        }
+
+        // The four non-optional members round-trip unconditionally, so a presence failure cannot be mistaken
+        // for a wholesale mapping failure.
+        Assert.Equal(DwSqliteFixture.UpdateTableName, recorded.Name);
+        Assert.Equal(DwSqliteFixture.ColumnNames, recorded.UpdatableColumns);
+        Assert.Equal(DwSqliteFixture.KeyColumnNames, recorded.KeyColumns);
+        Assert.Equal(DwSqliteFixture.IdentityColumnName, recorded.IdentityColumn);
+    }
+
     [Fact]
     public async Task AnEmptyIdentityColumnIsAcceptedAndTheThreeArmRejectionIsDelegated()
     {
@@ -645,6 +940,192 @@ public sealed class UpdateServiceTests
         Assert.Contains("Update table 1", refused.Status.ErrorText, StringComparison.Ordinal);
         Assert.Contains("sqlupdate.sru:L84", refused.Status.ErrorText, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The ordinal in the refusal diagnostic is the descriptor's ONE-BASED array position, and it tracks
+    /// the position rather than being fixed at the first.
+    /// </summary>
+    /// <param name="refusedPosition">The one-based position the collection refuses.</param>
+    /// <param name="tableCount">How many descriptors the request carries.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// R9 (AAP 0.4.5.4) IS WHY THIS IS ASSERTED RATHER THAN ASSUMED. The oracle appends at
+    /// <c>UpperBound(Tables) + 1</c> [<c>:L86</c>] and prepares over <c>for nIndex = 1 to nCount</c>
+    /// [<c>:L364</c>], so every ordinal a caller can be told about is one-based; the adapter's own loop is
+    /// zero-based over a repeated field and rebases for the report only
+    /// [<c>Grpc/UpdateService.cs</c>, <c>ordinal = index + OneBasedIndex.FirstIndex</c>]. A silent
+    /// off-by-one here would name the wrong descriptor in the one message a caller has to debug from -
+    /// indistinguishable from a behavioural regression, which is exactly R9's warning.
+    /// </para>
+    /// <para>
+    /// THE RESPONSE CARRIES THE ORDINAL AND THE LOG RECORD CARRIES THE PAIR, and both are asserted because
+    /// each answers a different question. "Update table 2" is what the CALLER receives and is deliberately
+    /// terse - it quotes no table name, no column name and no value, so nothing sensitive can travel on it
+    /// (constraint C-F). "table 2 of 3" is what the OPERATOR receives, and the count is what tells them the
+    /// refusal was positional rather than terminal.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(RefusedDescriptorPositions))]
+    public async Task TheOneBasedTableOrdinalTracksTheRefusedDescriptorsArrayPosition(
+        int refusedPosition,
+        int tableCount)
+    {
+        RecordingLogger<UpdateService> log = new();
+
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) =
+            await CreateTaskAsync(log);
+
+        // Admits every descriptor before the refused one, refuses that one, and is never reached again -
+        // the adapter stops at the first refusal, which is the oracle's own shape [:L84, :L366].
+        surface.AddResultsInOrder = [
+            .. Enumerable.Repeat(RetCode.OK, refusedPosition - OneBasedIndex.FirstIndex),
+            RetCode.E_INVALID_ARGUMENT];
+
+        PrepareUpdateRequest request = new()
+        {
+            Task = handle,
+            MultiTableUpdate = true,
+            DataObject = EvidencedDataObject,
+        };
+
+        for (int position = OneBasedIndex.FirstIndex; position <= tableCount; position++)
+        {
+            request.Tables.Add(Company(
+                string.Create(CultureInfo.InvariantCulture, $"COMPANY_{position}")));
+        }
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(request, Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+
+        // THE CALLER'S HALF: the one-based ordinal, and the oracle locator that explains the three arms.
+        Assert.Contains(
+            string.Create(CultureInfo.InvariantCulture, $"Update table {refusedPosition} was refused"),
+            refused.Status.ErrorText,
+            StringComparison.Ordinal);
+        Assert.Contains("sqlupdate.sru:L84", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // THE OPERATOR'S HALF: the ordinal AND the count, on the log record rather than the response.
+        string warning = Assert.Single(log.Messages, message =>
+            message.Contains("refused update table", StringComparison.Ordinal));
+
+        Assert.Contains(
+            string.Create(CultureInfo.InvariantCulture, $"table {refusedPosition} of {tableCount}"),
+            warning,
+            StringComparison.Ordinal);
+
+        // STOPPED AT THE REFUSAL, leaving the descriptors admitted so far in place [:L84, :L366].
+        Assert.Equal(refusedPosition, surface.Adds.Count);
+    }
+
+    /// <summary>The refused position and the descriptor count each case sends.</summary>
+    public static TheoryData<int, int> RefusedDescriptorPositions => new()
+    {
+        { 1, 1 },
+        { 1, 3 },
+        { 2, 3 },
+        { 3, 3 },
+    };
+
+    /// <summary>
+    /// The three-arm admission test of <c>:L84</c>, driven through the RPC against the REAL descriptor
+    /// collection rather than a steered refusal.
+    /// </summary>
+    /// <param name="arm">Which of the three conditions the descriptor violates.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THE REAL COLLECTION AND NOT THE FAKE.</b> Its sibling case above proves the adapter RELAYS
+    /// whatever the collection answers, which is the adapter's own responsibility. It cannot prove that
+    /// the three arms are the three the oracle has - a collection that admitted an empty key-column array
+    /// would pass it unchanged. Driving the provisioned <see cref="UpdatableTableCollection"/> through the
+    /// same RPC closes that gap without duplicating <c>UpdateWhereBuilderTests</c>, which owns the
+    /// collection in isolation.
+    /// </para>
+    /// <para>
+    /// <b>AN EMPTY IDENTITY COLUMN IS THE FOURTH CASE AND IT IS ADMITTED.</b> The oracle's condition names
+    /// three members and NOT the identity column [<c>:L84</c>], and the prepare applies that one only when
+    /// it is non-empty [<c>:L127-L129</c>] - a table with no identity column is ordinary, not malformed.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(AdmissionArms))]
+    public async Task TheThreeArmAdmissionTestSurfacesThroughTheRpcAgainstTheRealCollection(string arm)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        // The fake forwards every add to a real collection, so the arms under test are the collection's.
+        surface.RealTables = new UpdatableTableCollection();
+
+        TableUpdateContract descriptor = new() { Identitycolumn = DwSqliteFixture.IdentityColumnName };
+
+        switch (arm)
+        {
+            case "empty-name":
+                descriptor.Updatablecolumns.AddRange(DwSqliteFixture.ColumnNames);
+                descriptor.Keycolumns.AddRange(DwSqliteFixture.KeyColumnNames);
+                break;
+
+            case "no-updatable-columns":
+                descriptor.Name = DwSqliteFixture.UpdateTableName;
+                descriptor.Keycolumns.AddRange(DwSqliteFixture.KeyColumnNames);
+                break;
+
+            case "no-key-columns":
+                descriptor.Name = DwSqliteFixture.UpdateTableName;
+                descriptor.Updatablecolumns.AddRange(DwSqliteFixture.ColumnNames);
+                break;
+
+            default:
+                // The control: nothing is violated EXCEPT that the identity column is empty, which the
+                // oracle's condition does not name - so this one is admitted.
+                descriptor.Name = DwSqliteFixture.UpdateTableName;
+                descriptor.Updatablecolumns.AddRange(DwSqliteFixture.ColumnNames);
+                descriptor.Keycolumns.AddRange(DwSqliteFixture.KeyColumnNames);
+                descriptor.Identitycolumn = string.Empty;
+                break;
+        }
+
+        PrepareUpdateResponse response = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { descriptor },
+                DataObject = EvidencedDataObject,
+            },
+            Context);
+
+        if (string.Equals(arm, "empty-identity-column", StringComparison.Ordinal))
+        {
+            Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+            Assert.Equal(
+                OneBasedIndex.FirstIndex,
+                surface.RealTables.UpperBound);
+            Assert.Equal(string.Empty, surface.RealTables.DescriptorAt(OneBasedIndex.FirstIndex)
+                .IdentityColumn);
+
+            return;
+        }
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+
+        // NOTHING WAS APPENDED. The oracle returns BEFORE its first assignment [:L84], so a refused
+        // descriptor leaves the array exactly as it was.
+        Assert.Equal(OneBasedIndex.EmptyUpperBound, surface.RealTables.UpperBound);
+    }
+
+    /// <summary>The three refused arms of <c>:L84</c> plus the admitted empty-identity control.</summary>
+    public static TheoryData<string> AdmissionArms =>
+    [
+        "empty-name",
+        "no-updatable-columns",
+        "no-key-columns",
+        "empty-identity-column",
+    ];
+
 
     [Fact]
     public async Task MultiTablePrepareCarriesEveryDescriptorInArrayOrderAndClearsFirst()
@@ -1486,6 +1967,376 @@ public sealed class UpdateServiceTests
         Assert.Null(response.Counts);
     }
 
+    /// <summary>
+    /// 🔴 The four update outcomes reach the caller as FOUR DISTINCT ANSWERS, and no path anywhere yields a
+    /// success response for a concurrency mismatch.
+    /// </summary>
+    /// <param name="kind">
+    /// Which outcome the run produced, named rather than typed: <c>UpdateOutcomeKind</c> is internal to the
+    /// application assembly and a public theory member cannot expose it, so the name is the discriminator.
+    /// </param>
+    /// <param name="runCode">The code the run reconciled to.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE C-06 HEADLINE STATED AS A MATRIX.</b> The individual cases above each pin one
+    /// outcome's payload in detail; this one pins the property that only the whole set can show - that
+    /// <see cref="StatusCode.Aborted"/> is raised for the mismatch and for NOTHING ELSE, and that the
+    /// mismatch never lands anywhere but there. AAP 0.6.3.8 and 0.1.5 make Aborted the canonical mapping
+    /// onto HTTP 409 and forbid a silent overwrite anywhere in the system, so "a mismatch that answered
+    /// OK" is the single defect this file exists to make impossible.
+    /// </para>
+    /// <para>
+    /// A CANCELLATION IS NOT A FAILURE AND A FAILURE IS NOT A CONFLICT. The three non-conflict rows are
+    /// the controls: each answers on the response rather than by raising, each carries its own wire code,
+    /// and none is conflated with the conflict row.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(DistinctUpdateOutcomes))]
+    public async Task TheFourOutcomesMapDistinctlyAndAMismatchNeverAnswersASuccess(
+        string kind,
+        long runCode)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        surface.Result = new UpdateRunResult
+        {
+            Code = runCode,
+            Outcome = OutcomeOfKind(kind),
+            Counts = new UpdateRowCounts(1, 0, 0),
+            Identity = [new ResolvedIdentityColumnData(DwSqliteFixture.IdColumnNumber, [1L], [])],
+        };
+
+        if (string.Equals(kind, nameof(UpdateOutcomeKind.Conflict), StringComparison.Ordinal))
+        {
+            RpcException raised = await Assert.ThrowsAsync<RpcException>(
+                () => service.Update(new UpdateRequest { Task = handle }, Context));
+
+            // THE ONE ANSWER A MISMATCH MAY HAVE, and it carries its evidence.
+            Assert.Equal(StatusCode.Aborted, raised.StatusCode);
+            Assert.NotNull(raised.Trailers.GetValueBytes(ConflictDetector.RichErrorTrailerKey));
+
+            return;
+        }
+
+        UpdateResponse response = await service.Update(new UpdateRequest { Task = handle }, Context);
+
+        // NOT Aborted, and not raised at all: the three other outcomes answer on the response.
+        Assert.Equal(UpdateWireCodes.ToWireRetCode(runCode), response.Status.RetCode);
+
+        // The counts travel only on the reconciled success, so success is distinguishable from the two
+        // failures by more than its code alone.
+        if (runCode == RetCode.OK)
+        {
+            Assert.NotNull(response.Counts);
+            Assert.Equal(1L, response.Counts.Inserted);
+        }
+        else
+        {
+            Assert.Null(response.Counts);
+            Assert.Empty(response.Identity);
+        }
+    }
+
+    /// <summary>The four outcome kinds C-06 can produce, each with the code its run reconciles to.</summary>
+    /// <remarks>
+    /// The kind is carried by NAME because the enum is internal to the application assembly; the names are
+    /// taken from the enum itself with <c>nameof</c>, so a rename breaks compilation here rather than
+    /// silently skipping a row.
+    /// </remarks>
+    public static TheoryData<string, long> DistinctUpdateOutcomes => new()
+    {
+        { nameof(UpdateOutcomeKind.Succeeded), RetCode.OK },
+        { nameof(UpdateOutcomeKind.Cancelled), RetCode.CANCELLED },
+        { nameof(UpdateOutcomeKind.DatabaseError), RetCode.E_DB_ERROR },
+        { nameof(UpdateOutcomeKind.Conflict), RetCode.E_DB_ERROR },
+    };
+
+    /// <summary>Builds a representative outcome of the requested kind.</summary>
+    /// <param name="kind">The kind's name.</param>
+    /// <returns>The outcome.</returns>
+    private static UpdateOutcome OutcomeOfKind(string kind) => kind switch
+    {
+        nameof(UpdateOutcomeKind.Succeeded) => UpdateOutcome.Succeeded(
+            Resolution(
+                new UpdateRowCounts(1, 0, 0),
+                new ResolvedIdentityColumnData(DwSqliteFixture.IdColumnNumber, [1L], []))),
+        nameof(UpdateOutcomeKind.Cancelled) => UpdateOutcome.Cancelled(updateInvoked: false),
+        nameof(UpdateOutcomeKind.DatabaseError) => UpdateOutcome.DatabaseError(
+            DbErrorData.FromTransaction(-1, "the driver refused"),
+            errorReported: true),
+        nameof(UpdateOutcomeKind.Conflict) => UpdateOutcome.ConflictDetected(
+            StaleRowConflict(),
+            DbErrorData.FromTransaction(-1, "the row changed"),
+            updateTable: DwSqliteFixture.UpdateTableName,
+            updateResult: DataWindowBufferStore.DataStoreFailure,
+            observedByHook: DataWindowBufferStore.DataStoreSuccess,
+            overrideApplied: true),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "The matrix names four kinds."),
+    };
+
+    /// <summary>
+    /// A populated conflict detail over the sole evidenced fixture: one row whose salary another writer
+    /// moved, reported with both the current and the original value.
+    /// </summary>
+    /// <returns>The detail.</returns>
+    /// <remarks>
+    /// BOTH VALUES ARE CARRIED BECAUSE <c>updatewhere=1</c> REQUIRES BOTH. The fixture marks all six
+    /// columns <c>updatewhereclause=yes</c> [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], so
+    /// the concurrency predicate is the key column plus the ORIGINAL value of every marked column - a
+    /// detail carrying only the current state could not tell a caller what it was rebasing from.
+    /// The values are obvious non-secrets and match no provider credential pattern (constraint C-F).
+    /// </remarks>
+    private static ConflictDetail StaleRowConflict()
+    {
+        ConflictDetail detail = new()
+        {
+            UpdateTable = DwSqliteFixture.UpdateTableName,
+            RowsExpected = 1L,
+            RowsMatched = 0L,
+        };
+
+        detail.Rows.Add(new ConflictRow
+        {
+            Buffer = DwBuffer.Primary,
+            Row = OneBasedIndex.FirstIndex,
+            ItemStatus = ItemStatus.DataModified,
+            CurrentValues =
+            {
+                new ColumnValue
+                {
+                    ColumnId = DwSqliteFixture.SalaryColumnNumber,
+                    Value = new AnyValue { Int64Value = 5200L },
+                },
+            },
+            OriginalValues =
+            {
+                new ColumnValue
+                {
+                    ColumnId = DwSqliteFixture.SalaryColumnNumber,
+                    Value = new AnyValue { Int64Value = 4800L },
+                },
+            },
+        });
+
+        return detail;
+    }
+
+    /// <summary>
+    /// 🔴 <c>Grpc/UpdateService.cs</c> is the ONLY type in the whole Persistence service that raises
+    /// <see cref="StatusCode.Aborted"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS IS ASSERTED AND NOT MERELY DOCUMENTED (constraint C-K).</b> The produce/throw/map split
+    /// this file's header records has NO compile-time enforcement: any of the four gRPC services, the
+    /// classifier, a task or the status interceptor could construct an <c>Aborted</c> status and nothing
+    /// would object. A second throw site is the specific way the guarantee decays - one that raised Aborted
+    /// WITHOUT the conflict trailer would give a caller a 409 carrying no evidence to rebase from, which is
+    /// worse than a plain failure because it looks actionable. Counting the sites is how the split stays a
+    /// property of the code rather than a claim about it.
+    /// </para>
+    /// <para>
+    /// <b>THE SCAN IS OVER SOURCE, AND THAT IS A DELIBERATE CHOICE MADE AFTER MEASURING THE ALTERNATIVE.</b>
+    /// An IL scan was tried first - look for the <see cref="RpcException"/> constructor's metadata token in
+    /// every method body - and it OVER-REPORTS: four raw bytes coincide with unrelated tokens and inline
+    /// data, and it named a type that constructs no exception at all. A source scan cannot make that
+    /// mistake, reads the way a reviewer reads, and names the offending FILE rather than a mangled type,
+    /// which is what a failure has to say to be actionable. Comment and documentation lines are skipped, so
+    /// the many places that DISCUSS <c>Aborted</c> - including this file's own header - are not confused
+    /// with the one that raises it.
+    /// </para>
+    /// <para>
+    /// <b>BOTH HALVES OF THE SPLIT ARE COUNTED, WHICH IS WHAT MAKES IT A SPLIT.</b>
+    /// <see cref="StatusCode.Aborted"/> is NAMED in exactly one file - <c>Concurrency/ConflictDetector.cs</c>,
+    /// which produces the status - and <c>throw new RpcException</c> appears in exactly one, this file's
+    /// subject, which raises it. Neither file does the other's job, and <c>Program.cs</c> names neither
+    /// because it passes an already-chosen status through untouched.
+    /// </para>
+    /// <para>
+    /// SKIPPED RATHER THAN FAILED WHEN NO SOURCE TREE IS REACHABLE. Under an out-of-tree artifacts path the
+    /// production sources are simply not there, and a locator failure would report a defect in the test
+    /// environment as a defect in the code. The reachability is asserted separately by
+    /// <c>TestRepositoryRootTests</c>, so a silently-skipping locator cannot hide.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ThisTypeIsTheSoleAbortedThrowSiteInTheService()
+    {
+        if (LocateApplicationSourceRoot() is not { } sourceRoot)
+        {
+            return;
+        }
+
+        SortedSet<string> naming = new(StringComparer.Ordinal);
+        SortedSet<string> raising = new(StringComparer.Ordinal);
+
+        foreach (string file in Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            // The intermediate and output directories hold generated copies of the same code; counting them
+            // would double every finding.
+            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal)
+                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string relative = Path.GetRelativePath(sourceRoot, file).Replace('\\', '/');
+
+            foreach (string line in File.ReadLines(file))
+            {
+                string code = line.TrimStart();
+
+                if (code.StartsWith("//", StringComparison.Ordinal)
+                    || code.StartsWith('*')
+                    || code.StartsWith("/*", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (code.Contains("StatusCode.Aborted", StringComparison.Ordinal))
+                {
+                    naming.Add(relative);
+                }
+
+                if (code.Contains("throw new RpcException", StringComparison.Ordinal))
+                {
+                    raising.Add(relative);
+                }
+            }
+        }
+
+        // A GUARD ON THE GUARD: an empty scan would satisfy nothing below by accident.
+        Assert.NotEmpty(raising);
+
+        // PRODUCES - the classifier, and only the classifier.
+        Assert.Equal(["Concurrency/ConflictDetector.cs"], [.. naming]);
+
+        // THROWS - this file's subject, and only it. A new entry here is either a second throw site, which
+        // the division of responsibility forbids, or a deliberate change that must be argued for.
+        Assert.Equal(["Grpc/UpdateService.cs"], [.. raising]);
+    }
+
+    /// <summary>
+    /// The <c>PowerFramework.Persistence</c> application project directory, or <see langword="null"/> when
+    /// no source tree is reachable from this test run.
+    /// </summary>
+    /// <returns>The directory, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// The embedded repository root forms the path DIRECTLY because the marker being sought is
+    /// service-relative rather than repository-relative; the upward walk from the output directory is
+    /// retained beneath it so a run with no embedded root behaves as it did before. This mirrors the
+    /// locator in <c>TransactionServiceTests</c> rather than inventing a second convention -
+    /// see <see cref="TestRepositoryRoot"/>.
+    /// </remarks>
+    private static string? LocateApplicationSourceRoot()
+    {
+        const string ProjectDirectory = "PowerFramework.Persistence";
+
+        if (TestRepositoryRoot.Embedded is { } root)
+        {
+            string direct = Path.Combine(root, "services", "persistence-service", ProjectDirectory);
+
+            if (Directory.Exists(direct))
+            {
+                return direct;
+            }
+        }
+
+        DirectoryInfo? probe = new(AppContext.BaseDirectory);
+
+        while (probe is not null)
+        {
+            string candidate = Path.Combine(probe.FullName, ProjectDirectory);
+
+            if (Directory.Exists(candidate)
+                && File.Exists(Path.Combine(candidate, ProjectDirectory + ".csproj")))
+            {
+                return candidate;
+            }
+
+            probe = probe.Parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// No C-06 message declares a member that could carry a credential, so the transaction descriptor's
+    /// write-only <c>logpass</c> has no route onto this contract at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>CONSTRAINT C-F, ASSERTED STRUCTURALLY RATHER THAN BY REVIEW.</b> The legacy transaction structure
+    /// carries <c>string logpass</c> [<c>ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs</c>] and the
+    /// port keeps it WRITE-ONLY - never echoed in a response, never logged. A response message that grew a
+    /// credential-shaped field would defeat that at the contract level, where no amount of care in the
+    /// adapter could recover it, and it would do so invisibly: the field would simply be empty until
+    /// something populated it.
+    /// </para>
+    /// <para>
+    /// THE WHOLE REACHABLE GRAPH IS WALKED, not just the top-level messages, because a nested message is
+    /// exactly where such a field would hide. The walk follows every message-typed field transitively from
+    /// each C-06 response, so <c>OperationStatus</c>, <c>DbError</c>, <c>ConflictDetail</c>,
+    /// <c>ConflictRow</c>, <c>ColumnValue</c>, <c>AnyValue</c>, <c>IdentityColumnData</c> and
+    /// <c>NullableInt64</c> are all covered without being listed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoMessageOnTheUpdateContractCarriesACredentialShapedMember()
+    {
+        string[] forbidden = ["pass", "password", "credential", "secret", "logpass"];
+
+        HashSet<string> visited = new(StringComparer.Ordinal);
+        Queue<MessageDescriptor> pending = new();
+
+        foreach (MessageDescriptor root in new[]
+        {
+            CreateUpdateTaskResponse.Descriptor,
+            ReleaseUpdateTaskResponse.Descriptor,
+            ResetUpdateTaskResponse.Descriptor,
+            PrepareUpdateResponse.Descriptor,
+            UpdateResponse.Descriptor,
+        })
+        {
+            pending.Enqueue(root);
+        }
+
+        int inspected = 0;
+
+        while (pending.Count > 0)
+        {
+            MessageDescriptor message = pending.Dequeue();
+
+            if (!visited.Add(message.FullName))
+            {
+                continue;
+            }
+
+            inspected++;
+
+            foreach (FieldDescriptor field in message.Fields.InDeclarationOrder())
+            {
+                Assert.DoesNotContain(
+                    forbidden,
+                    marker => field.Name.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
+                if (field.FieldType == FieldType.Message && field.MessageType is { } nested)
+                {
+                    pending.Enqueue(nested);
+                }
+            }
+        }
+
+        // A GUARD ON THE GUARD. If the walk ever visited nothing - a renamed descriptor, a message that
+        // stopped being reachable - the loop above would pass by inspecting nothing at all.
+        Assert.True(inspected >= 5, "The walk must reach at least the five C-06 response messages.");
+    }
+
+
     [Fact]
     public async Task AnUnmappedOutcomeKindIsAStructuralFaultRatherThanAPlausibleStatus()
     {
@@ -1945,4 +2796,1655 @@ public sealed class UpdateServiceTests
 
         Assert.True(surface.Disposed);
     }
+
+    // =================================================================================================
+    //  THE ORCHESTRATION BENEATH THE ADAPTER - `ondotask` [:L284-L404], DRIVEN END TO END
+    //  -----------------------------------------------------------------------------------------------
+    //  WHY THE WORKER IS EXERCISED IN THIS FILE AND NOT ONLY BEHIND THE FAKE SURFACE. Everything above
+    //  substitutes the task at the boundary seam, which is right for asserting the TRANSLATION the adapter
+    //  owns. It cannot assert the SEQUENCE beneath it, and the sequence is where C-06's hardest guarantees
+    //  live: the sort must be dropped before the changeset is applied, the prepare must run per table on
+    //  one path and not at all on the other, and an identical error must be reported once rather than
+    //  twice. None of those is visible from a response; all of them are observable as an ordered series of
+    //  calls. So the cases below compose a REAL SqlUpdateTask over recording collaborators and read the
+    //  order back.
+    //
+    //  NO DATABASE, NO THREAD, NO CLOCK AND NO SLEEP (constraints C-E and AAP 0.6.7). The transaction
+    //  engine opens no connection and composes no connection string; the carrier is a recording view over a
+    //  real in-memory buffer store; the clock is frozen; nothing is posted, awaited or slept on. Every case
+    //  is a synchronous call and repeats identically.
+    //
+    //  THE SOLE EVIDENCED FIXTURE IS THE PRINCIPAL CASE (AAP 0.6.3.1). The descriptor, the column names,
+    //  the key column, the identity column, the expected modification script and the identity values all
+    //  come from DwSqliteFixture, which is dw_sqlite.srd read into code - so `updatewhere=1` and
+    //  `updatekeyinplace=no` are the fixture's own settings rather than values chosen to make a test pass.
+    // =================================================================================================
+
+    /// <summary>The ordered series of calls one orchestration run made, shared by every collaborator.</summary>
+    /// <remarks>
+    /// ONE LIST ACROSS ALL SURFACES, because the facts under test are about the order calls happen in
+    /// RELATIVE TO EACH OTHER - a sort on the store versus an apply on the carrier versus a modify on the
+    /// modifier. Per-surface counters could not express that at all.
+    /// </remarks>
+    private sealed class OrchestrationRecorder
+    {
+        private readonly List<string> _calls = [];
+
+        /// <summary>Every recorded call, in order.</summary>
+        internal IReadOnlyList<string> Calls => _calls;
+
+        /// <summary>Appends one call.</summary>
+        /// <param name="call">The call's name.</param>
+        internal void Record(string call) => _calls.Add(call);
+
+        /// <summary>The zero-based position of the first occurrence, or <c>-1</c> when absent.</summary>
+        /// <param name="call">The call's name.</param>
+        /// <returns>The position.</returns>
+        internal int PositionOf(string call) => _calls.IndexOf(call);
+
+        /// <summary>How many times a call was recorded.</summary>
+        /// <param name="call">The call's name.</param>
+        /// <returns>The count.</returns>
+        internal int CountOf(string call) =>
+            _calls.Count(recorded => string.Equals(recorded, call, StringComparison.Ordinal));
+
+        /// <summary>Asserts that <paramref name="first"/> was recorded strictly before <paramref name="second"/>.</summary>
+        /// <param name="first">The call that must come first.</param>
+        /// <param name="second">The call that must come second.</param>
+        internal void AssertPrecedes(string first, string second)
+        {
+            int firstAt = PositionOf(first);
+            int secondAt = PositionOf(second);
+
+            Assert.True(firstAt >= 0, $"{first} was never recorded; the series was [{string.Join(", ", _calls)}].");
+            Assert.True(secondAt >= 0, $"{second} was never recorded; the series was [{string.Join(", ", _calls)}].");
+            Assert.True(
+                firstAt < secondAt,
+                $"{first} must precede {second}; the series was [{string.Join(", ", _calls)}].");
+        }
+    }
+
+    /// <summary>The call names the orchestration series is written in.</summary>
+    /// <remarks>
+    /// Named constants rather than inline strings so a typo is a compile error instead of an assertion that
+    /// can never match - the failure mode a string-keyed recorder is otherwise prone to.
+    /// </remarks>
+    private static class OrchestrationCall
+    {
+        internal const string DropSort = "Store.SetSort";
+
+        internal const string ApplyChangeset = "Carrier.SetChanges";
+
+        internal const string AttachTransaction = "Carrier.SetTransObject";
+
+        internal const string BuildFromSyntax = "Carrier.Create";
+
+        internal const string Modify = "Modifier.Modify";
+
+        internal const string DescribeKeyInPlace = "Metadata.DescribeUpdateKeyInPlace";
+
+        internal const string Execute = "Target.Update";
+
+        internal const string Commit = "Engine.Commit";
+
+        internal const string Rollback = "Engine.Rollback";
+
+        internal const string Raise = "Host.OnError";
+    }
+
+    /// <summary>
+    /// A frozen clock. Both readings are overridden together, because the transaction pool measures liveness
+    /// and idle expiry as MONOTONIC elapsed time and a fake answering only <c>GetUtcNow</c> would let those
+    /// measurements escape onto the real <c>Stopwatch</c> - which is exactly the non-determinism
+    /// AAP 0.6.7 requires be seamed.
+    /// </summary>
+    private sealed class FrozenOrchestrationClock : TimeProvider
+    {
+        internal static readonly FrozenOrchestrationClock Instance = new();
+
+        private static readonly DateTimeOffset Fixed = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => Fixed;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp() => Fixed.UtcTicks;
+    }
+
+    /// <summary>
+    /// The storage engine, recording and refusing. It opens no connection and composes no connection
+    /// string, so the whole matrix runs with no database of any kind (constraint C-E).
+    /// </summary>
+    private sealed class OrchestrationEngine(OrchestrationRecorder recorder) : ITransactionEngine
+    {
+        /// <summary>Whether <see cref="Connect"/> answers a success. Steered per case.</summary>
+        internal bool ConnectSucceeds { get; set; } = true;
+
+        /// <summary>Whether <see cref="Commit"/> answers a success. Steered per case.</summary>
+        internal bool CommitSucceeds { get; set; } = true;
+
+        public int DbHandle { get; private set; }
+
+        public string Dbms { get; private set; } = string.Empty;
+
+        public bool AutoCommit { get; set; }
+
+        public void ApplyConnectionFields(in TransactionData descriptor) => Dbms = descriptor.Dbms;
+
+        public SqlState Connect(CancellationToken cancellationToken = default)
+        {
+            if (!ConnectSucceeds)
+            {
+                return SqlState.Failed(RetCode.SQLITE_CANTOPEN, "connect refused by the orchestration fake");
+            }
+
+            DbHandle = 1;
+
+            return SqlState.Succeeded();
+        }
+
+        public SqlState Disconnect()
+        {
+            DbHandle = 0;
+
+            return SqlState.Succeeded();
+        }
+
+        public SqlState Commit()
+        {
+            recorder.Record(OrchestrationCall.Commit);
+
+            return CommitSucceeds
+                ? SqlState.Succeeded()
+                : SqlState.Failed(RetCode.SQLITE_BUSY, "commit refused by the orchestration fake");
+        }
+
+        public SqlState Rollback()
+        {
+            recorder.Record(OrchestrationCall.Rollback);
+
+            return SqlState.Succeeded();
+        }
+
+        public SqlState Execute(string sqlCommand, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("No case in this region issues a statement; C-07 owns that.");
+
+        public SqlState Execute(in SqlCommandText command, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("No case in this region issues a statement; C-07 owns that.");
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /// <summary>One raise that reached the framework error channel.</summary>
+    private sealed record OrchestrationError(long Code, string Text);
+
+    /// <summary>
+    /// The threading substrate, recording every raise. That channel is what the epilogue's de-duplication
+    /// guard [<c>:L389, :L397</c>] decides to use or skip, so counting arrivals here is how suppression is
+    /// measured.
+    /// </summary>
+    private sealed class OrchestrationHost(OrchestrationRecorder recorder) : ISqlTaskHost
+    {
+        internal List<OrchestrationError> Errors { get; } = [];
+
+        public bool IsMainThread => false;
+
+        public bool IsCancelled => false;
+
+        public int TaskIndex => OneBasedIndex.FirstIndex;
+
+        public ISqlTaskProxy? ParentTasking => null;
+
+        public long GetTask(int index, out SqlTaskBase? task)
+        {
+            task = null;
+
+            return RetCode.E_OUT_OF_BOUND;
+        }
+
+        public bool HasData(string name) => false;
+
+        public object? GetData(string name) => null;
+
+        public long SetData(string name, object? data) => RetCode.OK;
+
+        public long OnPrepare() => RetCode.OK;
+
+        public void OnUninit()
+        {
+        }
+
+        public long OnError(long errCode, string errInfo)
+        {
+            recorder.Record(OrchestrationCall.Raise);
+            Errors.Add(new OrchestrationError(errCode, errInfo));
+
+            return RetCode.OK;
+        }
+
+        public long OnNotify(long notifyCode, long payload, string text) => RetCode.OK;
+    }
+
+    /// <summary>
+    /// The data store, recording the one call the orchestration makes on it that matters -
+    /// <c>data.SetSort("")</c> [<c>:L334</c>].
+    /// </summary>
+    /// <remarks>
+    /// The carrier behind it is REAL rather than faked, because the preparer's key-change refresh walks a
+    /// <c>DataWindowBufferStore</c> and a stub could not be walked. It holds no rows, so the refresh finds
+    /// nothing to flip - which is correct here: <c>UpdateWhereBuilderTests</c> owns the refresh MECHANICS
+    /// and this region owns whether the orchestration REACHES them.
+    /// </remarks>
+    private sealed class OrchestrationStore(OrchestrationRecorder recorder) : ISqlDataStore
+    {
+        private readonly DataWindowCarrier _carrier =
+            DataWindowCarrierFactory.Create(
+                CarrierThreadAffinity.WorkerThread,
+                FrozenOrchestrationClock.Instance);
+
+        /// <summary>The sort value the orchestration wrote, or null when it never wrote one.</summary>
+        internal string? SortSeen { get; private set; }
+
+        public DataWindowCarrier Carrier => _carrier;
+
+        public string DataObject { get; set; } = string.Empty;
+
+        public string GetSqlSelect() => string.Empty;
+
+        public string Modify(string modificationScript) => string.Empty;
+
+        // Non-empty for every property, which is what makes the added data-object probe
+        // [Tasks/SqlUpdateTask.cs, DataWindow.Units] read as RESOLVED. "!" is PowerBuilder's own
+        // describe-failure sentinel and is what the sibling harnesses answer.
+        public string Describe(string property) => DwSqliteFixture.InvalidPropertyAnswer;
+
+        public long SetFilter(string? filter) => DataWindowBufferStore.DataStoreSuccess;
+
+        public long SetSort(string? sort)
+        {
+            recorder.Record(OrchestrationCall.DropSort);
+            SortSeen = sort;
+
+            return DataWindowBufferStore.DataStoreSuccess;
+        }
+
+        public void ClearState() => _carrier.ClearState();
+
+        public void OnInit(ICarrierParentTask parentTask) => _carrier.OnInit(parentTask);
+
+        public ValueTask<long> RetrieveAsync(
+            IReadOnlyList<object?> parameters,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException("No case in this region retrieves; C-05 owns retrieval.");
+    }
+
+    /// <summary>Hands out one store per call, as the production factory does.</summary>
+    private sealed class OrchestrationStoreFactory(OrchestrationRecorder recorder) : ISqlDataStoreFactory
+    {
+        /// <summary>Every store handed out, so a case can read the sort back off the one that was used.</summary>
+        internal List<OrchestrationStore> Created { get; } = [];
+
+        public ISqlDataStore Create(CarrierThreadAffinity affinity)
+        {
+            OrchestrationStore store = new(recorder);
+            Created.Add(store);
+
+            return store;
+        }
+    }
+
+    /// <summary>
+    /// The describe surface the modification script is built against, decorating the fixture's own metadata
+    /// so the answers are <c>dw_sqlite.srd</c>'s and only the CALL is recorded.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DescribeUpdateKeyInPlace"/> is recorded because it is the gate on the delete-then-insert
+    /// key refresh [<c>:L155</c>], and reaching that gate is precisely what this region asserts about
+    /// Phase 5's mainline. The answers themselves are the fixture's: it declares
+    /// <c>updatekeyinplace=no</c> [<c>dw_sqlite.srd:L14</c>], so the gate opens.
+    /// </remarks>
+    private sealed class OrchestrationMetadata(OrchestrationRecorder recorder) : IUpdateTargetMetadata
+    {
+        private readonly DwSqliteTargetMetadata _fixture = new();
+
+        public int GetColumnCount() => _fixture.GetColumnCount();
+
+        public int GetColumnId(string columnIdProperty) => _fixture.GetColumnId(columnIdProperty);
+
+        public string DescribeUpdateKeyInPlace()
+        {
+            recorder.Record(OrchestrationCall.DescribeKeyInPlace);
+
+            return _fixture.DescribeUpdateKeyInPlace();
+        }
+    }
+
+    /// <summary>
+    /// The modify surface - <c>sErr = Data.Modify(sModString)</c> [<c>:L145</c>] - following the
+    /// EMPTY-STRING-MEANS-SUCCESS convention.
+    /// </summary>
+    private sealed class OrchestrationModifier(OrchestrationRecorder recorder) : IUpdateTargetModifier
+    {
+        private readonly List<string> _scripts = [];
+
+        /// <summary>Every script applied, in the order the prepare applied them.</summary>
+        internal IReadOnlyList<string> Scripts => _scripts;
+
+        /// <summary>The driver diagnostic to answer; empty is success. Steered per case.</summary>
+        internal string Error { get; set; } = string.Empty;
+
+        public string Modify(string modificationScript)
+        {
+            recorder.Record(OrchestrationCall.Modify);
+            _scripts.Add(modificationScript);
+
+            return Error;
+        }
+    }
+
+    /// <summary>
+    /// The update executor the classifier drives - <c>Data.of_ClearState()</c> [<c>:L186</c>] and
+    /// <c>Data.Update(true,false)</c> [<c>:L204</c>].
+    /// </summary>
+    private sealed class OrchestrationTarget(OrchestrationRecorder recorder) : IUpdateTarget
+    {
+        /// <summary>What the update answers. SUCCESS IS LITERALLY 1 [<c>:L214</c>], not the algebra's zero.</summary>
+        internal long UpdateResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
+
+        /// <summary>The measurement the narrowing reads, or null - the oracle's own state.</summary>
+        internal ConcurrencyEvidence? Evidence { get; set; }
+
+        /// <summary>How many times the update ran. One per descriptor on the multi-table path.</summary>
+        internal int UpdateCalls { get; private set; }
+
+        /// <summary>The argument pair every invocation was made with.</summary>
+        internal List<(bool AcceptText, bool ResetFlag)> Arguments { get; } = [];
+
+        public void ClearState()
+        {
+        }
+
+        public long Update(bool acceptText, bool resetFlag, CancellationToken cancellationToken = default)
+        {
+            recorder.Record(OrchestrationCall.Execute);
+            UpdateCalls++;
+            Arguments.Add((acceptText, resetFlag));
+
+            return UpdateResult;
+        }
+
+        public ConcurrencyEvidence? CaptureConcurrencyEvidence() => Evidence;
+    }
+
+    /// <summary>The update-capable carrier the orchestration drives, recording each of its own steps.</summary>
+    private sealed class OrchestrationCarrier : ISqlUpdateCarrier
+    {
+        private readonly OrchestrationRecorder _recorder;
+
+        internal OrchestrationCarrier(
+            OrchestrationStore store,
+            OrchestrationRecorder recorder,
+            OrchestrationMetadata metadata,
+            OrchestrationModifier modifier,
+            OrchestrationTarget target,
+            IIdentityValueSource identityValues)
+        {
+            RecordingStore = store;
+            _recorder = recorder;
+            Metadata = metadata;
+            Modifier = modifier;
+            UpdateTarget = target;
+            Identity = new IdentityTableSurfaces(new DwSqliteTargetMetadata(), identityValues);
+        }
+
+        /// <summary>What <c>data.Create(_sSQLSyntax, ref sError)</c> answers [<c>:L317</c>].</summary>
+        internal long CreateResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
+
+        /// <summary>The diagnostic the create writes into the oracle's by-reference local.</summary>
+        internal string CreateErrors { get; set; } = string.Empty;
+
+        /// <summary>What <c>data.SetChanges(_blbUpdateData)</c> answers [<c>:L336</c>].</summary>
+        internal long SetChangesResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
+
+        /// <summary>What <c>data.SetTransObject(transObject)</c> answers [<c>:L350</c>].</summary>
+        internal long SetTransObjectResult { get; set; } = DataWindowBufferStore.DataStoreSuccess;
+
+        /// <summary>The payload the apply received, so its release can be observed.</summary>
+        internal CarrierState? ChangesSeen { get; private set; }
+
+        /// <summary>How many times the payload was applied.</summary>
+        internal int SetChangesCalls { get; private set; }
+
+        internal OrchestrationMetadata Metadata { get; }
+
+        internal OrchestrationModifier Modifier { get; }
+
+        internal OrchestrationTarget UpdateTarget { get; }
+
+        /// <summary>
+        /// The store this carrier wraps, typed so the sort it was handed can be read back.
+        /// </summary>
+        /// <remarks>
+        /// ⚠ THE STORE THE FACTORY HANDED OUT IS NOT NECESSARILY THIS ONE. The adapter answers the same
+        /// carrier whatever store it is given, so the sort drop lands HERE and not on
+        /// <c>OrchestrationStoreFactory.Created</c>. Reading the wrong one is how an ordering assertion
+        /// silently observes nothing at all.
+        /// </remarks>
+        internal OrchestrationStore RecordingStore { get; }
+
+        public ISqlDataStore Store => RecordingStore;
+
+        public IUpdateTarget Target => UpdateTarget;
+
+        public IUpdateTargetMetadata TargetMetadata => Metadata;
+
+        public IUpdateTargetModifier TargetModifier => Modifier;
+
+        public IdentityTableSurfaces Identity { get; }
+
+        public long Create(string sqlSyntax, out string errors)
+        {
+            _recorder.Record(OrchestrationCall.BuildFromSyntax);
+            errors = CreateErrors;
+
+            return CreateResult;
+        }
+
+        public long SetChanges(CarrierState? changes)
+        {
+            _recorder.Record(OrchestrationCall.ApplyChangeset);
+            ChangesSeen = changes;
+            SetChangesCalls++;
+
+            // MIRRORS THE REAL SURFACE RATHER THAN ANSWERING A FIXED VALUE. A null payload is the oracle's
+            // zero-length blob and there is nothing to apply, which the contract answers with the datastore
+            // failure value - exactly what IChangesetPayloadCodec.TryApply answers. Modelling it is what lets
+            // the payload's RELEASE be observed: a run after the release applies null and therefore takes the
+            // no-data arm, which a fake answering success unconditionally would hide.
+            return changes is null ? DataWindowBufferStore.DataStoreFailure : SetChangesResult;
+        }
+
+        public long SetTransObject(IPooledTransaction? transaction)
+        {
+            _recorder.Record(OrchestrationCall.AttachTransaction);
+
+            return SetTransObjectResult;
+        }
+
+        public ConcurrencyEvidence? CaptureConcurrencyEvidence() => UpdateTarget.CaptureConcurrencyEvidence();
+
+        /// <summary>How many times the teardown released this carrier [<c>:L378</c>].</summary>
+        internal int Disposals { get; private set; }
+
+        public void Dispose() => Disposals++;
+    }
+
+    /// <summary>Adapts a store into the recording carrier, answering the SAME carrier every time.</summary>
+    /// <remarks>
+    /// One carrier per harness rather than one per adapt call, so a case can steer it before the run and
+    /// read it after. The orchestration adapts exactly once per run on every reachable path, so this is not
+    /// a behavioural shortcut.
+    /// </remarks>
+    private sealed class OrchestrationCarrierAdapter(OrchestrationCarrier carrier) : ISqlUpdateCarrierAdapter
+    {
+        /// <summary>How many times a store was adapted.</summary>
+        internal int Adaptations { get; private set; }
+
+        public ISqlUpdateCarrier Adapt(ISqlDataStore store)
+        {
+            Adaptations++;
+
+            return carrier;
+        }
+    }
+
+    /// <summary>
+    /// The caller-side proxy, recording the two events one successful invocation publishes -
+    /// <c>OnIdentityColumnDataRetrieved</c> [<c>:L243</c>] then <c>OnUpdated</c> [<c>:L247</c>].
+    /// </summary>
+    private sealed class OrchestrationProxy : ISqlUpdateTaskProxy
+    {
+        /// <summary>One published counts triple per successful invocation.</summary>
+        internal List<UpdateRowCounts> Published { get; } = [];
+
+        /// <summary>One published identity block per invocation that collected values.</summary>
+        internal List<(long ColumnId, IReadOnlyList<long?> Primary, IReadOnlyList<long?> Filter)> Identity
+        { get; } = [];
+
+        public void OnUpdated(long inserted, long updated, long deleted) =>
+            Published.Add(new UpdateRowCounts(inserted, updated, deleted));
+
+        public void OnIdentityColumnDataRetrieved(
+            long identityColumnId,
+            IReadOnlyList<long?> primaryValues,
+            IReadOnlyList<long?> filterValues) =>
+            Identity.Add((identityColumnId, primaryValues, filterValues));
+    }
+
+    /// <summary>
+    /// One composed orchestration: a real <see cref="SqlUpdateTask"/> over recording collaborators, with no
+    /// database, no thread and a frozen clock.
+    /// </summary>
+    private sealed class OrchestrationHarness : IDisposable
+    {
+        internal OrchestrationHarness(
+            IIdentityValueSource? identityValues = null,
+            ILogger<SqlUpdateTask>? logger = null)
+        {
+            Recorder = new OrchestrationRecorder();
+            Engine = new OrchestrationEngine(Recorder);
+            Host = new OrchestrationHost(Recorder);
+            StoreFactory = new OrchestrationStoreFactory(Recorder);
+            Redactor = new RecordingSqlRedactor();
+
+            Carrier = new OrchestrationCarrier(
+                new OrchestrationStore(Recorder),
+                Recorder,
+                new OrchestrationMetadata(Recorder),
+                new OrchestrationModifier(Recorder),
+                new OrchestrationTarget(Recorder),
+
+                // ZERO INSERTED ROWS BY DEFAULT, which closes the identity gate at [:L215] - the oracle's
+                // own behaviour for an update that inserted nothing. A case that wants the round trip hands
+                // in the fixture's sample source instead.
+                identityValues ?? new ZeroIdentityValues());
+
+            Adapter = new OrchestrationCarrierAdapter(Carrier);
+            Proxy = new OrchestrationProxy();
+
+            Pool = new TransactionPool(
+                Options.Create(new PersistenceOptions()),
+                FrozenOrchestrationClock.Instance,
+                new PooledTransactionActivator(() => Engine, FrozenOrchestrationClock.Instance));
+
+            Worker = new SqlUpdateTask(
+                Host,
+                Pool,
+                StoreFactory,
+                new SqlRetrievalHookActivator(),
+                Adapter,
+
+                // THE REAL CLASSIFIER, HANDED A RECORDING REDACTOR. The narrowing, the veto discrimination
+                // and the defensive override are the classifier's own; wrapping the redactor is what lets
+                // constraint C-F be asserted rather than assumed.
+                new ConflictDetector(Redactor),
+                FrozenOrchestrationClock.Instance,
+
+                // The worker's logger is REQUIRED rather than optional, so a case that has nothing to assert
+                // about the log still supplies one. The de-duplication guard writes its suppression there and
+                // nowhere else, which is the one place a case needs to read it.
+                logger ?? NullLogger<SqlUpdateTask>.Instance,
+                Proxy);
+        }
+
+        internal OrchestrationRecorder Recorder { get; }
+
+        internal OrchestrationEngine Engine { get; }
+
+        internal OrchestrationHost Host { get; }
+
+        internal OrchestrationStoreFactory StoreFactory { get; }
+
+        internal OrchestrationCarrier Carrier { get; }
+
+        internal OrchestrationCarrierAdapter Adapter { get; }
+
+        internal OrchestrationProxy Proxy { get; }
+
+        internal RecordingSqlRedactor Redactor { get; }
+
+        internal TransactionPool Pool { get; }
+
+        internal SqlUpdateTask Worker { get; }
+
+        /// <summary>
+        /// Configures the run to take the SQL-SYNTAX source arm [<c>:L316-L320</c>].
+        /// </summary>
+        /// <returns>This harness, for chaining.</returns>
+        /// <remarks>
+        /// The syntax arm rather than the data-object arm, deliberately: the data-object arm goes through
+        /// the datastore CACHE [<c>:L303-L306</c>], whose own restore logic issues further describes,
+        /// modifies and filter calls [<c>n_cst_thread_task_sqlbase.sru:L538-L568</c>] that would appear in
+        /// the recorded series and obscure the ordering under test. The cache path is owned by
+        /// <c>SqlTaskBaseTests</c>. Everything this region asserts happens AFTER the source arm, so the
+        /// choice changes nothing it measures.
+        /// </remarks>
+        internal OrchestrationHarness WithSyntaxSource()
+        {
+            Assert.Equal(RetCode.OK, Worker.SetSqlSyntax(DwSqliteFixture.RetrieveStatement));
+
+            // A PAYLOAD IS PART OF THE SOURCE CONFIGURATION, because every real update carries one: the
+            // caller measures its rows with GetChanges and sends both together
+            // [n_cst_threading_task_sqlupdate.sru:L255, :L258]. Cases that are ABOUT the payload overwrite
+            // this; cases that are about the sequence around it need it present so the run reaches them.
+            Assert.Equal(
+                RetCode.OK,
+                Worker.SetUpdateData(
+                    new CarrierState { Processing = DwSqliteFixture.ProcessingValue },
+                    DefaultPayloadRows));
+
+            return this;
+        }
+
+        /// <summary>The row count the default payload declares - non-zero, so a refusal is a failure.</summary>
+        internal const long DefaultPayloadRows = 3L;
+
+        /// <summary>Runs the orchestration once.</summary>
+        /// <returns>The code <c>ondotask</c> answered.</returns>
+        internal long Run() => Worker.OnDoTask(TestContext.Current.CancellationToken);
+
+        public void Dispose()
+        {
+            Worker.Dispose();
+            Pool.Dispose();
+            Engine.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// An identity value source reporting nothing inserted, which closes the identity gate at
+    /// <c>:L215</c>.
+    /// </summary>
+    private sealed class ZeroIdentityValues : IIdentityValueSource
+    {
+        public long GetInsertedCount() => 0L;
+
+        public long GetUpdatedCount() => 0L;
+
+        public long GetDeletedCount() => 0L;
+
+        public long RowCount() => 0L;
+
+        public long FilteredCount() => 0L;
+
+        public ItemStatus GetItemStatus(long row, int columnIndex, DwBuffer buffer) => ItemStatus.NotModified;
+
+        public long? GetItemNumber(long row, int columnNumber) => null;
+
+        public long? GetItemNumber(long row, int columnNumber, DwBuffer buffer, bool originalValue) => null;
+    }
+
+
+    // ---- STEP 4 [:L333-L334] - THE SORT IS DROPPED, AND IT IS DROPPED FIRST ----------------------
+
+    /// <summary>
+    /// 🔴 The sort is dropped BEFORE the changeset is applied, so the rows commit in COPY ORDER.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE ORACLE SAYS WHY IN ITS OWN COMMENT</b> [<c>:L333</c>]:
+    /// <c>//*去掉排序条件,保证数据按拷贝的顺序被提交</c> - "remove the sort condition so the data is
+    /// committed in copy order". Row order determines the order the UPDATE, INSERT and DELETE statements are
+    /// generated in, so a carrier that kept its sort emits the same statements in a DIFFERENT SEQUENCE. That
+    /// is observably different behaviour and a different outcome under a unique constraint or a trigger, so
+    /// it is preserved rather than tidied (constraint C-B).
+    /// </para>
+    /// <para>
+    /// <b>THE ORDER IS THE ASSERTION, NOT MERELY THE FACT.</b> Dropping the sort AFTER the apply would leave
+    /// the changeset landing into a sorted buffer, which is the state the row-loss defect punishes -
+    /// changeset application can lose rows on a sorted DataWindow larger than one block
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L148</c>], and the ordering here
+    /// is precisely what keeps this path away from it.
+    /// </para>
+    /// <para>
+    /// AND IT IS DROPPED TO EMPTY, not to the fixture's own sort. <c>dw_sqlite.srd:L14</c> declares
+    /// <c>sort="age A salary A "</c>, so "the sort was left alone" and "the sort was dropped" are
+    /// distinguishable states here rather than both reading as empty.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheSortIsDroppedBeforeTheChangesetIsAppliedSoRowsCommitInCopyOrder()
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+        Assert.Equal(
+            RetCode.OK,
+            harness.Worker.SetUpdateData(
+                new CarrierState { Processing = DwSqliteFixture.ProcessingValue },
+                OrchestrationHarness.DefaultPayloadRows));
+
+        Assert.Equal(RetCode.OK, harness.Run());
+
+        harness.Recorder.AssertPrecedes(OrchestrationCall.DropSort, OrchestrationCall.ApplyChangeset);
+
+        // THE WHOLE PREFIX, in the oracle's order: build from syntax [:L317], drop the sort [:L334], apply
+        // the changeset [:L336], attach the transaction [:L350], then execute [:L371].
+        Assert.Equal(
+            [
+                OrchestrationCall.BuildFromSyntax,
+                OrchestrationCall.DropSort,
+                OrchestrationCall.ApplyChangeset,
+                OrchestrationCall.AttachTransaction,
+                OrchestrationCall.Execute,
+            ],
+            harness.Recorder.Calls);
+
+        // DROPPED, not preserved, and read off the store the RUN used - which is the carrier's own, not
+        // the one the factory handed out. The fixture's own sort expression is a non-empty string, so
+        // "dropped" and "left alone" are distinguishable states here rather than both reading as empty.
+        Assert.Equal(string.Empty, harness.Carrier.RecordingStore.SortSeen);
+        Assert.NotEmpty(DwSqliteFixture.SortExpression);
+    }
+
+    // ---- STEP 5 [:L336-L346] - THE TWO-CONDITION "NO UPDATE DATA" RULE --------------------------
+
+    /// <summary>
+    /// 🔴 A changeset refusal is a SUCCESS only when the result is exactly <c>-1</c> AND the row count is
+    /// exactly zero; every other refusal is <see cref="RetCode.E_INVALID_DATA"/>.
+    /// </summary>
+    /// <param name="setChangesResult">What the carrier's apply answers.</param>
+    /// <param name="updateRows">The row count that accompanied the payload.</param>
+    /// <param name="expected">The code the run must answer.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE ORACLE'S RULE IS A CONJUNCTION AND IT IS EASY TO PORT AS ONE TEST</b>
+    /// [<c>:L339</c>]: <c>if rtCode = -1 and _nUpdateRows = 0 then rtCode = OK ; exit</c>. Both conjuncts
+    /// carry weight. A <c>-1</c> with a NON-ZERO count means the sender measured rows with
+    /// <c>GetChanges</c> and the payload then failed to apply them - a real failure
+    /// [<c>:L343-L345</c>]. A refusal that is not exactly <c>-1</c> is likewise a failure, because the
+    /// oracle compares against the literal rather than testing "not success".
+    /// </para>
+    /// <para>
+    /// AN EMPTY UPDATE IS THEREFORE NOT AN ERROR - a caller with nothing to commit gets
+    /// <see cref="RetCode.OK"/> and no statement is issued. Collapsing the pair into a single "the apply
+    /// failed" check would turn every empty update into a failure, and collapsing it the other way would
+    /// silently swallow a payload that was expected to carry rows.
+    /// </para>
+    /// <para>
+    /// THE ROW COUNT IS ASSERTED TO HAVE REACHED THE RUN, because it is the second conjunct and travels
+    /// separately from the payload [<c>:L44, :L74-L77</c>].
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ChangesetApplyOutcomes))]
+    public void AChangesetRefusalIsSuccessOnlyWhenTheRowCountIsAlsoZero(
+        long setChangesResult,
+        long updateRows,
+        long expected)
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+        harness.Carrier.SetChangesResult = setChangesResult;
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Worker.SetUpdateData(
+                new CarrierState { Processing = DwSqliteFixture.ProcessingValue },
+                updateRows));
+
+        Assert.Equal(updateRows, harness.Worker.GetUpdateRows());
+        Assert.Equal(expected, harness.Run());
+
+        // The apply always happens; what differs is what the run does with its answer.
+        Assert.Equal(1, harness.Carrier.SetChangesCalls);
+
+        if (expected == RetCode.OK && setChangesResult != DataWindowBufferStore.DataStoreSuccess)
+        {
+            // THE SUCCESS-WITH-NO-DATA ARM. It exits before the transaction is attached [:L341 precedes
+            // :L350], so nothing is executed and nothing is committed - there was nothing to commit.
+            Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.AttachTransaction));
+            Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.Execute));
+
+            // AND NOTHING IS REPORTED. The epilogue's rollback arm is not reached on an OK code [:L385].
+            Assert.Empty(harness.Host.Errors);
+            Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.Rollback));
+
+            return;
+        }
+
+        if (expected == RetCode.OK)
+        {
+            // The ordinary success: the payload applied, so the run proceeds to the branch.
+            Assert.Equal(1, harness.Recorder.CountOf(OrchestrationCall.Execute));
+
+            return;
+        }
+
+        // THE FAILURE ARM, carrying the oracle's own diagnostic verbatim [:L343].
+        Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.Execute));
+
+        OrchestrationError reported = Assert.Single(harness.Host.Errors);
+
+        Assert.Equal(RetCode.E_INVALID_DATA, reported.Code);
+        Assert.Equal(SqlUpdateTask.InvalidUpdateDataMessage, reported.Text);
+
+        // A FAILED RUN IS ROLLED BACK TWICE, and that is the legacy's own shape rather than a defect in
+        // the port (constraint C-B). The substrate's error event rolls back BEFORE forwarding the raise
+        // [n_cst_thread_task_sqlbase.sru:L731-L734], and the epilogue then rolls back again on its failure
+        // arm [:L395]. A rollback of an already-unwound transaction is a no-op, so the duplication is
+        // harmless - but it is OBSERVABLE, so it is pinned rather than smoothed over.
+        Assert.Equal(2, harness.Recorder.CountOf(OrchestrationCall.Rollback));
+    }
+
+    /// <summary>
+    /// The apply-result and row-count pairs, with the code each must answer.
+    /// </summary>
+    /// <remarks>
+    /// The fourth row is the one a single-condition port gets wrong: a refusal that is NOT the literal
+    /// <c>-1</c> fails the first conjunct and is therefore a failure, even with a zero row count.
+    /// </remarks>
+    public static TheoryData<long, long, long> ChangesetApplyOutcomes => new()
+    {
+        // applied, so the run proceeds - the control that keeps the matrix from passing for one reason.
+        { DataWindowBufferStore.DataStoreSuccess, 3L, RetCode.OK },
+
+        // -1 AND zero rows: success with no data [:L339-L342].
+        { DataWindowBufferStore.DataStoreFailure, 0L, RetCode.OK },
+
+        // -1 with rows the sender measured: a real failure [:L343-L345].
+        { DataWindowBufferStore.DataStoreFailure, 1L, RetCode.E_INVALID_DATA },
+        { DataWindowBufferStore.DataStoreFailure, 42L, RetCode.E_INVALID_DATA },
+
+        // not -1 at all, so the first conjunct fails whatever the count is.
+        { 0L, 0L, RetCode.E_INVALID_DATA },
+        { 2L, 0L, RetCode.E_INVALID_DATA },
+    };
+
+    // ---- STEP 6 [:L350-L354] - THE TRANSACTION IS ATTACHED BEFORE EITHER BRANCH -----------------
+
+    /// <summary>
+    /// The transaction is attached to the carrier before the branch runs, and a failed attach stops the run
+    /// with the oracle's own code and diagnostic.
+    /// </summary>
+    /// <param name="multiTable">Which branch the run takes.</param>
+    /// <remarks>
+    /// Asserted on BOTH branches because they consume the attachment differently - the multi-table branch
+    /// modifies the carrier before executing and the single-table branch executes straight away - and an
+    /// attachment sequenced after either would leave the statements running on no transaction at all.
+    /// </remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheTransactionIsAttachedBeforeTheBranchAndAFailedAttachStopsTheRun(bool multiTable)
+    {
+        using (OrchestrationHarness attached = new())
+        {
+            attached.WithSyntaxSource();
+            ConfigureFixtureDescriptors(attached.Worker, multiTable, DwSqliteFixture.UpdateTableName);
+
+            Assert.Equal(RetCode.OK, attached.Run());
+
+            attached.Recorder.AssertPrecedes(
+                OrchestrationCall.AttachTransaction,
+                OrchestrationCall.Execute);
+
+            if (multiTable)
+            {
+                attached.Recorder.AssertPrecedes(
+                    OrchestrationCall.AttachTransaction,
+                    OrchestrationCall.Modify);
+            }
+        }
+
+        using OrchestrationHarness refused = new();
+        refused.WithSyntaxSource();
+        ConfigureFixtureDescriptors(refused.Worker, multiTable, DwSqliteFixture.UpdateTableName);
+        refused.Carrier.SetTransObjectResult = DataWindowBufferStore.DataStoreFailure;
+
+        Assert.Equal(RetCode.E_INVALID_TRANSACTION, refused.Run());
+
+        // [:L351-L352] the diagnostic is the oracle's, consumed from the type that owns it.
+        OrchestrationError reported = Assert.Single(refused.Host.Errors);
+
+        Assert.Equal(RetCode.E_INVALID_TRANSACTION, reported.Code);
+        Assert.Equal(SqlUpdateTask.SetTransObjectFailedMessage, reported.Text);
+
+        // NEITHER BRANCH RAN. The refusal exits the body [:L353], so nothing was prepared or executed.
+        Assert.Equal(0, refused.Recorder.CountOf(OrchestrationCall.Modify));
+        Assert.Equal(0, refused.Recorder.CountOf(OrchestrationCall.Execute));
+    }
+
+    // ---- STEP 7 [:L356-L372] - THE BRANCH, WHICH IS THE HEART OF THE ORCHESTRATION --------------
+
+    /// <summary>
+    /// 🔴 The multi-table path prepares ONCE PER TABLE, IN ARRAY ORDER, and EACH PREPARE RUNS BEFORE ITS OWN
+    /// EXECUTION.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE INTERLEAVING IS THE CONTRACT, NOT AN IMPLEMENTATION DETAIL</b> [<c>:L364-L369</c>]:
+    /// <c>for nIndex = 1 to nCount { _of_UpdatePrepare(data,nIndex) ; _of_Update(data) }</c>. Each prepare
+    /// REWRITES the carrier's update table, key columns and identity column, so preparing all tables first
+    /// and then executing once would run every statement against the LAST table's contract - a write
+    /// landing in the wrong table while reporting success. Preparing table n+1 before table n has executed
+    /// would do the same thing one step earlier.
+    /// </para>
+    /// <para>
+    /// AAP 0.6.3.4 records multi-table update from one DataWindow as a REAL legacy capability rather than a
+    /// theoretical one: the descriptor is an ARRAY with its own reset and append paths, so the contract has
+    /// to carry it.
+    /// </para>
+    /// <para>
+    /// THE SCRIPTS THEMSELVES ARE ASSERTED, in order, and the first is compared against the fixture's own
+    /// DERIVED expectation rather than a string typed here - so a change in the script's shape fails at the
+    /// fixture, once, instead of in every suite that touches it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheMultiTablePathPreparesOncePerTableEachBeforeItsOwnExecution()
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+
+        ConfigureFixtureDescriptors(
+            harness.Worker,
+            multiTable: true,
+            DwSqliteFixture.UpdateTableName,
+            SecondUpdatableTable);
+
+        Assert.Equal(RetCode.OK, harness.Run());
+
+        // ONE PREPARE AND ONE EXECUTION PER DESCRIPTOR.
+        Assert.Equal(2, harness.Recorder.CountOf(OrchestrationCall.Modify));
+        Assert.Equal(2, harness.Recorder.CountOf(OrchestrationCall.Execute));
+        Assert.Equal(2, harness.Carrier.UpdateTarget.UpdateCalls);
+
+        // STRICTLY ALTERNATING, which is what "each before its own execution" means. Read off the tail of
+        // the series so the earlier steps do not have to be restated here.
+        Assert.Equal(
+            [
+                OrchestrationCall.Modify,
+                OrchestrationCall.DescribeKeyInPlace,
+                OrchestrationCall.Execute,
+                OrchestrationCall.Modify,
+                OrchestrationCall.DescribeKeyInPlace,
+                OrchestrationCall.Execute,
+            ],
+            harness.Recorder.Calls.Skip(
+                harness.Recorder.PositionOf(OrchestrationCall.Modify)));
+
+        // THE SCRIPTS, IN ORDER. The first is the fixture's own derived expectation; the second differs from
+        // it only in the update table it names, which is exactly what per-table preparation means.
+        Assert.Equal(2, harness.Carrier.Modifier.Scripts.Count);
+        Assert.Equal(DwSqliteFixture.ExpectedModificationScript, harness.Carrier.Modifier.Scripts[0]);
+
+        Assert.Contains(
+            UpdateWhereBuilder.UpdateTableProperty + " = '" + DwSqliteFixture.UpdateTableName + "'",
+            harness.Carrier.Modifier.Scripts[0],
+            StringComparison.Ordinal);
+        Assert.Contains(
+            UpdateWhereBuilder.UpdateTableProperty + " = '" + SecondUpdatableTable + "'",
+            harness.Carrier.Modifier.Scripts[1],
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 🔴 The single-table path executes with NO PREPARE AT ALL.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE ORACLE HAS EXACTLY ONE CALLER FOR <c>_of_UpdatePrepare</c></b>, at [<c>:L365</c>], INSIDE the
+    /// multi-table branch. The single-table branch calls the update directly [<c>:L371</c>] and lets the
+    /// carrier's own compiled definition govern the update table, the key columns and the identity column.
+    /// </para>
+    /// <para>
+    /// <b>A PORT THAT ALWAYS PREPARED WOULD CHANGE THE OBSERVABLE MODIFY-CALL SEQUENCE</b>, and it would do
+    /// more than that: the descriptor a single-table caller sends is INERT, so preparing from it would
+    /// overwrite a definition the caller never asked to change and would rewrite every generated statement's
+    /// column set. This case is written with a descriptor PRESENT and the switch OFF precisely so that "the
+    /// prepare was skipped" is distinguishable from "there was nothing to prepare from".
+    /// </para>
+    /// <para>
+    /// The key-in-place describe is asserted absent as well, because it is only ever reached from inside the
+    /// prepare [<c>:L155</c>] - so its absence is independent evidence that the prepare did not run.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheSingleTablePathExecutesWithNoPrepareAtAll()
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+
+        // A DESCRIPTOR IS PRESENT AND THE SWITCH IS OFF - the state that makes the skip observable.
+        ConfigureFixtureDescriptors(harness.Worker, multiTable: false, DwSqliteFixture.UpdateTableName);
+
+        Assert.Equal(OneBasedIndex.FirstIndex, harness.Worker.Tables.UpperBound);
+        Assert.False(harness.Worker.MultiTableUpdate);
+
+        Assert.Equal(RetCode.OK, harness.Run());
+
+        // NOT PREPARED, AND NOT PARTIALLY PREPARED.
+        Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.Modify));
+        Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.DescribeKeyInPlace));
+        Assert.Empty(harness.Carrier.Modifier.Scripts);
+
+        // EXECUTED ONCE, DIRECTLY - and with the oracle's own argument pair: accept text TRUE and reset flag
+        // FALSE [:L204], so the caller owns the buffer state afterwards.
+        Assert.Equal(1, harness.Carrier.UpdateTarget.UpdateCalls);
+        Assert.Equal((true, false), Assert.Single(harness.Carrier.UpdateTarget.Arguments));
+    }
+
+    /// <summary>
+    /// With the switch ON, an empty descriptor array is refused with the oracle's own diagnostic - and with
+    /// the switch OFF the same empty array is ordinary.
+    /// </summary>
+    /// <remarks>
+    /// The pair is what makes the asymmetry legible [<c>:L358-L363</c>] versus [<c>:L370-L372</c>]: the
+    /// multi-table branch CONSULTS the array and therefore an empty one is an error, while the single-table
+    /// branch never consults it at all. The diagnostic is consumed from the production type rather than
+    /// retyped, because a transposed character in a CJK literal is invisible in review.
+    /// </remarks>
+    [Fact]
+    public void MultiTableWithNoDescriptorsIsRefusedWhileSingleTableWithNoneIsOrdinary()
+    {
+        using (OrchestrationHarness refused = new())
+        {
+            refused.WithSyntaxSource();
+            Assert.Equal(RetCode.OK, refused.Worker.SetMultiTableUpdate(true));
+
+            Assert.Equal(RetCode.E_INVALID_ARGUMENT, refused.Run());
+
+            OrchestrationError reported = Assert.Single(refused.Host.Errors);
+
+            Assert.Equal(RetCode.E_INVALID_ARGUMENT, reported.Code);
+            Assert.Equal(UpdateWhereBuilder.NoUpdatableTableMessage, reported.Text);
+
+            Assert.Equal(0, refused.Recorder.CountOf(OrchestrationCall.Modify));
+            Assert.Equal(0, refused.Recorder.CountOf(OrchestrationCall.Execute));
+        }
+
+        using OrchestrationHarness ordinary = new();
+        ordinary.WithSyntaxSource();
+
+        Assert.Equal(RetCode.OK, ordinary.Run());
+        Assert.Equal(1, ordinary.Recorder.CountOf(OrchestrationCall.Execute));
+        Assert.Empty(ordinary.Host.Errors);
+    }
+
+    /// <summary>
+    /// A prepare that the driver refuses stops the multi-table loop at that table, and the table after it is
+    /// neither prepared nor executed.
+    /// </summary>
+    /// <remarks>
+    /// [<c>:L365-L366</c>] <c>if rtCode &lt;&gt; RetCode.OK then exit</c> - a VERBATIM zero comparison rather
+    /// than a failure predicate, so a prevention would stop the loop too. The stop matters for correctness
+    /// and not only for efficiency: continuing past a failed prepare would execute the next table's
+    /// statements against a carrier whose contract was left half-rewritten.
+    /// </remarks>
+    [Fact]
+    public void ARefusedPrepareStopsTheMultiTableLoopAtThatTable()
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+
+        ConfigureFixtureDescriptors(
+            harness.Worker,
+            multiTable: true,
+            DwSqliteFixture.UpdateTableName,
+            SecondUpdatableTable);
+
+        // [:L145-L149] the EMPTY-STRING-MEANS-SUCCESS convention: a non-empty answer is the driver's
+        // diagnostic and yields E_INTERNAL_ERROR.
+        harness.Carrier.Modifier.Error = "the driver rejected the modification script";
+
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, harness.Run());
+
+        // ONE prepare attempted, NONE executed, and the second table never reached.
+        Assert.Equal(1, harness.Recorder.CountOf(OrchestrationCall.Modify));
+        Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.Execute));
+
+        OrchestrationError reported = Assert.Single(harness.Host.Errors);
+
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, reported.Code);
+        Assert.Equal("the driver rejected the modification script", reported.Text);
+    }
+
+
+    // ---- THE EPILOGUE [:L385-L401] - COMMIT, ROLLBACK, AND THE DE-DUPLICATION GUARD --------------
+
+    /// <summary>
+    /// The epilogue commits only on a successful run with auto-commit on, and rolls back on every
+    /// unsuccessful one whether auto-commit is on or off.
+    /// </summary>
+    /// <param name="autoCommit">Whether the task was told to commit.</param>
+    /// <param name="succeeds">Whether the run reached the OK arm.</param>
+    /// <param name="expectedCommits">How many commits the epilogue must issue.</param>
+    /// <param name="expectedRollbacks">How many rollbacks it must issue.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE TEST AT [:L385] IS EXACT EQUALITY AGAINST OK, NOT A SUCCESS PREDICATE</b>, which is why the
+    /// two arms are mutually exclusive and why a cancellation - rewritten to
+    /// <see cref="RetCode.CANCELLED"/> at [<c>:L381-L383</c>], after the teardown - takes the rollback arm.
+    /// </para>
+    /// <para>
+    /// THE ROLLBACK IS UNCONDITIONAL ON THE FAILURE ARM [<c>:L395</c>], including for a run that never
+    /// issued a statement, and it goes to the TRANSACTION OBJECT DIRECTLY rather than through the task's own
+    /// rollback - the oracle's choice, preserved because the task's version additionally validates its own
+    /// attachment and would answer a different code for a detached task.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>A REPORTED FAILURE ROLLS BACK TWICE, AND THAT IS THE LEGACY'S SHAPE (constraint C-B).</b> The
+    /// substrate's error event rolls back BEFORE forwarding the raise
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L731-L734</c>], and the epilogue
+    /// then rolls back again [<c>:L395</c>]. The second is a no-op against an already-unwound transaction, so
+    /// nothing is harmed - but the count is observable, so the expectation states it rather than tolerating
+    /// either value.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(true, true, 1, 0)]
+    [InlineData(false, true, 0, 0)]
+    [InlineData(true, false, 0, 2)]
+    [InlineData(false, false, 0, 2)]
+    public void TheEpilogueCommitsOnlyOnASuccessfulRunAndRollsBackOnEveryOtherOne(
+        bool autoCommit,
+        bool succeeds,
+        int expectedCommits,
+        int expectedRollbacks)
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+
+        Assert.Equal(RetCode.OK, harness.Worker.SetAutoCommit(autoCommit));
+        Assert.Equal(autoCommit, harness.Worker.AutoCommit);
+
+        if (!succeeds)
+        {
+            // A refusal that is not the literal -1 fails whatever the row count is, so this reaches the
+            // failure arm without depending on the two-condition rule asserted elsewhere.
+            harness.Carrier.SetChangesResult = 0L;
+        }
+
+        long result = harness.Run();
+
+        Assert.Equal(succeeds ? RetCode.OK : RetCode.E_INVALID_DATA, result);
+        Assert.Equal(expectedCommits, harness.Recorder.CountOf(OrchestrationCall.Commit));
+        Assert.Equal(expectedRollbacks, harness.Recorder.CountOf(OrchestrationCall.Rollback));
+    }
+
+    /// <summary>
+    /// 🔴 The de-duplication guard reports a code the body has ALREADY raised exactly ONCE, and reports a
+    /// code the body has not raised.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE GUARD IS <c>if rtCode &lt;&gt; of_GetLastErrorCode() then Event OnError(...)</c></b>
+    /// [<c>:L389, :L397</c>]. Its purpose is that a failure the body has already reported in detail is not
+    /// reported a second time by the epilogue with a poorer diagnostic - a caller receiving the same code
+    /// twice cannot tell whether two things failed or one thing was announced twice.
+    /// </para>
+    /// <para>
+    /// <b>BOTH ROWS OF THIS CASE PRODUCE EXACTLY ONE RAISE, AND THAT IS THE POINT.</b> Counting raises alone
+    /// cannot distinguish "the epilogue suppressed a duplicate" from "the epilogue reported the only one", so
+    /// the suppression is asserted DIRECTLY through the debug record the guard writes when it takes the
+    /// suppressing branch. Without that, removing the guard would still leave a passing test on the first
+    /// row - with two identical raises instead of one.
+    /// </para>
+    /// <para>
+    /// The prepare-failure route is used for the suppressed row because the preparer raises through the same
+    /// error channel the epilogue would use, carrying the SAME code - which is the only shape in which the
+    /// guard can fire. The commit-failure route is the control: the body raised nothing, so the latch is
+    /// clear and the epilogue's report goes out.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ARepeatedIdenticalErrorIsReportedOnceAndAFreshOneIsAlwaysReported()
+    {
+        RecordingLogger<SqlUpdateTask> suppressedLog = new();
+
+        using (OrchestrationHarness suppressed = new(logger: suppressedLog))
+        {
+            suppressed.WithSyntaxSource();
+            ConfigureFixtureDescriptors(
+                suppressed.Worker,
+                multiTable: true,
+                DwSqliteFixture.UpdateTableName);
+
+            suppressed.Carrier.Modifier.Error = "the driver rejected the modification script";
+
+            Assert.Equal(RetCode.E_INTERNAL_ERROR, suppressed.Run());
+
+            // ONE raise, from the BODY, and the latch holds its code by the time the epilogue reads it.
+            OrchestrationError only = Assert.Single(suppressed.Host.Errors);
+
+            Assert.Equal(RetCode.E_INTERNAL_ERROR, only.Code);
+            Assert.Equal(RetCode.E_INTERNAL_ERROR, suppressed.Worker.GetLastErrorCode());
+
+            // AND THE SUPPRESSION GENUINELY HAPPENED rather than there having been nothing to suppress.
+            Assert.Contains(
+                suppressedLog.Messages,
+                message => message.Contains("suppressed a duplicate", StringComparison.Ordinal));
+        }
+
+        RecordingLogger<SqlUpdateTask> reportedLog = new();
+
+        using OrchestrationHarness reported = new(logger: reportedLog);
+        reported.WithSyntaxSource();
+        Assert.Equal(RetCode.OK, reported.Worker.SetAutoCommit(true));
+        reported.Engine.CommitSucceeds = false;
+
+        long result = reported.Run();
+
+        // The commit failed, so the epilogue's own code REPLACES the body's OK [:L387].
+        Assert.True(Predicates.IsFailed(result));
+
+        // ONE raise, from the EPILOGUE this time, and nothing was suppressed.
+        Assert.Equal(result, Assert.Single(reported.Host.Errors).Code);
+        Assert.DoesNotContain(
+            reportedLog.Messages,
+            message => message.Contains("suppressed a duplicate", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A cancellation is rolled back but never reported, which is the one failure arm that raises nothing.
+    /// </summary>
+    /// <remarks>
+    /// [<c>:L396</c>] <c>if rtCode &lt;&gt; RetCode.CANCELLED then</c> guards the raise and NOT the rollback,
+    /// so the two are deliberately asymmetric: the transaction is always unwound, and a caller who asked to
+    /// stop is not told that stopping was an error. The cancellation is observed through the task's own
+    /// caller token, which needs no thread and no clock.
+    /// </remarks>
+    [Fact]
+    public void ACancelledRunIsRolledBackButNeverReported()
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        Assert.Equal(RetCode.CANCELLED, harness.Worker.OnDoTask(cancelled.Token));
+
+        Assert.Equal(1, harness.Recorder.CountOf(OrchestrationCall.Rollback));
+        Assert.Equal(0, harness.Recorder.CountOf(OrchestrationCall.Commit));
+        Assert.Empty(harness.Host.Errors);
+    }
+
+    // ---- FINALIZE [:L406-L408] AND RESET [:L58-L72] - THE TWO DETERMINISTIC CLEARS ---------------
+
+    /// <summary>
+    /// Finalize releases the changeset payload and its row count DETERMINISTICALLY, at a defined point rather
+    /// than being left to the collector.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// [<c>:L406-L408</c>] <c>_blbUpdateData = Blob("") ; _nUpdateRows = 0</c>. The payload is the largest
+    /// thing the task holds and it has already been applied by the time this runs, so releasing it here is
+    /// the same discipline <c>docs/PB多线程绕坑提示.md</c> hazard 2 prescribes for cross-thread references.
+    /// </para>
+    /// <para>
+    /// <b>THE PAYLOAD IS PRIVATE, SO ITS RELEASE IS OBSERVED THROUGH THE RUN THAT WOULD HAVE USED IT.</b>
+    /// A run after the finalize applies <see langword="null"/> - the oracle's zero-length blob - which is
+    /// exactly what a released payload looks like from the carrier's side. Asserting the row count alone
+    /// would leave the larger of the two fields unproven, which is the wrong half to leave out.
+    /// </para>
+    /// <para>
+    /// THE MID-RUN RELEASE AT [<c>:L348</c>] IS ASSERTED ALONGSIDE IT, because it is the same discipline
+    /// applied at the earliest point it can be: a second run without a fresh payload also sees null, so the
+    /// release happened when the payload was applied rather than at the end of the run.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void FinalizeAndTheApplyItselfBothReleaseTheChangesetPayloadDeterministically()
+    {
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+
+        CarrierState payload = new() { Processing = DwSqliteFixture.ProcessingValue };
+
+        Assert.Equal(RetCode.OK, harness.Worker.SetUpdateData(payload, 7L));
+        Assert.Equal(7L, harness.Worker.GetUpdateRows());
+
+        // FIRST RUN: the payload is applied, then released at [:L348].
+        Assert.Equal(RetCode.OK, harness.Run());
+        Assert.Same(payload, harness.Carrier.ChangesSeen);
+
+        // SECOND RUN, no fresh payload: the release at [:L348] is why nothing arrives. The row count is
+        // deliberately still 7, because [:L348] clears the blob and NOT the count - so this run takes the
+        // E_INVALID_DATA arm rather than the success-with-no-data one, which is itself the proof that only
+        // the blob was cleared.
+        Assert.Equal(7L, harness.Worker.GetUpdateRows());
+        Assert.Equal(RetCode.E_INVALID_DATA, harness.Run());
+        Assert.Null(harness.Carrier.ChangesSeen);
+
+        // NOW THE FINALIZE, which clears BOTH.
+        Assert.Equal(RetCode.OK, harness.Worker.SetUpdateData(payload, 7L));
+        harness.Worker.OnFinalize();
+
+        Assert.Equal(0L, harness.Worker.GetUpdateRows());
+
+        // With both cleared, the same refusal is now the SUCCESS-WITH-NO-DATA arm [:L339].
+        Assert.Equal(RetCode.OK, harness.Run());
+        Assert.Null(harness.Carrier.ChangesSeen);
+    }
+
+    /// <summary>
+    /// Reset guards on the running flag with NOTHING cleared behind the refusal, then clears every input and
+    /// chains to the base LAST.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE GUARD IS THE FIRST STATEMENT</b> [<c>:L60</c>] <c>if #Running then return RetCode.E_BUSY</c>,
+    /// and the oracle returns BEFORE its first assignment - so a refused reset cannot half-clear the inputs
+    /// and leave the task in a state the caller neither asked for nor can see. Every one of the six inputs is
+    /// asserted intact after the refusal, because "nothing was cleared" is only meaningful if it covers all
+    /// of them.
+    /// </para>
+    /// <para>
+    /// <b>THE BASE IS CHAINED LAST AND ITS RESULT IS THE ANSWER</b> [<c>:L71</c>] -
+    /// <c>return super::of_Reset()</c> is a RETURN rather than a fire-and-forget call. The chaining is
+    /// observed through a piece of state the BASE owns and this task does not: the SQL parameter collection,
+    /// which the base's reset clears. A port that cleared its own fields and forgot the chain would pass
+    /// every other assertion here.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ResetGuardsOnTheRunningFlagAndClearsEveryInputBeforeChainingToTheBase()
+    {
+        using OrchestrationHarness harness = new();
+
+        // Every input set, including one the BASE owns so the chain can be observed.
+        Assert.Equal(RetCode.OK, harness.Worker.SetAutoCommit(true));
+        Assert.Equal(RetCode.OK, harness.Worker.SetSqlSyntax(DwSqliteFixture.RetrieveStatement));
+        ConfigureFixtureDescriptors(harness.Worker, multiTable: true, DwSqliteFixture.UpdateTableName);
+        Assert.Equal(
+            RetCode.OK,
+            harness.Worker.SetUpdateData(
+                new CarrierState { Processing = DwSqliteFixture.ProcessingValue },
+                ResetProbePayloadRows));
+        Assert.Equal(RetCode.OK, harness.Worker.SetParam(DwSqliteFixture.KeyColumnName, "COMPANY"));
+
+        Assert.True(harness.Worker.HasParams());
+
+        // THE REFUSAL, with nothing cleared behind it.
+        harness.Worker.IsRunning = () => true;
+
+        Assert.Equal(RetCode.E_BUSY, harness.Worker.Reset());
+        Assert.Equal(RetCode.E_BUSY, harness.Worker.ResetUpdatableTables());
+
+        Assert.True(harness.Worker.AutoCommit);
+        Assert.True(harness.Worker.MultiTableUpdate);
+        Assert.Equal(DwSqliteFixture.RetrieveStatement, harness.Worker.SqlSyntax);
+        Assert.Equal(OneBasedIndex.FirstIndex, harness.Worker.Tables.UpperBound);
+        Assert.Equal(ResetProbePayloadRows, harness.Worker.GetUpdateRows());
+        Assert.True(harness.Worker.HasParams());
+
+        // THE RESET ITSELF.
+        harness.Worker.IsRunning = () => false;
+
+        Assert.Equal(RetCode.OK, harness.Worker.Reset());
+
+        Assert.False(harness.Worker.AutoCommit);
+        Assert.False(harness.Worker.MultiTableUpdate);
+        Assert.Equal(string.Empty, harness.Worker.DataObject);
+        Assert.Equal(string.Empty, harness.Worker.SqlSyntax);
+        Assert.Equal(OneBasedIndex.EmptyUpperBound, harness.Worker.Tables.UpperBound);
+        Assert.Equal(0L, harness.Worker.GetUpdateRows());
+
+        // THE CHAIN: base-owned state cleared too [:L71].
+        Assert.False(harness.Worker.HasParams());
+        Assert.Equal(OneBasedIndex.EmptyUpperBound, harness.Worker.GetParamCount());
+
+        // AND THE PAYLOAD WITH IT [:L68], observed through the run that would have used it: with no source
+        // left either, the run now takes the oracle's no-source arm.
+        Assert.Equal(RetCode.E_INVALID_DATAOBJECT, harness.Run());
+        Assert.Null(harness.Carrier.ChangesSeen);
+    }
+
+    // ---- PHASE 5 - THE `updatekeyinplace=no` MAINLINE, AND THE MANDATORY REDACTOR ----------------
+
+    /// <summary>
+    /// 🔴 The FIXTURE'S OWN <c>updatekeyinplace=no</c> setting drives the delete-then-insert key refresh, and
+    /// the orchestration reaches it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE MAINLINE PATH AND NOT A RARE BRANCH.</b> The sole evidenced updatable DataWindow
+    /// declares <c>updatekeyinplace=no</c> in its own table specification
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>], so every update against the only fixture the
+    /// repository has takes this path. Treating it as an edge case is the specific mistake this comment
+    /// exists to prevent.
+    /// </para>
+    /// <para>
+    /// <b>WHAT THE SETTING MEANS AND WHY A WORKAROUND IS NEEDED.</b> <c>updatekeyinplace=no</c> makes a key
+    /// change a DELETE PLUS AN INSERT rather than an in-place UPDATE. The oracle documents a defect against
+    /// itself at [<c>:L151-L154</c>]: when the requested key field is not marked as a key, the modified state
+    /// will not generate the delete and insert statements, so the internal modified state must be
+    /// force-refreshed. Lines [<c>:L155-L167</c>] implement that by ASSIGNING EACH MODIFIED KEY COLUMN TO
+    /// ITSELF [<c>:L163</c>] purely to flip its item status - a statement with no .NET analogue, which is why
+    /// the port models original-value and item-status tracking explicitly.
+    /// </para>
+    /// <para>
+    /// <b>THE REFRESH MECHANICS BELONG TO <c>UpdateWhereBuilderTests</c>; THIS CASE OWNS WHETHER THE
+    /// ORCHESTRATION REACHES THEM.</b> Two things are asserted, and the ORDER between them is the oracle's:
+    /// the modification script carries the setting [<c>:L135-L141</c>], and the runtime describe that gates
+    /// the refresh is consulted AFTERWARDS [<c>:L155</c>] - the gate reads the value the modify has just
+    /// written, so a port that read it first would gate on the definition's old value.
+    /// </para>
+    /// <para>
+    /// THE CASE-SENSITIVITY IS LOAD-BEARING TOO. The oracle's gate is the exact comparison
+    /// <c>Describe(...) = "no"</c> and PowerScript string equality is case-sensitive, so <c>"No"</c> would
+    /// close the gate and skip the refresh entirely. The literal is consumed from the production constant.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheFixtureKeyInPlaceSettingDrivesTheDeleteThenInsertRefreshOnTheMainlinePath()
+    {
+        // THE FIXTURE'S OWN SETTING, asserted rather than assumed: this is what makes the path mainline.
+        Assert.False(DwSqliteFixture.UpdateKeyInPlace);
+        Assert.False(DwSqliteFixture.Descriptor().UpdateKeyInPlace);
+
+        using OrchestrationHarness harness = new();
+        harness.WithSyntaxSource();
+        ConfigureFixtureDescriptors(harness.Worker, multiTable: true, DwSqliteFixture.UpdateTableName);
+
+        Assert.Equal(RetCode.OK, harness.Run());
+
+        string script = Assert.Single(harness.Carrier.Modifier.Scripts);
+
+        // THE SETTING REACHED THE SCRIPT, in the oracle's own spelling and with the lower-case literal.
+        Assert.Contains(
+            UpdateWhereBuilder.UpdateKeyInPlaceProperty + " = " + UpdateWhereBuilder.NoLiteral,
+            script,
+            StringComparison.Ordinal);
+
+        // AND THE CONCURRENCY MODE WITH IT - updatewhere=1 is the fixture's own, and it is what makes the
+        // predicate span all six columns' ORIGINAL values (AAP 0.6.3.2).
+        Assert.Equal(1L, DwSqliteFixture.UpdateWhereMode);
+        Assert.Contains(
+            UpdateWhereBuilder.UpdateWhereProperty + " = '"
+                + DwSqliteFixture.UpdateWhereMode.ToString(CultureInfo.InvariantCulture) + "'",
+            script,
+            StringComparison.Ordinal);
+
+        // THE WHOLE SCRIPT, against the fixture's DERIVED expectation - so the six columns, the key column
+        // and the identity column are all covered without being restated here.
+        Assert.Equal(DwSqliteFixture.ExpectedModificationScript, script);
+
+        // THE GATE WAS REACHED, AND AFTER THE MODIFY [:L145 then :L155].
+        Assert.Equal(1, harness.Recorder.CountOf(OrchestrationCall.DescribeKeyInPlace));
+        harness.Recorder.AssertPrecedes(
+            OrchestrationCall.Modify,
+            OrchestrationCall.DescribeKeyInPlace);
+    }
+
+    /// <summary>
+    /// The identity round trip publishes ONE block per invocation, with the Primary values FORWARD and the
+    /// Filter values in the REVERSE source order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// [<c>:L228-L241</c>] walks <c>Primary!</c> forward and <c>Filter!</c>
+    /// <b>BACKWARD</b> - <c>for nIndex = nCount to 1 step -1</c> [<c>:L237</c>] - because the filter
+    /// buffer's row order is THE REVERSE of the source's, which the oracle records in its own comment at
+    /// [<c>:L235</c>]. AAP 0.4.5.4 R9 names this the single most dangerous line in the refactor for
+    /// one-based-to-zero-based translation: it LOOKS like a bug, it is NOT a bug, and "correcting" the
+    /// direction produces wrong identity values that a row-count assertion would not catch.
+    /// </para>
+    /// <para>
+    /// The expected values come from the fixture, whose Filter expectation is ordered DESCENDING by row for
+    /// exactly this reason - so this case and <c>IdentityColumnResolverTests</c> agree by construction rather
+    /// than by two independently typed lists.
+    /// </para>
+    /// <para>
+    /// TWO ARRAYS AND NOT ONE, at this level as well as on the wire: a merged array would lose both the
+    /// buffer distinction and the ordering asymmetry, and there would be nothing left to compare against.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheIdentityRoundTripPublishesOneBlockPerInvocationWithFilterValuesReversed()
+    {
+        using OrchestrationHarness harness = new(new DwSqliteSampleRowSource());
+        harness.WithSyntaxSource();
+
+        ConfigureFixtureDescriptors(
+            harness.Worker,
+            multiTable: true,
+            DwSqliteFixture.UpdateTableName,
+            SecondUpdatableTable);
+
+        Assert.Equal(RetCode.OK, harness.Run());
+
+        // ONE COUNTS TRIPLE PER INVOCATION [:L247]. Accumulation across the loop is the caller-side proxy's
+        // job [n_cst_threading_task_sqlupdate.sru:L66-L68], not this task's, so two invocations publish two.
+        Assert.Equal(2, harness.Proxy.Published.Count);
+        Assert.All(
+            harness.Proxy.Published,
+            counts => Assert.Equal(DwSqliteFixture.SampleRowCounts, counts));
+
+        // ONE IDENTITY BLOCK PER INVOCATION, appended in table order [:L243].
+        Assert.Equal(2, harness.Proxy.Identity.Count);
+
+        foreach ((long columnId, IReadOnlyList<long?> primary, IReadOnlyList<long?> filter)
+            in harness.Proxy.Identity)
+        {
+            Assert.Equal(DwSqliteFixture.ExpectedDiscoveredIdentityColumnNumber, columnId);
+
+            // FORWARD.
+            Assert.Equal(DwSqliteFixture.ExpectedPrimaryIdentityValues, primary);
+
+            // BACKWARD - and not the same order as Primary, which is what makes the assertion meaningful.
+            Assert.Equal(DwSqliteFixture.ExpectedFilterIdentityValues, filter);
+        }
+    }
+
+    /// <summary>
+    /// 🔴 Every database-error payload C-06 emits passes through the mandatory redactor, and the redactor
+    /// masks a statement rather than forwarding it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>CONSTRAINT C-F.</b> The legacy <c>sqlsyntax</c> field carries the COMPLETE generated statement
+    /// including interpolated literal values [<c>ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs</c>], and
+    /// the legacy logger performs NO redaction at all - which is why the redactor is a required addition
+    /// rather than a ported behaviour, and why every payload on the error channel has to go through it.
+    /// </para>
+    /// <para>
+    /// <b>THREE THINGS ARE ASSERTED, AND EACH CLOSES A DIFFERENT WAY THE GUARANTEE COULD DECAY.</b>
+    /// First, the redactor CANNOT BE OMITTED: the classifier refuses to be constructed without one, so no
+    /// container misconfiguration can produce an unmasked path. Second, the error run OFFERS its payload to
+    /// the redactor while the success run offers nothing - so the redactor is on the error path and the error
+    /// path alone. Third, the redactor genuinely MASKS: a payload carrying a statement with a literal comes
+    /// back with the statement replaced, which is what proves the offer is not a no-op.
+    /// </para>
+    /// <para>
+    /// The masking assertion is made against the REAL <see cref="SqlRedactor"/> rather than the recording
+    /// double, because a double that masked would prove only that the double masks.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryDatabaseErrorPayloadPassesThroughTheMandatoryRedactor()
+    {
+        // 1. THE REDACTOR IS MANDATORY, so an unmasked classifier cannot be constructed at all.
+        Assert.Throws<ArgumentNullException>(() => new ConflictDetector(null!));
+
+        // 2. THE ERROR PATH OFFERS ITS PAYLOAD; THE SUCCESS PATH OFFERS NOTHING.
+        using (OrchestrationHarness succeeded = new())
+        {
+            succeeded.WithSyntaxSource();
+
+            Assert.Equal(RetCode.OK, succeeded.Run());
+            Assert.Equal(0, succeeded.Redactor.CallCount);
+        }
+
+        using OrchestrationHarness failed = new();
+        failed.WithSyntaxSource();
+
+        // The update itself refuses, which is the classifier's database-error arm.
+        failed.Carrier.UpdateTarget.UpdateResult = DataWindowBufferStore.DataStoreFailure;
+
+        Assert.Equal(RetCode.E_DB_ERROR, failed.Run());
+        Assert.True(
+            failed.Redactor.CallCount >= 1,
+            "Every database-error payload must be offered to the redactor before it leaves the service.");
+
+        // NO STATEMENT TEXT REACHES THE CALLER on this arm - the oracle leaves the field empty here, and the
+        // payload still went through the redactor so that a future arm cannot reach the channel unmasked.
+        UpdateOutcome outcome = Assert.IsType<UpdateOutcome>(failed.Worker.LastOutcome);
+        DbErrorData reported = Assert.NotNull(outcome.DbError);
+
+        Assert.Equal(string.Empty, reported.SqlSyntax);
+
+        // 3. AND THE REDACTOR GENUINELY MASKS, asserted against the production instance.
+        DbErrorData masked = new ConflictDetector(SqlRedactor.Instance).Redact(
+            DbErrorData.FromStatement(
+                -1L,
+                "constraint failed",
+                "UPDATE COMPANY SET salary = 4800 WHERE id = 7 AND salary = 5200",
+                DwBuffer.Primary,
+                OneBasedIndex.FirstIndex));
+
+        Assert.DoesNotContain("4800", masked.SqlSyntax, StringComparison.Ordinal);
+        Assert.DoesNotContain("5200", masked.SqlSyntax, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, masked.SqlSyntax, StringComparison.Ordinal);
+
+        // The other members are untouched: redaction masks the STATEMENT and nothing else, so the diagnostic
+        // a caller needs survives.
+        Assert.Equal(-1L, masked.SqlDbCode);
+        Assert.Equal("constraint failed", masked.SqlErrText);
+        Assert.Equal(DwBuffer.Primary, masked.Buffer);
+        Assert.Equal(OneBasedIndex.FirstIndex, masked.Row);
+    }
+
+    /// <summary>
+    /// The second update table the multi-table cases name.
+    /// </summary>
+    /// <remarks>
+    /// It reuses the fixture's COLUMN names, because the fixture's metadata is the only describe surface that
+    /// can resolve a column id - which is also what a real multi-table update over one result set looks like:
+    /// one column set, two update tables. Only the table NAME differs, which is exactly the part per-table
+    /// preparation rewrites.
+    /// </remarks>
+    private const string SecondUpdatableTable = "DEPARTMENT";
+
+    /// <summary>
+    /// The row count the reset probe declares, chosen so that "still set" and "cleared" are unmistakable.
+    /// </summary>
+    private const long ResetProbePayloadRows = 9L;
+
+    /// <summary>
+    /// Sets the multi-table switch and appends one fixture-shaped descriptor per named table.
+    /// </summary>
+    /// <param name="worker">The task to configure.</param>
+    /// <param name="multiTable">Whether the switch is on.</param>
+    /// <param name="tableNames">The update tables to describe, in order.</param>
+    /// <remarks>
+    /// THE SWITCH IS SET FIRST AND THE DESCRIPTORS AFTER, which is the order the RPC uses and the order the
+    /// oracle's own reset forces [<c>:L63</c> clears the switch, <c>:L265-L268</c> sets it]. Each descriptor
+    /// carries the fixture's six columns, its key column, its identity column and BOTH optional settings
+    /// stated - so the modification script the prepare builds is the fixture's own derived expectation.
+    /// </remarks>
+    private static void ConfigureFixtureDescriptors(
+        SqlUpdateTask worker,
+        bool multiTable,
+        params string[] tableNames)
+    {
+        Assert.Equal(RetCode.OK, worker.SetMultiTableUpdate(multiTable));
+
+        foreach (string tableName in tableNames)
+        {
+            Assert.Equal(
+                RetCode.OK,
+                worker.AddUpdatableTable(
+                    tableName,
+                    DwSqliteFixture.ColumnNames,
+                    DwSqliteFixture.KeyColumnNames,
+                    DwSqliteFixture.IdentityColumnName,
+                    DwSqliteFixture.UpdateWhereMode,
+                    DwSqliteFixture.UpdateKeyInPlace));
+        }
+    }
+
 }

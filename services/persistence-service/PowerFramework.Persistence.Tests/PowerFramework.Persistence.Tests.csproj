@@ -15,23 +15,26 @@
     state of the tree and is superseded in every particular.
 
       BUILD AND TEST STATUS, MEASURED: this project builds in Release with zero warnings and zero
-      errors, and its whole suite passes - 2439 tests across 33 of its 34 files, the thirty-fourth
+      errors, and its whole suite passes - 3172 tests across 54 of its 55 files, the fifty-fifth
       being GlobalUsings.cs, with no failure and no skip. The application project it references
       carries Program.cs and produces an entry point, so the CS5001 an earlier revision reported is
       no longer reachable.
 
-      COVERAGE, MEASURED: PowerFramework.Persistence sits at 81.7 percent line coverage, which
-      clears the 80 percent per-service floor constraint C-H requires. Every production type in
-      the application project apart from the three EF-generated migration files is named by at
-      least one test file here, including the internal ItemStatusMachine in Buffers/ItemStatus.cs
-      and the internal PagedUniqueIndexColumnValidator in Sql/Paging/IPagingRewriter.cs, neither of
-      which has a file of its own.
+      COVERAGE, MEASURED: PowerFramework.Persistence sits at 88.89 percent line coverage
+      (12085 of 13595 lines), which clears the 80 percent per-service floor constraint C-H requires.
+      EVERY production type in the application project is now named by at least one test file here,
+      the three EF-generated files under Data/Migrations included, so the "apart from" exception an
+      earlier revision recorded no longer applies. That includes the internal ItemStatusMachine in
+      Buffers/ItemStatus.cs and the internal PagedUniqueIndexColumnValidator in
+      Sql/Paging/IPagingRewriter.cs, neither of which has a file of its own.
 
       DRIVEN THOROUGHLY: the three DataWindow buffers and the item-status machine; both transfer
       codecs, changeset and full state, including their receive and transfer paths; the SELECT
       statement model and its compound-select behaviour; ClauseModifier; the paged unique-index
       column validator; UpdateWhereBuilder; IdentityColumnResolver; ConflictDetector; SqlRedactor;
-      DbErrorData; CompanyEntity; TransactionData and TransactionPool; SqlTaskBase and SqlQueryTask
+      DbErrorData; CompanyEntity together with its EF mapping, the DDL that mapping emits and the
+      initial migration and model snapshot that carry it; TransactionData and TransactionPool;
+      SqlTaskBase and SqlQueryTask
       with all three task proxies; the Command, Transaction and Update gRPC services; the health
       and ping endpoints; and the composition root.
 
@@ -43,20 +46,30 @@
       why docs/PARITY.md section 6.2 treats them as byte-exact matrices.
 
       REACHED ONLY SHALLOWLY, WITH THE MEASURED RATE, SO THE NEXT READER KNOWS WHERE TO WORK:
-      Grpc/QueryService at 5.7 percent, whose chunked server-streaming members are entered only by
-      the composition-root registration test; Tasks/SqlUpdateTask at 24.1 percent, driven today
-      through its proxy rather than directly; Data/SqliteConnectionFactory at 38.0 percent, where
-      the pure URI and option surface is exercised but the members that actually open a connection
-      are not; Tasks/TaskProxies/SqlTaskProxyBase at 58.0 percent; and
-      Configuration/PersistenceOptions at 59.6 percent, whose unreached half is its validation
-      failure arms.
+      Data/SqliteConnectionFactory at 52.4 percent, where the pure URI and option surface is
+      exercised but several of the members that actually open, close or probe a connection are not;
+      Tasks/TaskProxies/SqlTaskProxyBase at 58.4 percent; Grpc/QueryService at 66.1 percent, whose
+      chunked server-streaming members are entered only in part; and
+      Configuration/PersistenceOptions at 70.2 percent, whose unreached remainder is its validation
+      failure arms. Tasks/SqlUpdateTask, which an earlier revision recorded at 24.1 percent, now
+      measures 87.0 percent.
 
-      NOT EXERCISED AT ALL, AND EACH FOR A STATED REASON: Data/PowerFrameworkDbContext together
-      with its design-time factory, and the three files under Data/Migrations. The migrations are
-      EF-generated and are meaningful only when applied against a database, so a unit test over
-      them would assert the generator's output rather than this service's behaviour; the schema
-      they create is instead pinned by CompanyEntityTests against the single DDL the legacy tree
-      publishes.
+      THE WHOLE SCHEMA SEAM IS NOW EXERCISED, WHERE AN EARLIER REVISION RECORDED IT AS NOT
+      EXERCISED AT ALL. Data/CompanyEntity.cs, Data/PowerFrameworkDbContext.cs - the context AND the
+      design-time factory declared beside it - and all three files under Data/Migrations each measure
+      100 percent, driven by CompanyEntityTests.cs. The claim they replace, that a unit test over the
+      migrations would only assert the EF generator's output, does not hold for what that file
+      actually asserts: it pins the table name, the six UPPERCASE column names, their exact declared
+      types with INT and INTEGER left distinct, their nullability, the single database-generated key,
+      the COLUMN ORDER that dw_sqlite.srd's by-position SELECT * binding depends on, the suppression
+      of EF's default AUTOINCREMENT emission, the agreement between the migration, the model snapshot
+      and OnModelCreating, and the absence of a connection-string literal in the design-time factory.
+      None of those is the generator's choice; every one is this service's, and each was confirmed to
+      fail under a deliberate mutation of the mapping before being relied on. The schema it pins is
+      still the single DDL the legacy tree publishes, read from the DwSqliteFixture transcription
+      rather than retyped. Every provider-backed case there owns a private in-memory SQLite
+      connection and disposes it, so nothing touches the configured data directory and nothing
+      recreates or reseeds the persistence-db volume the paired characterization captures depend on.
 
     THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE, AND THE GATE IS NOW ENFORCED.
     Constraint C-H requires 80 percent line coverage per in-scope service, evaluated per service

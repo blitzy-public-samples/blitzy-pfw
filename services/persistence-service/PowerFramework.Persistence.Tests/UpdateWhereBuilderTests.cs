@@ -4,8 +4,30 @@
 //  UNDER TEST     services/persistence-service/PowerFramework.Persistence/Concurrency/
 //                     UpdateWhereBuilder.cs
 //  ORACLE         ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru      (READ ONLY)
+//                     :L10-L17   the six-field `tabledata` structure, in declaration order
+//                     :L82-L96   of_addupdatabletable and its three validation arms
+//                     :L98-L170  _of_updateprepare - the seven script steps, both failure arms and
+//                                the self-assignment workaround
 //                 ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlupdate.sru   (READ ONLY)
+//                     :L227-L234 the four-argument overload that NULLS both optional settings
+//                 ws_objects/pfw.utility.sqlite.pbl.src/sqlitegetitemdouble.srf          (READ ONLY)
+//                     :L7-L8, L11, L14  the FOUR-ARGUMENT accessor and its `org` flag
+//                 ws_objects/pfw.shared.pbl.src/retcode.sru                              (READ ONLY)
+//                     :L46, L51, L70    E_INVALID_ARGUMENT, E_INVALID_SQL, E_INTERNAL_ERROR
 //  FIXTURE        ws_objects/pfw.tests.pbl.src/dw_sqlite.srd                             (READ ONLY)
+//                     :L8-L13    six columns, every one update=yes updatewhereclause=yes
+//                     :L14       updatewhere=1 updatekeyinplace=no
+//
+//  C-C - THE ORACLE IS READ ONLY AND IS CONSUMED THROUGH ONE TRANSCRIPTION. Every path above is the
+//  behavioural oracle: never edited, never reformatted, never moved, and never copied into the .NET
+//  tree. This file cites them by line locator and takes its DATA from DwSqliteFixture.cs, which is
+//  this project's single transcription of dw_sqlite.srd. A second transcription here would be a second
+//  thing to keep true, and the drift would surface as a passing test asserting the wrong contract - so
+//  the column names, the table name, the key and identity column, the column count, the two settings,
+//  the descriptor builders, the describe answers, the sample rows and the expected modification script
+//  are all consumed. Two literals are retained DELIBERATELY, each labelled where it appears, as the
+//  only pins on that transcription: the seven-step script written out long hand, and the six column
+//  names. A derivation can be self-consistently wrong; those two are what stop it.
 //
 //  WHY THESE ARE BYTE-EXACT ASSERTIONS. The modification script is machine-read by the carrier, so
 //  every space, quote, letter case and line feed in it is contract. These tests therefore assert the
@@ -13,14 +35,37 @@
 //  carriage return, a reordered reset triple or a missing trailing-newline suppression silently
 //  changed every byte in the parity recordings.
 //
-//  NO DATABASE AND NO DataWindow IS INVOLVED ANYWHERE IN THIS FILE. The describe and modify surfaces
-//  are the two injected interfaces, faked below; the carrier is Buffers/DataWindowBufferStore, which
-//  is an in-memory three-buffer model. That is what makes the per-service coverage gate reachable for
-//  the whole of Concurrency/UpdateWhereBuilder.cs.
+//  WHAT IS COVERED HERE, IN THE ORDER THE REGIONS APPEAR. The byte-exact script and its long-hand pin;
+//  the presence matrix, where ABSENT emits no line and false is not absence; the identity column, where
+//  empty is legal; failure arm 1, a key column whose described id is not positive; failure arm 2, a
+//  non-empty modify result; the add-time validation arms and the ordered multi-table collection; the
+//  updatekeyinplace=no key-change workaround with its runtime-described gate; the multi-table loop and
+//  its `!= OK` break; the R9 one-based regression guard; the marked-column helper; THE updatewhere=1
+//  PAYLOAD RULE, where both halves of every marked column must travel; the descriptor's shape and
+//  argument guards; and the identifier grammar this boundary adds and the legacy does not have.
+//
+//  NO DATABASE AND NO DataWindow IS INVOLVED ANYWHERE IN THIS FILE (C-E). The describe and modify
+//  surfaces are the two injected interfaces, faked below; the carrier is Buffers/DataWindowBufferStore,
+//  which is an in-memory three-buffer model. No SQLite file, no connection, no dialect client, and no
+//  SQL statement is generated anywhere. That is what makes the per-service coverage gate C-H requires
+//  reachable for the whole of Concurrency/UpdateWhereBuilder.cs.
 //
 //  THE FIXTURE IS TEST DATA, NOT PRODUCTION DATA. COMPANY and its six columns appear here because
 //  dw_sqlite.srd is the sole updatable DataWindow in the repository; the production code under test
 //  names no table, no column and no column count.
+//
+//  AAP 0.8.5 - NO ASSERTION IN THIS FILE IS A PERFORMANCE STATEMENT. The repository publishes no SLA,
+//  no latency budget and no throughput target, so none is asserted, implied or used to justify a
+//  choice. The sample row set is six rows because six makes each behaviour reachable exactly once, not
+//  because six sizes a workload.
+//
+//  C-F SELF-AUDIT: no key, credential, token, password, connection string or secret-shaped placeholder
+//  appears anywhere in this file - in any descriptor, sample row, message, literal or comment.
+//
+//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
+//  user-specified rule governs this file and none is invented here. The enterprise-standard baseline
+//  applies in their place; the binding non-rule constraints bearing on this file are cited inline where
+//  each is discharged - C-B, C-C, C-E, C-F, C-H, C-K, AAP 0.8.5 and risk R9.
 // ==============================================================================================
 
 using System.Globalization;
@@ -89,40 +134,72 @@ internal sealed class FakeUpdateTarget : IUpdateTargetMetadata, IUpdateTargetMod
 /// </summary>
 public sealed class UpdateWhereBuilderTests
 {
-    #region The sole evidenced fixture, transcribed from dw_sqlite.srd
+    #region The sole evidenced fixture - CONSUMED from DwSqliteFixture, never re-transcribed
+
+    // ------------------------------------------------------------------------------------------
+    //  WHY EVERY FIXTURE FACT BELOW IS A PROJECTION OF DwSqliteFixture AND NOT A LITERAL (C-C).
+    //
+    //  ws_objects/pfw.tests.pbl.src/dw_sqlite.srd is the read-only behavioural oracle and the SOLE
+    //  updatable DataWindow in the repository, and DwSqliteFixture.cs is this project's ONE
+    //  transcription of it. A second transcription here would be a second thing to keep true: the
+    //  two could drift, and the drift would surface as a passing test asserting the wrong contract.
+    //  So the six column names, the table name, the key and identity column, the column count, the
+    //  two settings, the descriptor builders, the describe answers and the expected modification
+    //  script are all CONSUMED. The aliases below exist only so the assertions read as prose; each
+    //  one is a projection with no data of its own.
+    // ------------------------------------------------------------------------------------------
 
     /// <summary>
     /// The six column names in declaration order, whose ids are therefore 1..6
     /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L13, L21-L26</c>].
     /// </summary>
-    private static readonly string[] FixtureColumns =
-        ["id", "name", "age", "address", "salary", "birth"];
+    private static IReadOnlyList<string> FixtureColumns => DwSqliteFixture.ColumnNames;
 
     /// <summary>The update table name [<c>dw_sqlite.srd:L14</c>].</summary>
-    private const string FixtureTable = "COMPANY";
+    private const string FixtureTable = DwSqliteFixture.UpdateTableName;
 
     /// <summary>
     /// The only column carrying <c>key=yes identity=yes</c> [<c>dw_sqlite.srd:L8</c>].
     /// </summary>
-    private const string FixtureKeyColumn = "id";
+    private const string FixtureKeyColumn = DwSqliteFixture.KeyColumnName;
 
     /// <summary>
     /// A target preloaded with the fixture's six columns and their one-based ids, and answering
     /// <c>"no"</c> to the key-in-place describe exactly as the fixture's static definition does
     /// [<c>dw_sqlite.srd:L14</c>].
     /// </summary>
+    /// <returns>A fresh recording double per call, so one test's requests cannot leak into another.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS IS A LOCAL RECORDING DOUBLE RATHER THAN <see cref="DwSqliteTargetMetadata"/>. The
+    /// fixture's own seam ANSWERS and deliberately DOES NOT RECORD, and several tests here assert
+    /// not the answer but WHICH describe properties were asked for and in what order - the evidence
+    /// that a build stopped at the offending column [<c>n_cst_thread_task_sqlupdate.sru:L121</c>], and
+    /// that an unsafe name never reached describe at all. So the RECORDING behaviour is local while
+    /// every ANSWER it gives is consumed from the fixture.
+    /// </para>
+    /// <para>
+    /// THE KEY-IN-PLACE ANSWER IS THE FIXTURE'S OWN SETTING, projected through the same constant the
+    /// script generator emits. <c>updatekeyinplace=no</c> [<c>dw_sqlite.srd:L14</c>] is therefore what
+    /// the runtime describe answers, which is what puts the key-change refresh of
+    /// <c>:L155-L167</c> ON THE MAINLINE for this fixture rather than in a corner.
+    /// </para>
+    /// </remarks>
     private static FakeUpdateTarget FixtureTarget()
     {
         FakeUpdateTarget target = new()
         {
-            ColumnCount = FixtureColumns.Length,
-            KeyInPlaceAnswer = "no",
+            ColumnCount = DwSqliteFixture.ColumnCount,
+            KeyInPlaceAnswer = DwSqliteFixture.UpdateKeyInPlace
+                ? UpdateWhereBuilder.YesLiteral
+                : UpdateWhereBuilder.NoLiteral,
         };
 
-        // Ids 1..6 in declaration order. R9: one-based, matching the .srd's own id= attributes.
-        for (int ordinal = 1; ordinal <= FixtureColumns.Length; ordinal++)
+        // The describe answers, keyed by the exact composed property the production code requests.
+        // R9: the ids are ONE-BASED and are the .srd's own `id=` attributes, never rebased here.
+        foreach (KeyValuePair<string, int> answer in DwSqliteFixture.ColumnIdDescribeAnswers)
         {
-            target.ColumnIds[FixtureColumns[ordinal - 1] + UpdateWhereBuilder.ColumnIdSuffix] = ordinal;
+            target.ColumnIds[answer.Key] = answer.Value;
         }
 
         return target;
@@ -132,21 +209,21 @@ public sealed class UpdateWhereBuilderTests
     /// The fixture's descriptor: all six columns updatable, <c>id</c> the sole key and the identity
     /// column, <c>updatewhere=1</c> and <c>updatekeyinplace=no</c> [<c>dw_sqlite.srd:L8-L14</c>].
     /// </summary>
-    private static UpdatableTableDescriptor FixtureDescriptor()
-    {
-        return UpdatableTableDescriptor.Create(
-            FixtureTable,
-            FixtureColumns,
-            [FixtureKeyColumn],
-            FixtureKeyColumn,
-            UpdateWhereBuilder.KeyAndUpdatableColumnsMode,
-            updateKeyInPlace: false);
-    }
+    /// <returns>A fresh descriptor per call, consumed from the fixture's own builder.</returns>
+    private static UpdatableTableDescriptor FixtureDescriptor() => DwSqliteFixture.Descriptor();
 
     /// <summary>
     /// Joins lines with the contract separator and NO trailing separator, which is the shape step 7
     /// produces [<c>n_cst_thread_task_sqlupdate.sru:L143</c>].
     /// </summary>
+    /// <param name="lines">The script's lines, in order.</param>
+    /// <returns>The assembled script.</returns>
+    /// <remarks>
+    /// THE SEPARATOR IS CONSUMED FROM THE PRODUCTION CONSTANT, which is a bare line feed:
+    /// PowerScript's <c>~n</c> is U+000A alone [<c>:L105-L139</c>]. Writing
+    /// <see cref="Environment.NewLine"/> here would pass on Linux and fail on Windows, which is the
+    /// worst available failure mode for a byte-exact comparison.
+    /// </remarks>
     private static string Script(params string[] lines)
     {
         return string.Join(UpdateWhereBuilder.LineSeparator, lines);
@@ -162,6 +239,30 @@ public sealed class UpdateWhereBuilderTests
         ModificationScriptResult result =
             UpdateWhereBuilder.BuildModificationString(FixtureDescriptor(), FixtureTarget());
 
+        // CONSUMED, NOT RE-TYPED. The expectation is the fixture's own derivation from its
+        // transcription of dw_sqlite.srd, so this assertion and the fixture cannot drift apart. The
+        // sibling test below is the single place the seven steps are written out long hand, which is
+        // what stops that derivation from being merely self-consistent.
+        Assert.Equal(DwSqliteFixture.ExpectedModificationScript, result.Script);
+
+        Assert.True(result.IsSucceeded);
+        Assert.Equal(RetCode.OK, result.Code);
+        Assert.Empty(result.ErrorText);
+
+        // The resolved key-column ids travel on the result, because the key-change refresh gate at
+        // :L156-L157 is `UpperBound(nKeyColumns) > 0` over exactly this list.
+        Assert.Equal([DwSqliteFixture.IdColumnNumber], result.KeyColumnIds);
+    }
+
+    [Fact]
+    public void TheFixturesDerivedScript_EqualsTheSevenStepsWrittenOutLongHand()
+    {
+        // WHY THIS TEST EXISTS AT ALL. DwSqliteFixture DERIVES its expected script from the
+        // transcribed column table rather than storing a literal, which is what keeps it from
+        // drifting from the transcription - but a derivation can be self-consistently wrong. This is
+        // therefore the ONE place in this file where :L103-L143 is written out character by
+        // character, pinning the derivation against an independent literal. It is a pin, not a second
+        // transcription: every other assertion in this file consumes the fixture.
         string expected = Script(
             // STEP 1 - the reset triple per one-based ordinal, in Update/Key/Identity order [:L103-L108].
             "#1.Update = no", "#1.Key = no", "#1.Identity = no",
@@ -188,10 +289,15 @@ public sealed class UpdateWhereBuilderTests
             // STEP 7 - always emitted, single-quoted, NO trailing newline [:L143].
             "DataWindow.Table.UpdateTable = 'COMPANY'");
 
-        Assert.Equal(expected, result.Script);
-        Assert.True(result.IsSucceeded);
-        Assert.Equal(RetCode.OK, result.Code);
-        Assert.Empty(result.ErrorText);
+        Assert.Equal(expected, DwSqliteFixture.ExpectedModificationScript);
+
+        // EIGHTEEN RESET LINES, counted rather than assumed: three per column across six columns
+        // [:L103-L108]. A port that reset only the columns it was about to re-enable would emit
+        // fewer and leave stale flags from a previous table's prepare.
+        Assert.Equal(
+            3 * DwSqliteFixture.ColumnCount,
+            DwSqliteFixture.ExpectedModificationScriptLines
+                .Count(line => line.StartsWith(UpdateWhereBuilder.ColumnOrdinalPrefix, StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -521,9 +627,24 @@ public sealed class UpdateWhereBuilderTests
         Assert.False(result.IsSucceeded);
         Assert.Equal(RetCode.E_INTERNAL_ERROR, result.Code);
 
-        // Exact string: the prefix, no space after the colon, then the offending column name.
+        // NOT E_INVALID_SQL AND NOT E_INVALID_ARGUMENT. The oracle answers E_INTERNAL_ERROR for an
+        // unresolvable column name [:L120-L121], which reads oddly for what is really bad caller
+        // input - and is reproduced exactly, because the code travels to a caller that branches on it.
+        Assert.NotEqual(RetCode.E_INVALID_SQL, result.Code);
+        Assert.NotEqual(RetCode.E_INVALID_ARGUMENT, result.Code);
+
+        // Exact string: the prefix, no space after the colon, then the offending column name. Asserted
+        // BOTH against the literal and against the application's companion constant, so there is
+        // exactly one spelling of it in the system and this test would catch a drift in either.
+        string offendingColumn = DwSqliteFixture.ColumnAt(DwSqliteFixture.SalaryColumnNumber).Name;
+
         Assert.Equal("无效的列名:salary", result.ErrorText);
         Assert.Equal("无效的列名:", UpdateWhereBuilder.InvalidColumnNameMessage);
+        Assert.Equal(
+            UpdateWhereBuilder.InvalidColumnNameMessage + offendingColumn,
+            result.ErrorText);
+        Assert.StartsWith(UpdateWhereBuilder.InvalidColumnNameMessage, result.ErrorText, StringComparison.Ordinal);
+        Assert.EndsWith(offendingColumn, result.ErrorText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -571,6 +692,15 @@ public sealed class UpdateWhereBuilderTests
         Assert.False(result.IsSucceeded);
         Assert.Equal(RetCode.E_INTERNAL_ERROR, result.Code);
         Assert.Equal(driverText, result.ErrorText);
+
+        // THE CODE IS E_INTERNAL_ERROR AND DELIBERATELY NOT E_INVALID_SQL, asserted from both sides
+        // because the two are easy to confuse and the confusion would be invisible. The oracle raises
+        // `Event OnError(RetCode.E_INTERNAL_ERROR,sErr)` [:L147] even though the text came from the
+        // carrier's own attribute parser - a failed Modify is a STRUCTURAL fault in the modification
+        // script, not a malformed SQL statement, and this file emits no SQL at all.
+        Assert.NotEqual(RetCode.E_INVALID_SQL, result.Code);
+        Assert.NotEqual(RetCode.E_DB_ERROR, result.Code);
+        Assert.NotEqual(RetCode.E_INVALID_ARGUMENT, result.Code);
 
         // Forwarded through the OnError-shaped sink with the same two arguments and no reformatting.
         Assert.Equal([(RetCode.E_INTERNAL_ERROR, driverText)], raised);
@@ -723,7 +853,7 @@ public sealed class UpdateWhereBuilderTests
 
         Assert.Equal(
             RetCode.OK,
-            tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], "id"));
+            tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], DwSqliteFixture.IdentityColumnName));
 
         UpdatableTableDescriptor descriptor = tables.DescriptorAt(1);
 
@@ -748,6 +878,50 @@ public sealed class UpdateWhereBuilderTests
         Assert.Equal("first", tables.DescriptorAt(1).Name);
         Assert.Equal("second", tables.DescriptorAt(2).Name);
         Assert.Equal("third", tables.DescriptorAt(3).Name);
+    }
+
+    [Fact]
+    public void AddUpdatableTable_TwoDescriptorsCoexistInOrder_WithTheMultiTableSwitchOn()
+    {
+        // MULTI-TABLE UPDATE FROM ONE DATAWINDOW IS A REAL LEGACY CAPABILITY, NOT A THEORETICAL ONE.
+        // The oracle holds the descriptors in an ARRAY - `TABLEDATA Tables[]` [:L30] - appends at
+        // UpperBound+1 [:L86], resets it wholesale [:L58, L67], and drives it with a switch of its own
+        // [`_bMultiTableUpdate` :L33]. The contract therefore carries a REPEATED table-update
+        // descriptor, so two descriptors coexisting in order is the shape that has to work.
+        UpdatableTableCollection tables = new() { MultiTableUpdate = true };
+
+        // The evidenced table first, then a second one, so the ordering assertion is not symmetric.
+        Assert.Equal(
+            RetCode.OK,
+            tables.AddUpdatableTable(
+                FixtureTable,
+                FixtureColumns,
+                DwSqliteFixture.KeyColumnNames,
+                DwSqliteFixture.IdentityColumnName,
+                DwSqliteFixture.UpdateWhereMode,
+                DwSqliteFixture.UpdateKeyInPlace));
+
+        Assert.Equal(
+            RetCode.OK,
+            tables.AddUpdatableTable("DEPARTMENT", ["dept_id", "dept_name"], ["dept_id"], "dept_id"));
+
+        // THE FLAG IS SET AND STAYS SET - adding does not clear it, and only Reset turns it off.
+        Assert.True(tables.MultiTableUpdate);
+
+        // BOTH COEXIST, IN APPEND ORDER. R9: index 1 is the FIRST descriptor, not the second.
+        Assert.Equal(2, tables.UpperBound);
+        Assert.Equal(2, tables.Descriptors.Count);
+        Assert.Equal(FixtureTable, tables.DescriptorAt(1).Name);
+        Assert.Equal("DEPARTMENT", tables.DescriptorAt(2).Name);
+        Assert.Equal([FixtureTable, "DEPARTMENT"], tables.Descriptors.Select(descriptor => descriptor.Name));
+
+        // AND THEY KEEP THEIR OWN SETTINGS. The second used the four-argument overload, so both of its
+        // optional fields are ABSENT while the first's are STATED - the two descriptors are
+        // independent rather than sharing one prepare's worth of state.
+        Assert.Equal(1L, tables.DescriptorAt(1).UpdateWhere);
+        Assert.False(tables.DescriptorAt(1).UpdateKeyInPlace);
+        Assert.Null(tables.DescriptorAt(2).UpdateWhere);
+        Assert.Null(tables.DescriptorAt(2).UpdateKeyInPlace);
     }
 
     [Theory]
@@ -786,7 +960,7 @@ public sealed class UpdateWhereBuilderTests
     {
         UpdatableTableCollection tables = new() { MultiTableUpdate = true };
 
-        tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], "id");
+        tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], DwSqliteFixture.IdentityColumnName);
 
         Assert.Equal(RetCode.OK, tables.Reset());
 
@@ -804,10 +978,10 @@ public sealed class UpdateWhereBuilderTests
         // [n_cst_threading_task_sqlupdate.sru:L207, L223, L236].
         Assert.Equal(
             RetCode.E_BUSY,
-            tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], "id", 1L, false));
+            tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], DwSqliteFixture.IdentityColumnName, 1L, false));
         Assert.Equal(
             RetCode.E_BUSY,
-            tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], "id"));
+            tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], DwSqliteFixture.IdentityColumnName));
         Assert.Equal(RetCode.E_BUSY, tables.Reset());
         Assert.Equal(OneBasedIndex.EmptyUpperBound, tables.UpperBound);
     }
@@ -819,7 +993,7 @@ public sealed class UpdateWhereBuilderTests
         UpdatableTableCollection tables = new();
 
         Assert.Null(tables.IsBusy);
-        Assert.Equal(RetCode.OK, tables.AddUpdatableTable(FixtureTable, FixtureColumns, ["id"], "id"));
+        Assert.Equal(RetCode.OK, tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], DwSqliteFixture.IdentityColumnName));
     }
 
     #endregion
@@ -1155,7 +1329,7 @@ public sealed class UpdateWhereBuilderTests
         UpdatePreparer preparer = new(target, target);
 
         UpdatableTableCollection tables = new() { MultiTableUpdate = false };
-        tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], "id", 1L, false);
+        tables.AddUpdatableTable(FixtureTable, FixtureColumns, [FixtureKeyColumn], DwSqliteFixture.IdentityColumnName, 1L, false);
 
         int updateCalls = 0;
 
@@ -1540,8 +1714,21 @@ public sealed class UpdateWhereBuilderTests
         // update=yes updatewhereclause=yes [dw_sqlite.srd:L8-L13], so the check spans all six originals.
         IReadOnlyList<string> marked = UpdateWhereBuilder.MarkedColumnsOf(FixtureDescriptor());
 
+        // CONSUMED FROM THE FIXTURE. `id` is the sole key column so it leads, and because it is also
+        // the first updatable column the deduplicated result happens to equal declaration order here -
+        // which is asserted rather than assumed, and the sibling test below pins the key-first rule on
+        // a descriptor where the two orders genuinely differ.
+        Assert.Equal(DwSqliteFixture.ColumnNames, marked);
+
+        // An independent literal, as the one pin on the fixture's column-name transcription.
         Assert.Equal(["id", "name", "age", "address", "salary", "birth"], marked);
-        Assert.Equal(FixtureColumns.Length, marked.Count);
+
+        // COUNT THEM. Six, not five: a naive assertion that merely checked "the key column is in
+        // there" would pass on a payload that omitted an updateable column's original value, and the
+        // omission would silently widen the concurrency window rather than fail.
+        Assert.Equal(DwSqliteFixture.ColumnCount, marked.Count);
+        Assert.Equal(6, marked.Count);
+        Assert.Equal(FixtureColumns.Count, marked.Count);
     }
 
     [Fact]
@@ -1615,7 +1802,454 @@ public sealed class UpdateWhereBuilderTests
 
     #endregion
 
+    #region The updatewhere=1 payload rule - BOTH halves of every marked column travel (G4a, C-B)
+
+    // ==========================================================================================
+    //  THE CONTRACT THIS REGION EXISTS FOR, AND WHY IT IS THE HARDEST ONE IN THE REFACTOR.
+    //
+    //  The sole updatable DataWindow in the repository declares
+    //
+    //      update="COMPANY" updatewhere=1 updatekeyinplace=no
+    //                                       [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14]
+    //
+    //  and ALL SIX of its columns carry `update=yes updatewhereclause=yes` [:L8-L13].
+    //
+    //  `updatewhere=1` is the "KEY AND UPDATEABLE COLUMNS" concurrency mode: the generated statement's
+    //  WHERE clause carries the key column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. With
+    //  all six marked, the optimistic-concurrency check therefore spans ALL SIX COLUMNS' ORIGINAL
+    //  VALUES - which is goal G4(a): preserve that semantic ACROSS A NETWORK BOUNDARY.
+    //
+    //  THE CONSEQUENCE, WHICH IS WHAT THESE TESTS ASSERT: THE PAYLOAD MUST TRANSMIT, PER ROW, BOTH
+    //  THE CURRENT AND THE ORIGINAL VALUE OF EVERY MARKED COLUMN. A payload with ONE VALUE PER CELL
+    //  cannot express the contract at all. It has exactly two options and both are wrong:
+    //
+    //    * omit the WHERE clause, silently overwriting a concurrent change - the one outcome the
+    //      refactor forbids outright; or
+    //    * compare against the value being written, which always matches, so the check never fires.
+    //
+    //  That is the whole reason Buffers/ exists as an ANTI-CORRUPTION LAYER rather than a flat rowset,
+    //  and it is why the legacy result carrier derives from a datastore
+    //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds.sru:L8] - the legacy carrier IS
+    //  a DataWindow, complete with three buffers, per-row and per-column item status, and an
+    //  original-value shadow. CarrierRow reproduces that triple explicitly.
+    //
+    //  THE ORG FLAG IS THE ORACLE'S OWN MECHANISM FOR READING THE SECOND HALF. The legacy accessor is
+    //  FOUR-ARGUMENT:
+    //
+    //      GetItemNumber(row, col, buff, org)
+    //                    [ws_objects/pfw.utility.sqlite.pbl.src/sqlitegetitemdouble.srf:L7-L8, L11, L14]
+    //
+    //  where `org` selects the ORIGINAL rather than the current value; the identity round trip uses the
+    //  same four-argument shape with org false [n_cst_thread_task_sqlupdate.sru:L239]. In this port that
+    //  boolean becomes a MEMBER CHOICE rather than a parameter - GetItemValue is the org=false read and
+    //  GetItemOriginalValue is the org=true read - because a bare bool at a call site says nothing
+    //  about which half it selects. The pairing is asserted below in both directions so the two members
+    //  cannot be confused, and NEITHER of them is a substitute for the other.
+    //
+    //  C-E: NO DATABASE IS INVOLVED. Every assertion below runs over
+    //  DwSqliteFixture.SampleCarrier(), an in-memory three-buffer model. No SQLite file, no
+    //  connection, no dialect client, and no statement is generated anywhere in this region - the
+    //  statement generator is Tasks/SqlUpdateTask's and the conflict projection is
+    //  Concurrency/ConflictDetector's.
+    // ==========================================================================================
+
+    [Theory]
+    [MemberData(nameof(DwSqliteFixture.ColumnMatrix), MemberType = typeof(DwSqliteFixture))]
+    public void EveryMarkedColumn_CarriesBothItsCurrentAndItsOriginalValue_OnEveryRow(
+        int id,
+        string name,
+        string dbName,
+        string declaredType,
+        bool update,
+        bool updateWhereClause,
+        bool key,
+        bool identity)
+    {
+        // THE THEORY RUNS OVER ALL SIX COLUMNS, CONSUMED FROM THE FIXTURE'S OWN MATRIX, so a column
+        // added to or removed from the transcription changes the number of cases here automatically.
+        DwSqliteColumn column = DwSqliteFixture.ColumnAt(id);
+
+        Assert.Equal(column.Name, name);
+        Assert.Equal(column.DbName, dbName);
+        Assert.Equal(column.DeclaredType, declaredType);
+
+        // THIS COLUMN IS MARKED, WHICH IS THE PRECONDITION FOR THE REST OF THE ASSERTION. Every one of
+        // the six carries both attributes [dw_sqlite.srd:L8-L13]; only `id` is additionally the key and
+        // the identity column [:L8].
+        Assert.True(update);
+        Assert.True(updateWhereClause);
+        Assert.Equal(id == DwSqliteFixture.IdColumnNumber, key);
+        Assert.Equal(id == DwSqliteFixture.IdColumnNumber, identity);
+
+        // AND IT PARTICIPATES IN THE CONCURRENCY CHECK, because updatewhere=1 spans the key column plus
+        // every updateable column.
+        Assert.Contains(
+            column.Name,
+            UpdateWhereBuilder.MarkedColumnsOf(DwSqliteFixture.Descriptor()));
+
+        DataWindowBufferStore carrier = DwSqliteFixture.SampleCarrier();
+
+        foreach (DwSqliteSampleRow row in DwSqliteFixture.SampleRows)
+        {
+            DwSqliteSampleCell cell = row.CellAt(id);
+
+            // THE org=false READ - the current value, which is what the SET list carries.
+            object? current = carrier.GetItemValue(row.Row, id, row.Buffer);
+
+            // THE org=true READ - the ORIGINAL value, which is what the WHERE clause carries. This is
+            // the four-argument accessor's second half [sqlitegetitemdouble.srf:L11].
+            object? original = carrier.GetItemOriginalValue(row.Row, id, row.Buffer);
+
+            // BOTH HALVES ARE PRESENT FOR EVERY MARKED COLUMN ON EVERY ROW, in every buffer. Not "the
+            // current value plus an original where one happens to have been captured" - the carrier
+            // answers the current value when nothing was captured, so both reads always answer.
+            Assert.True(CarrierValue.AreEquivalent(cell.Current, current));
+            Assert.True(CarrierValue.AreEquivalent(cell.Original, original));
+        }
+    }
+
+    [Fact]
+    public void TheOrgTrueAndOrgFalseReadsDiverge_OnAModifiedRow_AndBothTravel()
+    {
+        // THE ROW THAT PROVES A FLAT ROWSET IS INSUFFICIENT. The second sample row is stamped
+        // DataModified and has two ordinary columns edited, so its current and original values differ
+        // on those two and agree on the other four [see DwSqliteFixture.SampleRows, PRIMARY 2].
+        DwSqliteSampleRow modified = DwSqliteFixture.SampleRows.First(row =>
+            row.Buffer == DwBuffer.Primary && row.Status == ItemStatus.DataModified);
+
+        DataWindowBufferStore carrier = DwSqliteFixture.SampleCarrier();
+
+        int divergedColumns = 0;
+
+        foreach (DwSqliteSampleCell cell in modified.Cells)
+        {
+            object? current = carrier.GetItemValue(modified.Row, cell.ColumnNumber, modified.Buffer);
+            object? original =
+                carrier.GetItemOriginalValue(modified.Row, cell.ColumnNumber, modified.Buffer);
+
+            if (cell.IsEdited)
+            {
+                // THE TWO READS DIVERGE, AND BOTH ARE READABLE. An implementation that answered the
+                // current value from both accessors would pass every assertion built on an untouched
+                // row and fail exactly here - which is why this case is asserted separately.
+                Assert.False(CarrierValue.AreEquivalent(current, original));
+                Assert.True(CarrierValue.AreEquivalent(cell.Current, current));
+                Assert.True(CarrierValue.AreEquivalent(cell.Original, original));
+
+                divergedColumns++;
+            }
+            else
+            {
+                // AND ON AN UNEDITED COLUMN THEY AGREE, which is the state a naive port looks correct
+                // in. The carrier answers the current value when no original was captured, so
+                // "unchanged since the last baseline" and "no original exists" are the same statement.
+                Assert.True(CarrierValue.AreEquivalent(current, original));
+            }
+        }
+
+        // The fixture edits exactly two columns on this row, so the divergence is genuinely exercised
+        // rather than accidentally absent.
+        Assert.Equal(2, divergedColumns);
+    }
+
+    [Fact]
+    public void ThePayloadCarriesSixCurrentAndSixOriginalValues_ForEveryMarkedColumn()
+    {
+        // THE WIRE SHAPE THAT EXPRESSES THE CONTRACT. DataWindowRow declares BOTH
+        // `repeated ColumnValue columns = 4` and `repeated ColumnValue original_values = 5`
+        // [shared/PowerFramework.Contracts/Proto/common.v1.proto], and this test projects the carrier
+        // into it to assert that the carrier can actually fill both - which is the only reason the
+        // second repeated field is there.
+        IReadOnlyList<string> marked =
+            UpdateWhereBuilder.MarkedColumnsOf(DwSqliteFixture.Descriptor());
+
+        // COUNT THEM: SIX, NOT FIVE. A payload that carried the key column's original plus the four
+        // it happened to notice would pass a naive assertion and leave one column out of the
+        // concurrency check, silently widening the window rather than failing.
+        Assert.Equal(DwSqliteFixture.ColumnCount, marked.Count);
+        Assert.Equal(6, marked.Count);
+
+        DataWindowBufferStore carrier = DwSqliteFixture.SampleCarrier();
+
+        foreach (DwSqliteSampleRow sampleRow in DwSqliteFixture.SampleRows)
+        {
+            DataWindowRow payload = new()
+            {
+                Buffer = sampleRow.Buffer,
+                Row = sampleRow.Row,
+                ItemStatus = carrier.GetItemStatus(
+                    sampleRow.Row, ItemStatusMachine.RowStatusColumn, sampleRow.Buffer),
+            };
+
+            foreach (string columnName in marked)
+            {
+                DwSqliteColumn column = DwSqliteFixture.ColumnOf(columnName);
+
+                // The org=false read fills `columns`, the org=true read fills `original_values`.
+                object? current = carrier.GetItemValue(sampleRow.Row, column.Id, sampleRow.Buffer);
+                object? original =
+                    carrier.GetItemOriginalValue(sampleRow.Row, column.Id, sampleRow.Buffer);
+
+                Assert.True(CarrierValue.TryToWire(current, out AnyValue? currentWire));
+                Assert.True(CarrierValue.TryToWire(original, out AnyValue? originalWire));
+                Assert.NotNull(currentWire);
+                Assert.NotNull(originalWire);
+
+                payload.Columns.Add(new ColumnValue
+                {
+                    ColumnName = column.Name,
+                    ColumnId = column.Id,
+                    Value = currentWire,
+                    ItemStatus = carrier.GetItemStatus(sampleRow.Row, column.Id, sampleRow.Buffer),
+                });
+
+                payload.OriginalValues.Add(new ColumnValue
+                {
+                    ColumnName = column.Name,
+                    ColumnId = column.Id,
+                    Value = originalWire,
+                });
+            }
+
+            // BOTH REPEATED FIELDS ARE FULLY POPULATED, one entry per marked column, and they name the
+            // same six columns in the same order - so a consumer can pair them positionally or by name
+            // and get the same answer either way.
+            Assert.Equal(6, payload.Columns.Count);
+            Assert.Equal(6, payload.OriginalValues.Count);
+            Assert.Equal(
+                DwSqliteFixture.ColumnNames,
+                payload.Columns.Select(value => value.ColumnName));
+            Assert.Equal(
+                DwSqliteFixture.ColumnNames,
+                payload.OriginalValues.Select(value => value.ColumnName));
+            Assert.Equal(
+                payload.Columns.Select(value => value.ColumnId),
+                payload.OriginalValues.Select(value => value.ColumnId));
+
+            // AND THE EDITED CELLS ARRIVE AS TWO DIFFERENT WIRE VALUES, which is the observable proof
+            // that both halves survived the projection rather than being written twice from one read.
+            foreach (DwSqliteSampleCell cell in sampleRow.Cells.Where(cell => cell.IsEdited))
+            {
+                ColumnValue currentValue =
+                    payload.Columns.Single(value => value.ColumnId == cell.ColumnNumber);
+                ColumnValue originalValue =
+                    payload.OriginalValues.Single(value => value.ColumnId == cell.ColumnNumber);
+
+                Assert.NotEqual(currentValue.Value, originalValue.Value);
+            }
+        }
+    }
+
+    [Fact]
+    public void OneValuePerCellCannotExpressTheContract_WhichIsWhyBuffersIsAnAntiCorruptionLayer()
+    {
+        // C-K - THE NEGATIVE STATEMENT, MADE EXECUTABLE. This test does not exercise production code;
+        // it demonstrates the property that forced the design, so that a future reader considering
+        // "why not just send the rows?" finds the answer as a failing premise rather than as prose.
+        DwSqliteSampleRow modified = DwSqliteFixture.SampleRows.First(row =>
+            row.Buffer == DwBuffer.Primary && row.Status == ItemStatus.DataModified);
+
+        DataWindowBufferStore carrier = DwSqliteFixture.SampleCarrier();
+
+        // A FLAT ROWSET: one value per cell, which is all a result set can carry.
+        Dictionary<int, object?> flat = DwSqliteFixture.ColumnNames
+            .Select(DwSqliteFixture.ColumnOf)
+            .ToDictionary(
+                column => column.Id,
+                column => carrier.GetItemValue(modified.Row, column.Id, modified.Buffer));
+
+        Assert.Equal(6, flat.Count);
+
+        // THE INFORMATION THE WHERE CLAUSE NEEDS IS SIMPLY NOT IN THERE. For each edited cell the flat
+        // rowset holds the value being WRITTEN, so a where clause built from it would compare a column
+        // against its own new value - a comparison that matches whatever the row now holds and
+        // therefore never detects a concurrent change.
+        foreach (DwSqliteSampleCell cell in modified.Cells.Where(cell => cell.IsEdited))
+        {
+            object? fromFlat = flat[cell.ColumnNumber];
+            object? original =
+                carrier.GetItemOriginalValue(modified.Row, cell.ColumnNumber, modified.Buffer);
+
+            Assert.True(CarrierValue.AreEquivalent(cell.Current, fromFlat));
+            Assert.False(CarrierValue.AreEquivalent(fromFlat, original));
+        }
+
+        // WHEREAS THE CARRIER HOLDS BOTH HALVES, which is the difference the anti-corruption layer buys.
+        foreach (DwSqliteSampleCell cell in modified.Cells)
+        {
+            Assert.True(CarrierValue.AreEquivalent(
+                cell.Current, carrier.GetItemValue(modified.Row, cell.ColumnNumber, modified.Buffer)));
+            Assert.True(CarrierValue.AreEquivalent(
+                cell.Original,
+                carrier.GetItemOriginalValue(modified.Row, cell.ColumnNumber, modified.Buffer)));
+        }
+    }
+
+    [Fact]
+    public void TheFixturesOwnSettingsPutBothHalvesAndTheRefreshOnTheMainline()
+    {
+        // C-B - THE FIXTURE EXERCISES THE AWKWARD PATH, NOT THE EASY ONE, and this test says so in one
+        // place so the claim is checkable rather than asserted in a comment. dw_sqlite.srd:L14 sets
+        // BOTH of the settings that make this contract hard:
+        //
+        //   updatewhere=1        -> the check spans the key column plus every updateable column's
+        //                           ORIGINAL value, so both halves must travel;
+        //   updatekeyinplace=no  -> a key change is a DELETE plus an INSERT, which is what makes the
+        //                           force-refresh of :L151-L167 mainline rather than a rare branch.
+        Assert.Equal(UpdateWhereBuilder.KeyAndUpdatableColumnsMode, DwSqliteFixture.UpdateWhereMode);
+        Assert.True(UpdateWhereBuilder.IsKeyAndUpdatableColumnsMode(DwSqliteFixture.UpdateWhereMode));
+        Assert.False(DwSqliteFixture.UpdateKeyInPlace);
+
+        // ALL SIX COLUMNS ARE MARKED, read straight off the transcription rather than off the
+        // descriptor, so the two are cross-checked against each other.
+        Assert.Equal(6, DwSqliteFixture.ColumnCount);
+        Assert.All(DwSqliteFixture.Columns, column =>
+        {
+            Assert.True(column.Update);
+            Assert.True(column.UpdateWhereClause);
+        });
+
+        // AND THE PREPARE OVER THIS FIXTURE REPORTS THE REFRESH GATE OPEN, because the runtime describe
+        // answers `no` [:L155] - the fixture's own setting, not a value this test arranged.
+        FakeUpdateTarget target = FixtureTarget();
+
+        Assert.Equal(UpdateWhereBuilder.NoLiteral, target.KeyInPlaceAnswer);
+
+        UpdatePreparer preparer = new(target, target);
+        UpdatePreparationResult result =
+            preparer.Prepare(DwSqliteFixture.Descriptor(), DwSqliteFixture.SampleCarrier());
+
+        Assert.True(result.IsSucceeded);
+        Assert.True(result.KeyChangeRefreshRequired);
+
+        // The key-edited sample row is the one that qualifies, and it does so on the key column.
+        DwSqliteSampleRow keyEdited = DwSqliteFixture.SampleRows.Single(row =>
+            row.Buffer == DwBuffer.Primary
+            && row.Status == ItemStatus.DataModified
+            && row.CellAt(DwSqliteFixture.IdColumnNumber).IsEdited);
+
+        Assert.Contains(
+            new KeyColumnRefresh(keyEdited.Row, DwSqliteFixture.IdColumnNumber),
+            result.KeyChangeRefreshes);
+    }
+
+    #endregion
+
     #region Descriptor shape and argument guards
+
+    [Fact]
+    public void Descriptor_DeclaresExactlySixFieldsInTheOraclesOwnOrder()
+    {
+        // THE POSITIONAL CONSTRUCTOR IS THE ASSERTION. Constructing through it - rather than through
+        // Create, which names its parameters - is what pins the ORDER, because a reordered record
+        // would either fail to compile here or bind the wrong value to the wrong field.
+        //
+        // The order is the legacy structure's own [n_cst_thread_task_sqlupdate.sru:L10-L17]:
+        //     string  name              -> Name
+        //     string  updatablecolumns[] -> UpdatableColumns
+        //     string  keycolumns[]       -> KeyColumns
+        //     string  identitycolumn     -> IdentityColumn
+        //     long    updatewhere        -> UpdateWhere
+        //     boolean updatekeyinplace   -> UpdateKeyInPlace
+        //
+        // C-K: THE ORDER IS CONTRACT, NOT TIDINESS. The published boundary numbers
+        // TableUpdateContract's fields 1 through 6 against these same six in this same sequence
+        // [shared/PowerFramework.Contracts/Proto/persistence.v1.proto], so reordering the members here
+        // would leave the wire numbering describing a different shape from the type it mirrors.
+        UpdatableTableDescriptor descriptor = new(
+            DwSqliteFixture.UpdateTableName,
+            DwSqliteFixture.ColumnNames,
+            DwSqliteFixture.KeyColumnNames,
+            DwSqliteFixture.IdentityColumnName,
+            DwSqliteFixture.UpdateWhereMode,
+            DwSqliteFixture.UpdateKeyInPlace);
+
+        Assert.Equal(FixtureTable, descriptor.Name);
+        Assert.Equal(FixtureColumns, descriptor.UpdatableColumns);
+        Assert.Equal([FixtureKeyColumn], descriptor.KeyColumns);
+        Assert.Equal(FixtureKeyColumn, descriptor.IdentityColumn);
+        Assert.Equal(UpdateWhereBuilder.KeyAndUpdatableColumnsMode, descriptor.UpdateWhere);
+        Assert.False(descriptor.UpdateKeyInPlace);
+
+        // SIX MEMBERS AND NO SEVENTH. Counted off the record's own primary constructor, so adding a
+        // member without extending the wire contract fails here rather than at the boundary.
+        Assert.Equal(
+            6,
+            typeof(UpdatableTableDescriptor)
+                .GetConstructors()
+                .Max(constructor => constructor.GetParameters().Length));
+
+        // And the deconstruction agrees, position for position.
+        (string name, IReadOnlyList<string> updatable, IReadOnlyList<string> keys,
+            string identity, long? updateWhere, bool? keyInPlace) = descriptor;
+
+        Assert.Equal(FixtureTable, name);
+        Assert.Equal(FixtureColumns, updatable);
+        Assert.Equal([FixtureKeyColumn], keys);
+        Assert.Equal(FixtureKeyColumn, identity);
+        Assert.Equal(1L, updateWhere);
+        Assert.False(keyInPlace);
+    }
+
+    [Fact]
+    public void Descriptor_AbsentIsDistinguishableFromDefault_WhichIsProto3ExplicitPresence()
+    {
+        // C-K - WHY ABSENT-VERSUS-DEFAULT MATTERS ON EXACTLY THESE TWO FIELDS.
+        //
+        // The oracle writes each of them into the carrier ONLY when it is not null
+        // [n_cst_thread_task_sqlupdate.sru:L131-L133, L135-L141], so null carries the distinct meaning
+        // "LEAVE THE CARRIER'S OWN SETTING ALONE" - the property line is not emitted at all. That is
+        // not an uninitialised accident: the caller-side four-argument overload calls SetNull on BOTH
+        // before delegating [n_cst_threading_task_sqlupdate.sru:L227-L234], so absence is a
+        // first-class input.
+        //
+        // A SENTINEL WOULD BE WRONG IN BOTH CASES, and differently wrong in each:
+        //   * 0 IS A LEGAL UPDATE-WHERE MODE, so substituting it for absence silently forces a
+        //     concurrency mode the caller never asked for.
+        //   * false IS THE VALUE THAT TRIGGERS THE KEY-CHANGE REFRESH [:L155], so substituting it for
+        //     absence would start rewriting item statuses on a caller that stated nothing.
+        //
+        // This is one-to-one with proto3 EXPLICIT PRESENCE, which is how the published boundary models
+        // it: `optional int64` and `optional bool` on TableUpdateContract, where HasField is the wire
+        // counterpart of HasValue here.
+        UpdatableTableDescriptor absent = DwSqliteFixture.DescriptorWithAbsentSettings();
+
+        // NULL ROUND-TRIPS AS NULL. Not zero, not false.
+        Assert.Null(absent.UpdateWhere);
+        Assert.Null(absent.UpdateKeyInPlace);
+        Assert.False(absent.UpdateWhere.HasValue);
+        Assert.False(absent.UpdateKeyInPlace.HasValue);
+
+        // AND IS DISTINGUISHABLE FROM THE DEFAULT, asserted against the defaults themselves so the
+        // statement cannot be read as merely "it is null".
+        Assert.NotEqual(0L, absent.UpdateWhere);
+        Assert.NotEqual(false, absent.UpdateKeyInPlace);
+        Assert.NotEqual(absent.UpdateWhere, (long?)0L);
+        Assert.NotEqual(absent.UpdateKeyInPlace, (bool?)false);
+
+        // A DESCRIPTOR THAT STATES THE DEFAULTS IS A DIFFERENT DESCRIPTOR, and the record's own
+        // equality says so - which is what makes the distinction observable rather than asserted.
+        UpdatableTableDescriptor stated = absent with { UpdateWhere = 0L, UpdateKeyInPlace = false };
+
+        Assert.NotEqual(absent, stated);
+        Assert.Equal(0L, stated.UpdateWhere);
+        Assert.False(stated.UpdateKeyInPlace);
+
+        // THE OBSERVABLE HALF: absence emits NEITHER property line, while stating the defaults emits
+        // BOTH. Both expectations are consumed from the fixture.
+        ModificationScriptResult absentScript =
+            UpdateWhereBuilder.BuildModificationString(absent, FixtureTarget());
+
+        Assert.Equal(DwSqliteFixture.ExpectedModificationScriptWithAbsentSettings, absentScript.Script);
+        Assert.DoesNotContain(UpdateWhereBuilder.UpdateWhereProperty, absentScript.Script, StringComparison.Ordinal);
+        Assert.DoesNotContain(UpdateWhereBuilder.UpdateKeyInPlaceProperty, absentScript.Script, StringComparison.Ordinal);
+
+        ModificationScriptResult statedScript =
+            UpdateWhereBuilder.BuildModificationString(stated, FixtureTarget());
+
+        Assert.Contains("DataWindow.Table.UpdateWhere = '0'", statedScript.Script, StringComparison.Ordinal);
+        Assert.Contains("DataWindow.Table.UpdateKeyinPlace = no", statedScript.Script, StringComparison.Ordinal);
+    }
 
     [Fact]
     public void Descriptor_PreservesTheSixFieldsAndCopiesBothCollections()

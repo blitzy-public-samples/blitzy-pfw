@@ -11,10 +11,37 @@
 //                     ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru
 //                         the six paging sentinels and the count wrapper :L333-L394, :L830-L834
 //                     ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L190
-//                         the synthesized Chinese diagnostic that must pass through untouched
+//                         the synthesized Chinese diagnostic that must pass through untouched, and
+//                         the OnDBError(-1,...,"",Primary!,0) shape it is raised with
+//                     ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs:L8
+//                         `string logpass`, member 5 of 9 - the credential section 9 keeps off this
+//                         path entirely
+//                     ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L172, :L184
+//                         "GetChanges Failed" and "TransData Failed" - the two ENGLISH diagnostics
+//                         whose coexistence with the Chinese ones section 10 pins as deliberate
 //                     ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469
 //                         the sole DDL, whose AGE and SALARY columns are why numerics are masked
 //                     all READ ONLY per constraint C-C - read as specification, never edited
+//
+//  WHY THE SUBJECT OF THIS SUITE EXISTS AT ALL (constraint C-K)
+//  --------------------------------------------------------------------------------------------
+//  SqlRedactor HAS NO LEGACY SOURCE EQUIVALENT. Nearly every other file in this refactor is a port
+//  of a named ws_objects/** object; this one is a CONTROL THE LEGACY DOES NOT HAVE, carried in the
+//  migration plan with Source = "- no source equivalent" and Key Changes = "Required addition".
+//
+//  IT EXISTS BECAUSE THE LEGACY LOGGER REDACTS NOTHING. The legacy `sqlsyntax` member carries the
+//  COMPLETE generated statement with every parameter value already substituted into it as a SQL
+//  literal - executed at [n_cst_thread_task_sqlquery.sru:L843] and then reported, as the same
+//  string, at [:L855] - and there is no logging or redaction seam anywhere on that path. The one
+//  measured consumer puts the statement straight into a dialog
+//  [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L513]. SqlRedactor is therefore not a repair of
+//  a broken control; it is the FIRST control of its kind on this path, and this suite is what
+//  proves it cannot be bypassed.
+//
+//  A CONSEQUENCE WORTH HANDING ONWARD: because the .NET side masks this field and the ORACLE DOES
+//  NOT, any paired characterization recording that captures the statement must mask or exclude it
+//  on BOTH sides, or it will fail for a reason that is by design. That belongs to the parity and
+//  characterization documentation; this file only records it.
 //
 //  WHAT THIS SUITE IS ACTUALLY PROTECTING
 //  --------------------------------------------------------------------------------------------
@@ -44,18 +71,43 @@
 //  inject at), and ToDbError_MasksEvenThoughAPassThroughImplementationExists (the outcome, proven
 //  with a pass-through redactor alive in the same assembly).
 //
+//  A fourth property is the credential guarantee, and it is the other half of C-F. Section 9 holds
+//  it: `logpass` [transactiondata.srs:L8] must not reach a database-error payload, its wire
+//  projection, or a log record written while reporting the error. TransactionDataTests owns the
+//  write-only property of the descriptor TYPE; this file owns it on the ERROR AND DIAGNOSTIC PATH,
+//  which is a separate claim that the first does not imply. It is held structurally - the payload
+//  declares no member that could carry a descriptor, and the wire message has exactly the five
+//  fields dberrordata.srs:L3-L9 declares - and then behaviourally against a real captured log
+//  record. That the guard is load-bearing rather than decorative was verified by mutation: making
+//  the descriptor's renderer emit the credential fails both tests in section 9.
+//
+//  A fifth property is a PRESERVED DEFECT rather than a control, and section 10 pins it: the legacy
+//  SQL task layer mixes ENGLISH and CHINESE diagnostics, and that inconsistency is reproduced rather
+//  than harmonized (C-B). The census there fails if anyone translates the texts, normalises their
+//  casing, or routes them through localization - so the defect cannot be tidied away by accident.
+//  These texts travel in `sqlerrtext`, immediately beside the member this file guards, and the
+//  projection must carry them through UNTOUCHED while masking only their neighbour; both halves are
+//  asserted in one place because they pull in opposite directions.
+//
 //  C-F: EVERY INPUT IN THIS FILE IS SYNTHETIC. No statement here was captured from a log, and no
 //  value from any known hardcoded-secret site appears in any form. The names, ages and salaries are
-//  invented for the purpose, and the schema they reference is the repository's own sole DDL.
+//  invented for the purpose, and the schema they reference is the repository's own sole DDL. The
+//  credential sentinel in section 9 is a self-describing marker and is deliberately NOT
+//  password-shaped: a test that hardcoded a plausible password in order to prove that plausible
+//  passwords are hidden would itself be the violation it claims to prevent.
 //
 //  No performance property is asserted anywhere in this suite and nothing here is timed.
 // ==============================================================================================
 
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using Microsoft.Extensions.Logging;
 using PowerFramework.Contracts.Common.V1;
+using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Errors;
+using PowerFramework.Persistence.Sql.Paging;
 using PowerFramework.Persistence.Tasks;
+using PowerFramework.Persistence.Transactions;
 using Xunit;
 
 namespace PowerFramework.Persistence.Tests;
@@ -1321,6 +1373,506 @@ public sealed class SqlRedactorTests
         Assert.DoesNotContain("Ada", projected.Sqlsyntax, StringComparison.Ordinal);
         Assert.DoesNotContain("36", projected.Sqlsyntax, StringComparison.Ordinal);
         Assert.Contains(SqlRedactor.DefaultPlaceholder, projected.Sqlsyntax, StringComparison.Ordinal);
+    }
+
+    // ==========================================================================================
+    //  9. `logpass` CANNOT REACH THE DIAGNOSTIC PATH (constraint C-F)
+    //  ----------------------------------------------------------------------------------------
+    //  DIVISION OF OWNERSHIP, STATED SO NEITHER HALF IS ASSUMED TO COVER THE OTHER.
+    //  TransactionDataTests owns the WRITE-ONLY property of the descriptor type itself - that
+    //  `LogPass` has no getter at all, that the renderer omits it, that the serializer is told to
+    //  omit it. THIS section owns the same guarantee on the ERROR AND DIAGNOSTIC path, which is a
+    //  different claim: not "will the descriptor disclose the value when asked", but "can a value
+    //  supplied to a descriptor end up in a database-error payload, in that payload's wire
+    //  projection, or in a log record written while reporting the error". Neither half implies the
+    //  other, and this is the half that sits on the path this file exists to guard.
+    //
+    //  THE LEGACY MEMBER BEING GUARDED is the fifth of nine,
+    //      global type transactiondata from structure
+    //          string dbms, servername, database, logid, logpass, dbparm, lock, ... 
+    //      end type
+    //  [ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs:L8], and the requirement on it is
+    //  absolute rather than best-effort: logpass is WRITE-ONLY - never echoed in a response, never
+    //  logged.
+    //
+    //  WHY A STRUCTURAL ASSERTION LEADS. A behavioural test can only show the value did not appear
+    //  THIS TIME, for the one payload the test happened to build. The structural assertion shows
+    //  there is nowhere for it to appear at all: the payload declares no member of the descriptor's
+    //  type, its five members are scalars, and the wire message has exactly the five fields
+    //  dberrordata.srs:L3-L9 declares - so there is no sixth field for a credential to occupy.
+    //
+    //  THE SENTINEL IS DELIBERATELY NOT CREDENTIAL-SHAPED. It is a self-describing marker, chosen so
+    //  that no reader can mistake it for a real or realistic password and no secret scanner has
+    //  anything to match. C-F is not discharged by a test that hardcodes a plausible password in
+    //  order to demonstrate that plausible passwords are hidden - that test would itself be the
+    //  violation it claims to prevent.
+    // ==========================================================================================
+
+    /// <summary>
+    /// The value the tests below hand to <see cref="TransactionData.LogPass"/>. A self-describing
+    /// marker, never anything password-shaped.
+    /// </summary>
+    private const string LogPassSentinel = "logpass-sentinel-that-must-never-be-rendered";
+
+    /// <summary>
+    /// The payload type declares no member of the descriptor's type and no member that could carry
+    /// one, so a credential has no route onto this path even before behaviour is considered.
+    /// </summary>
+    [Fact]
+    public void ThePayloadDeclaresNoDescriptorMember_SoACredentialHasNoRouteOntoThisPath()
+    {
+        const BindingFlags all = BindingFlags.Public
+            | BindingFlags.NonPublic
+            | BindingFlags.Instance
+            | BindingFlags.Static
+            | BindingFlags.DeclaredOnly;
+
+        Assert.DoesNotContain(
+            typeof(DbErrorData).GetFields(all),
+            field => field.FieldType == typeof(TransactionData));
+        Assert.DoesNotContain(
+            typeof(DbErrorData).GetProperties(all),
+            property => property.PropertyType == typeof(TransactionData));
+
+        // Every public member is a scalar of one of the three legacy member types, so none of them
+        // can carry a descriptor - or anything else - indirectly.
+        Assert.All(
+            typeof(DbErrorData).GetProperties(
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly),
+            property => Assert.Contains(
+                property.PropertyType,
+                new[] { typeof(long), typeof(string), typeof(DwBuffer) }));
+
+        // And the wire message mirrors dberrordata.srs:L3-L9 field for field, so there is no sixth
+        // field either.
+        Assert.Equal(5, DbError.Descriptor.Fields.InDeclarationOrder().Count);
+    }
+
+    /// <summary>
+    /// A credential supplied to a descriptor reaches no field of the wire payload and none of the
+    /// three rendering surfaces a diagnostic travels through.
+    /// </summary>
+    [Fact]
+    public void ACredentialSuppliedToTheDescriptorReachesNoFieldOfTheWirePayload()
+    {
+        TransactionData descriptor = DescriptorCarryingTheSentinel();
+
+        // THE VALUE REALLY WAS ACCEPTED, so nothing below passes vacuously. `HasCredential` answers
+        // the question without disclosing the answer, and it is the only read the type offers -
+        // `LogPass` has no getter, which is itself the structural half of "write-only".
+        Assert.True(descriptor.HasCredential);
+
+        DbErrorData error = DbErrorData.FromTransaction(
+            RetCode.E_DB_ERROR,
+            "SQLite Error 14: 'unable to open database file'.") with
+        {
+            SqlSyntax = "SELECT ID,NAME FROM COMPANY WHERE NAME = 'Alice'",
+        };
+
+        DbError message = error.ToDbError();
+
+        // The two string-typed fields are the only ones that could carry text at all; the other
+        // three are a long, an enum and a long.
+        AssertSentinelAbsent(message.Sqlerrtext);
+        AssertSentinelAbsent(message.Sqlsyntax);
+
+        // The generated renderer emits EVERY field, so this one assertion covers all five at once
+        // and would catch a credential that had reached a field this test did not name.
+        AssertSentinelAbsent(message.ToString());
+
+        // The two in-process rendering surfaces, which are what a structured-log call formats.
+        AssertSentinelAbsent(descriptor.ToString());
+        AssertSentinelAbsent(error.ToString());
+    }
+
+    /// <summary>
+    /// A credential reaches no log record written while reporting the error, asserted against real
+    /// captured records rather than against the renderers in isolation.
+    /// </summary>
+    /// <remarks>
+    /// THE REALISTIC DISCLOSURE SHAPE IS ONE STRUCTURED-LOG CALL that formats the descriptor and the
+    /// error as single arguments - the way a credential actually escapes a system. That call formats
+    /// each argument by calling its <c>ToString()</c>, so driving a genuine
+    /// <see cref="ILoggerFactory"/> asserts the composition of the renderers and the logging
+    /// pipeline rather than trusting either alone.
+    /// </remarks>
+    [Fact]
+    public void ACredentialReachesNoLogRecordWrittenWhileReportingTheError()
+    {
+        TransactionData descriptor = DescriptorCarryingTheSentinel();
+
+        DbErrorData error = DbErrorData.FromStatement(
+            RetCode.E_DB_ERROR,
+            "SQLite Error 14: 'unable to open database file'.",
+            "UPDATE COMPANY SET SALARY = 12345.67 WHERE NAME = 'Alice'",
+            DwBuffer.Primary,
+            0);
+
+        DbError message = error.ToDbError();
+
+        RecordingLoggerProvider recorder = new();
+
+        using (ILoggerFactory factory = LoggerFactory.Create(builder => builder.AddProvider(recorder)))
+        {
+            ILogger logger = factory.CreateLogger(typeof(SqlRedactorTests).FullName!);
+
+            logger.LogError(
+                "update failed {Descriptor} {Error} {Wire}",
+                descriptor,
+                error,
+                message);
+        }
+
+        // NOT VACUOUS, IN THE TWO WAYS THIS TEST COULD HAVE BEEN. A pipeline that recorded nothing
+        // would satisfy every absence assertion below, and so would one that recorded the template
+        // without ever formatting its arguments. The record must therefore be shown to carry the
+        // descriptor's OWN rendering - `Database` is a member it genuinely does render - before the
+        // absence of its neighbour means anything at all.
+        string record = Assert.Single(recorder.Records);
+
+        Assert.Contains("test.db", record, StringComparison.Ordinal);
+        Assert.Contains("SQLite", record, StringComparison.Ordinal);
+
+        // The credential sat on the same descriptor, in the same call, and reached no record.
+        Assert.All(recorder.Records, AssertSentinelAbsent);
+
+        // Nor did the statement's literal values, because what reached the record is the projection's
+        // masked statement rather than the executed one.
+        Assert.DoesNotContain("Alice", record, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A credential that had somehow reached the statement text is masked like any other literal.
+    /// </summary>
+    /// <remarks>
+    /// NOT A ROUTE THIS PORT HAS - it is a route the LEGACY has. With binding disabled the runtime
+    /// interpolates values into the statement it then reports
+    /// [n_cst_thread_task_sqlbase.sru:L128-L129], and the framework's own bind emulation flattens
+    /// parameters into the statement unconditionally. If such a value ever reached this field, the
+    /// mask is the only thing standing between it and the wire, so the case is asserted rather than
+    /// assumed safe.
+    /// </remarks>
+    [Fact]
+    public void ACredentialThatSomehowReachedTheStatementTextIsMaskedLikeAnyOtherLiteral()
+    {
+        DbErrorData error = DbErrorData.FromStatement(
+            1,
+            "syntax error",
+            $"SELECT * FROM COMPANY WHERE NAME = '{LogPassSentinel}'",
+            DwBuffer.Primary,
+            0);
+
+        DbError message = error.ToDbError();
+
+        Assert.Equal($"SELECT * FROM COMPANY WHERE NAME = '{Mask}'", message.Sqlsyntax);
+        AssertSentinelAbsent(message.Sqlsyntax);
+        AssertSentinelAbsent(message.ToString());
+    }
+
+    // ==========================================================================================
+    //  10. THE PRESERVED MESSAGE-LANGUAGE INCONSISTENCY (constraint C-B)
+    //  ----------------------------------------------------------------------------------------
+    //  THE LEGACY SQL TASK LAYER IS NOT WRITTEN IN ONE LANGUAGE, and that is REPRODUCED rather than
+    //  harmonized. Two of its diagnostics are ENGLISH and the rest are CHINESE - in the same library,
+    //  on the same event channel, for failures of comparable severity:
+    //
+    //      "GetChanges Failed"   ENGLISH  [n_cst_thread_task_sqlquery.sru:L172, also :L206]
+    //      "TransData Failed"    ENGLISH  [:L184, also :L98, :L135, :L220]
+    //      "无效的分页设置!"       CHINESE  [:L308]
+    //      "SQL解析失败!"         CHINESE  [:L315, also :L686, :L827]
+    //      "无效的列名:"          CHINESE  [n_cst_thread_task_sqlupdate.sru:L120]
+    //      "没有可更新的表"        CHINESE  [n_cst_thread_task_sqlupdate.sru:L190]
+    //
+    //  PINNED AS EXPECTED BEHAVIOUR, NOT TOLERATED AS AN OVERSIGHT. The standing instruction is to
+    //  replicate documented defects verbatim rather than correct them, and an inconsistency that
+    //  survives only by accident is one that a later tidying pass quietly removes. The census below
+    //  therefore FAILS if anyone translates these texts, normalises their casing, or routes them
+    //  through localization - each of which would be exactly the silent correction C-B forbids.
+    //  Persistence deliberately holds no Shared.Localization reference, and the last test here keeps
+    //  it that way.
+    //
+    //  THE SUBJECT OF EACH ROW IS THE APPLICATION'S OWN CONSTANT, never a literal re-typed as the
+    //  subject, so there remains exactly one spelling of each text in the production tree. The
+    //  expected value beside it IS written out, and that is the point of a characterization pin
+    //  rather than a contradiction of it: two independently authored spellings that must agree is
+    //  what catches a constant being silently edited. It matters most for the CJK rows, where a
+    //  single transposed character is invisible in review yet fails every parity comparison.
+    //
+    //  WHY THIS LIVES IN THIS FILE. These texts travel in `sqlerrtext` - the payload member sitting
+    //  immediately beside the one this file guards - and `ToDbError` must carry them through
+    //  UNTOUCHED while masking only its neighbour. Those two claims pull in opposite directions, so
+    //  they are asserted together at the end of this section.
+    //
+    //  WHY THE CENSUS REACHES ACROSS Buffers/, Concurrency/ AND Sql/Paging/. The inconsistency is not
+    //  a property of any one folder - it only exists BETWEEN the places the legacy library raises its
+    //  diagnostics, so a census confined to Errors/ could not observe it at all. Every constant read
+    //  below lives in PowerFramework.Persistence, the single assembly this test project already
+    //  references, so nothing here widens the project's dependencies: no new project reference, no new
+    //  package, and no reach into a sibling service (C-A). Each is reached only to READ its text.
+    // ==========================================================================================
+
+    /// <summary>
+    /// The ENGLISH diagnostics: the application constant under test, the exact oracle text, and the
+    /// locator each was measured from.
+    /// </summary>
+    private static readonly (string Locator, string Actual, string Expected)[] EnglishCases =
+    [
+        ("n_cst_thread_task_sqlquery.sru:L172", ChangesetCodec.GetChangesFailedText, "GetChanges Failed"),
+        ("n_cst_thread_task_sqlquery.sru:L184", ChangesetCodec.TransDataFailedText, "TransData Failed"),
+        ("n_cst_thread_task_sqlquery.sru:L98", FullStateCodec.TransDataFailedMessage, "TransData Failed"),
+    ];
+
+    /// <summary>
+    /// The CHINESE diagnostics, on the same terms as <see cref="EnglishCases"/>.
+    /// </summary>
+    private static readonly (string Locator, string Actual, string Expected)[] ChineseCases =
+    [
+        ("n_cst_thread_task_sqlupdate.sru:L190", DbErrorMessages.NoUpdatableTable, "没有可更新的表"),
+        ("n_cst_thread_task_sqlquery.sru:L308", PagingRewriteResult.InvalidPagingSettingText, "无效的分页设置!"),
+        ("n_cst_thread_task_sqlquery.sru:L315", PagingRewriteResult.ParseFailedText, "SQL解析失败!"),
+        ("n_cst_thread_task_sqlupdate.sru:L120", UpdateWhereBuilder.InvalidColumnNameMessage, "无效的列名:"),
+    ];
+
+    /// <summary>The ENGLISH diagnostics, each with the locator it was measured from.</summary>
+    /// <returns>One row per preserved English diagnostic.</returns>
+    public static TheoryData<string, string, string> EnglishDiagnostics() => Rows(EnglishCases);
+
+    /// <summary>The CHINESE diagnostics, each with the locator it was measured from.</summary>
+    /// <returns>One row per preserved Chinese diagnostic.</returns>
+    public static TheoryData<string, string, string> ChineseDiagnostics() => Rows(ChineseCases);
+
+    /// <summary>Projects a diagnostic census onto theory rows.</summary>
+    /// <param name="cases">The census to project.</param>
+    /// <returns>One row per case.</returns>
+    private static TheoryData<string, string, string> Rows(
+        (string Locator, string Actual, string Expected)[] cases)
+    {
+        TheoryData<string, string, string> data = [];
+
+        foreach ((string locator, string actual, string expected) in cases)
+        {
+            data.Add(locator, actual, expected);
+        }
+
+        return data;
+    }
+
+    /// <summary>
+    /// Each English diagnostic is carried verbatim and stays pure ASCII - untranslated, and with its
+    /// original casing.
+    /// </summary>
+    /// <param name="locator">The legacy locator this row was measured from.</param>
+    /// <param name="actual">The application constant under test.</param>
+    /// <param name="expected">The exact text the oracle emits.</param>
+    [Theory]
+    [MemberData(nameof(EnglishDiagnostics))]
+    public void EnglishDiagnosticsStayEnglish(string locator, string actual, string expected)
+    {
+        Assert.Equal(expected, actual);
+
+        // PURE ASCII, which is the mechanical statement of "nobody translated this one".
+        Assert.True(actual.All(char.IsAscii));
+
+        // The original casing survives: these are Pascal-cased words, not sentence-cased prose, and
+        // normalising them would be a silent correction.
+        Assert.NotEqual(actual.ToLowerInvariant(), actual);
+
+        Assert.False(string.IsNullOrEmpty(locator));
+    }
+
+    /// <summary>
+    /// Each Chinese diagnostic is carried verbatim, character for character, and is NOT translated
+    /// into the English its neighbours use.
+    /// </summary>
+    /// <param name="locator">The legacy locator this row was measured from.</param>
+    /// <param name="actual">The application constant under test.</param>
+    /// <param name="expected">The exact text the oracle emits.</param>
+    [Theory]
+    [MemberData(nameof(ChineseDiagnostics))]
+    public void ChineseDiagnosticsStayChinese(string locator, string actual, string expected)
+    {
+        Assert.Equal(expected, actual);
+
+        // At least one CJK ideograph, which is the mechanical statement of "nobody translated this
+        // one". Asserted on code points so the check is independent of the source file's encoding.
+        Assert.Contains(actual, character => character is >= '\u4e00' and <= '\u9fff');
+
+        Assert.False(string.IsNullOrEmpty(locator));
+    }
+
+    /// <summary>
+    /// THE ANTI-HARMONIZATION ASSERTION: the diagnostic set spans BOTH languages at once. This is the
+    /// test that fails if a later pass makes the messages consistent.
+    /// </summary>
+    /// <remarks>
+    /// Asserted over the set rather than per message because the defect IS the coexistence. Every
+    /// individual message could be checked and still leave a tidying pass free to translate the two
+    /// English ones into Chinese, or the four Chinese ones into English, without breaking anything.
+    /// </remarks>
+    [Fact]
+    public void TheDiagnosticSetIsDeliberatelyNotSingleLanguage()
+    {
+        string[] english = [.. EnglishCases.Select(row => row.Actual)];
+        string[] chinese = [.. ChineseCases.Select(row => row.Actual)];
+
+        Assert.NotEmpty(english);
+        Assert.NotEmpty(chinese);
+
+        Assert.All(english, text => Assert.True(text.All(char.IsAscii)));
+        Assert.All(chinese, text => Assert.False(text.All(char.IsAscii)));
+
+        // The same condition reported through two different codecs shares one spelling, so the
+        // inconsistency is BETWEEN messages and never WITHIN one.
+        Assert.Equal(ChangesetCodec.TransDataFailedText, FullStateCodec.TransDataFailedMessage);
+    }
+
+    /// <summary>
+    /// Persistence routes no diagnostic through localization, which is what keeps every text above
+    /// byte-identical to its oracle.
+    /// </summary>
+    /// <remarks>
+    /// Structural, because the claim is an absence. Localization is a shared library this service
+    /// deliberately does not reference: translating a diagnostic is precisely the correction C-B
+    /// forbids, and an absent reference is a stronger guarantee than a convention.
+    /// </remarks>
+    [Fact]
+    public void PersistenceRoutesNoDiagnosticThroughLocalization()
+    {
+        Assert.DoesNotContain(
+            typeof(SqlRedactor).Assembly.GetReferencedAssemblies(),
+            name => name.Name?.Contains("Localization", StringComparison.OrdinalIgnoreCase) == true);
+    }
+
+    /// <summary>
+    /// Every preserved diagnostic survives the outward projection untouched while the statement
+    /// beside it is masked - the two obligations that pull in opposite directions, asserted together.
+    /// </summary>
+    /// <param name="locator">The legacy locator this row was measured from.</param>
+    /// <param name="text">The diagnostic text placed in the message member.</param>
+    /// <param name="expected">The exact text the oracle emits.</param>
+    [Theory]
+    [MemberData(nameof(EnglishDiagnostics))]
+    [MemberData(nameof(ChineseDiagnostics))]
+    public void APreservedDiagnosticSurvivesRedactionAndProjectionUntouched(
+        string locator,
+        string text,
+        string expected)
+    {
+        DbErrorData error = DbErrorData.FromStatement(
+            RetCode.E_INTERNAL_ERROR,
+            text,
+            "SELECT * FROM COMPANY WHERE NAME = 'Alice' AND AGE = 30",
+            DwBuffer.Primary,
+            1);
+
+        // The in-process narrowing changes the statement and nothing else.
+        Assert.Equal(expected, Subject.Redact(error).SqlErrText);
+
+        DbError message = error.ToDbError();
+
+        // The message crosses the wire verbatim ...
+        Assert.Equal(expected, message.Sqlerrtext);
+
+        // ... while its neighbour is masked. Asserting both here is what stops a change that
+        // narrowed the message field too from passing a message-only test.
+        Assert.Equal(
+            $"SELECT * FROM COMPANY WHERE NAME = '{Mask}' AND AGE = {Mask}",
+            message.Sqlsyntax);
+
+        Assert.False(string.IsNullOrEmpty(locator));
+    }
+
+    // ==========================================================================================
+    //  HELPERS FOR SECTIONS 9 AND 10
+    // ==========================================================================================
+
+    /// <summary>
+    /// A connection descriptor carrying <see cref="LogPassSentinel"/> as its credential, with the
+    /// other members set to unremarkable, non-sensitive values.
+    /// </summary>
+    /// <returns>The descriptor.</returns>
+    /// <remarks>
+    /// The credential is supplied through the initializer because <see cref="TransactionData.LogPass"/>
+    /// has no getter - supplying it is the only thing a caller can do with it.
+    /// </remarks>
+    private static TransactionData DescriptorCarryingTheSentinel() => new()
+    {
+        Dbms = "SQLite",
+        ServerName = "localhost",
+        Database = "test.db",
+        LogId = "pfw",
+        LogPass = LogPassSentinel,
+        AutoCommit = false,
+    };
+
+    /// <summary>Asserts the credential sentinel appears nowhere in <paramref name="rendered"/>.</summary>
+    /// <param name="rendered">The rendered text to search.</param>
+    private static void AssertSentinelAbsent(string rendered) =>
+        Assert.DoesNotContain(LogPassSentinel, rendered, StringComparison.Ordinal);
+
+    /// <summary>
+    /// A logger provider that captures every formatted record, so an absence can be asserted against
+    /// real log output rather than against a renderer in isolation.
+    /// </summary>
+    private sealed class RecordingLoggerProvider : ILoggerProvider
+    {
+        /// <summary>The formatted records captured so far.</summary>
+        private readonly List<string> _records = [];
+
+        /// <summary>Every formatted record, in order, as a snapshot.</summary>
+        internal IReadOnlyList<string> Records
+        {
+            get
+            {
+                lock (_records)
+                {
+                    return [.. _records];
+                }
+            }
+        }
+
+        /// <inheritdoc/>
+        public ILogger CreateLogger(string categoryName) => new Recorder(this);
+
+        /// <inheritdoc/>
+        public void Dispose()
+        {
+        }
+
+        /// <summary>Appends one formatted record under the provider's lock.</summary>
+        /// <param name="record">The formatted record.</param>
+        private void Append(string record)
+        {
+            lock (_records)
+            {
+                _records.Add(record);
+            }
+        }
+
+        /// <summary>A logger that formats and records everything it is given.</summary>
+        /// <param name="owner">The provider to append to.</param>
+        private sealed class Recorder(RecordingLoggerProvider owner) : ILogger
+        {
+            /// <inheritdoc/>
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            /// <inheritdoc/>
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            /// <inheritdoc/>
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                ArgumentNullException.ThrowIfNull(formatter);
+
+                owner.Append(formatter(state, exception));
+            }
+        }
     }
 
     /// <summary>

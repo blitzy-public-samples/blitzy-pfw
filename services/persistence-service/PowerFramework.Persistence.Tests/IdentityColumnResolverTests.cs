@@ -11,10 +11,45 @@
 //  plan names the Filter buffer's backward collection loop
 //  [n_cst_thread_task_sqlupdate.sru:L237] the single most dangerous line in the whole migration,
 //  precisely because reversing it keeps the COUNT of collected values identical while pairing every
-//  value with the WRONG ROW. A count-only assertion therefore cannot detect the regression, and
-//  FilterValuesAreCollectedInDescendingRowOrder plus
-//  BackwardCollectionRoundTripsThroughAForwardApplier exist to detect it. Do not weaken either into
-//  a count or a set comparison.
+//  value with the WRONG ROW. A count-only assertion therefore cannot detect the regression, so FOUR
+//  tests assert the Filter ORDER as a SEQUENCE and none of them may be weakened into a count, a set
+//  or a sorted comparison:
+//    * FilterValuesAreCollectedInDescendingRowOrder            - the direction, on staged rows
+//    * BackwardCollectionRoundTripsThroughAForwardApplier      - the direction composed with its
+//                                                                forward-applying counterpart
+//    * TheFixtureRoundTripResolvesColumnOneAndReportsTheFilterArrayInverted
+//                                                              - the direction in the ORACLE'S OWN
+//                                                                data, which reads 7 then 6
+//    * TheOrderedCallLogShowsTheArityAndTheWalkDirectionTogether
+//                                                              - the direction and the accessor
+//                                                                arity off one ordered call log
+//  ReversingTheFixturesFilterSequenceIsUndetectableByCountOrContentAlone states the reason in
+//  executable form: the reversed sequence has the same length and the same contents.
+//
+//  C-B / C-K - THE BACKWARD WALK IS PRESERVED LEGACY BEHAVIOUR WITH A DOCUMENTED REASON, AND IT IS
+//  HALF OF A MATCHED PAIR:
+//    * COLLECT BACKWARD, here. The oracle's own comment one line above the loop
+//      [n_cst_thread_task_sqlupdate.sru:L235] states that the Filter buffer's data order is INVERTED
+//      relative to the data source that called GetChanges. The loop is not a defect; it is the
+//      compensation for that inversion.
+//    * APPLY FORWARD, elsewhere. The write-back half walks BOTH buffers ASCENDING through
+//      GetNextModified and consumes each array from its first element onward - see
+//      PowerFramework.Persistence/Tasks/TaskProxies/SqlUpdateTaskProxy.cs (ApplyBothBuffers /
+//      ApplyBuffer), mirroring n_cst_threading_task_sqlupdate.sru:L120-L205, and asserted in the
+//      sibling SqlUpdateTaskProxyTests.cs.
+//  Collect-backward composed with apply-forward is what lands each value on the row it belongs to.
+//  NEITHER HALF MAKES SENSE ALONE: "correcting" this file's direction in isolation yields wrong
+//  identity values that every count assertion in the suite would still accept.
+//
+//  C-K - AAP SECTION 0.4.5.4, THE ONE-BASED TRANSLATION RULE, AND WHY THIS UNIT IS ITS MOST
+//  IMPORTANT SUBJECT. The plan requires that every ported loop either go through a CENTRALISED
+//  one-based indexing helper or be INDIVIDUALLY AUDITED, because PowerBuilder arrays are one-based
+//  and its upper-bound function answers the LAST VALID INDEX. The subject uses the helper
+//  (OneBasedIndex.Range / UpperBound / EmptyUpperBound / ToZeroBased) and the named row and column
+//  sentinels (ItemStatusMachine.FirstRowNumber / FirstColumnNumber / RowStatusColumn); this file is
+//  the audit, and the "R9 - the one-based audit" region below is where it is written down. Its
+//  reverse-iteration case is the one the plan singles out, so the tests here address rows in the
+//  ONE-BASED domain throughout and let the fake perform the single rebasing.
 //
 //  NO DATABASE AND NO DataWindow IS INVOLVED ANYWHERE IN THIS FILE. Both surfaces the subject reads
 //  through are injected and are faked by RecordingIdentitySource below, which records every
@@ -27,6 +62,7 @@
 // ==============================================================================================
 
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Google.Protobuf;
@@ -241,42 +277,59 @@ internal sealed class RecordingIdentitySource : IIdentityColumnMetadata, IIdenti
 /// </summary>
 public sealed class IdentityColumnResolverTests
 {
-    #region The sole evidenced fixture, transcribed from dw_sqlite.srd
+    #region The sole evidenced fixture, CONSUMED from DwSqliteFixture rather than re-transcribed
 
-    /// <summary>The update table name [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>].</summary>
-    private const string FixtureTable = "COMPANY";
+    // ==========================================================================================
+    //  C-C - THE FIXTURE IS READ, NOT COPIED.
+    //  ----------------------------------------------------------------------------------------
+    //  Every fixture fact below resolves to DwSqliteFixture, which is the single transcription of
+    //  ws_objects/pfw.tests.pbl.src/dw_sqlite.srd in this project. Re-spelling "COMPANY" or the six
+    //  column names here would create a second transcription that could drift from the .srd without
+    //  any test failing - and the one fact this whole file turns on, that every dbname is BARE
+    //  [dw_sqlite.srd:L8-L13], is exactly the kind of detail a drifting copy loses.
+    // ==========================================================================================
+
+    /// <summary>
+    /// The update table name the discovery prefix is derived from
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>], read from the fixture.
+    /// </summary>
+    private static string FixtureTable => DwSqliteFixture.UpdateTableName;
 
     /// <summary>
     /// The six column names in declaration order, whose ids are therefore 1..6
     /// [<c>dw_sqlite.srd:L8-L13, L21-L26</c>]. Only <c>id</c> carries
     /// <c>key=yes identity=yes</c> [<c>:L8</c>].
     /// </summary>
-    private static readonly string[] FixtureColumns =
-        ["id", "name", "age", "address", "salary", "birth"];
+    private static IReadOnlyList<string> FixtureColumns => DwSqliteFixture.ColumnNames;
 
     /// <summary>
-    /// A source preloaded with the fixture: six columns, <c>id</c> the sole identity column, and its
-    /// database name the UNQUALIFIED <c>id</c> exactly as the definition declares it [<c>:L8</c>].
+    /// A recording source preloaded with the fixture's own describe answers: six columns, <c>id</c>
+    /// the sole identity column, and every database name the UNQUALIFIED spelling the definition
+    /// declares [<c>:L8-L13</c>].
     /// </summary>
+    /// <returns>The preloaded recording source.</returns>
+    /// <remarks>
+    /// THE ANSWERS COME FROM THE FIXTURE'S MAPS, WHICH ARE THEMSELVES KEYED BY THE COMPOSED DESCRIBE
+    /// PROPERTY - so this source answers precisely the questions the subject asks, and a change to the
+    /// property vocabulary cannot leave the two disagreeing silently.
+    /// </remarks>
     private static RecordingIdentitySource FixtureSource()
     {
         RecordingIdentitySource source = new()
         {
             UpdateTable = FixtureTable,
-            ColumnCount = FixtureColumns.Length,
+            ColumnCount = DwSqliteFixture.ColumnCount,
         };
 
-        // Ids 1..6 in declaration order. R9: one-based, matching the .srd's own id= attributes.
-        for (int ordinal = ItemStatusMachine.FirstColumnNumber;
-            ordinal <= FixtureColumns.Length;
-            ordinal++)
+        foreach ((string property, string answer) in DwSqliteFixture.IdentityDescribeAnswers)
         {
-            source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(ordinal)] =
-                FixtureColumns[ordinal - ItemStatusMachine.FirstColumnNumber];
+            source.IdentityAnswers[property] = answer;
         }
 
-        source.IdentityAnswers[IdentityColumnResolver.DescribeIdentityProperty(1)] =
-            UpdateWhereBuilder.YesLiteral;
+        foreach ((string property, string answer) in DwSqliteFixture.DbNameDescribeAnswers)
+        {
+            source.DbNameAnswers[property] = answer;
+        }
 
         return source;
     }
@@ -295,89 +348,313 @@ public sealed class IdentityColumnResolverTests
 
     #region Discovery - the full selection-ordering matrix
 
-    /// <summary>
-    /// No column marked as an identity column at all yields
-    /// <see cref="IdentityColumnResolver.NoIdentityColumn"/>, which gates collection off entirely
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L226</c>].
-    /// </summary>
-    [Fact]
-    public void DiscoveryFindsNothingWhenNoColumnIsMarkedIdentity()
-    {
-        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
+    // ==========================================================================================
+    //  THE SELECTION RULE, STATED TWICE SO IT CANNOT BE MISREAD.
+    //  ----------------------------------------------------------------------------------------
+    //      sColDBNamePrefix = Lower(sUpdateTable) + "."                                  [:L217]
+    //      for nIndex = 1 to Column.Count                                                [:L219]
+    //          if Describe("#N.Identity") = "yes" then                                   [:L220]
+    //              if Lower(Left(Describe("#N.DBName"),Len(prefix))) = prefix
+    //                 or nIdentityColumn = 0 then                                        [:L221]
+    //                  nIdentityColumn = nIndex                                          [:L222]
+    //
+    //  READING ONE - a PREFIX MATCH assigns UNCONDITIONALLY, so it may overwrite an earlier pick:
+    //                THE LAST PREFIX-MATCHING IDENTITY COLUMN WINS.
+    //  READING TWO - a NON-MATCHING column assigns only while nothing has been chosen:
+    //                THE FIRST IDENTITY COLUMN IS THE FALLBACK.
+    //
+    //  Both readings describe the SAME code. It is neither plain "first wins" nor plain "last wins",
+    //  and the matrix below asserts the BEHAVIOUR rather than either paraphrase - which is why it
+    //  includes the two cases that separate them: a bare column after a qualified one must NOT take
+    //  over, and a qualified column after a bare one MUST.
+    // ==========================================================================================
 
+    /// <summary>
+    /// The complete discovery matrix: one case per reachable path through the two nested conditions,
+    /// each declared as a whole column list so the ORDER of the columns - which is what the rule turns
+    /// on - is visible in the case itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// EVERY PARAMETER IS A PRIMITIVE OR AN ARRAY OF PRIMITIVES, deliberately: xUnit serializes theory
+    /// data so each case is discovered, named and re-run individually, and a bespoke case type would
+    /// forfeit that. The two arrays are parallel and INDEX <c>n</c> IS ONE-BASED COLUMN <c>n + 1</c>,
+    /// which is the same single rebasing point the recording fake uses (R9).
+    /// </para>
+    /// <para>
+    /// The database names are deliberately mixed in case, because both sides of the comparison are
+    /// lower-cased [<c>:L217, :L221</c>] and a one-sided implementation would pass a same-case matrix.
+    /// </para>
+    /// <para>
+    /// C-C - THE COLUMN LISTS HERE ARE SYNTHETIC PROBES, NOT A TRANSCRIPTION. They deliberately contain
+    /// shapes the sole evidenced DataWindow does not - two identity columns, qualified database names, a
+    /// name that merely contains the qualifier - because the selection rule has arms the fixture cannot
+    /// reach. The FIXTURE'S OWN shape is asserted separately and read from
+    /// <c>DwSqliteFixture</c>: see <c>DiscoveryOnTheFixtureTakesColumnOneThroughTheFallbackArm</c> and
+    /// the principal case <c>TheFixtureRoundTripResolvesColumnOneAndReportsTheFilterArrayInverted</c>.
+    /// Nothing in this matrix claims to describe <c>dw_sqlite.srd</c>.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<string, string, string[], string[], int> SelectionRuleMatrix
+    {
+        get
+        {
+            const string yes = UpdateWhereBuilder.YesLiteral;
+            const string no = UpdateWhereBuilder.NoLiteral;
+
+            return new TheoryData<string, string, string[], string[], int>
+            {
+                // ---------- the seven cases the folder requirements enumerate ----------
+
+                // 1. One identity column carrying the qualifier: taken by the PREFIX arm [:L221].
+                {
+                    "one qualified identity column",
+                    "COMPANY",
+                    [no, no, no, yes],
+                    ["id", "name", "age", "COMPANY.id"],
+                    4
+                },
+
+                // 2. One identity column with a BARE name: taken by the FALLBACK arm `or ... = 0`.
+                //    This is the fixture's own shape - see the dedicated test below.
+                {
+                    "one bare identity column",
+                    "COMPANY",
+                    [no, no, yes],
+                    ["id", "name", "age"],
+                    3
+                },
+
+                // 3. TWO qualified identity columns: the LATER one wins, because the prefix arm
+                //    assigns unconditionally and therefore overwrites [:L222].
+                {
+                    "two qualified identity columns - the later wins",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "company.id", "age", "address", "COMPANY.SALARY"],
+                    5
+                },
+
+                // 4. ★ THE CASE THAT SEPARATES THE TWO READINGS. The FIRST column is qualified and
+                //    the SECOND is bare: the bare one CANNOT overwrite, because its arm only fires
+                //    while nothing has been chosen [:L221]. A "last identity column wins"
+                //    implementation answers 5 here and passes every other case in this matrix.
+                {
+                    "qualified first, bare second - the qualified first wins",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "company.id", "age", "address", "salary"],
+                    2
+                },
+
+                // 5. The mirror of case 4: bare FIRST, qualified SECOND, so the prefix arm overwrites
+                //    the fallback pick. A "first identity column wins" implementation answers 2 here.
+                {
+                    "bare first, qualified second - the qualified second wins",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "company.salary"],
+                    5
+                },
+
+                // 6. No identity column at all: nothing is resolved, which gates every stage below
+                //    discovery off entirely [:L226].
+                {
+                    "no identity column at all",
+                    "COMPANY",
+                    [no, no, no, no, no, no],
+                    ["id", "name", "age", "address", "salary", "birth"],
+                    IdentityColumnResolver.NoIdentityColumn
+                },
+
+                // 7. A column that MATCHES THE PREFIX but is NOT an identity column is ignored
+                //    entirely: the identity test is the OUTER condition [:L220], so the prefix test
+                //    is never even reached for it.
+                {
+                    "a qualified column that is not an identity column is ignored",
+                    "COMPANY",
+                    [no, no, no, no, no, no],
+                    ["company.id", "company.name", "age", "address", "salary", "birth"],
+                    IdentityColumnResolver.NoIdentityColumn
+                },
+
+                // ---------- the fallback arm's own ordering ----------
+
+                // Two BARE identity columns: the FIRST is kept, because the second's arm requires
+                //  `nIdentityColumn = 0` and it is no longer zero [:L221].
+                {
+                    "two bare identity columns - the first is kept",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "salary"],
+                    2
+                },
+
+                // ---------- the SHAPE of the comparison: a Left()-length prefix test ----------
+
+                // NOT A Contains. The qualifier appears INSIDE this name but not AT ITS START, so the
+                //  truncation cannot equal it and the bare column 2 keeps the pick. A Contains-based
+                //  implementation answers 5.
+                {
+                    "a name containing the qualifier but not starting with it does not match",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "xcompany.salary"],
+                    2
+                },
+
+                // NOT A FULL-NAME EQUALITY. This name is LONGER than the qualifier and still matches,
+                //  because only the first Len(prefix) characters are compared [:L221]. An equality
+                //  against the whole name answers 2.
+                {
+                    "a longer qualified name still matches on its first characters",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "company.salary_amount"],
+                    5
+                },
+
+                // THE QUALIFIER EXACTLY, with nothing after it, also matches - the boundary between
+                //  the two readings above.
+                {
+                    "the bare qualifier itself matches",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "company."],
+                    5
+                },
+
+                // A NAME SHORTER THAN THE QUALIFIER cannot match, even though it is a prefix OF the
+                //  qualifier: PowerScript's Left answers the whole short string [:L221 via LegacyLeft],
+                //  and "company" is not "company.". A StartsWith test in the other direction answers 5.
+                {
+                    "a name shorter than the qualifier does not match",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "company"],
+                    2
+                },
+
+                // THE SAME LENGTH but a different final character: the dot is part of the comparison.
+                {
+                    "a same-length name differing in the separator does not match",
+                    "COMPANY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "company_salary"],
+                    2
+                },
+
+                // ---------- both sides are lower-cased ----------
+
+                // THE TABLE SIDE is lower-cased [:L217]: a mixed-case update table still matches a
+                //  lower-case qualified name.
+                {
+                    "the update table name is lower-cased before comparison",
+                    "CoMpAnY",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "company.salary"],
+                    5
+                },
+
+                // THE COLUMN SIDE is lower-cased [:L221]: an upper-case qualified name still matches a
+                //  lower-case update table.
+                {
+                    "the column database name is lower-cased before comparison",
+                    "company",
+                    [no, yes, no, no, yes],
+                    ["id", "id", "age", "address", "COMPANY.SALARY"],
+                    5
+                },
+            };
+        }
+    }
+
+    /// <summary>
+    /// ★ THE SELECTION RULE, ASSERTED AS BEHAVIOUR. Each case declares a whole column list and the
+    /// ONE-BASED ordinal the oracle's scan arrives at [<c>:L219-L225</c>].
+    /// </summary>
+    /// <param name="description">The case's description, which names it in the test output.</param>
+    /// <param name="updateTable">The update table the qualifier is derived from [<c>:L217</c>].</param>
+    /// <param name="identityAnswers">
+    /// What each column answers to <c>#n.Identity</c>, index <c>n</c> being one-based column
+    /// <c>n + 1</c>.
+    /// </param>
+    /// <param name="dbNames">What each column answers to <c>#n.DBName</c>, in the same order.</param>
+    /// <param name="expectedColumnId">
+    /// The expected one-based column id, or <see cref="IdentityColumnResolver.NoIdentityColumn"/>.
+    /// </param>
+    [Theory]
+    [MemberData(nameof(SelectionRuleMatrix))]
+    public void DiscoveryAppliesThePrefixOverrideOverAFirstFoundFallback(
+        string description,
+        string updateTable,
+        string[] identityAnswers,
+        string[] dbNames,
+        int expectedColumnId)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(description));
+
+        // A malformed case would silently assert the wrong thing, so the two parallel arrays are
+        // required to agree before anything is exercised.
+        Assert.Equal(identityAnswers.Length, dbNames.Length);
+
+        RecordingIdentitySource source = new()
+        {
+            UpdateTable = updateTable,
+            ColumnCount = identityAnswers.Length,
+        };
+
+        // R9 - the ONE rebasing point: index n of the declared list is one-based column n + 1.
+        foreach (int ordinal in OneBasedIndex.Range(identityAnswers.Length))
+        {
+            int slot = OneBasedIndex.ToZeroBased(ordinal, identityAnswers.Length, nameof(ordinal));
+
+            source.IdentityAnswers[IdentityColumnResolver.DescribeIdentityProperty(ordinal)] =
+                identityAnswers[slot];
+            source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(ordinal)] =
+                dbNames[slot];
+        }
+
+        Assert.Equal(expectedColumnId, IdentityColumnResolver.DiscoverIdentityColumn(source));
+    }
+
+    /// <summary>
+    /// C-B - THE COMPARISON IS A PREFIX TEST OF EXACTLY THE QUALIFIER'S LENGTH, and this states that
+    /// directly against the two helpers the scan is built from rather than through a whole scan.
+    /// </summary>
+    /// <remarks>
+    /// The matrix above proves the CONSEQUENCES - that a containing name loses and a longer qualified
+    /// name wins. This proves the MECHANISM, so a reader can see that the rule is
+    /// <c>Lower(Left(name, Len(prefix))) = prefix</c> [<c>:L221</c>] and not a substring search, a
+    /// culture-aware comparison, or an equality against the whole name.
+    /// </remarks>
+    [Fact]
+    public void ThePrefixTestTruncatesToTheQualifierLengthAndComparesLowerCasedOnBothSides()
+    {
+        string prefix = IdentityColumnResolver.BuildColumnDbNamePrefix("CoMpAnY");
+
+        // The table side is already lower-cased by the builder, so the qualifier itself is the yardstick.
+        Assert.Equal("company.", prefix);
+
+        // A qualified name of ANY length beyond the qualifier matches on its first characters only.
         Assert.Equal(
-            IdentityColumnResolver.NoIdentityColumn,
-            IdentityColumnResolver.DiscoverIdentityColumn(source));
-    }
+            prefix,
+            IdentityColumnResolver.LegacyLeft("COMPANY.SALARY_AMOUNT", prefix.Length)
+                .ToLowerInvariant());
 
-    /// <summary>
-    /// A single identity column whose database name carries the update table's qualifier is chosen by
-    /// the PREFIX arm [<c>:L221</c>].
-    /// </summary>
-    [Fact]
-    public void DiscoveryTakesAPrefixMatchingColumn()
-    {
-        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
-        MarkIdentity(source, 4, "COMPANY.id");
+        // A name that merely CONTAINS the qualifier does not, because the truncation starts at the
+        // beginning - which is the difference between this test and a Contains.
+        Assert.Contains(prefix, "xcompany.salary", StringComparison.Ordinal);
+        Assert.NotEqual(
+            prefix,
+            IdentityColumnResolver.LegacyLeft("xcompany.salary", prefix.Length).ToLowerInvariant());
 
-        Assert.Equal(4, IdentityColumnResolver.DiscoverIdentityColumn(source));
-    }
-
-    /// <summary>
-    /// A single identity column whose database name does NOT carry the qualifier is still chosen -
-    /// by the FALLBACK arm <c>or nIdentityColumn = 0</c> [<c>:L221</c>].
-    /// </summary>
-    [Fact]
-    public void DiscoveryTakesANonMatchingColumnThroughTheFallbackArm()
-    {
-        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
-        MarkIdentity(source, 3, "id");
-
-        Assert.Equal(3, IdentityColumnResolver.DiscoverIdentityColumn(source));
-    }
-
-    /// <summary>
-    /// ★ THE ORDERING TEST. A non-matching column seen FIRST is claimed by the fallback arm, and a
-    /// prefix-matching column seen LATER OVERWRITES it, because the prefix arm assigns
-    /// unconditionally [<c>:L221-L222</c>]. This is what makes the rule "first wins WITH a prefix
-    /// override" rather than "first match wins".
-    /// </summary>
-    [Fact]
-    public void DiscoveryLetsALaterPrefixMatchOverrideAnEarlierFallbackPick()
-    {
-        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
-        MarkIdentity(source, 2, "id");
-        MarkIdentity(source, 5, "company.salary");
-
-        Assert.Equal(5, IdentityColumnResolver.DiscoverIdentityColumn(source));
-    }
-
-    /// <summary>
-    /// Two non-matching identity columns: THE FIRST IS KEPT, because the fallback arm only assigns
-    /// while nothing is set [<c>:L221</c>].
-    /// </summary>
-    [Fact]
-    public void DiscoveryKeepsTheFirstOfTwoNonMatchingColumns()
-    {
-        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
-        MarkIdentity(source, 2, "id");
-        MarkIdentity(source, 5, "salary");
-
-        Assert.Equal(2, IdentityColumnResolver.DiscoverIdentityColumn(source));
-    }
-
-    /// <summary>
-    /// Two PREFIX-MATCHING identity columns: THE LAST ONE WINS, because each assigns
-    /// unconditionally [<c>:L222</c>]. The third of the three reachable orderings.
-    /// </summary>
-    [Fact]
-    public void DiscoveryLetsTheLastOfTwoPrefixMatchesWin()
-    {
-        RecordingIdentitySource source = new() { UpdateTable = FixtureTable, ColumnCount = 6 };
-        MarkIdentity(source, 2, "company.id");
-        MarkIdentity(source, 5, "COMPANY.SALARY");
-
-        Assert.Equal(5, IdentityColumnResolver.DiscoverIdentityColumn(source));
+        // A name SHORTER than the qualifier cannot match even when it is a prefix of it, because
+        // PowerScript's Left answers the whole short string rather than padding it.
+        Assert.StartsWith("company", prefix, StringComparison.Ordinal);
+        Assert.NotEqual(
+            prefix,
+            IdentityColumnResolver.LegacyLeft("COMPANY", prefix.Length).ToLowerInvariant());
     }
 
     /// <summary>
@@ -463,25 +740,160 @@ public sealed class IdentityColumnResolverTests
             UpdateWhereBuilder.ColumnCountProperty,
         ];
 
-        for (int ordinal = ItemStatusMachine.FirstColumnNumber;
-            ordinal <= FixtureColumns.Length;
-            ordinal++)
+        foreach (int ordinal in OneBasedIndex.Range(DwSqliteFixture.ColumnCount))
         {
             expected.Add(IdentityColumnResolver.DescribeIdentityProperty(ordinal));
 
-            // Only the marked column reaches the database-name read; the others short-circuit.
-            if (ordinal == 1)
+            // C-B - ONLY THE MARKED COLUMN REACHES THE DATABASE-NAME READ. The oracle's identity test
+            // is the OUTER `if` [:L220] and the prefix test the INNER one [:L221], so a column that
+            // answers anything but "yes" is skipped entirely and its #n.DBName is never asked for.
+            // The expectation is built from the fixture's own answers rather than from a hardcoded
+            // ordinal, so it follows the .srd if the identity column ever moves.
+            if (string.Equals(
+                    DwSqliteFixture.IdentityDescribeAnswers[
+                        IdentityColumnResolver.DescribeIdentityProperty(ordinal)],
+                    UpdateWhereBuilder.YesLiteral,
+                    StringComparison.Ordinal))
             {
                 expected.Add(IdentityColumnResolver.DescribeDbNameProperty(ordinal));
             }
         }
 
         Assert.Equal(expected, source.DescribeReads);
-        Assert.DoesNotContain("#0.Identity", source.DescribeReads);
-        Assert.DoesNotContain("#7.Identity", source.DescribeReads);
+
+        // R9 - neither the ordinal BELOW the first column nor the one PAST the last is ever composed,
+        // which are the two shapes a rebased loop would produce. Both are spelled from the production
+        // vocabulary rather than as literals so they track the describe grammar.
+        Assert.DoesNotContain(
+            IdentityPropertyOf(ItemStatusMachine.FirstColumnNumber - 1),
+            source.DescribeReads);
+        Assert.DoesNotContain(
+            IdentityPropertyOf(DwSqliteFixture.ColumnCount + 1),
+            source.DescribeReads);
+    }
+
+    /// <summary>
+    /// Composes an identity describe property for an ordinal the production helper refuses, so the
+    /// tests can assert that such a property is NEVER asked for.
+    /// </summary>
+    /// <param name="ordinal">The ordinal, which may legitimately be out of range here.</param>
+    /// <returns>The property string.</returns>
+    /// <remarks>
+    /// <see cref="IdentityColumnResolver.DescribeIdentityProperty"/> throws below the first column, and
+    /// rightly so - which is exactly why a negative assertion cannot call it. This helper spells the
+    /// same grammar from the same two constants instead of hardcoding <c>"#0.Identity"</c>.
+    /// </remarks>
+    private static string IdentityPropertyOf(int ordinal) =>
+        UpdateWhereBuilder.ColumnOrdinalPrefix
+            + ordinal.ToString(CultureInfo.InvariantCulture)
+            + UpdateWhereBuilder.IdentityAttributeSuffix;
+
+    #endregion
+
+    #region ★ THE PRINCIPAL CASE - the whole round trip over the fixture's own rows
+
+    // ==========================================================================================
+    //  THE GOLDEN MASTER, DRIVEN THROUGH THE FIXTURE'S OWN SEAMS.
+    //  ----------------------------------------------------------------------------------------
+    //  Every other test in this file stages rows to isolate one behaviour. This one stages nothing:
+    //  it hands the subject DwSqliteTargetMetadata and DwSqliteSampleRowSource - the fixture's own
+    //  implementations of the two injected surfaces - and asserts the payload the sole updatable
+    //  DataWindow in the repository produces.
+    //
+    //  THREE FACTS OF THE FIXTURE MAKE THIS THE CASE THAT MATTERS MOST:
+    //    1. Its identity column's database name is the BARE "id" [dw_sqlite.srd:L8], so the ordinal is
+    //       reached through the FALLBACK arm. The prefix arm is the EXCEPTIONAL path here, not the
+    //       normal one, and a reader who assumes otherwise misreads the whole unit.
+    //    2. Its Filter buffer holds its two newly-inserted rows in the INVERTED order
+    //       [n_cst_thread_task_sqlupdate.sru:L235], so the expected sequence reads 7 THEN 6 - the
+    //       backward walk's signature, in the fixture's own data rather than in staged data.
+    //    3. Its counts are not all equal, so an argument-order transposition at :L247 is visible.
+    // ==========================================================================================
+
+    /// <summary>
+    /// ★ The complete identity round trip over <c>dw_sqlite.srd</c>: the fallback-resolved ordinal,
+    /// the Primary array in source order, the Filter array in INVERTED order, and the counts triple.
+    /// </summary>
+    [Fact]
+    public void TheFixtureRoundTripResolvesColumnOneAndReportsTheFilterArrayInverted()
+    {
+        DwSqliteTargetMetadata metadata = new();
+        DwSqliteSampleRowSource values = new();
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(metadata, values);
+
+        ResolvedIdentityColumnData payload = Assert.Single(outcome.Identity);
+
+        // 1. THE ORDINAL, reached through the fallback arm because every dbname is bare [:L8-L13].
+        Assert.Equal(
+            DwSqliteFixture.ExpectedDiscoveredIdentityColumnNumber,
+            payload.IdentityColumnId);
+        Assert.Equal(DwSqliteFixture.IdColumnNumber, (int)payload.IdentityColumnId);
+
+        // The identity column really is the one the definition names, and it really is column one.
+        Assert.Equal(
+            DwSqliteFixture.IdentityColumnName,
+            FixtureColumns[
+                OneBasedIndex.ToZeroBased(
+                    DwSqliteFixture.IdColumnNumber,
+                    DwSqliteFixture.ColumnCount,
+                    nameof(DwSqliteFixture.IdColumnNumber))]);
+
+        // 2. THE TWO ARRAYS, as SEQUENCES. The Filter array is the inverted one, and asserting it as an
+        //    ordered sequence is the only assertion that can fail when the walk direction is flipped.
+        Assert.Equal(DwSqliteFixture.ExpectedPrimaryIdentityValues, payload.PrimaryValues);
+        Assert.Equal(DwSqliteFixture.ExpectedFilterIdentityValues, payload.FilterValues);
+
+        // Spelled out, so the inversion is legible without opening the fixture: the Filter buffer's
+        // row 1 holds id 6 and its row 2 holds id 7, and the BACKWARD walk therefore reports 7 first.
+        Assert.Equal<long?>([7L, 6L], payload.FilterValues);
+        Assert.True(
+            payload.FilterValues.Count > 1,
+            "A single-element Filter array could not distinguish the two walk directions, so the "
+                + "fixture must keep more than one newly-inserted filtered row.");
+
+        // 3. THE COUNTS, on the success path regardless of the identity payload [:L247].
+        Assert.Equal(DwSqliteFixture.SampleRowCounts, outcome.Counts);
+
+        // No null is involved on this fixture: `id` is INTEGER PRIMARY KEY AUTOINCREMENT, so the
+        // database always assigns it [w_test_sqlite.srw:L463-L469].
+        Assert.False(payload.ContainsNullValue);
+    }
+
+    /// <summary>
+    /// ★ THE FALSIFICATION CONTROL FOR THE PRINCIPAL CASE. Reversing the fixture's expected Filter
+    /// sequence keeps its LENGTH and its CONTENTS identical while changing which row each value belongs
+    /// to - so a suite that asserted a count, a length or a set would pass against the reversed walk.
+    /// </summary>
+    /// <remarks>
+    /// This test asserts a property of the EXPECTATIONS rather than of the subject, and that is
+    /// deliberate: it is the executable form of the refactor plan's warning that "correcting" the
+    /// backward walk at <c>n_cst_thread_task_sqlupdate.sru:L237</c> produces wrong identity values that
+    /// a row-count assertion cannot catch. If the fixture ever degenerated to one filtered row, or to
+    /// two rows sharing an id, the guard below would fail and say so instead of letting the headline
+    /// assertion quietly lose its power.
+    /// </remarks>
+    [Fact]
+    public void ReversingTheFixturesFilterSequenceIsUndetectableByCountOrContentAlone()
+    {
+        IReadOnlyList<long?> expected = DwSqliteFixture.ExpectedFilterIdentityValues;
+        long?[] reversed = [.. expected.Reverse()];
+
+        // A COUNT assertion cannot tell them apart.
+        Assert.Equal(expected.Count, reversed.Length);
+
+        // Neither can a SET or an order-insensitive comparison. C-B - THIS IS THE ONLY SORTED
+        // COMPARISON IN THE FILE AND IT IS DELIBERATE: it is applied to the two EXPECTATIONS to
+        // demonstrate that sorting hides the defect, never to a value the subject produced. A sorted
+        // or set-based assertion on a subject result would be the exact violation this test warns of.
+        Assert.Equal(expected.Order(), reversed.Order());
+
+        // Only the ORDER does - which is why every Filter assertion in this file is a sequence.
+        Assert.NotEqual(expected, reversed);
     }
 
     #endregion
+
 
     #region Collection direction - the headline regression guards
 
@@ -561,9 +973,12 @@ public sealed class IdentityColumnResolverTests
     /// The applier stub below is the shape of the write-back half
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlupdate.sru:L151-L165</c>]: it
     /// walks the Filter buffer's qualifying rows ASCENDING, consuming the collected list from its
-    /// first element onward. It is a stub on purpose - the real applier belongs to
-    /// <c>Tasks/TaskProxies/</c> - and it exists here only to close the argument that the backward
-    /// collection is correct.
+    /// first element onward. It is a stub on purpose - the real applier is
+    /// <c>PowerFramework.Persistence/Tasks/TaskProxies/SqlUpdateTaskProxy.cs</c>'s
+    /// <c>ApplyBothBuffers</c>, which is asserted by the sibling <c>SqlUpdateTaskProxyTests.cs</c> -
+    /// and it exists here only to close the argument that the backward collection is correct. COLLECT
+    /// BACKWARD AND APPLY FORWARD IS ONE MECHANISM SPLIT ACROSS TWO FILES; this test is the half that
+    /// shows the two compose.
     /// </para>
     /// <para>
     /// The second half of the test is the negative control. It feeds the REVERSED collection through
@@ -669,6 +1084,97 @@ public sealed class IdentityColumnResolverTests
     }
 
     /// <summary>
+    /// ★ ARITY AND DIRECTION IN ONE ORDERED TRACE, taken through the shared carrier double so the two
+    /// properties are read off a SINGLE call log rather than from two separate lists.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>FakeDataWindowCarrier</c> is a real <c>DataWindowBufferStore</c> that records every numeric
+    /// read as an ordered <c>RecordedValueRead</c> carrying the call's sequence number, its row, its
+    /// buffer, the original-value flag AND whether the FOUR-ARGUMENT overload was used. That last field
+    /// is what makes this test possible: the two overloads are otherwise indistinguishable from their
+    /// results, and the oracle uses a different one per buffer -
+    /// <c>GetItemNumber(nIndex,nIdentityColumn)</c> for Primary [<c>:L231</c>] and
+    /// <c>GetItemNumber(nIndex,nIdentityColumn,Filter!,false)</c> for Filter [<c>:L239</c>]. The
+    /// distinction matters beyond tidiness: only the long form can name a buffer or ask for an ORIGINAL
+    /// value, which is why <c>sqlitegetitemdouble.srf</c> wraps the long form rather than the short one.
+    /// </para>
+    /// <para>
+    /// C-E - NO DATABASE IS INVOLVED. The carrier is an in-memory buffer store; nothing here opens a
+    /// connection or touches a file.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheOrderedCallLogShowsTheArityAndTheWalkDirectionTogether()
+    {
+        FakeDataWindowCarrier carrier = new();
+
+        // Two newly-inserted Primary rows and three newly-inserted Filter rows. Each value encodes its
+        // own row number, so a misread row is visible in the value as well as in the log.
+        foreach (long value in (long[])[11L, 12L])
+        {
+            long row = carrier.SeedRetrievedRow(
+                DwBuffer.Primary,
+                (DwSqliteFixture.IdColumnNumber, value));
+            carrier.SetRowStatus(row, DwBuffer.Primary, ItemStatus.NewModified);
+        }
+
+        foreach (long value in (long[])[21L, 22L, 23L])
+        {
+            long row = carrier.SeedRetrievedRow(
+                DwBuffer.Filter,
+                (DwSqliteFixture.IdColumnNumber, value));
+            carrier.SetRowStatus(row, DwBuffer.Filter, ItemStatus.NewModified);
+        }
+
+        // Seeding writes values, and those writes are not numeric READS - but clearing the log makes
+        // the trace below unambiguously the subject's own.
+        carrier.ClearValueReads();
+        carrier.RowsInserted = 5L;
+        carrier.RowsUpdated = 1L;
+        carrier.RowsDeleted = 0L;
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(FixtureSource(), carrier);
+
+        ResolvedIdentityColumnData payload = Assert.Single(outcome.Identity);
+        Assert.Equal<long?>([11L, 12L], payload.PrimaryValues);
+
+        // DESCENDING, because the Filter buffer is walked backward [:L237].
+        Assert.Equal<long?>([23L, 22L, 21L], payload.FilterValues);
+
+        IReadOnlyList<RecordedValueRead> log = carrier.ValueReads;
+
+        // The log is the CALL ORDER: five reads, sequence numbers 1..5 with no gaps.
+        Assert.Equal([1, 2, 3, 4, 5], log.Select(static read => read.Ordinal));
+
+        // PRIMARY FIRST, ASCENDING, THROUGH THE TWO-ARGUMENT FORM.
+        Assert.Equal(
+            [(DwBuffer.Primary, 1L, false), (DwBuffer.Primary, 2L, false)],
+            log.Take(2).Select(static read => (read.Buffer, read.Row, read.FourArgument)));
+
+        // FILTER SECOND, DESCENDING, THROUGH THE FOUR-ARGUMENT FORM.
+        Assert.Equal(
+            [(DwBuffer.Filter, 3L, true), (DwBuffer.Filter, 2L, true), (DwBuffer.Filter, 1L, true)],
+            log.Skip(2).Select(static read => (read.Buffer, read.Row, read.FourArgument)));
+
+        // Every read names the discovered identity column, and NOT ONE asks for an ORIGINAL value: the
+        // oracle passes the original-value flag as false [:L239] because the identity value it wants is
+        // the one the database just assigned, which exists only in the current value.
+        Assert.All(
+            log,
+            read =>
+            {
+                Assert.Equal(DwSqliteFixture.IdColumnNumber, read.ColumnNumber);
+                Assert.False(read.OriginalValue);
+            });
+        Assert.Equal(0, carrier.OriginalValueReadCount);
+
+        // The counts triple travels alongside, in the oracle's own argument order [:L247].
+        Assert.Equal(new UpdateRowCounts(5L, 1L, 0L), outcome.Counts);
+    }
+
+
+    /// <summary>
     /// C-B - asymmetry 3 of 3. The Filter scan is bounded by the FILTERED count and the Primary scan
     /// by the ROW count [<c>:L228</c> then <c>:L236</c>], and each reads only its own buffer's status
     /// [<c>:L230</c>, <c>:L238</c>]. Buffers of different sizes prove the two bounds are not shared.
@@ -719,14 +1225,34 @@ public sealed class IdentityColumnResolverTests
             new FakeIdentityRow(ItemStatus.New, 13L),
             NewRow(14L),
         ]);
+        // THE SAME FOUR STATUSES IN THE FILTER BUFFER, so the guard is shown to be identical on both
+        // sides rather than inferred from the Primary scan. DataModified! and NotModified! are the two
+        // the folder requirements name explicitly, and New! - inserted but not yet edited - is the
+        // third near miss, since only NewModified! satisfies the equality at [:L230, :L238].
         source.FilterRows.AddRange(
         [
             new FakeIdentityRow(ItemStatus.New, 21L),
             new FakeIdentityRow(ItemStatus.NotModified, 22L),
+            new FakeIdentityRow(ItemStatus.DataModified, 23L),
+            NewRow(24L),
         ]);
 
         Assert.Equal<long?>([14L], IdentityColumnResolver.CollectPrimaryValues(source, 1));
-        Assert.Empty(IdentityColumnResolver.CollectFilterValues(source, 1));
+
+        // Row 4 is the only qualifying Filter row, so the descending walk yields it alone.
+        Assert.Equal<long?>([24L], IdentityColumnResolver.CollectFilterValues(source, 1));
+
+        // And the three near misses really were VISITED and REJECTED rather than never reached: the
+        // scan reads every row's status in both buffers and filters on the value, exactly as the
+        // oracle's `if` inside the loop does.
+        Assert.Equal(
+            [1L, 2L, 3L, 4L],
+            source.StatusReads.Where(read => read.Buffer == DwBuffer.Primary)
+                .Select(read => read.Row));
+        Assert.Equal(
+            [4L, 3L, 2L, 1L],
+            source.StatusReads.Where(read => read.Buffer == DwBuffer.Filter)
+                .Select(read => read.Row));
     }
 
     /// <summary>
@@ -833,6 +1359,76 @@ public sealed class IdentityColumnResolverTests
     #endregion
 
     #region The emit guard
+
+    /// <summary>
+    /// The four reachable combinations of the guard's two operands
+    /// <c>UpperBound(primary) &gt; 0 or UpperBound(filter) &gt; 0</c> [<c>:L242</c>], with whether the
+    /// identity callback fires.
+    /// </summary>
+    /// <remarks>
+    /// THE GUARD IS AN <c>OR</c>, SO ONLY ONE OF THE FOUR IS SILENT. Stating all four as one matrix is
+    /// what makes the operator itself the subject: an <c>AND</c> would answer <see langword="false"/>
+    /// for the two single-sided cases, and an unguarded emit would answer <see langword="true"/> for
+    /// the empty one.
+    /// </remarks>
+    public static TheoryData<string, int, int, bool> EmitGuardMatrix =>
+        new()
+        {
+            { "primary only", 2, 0, true },
+            { "filter only", 0, 3, true },
+            { "both buffers", 2, 3, true },
+            { "neither buffer", 0, 0, false },
+        };
+
+    /// <summary>
+    /// LEVEL 3 - the identity callback fires when AT LEAST ONE array is non-empty, and stays silent
+    /// only when both are empty [<c>:L242-L244</c>].
+    /// </summary>
+    /// <param name="description">The case's description, which names it in the test output.</param>
+    /// <param name="newPrimaryRows">How many newly-modified Primary rows to stage.</param>
+    /// <param name="newFilterRows">How many newly-modified Filter rows to stage.</param>
+    /// <param name="expectedToFire">Whether the payload is expected.</param>
+    [Theory]
+    [MemberData(nameof(EmitGuardMatrix))]
+    public void TheIdentityCallbackFiresWhenEitherArrayIsNonEmpty(
+        string description,
+        int newPrimaryRows,
+        int newFilterRows,
+        bool expectedToFire)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(description));
+
+        RecordingIdentitySource source = FixtureSource();
+
+        // A non-qualifying row in each buffer, so that "empty" means the GUARD saw nothing rather than
+        // the buffer being empty - the two are different states and only the first is under test here.
+        source.PrimaryRows.Add(new FakeIdentityRow(ItemStatus.DataModified, 1L));
+        source.FilterRows.Add(new FakeIdentityRow(ItemStatus.NotModified, 2L));
+
+        for (int index = 0; index < newPrimaryRows; index++)
+        {
+            source.PrimaryRows.Add(NewRow(100L + index));
+        }
+
+        for (int index = 0; index < newFilterRows; index++)
+        {
+            source.FilterRows.Add(NewRow(200L + index));
+        }
+
+        source.InsertedCount = newPrimaryRows + newFilterRows + 1L;
+
+        ResolvedIdentityColumnData? payload = IdentityColumnResolver.CollectIdentityData(
+            source,
+            DwSqliteFixture.IdColumnNumber);
+
+        IdentityResolutionOutcome outcome = IdentityColumnResolver.Resolve(source, source);
+
+        Assert.Equal(expectedToFire, payload is not null);
+        Assert.Equal(expectedToFire, outcome.Identity.Length == 1);
+
+        // Whether it fired or not, the counts are reported either way [:L247].
+        Assert.Equal(source.InsertedCount, outcome.Counts.Inserted);
+    }
 
     /// <summary>
     /// LEVEL 3 - both arrays empty emits NOTHING AT ALL [<c>:L242-L244</c>]. No empty payload is
@@ -971,6 +1567,26 @@ public sealed class IdentityColumnResolverTests
 
     #region R9 - the one-based audit
 
+    // ==========================================================================================
+    //  C-K - THIS REGION IS THE AUDIT AAP SECTION 0.4.5.4 REQUIRES, AND ITS MOST IMPORTANT SUBJECT.
+    //  ----------------------------------------------------------------------------------------
+    //  The plan states that one-based to zero-based translation is the single most dangerous
+    //  mechanical hazard in the refactor - PowerBuilder arrays are one-based and its upper-bound
+    //  function answers the LAST VALID INDEX, whereas a CLR array is zero-based with a length one past
+    //  the end - and it requires every ported loop either to go through a CENTRALISED one-based
+    //  indexing helper or to be INDIVIDUALLY AUDITED. It names the reverse-iteration cases the most
+    //  dangerous of all, and cites this very Filter walk [n_cst_thread_task_sqlupdate.sru:L237].
+    //
+    //  THE SUBJECT TAKES THE FIRST OPTION and this region is the audit of it:
+    //    * the helper is OneBasedIndex (Range, UpperBound, EmptyUpperBound, IsWithin, ToZeroBased),
+    //    * the sentinels are ItemStatusMachine.FirstRowNumber, FirstColumnNumber and RowStatusColumn,
+    //    * and the only rebasing anywhere in this file is inside the recording fake, which THROWS on a
+    //      row of 0 or of count + 1 - so an off-by-one surfaces as a loud failure rather than as a
+    //      quietly shifted result.
+    //  The tests below pin the three shapes an off-by-one takes: the single-row boundary, a full
+    //  six-row walk in both directions, and the empty buffer that must visit nothing at all.
+    // ==========================================================================================
+
     /// <summary>
     /// R9 - a single row in each buffer is addressed as row 1 in BOTH directions: never row 0 and
     /// never row 2. The fake throws on either, so the assertion is that this does not throw plus the
@@ -1069,7 +1685,7 @@ public sealed class IdentityColumnResolverTests
         Assert.Equal<long?>([902L, 901L], filter);
 
         // The id is the ONE-BASED describe ordinal, so it addresses a real column.
-        Assert.InRange(id, ItemStatusMachine.FirstColumnNumber, FixtureColumns.Length);
+        Assert.InRange(id, ItemStatusMachine.FirstColumnNumber, DwSqliteFixture.ColumnCount);
     }
 
     /// <summary>
@@ -1449,22 +2065,19 @@ public sealed class IdentityColumnResolverTests
         RecordingIdentitySource source = new()
         {
             UpdateTable = FixtureTable,
-            ColumnCount = FixtureColumns.Length,
+            ColumnCount = DwSqliteFixture.ColumnCount,
             InsertedCount = primary.Length + filter.Length,
         };
 
-        for (int ordinal = ItemStatusMachine.FirstColumnNumber;
-            ordinal <= FixtureColumns.Length;
-            ordinal++)
+        foreach (int ordinal in OneBasedIndex.Range(DwSqliteFixture.ColumnCount))
         {
             source.DbNameAnswers[IdentityColumnResolver.DescribeDbNameProperty(ordinal)] =
-                FixtureColumns[ordinal - ItemStatusMachine.FirstColumnNumber];
+                DwSqliteFixture.ColumnAt(ordinal).DbName;
         }
 
-        MarkIdentity(
-            source,
-            identityOrdinal,
-            FixtureColumns[identityOrdinal - ItemStatusMachine.FirstColumnNumber]);
+        // The bare database name keeps this table on the FALLBACK arm, so the ordinal each fake table
+        // reports is the one the caller asked for rather than one the prefix arm reassigned.
+        MarkIdentity(source, identityOrdinal, DwSqliteFixture.ColumnAt(identityOrdinal).DbName);
 
         source.PrimaryRows.AddRange(primary.Select(NewRow));
 

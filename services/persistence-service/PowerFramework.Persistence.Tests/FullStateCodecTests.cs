@@ -4,23 +4,50 @@
 //  SYSTEM UNDER TEST
 //      services/persistence-service/PowerFramework.Persistence/Buffers/FullStateCodec.cs
 //
-//  BEHAVIOURAL ORACLE (all READ ONLY per constraint C-C)
+//  BEHAVIOURAL ORACLE (all READ ONLY per constraint C-C - cited here, never copied and never edited)
 //      ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru
 //          :L93-L101   the codec selector and the full-state send path
-//          :L559-L581  DEFECT 3 at :L563 and the changeset arm's opposite note at :L578
-//          :L672-L676  DEFECT 4 at :L673
+//          :L555-L585  the sort-and-filter block in full: the off-main-thread gate at :L559, DEFECT 3
+//                      at :L563, the changeset arm's OPPOSITE note at :L578, and the main-thread
+//                      else-arm at :L582-L583 that synchronizes on its own separate condition
+//          :L660-L680  the crosstab block in full: the surrounding modify-string block at :L663-L669,
+//                      DEFECT 4 at :L673, its guarded read-then-write at :L674-L676, and the
+//                      transaction attachment at :L678-L680 that the guard must precede
 //      ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L184-L251
 //          the receive path and the sign-opposite result normalization
+//      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd
+//          :L3 the processing kind, :L14 the sort expression this file trims
 //      docs/PB多线程绕坑提示.md   the two threading hazards
 //
 //  ==============================================================================================
 //  THESE ARE UNIT TESTS. THEY ARE NOT CHARACTERIZATION TESTS, AND THEY CANNOT BE.
 //  ==============================================================================================
 //  ALL TWELVE DataWindow definitions in this repository were scanned for their `processing=` value.
-//  ELEVEN ARE `processing=1` AND ONE, ws_objects/pfw.tests.pbl.src/dw_barcode.srd, IS `processing=0`.
-//  NOT ONE IS 4 OR 5 - and 4 and 5, Crosstab and Composite, are the only two values that select this
-//  codec [n_cst_thread_task_sqlquery.sru:L94]. THERE IS THEREFORE NO LEGACY FIXTURE ON THIS PATH AND
-//  NO RECORDING TO COMPARE AGAINST: neither of the two defects below can be characterized.
+//  ELEVEN ARE `processing=1` - INCLUDING THE PRIMARY FIXTURE, ws_objects/pfw.tests.pbl.src/dw_sqlite.srd,
+//  WHOSE :L3 READS `processing=1` - AND ONE, ws_objects/pfw.tests.pbl.src/dw_barcode.srd, IS
+//  `processing=0`. NOT ONE IS 4 OR 5 - and 4 and 5, Crosstab and Composite, are the only two values that
+//  select this codec [n_cst_thread_task_sqlquery.sru:L94]. THERE IS THEREFORE NO LEGACY FIXTURE ON THIS
+//  PATH AND NO RECORDING TO COMPARE AGAINST: neither of the two defects below can be characterized.
+//
+//  THAT CENSUS IS NOT PROSE. `NoDataWindowInTheRepositorySelectsThisCodec_OracleCensus` re-derives it
+//  from the twelve definition files themselves, so the claim is falsifiable: the day a crosstab fixture
+//  is added to the repository that test FAILS, which is exactly the day this header would need rewriting
+//  and the day a real behavioural oracle would become available for these two defects.
+//
+//  ----------------------------------------------------------------------------------------------
+//  C-K - THE TWO CODECS DISAGREE ON PURPOSE, WHICH IS WHY THERE ARE TWO TEST FILES.
+//  ----------------------------------------------------------------------------------------------
+//  The two arms of one `choose case` give OPPOSITE instructions about the same two operations, and a
+//  future reader must not unify them:
+//
+//    :L563  full-state  -> 使用SetFullState传递数据的风格需要同步排序和过滤条件
+//                          SYNCHRONIZES sort and filter onto the source. THIS FILE.
+//    :L578  changeset   -> 使用SetChanges传递数据的风格不需要排序和过滤条件，甚至会影响性能
+//                          CLEARS both with SetSort("") and SetFilter(""). ChangesetCodecTests.
+//
+//  The same inversion governs `Reset`, which is REQUIRED here after the capture [:L96] and FORBIDDEN
+//  mid-loop there [:L176-L177], and the result normalization, where an above-one code becomes SUCCESS
+//  here [:L248] and FAILURE there [:L250]. Three independent oppositions, none of them an oversight.
 //
 //  Every case in this file consequently runs against a SYNTHETIC carrier whose processing kind is set
 //  to crosstab or composite by hand, and every test name carries the suffix `_UnitLevelNoOracle` or
@@ -37,17 +64,41 @@
 //  buffers. No connection is opened, no schema is assumed - and note that no crosstab schema exists
 //  anywhere in the repository, so none is invented here - and no time is read.
 //
+//  ----------------------------------------------------------------------------------------------
+//  THE ONE THING IN THE CODEC THIS SUITE CANNOT REACH, STATED RATHER THAN LEFT AS A COVERAGE GAP.
+//  ----------------------------------------------------------------------------------------------
+//  `FullStateCodec.RowCountOf`'s default arm throws `NotSupportedException` for a buffer that is not one
+//  of the three PowerBuilder declares. IT HAS NO REACHABLE CALLER: the only call site iterates
+//  `PayloadBufferOrder`, a fixed three-element array of Primary, Delete and Filter, and on the inbound
+//  side `AreSegmentsCanonical` rejects any roster that is not exactly those three in exactly that order
+//  BEFORE a count is ever taken. The arm is a guard against a future edit to that array, not a path a
+//  payload can take, so it is left uncovered ON PURPOSE. Reaching it would mean widening the private
+//  surface purely to let a test in - which would weaken the very invariant the arm is guarding.
+//
+//  Everything else - both defects, both arms of each guard, both codec-selection outcomes, every
+//  rejection reason and every value-domain refusal - IS covered, and the two adjacent diagnostics of the
+//  crosstab block are pinned byte for byte.
+//
 //  C-F SELF-AUDIT: every value in this file is synthetic. No credential, key, token, password,
 //  connection string or certificate appears in any form.
 // ==============================================================================================
 
 using System.Globalization;
+using System.Text;
 
 using Google.Protobuf;
 
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Buffers;
+
+// THE ONE NAMESPACE THIS FILE REACHES OUTSIDE ITS OWN SUBJECT, AND WHY. `Tasks` carries
+// `SqlQueryTask`, which COMPOSES the crosstab block's three ordered steps and owns the two diagnostics
+// adjacent to the guard - the transaction-attachment text at the oracle's :L679 and the modify-string
+// block's code at :L666. Those are properties of the block this codec sits inside, so they are asserted
+// here rather than left to a reader to hope are covered elsewhere. It is NOT in GlobalUsings.cs, unlike
+// Buffers, Data, Errors and Sql, so it is named here.
+using PowerFramework.Persistence.Tasks;
 
 using Xunit;
 
@@ -57,65 +108,29 @@ using Xunit;
 // CS1537 rather than a harmless duplicate. The bare name already means the kernel class here.
 namespace PowerFramework.Persistence.Tests;
 
-/// <summary>
-/// A recording stand-in for the four carrier operations the full-state path invokes, reproducing only
-/// what <see cref="IFullStateCarrierSurface"/> declares.
-/// </summary>
-/// <remarks>
-/// Hand-written rather than taken from a mocking package, because this service adds no package
-/// reference for one (C-I) and four members do not warrant one. The CALL LOG is the point: DEFECT 4's
-/// whole behaviour is that a modify call happens exactly once, or not at all, and that the read
-/// precedes the write - none of which can be asserted from return values.
-/// </remarks>
-internal sealed class RecordingCarrierSurface : IFullStateCarrierSurface
-{
-    /// <summary>Every call, in order, as "member:argument".</summary>
-    internal List<string> Calls { get; } = [];
-
-    /// <summary>What <see cref="Describe"/> answers.</summary>
-    internal string DescribeAnswer { get; set; } = string.Empty;
-
-    /// <summary>What <see cref="Modify"/> answers. Empty means success.</summary>
-    internal string ModifyAnswer { get; set; } = string.Empty;
-
-    /// <summary>What <see cref="SetSort"/> answers. One means success.</summary>
-    internal long SetSortAnswer { get; set; } = DataWindowBufferStore.DataStoreSuccess;
-
-    /// <summary>What <see cref="SetFilter"/> answers. One means success.</summary>
-    internal long SetFilterAnswer { get; set; } = DataWindowBufferStore.DataStoreSuccess;
-
-    /// <inheritdoc/>
-    public string Describe(string property)
-    {
-        Calls.Add("Describe:" + property);
-
-        return DescribeAnswer;
-    }
-
-    /// <inheritdoc/>
-    public string Modify(string modifyString)
-    {
-        Calls.Add("Modify:" + modifyString);
-
-        return ModifyAnswer;
-    }
-
-    /// <inheritdoc/>
-    public long SetSort(string sort)
-    {
-        Calls.Add("SetSort:" + sort);
-
-        return SetSortAnswer;
-    }
-
-    /// <inheritdoc/>
-    public long SetFilter(string filter)
-    {
-        Calls.Add("SetFilter:" + filter);
-
-        return SetFilterAnswer;
-    }
-}
+// ==================================================================================================
+//  THE CARRIER DOUBLE IS THE SHARED ORDERED CALL RECORDER, NOT A LOCAL ONE.
+//  ------------------------------------------------------------------------------------------------
+//  `TestDoubles.ScriptedCarrierSurface` implements `IFullStateCarrierSurface` and records EVERY
+//  describe, modify, sort and filter interaction in ONE ordered log of `RecordedCarrierCall`. It is
+//  used here rather than a file-local recorder for two reasons, and the second is the load-bearing one:
+//
+//    1. A local duplicate of a shared double drifts. Two recorders answering `Describe` differently -
+//       one with the empty string, the shared one with PowerBuilder's own "?" unreadable marker - would
+//       have this file asserting against a state the legacy never produces.
+//
+//    2. ORDER IS THE ASSERTION FOR DEFECT 4, AND AN UNORDERED SPY CANNOT EXPRESS "BEFORE". The shared
+//       double carries `OrdinalOf`, `FirstOrdinalContaining` and `Precedes` precisely so the crosstab
+//       guard's position can be asserted rather than only its content, and its own documentation names
+//       this codec's guard as the case it was built for. A port that wrote the guard AFTER attaching
+//       the transaction would satisfy every content-only assertion while reproducing none of the
+//       behaviour, because the whole point of the property is to be in place BEFORE anything can raise
+//       the prompt it suppresses.
+//
+//  ITS DESCRIBE FALLBACK IS "?" RATHER THAN THE EMPTY STRING, which matters to the guard: PowerBuilder
+//  answers "?" for a property that is not applicable and "!" for one that cannot be read, and NEITHER
+//  equals "yes", so both fall into the write arm exactly as the legacy's `<>` does [:L674].
+// ==================================================================================================
 
 /// <summary>
 /// Pins the full-state send and receive paths, the deterministic payload round trip, and both preserved
@@ -201,6 +216,153 @@ public sealed class FullStateCodecTests
     }
 
     /// <summary>
+    /// Renders the shared ordered call recorder's log as one <c>"Verb:argument"</c> line per call, IN
+    /// CALL ORDER.
+    /// </summary>
+    /// <param name="surface">The recorder to read.</param>
+    /// <returns>The ordered trace.</returns>
+    /// <remarks>
+    /// <para>
+    /// A PROJECTION OF THE SHARED LOG, NOT A SECOND RECORDER. Every element comes from
+    /// <see cref="ScriptedCarrierSurface.Calls"/> in <see cref="RecordedCarrierCall.Ordinal"/> order, so
+    /// an assertion written against this trace is an assertion about ORDER as well as content: comparing
+    /// a whole sequence with <c>Assert.Equal</c> fails on a reordering, on an extra call and on a missing
+    /// one alike, which is exactly the trio a set-shaped or count-shaped assertion cannot separate.
+    /// </para>
+    /// <para>
+    /// It exists because the verb-and-argument pair reads far better in a failure message than a record
+    /// struct carrying an ordinal and a result does, and because the shared double's own
+    /// <see cref="ScriptedCarrierSurface.Precedes"/> answers a boolean - excellent for "A before B" and
+    /// useless for "these calls and no others".
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<string> Trace(ScriptedCarrierSurface surface)
+    {
+        return
+        [
+            .. surface.Calls
+                .OrderBy(static call => call.Ordinal)
+                .Select(static call => string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{call.Kind}:{call.Argument}")),
+        ];
+    }
+
+    /// <summary>
+    /// The production source file that COMPOSES the three ordered steps of the crosstab block.
+    /// </summary>
+    /// <returns>The absolute path of <c>Tasks/SqlQueryTask.cs</c>.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE COMPOSITION IS NOT IN THE CODEC, WHICH IS WHY THE COMPOSER IS WHAT GETS READ. This codec owns
+    /// the guard and knows nothing about transactions or statements; the ORDER of the guard, the
+    /// attachment and the modification is decided by the task that calls all three. Asserting the order
+    /// therefore means observing the task.
+    /// </para>
+    /// <para>
+    /// THE LOCATOR FOLLOWS THE PATTERN THIS PROJECT ALREADY USES - see
+    /// <c>TransactionServiceTests.TheServiceSourceReadsNoWallClock</c>: form the path directly from the
+    /// repository root the build embedded when that is available, and fall back to walking up out of the
+    /// test output directory when it is not. The marker is SERVICE relative rather than repository
+    /// relative, so the walk is looking for <c>services/persistence-service</c> and not for the root.
+    /// </para>
+    /// </remarks>
+    private static string LocateQueryTaskSource()
+    {
+        if (TestRepositoryRoot.Embedded is { } root)
+        {
+            string direct = Path.Combine(
+                root,
+                "services",
+                "persistence-service",
+                "PowerFramework.Persistence",
+                "Tasks",
+                "SqlQueryTask.cs");
+
+            // TESTED RATHER THAN TRUSTED, so a relaid-out tree degrades to the walk below instead of
+            // failing on a stale assumption.
+            if (File.Exists(direct))
+            {
+                return direct;
+            }
+        }
+
+        DirectoryInfo? probe = new(AppContext.BaseDirectory);
+
+        while (probe is not null)
+        {
+            string candidate = Path.Combine(
+                probe.FullName,
+                "PowerFramework.Persistence",
+                "Tasks",
+                "SqlQueryTask.cs");
+
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            probe = probe.Parent;
+        }
+
+        throw new InvalidOperationException(
+            "Tasks/SqlQueryTask.cs could not be located from "
+                + $"'{TestRepositoryRoot.SearchStart}'. It composes the crosstab block's three ordered "
+                + "steps, so the position assertion cannot be made without it - and passing the test "
+                + "without reading it would assert nothing.");
+    }
+
+    /// <summary>
+    /// A source file's EXECUTABLE lines, with every comment-only line removed.
+    /// </summary>
+    /// <param name="path">The file to read.</param>
+    /// <returns>The remaining lines, newline joined, in file order.</returns>
+    /// <remarks>
+    /// <b>THE ASSERTIONS MUST BE ABOUT CODE, NOT ABOUT THE FILE'S OWN PROSE.</b> Every production file in
+    /// this service documents the legacy behaviour it reproduces and quotes the oracle at length, so a
+    /// naive text search finds the right identifiers inside COMMENTS - including, in this very case, a
+    /// block comment that names all three ordered steps in the correct order while proving nothing about
+    /// the code beneath it. Stripping the comment-only lines first is what makes a match evidence.
+    /// </remarks>
+    private static string ExecutableLinesOf(string path)
+    {
+        return string.Join(
+            '\n',
+            File.ReadAllLines(path)
+                .Where(static line =>
+                {
+                    string trimmed = line.TrimStart();
+
+                    return !trimmed.StartsWith("//", StringComparison.Ordinal);
+                }));
+    }
+
+    /// <summary>
+    /// The one-based line index of the FIRST line containing a fragment.
+    /// </summary>
+    /// <param name="text">The newline-joined text to search.</param>
+    /// <param name="fragment">The text to look for.</param>
+    /// <returns>The one-based line index, or <c>0</c> when no line contains the fragment.</returns>
+    /// <remarks>
+    /// ZERO FOR ABSENT RATHER THAN AN EXCEPTION, because every caller asserts presence explicitly before
+    /// comparing two positions - absence is a distinct failure from misordering and is reported as one.
+    /// </remarks>
+    private static int OrdinalOfLineContaining(string text, string fragment)
+    {
+        string[] lines = text.Split('\n');
+
+        for (int index = 0; index < lines.Length; index++)
+        {
+            if (lines[index].Contains(fragment, StringComparison.Ordinal))
+            {
+                return index + 1;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
     /// The gate value for which synchronization IS dispatched by processing kind - the legacy's
     /// <c>Not of_IsMainThread() and Not _of_NeedCreate()</c> at
     /// <c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L559</c>.
@@ -270,7 +432,7 @@ public sealed class FullStateCodecTests
         long kind)
     {
         DataWindowBufferStore store = NewCrosstabCarrier(kind);
-        RecordingCarrierSurface surface = new();
+        ScriptedCarrierSurface surface = new();
         List<(long Code, string Message)> reported = [];
 
         Assert.Throws<InvalidOperationException>(
@@ -283,6 +445,169 @@ public sealed class FullStateCodecTests
                 RecordingReporter(reported)));
 
         Assert.Empty(surface.Calls);
+    }
+
+    /// <summary>
+    /// THE WHOLE OF THE DECLARED PROCESSING DOMAIN, 0 THROUGH 5, WITH ITS OWNER NAMED FOR EACH VALUE.
+    /// Only 4 and 5 select this codec.
+    /// </summary>
+    /// <remarks>
+    /// Written as one exhaustive table rather than as two complementary ones so that the partition is
+    /// visible at a glance and a value cannot fall through both: each of the six kinds PowerBuilder
+    /// declares appears exactly once, with the expected answer beside it.
+    /// </remarks>
+    /// <param name="kind">The processing kind.</param>
+    /// <param name="expectedFullState">Whether that kind selects the full-state codec.</param>
+    [Theory]
+    [InlineData(0L, false)]
+    [InlineData(1L, false)]
+    [InlineData(2L, false)]
+    [InlineData(3L, false)]
+    [InlineData(4L, true)]
+    [InlineData(5L, true)]
+    public void OnlyCrosstabAndCompositeSelectThisCodecAcrossTheWholeDomain_UnitLevelNoOracle(
+        long kind,
+        bool expectedFullState)
+    {
+        Assert.Equal(expectedFullState, NewCrosstabCarrier(kind).RequiresFullStateTransfer);
+
+        // The same answer from the value type itself, so the discriminator cannot disagree with the
+        // carrier that consults it.
+        Assert.Equal(
+            expectedFullState,
+            new DataWindowProcessing(kind).SelectsFullStateTransfer);
+    }
+
+    /// <summary>
+    /// THE NO-FIXTURE FACT, RE-DERIVED FROM THE ORACLE FILES RATHER THAN ASSERTED IN PROSE: not one
+    /// DataWindow in this repository declares a processing kind that selects this codec.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE FILE HEADER'S CENTRAL CLAIM, MADE FALSIFIABLE.</b> The header states that every one
+    /// of the twelve DataWindow definitions is <c>processing=0</c> or <c>processing=1</c> and that none is
+    /// 4 or 5, which is why every carrier in this suite is synthetic and why no characterization evidence
+    /// exists. A reader has no reason to take that on trust, and a claim about the repository that lives
+    /// only in a comment silently becomes false the moment a crosstab fixture is added. This test reads
+    /// the definitions and re-derives the census, so the day a <c>processing=4</c> DataWindow appears it
+    /// FAILS - which is exactly the day this file's honesty statement would need rewriting and the day a
+    /// real oracle would become available.
+    /// </para>
+    /// <para>
+    /// C-C: the definitions are READ and never written. The count is asserted too, so a run against a
+    /// partial checkout that found only some of them cannot pass by finding nothing.
+    /// </para>
+    /// <para>
+    /// SKIPPED RATHER THAN FAILED WHEN THE LEGACY TREE IS ABSENT. The service must build and test from a
+    /// clean checkout of its own (C-A/C-I); if the oracle tree is not present the census cannot be taken,
+    /// and the honest outcome is to say so rather than to fail a codec test for a missing input.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoDataWindowInTheRepositorySelectsThisCodec_OracleCensus()
+    {
+        if (LocateLegacyDataWindowDirectory() is not { } oracleRoot)
+        {
+            Assert.Skip(
+                "The legacy ws_objects tree is not present in this checkout, so the processing-kind "
+                    + "census cannot be taken. The synthetic carriers used throughout this suite are "
+                    + "unaffected - see the file header.");
+
+            return;
+        }
+
+        string[] definitions = Directory.GetFiles(oracleRoot, "*.srd", SearchOption.AllDirectories);
+
+        // TWELVE, which is the number the file header states.
+        Assert.Equal(12, definitions.Length);
+
+        List<string> selectingThisCodec = [];
+        Dictionary<string, long> census = new(StringComparer.Ordinal);
+
+        foreach (string definition in definitions)
+        {
+            long kind = ProcessingKindOf(File.ReadAllText(definition));
+
+            census[Path.GetFileName(definition)] = kind;
+
+            if (new DataWindowProcessing(kind).SelectsFullStateTransfer)
+            {
+                selectingThisCodec.Add(Path.GetFileName(definition));
+            }
+        }
+
+        // NOT ONE. This is the fact the whole file rests on.
+        Assert.Empty(selectingThisCodec);
+
+        // EVERY ONE IS 0 OR 1, so the absence is not an artefact of an unparsed value being read as zero.
+        Assert.All(census, entry => Assert.InRange(entry.Value, 0L, 1L));
+
+        // AND THE PRIMARY FIXTURE SPECIFICALLY IS processing=1 [dw_sqlite.srd:L3], which is the value the
+        // header names.
+        Assert.Equal(1L, census["dw_sqlite.srd"]);
+
+        // Exactly one is 0 - dw_barcode.srd - and the remaining eleven are 1.
+        Assert.Equal(1, census.Count(entry => entry.Value == 0L));
+        Assert.Equal(11, census.Count(entry => entry.Value == 1L));
+        Assert.Equal(0L, census["dw_barcode.srd"]);
+    }
+
+    /// <summary>
+    /// Reads the <c>processing=</c> value out of a DataWindow definition's <c>datawindow(...)</c> line.
+    /// </summary>
+    /// <param name="definition">The whole definition text.</param>
+    /// <returns>The declared processing kind.</returns>
+    /// <remarks>
+    /// A DELIBERATELY NARROW READER. It looks for the first <c>processing=</c> occurrence and takes the
+    /// digits after it, which is all the census needs; it is not a DataWindow-syntax parser and makes no
+    /// claim to be one. Culture-invariant parsing, because a definition is machine-generated ASCII and
+    /// must not be read differently on a host with another locale.
+    /// </remarks>
+    private static long ProcessingKindOf(string definition)
+    {
+        const string Marker = "processing=";
+
+        int start = definition.IndexOf(Marker, StringComparison.Ordinal);
+
+        Assert.True(start >= 0, "the definition declares no processing kind at all");
+
+        int cursor = start + Marker.Length;
+        int end = cursor;
+
+        while (end < definition.Length && char.IsAsciiDigit(definition[end]))
+        {
+            end++;
+        }
+
+        Assert.True(end > cursor, "the processing marker is not followed by a value");
+
+        return long.Parse(
+            definition.AsSpan(cursor, end - cursor),
+            CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// The legacy library export directory holding the DataWindow definitions, or <see langword="null"/>
+    /// when the legacy tree is not present in this checkout.
+    /// </summary>
+    /// <returns>The directory, or <see langword="null"/>.</returns>
+    private static string? LocateLegacyDataWindowDirectory()
+    {
+        DirectoryInfo? probe = new(TestRepositoryRoot.SearchStart);
+
+        while (probe is not null)
+        {
+            string candidate = Path.Combine(probe.FullName, "ws_objects");
+
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            probe = probe.Parent;
+        }
+
+        return null;
     }
 
     #endregion
@@ -384,6 +709,126 @@ public sealed class FullStateCodecTests
     }
 
     /// <summary>
+    /// THE HANDOVER KEEPS WHAT IT WAS GIVEN. <c>blbData = Blob("")</c> at <c>:L101</c> releases the
+    /// SENDER'S hold on the payload after the handover has taken it - it does not destroy the payload the
+    /// handover now owns.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE OBSERVABLE CLAIM, STATED EXACTLY.</b> In the legacy the payload is a <c>blob</c> passed by
+    /// reference and the sender's local is reassigned to an empty one at <c>:L101</c>; the receiver
+    /// already holds its own value, so it is unaffected. The managed payload is a message the chunk holds
+    /// by reference, so what is OBSERVABLE here is the half that matters to a caller: AFTER
+    /// <see cref="FullStateCodec.Send"/> returns, the chunk the handover received still carries the whole
+    /// image, and a full round trip through it still restores the rows. A port that read the legacy line
+    /// as "clear the payload" and cleared the MESSAGE would destroy the chunk it had just handed over -
+    /// which is precisely the mistake this pins.
+    /// </para>
+    /// <para>
+    /// AND THE SENDER'S SOURCE IS EMPTY, so nothing is left behind on the sending side either. The two
+    /// halves together are the whole of what the legacy line achieves.
+    /// </para>
+    /// <para>
+    /// THE FAILURE BRANCH DOES NOT REACH THE RELEASE AT ALL, because the legacy's clear sits AFTER the
+    /// <c>end if</c> - asserted separately below.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Send_LeavesTheHandedOverChunkIntactAndTheSourceEmpty_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore store = NewCrosstabCarrier();
+        SeedRow(store, DwBuffer.Primary, "handed over", ItemStatus.NewModified);
+        SeedRow(store, DwBuffer.Delete, "deleted");
+        SeedRow(store, DwBuffer.Filter, "filtered");
+
+        List<QueryDataChunk> captured = [];
+
+        Assert.Equal(
+            RetCode.OK,
+            FullStateCodec.Send(store, RecordingHandover(captured, 1L), RecordingReporter([])));
+
+        QueryDataChunk chunk = Assert.Single(captured);
+
+        // THE CHUNK STILL CARRIES EVERYTHING, read AFTER Send returned.
+        Assert.NotNull(chunk.State);
+        Assert.Equal(3, chunk.State.Segments.Count);
+
+        // ONE ROW IN EACH OF THE THREE BUFFERS - the primary, the deleted and the filtered row all
+        // survived the handover, so nothing was released selectively.
+        Assert.Single(chunk.State.Segments[0].Rows);
+        Assert.Single(chunk.State.Segments[1].Rows);
+        Assert.Single(chunk.State.Segments[2].Rows);
+
+        // And it still restores, which is the only property a consumer actually depends on.
+        DataWindowBufferStore restored = new();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            FullStateCodec.Apply(restored, chunk.State));
+        Assert.Equal("handed over", restored.GetItemValue(1L, 1, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.NewModified, restored.GetItemStatus(1L, 0, DwBuffer.Primary));
+
+        // THE SENDING SIDE HOLDS NOTHING.
+        Assert.Equal(0L, store.RowCount());
+        Assert.Equal(0L, store.DeletedCount());
+        Assert.Equal(0L, store.FilteredCount());
+    }
+
+    /// <summary>
+    /// A CAPTURE THAT CANNOT BE REPRESENTED IS REPORTED WITH THE SAME VERBATIM TEXT AND CODE as a failed
+    /// handover, and the handover is NEVER REACHED.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE SECOND OF THE TWO ARMS THAT ANSWER <c>TransData Failed</c>, and it is a NARROWING the
+    /// port introduces deliberately rather than a behaviour the oracle has. The legacy's
+    /// <c>GetFullState</c> cannot fail on a value the runtime produced itself, so <c>:L95</c> has no
+    /// failure arm; this port CAN be handed a column value outside <c>common.v1.AnyValue</c>'s published
+    /// arms, and it refuses it with a DEFINED failure rather than coercing it to a string that would
+    /// round-trip as the wrong type and read as correct. The channel chosen is the oracle's own - the
+    /// internal-error code and the internal-error text of <c>:L98-L99</c> - so no new failure mode is
+    /// visible to a caller (C-B).
+    /// </para>
+    /// <para>
+    /// THE HANDOVER MUST NOT RUN. A payload that could not be captured must not be sent at all, and
+    /// asserting that the handover recorded nothing is the only way to see it: the return code alone is
+    /// identical to the handover-failure arm's.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Send_ReportsTransDataFailedWhenTheCarrierCannotBeCaptured_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore store = NewCrosstabCarrier();
+        long row = store.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        // A duration has no AnyValue arm - TimeValue is a time OF DAY - so this cannot be captured.
+        store.SetItemValue(row, 1, DwBuffer.Primary, TimeSpan.FromMinutes(90L));
+
+        List<QueryDataChunk> captured = [];
+        List<(long Code, string Message)> reported = [];
+
+        long result = FullStateCodec.Send(
+            store,
+            RecordingHandover(captured, 1L),
+            RecordingReporter(reported));
+
+        Assert.Equal(RetCode.E_INTERNAL_ERROR, result);
+
+        // THE SAME TEXT AND CODE AS THE HANDOVER-FAILURE ARM [:L98-L99].
+        Assert.Equal(
+            (RetCode.E_INTERNAL_ERROR, "TransData Failed"),
+            Assert.Single(reported));
+
+        // AND THE HANDOVER NEVER RAN.
+        Assert.Empty(captured);
+
+        // THE SOURCE IS UNTOUCHED, because the reset at :L96 sits after the capture. A carrier whose
+        // capture was refused still holds its rows, so a caller can inspect or retry rather than having
+        // lost the data to a failure.
+        Assert.Equal(1L, store.RowCount());
+    }
+
+    /// <summary>
     /// A handover result BELOW ZERO reports the verbatim text of <c>:L98</c> and returns the internal
     /// error of <c>:L99</c>.
     /// </summary>
@@ -413,6 +858,22 @@ public sealed class FullStateCodecTests
         // BYTE EXACT. The text reaches log records and characterization recordings.
         Assert.Equal("TransData Failed", report.Message);
         Assert.Equal(FullStateCodec.TransDataFailedMessage, report.Message);
+
+        // ENGLISH, AND THAT IS THE INCONSISTENCY TO PRESERVE (C-B). Nearly every other diagnostic this
+        // block can raise is Chinese - 无效的DataObject at :L554, SQL为空! at :L616, 设置事务对象失败! at
+        // :L679, SQL解析失败! at :L686 - and THIS ONE IS NOT. Nothing in the oracle explains why; it is
+        // simply what the source says. Asserting the text is pure ASCII is what stops a future pass from
+        // "harmonizing" the odd one out, which would be a silent behaviour change dressed as tidying.
+        Assert.All(report.Message, character => Assert.InRange(character, ' ', '~'));
+        Assert.Equal(
+            report.Message.Length,
+            Encoding.UTF8.GetByteCount(report.Message));
+
+        // THE ORDER OF :L95, :L96 AND :L97 IS PINNED BY THIS BRANCH. The reset at :L96 runs BEFORE the
+        // handover at :L97, so a carrier whose handover FAILED has already been emptied - the capture
+        // succeeded and the source was released before the failure was known. A port that deferred the
+        // reset until after a successful handover would leave the rows here.
+        Assert.Equal(0L, store.RowCount());
     }
 
     /// <summary>
@@ -471,7 +932,7 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_AppliesSortThenFilterWhenTheGateIsOpen_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new();
+        ScriptedCarrierSurface surface = new();
         List<(long Code, string Message)> reported = [];
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
@@ -484,7 +945,7 @@ public sealed class FullStateCodecTests
 
         Assert.Equal(RetCode.OK, result);
         Assert.Empty(reported);
-        Assert.Equal(["SetSort:age A salary A", "SetFilter:age > 1"], surface.Calls);
+        Assert.Equal(["SetSort:age A salary A", "SetFilter:age > 1"], Trace(surface));
     }
 
     /// <summary>
@@ -501,7 +962,7 @@ public sealed class FullStateCodecTests
         bool taskNeedsCreate)
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new();
+        ScriptedCarrierSurface surface = new();
         List<(long Code, string Message)> reported = [];
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
@@ -553,7 +1014,7 @@ public sealed class FullStateCodecTests
         int expectedCallCount)
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new();
+        ScriptedCarrierSurface surface = new();
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
             store,
@@ -573,29 +1034,55 @@ public sealed class FullStateCodecTests
     /// <c>:L566</c>, the second with no <c>Trim</c> - and it is reproduced rather than tidied because the
     /// reported text is observable.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DRIVEN BY THE FIXTURE'S OWN SORT VALUE, WHICH IS WHAT MAKES THE TRIM REAL RATHER THAN NOTIONAL.
+    /// <c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c> declares
+    /// <c>sort="age A salary A "</c> - WITH A TRAILING SPACE - and
+    /// <see cref="DwSqliteFixture.SortExpression"/> carries it verbatim. A hand-written expression with
+    /// no surrounding whitespace would make <c>Trim</c> a no-op and the assertion vacuous: applied and
+    /// reported would be the same string and the asymmetry would be invisible. The one value the
+    /// repository actually publishes exercises it.
+    /// </para>
+    /// <para>
+    /// The two halves are asserted against DIFFERENT observations rather than against each other. The
+    /// applied value comes from the ordered call log, the reported value from the error reporter, and
+    /// each expectation is written out in full - so neither can be satisfied by the other, and no
+    /// expectation is computed with the same concatenation the code under test performs.
+    /// </para>
+    /// </remarks>
     [Fact]
     public void SynchronizeSortAndFilter_TrimsWhatItAppliesButReportsTheUntrimmedValue_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new() { SetSortAnswer = DataWindowBufferStore.DataStoreFailure };
+        ScriptedCarrierSurface surface = new() { SetSortResult = DataWindowBufferStore.DataStoreFailure };
         List<(long Code, string Message)> reported = [];
+
+        // The fixture's value ends in a space, and a leading space is added so the trim is exercised at
+        // BOTH ends - PowerBuilder's Trim strips both, and a port using TrimEnd alone would pass a
+        // trailing-only case.
+        const string PendingSort = " age A salary A ";
+
+        Assert.EndsWith(" ", DwSqliteFixture.SortExpression, StringComparison.Ordinal);
+        Assert.Equal(" " + DwSqliteFixture.SortExpression, PendingSort);
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
             store,
             surface,
-            "   age A   ",
+            PendingSort,
             null,
             OpenGate,
             RecordingReporter(reported));
 
         Assert.Equal(RetCode.E_INVALID_ARGUMENT, result);
 
-        // Applied: trimmed.
-        Assert.Equal(["SetSort:age A"], surface.Calls);
+        // APPLIED: trimmed at both ends, written out verbatim rather than derived.
+        Assert.Equal(["SetSort:age A salary A"], Trace(surface));
 
-        // Reported: NOT trimmed.
-        Assert.Equal("SetSort:    age A   ", "SetSort: " + "   age A   ");
-        Assert.Equal("SetSort:    age A   ", Assert.Single(reported).Message);
+        // REPORTED: the prefix plus the value EXACTLY AS IT ARRIVED, both spaces intact. Written out in
+        // full - note the two spaces after the colon, one from the prefix and one from the value.
+        Assert.Equal("SetSort:  age A salary A ", Assert.Single(reported).Message);
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, reported[0].Code);
     }
 
     /// <summary>
@@ -605,9 +1092,9 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_TrimsTheFilterButReportsItUntrimmed_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new()
+        ScriptedCarrierSurface surface = new()
         {
-            SetFilterAnswer = DataWindowBufferStore.DataStoreFailure,
+            SetFilterResult = DataWindowBufferStore.DataStoreFailure,
         };
         List<(long Code, string Message)> reported = [];
 
@@ -620,7 +1107,7 @@ public sealed class FullStateCodecTests
             RecordingReporter(reported));
 
         Assert.Equal(RetCode.E_INVALID_ARGUMENT, result);
-        Assert.Equal(["SetFilter:age > 1"], surface.Calls);
+        Assert.Equal(["SetFilter:age > 1"], Trace(surface));
         Assert.Equal("SetFilter:   age > 1 ", Assert.Single(reported).Message);
     }
 
@@ -632,7 +1119,7 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_ReportsTheSetSortPrefixByteExact_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new() { SetSortAnswer = DataWindowBufferStore.DataStoreFailure };
+        ScriptedCarrierSurface surface = new() { SetSortResult = DataWindowBufferStore.DataStoreFailure };
         List<(long Code, string Message)> reported = [];
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
@@ -656,9 +1143,9 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_ReportsTheSetFilterPrefixByteExact_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new()
+        ScriptedCarrierSurface surface = new()
         {
-            SetFilterAnswer = DataWindowBufferStore.DataStoreFailure,
+            SetFilterResult = DataWindowBufferStore.DataStoreFailure,
         };
         List<(long Code, string Message)> reported = [];
 
@@ -684,7 +1171,7 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_NeverAttemptsTheFilterOnceTheSortIsRejected_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new() { SetSortAnswer = DataWindowBufferStore.DataStoreFailure };
+        ScriptedCarrierSurface surface = new() { SetSortResult = DataWindowBufferStore.DataStoreFailure };
         List<(long Code, string Message)> reported = [];
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
@@ -696,8 +1183,8 @@ public sealed class FullStateCodecTests
             RecordingReporter(reported));
 
         Assert.Equal(RetCode.E_INVALID_ARGUMENT, result);
-        Assert.Equal(["SetSort:age A"], surface.Calls);
-        Assert.DoesNotContain("SetFilter:age > 1", surface.Calls);
+        Assert.Equal(["SetSort:age A"], Trace(surface));
+        Assert.DoesNotContain("SetFilter:age > 1", Trace(surface));
         Assert.Single(reported);
     }
 
@@ -713,7 +1200,7 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_TreatsAnythingButOneAsFailure_UnitLevelNoOracle(long answer)
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new() { SetSortAnswer = answer };
+        ScriptedCarrierSurface surface = new() { SetSortResult = answer };
 
         long result = FullStateCodec.SynchronizeSortAndFilter(
             store,
@@ -733,7 +1220,7 @@ public sealed class FullStateCodecTests
     public void SynchronizeSortAndFilter_RejectsNullArguments_UnitLevelNoOracle()
     {
         DataWindowBufferStore store = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new();
+        ScriptedCarrierSurface surface = new();
 
         Assert.Throws<ArgumentNullException>(
             () => FullStateCodec.SynchronizeSortAndFilter(
@@ -748,7 +1235,69 @@ public sealed class FullStateCodecTests
 
     #endregion
 
+    // ==============================================================================================
+    //  DEFECT 4, PRESERVED VERBATIM (C-B), AND ITS OWN WORDS.
+    //  --------------------------------------------------------------------------------------------
+    //  ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L672-L676
+    //
+    //      //FIXME
+    //      //解决交叉表字段过多时可能出现SetFullState崩溃问题
+    //      if data.Describe("DataWindow.NoUserPrompt") <> "yes" then
+    //          data.Modify("DataWindow.NoUserPrompt=yes")
+    //      end if
+    //
+    //  - "works around the SetFullState crash that can occur when a crosstab has too many columns".
+    //
+    //  WHAT IS ASSERTED AND WHAT IS DELIBERATELY NOT. These cases assert that the workaround IS PRESENT,
+    //  that its guard has BOTH ARMS, and that it is CORRECTLY POSITIONED. They do NOT assert that the
+    //  crash cannot happen - that is not knowable from this repository, the crash lives inside a closed
+    //  PowerBuilder runtime, and no fixture on this path exists to provoke it. The defect is REPRODUCED,
+    //  never diagnosed and never declared fixed.
+    //
+    //  AND THE MODIFY RESULT IS DISCARDED BY THE ORACLE AT :L675, unlike the captured one at :L664 - so a
+    //  port that treated a failure here as fatal would be STRICTER than the legacy. The result is surfaced
+    //  for observability and never returned on.
+    // ==============================================================================================
+
     #region DEFECT 4 - the guarded no-user-prompt write [:L673]
+
+    /// <summary>
+    /// Every describe answer that is NOT <c>"yes"</c> and therefore selects the write arm of the guard.
+    /// </summary>
+    /// <remarks>
+    /// THE MATRIX IS THE GUARD'S CONTRACT, so it is declared once and shared rather than repeated inline.
+    /// It covers the empty string, an explicit negative, BOTH PowerBuilder describe sentinels - <c>"!"</c>
+    /// for unreadable and <c>"?"</c> for not-applicable, neither of which equals <c>"yes"</c> and both of
+    /// which the legacy's <c>&lt;&gt;</c> therefore writes on - and three near misses that an
+    /// ordinal comparison must reject: differing case in two forms and a trailing space.
+    /// </remarks>
+    public static TheoryData<string> DescribeAnswersThatSelectTheWriteArm =>
+    [
+        string.Empty,
+        "no",
+        "!",
+        "?",
+        "Yes",
+        "YES",
+        "yes ",
+    ];
+
+    /// <summary>
+    /// The modify results and the success each implies, under the legacy's empty-means-success convention.
+    /// </summary>
+    /// <remarks>
+    /// A SINGLE SPACE IS A FAILURE and is in the matrix for that reason: the legacy test is
+    /// <c>if sError &lt;&gt; ""</c> at <c>:L665</c> and NOT a whitespace test, so a port that trimmed
+    /// before comparing would read a blank diagnostic as success.
+    /// </remarks>
+    public static TheoryData<string, bool> ModifyResultsAndTheirSuccess =>
+        new()
+        {
+            { string.Empty, true },
+            { " ", false },
+            { "Property Not Found", false },
+            { "Line 1 Column 1: incorrect syntax", false },
+        };
 
     /// <summary>
     /// EXACTLY ONE MODIFY CALL when the property does not already read <c>"yes"</c>, and the modify
@@ -756,17 +1305,11 @@ public sealed class FullStateCodecTests
     /// <c>"yes"</c> and the legacy's <c>&lt;&gt;</c> therefore writes on both.
     /// </summary>
     [Theory]
-    [InlineData("")]
-    [InlineData("no")]
-    [InlineData("!")]
-    [InlineData("?")]
-    [InlineData("Yes")]
-    [InlineData("YES")]
-    [InlineData("yes ")]
+    [MemberData(nameof(DescribeAnswersThatSelectTheWriteArm))]
     public void ApplyNoUserPromptWorkaround_WritesExactlyOnceWhenNotAlreadyYes_UnitLevelNoOracle(
         string describeAnswer)
     {
-        RecordingCarrierSurface surface = new() { DescribeAnswer = describeAnswer };
+        ScriptedCarrierSurface surface = new() { DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = describeAnswer } };
 
         NoUserPromptOutcome outcome = FullStateCodec.ApplyNoUserPromptWorkaround(surface);
 
@@ -778,7 +1321,7 @@ public sealed class FullStateCodecTests
         // neither is visible in a return value.
         Assert.Equal(
             ["Describe:DataWindow.NoUserPrompt", "Modify:DataWindow.NoUserPrompt=yes"],
-            surface.Calls);
+            Trace(surface));
         Assert.Equal("DataWindow.NoUserPrompt", FullStateCodec.NoUserPromptProperty);
         Assert.Equal("DataWindow.NoUserPrompt=yes", FullStateCodec.NoUserPromptModifyString);
     }
@@ -791,7 +1334,7 @@ public sealed class FullStateCodecTests
     [Fact]
     public void ApplyNoUserPromptWorkaround_DoesNotWriteAtAllWhenAlreadyYes_UnitLevelNoOracle()
     {
-        RecordingCarrierSurface surface = new() { DescribeAnswer = "yes" };
+        ScriptedCarrierSurface surface = new() { DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "yes" } };
 
         NoUserPromptOutcome outcome = FullStateCodec.ApplyNoUserPromptWorkaround(surface);
 
@@ -801,8 +1344,8 @@ public sealed class FullStateCodecTests
         Assert.Equal(string.Empty, outcome.ModifyError);
 
         // The read happened; the write did not.
-        Assert.Equal(["Describe:DataWindow.NoUserPrompt"], surface.Calls);
-        Assert.DoesNotContain("Modify:DataWindow.NoUserPrompt=yes", surface.Calls);
+        Assert.Equal(["Describe:DataWindow.NoUserPrompt"], Trace(surface));
+        Assert.DoesNotContain("Modify:DataWindow.NoUserPrompt=yes", Trace(surface));
     }
 
     /// <summary>
@@ -814,8 +1357,8 @@ public sealed class FullStateCodecTests
     {
         Assert.Equal("yes", FullStateCodec.NoUserPromptEnabledValue);
 
-        RecordingCarrierSurface upper = new() { DescribeAnswer = "YES" };
-        RecordingCarrierSurface exact = new() { DescribeAnswer = "yes" };
+        ScriptedCarrierSurface upper = new() { DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "YES" } };
+        ScriptedCarrierSurface exact = new() { DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "yes" } };
 
         Assert.True(FullStateCodec.ApplyNoUserPromptWorkaround(upper).ModifyAttempted);
         Assert.False(FullStateCodec.ApplyNoUserPromptWorkaround(exact).ModifyAttempted);
@@ -826,16 +1369,15 @@ public sealed class FullStateCodecTests
     /// into a boolean, because the text is the whole of the diagnostic.
     /// </summary>
     [Theory]
-    [InlineData("", true)]
-    [InlineData("Property Not Found", false)]
+    [MemberData(nameof(ModifyResultsAndTheirSuccess))]
     public void ApplyNoUserPromptWorkaround_PreservesEmptyMeansSuccess_UnitLevelNoOracle(
         string modifyAnswer,
         bool expectedSuccess)
     {
-        RecordingCarrierSurface surface = new()
+        ScriptedCarrierSurface surface = new()
         {
-            DescribeAnswer = "no",
-            ModifyAnswer = modifyAnswer,
+            DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "no" },
+            ModifyError = modifyAnswer,
         };
 
         NoUserPromptOutcome outcome = FullStateCodec.ApplyNoUserPromptWorkaround(surface);
@@ -852,6 +1394,307 @@ public sealed class FullStateCodecTests
     public void ApplyNoUserPromptWorkaround_RejectsANullSurface_UnitLevelNoOracle()
     {
         Assert.Throws<ArgumentNullException>(() => FullStateCodec.ApplyNoUserPromptWorkaround(null!));
+    }
+
+    /// <summary>
+    /// A <see langword="null"/> MODIFY RESULT IS NORMALIZED TO THE EMPTY STRING, and therefore reads as
+    /// SUCCESS - because empty is what success means here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THE GUARD IS RIGHT RATHER THAN MERELY DEFENSIVE.</b> PowerBuilder's <c>Modify</c> answers a
+    /// STRING and has no null, so there is no oracle behaviour for a null result to preserve or violate;
+    /// the question is only which managed reading is faithful. Empty is the correct choice: the surface is
+    /// an interface a caller implements, an implementation that returns nothing at all is saying "no
+    /// diagnostic", and "no diagnostic" is exactly what the legacy's empty string means. Treating it as a
+    /// FAILURE would invent a fault the oracle cannot produce and - because
+    /// <c>Tasks/SqlQueryTask</c> logs a failure here at Warning on first occurrence - would put a
+    /// permanent warning in an operator's channel for a call that succeeded.
+    /// </para>
+    /// <para>
+    /// THE DOUBLE IS PURPOSE-BUILT AND HOSTILE, WHICH IS WHY IT IS NOT THE SHARED RECORDER. The shared
+    /// <c>ScriptedCarrierSurface</c> cannot express this: its modify result is a non-nullable string, as
+    /// the interface declares. Reaching the guard requires an implementation that deliberately breaks that
+    /// contract, and a five-line local type that does one illegal thing is clearer than widening the
+    /// shared double to make every other test able to do it too.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ApplyNoUserPromptWorkaround_ReadsANullModifyResultAsSuccess_UnitLevelNoOracle()
+    {
+        NullModifyingSurface surface = new();
+
+        NoUserPromptOutcome outcome = FullStateCodec.ApplyNoUserPromptWorkaround(surface);
+
+        Assert.True(outcome.ModifyAttempted);
+        Assert.False(outcome.PropertyAlreadySet);
+
+        // NORMALIZED, not propagated: the outcome's text is the empty string and never null, so a caller
+        // reading `.Length` cannot fault.
+        Assert.Equal(string.Empty, outcome.ModifyError);
+        Assert.True(outcome.Succeeded);
+
+        // And the write was attempted exactly once, with the byte-exact modify string.
+        Assert.Equal(1, surface.ModifyCount);
+        Assert.Equal(FullStateCodec.NoUserPromptModifyString, surface.LastModifyString);
+    }
+
+    /// <summary>
+    /// A carrier surface that breaks its own contract by answering <see langword="null"/> from
+    /// <see cref="Modify"/>, so the codec's normalization of that answer can be reached.
+    /// </summary>
+    /// <remarks>
+    /// THE ONLY LOCAL DOUBLE IN THIS FILE, AND DELIBERATELY SO. Every other case uses the shared ordered
+    /// call recorder; this one exists because the behaviour under test is the handling of a value the
+    /// shared double's typed surface cannot produce.
+    /// </remarks>
+    private sealed class NullModifyingSurface : IFullStateCarrierSurface
+    {
+        /// <summary>How many times <see cref="Modify"/> was called.</summary>
+        internal int ModifyCount { get; private set; }
+
+        /// <summary>The last modification string presented, or the empty string when none was.</summary>
+        internal string LastModifyString { get; private set; } = string.Empty;
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Answers PowerBuilder's "not applicable" marker, which is not <c>"yes"</c> and therefore selects
+        /// the write arm the guard is being driven into.
+        /// </remarks>
+        public string Describe(string property) => "?";
+
+        /// <inheritdoc/>
+        public string Modify(string modifyString)
+        {
+            ModifyCount++;
+            LastModifyString = modifyString;
+
+            // THE CONTRACT BREACH THIS TYPE EXISTS FOR.
+            return null!;
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>Never reached: the guard sets no sort.</remarks>
+        public long SetSort(string sort) => DataWindowBufferStore.DataStoreSuccess;
+
+        /// <inheritdoc/>
+        /// <remarks>Never reached: the guard sets no filter.</remarks>
+        public long SetFilter(string filter) => DataWindowBufferStore.DataStoreSuccess;
+    }
+
+    /// <summary>
+    /// THE GUARD IS A READ-THEN-WRITE AND THE ORDINALS PROVE IT: the describe is call ONE and the modify
+    /// is call TWO, on one ordered log.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THE ORDINALS AND NOT JUST THE PAIR. <c>if data.Describe("DataWindow.NoUserPrompt") &lt;&gt;
+    /// "yes" then data.Modify(...)</c> [<c>:L674-L675</c>] is a CONDITIONAL write, and a port that wrote
+    /// first and read afterwards would still show one describe and one modify in any set-shaped
+    /// assertion while having lost the condition entirely - it would write unconditionally. Positions 1
+    /// and 2 are what separate the two implementations.
+    /// </para>
+    /// <para>
+    /// THE WHOLE LOG IS ALSO PINNED, so the guard is proved to issue NOTHING ELSE: no sort, no filter, no
+    /// second describe, no retry. Exactly two calls, in exactly that order.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ApplyNoUserPromptWorkaround_ReadsBeforeItWrites_UnitLevelNoOracle()
+    {
+        ScriptedCarrierSurface surface = new()
+        {
+            DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "no" },
+        };
+
+        _ = FullStateCodec.ApplyNoUserPromptWorkaround(surface);
+
+        Assert.Equal(
+            1,
+            surface.OrdinalOf(CarrierCallKind.Describe, FullStateCodec.NoUserPromptProperty));
+        Assert.Equal(
+            2,
+            surface.OrdinalOf(CarrierCallKind.Modify, FullStateCodec.NoUserPromptModifyString));
+
+        Assert.True(
+            surface.Precedes(
+                CarrierCallKind.Describe,
+                FullStateCodec.NoUserPromptProperty,
+                CarrierCallKind.Modify,
+                FullStateCodec.NoUserPromptModifyString),
+            "the guard must READ the property before it WRITES it, or the write is unconditional");
+
+        // NOTHING ELSE AT ALL. Two calls, and neither is a sort or a filter.
+        Assert.Equal(2, surface.Calls.Count);
+        Assert.Equal(1, surface.CountOf(CarrierCallKind.Describe));
+        Assert.Equal(1, surface.CountOf(CarrierCallKind.Modify));
+        Assert.Equal(0, surface.CountOf(CarrierCallKind.SetSort));
+        Assert.Equal(0, surface.CountOf(CarrierCallKind.SetFilter));
+    }
+
+    /// <summary>
+    /// POSITION IS THE ASSERTION. In the production composition the guard is written BEFORE the
+    /// transaction is attached and BEFORE the SQL statement is modified, exactly as
+    /// <c>:L674-L676</c> sits before <c>:L678</c> and before <c>:L684</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS ORDER IS BEHAVIOUR AND NOT TIDINESS.</b> The property being written suppresses a
+    /// modal prompt. A workaround applied AFTER the operation that raises the prompt works around
+    /// nothing - the prompt has already been raised - so a port that issued the three steps in any other
+    /// order would reproduce the calls and none of the effect. That is precisely the failure a
+    /// content-only assertion cannot see, which is why this is asserted as an ORDER.
+    /// </para>
+    /// <para>
+    /// <b>OBSERVED FROM THE PRODUCTION COMPOSITION, NOT FROM THIS TEST'S OWN CALL SEQUENCE.</b> The three
+    /// steps are composed by <c>Tasks/SqlQueryTask</c>, not by this codec - the codec owns the guard and
+    /// knows nothing of transactions or statements - so a runtime double driven from here could only
+    /// record the order THIS TEST chose to invoke them in, which would assert nothing about the port. The
+    /// composition is therefore read from the production source and the three call sites are compared by
+    /// position, following the pattern <c>TransactionServiceTests.TheServiceSourceReadsNoWallClock</c>
+    /// established in this project. Comment lines are stripped first so the assertion is about CODE and
+    /// cannot be satisfied by prose that merely mentions the right names.
+    /// </para>
+    /// <para>
+    /// <b>ABSENCE IS NOT ORDER.</b> Each of the three sites is asserted PRESENT before any comparison, so
+    /// a composition that dropped the guard altogether fails here rather than passing vacuously.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheGuardIsComposedBeforeTheTransactionAndBeforeTheSql_UnitLevelNoOracle()
+    {
+        string code = ExecutableLinesOf(LocateQueryTaskSource());
+
+        int guard = OrdinalOfLineContaining(code, "FullStateCodec.ApplyNoUserPromptWorkaround(");
+        int attachment = OrdinalOfLineContaining(code, "_dataWindowRuntime.AttachTransaction(");
+        int statement = OrdinalOfLineContaining(
+            code,
+            "BuildTableSelectAssignment(EscapeStatementForModify(");
+
+        // PRESENT FIRST. A missing site would otherwise make the comparisons below vacuous.
+        Assert.True(guard > 0, "the no-user-prompt guard is not composed at all");
+        Assert.True(attachment > 0, "the transaction attachment is not composed at all");
+        Assert.True(statement > 0, "the statement modification is not composed at all");
+
+        // [:L674-L676] BEFORE [:L678].
+        Assert.True(
+            guard < attachment,
+            $"the guard (line {guard}) must precede the transaction attachment (line {attachment})");
+
+        // [:L674-L676] BEFORE [:L684] onward.
+        Assert.True(
+            guard < statement,
+            $"the guard (line {guard}) must precede the statement modification (line {statement})");
+    }
+
+    /// <summary>
+    /// THE ADJACENT ARM AT <c>:L678-L680</c>: a transaction attachment that does not answer one is
+    /// refused with <c>E_INVALID_TRANSACTION</c> and the VERBATIM Chinese diagnostic.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ASSERTED HERE BECAUSE IT IS THE STEP THE GUARD MUST PRECEDE, so the two cannot be reasoned about
+    /// separately: the guard's whole purpose is to be in place before this call, and a reader of the
+    /// position assertion above needs the failure semantics of the thing being preceded in front of them.
+    /// The task-level behaviour is exercised end to end by <c>SqlQueryTaskTests</c>; what is pinned here
+    /// is the OBSERVABLE PAIR - the code and the text - byte for byte.
+    /// </para>
+    /// <para>
+    /// <b>THE TEXT IS CHINESE AND STAYS CHINESE (C-B).</b> It is asserted against a literal written out in
+    /// full rather than against the production constant alone, so a re-encoding accident - the constant
+    /// silently becoming mojibake - fails this test instead of comparing equal to itself. The character
+    /// count and the trailing FULL-WIDTH-free ASCII exclamation mark are pinned for the same reason.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AFailedTransactionAttachmentCarriesTheVerbatimLegacyDiagnostic_UnitLevelNoOracle()
+    {
+        // `Event OnError(RetCode.E_INVALID_TRANSACTION,"设置事务对象失败!")` [:L679].
+        Assert.Equal("设置事务对象失败!", SqlQueryTask.SetTransObjectFailedText);
+
+        // NO MOJIBAKE: NINE characters - eight Han plus one ASCII exclamation mark. The UTF-8 encoding
+        // is twenty-five bytes, so the same text decoded as Latin-1 would be twenty-five CHARACTERS and
+        // would fail both of these.
+        Assert.Equal(9, SqlQueryTask.SetTransObjectFailedText.Length);
+        Assert.Equal(25, Encoding.UTF8.GetByteCount(SqlQueryTask.SetTransObjectFailedText));
+        Assert.EndsWith("!", SqlQueryTask.SetTransObjectFailedText, StringComparison.Ordinal);
+        Assert.DoesNotContain('\uFFFD', SqlQueryTask.SetTransObjectFailedText);
+
+        // `return RetCode.E_INVALID_TRANSACTION` [:L680]. Distinct from every other code this block can
+        // answer, which is what makes the arm identifiable to a caller.
+        Assert.Equal(-7L, RetCode.E_INVALID_TRANSACTION);
+        Assert.NotEqual(RetCode.E_INVALID_SQL, RetCode.E_INVALID_TRANSACTION);
+        Assert.NotEqual(RetCode.E_INTERNAL_ERROR, RetCode.E_INVALID_TRANSACTION);
+
+        // The composition pairs exactly that code with exactly that text, adjacent to the attachment.
+        string code = ExecutableLinesOf(LocateQueryTaskSource());
+
+        Assert.Contains(
+            "RetCode.E_INVALID_TRANSACTION, SetTransObjectFailedText",
+            code,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE SURROUNDING MODIFY-STRING BLOCK AT <c>:L663-L669</c>: an EMPTY result is success and a
+    /// NON-EMPTY result is a failure carrying <c>E_INVALID_SQL</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// TWO CONVENTIONS, ONE OF THEM COUNTER-INTUITIVE, AND BOTH PRESERVED. <c>Modify</c> reports by
+    /// RETURNING TEXT, so success is the EMPTY string and any content at all is a diagnostic
+    /// [<c>if sError &lt;&gt; "" then</c>, <c>:L665</c>]. A port that inverted this into a boolean would
+    /// discard the diagnostic, which is the whole of what a failed modify reports.
+    /// </para>
+    /// <para>
+    /// AND THE CODE IS <c>E_INVALID_SQL</c>, NOT <c>E_INTERNAL_ERROR</c>, even though the failing
+    /// operation is a property modification rather than a statement [<c>:L666</c>]. The neighbouring
+    /// modify at <c>:L637</c> answers <c>E_INTERNAL_ERROR</c> for what looks like the same class of
+    /// fault. Both are the oracle's, the inconsistency is not harmonized, and asserting the two are
+    /// DIFFERENT is what stops a future tidy-up from collapsing them.
+    /// </para>
+    /// <para>
+    /// THE GUARD'S OWN MODIFY IS THE THIRD MEMBER OF THAT FAMILY AND IT DISCARDS ITS RESULT
+    /// [<c>:L675</c>], unlike the captured one at <c>:L664</c> - so the guard reports a failure through
+    /// <see cref="NoUserPromptOutcome.ModifyError"/> for observability WITHOUT returning on it, and a
+    /// caller that treated it as fatal would be STRICTER than the legacy. That distinction is asserted
+    /// here alongside the block it sits inside, because the three modifies are only distinguishable from
+    /// one another by what each does with its result.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ModifyResultsAndTheirSuccess))]
+    public void TheModifyStringBlockTreatsEmptyAsSuccessAndAnythingElseAsInvalidSql_UnitLevelNoOracle(
+        string modifyResult,
+        bool expectedSuccess)
+    {
+        // THE CONVENTION, on the one modify this codec owns. A SINGLE SPACE is a failure: the legacy test
+        // is `<> ""` and not a whitespace test, so a port that trimmed before comparing would wrongly
+        // read a blank diagnostic as success.
+        ScriptedCarrierSurface surface = new()
+        {
+            DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "no" },
+            ModifyError = modifyResult,
+        };
+
+        NoUserPromptOutcome outcome = FullStateCodec.ApplyNoUserPromptWorkaround(surface);
+
+        Assert.True(outcome.ModifyAttempted);
+        Assert.Equal(modifyResult, outcome.ModifyError);
+        Assert.Equal(expectedSuccess, outcome.Succeeded);
+
+        // The result is REPORTED, never thrown, so the guard cannot abort a retrieval the legacy would
+        // have completed - `:L675` discards this value.
+        Assert.Equal(expectedSuccess, outcome.ModifyError.Length == 0);
+
+        // AND THE CODE THE SURROUNDING BLOCK ANSWERS for a non-empty result [:L666-L667].
+        string code = ExecutableLinesOf(LocateQueryTaskSource());
+
+        Assert.Contains("RetCode.E_INVALID_SQL, modifyError", code, StringComparison.Ordinal);
+        Assert.Equal(-8L, RetCode.E_INVALID_SQL);
+
+        // NOT harmonized with the neighbouring modify's code at :L637.
+        Assert.NotEqual(RetCode.E_INTERNAL_ERROR, RetCode.E_INVALID_SQL);
     }
 
     #endregion
@@ -1161,6 +2004,158 @@ public sealed class FullStateCodecTests
             FullStateCodec.Capture(foreign));
 
         Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
+
+        // AND THIS IS THE OBSERVABLE PROOF THAT THERE IS NO PRECEDING RESET - see the sibling case below
+        // for the full argument. A rejected image leaves the target exactly as it was.
+        Assert.Equal(1L, target.RowCount());
+        Assert.Equal("untouched", target.GetItemValue(1L, 1, DwBuffer.Primary));
+    }
+
+    /// <summary>
+    /// NO PRECEDING RESET, PROVED BY A REJECTED IMAGE LEAVING THE TARGET INTACT.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SHARPEST OBSERVABLE DIFFERENCE FROM THE CHANGESET PATH, AND HOW IT IS SEEN.</b> The
+    /// changeset arm resets the target BEFORE applying, gated on the chunk index -
+    /// <c>if current = 1 then Reset()</c> then <c>SetChanges(blbData)</c>
+    /// [<c>n_cst_threading_task_sqlquery.sru:L192-L197, L218-L221, L235-L238</c>]. The full-state arm has
+    /// NO such step: it calls <c>SetFullState(blbData)</c> directly [<c>:L190, L216, L233</c>], because
+    /// restoring a complete image replaces the contents intrinsically.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE ABSENCE IS ASSERTED THIS WAY AND NOT WITH A RECORDER.</b>
+    /// <c>DataWindowBufferStore.Reset</c> is not a virtual member, so no recording subclass can intercept
+    /// it and the ordered call recorder - which observes the DESCRIBE and MODIFY surface - cannot see it
+    /// either. The absence is therefore proved by CONSEQUENCE, which is stronger than an interception
+    /// would be anyway: the replacement reset inside
+    /// <see cref="FullStateCodec.Apply(DataWindowBufferStore, CarrierState?)"/> runs only AFTER every
+    /// structural check has passed, so a REJECTED image cannot have reached it. If a preceding reset
+    /// existed, the target would be empty here whatever the rejection. It is not.
+    /// </para>
+    /// <para>
+    /// Four independent rejections are exercised so the conclusion does not rest on one code path: a
+    /// segment roster of the wrong length, a duplicated buffer tag, a row filed under the wrong buffer,
+    /// and an image whose processing kind belongs to the other codec.
+    /// </para>
+    /// </remarks>
+    /// <param name="because">Why the image is rejected, for the failure message.</param>
+    /// <param name="rejected">The image that must be refused.</param>
+    [Theory]
+    [MemberData(nameof(RejectedImages))]
+    public void Receive_LeavesTheTargetUntouchedWhenItRefusesAnImage_UnitLevelNoOracle(
+        string because,
+        CarrierState rejected)
+    {
+        DataWindowBufferStore target = new();
+        SeedRow(target, DwBuffer.Primary, "still here", ItemStatus.NewModified);
+        SeedRow(target, DwBuffer.Delete, "still deleted");
+
+        long result = FullStateCodec.Receive(
+            FullStateCodec.ResolveTarget(null, false, target),
+            rejected);
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, result);
+
+        // EVERY ROW, EVERY BUFFER AND EVERY STATUS SURVIVES. A preceding reset would have emptied all
+        // three buffers before the rejection was even detected.
+        Assert.Equal(1L, target.RowCount());
+        Assert.Equal(1L, target.DeletedCount());
+        Assert.Equal("still here", target.GetItemValue(1L, 1, DwBuffer.Primary));
+        Assert.Equal(
+            ItemStatus.NewModified,
+            target.GetItemStatus(1L, 0, DwBuffer.Primary));
+
+        Assert.False(string.IsNullOrEmpty(because));
+    }
+
+    /// <summary>
+    /// Four structurally or semantically invalid images, one per rejection reason.
+    /// </summary>
+    public static TheoryData<string, CarrierState> RejectedImages
+    {
+        get
+        {
+            TheoryData<string, CarrierState> data = [];
+
+            CarrierState tooFew = new() { Processing = 4L };
+            tooFew.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Primary });
+            data.Add("a segment roster shorter than the canonical three", tooFew);
+
+            CarrierState duplicated = new() { Processing = 4L };
+            duplicated.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Primary });
+            duplicated.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Primary });
+            duplicated.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Filter });
+            data.Add("a duplicated buffer tag in place of Delete", duplicated);
+
+            CarrierState reordered = new() { Processing = 4L };
+            reordered.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Delete });
+            reordered.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Primary });
+            reordered.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Filter });
+            data.Add("the canonical buffers in the wrong order", reordered);
+
+            CarrierState foreignKind = new() { Processing = 1L };
+            foreignKind.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Primary });
+            foreignKind.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Delete });
+            foreignKind.Segments.Add(new CarrierBufferSegment { Buffer = DwBuffer.Filter });
+            data.Add("a processing kind belonging to the changeset codec", foreignKind);
+
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// NO CHUNK BOOKKEEPING OF ANY KIND, and no describe or modify traffic either.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE BOOKKEEPING THE CHANGESET ARM DOES AND THIS ONE DOES NOT.</b> That arm brackets its
+    /// <c>SetChanges</c> with two chunk-index-gated steps - a reset when <c>current = 1</c> and, when
+    /// <c>count = current</c>, a <c>ResetUpdate</c> [<c>:L198-L199, L222-L224, L239-L241</c>]. The
+    /// full-state arm has neither, because a complete image needs no assembling across chunks.
+    /// </para>
+    /// <para>
+    /// <b>THE ABSENCE OF THE UPDATE-RESET IS DIRECTLY OBSERVABLE, WHICH IS WHY IT IS ASSERTED AND NOT
+    /// ARGUED.</b> <c>ResetUpdate</c> re-baselines every row to unmodified and EMPTIES the Delete buffer.
+    /// So an image carrying a <c>NewModified</c> row and a deleted row proves the point twice: had the
+    /// bookkeeping run, the status would read <c>NotModified</c> and the deleted row would be gone.
+    /// </para>
+    /// <para>
+    /// <b>AND THE SIGNATURE ITSELF CARRIES NO CHUNK COUNT AND NO CHUNK INDEX</b> - the receive entry point
+    /// takes a target and an image and nothing else - so there is no chunk arithmetic to get wrong. The
+    /// ordered call recorder confirms the complementary half: applying an image issues NO describe, modify,
+    /// sort or filter call at all, so nothing about the carrier's definition is touched on the way in.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Receive_AppliesInOneShotWithNoChunkBookkeeping_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore source = NewCrosstabCarrier();
+        SeedRow(source, DwBuffer.Primary, "modified", ItemStatus.NewModified);
+        SeedRow(source, DwBuffer.Delete, "deleted");
+
+        CarrierState? image = FullStateCodec.Capture(source);
+
+        DataWindowBufferStore target = new();
+        ScriptedCarrierSurface surface = new();
+
+        long result = FullStateCodec.Receive(
+            FullStateCodec.ResolveTarget(null, false, target),
+            image);
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, result);
+
+        // NO UPDATE-RESET: the status survives and the Delete buffer is still populated.
+        Assert.Equal(ItemStatus.NewModified, target.GetItemStatus(1L, 0, DwBuffer.Primary));
+        Assert.Equal(1L, target.DeletedCount());
+
+        // NO DEFINITION TRAFFIC. The surface was available and was never used, which is what the ordered
+        // recorder is for: the emptiness of the log is the assertion.
+        Assert.Empty(surface.Calls);
+        Assert.Equal(0, surface.CountOf(CarrierCallKind.Describe));
+        Assert.Equal(0, surface.CountOf(CarrierCallKind.Modify));
+        Assert.Equal(0, surface.CountOf(CarrierCallKind.SetSort));
+        Assert.Equal(0, surface.CountOf(CarrierCallKind.SetFilter));
     }
 
     /// <summary>
@@ -1545,6 +2540,106 @@ public sealed class FullStateCodecTests
         source.SetItemValue(row, 1, DwBuffer.Primary, unrepresentable);
 
         Assert.Null(FullStateCodec.Capture(source));
+    }
+
+    /// <summary>
+    /// AN UNREPRESENTABLE ORIGINAL IS REFUSED TOO, not only an unrepresentable current value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE ORIGINAL VALUE IS PART OF THE PAYLOAD, WHICH IS WHY IT GETS THE SAME TREATMENT.</b> The
+    /// golden-master fixture declares <c>updatewhere=1</c> with <c>updatewhereclause=yes</c> on all six
+    /// columns [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], so the generated WHERE clause
+    /// is built from ORIGINAL values and an image that dropped or mangled one would produce a clause that
+    /// matches a row the legacy would have conflicted on. A silently omitted original is therefore worse
+    /// than a refused image, and the refusal is the same defined failure as for a current value.
+    /// </para>
+    /// <para>
+    /// THE SEQUENCE IS WHAT MAKES THE STATE REACHABLE: write the unrepresentable value, BASELINE so it
+    /// becomes the original, then overwrite with a perfectly ordinary string. The row now has a
+    /// representable current value and an unrepresentable original - a combination no single write can
+    /// produce, and exactly the one a real edit of a freshly retrieved row produces.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Capture_AnswersAnAbsentImageWhenOnlyTheORIGINALIsUnrepresentable_UnitLevelNoOracle()
+    {
+        DataWindowBufferStore source = NewCrosstabCarrier();
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        // 1. The unrepresentable value goes in first.
+        source.SetItemValue(row, 1, DwBuffer.Primary, TimeSpan.FromMinutes(90L));
+
+        // 2. Baseline, so that value becomes the row's ORIGINAL rather than its pending edit.
+        source.ResetUpdate();
+
+        // 3. Overwrite with something the wire expresses perfectly well.
+        source.SetItemValue(row, 1, DwBuffer.Primary, "an ordinary string");
+
+        Assert.Equal("an ordinary string", source.GetItemValue(row, 1, DwBuffer.Primary));
+        Assert.Equal(
+            TimeSpan.FromMinutes(90L),
+            source.GetItemOriginalValue(row, 1, DwBuffer.Primary));
+
+        // THE CURRENT VALUE ALONE WOULD HAVE CAPTURED FINE. The refusal comes from the original.
+        Assert.Null(FullStateCodec.Capture(source));
+    }
+
+    /// <summary>
+    /// A <c>blob</c> ORIGINAL IS COMPARED BY CONTENT AND NOT BY REFERENCE, so an unchanged blob records
+    /// no original and a changed one records it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY REFERENCE EQUALITY WOULD BE WRONG IN BOTH DIRECTIONS.</b> <c>byte[]</c> is the one mutable
+    /// value a carrier holds, so it is COPIED at every crossing - which means a blob that was never
+    /// edited is nonetheless a DIFFERENT ARRAY INSTANCE from its own original. Comparing by reference
+    /// would therefore record an original for every blob column in every row, inflating the payload and
+    /// adding a WHERE-clause term for a column that did not change. Comparing by value in the other
+    /// direction - two distinct arrays with identical bytes - correctly records nothing.
+    /// </para>
+    /// <para>
+    /// PowerScript assigns a <c>blob</c> BY VALUE, so content comparison is the oracle's semantics rather
+    /// than a convenience chosen here.
+    /// </para>
+    /// </remarks>
+    /// <param name="edited">The value written over the baselined blob.</param>
+    /// <param name="expectOriginalRecorded">Whether the image should carry an original for the column.</param>
+    [Theory]
+    [InlineData(new byte[] { 1, 2, 3 }, false)]
+    [InlineData(new byte[] { 1, 2, 4 }, true)]
+    [InlineData(new byte[] { 1, 2 }, true)]
+    [InlineData(new byte[] { 1, 2, 3, 0 }, true)]
+    [InlineData(new byte[0], true)]
+    public void Capture_ComparesABlobOriginalByContent_UnitLevelNoOracle(
+        byte[] edited,
+        bool expectOriginalRecorded)
+    {
+        DataWindowBufferStore source = NewCrosstabCarrier();
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        source.SetItemValue(row, 1, DwBuffer.Primary, new byte[] { 1, 2, 3 });
+        source.ResetUpdate();
+        source.SetItemValue(row, 1, DwBuffer.Primary, edited);
+
+        CarrierState? image = FullStateCodec.Capture(source);
+
+        Assert.NotNull(image);
+
+        DataWindowRow projected = Assert.Single(image.Segments[0].Rows);
+
+        Assert.Single(projected.Columns);
+        Assert.Equal(edited, projected.Columns[0].Value.BlobValue.ToByteArray());
+
+        // THE CONTENT COMPARISON DECIDES WHETHER AN ORIGINAL IS CARRIED AT ALL.
+        Assert.Equal(expectOriginalRecorded, projected.OriginalValues.Count == 1);
+
+        if (expectOriginalRecorded)
+        {
+            Assert.Equal(
+                new byte[] { 1, 2, 3 },
+                projected.OriginalValues[0].Value.BlobValue.ToByteArray());
+        }
     }
 
     /// <summary>
@@ -2192,7 +3287,7 @@ public sealed class FullStateCodecTests
     public void SendAndReceiveCarryTheCarrierAcrossTheSeamInLegacyOrder_SyntheticCrosstabNoOracle()
     {
         DataWindowBufferStore source = NewCrosstabCarrier();
-        RecordingCarrierSurface surface = new() { DescribeAnswer = "no" };
+        ScriptedCarrierSurface surface = new() { DescribeAnswers = { [FullStateCodec.NoUserPromptProperty] = "no" } };
         List<(long Code, string Message)> reported = [];
 
         // 1. DEFECT 3 - synchronize, because the image will REPLACE the receiver's definition [:L563].
@@ -2243,7 +3338,171 @@ public sealed class FullStateCodecTests
                 "Describe:DataWindow.NoUserPrompt",
                 "Modify:DataWindow.NoUserPrompt=yes",
             ],
-            surface.Calls);
+            Trace(surface));
+    }
+
+    #endregion
+
+    #region What this codec is NOT allowed to contain - C-D and C-E, asserted rather than assumed
+
+    /// <summary>
+    /// C-D - CROSSTAB HERE IS A DATA-TRANSFER DISCRIMINATOR AND NOTHING ELSE. This codec contains no
+    /// crosstab rendering, no geometry, no DPI conversion, no font measurement and no reference to any
+    /// deferred capability area.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY A CODEC IS EVEN AT RISK OF THIS.</b> "Crosstab" names a PRESENTATION style, and the two
+    /// processing kinds this codec serves are Crosstab and Composite - so the temptation to reach for
+    /// something that lays a crosstab out is real and would be a boundary violation, not a mere
+    /// stylistic slip. Crosstab PRESENTATION belongs to the DEFERRED DesignSystem service, which the
+    /// requirements forbid implementing even as a stub; what belongs here is only the recognition that a
+    /// crosstab's state has to travel as one complete image instead of as a stream of row changes.
+    /// </para>
+    /// <para>
+    /// <b>THE ORACLE ITSELF DRAWS THIS LINE TWICE AND THE PORT FOLLOWS IT.</b> <c>SetRedraw</c> and
+    /// <c>GroupCalc</c> appear ONLY on the changeset path's DataWindow arm
+    /// [<c>n_cst_threading_task_sqlquery.sru:L193-L194, L200, L203</c>] and in NEITHER its DataStore arm
+    /// [<c>:L218-L224</c>] NOR either full-state arm [<c>:L190, L233</c>]. Two independent sightings of
+    /// that asymmetry are the evidence that both are presentational, so their absence here is a
+    /// DOCUMENTED NON-PORT rather than an oversight - and <c>ResetUpdate</c>, which appears in BOTH arms,
+    /// is correspondingly kept.
+    /// </para>
+    /// <para>
+    /// Asserted against the comment-stripped source so the codec's own prose - which discusses every one
+    /// of these names at length in order to explain why it does not use them - cannot satisfy the check.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheCodecCarriesNoPresentationalSurface_UnitLevelNoOracle()
+    {
+        string code = ExecutableLinesOf(LocateFullStateCodecSource());
+
+        foreach (string forbidden in
+            new[]
+            {
+                // The two presentational calls the oracle itself keeps off this path.
+                "SetRedraw", "GroupCalc",
+
+                // Geometry, DPI and font measurement - the deferred half of the three split services.
+                "PX2MM", "MMX2PX", "D2PX", "U2PY", "GetWindowRect", "SetWindowPos", "ShowWindow",
+                "OffsetRect", "Font", "Canvas", "Painter", "Bitmap", "Graphics", "Dpi",
+
+                // The deferred capability areas by name, and their reserved gateway routes.
+                "DesignSystem", "Documents", "Integration", "ScriptBridge",
+                "/v1/design", "/v1/documents", "/v1/integration", "/v1/scripting",
+
+                // A stub of any kind would be a partial implementation of a deferred service.
+                "NotImplementedException",
+            })
+        {
+            Assert.DoesNotContain(forbidden, code, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// C-E - NO FABRICATED DATABASE AND NO SERIALIZER. This codec opens no connection, names no database
+    /// dialect, and hand-rolls neither a JSON nor an XML encoding of the image.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE IMAGE IS A PUBLISHED PROTOBUF MESSAGE, WHICH IS THE WHOLE POINT.</b>
+    /// <c>persistence.v1.CarrierState</c> replaced a private byte format precisely so that DataServices -
+    /// which references the contracts project and nothing else - can produce and consume the payload the
+    /// C-05 and C-06 contracts hand it. A JSON or XML encoding appearing here would be a SECOND,
+    /// unpublished wire format for the same data, and the XML object family is deferred to Documents in
+    /// any case.
+    /// </para>
+    /// <para>
+    /// <b>AND NO DATABASE.</b> The repository evidences exactly one storage engine and exactly one schema,
+    /// and neither has anything to do with moving a captured image between two carriers. SQL Server and
+    /// Oracle appear in this service only as pure-string paging rewriters, with no instance of either
+    /// provisioned; a dialect name in a codec would be a fabricated dependency.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheCodecCarriesNoSerializerAndNoDatabaseType_UnitLevelNoOracle()
+    {
+        string code = ExecutableLinesOf(LocateFullStateCodecSource());
+
+        foreach (string forbidden in
+            new[]
+            {
+                // Serializers, hand-rolled or otherwise.
+                "JsonSerializer", "JsonConvert", "Newtonsoft", "System.Text.Json", "Utf8JsonWriter",
+                "XmlSerializer", "XDocument", "XmlDocument", "XmlReader", "XmlWriter", "XPath",
+                "DataContract", "BinaryFormatter",
+
+                // Connections, commands, contexts and providers.
+                "SqliteConnection", "SqliteCommand", "DbConnection", "DbCommand", "SqlConnection",
+                "IDbConnection", "DbContext", "EntityFrameworkCore", "Microsoft.Data.Sqlite",
+                "SqlClient", "ConnectionString",
+
+                // Dialect names, which would be a fabricated dependency in a codec.
+                "DbtMssql", "DbtOracle", "SqlServer", "Oracle", "Sqlite",
+            })
+        {
+            Assert.DoesNotContain(forbidden, code, StringComparison.Ordinal);
+        }
+
+        // AND THE POSITIVE HALF: the image type it does use is the PUBLISHED contract message, reached
+        // through the contracts namespace rather than through anything local.
+        Assert.Contains("PowerFramework.Contracts.Persistence.V1", code, StringComparison.Ordinal);
+        Assert.Equal(
+            "PowerFramework.Contracts.Persistence.V1",
+            typeof(CarrierState).Namespace);
+    }
+
+    /// <summary>
+    /// The system under test's own source file.
+    /// </summary>
+    /// <returns>The absolute path of <c>Buffers/FullStateCodec.cs</c>.</returns>
+    /// <remarks>
+    /// Same locator shape as <c>LocateQueryTaskSource</c>: the embedded repository root forms the path
+    /// directly when available, and the upward walk out of the test output directory is retained as the
+    /// fallback. The marker is SERVICE relative, so the walk is looking for
+    /// <c>services/persistence-service</c>.
+    /// </remarks>
+    private static string LocateFullStateCodecSource()
+    {
+        if (TestRepositoryRoot.Embedded is { } root)
+        {
+            string direct = Path.Combine(
+                root,
+                "services",
+                "persistence-service",
+                "PowerFramework.Persistence",
+                "Buffers",
+                "FullStateCodec.cs");
+
+            if (File.Exists(direct))
+            {
+                return direct;
+            }
+        }
+
+        DirectoryInfo? probe = new(AppContext.BaseDirectory);
+
+        while (probe is not null)
+        {
+            string candidate = Path.Combine(
+                probe.FullName,
+                "PowerFramework.Persistence",
+                "Buffers",
+                "FullStateCodec.cs");
+
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            probe = probe.Parent;
+        }
+
+        throw new InvalidOperationException(
+            "Buffers/FullStateCodec.cs could not be located from "
+                + $"'{TestRepositoryRoot.SearchStart}'. The two surface-absence assertions read it "
+                + "directly, and passing them without reading it would assert nothing.");
     }
 
     #endregion

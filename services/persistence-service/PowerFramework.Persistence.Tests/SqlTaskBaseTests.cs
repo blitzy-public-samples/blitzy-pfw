@@ -20,23 +20,56 @@
 //    6  the "!" and "?" describe-sentinel normalisation, applied to SNAPSHOTS ONLY
 //    7  the NESTED DBParm parse, which makes NCharBind=1 alone completely inert
 //    8  the database-error event's literal 3, which is not a return code at all
+//    9  the UNANCHORED DBParm patterns, under which DisableBind=10 reads as SET
+//
+//  and the two boundaries that are easy to mistake for leaks and are neither: the IN-PROCESS database
+//  error payload deliberately still carries the generated statement, because the redaction obligation
+//  attaches to the two EXITS - the wire projection and the log record - and masking earlier would
+//  destroy what SQL-preview interception and characterization comparison both need.
 //
 //  plus the two ORDERING contracts - the BACKWARD commit-signal propagation, and OnError's
 //  rollback-before-ancestor - and the hook's decline contract, where E_NO_IMPLEMENTATION means
 //  "not handled, run the default" rather than "failed".
 //
+//  AND FOUR STRUCTURAL GUARANTEES that no behavioural assertion can express, each of which is a
+//  constraint rather than a preference, so each is pinned by a test that fails if it is traded away:
+//
+//    A  the DBParm patterns are the ORACLE'S OWN TEXT, case-insensitive, and declared ONCE     (C-B)
+//    B  the parse uses the BASE CLASS LIBRARY'S regular expressions and pulls in no deferred
+//       capability, so it is not a dependency on the deferred regexp library                   (C-D)
+//    C  the literal generator's interpolated output REACHES ISqlRedactor and is masked there    (C-F)
+//    D  the worker half and its caller-side proxy remain TWO TYPES - the thread-affinity duality
+//       is a contract, not commentary, and flattening it is what AAP 0.4.5.4 forbids            (C-K)
+//
 //  NO DATABASE, NO REAL THREAD, NO NETWORK AND NO DataWindow RUNTIME IS INVOLVED ANYWHERE IN THIS
-//  FILE (C-H). Every collaborator is a hand-written double in this file: the threading substrate,
-//  the caller-side proxy, the pooled transaction, its activator, and the DataWindow runtime. The
-//  clock is a fixed TimeProvider that nothing advances, which is exactly the point - the subject
-//  reads no clock, and a test that needed one would prove otherwise.
+//  FILE (C-E, C-H). Every collaborator is a hand-written double in this file: the threading
+//  substrate, the caller-side proxy, the pooled transaction, its activator, and the DataWindow
+//  runtime. The clock is a fixed TimeProvider that nothing advances, which is exactly the point -
+//  the subject reads no clock, and a test that needed one would prove otherwise. Nothing here
+//  sleeps, waits on real time, or asserts a duration, so two runs produce identical results
+//  (AAP 0.6.7), and nothing here asserts a speed - the datastore cache is pinned by BEHAVIOUR only,
+//  never by a performance claim (AAP 0.8.5).
 //
 //  EVERY VALUE HERE IS SYNTHETIC (C-F). No password, account, host or connection string is copied
 //  from the legacy tree or from any of the catalogued in-source secret sites. The one
 //  password-shaped constant is spelled so it could not be mistaken for a credential.
+//
+//  WHY A FEW SIBLING TYPES ARE NAMED HERE, AND WHY THAT IS NOT A WIDENED DEPENDENCY. Four of the
+//  guarantees above cannot be stated about the base alone, because the property under test IS the
+//  relationship between the base and something else: the rank guard lives on the CALLER-SIDE half,
+//  the injected redactor is a dependency of the DERIVED task that composes statements, `Reset`'s
+//  base-chain can only be observed through a REAL derived override, and "two types, not one" is a
+//  statement about a PAIR. The types involved - SqlTaskProxyBase and the three proxies,
+//  PersistenceSqlTaskProxyHost, and SqlQueryTask / SqlUpdateTask / SqlCommandTask - are all
+//  `internal` members of the SAME PowerFramework.Persistence assembly this project already
+//  references once, so naming them adds no project reference, no package and no edge to the build
+//  graph. It is also the established shape in this folder: SqlCommandTaskProxyTests and
+//  PersistenceTaskCompositionTests reach across the same pair for the same reason.
 // ==============================================================================================
 
 using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
+using System.Text.RegularExpressions;
 
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -44,6 +77,7 @@ using Microsoft.Extensions.Options;
 
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Tasks;
+using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
 using PowerFramework.Shared.Containers;
 
@@ -56,6 +90,20 @@ public sealed class SqlTaskBaseTests
 {
     /// <summary>A synthetic data-object name distinct from the golden-master fixture's.</summary>
     private const string OtherDataObject = "dw_other";
+
+    /// <summary>
+    /// The thread-keyed-data key the datastore cache lives under.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE ORACLE'S OWN SPELLING, ASSERTED RATHER THAN ASSUMED</b> -
+    /// <c>#ParentThread.of_HasData("$SQL.DataStoreCache")</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L531</c>], with the matching
+    /// <c>of_GetData</c> and <c>of_SetData</c> at <c>:L532</c> and <c>:L536</c>. Declared here because
+    /// the subject's own copy is private: the key is part of the observable contract between two tasks
+    /// sharing one thread, so a drift in its spelling would silently give every task its own cache, and
+    /// nothing but a literal comparison would notice.
+    /// </remarks>
+    private const string DataStoreCacheKey = "$SQL.DataStoreCache";
 
     /// <summary>A synthetic filter expression. Invented here; not copied from the legacy tree.</summary>
     private const string SomeFilter = "age > 30";
@@ -183,6 +231,55 @@ public sealed class SqlTaskBaseTests
         Assert.Equal(RetCode.OK, harness.Task.ResetParams());
         Assert.Equal(0, harness.Task.GetParamCount());
         Assert.False(harness.Task.HasParams());
+    }
+
+    [Fact]
+    public void ParameterShape_AcceptsAOneDimensionalArray_AndTheRankGuardLivesOnTheProxy()
+    {
+        // 参数只支持简单类型或简单类型的一维数组 - "parameters support only simple types, or ONE-DIMENSIONAL
+        // arrays of simple types" [n_cst_threading_task_sqlbase.sru:L146]. The oracle splits that rule
+        // across the PROXY PAIR, and the split is the point:
+        //
+        //   * the CALLER-SIDE half refuses the shape up front -
+        //         if UpperBound(value,2) >= 0 then return RetCode.E_INVALID_ARGUMENT   [:L148]
+        //         if UpperBound(value,1) =  0 then return RetCode.E_INVALID_ARGUMENT   [:L149]
+        //   * the WORKER-SIDE half - this subject - stores whatever reached it and renders it, so a
+        //     rank-1 array takes the ARRAY literal path [n_cst_thread_task_sqlbase.sru:L266-L313].
+        using Harness harness = new();
+
+        // ONE-DIMENSIONAL: ACCEPTED by the worker, and the generator takes the ARRAY path for it -
+        // the comma-joined list form rather than a scalar rendering.
+        long[] ages = [30L, 40L, 50L];
+        Assert.Equal(RetCode.OK, harness.Task.AddParam("ages", ages));
+        Assert.Equal(1, harness.Task.GetParamCount());
+
+        object? stored = null;
+        Assert.Equal(RetCode.OK, harness.Task.GetParam("ages", ref stored));
+        Assert.Same(ages, stored);
+        Assert.Equal("30,40,50", SqlTaskBase.ParamToString(ages, (long)DatabaseType.DbtMssql));
+
+        // MULTI-DIMENSIONAL: the worker does NOT recognise it as a parameter array, so it can never be
+        // spliced into a list form. That is what makes the caller-side refusal safe rather than merely
+        // tidy - there is no second path through which a rank-2 array could reach a statement.
+        long[,] grid = new long[2, 2];
+        Assert.NotEqual(
+            "0,0,0,0",
+            SqlTaskBase.ParamToString(grid, (long)DatabaseType.DbtMssql));
+
+        // And the documented refusal itself, executed through the caller-side half so the code is
+        // observed rather than quoted. The rank test runs BEFORE the worker is even consulted, which is
+        // why an unbound host is sufficient here and why no worker, pool or provider is involved.
+        using PersistenceSqlTaskProxyHost proxyHost = new("sqlcommand");
+        using SqlCommandTaskProxy proxy = new(
+            proxyHost,
+            NullLogger<SqlCommandTaskProxy>.Instance,
+            FixedClock.Instance);
+
+        // [:L148] rank 2 or higher.
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, proxy.AddParam("grid", grid));
+
+        // [:L149] the empty variable-size array, whose one-based upper bound is 0.
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, proxy.AddParam("empty", Array.Empty<long>()));
     }
 
     // ==========================================================================================
@@ -331,6 +428,283 @@ public sealed class SqlTaskBaseTests
         Assert.Equal("'abc'", SqlTaskBase.ParamToString("abc", (long)DatabaseType.DbtMssql));
     }
 
+    /// <summary>
+    /// The two dialects crossed with the two temporal arms - the ONLY place in the generator where the
+    /// database type changes the emitted text.
+    /// </summary>
+    /// <returns>The value, the dialect discriminator, and the exact literal the oracle emits.</returns>
+    /// <remarks>
+    /// <para>
+    /// A matrix of its own rather than four more rows on <see cref="ScalarLiterals"/>, because the
+    /// property under test is DIVERGENCE: every other arm of the <c>choose case</c> emits the same text
+    /// in both dialects, and these two do not. Reading them side by side is what makes an accidental
+    /// normalisation - one dialect's form quietly used for both - visible in the test output.
+    /// </para>
+    /// <para>
+    /// The two evidenced discriminators are the only ones the oracle declares:
+    /// <c>DBT_MSSQL = 0</c> and <c>DBT_ORACLE = 1</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61</c>]. <b>SQLite is not in
+    /// that enumeration at all</b>, and no third arm is invented here (constraint C-E): these
+    /// assertions are pure STRING output, which is exactly how AAP 0.6.4 preserves both DBMS
+    /// behaviours without provisioning an instance of either.
+    /// </para>
+    /// <para>
+    /// <b>THE FIRST TYPE ARGUMENT IS DELIBERATELY <c>object</c>, MATCHING <see cref="ScalarLiterals"/>.</b>
+    /// The subject's signature is <c>ParamToString(object? param, long dbType)</c> - it dispatches on the
+    /// RUNTIME type, which is the whole behaviour under test - so a narrower, provably-serializable type
+    /// argument would either need one matrix per arm or a stringly-typed stand-in, and both would hide the
+    /// dispatch. The analyzer's caution about row enumeration does not bite here: every value below is a
+    /// primitive or a BCL date/time type that xunit serializes, and the rows are observably enumerated
+    /// individually in the run output.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<object, long, string> DialectTemporalLiterals() => new()
+    {
+        // [:L321-L326] and [:L355-L360] - `case "date"`. SQL Server takes the plain quoted form ...
+        { new DateOnly(2022, 4, 14), (long)DatabaseType.DbtMssql, "'2022-04-14'" },
+
+        // ... and Oracle wraps it in to_date with a MATCHING model string, lower-cased as the oracle
+        // spells it.
+        {
+            new DateOnly(2022, 4, 14),
+            (long)DatabaseType.DbtOracle,
+            "to_date('2022-04-14','yyyy-mm-dd')"
+        },
+
+        // [:L327-L332] - `case "datetime"`. The Oracle model spells hh24 and mi, NOT hh and mm, and the
+        // difference is not cosmetic: hh would render a 24-hour value against a 12-hour model and mm
+        // would render MINUTES against a MONTH model.
+        {
+            new DateTime(2022, 4, 14, 7, 8, 9, DateTimeKind.Unspecified),
+            (long)DatabaseType.DbtMssql,
+            "'2022-04-14 07:08:09'"
+        },
+        {
+            new DateTime(2022, 4, 14, 7, 8, 9, DateTimeKind.Unspecified),
+            (long)DatabaseType.DbtOracle,
+            "to_date('2022-04-14 07:08:09','yyyy-mm-dd hh24:mi:ss')"
+        },
+
+        // A late hour, so a 12-versus-24-hour slip cannot pass. 23:00 rendered against a 12-hour model
+        // would read 11:00, and both rows below would still "look like a time".
+        {
+            new DateTime(2023, 12, 31, 23, 59, 58, DateTimeKind.Unspecified),
+            (long)DatabaseType.DbtMssql,
+            "'2023-12-31 23:59:58'"
+        },
+        {
+            new DateTime(2023, 12, 31, 23, 59, 58, DateTimeKind.Unspecified),
+            (long)DatabaseType.DbtOracle,
+            "to_date('2023-12-31 23:59:58','yyyy-mm-dd hh24:mi:ss')"
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(DialectTemporalLiterals))]
+    public void ParamToString_Temporal_DivergesByDialect_ByteForByte(
+        object value,
+        long dbType,
+        string expected)
+    {
+        string actual = SqlTaskBase.ParamToString(value, dbType)!;
+
+        // ORDINAL, EXPLICITLY. The default equality for two strings is already ordinal, and saying so
+        // here is not redundant: these literals are byte-exact parity artefacts that travel inside
+        // generated statements, so a culture-sensitive or case-insensitive comparison would let a
+        // model-string casing drift - `YYYY-MM-DD` for `yyyy-mm-dd` - pass unnoticed.
+        Assert.Equal(expected, actual, StringComparer.Ordinal);
+
+        // The same fact stated as a length-and-content check, which catches a trailing space that an
+        // eyeballed comparison misses.
+        Assert.Equal(expected.Length, actual.Length);
+    }
+
+    [Fact]
+    public void ParamToString_Temporal_TheTwoDialectsNeverAgree()
+    {
+        // The guard against the one mistake this matrix exists to catch: a port that renders both
+        // dialects through one branch passes every row above only if the two expected strings are equal,
+        // and they are not. Asserted directly so the matrix cannot be defeated by a copy-paste.
+        DateOnly date = new(2022, 4, 14);
+        DateTime moment = new(2022, 4, 14, 7, 8, 9, DateTimeKind.Unspecified);
+
+        Assert.NotEqual(
+            SqlTaskBase.ParamToString(date, (long)DatabaseType.DbtMssql),
+            SqlTaskBase.ParamToString(date, (long)DatabaseType.DbtOracle),
+            StringComparer.Ordinal);
+
+        Assert.NotEqual(
+            SqlTaskBase.ParamToString(moment, (long)DatabaseType.DbtMssql),
+            SqlTaskBase.ParamToString(moment, (long)DatabaseType.DbtOracle),
+            StringComparer.Ordinal);
+
+        // Whereas the NON-temporal arms are dialect-invariant, which is the other half of the same
+        // statement - the divergence is confined to date and datetime and appears nowhere else.
+        Assert.Equal(
+            SqlTaskBase.ParamToString("O'Brien", (long)DatabaseType.DbtMssql),
+            SqlTaskBase.ParamToString("O'Brien", (long)DatabaseType.DbtOracle),
+            StringComparer.Ordinal);
+        Assert.Equal(
+            SqlTaskBase.ParamToString(new TimeOnly(23, 59, 59), (long)DatabaseType.DbtMssql),
+            SqlTaskBase.ParamToString(new TimeOnly(23, 59, 59), (long)DatabaseType.DbtOracle),
+            StringComparer.Ordinal);
+        Assert.Equal(
+            SqlTaskBase.ParamToString(1500.00m, (long)DatabaseType.DbtMssql),
+            SqlTaskBase.ParamToString(1500.00m, (long)DatabaseType.DbtOracle),
+            StringComparer.Ordinal);
+    }
+
+    // ==========================================================================================
+    //  SUITE 2b - THE GENERATOR'S OUTPUT AND ITS REDACTION OBLIGATION  (constraint C-F)
+    //
+    //  WHY THIS BELONGS BESIDE THE GENERATOR RATHER THAN IN A REDACTOR SUITE. AAP 0.6.4 traces the
+    //  injection exposure to one mechanism: DisableBind=1 means the runtime does not use bind
+    //  variables, so VALUES ARE INTERPOLATED INTO STATEMENT TEXT AS LITERALS. The generator above is
+    //  where that interpolation happens, so it is also where a caller's data first becomes part of a
+    //  string that a database error will later carry in its `sqlsyntax` member - and the legacy logger
+    //  performs NO redaction at all. The obligation is therefore the generator's neighbour, and the
+    //  assertions below prove the seam is reached rather than merely available.
+    //
+    //  WHAT IS DELIBERATELY NOT ASSERTED (constraint C-B). Nothing here asserts that the generator
+    //  REFUSES hostile input, escapes more than the oracle escapes, or rewrites a suspicious literal.
+    //  Preserving the interpolation IS the requirement; the mitigation is internal parameterization
+    //  plus redaction, both of which are asserted, and neither of which changes the observable text.
+    // ==========================================================================================
+
+    [Fact]
+    public void TheGeneratorsInterpolatedOutput_ReachesTheRedactorSeamVerbatim_AndIsMaskedThere()
+    {
+        using Harness harness = new();
+
+        // Three literals from three different arms of the generator, so no single arm carries the test.
+        harness.Task.AddParam("name", "O'Brien");
+        harness.Task.AddParam("salary", 1500.00m);
+        harness.Task.AddParam("birth", new DateOnly(1990, 1, 2));
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "UPDATE COMPANY SET salary = :salary, birth = :birth WHERE name = :name",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        // The generator really did interpolate - each literal is present in the OBSERVABLE text, in the
+        // oracle's own form, doubled quote included.
+        Assert.Contains("'O''Brien'", bound.ObservableText, StringComparison.Ordinal);
+        Assert.Contains("1500.00", bound.ObservableText, StringComparison.Ordinal);
+        Assert.Contains("'1990-01-02'", bound.ObservableText, StringComparison.Ordinal);
+
+        // ... while the text that actually EXECUTES carries provider placeholders and none of the three.
+        Assert.DoesNotContain("O''Brien", bound.ParameterizedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("1990-01-02", bound.ParameterizedText, StringComparison.Ordinal);
+        Assert.Equal(3, bound.Parameters.Count);
+
+        // THE SEAM. RecordingSqlRedactor is the ISqlRedactor double from TestDoubles.cs, and it answers
+        // two questions at once: WHAT was presented, and WHAT came back.
+        RecordingSqlRedactor seam = new();
+        string published = seam.Redact(bound.ObservableText);
+
+        // Presented exactly once, and VERBATIM - a seam that saw a truncated or pre-scrubbed statement
+        // would be redacting something other than what the generator produced.
+        Assert.Equal(1, seam.CallCount);
+        Assert.Equal(bound.ObservableText, seam.LastStatement);
+        Assert.True(seam.Observed(bound.ObservableText));
+        Assert.Equal(1, seam.OrdinalOf(bound.ObservableText));
+
+        // And nothing the generator interpolated survives the seam.
+        Assert.Equal(RecordingSqlRedactor.MaskedMarker, published);
+        Assert.DoesNotContain("O''Brien", published, StringComparison.Ordinal);
+        Assert.DoesNotContain("1500.00", published, StringComparison.Ordinal);
+        Assert.DoesNotContain("1990-01-02", published, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheGeneratorsInterpolatedOutput_NeverLeavesTheProcessThroughADatabaseError()
+    {
+        // The production path, end to end: generate the interpolated statement, hand it to the database
+        // error event, and read BOTH copies that leave the process - the wire payload the proxy receives
+        // and the log record the sink writes. Neither may carry a literal.
+        RecordingTaskLogger log = new();
+        using Harness harness = new(logger: log);
+
+        harness.Task.AddParam("name", "O'Brien");
+        harness.Task.AddParam("salary", 1500.00m);
+
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.CallBindParams(
+                "UPDATE COMPANY SET salary = :salary WHERE name = :name",
+                (long)DatabaseType.DbtMssql,
+                out SqlBoundStatement bound));
+
+        // [:L85-L98] the event's own signature carries the statement, so this is the real hand-off.
+        Assert.Equal(
+            3L,
+            harness.Task.OnDbError(-1L, "unit-test provider text", bound.ObservableText, DwBuffer.Primary, 7L));
+
+        // THE IN-PROCESS PAYLOAD STILL CARRIES THE LITERALS, AND THAT IS THE DESIGN RATHER THAN A LEAK.
+        // Masking here would destroy the information the SQL-preview interception and the
+        // characterization comparison both need, and this payload has not left the process: it travelled
+        // from the worker half to the caller-side proxy, in memory. The obligation attaches to the two
+        // EXITS, and both are asserted below.
+        DbErrorData inProcess = Assert.Single(harness.Proxy.Errors);
+        Assert.Contains("'O''Brien'", inProcess.SqlSyntax, StringComparison.Ordinal);
+        Assert.Contains("1500.00", inProcess.SqlSyntax, StringComparison.Ordinal);
+
+        // EXIT 1 - THE WIRE. The only sanctioned projection masks unconditionally and takes no policy
+        // argument a call site could weaken, so every literal the generator interpolated is gone while
+        // the statement's SHAPE survives and stays diagnosable.
+        DbError wire = inProcess.ToDbError();
+        Assert.DoesNotContain("O''Brien", wire.Sqlsyntax, StringComparison.Ordinal);
+        Assert.DoesNotContain("Brien", wire.Sqlsyntax, StringComparison.Ordinal);
+        Assert.DoesNotContain("1500.00", wire.Sqlsyntax, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, wire.Sqlsyntax, StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE COMPANY SET salary = ", wire.Sqlsyntax, StringComparison.Ordinal);
+
+        // EXIT 2 - THE LOG RECORD, which is a SECOND, INDEPENDENT copy of the same statement and is the
+        // one the legacy wrote with no redaction at all.
+        string record = Assert.Single(harness.Log.Records);
+        Assert.DoesNotContain("O''Brien", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("Brien", record, StringComparison.Ordinal);
+        Assert.DoesNotContain("1500.00", record, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, record, StringComparison.Ordinal);
+
+        // An attached exception would be rendered in full by every provider and would republish whatever
+        // the formatted text was careful to mask, so there must not be one.
+        Assert.Null(Assert.Single(harness.Log.Exceptions));
+    }
+
+    [Fact]
+    public void TheRedactorIsAConstructorDependencyOfEveryTaskThatCarriesStatementText()
+    {
+        // C-F, STATED STRUCTURALLY. The base's own error path reaches the seam through the shared
+        // singleton, which cannot be swapped out and therefore cannot be forgotten. The derived task
+        // that composes statements - and so owns the statement text a caller can observe - takes the
+        // seam as a CONSTRUCTOR PARAMETER, which means an instance of it cannot exist without one.
+        // Asserted rather than assumed, because an optional-with-a-default spelling would compile
+        // identically and silently permit a task with no redaction at all.
+        ConstructorInfo[] constructors = typeof(SqlQueryTask)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        Assert.NotEmpty(constructors);
+        Assert.All(
+            constructors,
+            constructor =>
+            {
+                ParameterInfo redactor = Assert.Single(
+                    constructor.GetParameters(),
+                    parameter => parameter.ParameterType == typeof(ISqlRedactor));
+
+                // Not optional, so there is no spelling of the call that omits it.
+                Assert.False(redactor.IsOptional);
+                Assert.False(redactor.HasDefaultValue);
+            });
+
+        // And the singleton the base itself uses is a real ISqlRedactor rather than a bare formatter, so
+        // the two paths share one contract.
+        Assert.IsType<ISqlRedactor>(SqlRedactor.Instance, exactMatch: false);
+    }
+
     // ==========================================================================================
     //  SUITE 3 - THE PER-THREAD DATASTORE CACHE  [n_cst_thread_task_sqlbase.sru:L527-L571]
     //  Including the defect this whole file exists to stop anybody from "fixing".
@@ -353,7 +727,7 @@ public sealed class SqlTaskBaseTests
         Assert.Same(harness.Task, store.Carrier.ParentTask);
 
         // The entry really is in the thread's keyed data, under the oracle's own key [:L536].
-        OrderedMap cache = Assert.IsType<OrderedMap>(harness.Host.GetData("$SQL.DataStoreCache"));
+        OrderedMap cache = Assert.IsType<OrderedMap>(harness.Host.GetData(DataStoreCacheKey));
         Assert.True(cache.Exists(DwSqliteFixture.DataObjectName));
     }
 
@@ -537,12 +911,98 @@ public sealed class SqlTaskBaseTests
 
         OrderedMap cache = new();
         Assert.True(cache.Add(DwSqliteFixture.DataObjectName, "not a cache record"));
-        harness.Host.SetData("$SQL.DataStoreCache", cache);
+        harness.Host.SetData(DataStoreCacheKey, cache);
 
         ISqlDataStore store = harness.Task.CallGetCacheDataStore(DwSqliteFixture.DataObjectName);
 
         Assert.Equal(DwSqliteFixture.RetrieveStatement, store.GetSqlSelect());
         Assert.IsType<CachedDataStore>(cache.Get(DwSqliteFixture.DataObjectName));
+    }
+
+    [Fact]
+    public void GetCacheDataStore_IsKeyedByDataObjectNameOverAnOrderedMap_InInsertionOrder()
+    {
+        // [:L527] `public function n_cst_thread_task_sqlbase_ds of_getcacheds(readonly string dataobject)`
+        // and [:L536-L539] `mapCache = ... of_GetData("$SQL.DataStoreCache") ... mapCache.Exists(dataObject)`.
+        // The KEY IS THE DATA-OBJECT NAME and the container is the ordered map, not a plain dictionary -
+        // n_map records INSERTION ORDER and exposes it positionally [n_map.sru:L11-L12], and the port
+        // keeps both properties.
+        using Harness harness = new();
+
+        ISqlDataStore fixtureStore = harness.Task.CallGetCacheDataStore(DwSqliteFixture.DataObjectName);
+        ISqlDataStore otherStore = harness.Task.CallGetCacheDataStore(OtherDataObject);
+
+        Assert.True(harness.Host.HasData(DataStoreCacheKey));
+        OrderedMap cache = Assert.IsType<OrderedMap>(harness.Host.GetData(DataStoreCacheKey));
+
+        // Keyed BY NAME - present for the two names asked for, absent for one never asked for.
+        Assert.Equal(2UL, cache.Count());
+        Assert.True(cache.Exists(DwSqliteFixture.DataObjectName));
+        Assert.True(cache.Exists(OtherDataObject));
+        Assert.False(cache.Exists("dw_never_requested"));
+
+        // ORDERED, and ONE-BASED, exactly as n_map reports it. A dictionary would satisfy the lookups
+        // above and answer nothing here.
+        Assert.Equal(DwSqliteFixture.DataObjectName, cache.GetKey(1));
+        Assert.Equal(OtherDataObject, cache.GetKey(2));
+        Assert.Equal(string.Empty, cache.GetKey(0));
+        Assert.Equal(string.Empty, cache.GetKey(3));
+
+        // The positional read reaches the SAME entries as the keyed read.
+        Assert.Same(cache.Get(DwSqliteFixture.DataObjectName), cache.Get(1));
+        Assert.Same(cache.Get(OtherDataObject), cache.Get(2));
+
+        // [:L561] the entry holds the STORE ITSELF, so the handed-out store and the cached one are one
+        // object rather than two views of the same definition.
+        CachedDataStore fixtureEntry = Assert.IsType<CachedDataStore>(
+            cache.Get(DwSqliteFixture.DataObjectName));
+        Assert.Same(fixtureStore, fixtureEntry.DataStore);
+
+        CachedDataStore otherEntry = Assert.IsType<CachedDataStore>(cache.Get(OtherDataObject));
+        Assert.Same(otherStore, otherEntry.DataStore);
+        Assert.NotSame(fixtureEntry.DataStore, otherEntry.DataStore);
+
+        // [:L560, :L562, :L564] the three snapshots are the definition as it stood at insertion, with the
+        // two describe sentinels already normalised.
+        Assert.Equal(DwSqliteFixture.RetrieveStatement, fixtureEntry.OrigSql);
+        Assert.Equal(DwSqliteFixture.SortExpression, fixtureEntry.OrigSort);
+        Assert.Equal(string.Empty, fixtureEntry.OrigFilter);
+    }
+
+    [Fact]
+    public void GetCacheDataStore_HoldsLiveCarrierReferences_NotCopiesOfCarrierState()
+    {
+        // WHY THIS IS A SEPARATE ASSERTION FROM "the same store". A cache that handed back an equal but
+        // distinct carrier would still pass every Same() check on the STORE while silently giving each
+        // caller its own buffers - and the whole reason the legacy caches at all is that the datastore,
+        // its buffers and its item statuses are the state being reused [:L540-L551]. The legacy holds a
+        // POINTER in `cacheDS.ds`, so the port must hold a live reference too.
+        using Harness harness = new();
+
+        ISqlDataStore first = harness.Task.CallGetCacheDataStore(DwSqliteFixture.DataObjectName);
+        DataWindowCarrier firstCarrier = first.Carrier;
+
+        OrderedMap cache = Assert.IsType<OrderedMap>(harness.Host.GetData(DataStoreCacheKey));
+        CachedDataStore entry = Assert.IsType<CachedDataStore>(
+            cache.Get(DwSqliteFixture.DataObjectName));
+
+        // The cached entry's store and the handed-out store share ONE carrier instance.
+        Assert.Same(firstCarrier, entry.DataStore.Carrier);
+
+        // And so does the store the HIT path hands back on the next call.
+        ISqlDataStore second = harness.Task.CallGetCacheDataStore(DwSqliteFixture.DataObjectName);
+        Assert.Same(first, second);
+        Assert.Same(firstCarrier, second.Carrier);
+
+        // Mutation through one handle is visible through the other, which is what "live reference"
+        // means and what a defensive copy would break. The init event re-runs on every call [:L568], so
+        // the carrier's parent association is re-established rather than duplicated.
+        Assert.Same(harness.Task, firstCarrier.ParentTask);
+        Assert.Same(harness.Task, second.Carrier.ParentTask);
+
+        // A DIFFERENT name gets its own carrier - the sharing is per key, never global.
+        ISqlDataStore other = harness.Task.CallGetCacheDataStore(OtherDataObject);
+        Assert.NotSame(firstCarrier, other.Carrier);
     }
 
     // ==========================================================================================
@@ -584,6 +1044,264 @@ public sealed class SqlTaskBaseTests
         Assert.Equal(RetCode.OK, harness.Task.SetTransData(Descriptor("DisableBind=1")));
 
         Assert.False(harness.Task.IsNCharBindingEnabled());
+    }
+
+    /// <summary>
+    /// The complete <c>DBParm</c> flag matrix: the four combinations of the two flags, the spellings the
+    /// oracle's own patterns admit, and the values they refuse.
+    /// </summary>
+    /// <returns>The <c>DBParm</c> string, and the national-character flag it must resolve to.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE ORACLE'S CONDITION IS NESTED, AND THE NESTING IS THE CONTRACT (constraint C-B)</b>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L127-L132</c>]:
+    /// </para>
+    /// <code>
+    /// _bNCharBinding = false                                                              [:L127]
+    /// if RegExpFind(_transData.DBParm,"DisableBind\s*=\s*(0|1)",2,true) = "1" then        [:L128]
+    ///     if RegExpFind(_transData.DBParm,"NCharBind\s*=\s*(0|1)",2,true) = "1" then      [:L129]
+    ///         _bNCharBinding = true                                                       [:L130]
+    /// </code>
+    /// <para>
+    /// The row that matters most is <c>DisableBind=0</c> with <c>NCharBind=1</c>. A port that treats the
+    /// two flags as INDEPENDENT answers <see langword="true"/> there and passes every other row in this
+    /// matrix, which is precisely why the row is here: <c>NCharBind=1</c> on its own is legal and
+    /// COMPLETELY INERT, and honouring it would change the generated statement for every caller who set
+    /// it without the first flag.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE FIRST FLAG MATTERS AT ALL, AND IT IS A SECURITY FACT (AAP 0.2.1.4, 0.6.4; C-K).</b>
+    /// <c>DisableBind=1</c> means PowerBuilder DOES NOT USE BIND VARIABLES - parameter values are
+    /// INTERPOLATED INTO THE STATEMENT TEXT AS LITERALS, which is the mechanical root of the
+    /// SQL-injection exposure AAP 0.6.4 analyses and the reason the literal generator exists at all. The
+    /// .NET implementation parameterizes INTERNALLY while preserving the observable generated statement
+    /// byte for byte, and redacts the statement before any diagnostic leaves the process; this matrix
+    /// pins the FLAG PARSE only, and asserts nothing about how the statement is executed. <b>The
+    /// exposure is DOCUMENTED, not corrected (constraint C-B).</b>
+    /// </para>
+    /// <para>
+    /// <b>Every string below is synthetic (constraint C-F).</b> None carries a password, an account, a
+    /// host or anything copied from the legacy tree or from a catalogued in-source secret site; the
+    /// realistic multi-parameter row is built from <c>unit-test-</c> sentinels and deliberately omits any
+    /// credential-shaped parameter entirely.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<string, bool> NCharBindingMatrix() => new()
+    {
+        // --- the four combinations of the nested condition -------------------------------------
+        // BOTH set: [:L128] passes, [:L129] passes, [:L130] fires. The ONLY true arm.
+        { "DisableBind=1;NCharBind=1", true },
+
+        // Bind disabled but national-character binding off: [:L128] passes, [:L129] fails.
+        { "DisableBind=1;NCharBind=0", false },
+
+        // ⚠ THE ROW AN INDEPENDENT-FLAGS PORT GETS WRONG. [:L128] fails, so [:L129] IS NEVER REACHED
+        // and NCharBind=1 is inert. A flat `disableBind && nCharBind` computes the same answer here by
+        // coincidence; a port that honours NCharBind on its own does not.
+        { "DisableBind=0;NCharBind=1", false },
+
+        // NEITHER present: [:L127] alone decides, and it decides false.
+        { "", false },
+
+        // --- the spellings the oracle's patterns admit -----------------------------------------
+        // The fourth RegExpFind argument is `true` - IGNORE CASE - so every casing matches [:L128-L129].
+        { "disablebind=1;ncharbind=1", true },
+        { "DISABLEBIND=1;NCHARBIND=1", true },
+        { "DiSaBlEbInD=1;nChArBiNd=1", true },
+
+        // `\s*` on BOTH sides of the `=`, so any run of whitespace - including none - is tolerated.
+        { "DisableBind = 1;NCharBind = 1", true },
+        { "DisableBind  =  1;NCharBind  =  1", true },
+        { "disablebind =1;NCharBind= 1", true },
+
+        // A tab is whitespace to `\s*` just as a space is.
+        { "DisableBind\t=\t1;NCharBind\t=\t1", true },
+
+        // Casing and whitespace together, which is how a hand-edited connection string actually looks.
+        { "  DISABLEBIND   =   1  ;  ncharbind   =   1  ", true },
+
+        // --- a REALISTIC multi-parameter DBParm string, not a flag in isolation ----------------
+        // The flags are found by SEARCH rather than by position, so neighbouring parameters, quoted
+        // values and a trailing parameter are all irrelevant. Note StaticBind - a DIFFERENT parameter
+        // whose name ends in the same word - is not mistaken for either flag.
+        {
+            "Provider='unit-test-provider';DisableBind=1;StaticBind=0;NCharBind=1;DelimitIdentifier='No'",
+            true
+        },
+        {
+            "Provider='unit-test-provider';StaticBind=1;NCharBind=1;DelimitIdentifier='No'",
+            false
+        },
+        {
+            "ConnectString='DSN=unit-test-dsn';DisableBind = 1;NCharBind = 0;CommitOnDisconnect='No'",
+            false
+        },
+
+        // --- only 0 and 1 are recognised, because the capture group is literally `(0|1)` --------
+        // `DisableBind=2` produces NO MATCH, so the captured text is not "1" and [:L128] falls through.
+        { "DisableBind=2;NCharBind=1", false },
+        { "DisableBind=1;NCharBind=2", false },
+        { "DisableBind=yes;NCharBind=yes", false },
+        { "DisableBind=;NCharBind=", false },
+
+        // ⚠ PRESERVED QUIRK, NOT A DEFECT TO FIX (constraint C-B). The patterns are UNANCHORED on the
+        // right, so `=10` matches the LEADING `1` and the flag reads as set - exactly as the oracle's own
+        // RegExpFind does with the same pattern. Anchoring the patterns would change the answer for this
+        // input, which is a behavioural change dressed as a correction.
+        { "DisableBind=10;NCharBind=10", true },
+    };
+
+    [Theory]
+    [MemberData(nameof(NCharBindingMatrix))]
+    public void SetTransData_ResolvesTheNestedFlagPair_AcrossTheWholeMatrix(string dbParm, bool expected)
+    {
+        using Harness harness = new();
+
+        Assert.Equal(RetCode.OK, harness.Task.SetTransData(Descriptor(dbParm)));
+
+        // The task's two spellings of one backing field [:L524] - both must agree, because the carrier
+        // reaches the same fact through the parent-task contract while derived tasks call the function.
+        Assert.Equal(expected, harness.Task.IsNCharBindingEnabled());
+        Assert.Equal(expected, harness.Task.IsNCharBinding);
+
+        // And the descriptor resolves it identically on its own, which is what proves there is ONE parse
+        // rather than two that can drift apart.
+        Assert.Equal(expected, harness.Task.GetTransData().IsNCharBindingEnabled);
+    }
+
+    [Theory]
+    [MemberData(nameof(NCharBindingMatrix))]
+    public void TheDescriptorsFlagPairIsResolvedInOnePass_AndTheNestingIsVisibleInIt(
+        string dbParm,
+        bool expected)
+    {
+        // The same matrix through the ONE-PASS resolver the task actually calls, so the two out-parameters
+        // can be read together. Reading them together is what makes the SUBORDINATION observable: the
+        // second is false whenever the first is, no matter what the string says.
+        TransactionData descriptor = Descriptor(dbParm);
+
+        descriptor.ResolveDbParmFlags(out bool isBindDisabled, out bool isNCharBindingEnabled);
+
+        Assert.Equal(expected, isNCharBindingEnabled);
+        Assert.Equal(descriptor.IsBindDisabled, isBindDisabled);
+
+        // [:L129] is INSIDE [:L128], so the national-character flag can never outrun the bind flag.
+        if (isNCharBindingEnabled)
+        {
+            Assert.True(isBindDisabled);
+        }
+    }
+
+    [Fact]
+    public void TheDbParmFlagsAreParsedOnceByTheDescriptor_NotAgainByTheTask()
+    {
+        // [:L127-L132] IS ONE SITE IN THE ORACLE, AND IT IS ONE SITE HERE. A second parser - a private
+        // regex on the task, say - would compute the same answer today and be free to drift tomorrow,
+        // and the flat-conjunction mistake would then only have to be made in one of the two copies.
+        // Asserted structurally, because no behavioural test can distinguish one parse from two that
+        // currently agree.
+        MethodInfo[] taskRegexMembers = [.. typeof(SqlTaskBase)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(static method => method.ReturnType == typeof(Regex))];
+
+        Assert.Empty(taskRegexMembers);
+
+        Assert.DoesNotContain(
+            typeof(SqlTaskBase)
+                .GetFields(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly),
+            static field => field.FieldType == typeof(Regex));
+
+        // The descriptor owns exactly TWO patterns - one per flag - and no more.
+        MethodInfo[] patterns = [.. typeof(TransactionData)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(static method => method.ReturnType == typeof(Regex))];
+
+        Assert.Equal(2, patterns.Length);
+    }
+
+    [Fact]
+    public void TheDbParmPatternsAreTheOraclesOwnTextAndAreCaseInsensitive()
+    {
+        // BYTE-EXACT PATTERN PARITY with [:L128-L129]. The pattern text is the specification here, so it
+        // is compared as text rather than inferred from behaviour: a pattern that had been "tidied" -
+        // `\s*=\s*` widened to `\s*=\s*\d`, or the group turned into `([01])` - would still pass the
+        // behavioural matrix above for every input in it while accepting inputs the oracle refuses.
+        IReadOnlyDictionary<string, string> expected = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DisableBind"] = @"DisableBind\s*=\s*(0|1)",
+            ["NCharBind"] = @"NCharBind\s*=\s*(0|1)",
+        };
+
+        MethodInfo[] patterns = [.. typeof(TransactionData)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(static method => method.ReturnType == typeof(Regex))];
+
+        Assert.Equal(expected.Count, patterns.Length);
+
+        List<string> observed = [];
+        foreach (MethodInfo pattern in patterns)
+        {
+            // exactMatch: false because a source-generated pattern is a SUBCLASS of Regex - the generated
+            // type lives in this assembly while the engine it inherits is the base class library's.
+            Regex compiled = Assert.IsType<Regex>(pattern.Invoke(null, null), exactMatch: false);
+
+            observed.Add(compiled.ToString());
+
+            // The fourth RegExpFind argument, `true`, is IGNORE CASE - and it is the reason every casing
+            // row in the matrix above passes.
+            Assert.True(compiled.Options.HasFlag(RegexOptions.IgnoreCase));
+
+            // Exactly one capture group: the `(0|1)` the oracle reads at its index 2.
+            Assert.Equal(1, compiled.GetGroupNumbers().Length - 1);
+        }
+
+        Assert.Equal(
+            expected.Values.Order(StringComparer.Ordinal),
+            observed.Order(StringComparer.Ordinal),
+            StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void TheDbParmParseUsesOnlyTheBaseClassLibrarysRegularExpressions()
+    {
+        // ============================================================================================
+        //  CONSTRAINT C-D - AND THIS IS THE FILE'S ONLY DEFERRED-CAPABILITY QUESTION.
+        //  AAP 0.2.1.4 records `regexpfind` as NOT a library dependency: its single in-scope use is
+        //  this DBParm parse [n_cst_thread_task_sqlbase.sru:L128-L129], and that use is satisfied by
+        //  System.Text.RegularExpressions. The deferred `pfw.utility.regexp` library therefore has NO
+        //  in-scope consumer, which is why it stays wholly assigned to Documents. Asserted here so a
+        //  later "shared regex helper" cannot quietly reintroduce the coupling the mapping removed.
+        // ============================================================================================
+        Assembly persistence = typeof(SqlTaskBase).Assembly;
+
+        // The regular-expression type itself is the BCL's, from the BCL's own assembly.
+        Assert.Equal("System.Text.RegularExpressions", typeof(Regex).Assembly.GetName().Name);
+
+        // The source-generated patterns DERIVE from that BCL type, so the engine doing the matching is
+        // the BCL's engine even though the generated subclass lives in this assembly.
+        MethodInfo[] patterns = [.. typeof(TransactionData)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(static method => method.ReturnType == typeof(Regex))];
+
+        Assert.NotEmpty(patterns);
+        Assert.All(
+            patterns,
+            pattern => Assert.IsType<Regex>(pattern.Invoke(null, null), exactMatch: false));
+
+        // NOTHING NAMED FOR A DEFERRED SERVICE IS REFERENCED. The four deferred capability areas are
+        // DesignSystem, Documents, Integration and ScriptBridge; none is built in this phase, so no
+        // assembly named for one can exist to be referenced, and the regexp library that would have
+        // carried this parse belongs to Documents.
+        string[] deferred = ["DesignSystem", "Documents", "Integration", "ScriptBridge", "Regexp"];
+        IEnumerable<string> referenced = persistence
+            .GetReferencedAssemblies()
+            .Select(static reference => reference.Name ?? string.Empty);
+
+        Assert.All(
+            referenced,
+            name => Assert.All(
+                deferred,
+                capability => Assert.DoesNotContain(capability, name, StringComparison.OrdinalIgnoreCase)));
     }
 
     [Fact]
@@ -689,6 +1407,180 @@ public sealed class SqlTaskBaseTests
         // earlier one, and a blank name is rejected outright.
         Assert.Equal(RetCode.E_BUSY, harness.HookActivator.Register("my_hook", () => new DecliningHook()));
         Assert.Equal(RetCode.E_INVALID_ARGUMENT, harness.HookActivator.Register(" ", () => new DecliningHook()));
+    }
+
+    [Fact]
+    public void ISqlRetrievalHookIsASingleMethodContract_ShapedLikeTheOraclesOneEvent()
+    {
+        // ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_hook.sru is TWENTY-TWO LINES and
+        // declares exactly ONE member:
+        //
+        //   event type long onretrieve(
+        //       n_cst_thread_task_sqlbase task, n_cst_thread_trans transobject, datastore data)
+        //
+        // The contract's SHAPE is the contract - a hook is an extension point a deployment implements, so
+        // any member added here becomes a new obligation on every implementor and any parameter dropped
+        // takes information away from all of them. Asserted structurally because no behavioural test can
+        // notice a second member that nothing calls yet.
+        MethodInfo onRetrieve = Assert.Single(typeof(ISqlRetrievalHook).GetMethods());
+
+        Assert.Equal(nameof(ISqlRetrievalHook.OnRetrieve), onRetrieve.Name);
+
+        // `event type long` - the oracle's return is a long, and it carries a ROW COUNT on the handled
+        // arm rather than a return code, which is why it is not narrowed to an enum.
+        Assert.Equal(typeof(long), onRetrieve.ReturnType);
+
+        // The three parameters, in the oracle's own order: task, transaction, carrier.
+        ParameterInfo[] parameters = onRetrieve.GetParameters();
+        Assert.Equal(3, parameters.Length);
+        Assert.Equal(typeof(SqlTaskBase), parameters[0].ParameterType);
+        Assert.Equal(typeof(IPooledTransaction), parameters[1].ParameterType);
+        Assert.Equal(typeof(DataWindowCarrier), parameters[2].ParameterType);
+
+        // None of the three is optional, so no implementor can be handed fewer than the oracle hands.
+        Assert.All(parameters, parameter => Assert.False(parameter.IsOptional));
+
+        // ONE member means one METHOD and nothing else - no property, no event, no nested contract.
+        Assert.Empty(typeof(ISqlRetrievalHook).GetProperties());
+        Assert.Empty(typeof(ISqlRetrievalHook).GetEvents());
+        Assert.Empty(typeof(ISqlRetrievalHook).GetInterfaces());
+    }
+
+    /// <summary>
+    /// Every answer a hook can give, and whether it means "not handled - run the default retrieval".
+    /// </summary>
+    /// <returns>The hook's answer, and the expected decline verdict.</returns>
+    /// <remarks>
+    /// <para>
+    /// The port of the oracle's two-arm test
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L761</c>]:
+    /// </para>
+    /// <code>
+    /// if IsNull(nRowCnt) or nRowCnt = RetCode.E_NO_IMPLEMENTATION then  ... default retrieval ...
+    /// </code>
+    /// <para>
+    /// <b>EXACTLY TWO VALUES DECLINE, AND EVERY OTHER VALUE - INCLUDING EVERY FAILURE CODE - MEANS THE
+    /// HOOK HANDLED IT.</b> The trap the matrix closes is the neighbouring constant:
+    /// <see cref="RetCode.E_NO_SUPPORT"/> is <c>-2000</c> and
+    /// <see cref="RetCode.E_NO_IMPLEMENTATION"/> is <c>-2001</c>, they read almost identically, and only
+    /// the second declines. Treating both as a decline would silently run the default retrieval after a
+    /// hook that reported it could not support the request at all.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<long?, bool> HookAnswers() => new()
+    {
+        // --- the two declining answers -----------------------------------------------------------
+        // `IsNull(nRowCnt)` - no hook ran, which is the SetNull arm at [sqlquery:L759].
+        { null, true },
+
+        // The one sanctioned decline value.
+        { RetCode.E_NO_IMPLEMENTATION, true },
+
+        // --- every other answer means HANDLED ----------------------------------------------------
+        // A ROW COUNT, which is what a hook that really retrieved returns. Note there is no row-count
+        // row for 0 or 1 separate from the two constants below: 0 IS RetCode.OK and 1 IS RetCode.PREVENT,
+        // one value each, and that collision is itself the reason the decline test compares against ONE
+        // named constant rather than reasoning about sign or success.
+        { 42L, false },
+
+        // Zero rows retrieved - a legitimate result and emphatically not a decline - which is the same
+        // value as the success constant.
+        { RetCode.OK, false },
+
+        // One row retrieved, which is the same value as the veto constant.
+        { RetCode.PREVENT, false },
+
+        // Failure codes: a hook that FAILED still handled the request, so the default must NOT run and
+        // silently overwrite its outcome.
+        { RetCode.FAILED, false },
+        { RetCode.CANCELLED, false },
+        { RetCode.E_DB_ERROR, false },
+        { RetCode.E_INVALID_TRANSACTION, false },
+
+        // ⚠ THE NEIGHBOURING CONSTANT. -2000, one away from the decline value, and NOT a decline.
+        { RetCode.E_NO_SUPPORT, false },
+        { RetCode.UNKNOWN, false },
+    };
+
+    [Theory]
+    [MemberData(nameof(HookAnswers))]
+    public void HookDeclinedRetrieval_AnswersTheOraclesTwoArmTest(long? hookResult, bool expectedDecline)
+    {
+        Assert.Equal(expectedDecline, SqlTaskBase.HookDeclinedRetrieval(hookResult));
+
+        // AND IT IS NOT THE SAME QUESTION AS "did it fail". The return-code algebra answers true for
+        // E_NO_IMPLEMENTATION and for every other negative code alike, so a port that reached for
+        // IsFailed here would turn every failure into a decline and re-run the retrieval over it.
+        if (hookResult is { } answer && Predicates.IsFailed(answer) && answer != RetCode.E_NO_IMPLEMENTATION)
+        {
+            Assert.False(SqlTaskBase.HookDeclinedRetrieval(answer));
+        }
+    }
+
+    [Fact]
+    public void AnUnresolvableHookClassName_IsRefusedWithADocumentedCode_NeverAnUnstructuredException()
+    {
+        // ============================================================================================
+        //  A HOOK CLASS NAME IS CALLER-CONTROLLED INPUT. The oracle writes `hook = Create Using
+        //  _sHookClass` [sqlquery:L516-L517] where the name arrives through the public setter
+        //  of_sethookclass [:L428], which contract C-05 republishes as QuerySpec.hook_class. Activating
+        //  an arbitrary type from that string would be a remote type-activation primitive, so the port
+        //  resolves against an ALLOWLIST and refuses at the SETTER - which is the only place a caller can
+        //  still act on the refusal.
+        // ============================================================================================
+        using Harness harness = new();
+
+        // BLANK IS ADMISSIBLE AND MUST STAY SO (C-B). The oracle's own guard is
+        // `if _sHookClass <> "" then` [sqlquery:L516], so blank means "no hook" - the ordinary case, not
+        // a name at all - and refusing it would reject every caller that simply does not want one.
+        Assert.True(harness.Task.CallIsAdmissibleHookClass(null));
+        Assert.True(harness.Task.CallIsAdmissibleHookClass(string.Empty));
+        Assert.True(harness.Task.CallIsAdmissibleHookClass("   "));
+
+        // AN UNREGISTERED NAME IS NOT ADMISSIBLE. Without this answer the setter had no way to ask, so an
+        // unsanctioned name was stored, ignored at retrieval, and the retrieval then ran with NO hook -
+        // which reads to the caller as "your hook ran and did nothing" rather than "your hook was
+        // rejected".
+        Assert.False(harness.Task.CallIsAdmissibleHookClass("n_cst_thread_task_sqlbase_hook"));
+        Assert.False(harness.Task.CallIsAdmissibleHookClass("System.Object"));
+        Assert.False(harness.Task.CallIsAdmissibleHookClass("PowerFramework.Persistence.Tasks.SqlQueryTask"));
+
+        // NO UNSTRUCTURED EXCEPTION ON ANY OF THOSE PATHS. Resolution answers null - the legacy state in
+        // which IsValid(hook) is false - and the admission test answers false; neither throws, and a
+        // thrown type-load or missing-method exception reaching a request path is exactly what an
+        // allowlist exists to prevent.
+        Assert.Null(Record.Exception(() => harness.Task.CallResolveRetrievalHook("System.Object")));
+        Assert.Null(Record.Exception(() => harness.Task.CallResolveRetrievalHook("no.such.type, no.such.assembly")));
+        Assert.Null(Record.Exception(() => harness.Task.CallIsAdmissibleHookClass("System.Object")));
+        Assert.Null(harness.Task.CallResolveRetrievalHook("System.Object"));
+
+        // THE DOCUMENTED CODE. A name that fails admission is refused with E_INVALID_ARGUMENT at the
+        // setter the contract publishes, and the same code answers a blank registration attempt - so the
+        // refusal a caller sees is an argument error it can act on.
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            harness.HookActivator.Register(string.Empty, static () => new DecliningHook()));
+        Assert.Equal(
+            RetCode.E_INVALID_ARGUMENT,
+            harness.HookActivator.Register("   ", static () => new DecliningHook()));
+
+        // ... and once the deployment SANCTIONS the name, the very same string resolves. The caller
+        // selects among hooks the deployment already registered; it never names a type directly.
+        Assert.Equal(RetCode.OK, harness.HookActivator.Register("sanctioned_hook", static () => new DecliningHook()));
+        Assert.True(harness.Task.CallIsAdmissibleHookClass("sanctioned_hook"));
+        ISqlRetrievalHook resolved = Assert.IsType<DecliningHook>(
+            harness.Task.CallResolveRetrievalHook("sanctioned_hook"));
+
+        // A REGISTERED, RESOLVED HOOK THAT DECLINES STILL MEANS "run the default" - the two halves of the
+        // contract meeting, which is the whole point of resolving one.
+        Assert.True(
+            SqlTaskBase.HookDeclinedRetrieval(
+                resolved.OnRetrieve(harness.Task, new FakePooledTransaction(), harness.Task.CallCreateDataStore().Carrier)));
+
+        // The allowlist matches ORDINALLY - a PowerBuilder class name is a fixed token, and a
+        // case-insensitive match would widen the allowlist for no behavioural gain.
+        Assert.False(harness.Task.CallIsAdmissibleHookClass("SANCTIONED_HOOK"));
+        Assert.Null(harness.Task.CallResolveRetrievalHook("Sanctioned_Hook"));
     }
 
     [Fact]
@@ -2083,6 +2975,188 @@ public sealed class SqlTaskBaseTests
     }
 
     // ==========================================================================================
+    //  SUITE 11 - THE POOLED-TRANSACTION SURFACE, AND THE PROXY-PAIR DUALITY
+    //  [n_cst_thread_task_sqlbase.sru:L122, :L142, :L165, :L169]  +  AAP 0.4.5.4
+    //
+    //  The suites above drive the pool THROUGH the task, which is how the task uses it. These drive
+    //  the four members DIRECTLY, because their ONE-BASED index convention and their zero sentinel are
+    //  a contract the task depends on and cannot state on its own.
+    // ==========================================================================================
+
+    [Fact]
+    public void ThePoolSurfaceTheTaskDrivesIsTheOraclesFourOneBasedMembers()
+    {
+        // The oracle reaches the pool at exactly four places, and every one of them passes an INDEX:
+        //     of_GetTransPool().of_RemoveRef(_nTransRefIdx)                    [:L122, :L716]
+        //     of_GetTransPool().of_Release(_nTransRefIdx, ref transObject)     [:L142]
+        //     _nTransRefIdx = transPool.of_AddRef(_transData)                  [:L165]
+        //     rtCode = transPool.of_Get(_nTransRefIdx, ref transObject)        [:L169]
+        // and every one of them guards with `_nTransRefIdx > 0` [:L122, :L153, :L164], so ZERO IS THE
+        // "NO REFERENCE" SENTINEL rather than a valid first position.
+        using Harness harness = new();
+        TransactionData descriptor = Descriptor("DisableBind=0");
+
+        // AddRef answers an INDEX, NOT A RETURN CODE - which is why its result is assigned rather than
+        // tested with IsSucceeded - and the first entry is at ONE.
+        int refIndex = harness.Pool.AddRef(descriptor);
+        Assert.Equal(1, refIndex);
+        Assert.True(harness.Pool.Exists(descriptor));
+
+        // A SECOND descriptor appends at upper bound plus one, so the indices really are positions.
+        int secondIndex = harness.Pool.AddRef(Descriptor("DisableBind=1;NCharBind=1"));
+        Assert.Equal(2, secondIndex);
+
+        // Get hands out the pooled transaction for that position.
+        Assert.Equal(RetCode.OK, harness.Pool.Get(refIndex, out IPooledTransaction? borrowed));
+        Assert.NotNull(borrowed);
+
+        // ZERO NAMES NOTHING, on all three guarded members, and the answer is the documented code rather
+        // than an exception or a null hand-back.
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, harness.Pool.Get(0, out IPooledTransaction? fromZero));
+        Assert.Null(fromZero);
+
+        IPooledTransaction? nothing = null;
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, harness.Pool.Release(0, ref nothing));
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, harness.Pool.RemoveRef(0));
+
+        // And so does a position one past the last.
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, harness.Pool.Get(3, out IPooledTransaction? pastTheEnd));
+        Assert.Null(pastTheEnd);
+        Assert.Equal(RetCode.E_OUT_OF_BOUND, harness.Pool.RemoveRef(3));
+
+        // Release returns the borrowed handle to the pool ...
+        Assert.Equal(RetCode.OK, harness.Pool.Release(refIndex, ref borrowed));
+
+        // ... and RemoveRef drops the REFERENCE, which is a different act from returning the handle.
+        //
+        // ⚠ HIGHEST INDEX FIRST, DELIBERATELY. Dropping an entry RENUMBERS every later position - the
+        // legacy rebuilds its array - so removing position 1 first would leave the stored `secondIndex`
+        // pointing past the end. That renumbering hazard is a finding of its own and is pinned by
+        // TransactionPoolTests.ALeaseSurvivesTheRenumberingThatAStoredPositionDoesNot; it is not
+        // re-litigated here, merely respected, and this comment exists so the ordering below reads as
+        // intentional rather than arbitrary.
+        Assert.Equal(RetCode.OK, harness.Pool.RemoveRef(secondIndex));
+        Assert.Equal(RetCode.OK, harness.Pool.RemoveRef(refIndex));
+        Assert.False(harness.Pool.Exists(descriptor));
+
+        // The typed lease the port adds alongside the index carries the same sentinel: the default value
+        // is deliberately the invalid one, for the same reason the legacy's sentinel is zero.
+        Assert.False(PoolLease.None.IsValid);
+        Assert.True(new PoolLease(1L).IsValid);
+        Assert.False(new PoolLease(0L).IsValid);
+    }
+
+    [Fact]
+    public void TheWorkerHalfAndItsCallerSideProxyRemainTwoTypes_TheDualityIsNotFlattened()
+    {
+        // ============================================================================================
+        //  AAP 0.4.5.4 - THREAD-AFFINITY ANNOTATIONS ARE CONTRACT, NOT COMMENTARY (constraint C-K).
+        //  The legacy encodes required execution context by having every concurrency class exist TWICE:
+        //  a caller-side n_cst_threading_task_sql* and a worker-side n_cst_thread_task_sql*, so that no
+        //  object is ever touched from two threads. This file's subject is the WORKER half - its own
+        //  export comment reads [运行在子线程], "runs on the child thread". Collapsing the pair into one
+        //  async method is the specific thing the affinity contract forbids, and it is the kind of
+        //  simplification that looks like an improvement, compiles, passes every behavioural test, and
+        //  removes the only record of which thread may touch what.
+        // ============================================================================================
+
+        // THE WORKER IS NOT A PROXY, IN EITHER DIRECTION. If either assignment held, one type would be
+        // standing in for both halves and the duality would already be gone.
+        Assert.False(typeof(ISqlTaskProxy).IsAssignableFrom(typeof(SqlTaskBase)));
+        Assert.False(typeof(SqlTaskBase).IsAssignableFrom(typeof(SqlTaskProxyBase)));
+        Assert.False(typeof(SqlTaskProxyBase).IsAssignableFrom(typeof(SqlTaskBase)));
+
+        // The caller-side base IS the proxy contract, which is what the worker reaches it through.
+        Assert.True(typeof(ISqlTaskProxy).IsAssignableFrom(typeof(SqlTaskProxyBase)));
+
+        // THREE PAIRS, SIX DISTINCT TYPES - query, update and command, each with both halves.
+        Type[] workers = [typeof(SqlQueryTask), typeof(SqlUpdateTask), typeof(SqlCommandTask)];
+        Type[] proxies = [typeof(SqlQueryTaskProxy), typeof(SqlUpdateTaskProxy), typeof(SqlCommandTaskProxy)];
+
+        Assert.All(workers, worker => Assert.True(typeof(SqlTaskBase).IsAssignableFrom(worker)));
+        Assert.All(proxies, proxy => Assert.True(typeof(SqlTaskProxyBase).IsAssignableFrom(proxy)));
+        Assert.All(workers, worker => Assert.False(typeof(ISqlTaskProxy).IsAssignableFrom(worker)));
+        Assert.All(proxies, proxy => Assert.False(typeof(SqlTaskBase).IsAssignableFrom(proxy)));
+        Assert.Equal(6, workers.Concat(proxies).Distinct().Count());
+
+        // THE TWO HALVES MEET AT A TYPED SEAM, and it is one-directional: the worker's substrate hands it
+        // the proxy as ISqlTaskProxy, so the worker can raise an event on its caller and can reach
+        // nothing else of it.
+        PropertyInfo? parentTasking = typeof(ISqlTaskHost).GetProperty(nameof(ISqlTaskHost.ParentTasking));
+        Assert.NotNull(parentTasking);
+        Assert.Equal(typeof(ISqlTaskProxy), parentTasking.PropertyType);
+
+        // ... while the OTHER direction is the worker type itself, which is how the proxy reaches the
+        // half that owns the parameters and the transaction.
+        PropertyInfo? workerTask = typeof(ISqlTaskProxyHost).GetProperty(nameof(ISqlTaskProxyHost.Task));
+        Assert.NotNull(workerTask);
+        Assert.Equal(typeof(SqlTaskBase), workerTask.PropertyType);
+
+        // The worker-side base is ABSTRACT, so no instance of it exists that is neither a query, an
+        // update nor a command - which is what keeps the pairing exhaustive.
+        Assert.True(typeof(SqlTaskBase).IsAbstract);
+        Assert.True(typeof(SqlTaskProxyBase).IsAbstract);
+    }
+
+    [Fact]
+    public void ADerivedTasksResetChainsToTheBase_ClearingTheParametersAndTheCommitSignal()
+    {
+        // [:L242-L249] of_reset resets the commit signal IF ONE EXISTS and then clears the parameters, and
+        // every derived task's own reset must reach it. A derived override that forgot `base.Reset()`
+        // would leave a task's parameters and its signalled commit state behind for the NEXT dispatch on
+        // the same task - state the caller-side proxy explicitly permits reusing.
+        using Harness harness = new();
+
+        // A REAL derived task, not a stand-in: SqlCommandTask takes exactly the base's six collaborators,
+        // so the chain can be exercised without a provider, a session or a running thread.
+        using SqlCommandTask derived = new(
+            harness.Host,
+            harness.Pool,
+            new RecordingDataStoreFactory(harness.Runtime),
+            harness.HookActivator,
+            FixedClock.Instance,
+            NullLogger<SqlCommandTask>.Instance);
+
+        // Base state, established through the base's own members.
+        derived.AddParam("name", "unit-test-name");
+        derived.AddParam("age", 30L);
+        Assert.Equal(2, derived.GetParamCount());
+        Assert.True(derived.HasParams());
+
+        // Ask for the signal so the reset has one to reset, then signal it.
+        ManualResetEventSlim signal = derived.GetCommitEvent();
+        signal.Set();
+        Assert.True(derived.IsCommitted());
+
+        // THE DERIVED OVERRIDE, not the base member - this is the call a caller actually makes.
+        MethodInfo? reset = typeof(SqlCommandTask).GetMethod(
+            nameof(SqlCommandTask.Reset),
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.NotNull(reset);
+        Assert.Equal(typeof(SqlCommandTask), reset.DeclaringType);
+
+        Assert.Equal(RetCode.OK, derived.Reset());
+
+        // BOTH of the base's effects are visible through the derived instance, which is only possible if
+        // the override chained.
+        Assert.Equal(0, derived.GetParamCount());
+        Assert.False(derived.HasParams());
+        Assert.False(derived.IsCommitted());
+        Assert.False(signal.IsSet);
+
+        // And every derived task in the folder declares the override, so none of them can silently stop
+        // chaining while the others keep doing it.
+        Assert.All(
+            new[] { typeof(SqlQueryTask), typeof(SqlUpdateTask), typeof(SqlCommandTask) },
+            worker => Assert.Equal(
+                worker,
+                worker.GetMethod(
+                    nameof(SqlCommandTask.Reset),
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+                    ?.DeclaringType));
+    }
+
+    // ==========================================================================================
     //  THE DOUBLES. Every collaborator the subject has is hand-written here, which is what makes
     //  the "no database, no real thread, no network" guarantee checkable rather than claimed (C-H).
     // ==========================================================================================
@@ -2286,6 +3360,22 @@ public sealed class SqlTaskBaseTests
 
         internal ISqlRetrievalHook? CallResolveRetrievalHook(string? hookClassName) =>
             ResolveRetrievalHook(hookClassName);
+
+        /// <summary>
+        /// Reaches the SETTER'S admission test, which is the member a hook-class setter consults before
+        /// storing a caller-supplied name.
+        /// </summary>
+        /// <param name="hookClassName">The class name, as a caller supplied it.</param>
+        /// <returns>Whatever the production member returns.</returns>
+        /// <remarks>
+        /// Exposed separately from <see cref="CallResolveRetrievalHook"/> because the two answer DIFFERENT
+        /// questions at DIFFERENT times: admission runs at the setter, where a refusal can still reach the
+        /// caller as an argument error, and resolution runs at retrieval, where the only remaining option
+        /// is to proceed with no hook. Testing one through the other would hide that separation, which is
+        /// the whole design.
+        /// </remarks>
+        internal bool CallIsAdmissibleHookClass(string? hookClassName) =>
+            IsAdmissibleHookClass(hookClassName);
 
         /// <summary>
         /// Reaches the pre-execution detector, which is <see langword="static"/> and needs no instance.
@@ -2670,7 +3760,8 @@ public sealed class SqlTaskBaseTests
         public long Exec(string? sqlCommand, CancellationToken cancellationToken = default) => RetCode.OK;
 
         // The BOUND overload, delegating to the rendered one for the same reason the engine doubles do.
-        public long Exec(in SqlCommandText command, CancellationToken cancellationToken = default) => Exec(command.RenderedText);
+        public long Exec(in SqlCommandText command, CancellationToken cancellationToken = default) =>
+            Exec(command.RenderedText, cancellationToken);
 
         public bool IsConnected() => Connected;
 
