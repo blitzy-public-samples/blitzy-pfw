@@ -38,7 +38,11 @@
 //        is booted, no port is bound and no sibling service is required.
 // ==================================================================================================
 
+using System.Globalization;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using PowerFramework.DataServices.Configuration;
 using Xunit;
 
@@ -213,5 +217,198 @@ public sealed class InvariantTokenValidationTests
         }
 
         return options;
+    }
+
+    /// <summary>
+    /// The shipped host retrieves the key set more often than the library would, in both directions.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>SAYING NOTHING WAS A ROTATION DECISION TAKEN BY OMISSION, AND THE TWO LIBRARY DEFAULTS FAIL IN
+    /// OPPOSITE DIRECTIONS AT ONCE.</b> When Security rotates its signing key and key identifier, a token
+    /// minted BEFORE the rotation keeps validating against the cached set while one minted AFTER it is
+    /// refused <c>401</c> with <c>IDX10503</c>. <c>RefreshInterval</c> - the floor on the refresh the
+    /// handler asks for the instant it sees an unknown identifier - defaults to five minutes, so the
+    /// "new token refused" half lasted minutes; <c>AutomaticRefreshInterval</c> defaults to TWELVE HOURS
+    /// and is the only thing that ever drops a RETIRED key, because a successful validation provokes no
+    /// refresh, so the "old token still accepted" half lasted half a day.
+    /// </para>
+    /// <para>
+    /// ASSERTED AGAINST THE LIBRARY'S OWN PUBLISHED DEFAULTS rather than against literals, so a runtime
+    /// that changed either would report the change here instead of leaving a stale claim standing. Both the
+    /// equality and the strict inequality are asserted, because an equality-only row would pass on a host
+    /// that assigned the defaults straight back.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheShippedHostRetrievesKeysMoreOftenThanTheLibraryWouldAsync()
+    {
+        await using DataServicesTestHostFactory host = new();
+
+        JwtBearerOptions bearer = Resolve(host);
+
+        Assert.Equal(JwtAuthenticationOptions.DefaultMetadataRefreshInterval, bearer.RefreshInterval);
+        Assert.Equal(
+            JwtAuthenticationOptions.DefaultMetadataAutomaticRefreshInterval,
+            bearer.AutomaticRefreshInterval);
+
+        Assert.True(
+            bearer.RefreshInterval < BaseConfigurationManager.DefaultRefreshInterval,
+            "The requested-refresh floor is not tighter than the library default it displaces.");
+
+        Assert.True(
+            bearer.AutomaticRefreshInterval < BaseConfigurationManager.DefaultAutomaticRefreshInterval,
+            "The background interval is not tighter than the library default it displaces.");
+
+        // The refresh-on-unknown-key behaviour is what makes the first interval mean anything at all.
+        Assert.True(bearer.RefreshOnIssuerKeyNotFound);
+    }
+
+    /// <summary>
+    /// A deployment can tune both intervals, and neither of them moves the lifetime tolerance.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// The configured values are neither the library's defaults nor this service's own, so the row cannot
+    /// pass on a composition root that reads nothing NOR on one that hardcodes the shipped constants. The
+    /// tolerance is asserted unmoved in the same breath: two configurable durations arrived on a type whose
+    /// other duration - the clock skew - is a compiled constant precisely so no deployment can widen a
+    /// token's usable life, and this is what stops a later change routing one into it.
+    /// </remarks>
+    [Fact]
+    public async Task ADeploymentCanTuneBothIntervalsWithoutMovingTheToleranceAsync()
+    {
+        TimeSpan requested = TimeSpan.FromSeconds(8);
+        TimeSpan background = TimeSpan.FromMinutes(17);
+
+        await using DataServicesTestHostFactory host = new();
+        host.AdditionalSettings[
+            JwtAuthenticationOptions.SectionName + ":MetadataRefreshInterval"] = requested.ToString();
+        host.AdditionalSettings[
+            JwtAuthenticationOptions.SectionName + ":MetadataAutomaticRefreshInterval"] =
+            background.ToString();
+
+        JwtBearerOptions bearer = Resolve(host);
+
+        Assert.Equal(requested, bearer.RefreshInterval);
+        Assert.Equal(background, bearer.AutomaticRefreshInterval);
+        Assert.Equal(TimeSpan.FromSeconds(30), bearer.TokenValidationParameters.ClockSkew);
+    }
+
+    /// <summary>
+    /// An interval below the floor the token library enforces is refused by the validator, by name.
+    /// </summary>
+    /// <param name="requested">The requested-refresh floor to configure.</param>
+    /// <param name="background">The background interval to configure.</param>
+    /// <param name="expectedMember">The member the failure must name.</param>
+    /// <remarks>
+    /// WITHOUT THIS THE FAULT SURFACES ON THE FIRST AUTHENTICATED REQUEST AND NAMES NEITHER SETTING. The
+    /// configuration manager throws IDX10107 or IDX10108 while the handler builds it, which happens on the
+    /// first request rather than at startup. The third row is a relationship rather than a range: a floor
+    /// LONGER than the background interval makes a rotation converge more slowly for a caller presenting a
+    /// new token than for one presenting nothing at all.
+    /// </remarks>
+    [Theory]
+    [InlineData("00:00:00.500", "00:05:00", "MetadataRefreshInterval")]
+    [InlineData("00:00:05", "00:01:00", "MetadataAutomaticRefreshInterval")]
+    [InlineData("00:10:00", "00:05:00", "MetadataRefreshInterval")]
+    public void AnIntervalBelowTheLibraryFloorIsRefusedByName(
+        string requested,
+        string background,
+        string expectedMember)
+    {
+        JwtAuthenticationOptions options = Valid();
+        options.MetadataRefreshInterval = TimeSpan.Parse(requested, CultureInfo.InvariantCulture);
+        options.MetadataAutomaticRefreshInterval =
+            TimeSpan.Parse(background, CultureInfo.InvariantCulture);
+
+        ValidateOptionsResult result = Validator.Validate(name: null, options);
+
+        Assert.True(result.Failed);
+        Assert.NotNull(result.Failures);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains(
+                string.Concat(JwtAuthenticationOptions.SectionName, ":", expectedMember),
+                StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// THE POSITIVE ARM: the shipped pair raises no failure.
+    /// </summary>
+    /// <remarks>
+    /// Without it the three rows above would pass against a validator that refused every pair, and the
+    /// shipped settings file would be unstartable while this suite stayed green.
+    /// </remarks>
+    [Fact]
+    public void TheShippedIntervalPairRaisesNoFailure() =>
+        Assert.True(Validator.Validate(name: null, Valid()).Succeeded);
+
+    /// <summary>
+    /// The last-known-good fallback is bounded to the background interval, not left at an hour.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// MEASURED AT A SIBLING BOUNDARY, NOT REASONED: with both intervals configured, a token signed by a
+    /// RETIRED key was still accepted nine and a half minutes after the rotation, because
+    /// <c>BaseConfigurationManager</c> keeps a cache of recently-good configurations that the handler
+    /// retries against and its entries live for <c>LastKnownGoodLifetime</c> - one hour by default. It is
+    /// BOUNDED rather than switched off: the fallback is what keeps this boundary validating through a
+    /// transient inability to FETCH the key set, so both halves are asserted - the derived lifetime and the
+    /// fallback still being enabled.
+    /// </remarks>
+    [Fact]
+    public async Task TheLastKnownGoodFallbackIsBoundedToTheBackgroundIntervalAsync()
+    {
+        TimeSpan background = TimeSpan.FromMinutes(21);
+
+        await using DataServicesTestHostFactory host = new();
+        host.AdditionalSettings[
+            JwtAuthenticationOptions.SectionName + ":MetadataAutomaticRefreshInterval"] =
+            background.ToString();
+
+        JwtBearerOptions bearer = Resolve(host);
+
+        BaseConfigurationManager manager =
+            Assert.IsAssignableFrom<BaseConfigurationManager>(bearer.ConfigurationManager);
+
+        Assert.Equal(background, manager.LastKnownGoodLifetime);
+        Assert.NotEqual(
+            BaseConfigurationManager.DefaultLastKnownGoodConfigurationLifetime,
+            manager.LastKnownGoodLifetime);
+
+        Assert.True(manager.UseLastKnownGoodConfiguration);
+    }
+
+    /// <summary>
+    /// The SHIPPED host bounds the fallback to its own five-minute background interval.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task TheShippedHostBoundsTheFallbackToItsBackgroundIntervalAsync()
+    {
+        await using DataServicesTestHostFactory host = new();
+
+        JwtBearerOptions bearer = Resolve(host);
+
+        BaseConfigurationManager manager =
+            Assert.IsAssignableFrom<BaseConfigurationManager>(bearer.ConfigurationManager);
+
+        Assert.Equal(
+            JwtAuthenticationOptions.DefaultMetadataAutomaticRefreshInterval,
+            manager.LastKnownGoodLifetime);
+    }
+
+    /// <summary>Starts the host and returns the bearer options it actually runs on.</summary>
+    /// <param name="host">The host to start.</param>
+    /// <returns>The resolved handler options.</returns>
+    private static JwtBearerOptions Resolve(DataServicesTestHostFactory host)
+    {
+        using HttpClient client = host.CreateClient();
+
+        return host.Services
+            .GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(JwtBearerDefaults.AuthenticationScheme);
     }
 }

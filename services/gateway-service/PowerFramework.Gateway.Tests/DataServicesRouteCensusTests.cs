@@ -9,13 +9,13 @@
 //  four-part assertion made in source and nowhere verified: a path, an HTTP method, a request/response
 //  message pair, and the ONE typed-client member the route delegates to.
 //
-//  The sibling suites exercise three of the thirty-nine, and they were chosen for good reasons - the
+//  The sibling suites exercise three of the forty, and they were chosen for good reasons - the
 //  update carries the 409, the retrieval carries the stream, the event-gate read carries the session
 //  identifier. What they cannot see is a route wired to the WRONG NEIGHBOUR. Every projection has the same
 //  shape, so `/calc-all` delegating to `Calc`, `/expressions/set` delegating to `AddExpression`, or
 //  `/variable-expressions/get` bound to `SetVariableExpression` all compile, all answer 200, all render a
 //  well-formed body of the right family, and all pass every test in this folder. The mis-wiring is
-//  invisible precisely because the surface is uniform and hand-written thirty-nine times.
+//  invisible precisely because the surface is uniform and hand-written forty times.
 //
 //  So this file asserts the census rather than the sample, in four independent directions:
 //
@@ -26,7 +26,7 @@
 //    2. AGAINST THE PUBLISHED DOCUMENT. Every route the production host declares under /v1/datawindow must
 //       appear in the table with the same method, path and operation id, and vice versa. Read from the
 //       host's own OpenAPI document, so it is the DEPLOYED registration being measured.
-//    3. AGAINST THE RUNNING HOST, ROUTE BY ROUTE. All thirty-nine are driven through the real composition
+//    3. AGAINST THE RUNNING HOST, ROUTE BY ROUTE. All forty are driven through the real composition
 //       root against a recording transport, and each must reach EXACTLY ONE upstream RPC and it must be
 //       the expected one, by fully-qualified gRPC method name.
 //    4. AGAINST THE TYPED CLIENT DIRECTLY, for the members no route projects: the session scope, the two
@@ -281,7 +281,7 @@ internal sealed class RecordingCallInvoker : CallInvoker
 }
 
 /// <summary>
-/// The census: all thirty-nine projected routes and the typed-client members no route can reach.
+/// The census: all forty projected routes and the typed-client members no route can reach.
 /// </summary>
 /// <remarks>
 /// Each test owns its host, because each substitutes the DataServices client and the shared class fixture
@@ -325,13 +325,13 @@ public sealed class DataServicesRouteCensusTests
     /// implement the macro switch and to consume the expression trace. An inverted stream has no
     /// request/response direction to project onto a REST route, so their absence is a contract property
     /// rather than an omission - and it is asserted by name here so that projecting one later fails loudly
-    /// instead of quietly adding a fortieth route.
+    /// instead of quietly adding a forty-first route.
     /// </remarks>
     private static readonly ImmutableArray<string> InvertedChannels =
         ["InvokeMethodChannel", "TraceChannel"];
 
     /// <summary>
-    /// THE CENSUS TABLE. Thirty-nine rows, and the count is asserted rather than trusted.
+    /// THE CENSUS TABLE. Forty rows, and the count is asserted rather than trusted.
     /// </summary>
     /// <remarks>
     /// Written out by hand ON PURPOSE, because a table derived from the production registration would
@@ -376,6 +376,14 @@ public sealed class DataServicesRouteCensusTests
             ExpressionPrefix + "/sessions", "openExpressionSession"),
         new("CloseExpressionSession", ContractService.ColumnExpression, "DELETE",
             ExpressionPrefix + "/sessions/{sessionId}", "closeExpressionSession"),
+
+        // LoadRows is the one row here that answers to no legacy member. In-process the caller and the
+        // engine SHARE one DataWindow, so filling it was never an operation; across a boundary a session's
+        // DataWindow is created empty and private, and without this route every calculation operation on
+        // C-04 evaluates over zero rows. Session-scoped handle only, and it APPENDS - so the client member
+        // it drives is documented as not replay-safe.
+        new("LoadRows", ContractService.ColumnExpression, "POST",
+            ExpressionPrefix + "/rows/load", "loadExpressionRows"),
         new("AddExpression", ContractService.ColumnExpression, "POST",
             ExpressionPrefix + "/expressions/add", "addExpression"),
         new("SetExpression", ContractService.ColumnExpression, "POST",
@@ -443,25 +451,25 @@ public sealed class DataServicesRouteCensusTests
     /// omit an RPC entirely, and an omitted RPC is the one failure a per-route test can never detect.
     /// </para>
     /// <para>
-    /// The exclusions are asserted BY NAME. A test that merely counted "thirty-nine of forty-two" would
+    /// The exclusions are asserted BY NAME. A test that merely counted "forty of forty-three" would
     /// pass if the wrong three were missing.
     /// </para>
     /// </remarks>
     [Fact]
     public void TheCensusIsExactlyTheProjectableSurfaceOfBothContracts()
     {
-        Assert.Equal(39, Census.Length);
+        Assert.Equal(40, Census.Length);
 
         // No duplicate anywhere: not a path, not an operation id, not an RPC.
-        Assert.Equal(39, Census.Select(route => route.Path + route.HttpMethod).Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(39, Census.Select(route => route.OperationId).Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(39, Census.Select(route => route.GrpcMethodName).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(40, Census.Select(route => route.Path + route.HttpMethod).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(40, Census.Select(route => route.OperationId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(40, Census.Select(route => route.GrpcMethodName).Distinct(StringComparer.Ordinal).Count());
 
         AssertSurfaceCovered(ContractService.DataWindow, DataWindowService.Descriptor, expectedProjected: 15);
         AssertSurfaceCovered(
             ContractService.ColumnExpression,
             ColumnExpressionService.Descriptor,
-            expectedProjected: 24);
+            expectedProjected: 25);
 
         // The inverted pair belongs to C-04 and is projected by nothing.
         foreach (string inverted in InvertedChannels)

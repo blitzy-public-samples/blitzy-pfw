@@ -2493,9 +2493,36 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
     /// <summary>The key credentials are signed and verified with.</summary>
     private readonly byte[] _key = RandomNumberGenerator.GetBytes(32);
 
+    /// <summary>Extra configuration this host was created with, applied last.</summary>
+    private readonly IReadOnlyDictionary<string, string?> _settings;
+
+    /// <summary>Builds a host carrying no extra configuration.</summary>
+    private CompositionHost()
+        : this(new Dictionary<string, string?>(StringComparer.Ordinal))
+    {
+    }
+
+    /// <summary>Builds a host carrying extra configuration.</summary>
+    /// <param name="settings">The configuration keys to apply after this host's own.</param>
+    private CompositionHost(IReadOnlyDictionary<string, string?> settings) => _settings = settings;
+
     /// <summary>Creates a host.</summary>
     /// <returns>A started-on-first-use host.</returns>
     internal static CompositionHost Create() => new();
+
+    /// <summary>Creates a host carrying extra configuration.</summary>
+    /// <param name="settings">
+    /// Configuration keys applied AFTER this host's own, so a case can override any of them, supplied as
+    /// host configuration so the service's own startup gate and options validator judge them.
+    /// </param>
+    /// <returns>A started-on-first-use host.</returns>
+    /// <remarks>
+    /// The overload exists so a case can assert a behaviour of the DEPLOYED composition root that only
+    /// appears under a particular setting - a metadata refresh interval, say - without standing up a second
+    /// factory that would then be a second, drifting definition of "the host this service boots".
+    /// </remarks>
+    internal static CompositionHost Create(IReadOnlyDictionary<string, string?> settings) =>
+        new(settings);
 
     /// <summary>
     /// The data directory every host in this file is configured with.
@@ -2648,6 +2675,13 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
         builder.UseSetting(
             "Sqlite:DataDirectory",
             Path.Combine(Path.GetTempPath(), "pfw-composition-root"));
+
+        // LAST, so a case can override any setting above it. Empty for every host created through the
+        // parameterless factory method, which is all but a handful of them.
+        foreach (KeyValuePair<string, string?> setting in _settings)
+        {
+            builder.UseSetting(setting.Key, setting.Value);
+        }
 
         builder.ConfigureServices(services => services.Configure<JwtBearerOptions>(
             JwtBearerDefaults.AuthenticationScheme,

@@ -912,6 +912,56 @@ message ColumnValue {
   // HasItemStatus and ClearItemStatus, and an omitted field is unambiguously distinct from an
   // explicit ITEM_STATUS_NOT_MODIFIED, which is exactly the distinction a sentinel would have been
   // reaching for. Absent is the NORMAL case outside the update path.
+  //
+  // ============ WHAT ABSENCE MEANS *ON* THE UPDATE PATH, WHICH IS NOT LEFT TO A READER ============
+  //
+  // Saying only "absent is normal outside the update path" left the update path itself undefined, and
+  // the reading a receiver picked was the harmful one: every absent status read as NotModified!, so a
+  // row stamped DataModified! carrying its six current values and its six originals - the payload this
+  // contract describes, and the payload a caller assembles from what a retrieval returned - generated
+  // no SET list, affected no row, and was classified as an OPTIMISTIC-CONCURRENCY CONFLICT. The caller
+  // was told another writer had changed a row nothing had touched, and the only way to make an update
+  // apply at all was to send a field this contract calls optional.
+  //
+  // THE RULE, IN BOTH DIRECTIONS:
+  //   * NOT ONE column of a MODIFIED row carries a status  -> the ROW's own status governs EVERY COLUMN
+  //     WHOSE SUPPLIED VALUE DIFFERS FROM ITS SUPPLIED ORIGINAL, and a column whose value did not move
+  //     stays NotModified!. This is the legacy row-status convention above: a row's status is read with
+  //     column index 0 [n_cst_thread_task_sqlupdate.sru:L160], and in process a row is DataModified!
+  //     precisely BECAUSE a column of it was modified - but the row's OTHER columns are NOT modified,
+  //     since the runtime flips a status only where SetItem changed a value. That is what makes the
+  //     generated SET list name the columns that changed rather than the whole updatable set. Because a
+  //     row carries both halves of every marked column anyway - updatewhere=1 needs the originals for
+  //     the predicate - the pair itself says which columns moved, so reading it reconstructs exactly the
+  //     per-column state the in-process runtime would have held. Adopting the row's status for every
+  //     supplied column instead writes a WIDER SET LIST than the oracle's and stamps the KEY column
+  //     modified, which sends an update whose key never moved down the updatekeyinplace=no
+  //     DELETE-plus-INSERT path and answers rowsUpdated = 0 beside statements the caller never asked for.
+  //     THE VALUE TEST APPLIES ONLY WHERE AN ORIGINAL WAS STATED: a column with no original_values entry
+  //     has no baseline to be measured against, so the row's statement stands for it - which is the whole
+  //     of an INSERT-shaped row, whose status is NewModified! and which carries no originals at all
+  //     because it has no prior state.
+  //   * ANY column carries a status -> every column is taken at its word, and an unstamped one stays
+  //     NotModified!. This is what keeps a partial update EXACT: a payload that stamps the one column it
+  //     changed writes exactly that column, so an unmodified value cannot clobber a concurrent writer's.
+  //     Presence, not value, decides WHICH RULE APPLIES - an explicit ITEM_STATUS_NOT_MODIFIED is a
+  //     statement, and an explicit ITEM_STATUS_DATA_MODIFIED is honoured even where the value did not
+  //     move, which is how the legacy's self-assignment key-refresh workaround
+  //     [n_cst_thread_task_sqlupdate.sru:L155-L167] stays expressible across this boundary.
+  //   * A MODIFIED row whose every updatable column resolves to NotModified! cannot express an update.
+  //     It is a payload contradiction and is refused with the oracle's own invalid-update-data code,
+  //     RetCode.E_INVALID_DATA - HTTP 400 through C-09 - never as a concurrency conflict.
+  //
+  // VALUES ARE COMPARED AS VALUES, NOT AS WIRE ARMS. AnyValue is a union in which one number has several
+  // faithful spellings - a retrieval answers a legacy `number` column through double_value, and a caller
+  // re-sending that number as int64_value is equally within the contract - so 28 sent as int64_value and
+  // 28 sent as double_value are THE SAME VALUE for the test above, exactly as the storage engine compares
+  // them. No conversion is invented ACROSS families: a date is not compared against the text that would
+  // render it, and a bool is not compared against 0 or 1.
+  //
+  // A PRODUCER INSIDE THIS SYSTEM ALWAYS SETS THE FIELD, so the first rule is reachable only from a
+  // caller-composed payload: the carrier serialization assigns this field on every projected column, and
+  // assigning a proto3 `optional` field sets its presence bit whatever the value.
   optional ItemStatus item_status = 4;
 }
 

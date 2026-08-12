@@ -1828,6 +1828,54 @@ public sealed class DataWindowServiceContractTests
             Assert.Single(fixture.Persistence.QueryStub.CreateTaskRequests).Spec.HasChunkSize);
     }
 
+    /// <summary>
+    /// Every chunk size a caller can actually state travels, so the guard that owns it adjudicates it.
+    /// </summary>
+    /// <param name="requested">The size the caller stated.</param>
+    /// <remarks>
+    /// 🔴 <b>THE FILTER USED TO BE <c>&gt; 0</c>, AND THAT DISCARDED THE WORST VALUES SILENTLY.</b> A caller
+    /// sending <c>-5</c> had it dropped here and received a successful retrieval chunked at the server's own
+    /// size, while a caller sending <c>500</c> had it forwarded and was refused
+    /// <c>E_INVALID_ARGUMENT</c> by C-05's guard [<c>n_cst_thread_task_sqlquery.sru:L410</c>] - two equally
+    /// nonsensical sizes, two different outcomes, and the more obviously wrong of the two accepted.
+    /// <para>
+    /// THE FIX FORWARDS RATHER THAN VALIDATES, WHICH IS WHY THE REFUSED VALUES ARE ROWS HERE TOO. This
+    /// boundary deliberately does not reproduce C-05's guard (C-B): copying it would invent a validation
+    /// the legacy does not perform here. So <c>500</c> and <c>1000</c> are asserted to TRAVEL, not to be
+    /// refused - the refusal belongs to the layer that owns the rule, and
+    /// <c>PersistenceWorkHandleLifecycleTests</c> asserts it arrives as <c>400</c>.
+    /// </para>
+    /// <para>
+    /// Zero is the one value that cannot travel, and the sibling row above pins it: a proto3 scalar cannot
+    /// distinguish an absent field from a zero one, so zero is the only size a caller cannot have stated
+    /// deliberately. Both boundaries of the guard are rows here so a later change cannot quietly reinstate a
+    /// range test that happens to agree with it on one side.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(-5)]
+    [InlineData(-1)]
+    [InlineData(1)]
+    [InlineData(500)]
+    [InlineData(1000)]
+    [InlineData(1001)]
+    [InlineData(int.MinValue)]
+    [InlineData(int.MaxValue)]
+    public async Task EveryStatedChunkSizeTravelsSoTheGuardThatOwnsItAdjudicatesIt(int requested)
+    {
+        C03Fixture fixture = new();
+
+        await fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "dw-1", ChunkSize = requested },
+            new C03StreamWriter<RetrieveChunk>(),
+            fixture.Context);
+
+        PersistenceQuerySpec spec = Assert.Single(fixture.Persistence.QueryStub.CreateTaskRequests).Spec;
+
+        Assert.True(spec.HasChunkSize);
+        Assert.Equal(requested, spec.ChunkSize);
+    }
+
     [Fact]
     public async Task AConflictIsSurfacedAsAbortedWithItsDetailAndIsNeverRetried()
     {
@@ -2203,6 +2251,33 @@ public sealed class DataWindowServiceContractTests
     [InlineData(WireRetCode.EInvalidSql, StatusCode.FailedPrecondition)]
     [InlineData(WireRetCode.EBusy, StatusCode.ResourceExhausted)]
     [InlineData(WireRetCode.EInvalidHandle, StatusCode.NotFound)]
+
+    // 🔴 THE ROWS THAT USED TO FALL TO THE DEFAULT AND REACH A CALLER AS HTTP 500 FOR THEIR OWN MISTAKE.
+    // E_INVALID_DATAOBJECT is the one the finding was raised on - a retrieval naming a DataWindow that does
+    // not exist. The rest are the same class: a carrier that cannot be applied, an index past the end, a
+    // name the upstream could not find, the expression engine's own two not-found codes, and a refusal by
+    // policy. Every one of them is a 4xx at the ingress once mapped, and every one of them was a 5xx.
+    [InlineData(WireRetCode.EInvalidDataobject, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EInvalidData, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EOutOfBound, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EOutOfRange, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EObjectNotFound, StatusCode.NotFound)]
+    [InlineData(WireRetCode.ENotExists, StatusCode.NotFound)]
+    [InlineData(WireRetCode.EVarNotFound, StatusCode.NotFound)]
+    [InlineData(WireRetCode.EMemberNotFound, StatusCode.NotFound)]
+    [InlineData(WireRetCode.EAccessDenied, StatusCode.PermissionDenied)]
+    [InlineData(WireRetCode.ENoSupport, StatusCode.Unimplemented)]
+    [InlineData(WireRetCode.ENoImplementation, StatusCode.Unimplemented)]
+    [InlineData(WireRetCode.ETimeOut, StatusCode.DeadlineExceeded)]
+    [InlineData(WireRetCode.ERetry, StatusCode.ResourceExhausted)]
+    [InlineData(WireRetCode.EOutOfMemory, StatusCode.ResourceExhausted)]
+
+    // AND THE TWO THAT MUST STAY Internal, because the default arm's own reasoning applies to them: the
+    // data path behind this service answered badly, which is a server-side condition whatever its cause.
+    // Without these rows a later change could widen the caller-error groups until nothing was left on the
+    // default, which would blame the caller for a database failure.
+    [InlineData(WireRetCode.EDbError, StatusCode.Internal)]
+    [InlineData(WireRetCode.Failed, StatusCode.Internal)]
     public async Task AFailingTerminalStatusWithNoDatabaseErrorIsACallFailureAndNotAnEmptyResult(
         WireRetCode outcome,
         StatusCode expected)
@@ -2298,6 +2373,94 @@ public sealed class DataWindowServiceContractTests
         // AND THE RETURN CODE, WHICH THE CHUNK CANNOT CARRY, IS IN THE STATUS.
         Assert.Contains(
             RetCode.E_DB_ERROR.ToString(CultureInfo.InvariantCulture),
+            failure.Status.Detail,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The failure a terminal status CARRYING a database error becomes projects onto its declared status.
+    /// </summary>
+    /// <param name="outcome">The upstream outcome.</param>
+    /// <param name="expected">The gRPC status it must become.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SECOND OF THE TWO STATUS PATHS ON ONE ROUTE, AND THE ONE THE FINDING WAS RAISED ON.</b> A
+    /// failing terminal status with NO database error becomes its status through one helper (the theory
+    /// above); one that DOES carry a database error writes the error chunk first and then becomes its status
+    /// through a DIFFERENT helper. Persistence attaches a database error to an unresolvable-DataObject
+    /// retrieval, so it was this path that answered <c>Internal</c> and reached the caller as HTTP 500 for a
+    /// mistake that was entirely theirs.
+    /// </para>
+    /// <para>
+    /// THE ROWS ARE THE SAME OUTCOME CODES THE THEORY ABOVE USES, ON PURPOSE. A caller keys its
+    /// retry-or-surface policy on the status code, so one upstream code reaching them as a caller error on
+    /// one path and a server fault on the other makes that policy unwritable. The two helpers spell the
+    /// 400-class group differently - <c>InvalidArgument</c> here, <c>FailedPrecondition</c> there - which is
+    /// a recorded divergence rather than a defect: both project to HTTP 400 at the ingress, and each
+    /// spelling is the one its own helper's siblings already use.
+    /// </para>
+    /// <para>
+    /// AND THE DATABASE ERROR STILL TRAVELS ON EVERY ROW. The chunk is asserted alongside the status,
+    /// because the payload claim and the classification claim are independent and a fix to one must not
+    /// quietly cost the other.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(WireRetCode.EInvalidDataobject, StatusCode.InvalidArgument)]
+    [InlineData(WireRetCode.EInvalidArgument, StatusCode.InvalidArgument)]
+    [InlineData(WireRetCode.EInvalidSql, StatusCode.InvalidArgument)]
+    [InlineData(WireRetCode.EInvalidData, StatusCode.InvalidArgument)]
+    [InlineData(WireRetCode.EOutOfBound, StatusCode.InvalidArgument)]
+    [InlineData(WireRetCode.EOutOfRange, StatusCode.InvalidArgument)]
+    [InlineData(WireRetCode.EObjectNotFound, StatusCode.NotFound)]
+    [InlineData(WireRetCode.ENotExists, StatusCode.NotFound)]
+    [InlineData(WireRetCode.EVarNotFound, StatusCode.NotFound)]
+    [InlineData(WireRetCode.EMemberNotFound, StatusCode.NotFound)]
+    [InlineData(WireRetCode.EInvalidHandle, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EInvalidTransaction, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EAccessDenied, StatusCode.PermissionDenied)]
+    [InlineData(WireRetCode.ENoSupport, StatusCode.Unimplemented)]
+    [InlineData(WireRetCode.ENoImplementation, StatusCode.Unimplemented)]
+    [InlineData(WireRetCode.EBusy, StatusCode.ResourceExhausted)]
+    [InlineData(WireRetCode.EOutOfMemory, StatusCode.ResourceExhausted)]
+    [InlineData(WireRetCode.ERetry, StatusCode.Aborted)]
+    [InlineData(WireRetCode.ETimeOut, StatusCode.DeadlineExceeded)]
+
+    // The two that must remain server-side, for the reason the default arm states.
+    [InlineData(WireRetCode.EDbError, StatusCode.Internal)]
+    [InlineData(WireRetCode.Failed, StatusCode.Internal)]
+    public async Task ATerminalStatusCarryingADatabaseErrorProjectsOntoItsDeclaredStatus(
+        WireRetCode outcome,
+        StatusCode expected)
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryScript.Add(new PersistenceQueryResponse
+        {
+            Status = new PersistenceOperationStatus
+            {
+                RetCode = outcome,
+                DbError = new DbError { Sqldbcode = 1L, Sqlerrtext = "no such table: COMPANY" },
+            },
+        });
+
+        C03StreamWriter<RetrieveChunk> stream = new();
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(() => fixture.Service.Retrieve(
+            new RetrieveRequest { DatawindowHandle = "no_such_dw" },
+            stream,
+            fixture.Context));
+
+        Assert.Equal(expected, failure.StatusCode);
+
+        // The payload reached the caller before the status did, on every row.
+        RetrieveChunk terminal = Assert.Single(stream.Written);
+        Assert.True(terminal.Final);
+        Assert.Equal(1L, terminal.Error.Sqldbcode);
+
+        // And the numeric outcome is on the status, which is how the specific legacy code survives a
+        // grouping that maps several codes onto one status.
+        Assert.Contains(
+            ((long)outcome).ToString(CultureInfo.InvariantCulture),
             failure.Status.Detail,
             StringComparison.Ordinal);
     }
@@ -2917,6 +3080,101 @@ public sealed class DataWindowServiceContractTests
 
         // SORT_NONE names no direction, so it contributes nothing rather than defaulting to ascending.
         Assert.DoesNotContain("ignored", response.State.SortExpression, StringComparison.Ordinal);
+
+        // 🔴 AND THE WHOLE STRING, not just the ordering. The two IndexOf assertions above are what let a
+        // real defect through: the projection joined its clauses with the EMPTY STRING, so this published
+        // "age Asalary D" - which satisfies "salary appears after age" perfectly while being an expression
+        // no DataWindow can parse. Asserting relative position tells you the order is right and says
+        // nothing about whether the result is well formed.
+        Assert.Equal("age A,salary D", response.State.SortExpression);
+    }
+
+    /// <summary>
+    /// The composed expression is joined with the ORACLE'S COMMA, at one, two and three columns.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DEFECT THIS PINS. <c>ApplyColumnSort</c> composes each clause through the model - so every
+    /// individual clause was always the oracle's - and then joined them with <c>string.Empty</c>. One
+    /// column therefore looked perfect and every multi-column sort was run together into a single
+    /// unparseable token: <c>"age D,salary A"</c> was published as <c>"age Dsalary A"</c>. The model's own
+    /// parity matrix could not catch it, because the model composes its multi-column expression itself
+    /// [<c>ColumnSortModel.Sort</c>, oracle <c>:L195-L198</c>] and does so correctly; the fault was in the
+    /// wire projection, which no test covered.
+    /// </para>
+    /// <para>
+    /// ONE COLUMN IS INCLUDED DELIBERATELY as the control that fails no differently either way, so the
+    /// two- and three-column rows are demonstrably the ones carrying the assertion.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("age D", "age:D")]
+    [InlineData("age D,salary A", "age:D|salary:A")]
+    [InlineData("age A,salary A,name D", "age:A|salary:A|name:D")]
+    public async Task TheComposedSortExpressionIsJoinedWithTheOraclesComma(string expected, string columns)
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+
+        foreach (string column in columns.Split('|'))
+        {
+            string[] parts = column.Split(':');
+
+            request.Columns.Add(new ColumnSortState.Types.ColumnSort
+            {
+                ColumnName = parts[0],
+                Direction = string.Equals(parts[1], "A", StringComparison.Ordinal)
+                    ? ColumnSortState.Types.Direction.SortAsc
+                    : ColumnSortState.Types.Direction.SortDesc,
+            });
+        }
+
+        ApplyColumnSortResponse response = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, response.RetCode);
+        Assert.Equal(expected, response.State.SortExpression);
+    }
+
+    /// <summary>
+    /// The projection joins with the model's OWN separator, so the two cannot drift apart again.
+    /// </summary>
+    /// <remarks>
+    /// The root cause was two definitions of one thing: the model held <c>","</c> and the projection held
+    /// <c>string.Empty</c>. This asserts the published expression against the model's constant rather than
+    /// against a third literal written here, so a change to the separator moves this test with it instead
+    /// of breaking it.
+    /// </remarks>
+    [Fact]
+    public async Task TheProjectionUsesTheModelsOwnSeparatorRatherThanALiteralOfItsOwn()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+
+        foreach ((string column, ColumnSortState.Types.Direction direction) in
+            new[]
+            {
+                ("age", ColumnSortState.Types.Direction.SortDesc),
+                ("salary", ColumnSortState.Types.Direction.SortAsc),
+            })
+        {
+            request.Columns.Add(new ColumnSortState.Types.ColumnSort
+            {
+                ColumnName = column,
+                Direction = direction,
+            });
+        }
+
+        ApplyColumnSortResponse response = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(
+            "age D" + ColumnSortModel.ClauseSeparator + "salary A",
+            response.State.SortExpression);
+
+        // And the separator really is the oracle's comma, asserted once here so the row above cannot pass
+        // against a separator that has been changed to something else on both sides at once.
+        Assert.Equal(",", ColumnSortModel.ClauseSeparator);
     }
 
     [Fact]

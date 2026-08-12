@@ -51,6 +51,7 @@ using System.Collections.Frozen;
 using System.Globalization;
 using System.Net.Http.Headers;
 using Google.Protobuf.Reflection;
+using Grpc.Net.Client.Configuration;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
 using Polly.CircuitBreaker;
@@ -265,6 +266,41 @@ internal static class OutboundCallPolicy
         (int)global::Grpc.Core.StatusCode.Unavailable,
     ]);
 
+    /// <summary>The replay-safe methods of C-05, by name on its descriptor.</summary>
+    /// <remarks>
+    /// <para>
+    /// HOISTED SO ONE DEFINITION FEEDS BOTH RETRY LAYERS. The HTTP-level policy classifies by request
+    /// path and the gRPC-level policy classifies by method name; if each kept its own roster they would
+    /// drift, and the drift would show up as an operation being retried at one layer and not the other -
+    /// which for a non-idempotent method is a double-apply. See <see cref="BuildRetryServiceConfig"/>.
+    /// </para>
+    /// <para>
+    /// DECLARED ABOVE <see cref="ReplaySafePaths"/> BECAUSE STATIC INITIALIZERS RUN IN DECLARATION
+    /// ORDER. That field is initialised by <see cref="BuildReplaySafePaths"/>, which reads all four
+    /// rosters; declared after it, each would still be <see langword="null"/> when the set is built and
+    /// class initialization would fail with a <see cref="NullReferenceException"/> at the first outbound
+    /// call. Keep them here.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] ReplaySafeQueryMethods = ["ReleaseQueryTask", "Count"];
+
+    /// <summary>The replay-safe methods of C-06, by name on its descriptor.</summary>
+    private static readonly string[] ReplaySafeUpdateMethods = ["ReleaseUpdateTask"];
+
+    /// <summary>The replay-safe methods of C-07, by name on its descriptor.</summary>
+    private static readonly string[] ReplaySafeCommandMethods = ["ReleaseCommandTask"];
+
+    /// <summary>The replay-safe methods of C-08, by name on its descriptor.</summary>
+    private static readonly string[] ReplaySafeTransactionMethods =
+    [
+        "GetTransactionData",
+        "AutoCommit",
+        "IsConnected",
+        "GetDatabaseType",
+        "GetSessionState",
+        "GridSyntaxFromSql",
+    ];
+
     /// <summary>
     /// Absolute request paths whose attempts may be replayed at the transport level.
     /// </summary>
@@ -306,6 +342,35 @@ internal static class OutboundCallPolicy
 
         return ValueTask.FromResult(HttpClientResiliencePredicates.IsTransient(arguments.Outcome));
     }
+
+    /// <summary>
+    /// The retry predicate installed on a gRPC channel's HTTP pipeline: it never retries.
+    /// </summary>
+    /// <param name="arguments">The attempt's outcome. Not read.</param>
+    /// <returns>Always <see langword="false"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// NOT A DISABLED FEATURE - A DELIBERATE DIVISION OF LABOUR. Retry for a gRPC channel belongs to the
+    /// gRPC layer, which is strictly better informed: it sees a CONNECT failure, which this pipeline
+    /// never does because the balancer establishes the connection outside it, and it also sees a status
+    /// delivered in trailers, which is the only failure this pipeline could ever have acted on. Retrying
+    /// here as well adds no reachable failure mode and MULTIPLIES the attempt count - four attempts at
+    /// each layer makes sixteen calls against an upstream that is by definition already struggling.
+    /// </para>
+    /// <para>
+    /// EXPRESSED AS A PREDICATE RATHER THAN AS ZERO ATTEMPTS because the resilience package's own
+    /// validator requires <c>MaxRetryAttempts</c> to be at least one, so "no retries" is not expressible
+    /// as a count. A named method rather than an inline lambda so a test can assert the identity of what
+    /// is installed instead of inferring it from behaviour.
+    /// </para>
+    /// <para>
+    /// IT IS INSTALLED ON THE FOUR PERSISTENCE CHANNELS ONLY. The Security REST client is not a gRPC
+    /// channel, has no service config, and keeps <see cref="ShouldRetryAsync"/> as its only retry
+    /// mechanism - which is why that predicate and its thirteen crypto path classifications remain live.
+    /// </para>
+    /// </remarks>
+    internal static ValueTask<bool> NeverRetryAtTheHttpLayerAsync(
+        RetryPredicateArguments<HttpResponseMessage> arguments) => ValueTask.FromResult(false);
 
     /// <summary>
     /// Decides whether an outcome counts against the circuit breaker.
@@ -574,21 +639,14 @@ internal static class OutboundCallPolicy
     {
         HashSet<string> paths = new(StringComparer.Ordinal);
 
-        AddContractMethods(paths, QueryService.Descriptor, ["ReleaseQueryTask", "Count"]);
-        AddContractMethods(paths, UpdateService.Descriptor, ["ReleaseUpdateTask"]);
-        AddContractMethods(paths, CommandService.Descriptor, ["ReleaseCommandTask"]);
-
-        AddContractMethods(
-            paths,
-            TransactionService.Descriptor,
-            [
-                "GetTransactionData",
-                "AutoCommit",
-                "IsConnected",
-                "GetDatabaseType",
-                "GetSessionState",
-                "GridSyntaxFromSql",
-            ]);
+        // THE ROSTERS ARE THE HOISTED FIELDS, NOT LITERALS REPEATED HERE, so the path table this builds
+        // and the gRPC service config BuildRetryServiceConfig builds cannot classify one method
+        // differently. They used to be inline collection expressions at these four call sites, which is
+        // exactly the arrangement that lets a later edit admit a method at one layer only.
+        AddContractMethods(paths, QueryService.Descriptor, ReplaySafeQueryMethods);
+        AddContractMethods(paths, UpdateService.Descriptor, ReplaySafeUpdateMethods);
+        AddContractMethods(paths, CommandService.Descriptor, ReplaySafeCommandMethods);
+        AddContractMethods(paths, TransactionService.Descriptor, ReplaySafeTransactionMethods);
 
         foreach (string path in
             (string[])
@@ -612,6 +670,97 @@ internal static class OutboundCallPolicy
         }
 
         return FrozenSet.ToFrozenSet(paths, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Builds the gRPC-level retry configuration for the replay-safe methods of the four contracts.
+    /// </summary>
+    /// <param name="maxAttempts">The total attempts allowed for one call, INCLUDING the first.</param>
+    /// <param name="initialBackoff">The delay before the second attempt.</param>
+    /// <returns>A service configuration carrying one method configuration per replay-safe method.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS EXISTS BECAUSE THE HTTP-LEVEL RETRY POLICY CANNOT SEE THE FAILURE THAT MATTERS MOST.
+    /// </para>
+    /// <para>
+    /// The Polly pipeline is attached to the HttpClient's message handler. Grpc.Net establishes its
+    /// connection in the BALANCER's subchannel transport, which runs outside that handler - so a call
+    /// against a Persistence that is down fails in
+    /// <c>SocketConnectivitySubchannelTransport.TryConnectAsync</c> and is never presented to
+    /// <see cref="ShouldRetryAsync"/> at all. That was measured on the sibling edge rather than inferred:
+    /// with the upstream stopped and a freshly started process, a replay-safe read answered in a quarter
+    /// of a second against three configured attempts, and the log recorded
+    /// <c>Unavailable / "Error connecting to subchannel"</c> with a <c>SocketException</c> raised inside
+    /// the balancer while the pipeline was demonstrably alive for a REST client in the same log. So
+    /// "upstream unreachable" - the single most likely transient fault in a decomposed system, and the
+    /// one the resilience dependency was taken for - was the one case never retried.
+    /// </para>
+    /// <para>
+    /// gRPC-level retry runs INSIDE the gRPC client, sees connect failures, and is METHOD-SCOPED, which
+    /// is why it fits here: this policy is already operation-scoped, so the two layers agree by
+    /// construction rather than by coincidence. Both are kept - the HTTP one still owns the circuit
+    /// breaker, the per-attempt timeout and the total request timeout - but only one of them retries.
+    /// </para>
+    /// <para>
+    /// ONLY REPLAY-SAFE METHODS ARE NAMED, and a method absent from a service config's method list is
+    /// simply not retried. So <c>Query</c>, <c>Update</c>, <c>Exec</c>, <c>Commit</c>, <c>BeginSession</c>,
+    /// <c>EndSession</c> and every clause setter remain single-attempt exactly as before: replaying one
+    /// would apply an update twice, append a clause twice, or decrement a reference-counted session
+    /// another borrower still holds. The exclusions are argued method by method on
+    /// <see cref="BuildReplaySafePaths"/> and are not restated here, because there is only one roster.
+    /// </para>
+    /// <para>
+    /// THE RETRYABLE STATUS SET IS <see cref="RetryableGrpcStatuses"/> ITSELF, not a second list, for the
+    /// same anti-drift reason the method rosters are hoisted.
+    /// </para>
+    /// </remarks>
+    internal static ServiceConfig BuildRetryServiceConfig(int maxAttempts, TimeSpan initialBackoff)
+    {
+        ServiceConfig config = new();
+
+        foreach ((ContractDescriptor descriptor, string[] methods) in
+            ((ContractDescriptor, string[])[])
+            [
+                (QueryService.Descriptor, ReplaySafeQueryMethods),
+                (UpdateService.Descriptor, ReplaySafeUpdateMethods),
+                (CommandService.Descriptor, ReplaySafeCommandMethods),
+                (TransactionService.Descriptor, ReplaySafeTransactionMethods),
+            ])
+        {
+            foreach (string method in methods)
+            {
+                MethodConfig methodConfig = new()
+                {
+                    RetryPolicy = new RetryPolicy
+                    {
+                        MaxAttempts = maxAttempts,
+                        InitialBackoff = initialBackoff,
+
+                        // Bounded so a long outage cannot grow the delay without limit inside the
+                        // caller's total budget, which the attempt and total timeouts still enforce
+                        // above this.
+                        MaxBackoff = initialBackoff * 8,
+                        BackoffMultiplier = 2,
+                    },
+                };
+
+                foreach (int status in RetryableGrpcStatuses)
+                {
+                    methodConfig.RetryPolicy.RetryableStatusCodes.Add(
+                        (global::Grpc.Core.StatusCode)status);
+                }
+
+                methodConfig.Names.Add(new MethodName
+                {
+                    Service = descriptor.FullName,
+                    Method = method,
+                });
+
+                config.MethodConfigs.Add(methodConfig);
+            }
+        }
+
+        return config;
     }
 
     /// <summary>

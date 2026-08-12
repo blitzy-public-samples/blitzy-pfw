@@ -314,9 +314,13 @@ public sealed class ServiceConfigurationCoherenceTests
         "Security:JwksPath",
         "Security:OpenIdConfigurationPath",
 
-        // The mutual-TLS fallback's trust anchor and its revocation strictness. An EMPTY anchor means no
-        // client-certificate reconciliation happens at all, which is the estate's default because JWT is
-        // the default mechanism and mutual TLS is the documented per-pair fallback. Both leaves are
+        // The mutual-TLS fallback's ISSUANCE trust anchor and its revocation strictness. This is the
+        // anchor a caller certificate must chain to before POST /v1/tokens honours the identity it
+        // carries, and it is a DIFFERENT leaf from Security:MutualTls:ClientCaPath below, which is the
+        // LISTENER's. An empty anchor here means the composition root adopts the listener's - the one the
+        // orchestration layer actually publishes a variable for - and only when NEITHER is configured
+        // does no client-certificate reconciliation happen at all, which is the estate's default because
+        // JWT is the default mechanism and mutual TLS is the documented per-pair fallback. Both leaves are
         // declared even though both carry usable defaults, so the settings file stays the complete
         // picture of the section - a member that exists in configuration but in no settings file is one
         // an operator cannot discover.
@@ -357,8 +361,8 @@ public sealed class ServiceConfigurationCoherenceTests
     ];
 
     /// <summary>
-    /// The complete authoritative option-leaf set of the Persistence service - thirty entries, no
-    /// thirty-first.
+    /// The complete authoritative option-leaf set of the Persistence service - thirty-two entries, no
+    /// thirty-third.
     /// </summary>
     /// <remarks>
     /// Every one of these binds from the configuration ROOT rather than from a service-named wrapper,
@@ -423,6 +427,16 @@ public sealed class ServiceConfigurationCoherenceTests
         "Jwt:ValidateAudience",
         "Jwt:ValidateLifetime",
         "Jwt:ValidateIssuerSigningKey",
+
+        // THE TWO KEY-SET REFRESH INTERVALS, AND THEY ARE DECLARED RATHER THAN DEFAULTED IN CODE ALONE
+        // BECAUSE THEY BOUND A SECURITY WINDOW AN OPERATOR MUST BE ABLE TO SEE. Together they fix how long
+        // a signing-key rotation at Security leaves this boundary's verdicts inverted - a pre-rotation
+        // token still accepted, a post-rotation one refused 401 - and the token library's own defaults for
+        // them are five minutes and TWELVE HOURS, so saying nothing was a rotation decision taken by
+        // omission. Both are read by the composition root off this section and validated against the
+        // library's published minimums at startup.
+        "Jwt:MetadataRefreshInterval",
+        "Jwt:MetadataAutomaticRefreshInterval",
 
         "Sqlite:DataDirectory",
         "Sqlite:DatabaseFileName",

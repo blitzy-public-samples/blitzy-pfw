@@ -519,6 +519,11 @@ namespace PowerFramework.Persistence.Tasks
             long deleted = 0L;
             long affected = 0L;
 
+            // ROWS THE PAYLOAD CONTRADICTED ITSELF ABOUT, counted apart from every other total. A row
+            // flagged modified that supplies no updatable column value generates nothing, so it belongs
+            // in neither the statement count nor the unmatched list - see the arm that increments it.
+            long withoutAssignableValues = 0L;
+
             // THE ROWS WHOSE PREDICATE MATCHED NOTHING, RECORDED AS THEY ARE FOUND. A statement that
             // affected zero rows under updatewhere=1 is the concurrency mismatch itself - the predicate
             // carried every marked column's ORIGINAL value, so nothing matching means another writer had
@@ -648,7 +653,26 @@ namespace PowerFramework.Persistence.Tasks
                                 continue;
                             }
 
-                            long changed = ApplyUpdate(commands, table, plan, buffer, row);
+                            long changed = ApplyUpdate(
+                                commands,
+                                table,
+                                plan,
+                                buffer,
+                                row,
+                                out bool hadAssignableValues);
+
+                            if (!hadAssignableValues)
+                            {
+                                // 🔴 NOT AN UNMATCHED ROW, AND KEEPING THE TWO APART IS THE WHOLE
+                                // CORRECTION. No statement was generated for this row, so it cannot have
+                                // lost a race with anything: counting it towards `updated` and recording
+                                // it as unmatched made the classifier report an optimistic-concurrency
+                                // conflict for a row nothing had touched. It is counted on its own so the
+                                // classifier can answer the payload fault it actually is.
+                                withoutAssignableValues++;
+
+                                continue;
+                            }
 
                             if (changed == 0L)
                             {
@@ -665,14 +689,45 @@ namespace PowerFramework.Persistence.Tasks
             }
             catch (SqliteException failure)
             {
+                long resultCode = SqliteConnectionFactory.MapSqliteResultCode(
+                    failure.SqliteErrorCode,
+                    failure.SqliteExtendedErrorCode);
+
+                // ==================================================================================
+                //  🔴 THE TRANSACTION'S OWN SQL STATE IS STAMPED, WHICH NOTHING IN THIS SERVICE DID.
+                //
+                //  In PowerBuilder the DBMS interface writes SQLCode, SQLDBCode and SQLErrText onto the
+                //  transaction object after every operation, and the ported update classification reads
+                //  exactly those three: it builds its failure payload from
+                //  `DbErrorData.FromTransaction(transaction.SqlDbCode, transaction.SqlErrText)`
+                //  [ConflictDetector.Classify, the else arm - n_cst_thread_task_sqlupdate.sru:L249-L250]
+                //  and discriminates a caller-correctable constraint refusal from an engine fault on the
+                //  same code. Nothing wrote that state, so the payload was always empty and the
+                //  discrimination could never fire: a row omitting a NOT NULL column was answered as an
+                //  unspecific database error - HTTP 502, "the fault is behind the gateway" - when the
+                //  caller's own payload was the whole cause and the driver had named the column.
+                //
+                //  STAMPED BEFORE THE EVENT IS RAISED, so a handler that inspects the transaction sees
+                //  the same state the classifier will. SQLCode is the DataWindow failure value, which is
+                //  PowerBuilder's own -1 on a failed operation; SQLNRows is zero because the statement
+                //  did not complete; SQLReturnData is null, which the state reads back as empty.
+                //
+                //  THE STATEMENT TEXT IS DELIBERATELY NOT STAMPED. It may carry interpolated literal
+                //  values, and the redaction policy lives on the publication paths rather than here.
+                // ==================================================================================
+                transaction.StampSqlState(new SqlState(
+                    sqlCode: DataWindowBufferStore.DataStoreFailure,
+                    sqlDbCode: resultCode,
+                    sqlNRows: 0L,
+                    sqlErrText: failure.Message,
+                    sqlReturnData: null));
+
                 // The fault reaches the caller through the carrier's own database-error channel, which is
                 // where the ported arms read it, and the statement text is NOT attached: it may carry
                 // interpolated literal values, and the channel that publishes it applies the service's
                 // redaction policy of its own accord.
                 _ = _store.Carrier.OnDbError(
-                    SqliteConnectionFactory.MapSqliteResultCode(
-                        failure.SqliteErrorCode,
-                        failure.SqliteExtendedErrorCode),
+                    resultCode,
                     failure.Message,
                     string.Empty,
                     failingBuffer,
@@ -688,6 +743,27 @@ namespace PowerFramework.Persistence.Tasks
             _deleted = deleted;
 
             long expected = inserted + updated + deleted;
+
+            // A CONTRADICTORY PAYLOAD IS REPORTED EVEN WHEN NO STATEMENT RAN, and it is reported BEFORE the
+            // no-evidence arm below. A payload whose only modified row supplies no updatable column value
+            // generates nothing at all, so `expected` is zero and the next arm would answer an ordinary
+            // success - telling a caller its edit applied when no statement was ever built. The evidence
+            // therefore carries the count with both row counts at zero, which IsConcurrencyMismatch
+            // declines by its own third condition, and the classifier's payload-fault arm answers it.
+            if (withoutAssignableValues > 0L)
+            {
+                _evidence = new ConcurrencyEvidence
+                {
+                    RowsExpected = expected,
+                    RowsMatched = affected,
+                    RowsWithoutAssignableValues = withoutAssignableValues,
+                    Rows = ProjectUnmatchedRows(commands, table, plan, unmatched),
+                };
+
+                _store.Carrier.OnUpdateEnd(inserted, updated, deleted);
+
+                return DataWindowBufferStore.DataStoreSuccess;
+            }
 
             // NO STATEMENT MEANS NO EVIDENCE, AND THE ABSENCE IS THE ANSWER. An update over a carrier with
             // nothing modified is an ordinary success that writes nothing, and there is no reconciliation
@@ -1712,10 +1788,21 @@ namespace PowerFramework.Persistence.Tasks
         /// comparison alone can never fire without it and stating it makes the intent explicit.
         /// </para>
         /// <para>
-        /// NULL IS A VALUE ON BOTH SIDES. <c>Equals</c> is reached through the static helper so that null
-        /// versus null is "unchanged" and null versus a value is "changed", rather than either being
-        /// coerced to zero or to the empty string - a coercion here would silently suppress or invent a
-        /// key change.
+        /// NULL IS A VALUE ON BOTH SIDES, so null versus null is "unchanged" and null versus a value is
+        /// "changed", rather than either being coerced to zero or to the empty string - a coercion here
+        /// would silently suppress or invent a key change.
+        /// </para>
+        /// <para>
+        /// 🔴 <b>THE COMPARISON IS <see cref="CarrierValue.AreEquivalent"/> AND NOT <c>Equals</c>, BECAUSE
+        /// ONE NUMBER HAS SEVERAL FAITHFUL WIRE SPELLINGS.</b> A retrieval answers a legacy
+        /// <c>number</c> column through <c>double_value</c> while a caller re-sending that same key as
+        /// <c>int64_value</c> is equally within the contract, so a round trip legitimately produces
+        /// <c>28L</c> beside an original of <c>28.0d</c>. <c>Equals</c> reports those DIFFERENT because
+        /// their boxed types differ, and the storage engine does not agree - SQLite compares
+        /// <c>28.0</c> against an <c>INTEGER</c> 28 as equal under numeric affinity, so the generated
+        /// predicate matched while this test claimed the key had moved. The result was an ordinary update
+        /// executed as a DELETE plus an INSERT: the right data by luck, the wrong statements, a
+        /// re-created row, and <c>rowsUpdated = 0</c> reported to a caller that had updated one row.
         /// </para>
         /// </remarks>
         private bool HasKeyChange(UpdateColumnPlan plan, DwBuffer buffer, long row)
@@ -1730,7 +1817,7 @@ namespace PowerFramework.Persistence.Tasks
                 object? current = _store.Carrier.GetItemValue(row, column.Number, buffer);
                 object? original = _store.Carrier.GetItemOriginalValue(row, column.Number, buffer);
 
-                if (!Equals(current, original))
+                if (!CarrierValue.AreEquivalent(current, original))
                 {
                     return true;
                 }
@@ -1921,13 +2008,26 @@ namespace PowerFramework.Persistence.Tasks
         /// <param name="plan">The installed column plan.</param>
         /// <param name="buffer">The buffer the row lives in.</param>
         /// <param name="row">The one-based row number within that buffer.</param>
-        /// <returns>The rows the statement affected.</returns>
+        /// <param name="hadAssignableValues">
+        /// <see langword="false"/> when the row produced NO assignment at all, which is a payload
+        /// contradiction rather than a statement that matched nothing - see the remarks.
+        /// </param>
+        /// <returns>The rows the statement affected, or zero when no statement was generated.</returns>
+        /// <remarks>
+        /// 🔴 <b>THE OUT-PARAMETER IS WHAT KEEPS "NO STATEMENT" DISTINGUISHABLE FROM "NO MATCH", AND
+        /// COLLAPSING THEM REPORTED A CONCURRENCY CONFLICT FOR A ROW NOTHING HAD TOUCHED.</b> Both cases
+        /// answer zero affected rows and the two mean opposite things: a statement that ran and matched
+        /// nothing is the optimistic miss this whole contract exists to detect, while a row that generated
+        /// no statement was never submitted to anything and cannot have lost a race. The caller counts the
+        /// second separately and the classifier answers it as the caller's own payload fault.
+        /// </remarks>
         private long ApplyUpdate(
             ISqliteCommandSource commands,
             string table,
             UpdateColumnPlan plan,
             DwBuffer buffer,
-            long row)
+            long row,
+            out bool hadAssignableValues)
         {
             StringBuilder statement = new("UPDATE ");
             _ = statement.Append(table).Append(" SET ");
@@ -1963,10 +2063,15 @@ namespace PowerFramework.Persistence.Tasks
 
             if (values.Count == 0)
             {
-                // A row flagged modified whose every column reads unmodified generates no statement, and
-                // reporting zero affected rows is the honest answer: nothing was asked of the store.
+                // A row flagged modified whose every updatable column reads unmodified generates no
+                // statement. Reported through the out-parameter rather than as a zero-row result, because
+                // the caller must not read it as a predicate that matched nothing - see the remarks.
+                hadAssignableValues = false;
+
                 return 0L;
             }
+
+            hadAssignableValues = true;
 
             AppendWhere(statement, plan, buffer, row, values);
 

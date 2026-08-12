@@ -2747,6 +2747,29 @@ internal sealed class BoundDataWindowHostFactory : IDataWindowHostFactory
 
         return _hosts.GetOrAdd(dataWindowName, _ => FakeDataWindowFixtures.CreateCompanyFixture(_broker));
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// A FRESH HOST, NOT THE RETAINED ONE, because this double's <see cref="Create"/> IS retentive by name
+    /// and so reproduces the production factory's C-03 behaviour. An expression session must not share a
+    /// host with another session, so this deliberately bypasses the retention table.
+    /// <para>
+    /// THE BROKER IS STILL THE SHARED ONE. This double exists to let a test observe events on a broker it
+    /// holds, and isolating the host is about ROW STATE, not about severing the test's observation point.
+    /// </para>
+    /// </remarks>
+    public DataWindowServiceHost? CreateIsolated(string dataWindowName)
+    {
+        ArgumentNullException.ThrowIfNull(dataWindowName);
+
+        return string.IsNullOrWhiteSpace(dataWindowName)
+            || string.Equals(
+                dataWindowName,
+                DataServicesTestHostFactory.UnboundDataWindowName,
+                StringComparison.Ordinal)
+            ? null
+            : FakeDataWindowFixtures.CreateCompanyFixture(_broker);
+    }
 }
 
 /// <summary>

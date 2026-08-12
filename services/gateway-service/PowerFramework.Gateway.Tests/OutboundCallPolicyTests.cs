@@ -20,9 +20,13 @@
 //  written and never installed, which is exactly the shape of the original defect.
 // ==================================================================================================
 
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using Grpc.Core;
+using Grpc.Net.Client;
+using Grpc.Net.Client.Configuration;
+using Grpc.Net.ClientFactory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Http.Resilience;
@@ -682,11 +686,27 @@ public sealed class OutboundCallPolicyTests
     /// vacuously.
     /// </para>
     /// <para>
-    /// THE EXPECTED COUNT IS READ FROM THE PACKAGE'S OWN DEFAULT rather than written as a literal,
-    /// because Gateway deliberately does not configure the attempt count - choosing one would assert an
-    /// availability posture the repository publishes nothing to derive from. The retry DELAY is
-    /// shortened here only so the assertion does not spend the package's exponential backoff proving a
-    /// decision that takes no time to make.
+    /// 🔴 THE ATTEMPTS ARE NOW PERFORMED BY THE gRPC LAYER, NOT THIS ONE, which is why this test still
+    /// passes after the HTTP pipeline's retry was stood down. It is the same observable - a replay-safe
+    /// read is attempted several times and an unsafe one exactly once - reached through the layer that can
+    /// actually see a connect failure. Keeping the assertion unchanged across that move is the point:
+    /// the policy is what is being tested, not the mechanism that implements it.
+    /// </para>
+    /// <para>
+    /// THE EXPECTED COUNT IS DERIVED FROM THE BOUND OPTIONS, and that is a correction. It used to be read
+    /// from the resilience package's own default on the ground that Gateway configured no attempt count.
+    /// Gateway configures one now - the gRPC layer needs the same number, and a number living in two
+    /// places under two defaults is a number that will disagree - and the shipped value happens to equal
+    /// the package's, so the old expression would have passed even if the composition root stopped
+    /// configuring anything at all. Both the count and its base delay are set from configuration here, so
+    /// the assertion observes the derivation rather than a coincidence.
+    /// </para>
+    /// <para>
+    /// THE BASE DELAY IS SHORTENED AT BOTH LAYERS, for the reason the HTTP delay always was: the
+    /// assertion should not spend an exponential backoff proving a decision that takes no time to make.
+    /// The gRPC half matters more than the HTTP half did - the gRPC retry spec's delay is
+    /// <c>random(0, backoff)</c>, so at the shipped two-second base this one test would sit for several
+    /// seconds of pure waiting.
     /// </para>
     /// </remarks>
     [Fact]
@@ -695,6 +715,9 @@ public sealed class OutboundCallPolicyTests
         CountingUpstream upstream = new(StatusCode.Unavailable);
 
         using GatewayTestHostFixture fixture = new();
+
+        fixture.AdditionalSettings[$"{GatewayOptions.SectionName}:Outbound:RetryBaseDelay"] =
+            "00:00:00.001";
 
         fixture.AdditionalServiceConfiguration.Add(services =>
         {
@@ -709,7 +732,15 @@ public sealed class OutboundCallPolicyTests
         // Starting the host is what materialises the registrations; the client itself is unused.
         using HttpClient started = fixture.CreateAnonymousClient();
 
-        int expectedAttempts = new HttpStandardResilienceOptions().Retry.MaxRetryAttempts + 1;
+        int expectedAttempts = fixture.Services
+            .GetRequiredService<IOptions<GatewayOptions>>()
+            .Value
+            .Outbound
+            .MaxRetryAttempts + 1;
+
+        // Stated rather than assumed: a configured count of zero would make the assertion below
+        // indistinguishable from the unsafe-operation assertion, and pass for the wrong reason.
+        Assert.True(expectedAttempts > 1, "the configured policy must allow at least one replay");
 
         DataWindowService.DataWindowServiceClient dataWindow =
             fixture.Services.GetRequiredService<DataWindowService.DataWindowServiceClient>();
@@ -774,6 +805,238 @@ public sealed class OutboundCallPolicyTests
         Assert.Equal(1, upstream.Attempts);
     }
 
+    // ==============================================================================================
+    //  3b. THE RETRY LAYER THAT CAN SEE A CONNECT FAILURE
+    //
+    //  Section 3 above asserts the HTTP pipeline. That pipeline hangs off the HttpClient's message
+    //  handler, and Grpc.Net establishes its connection in the BALANCER's subchannel transport, outside
+    //  the handler - so "the upstream is down", the single most likely transient fault in a decomposed
+    //  system and the one this dependency was taken for, never reached the predicate at all. Measured
+    //  rather than inferred: with DataServices stopped and a freshly started Gateway, a replay-safe read
+    //  answered in 0.25 s against three configured attempts, the log recorded
+    //  `Unavailable / "Error connecting to subchannel"` raised inside
+    //  SocketConnectivitySubchannelTransport.TryConnectAsync, and Polly was demonstrably executing for
+    //  the REST client in the same log. The tests below assert the second layer, and assert that the two
+    //  layers agree about which methods may be replayed rather than each holding its own opinion.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The gRPC retry configuration names EXACTLY the methods the HTTP-level predicate would replay.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE ONE ASSERTION THAT STOPS THE TWO LAYERS DRIFTING. Each classifies differently - the HTTP one
+    /// by absolute request path, the gRPC one by service and method name - so nothing makes them agree
+    /// except that both read the same rosters. This walks EVERY method of both contracts and asserts the
+    /// gRPC configuration names it if and only if the HTTP predicate would admit a replay of it. A method
+    /// admitted at one layer only is a double-apply on one path and a lost retry on the other, and neither
+    /// shows up as a failure anywhere else in this file.
+    /// </para>
+    /// <para>
+    /// IT IS ALSO A CENSUS, because it enumerates the descriptors rather than a list: a method added to
+    /// either contract later is covered without editing this file. Unclassified, it must be absent from
+    /// the configuration - which is the safe default this policy is built on - and the streaming members
+    /// are covered by the same rule rather than by an exception, since a streamed call cannot be replayed
+    /// at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheGrpcRetryConfigurationNamesExactlyTheMethodsTheHttpPredicateAdmits()
+    {
+        ServiceConfig config = OutboundCallPolicy.BuildRetryServiceConfig(
+            maxAttempts: 4,
+            initialBackoff: TimeSpan.FromMilliseconds(10));
+
+        HashSet<string> named = new(StringComparer.Ordinal);
+
+        foreach (MethodConfig methodConfig in config.MethodConfigs)
+        {
+            foreach (MethodName method in methodConfig.Names)
+            {
+                Assert.True(
+                    named.Add($"{method.Service}/{method.Method}"),
+                    $"'{method.Service}/{method.Method}' is configured twice, so one configuration is "
+                        + "silently shadowing the other.");
+            }
+        }
+
+        HashSet<string> admitted = new(StringComparer.Ordinal);
+
+        foreach (Google.Protobuf.Reflection.ServiceDescriptor descriptor in
+            (Google.Protobuf.Reflection.ServiceDescriptor[])
+            [
+                DataWindowService.Descriptor,
+                ColumnExpressionService.Descriptor,
+            ])
+        {
+            foreach (Google.Protobuf.Reflection.MethodDescriptor method in descriptor.Methods)
+            {
+                if (await ShouldRetryForUriAsync(
+                    Absolute($"/{descriptor.FullName}/{method.Name}"),
+                    StatusCode.Unavailable))
+                {
+                    _ = admitted.Add($"{descriptor.FullName}/{method.Name}");
+                }
+            }
+        }
+
+        // Stated rather than merely compared, so an empty roster on either side cannot pass as agreement.
+        Assert.NotEmpty(admitted);
+        Assert.Equal(
+            admitted.OrderBy(name => name, StringComparer.Ordinal),
+            named.OrderBy(name => name, StringComparer.Ordinal));
+
+        // AND THE EXCLUSIONS ARE NAMED, because "equal to whatever the predicate says" would still pass if
+        // both layers admitted an update. These four are the ones a replay actually damages: two apply
+        // rows or append them, one opens a session that must be closed, and one is a streamed read that
+        // cannot be replayed at all.
+        foreach (string excluded in (string[])
+            [
+                $"{DataWindowService.Descriptor.FullName}/Update",
+                $"{DataWindowService.Descriptor.FullName}/Retrieve",
+                $"{DataWindowService.Descriptor.FullName}/OpenValidationSession",
+                $"{ColumnExpressionService.Descriptor.FullName}/LoadRows",
+            ])
+        {
+            Assert.DoesNotContain(excluded, named);
+        }
+    }
+
+    /// <summary>
+    /// The retry policy attached to each named method is bounded, inclusive, and retries only the two
+    /// statuses the HTTP predicate admits.
+    /// </summary>
+    /// <param name="maxAttempts">The attempt count handed to the builder.</param>
+    /// <param name="initialBackoff">The first delay handed to the builder.</param>
+    /// <remarks>
+    /// THE ATTEMPT COUNT IS INCLUSIVE HERE AND A RETRY COUNT IN POLLY, which is the arithmetic most likely
+    /// to be got wrong later: a gRPC <c>RetryPolicy.MaxAttempts</c> counts the FIRST attempt, so it is one
+    /// greater than the number of retries the same intent expresses in the HTTP pipeline. The bound on the
+    /// backoff is asserted because an unbounded exponential inside a total budget spends the budget
+    /// waiting rather than attempting.
+    /// </remarks>
+    [Theory]
+    [InlineData(2, "00:00:00.010")]
+    [InlineData(4, "00:00:02")]
+    [InlineData(6, "00:00:00.250")]
+    public void EveryConfiguredMethodCarriesTheSameBoundedPolicy(int maxAttempts, string initialBackoff)
+    {
+        TimeSpan backoff = TimeSpan.Parse(initialBackoff, CultureInfo.InvariantCulture);
+
+        ServiceConfig config = OutboundCallPolicy.BuildRetryServiceConfig(maxAttempts, backoff);
+
+        Assert.NotEmpty(config.MethodConfigs);
+
+        foreach (MethodConfig methodConfig in config.MethodConfigs)
+        {
+            Grpc.Net.Client.Configuration.RetryPolicy policy =
+                Assert.IsType<Grpc.Net.Client.Configuration.RetryPolicy>(methodConfig.RetryPolicy);
+
+            Assert.Equal(maxAttempts, policy.MaxAttempts);
+            Assert.Equal(backoff, policy.InitialBackoff);
+            Assert.Equal(backoff * 8, policy.MaxBackoff);
+            Assert.Equal(2, policy.BackoffMultiplier);
+
+            // THE SAME TWO STATUSES THE HTTP PREDICATE ADMITS, and no others. UNAVAILABLE is the upstream
+            // saying it cannot serve; RESOURCE_EXHAUSTED is a bounded admission refusal a later attempt
+            // can legitimately pass. Everything else is either a correct answer that will not change
+            // between attempts or a fault whose repetition is not known to be safe.
+            Assert.Equal(
+                new[] { StatusCode.ResourceExhausted, StatusCode.Unavailable },
+                policy.RetryableStatusCodes.OrderBy(status => status).ToArray());
+
+            // Exactly one method per configuration, so a status-set edit cannot silently apply to a
+            // method a reader did not expect to be grouped with it.
+            _ = Assert.Single(methodConfig.Names);
+        }
+    }
+
+    /// <summary>
+    /// Both deployed DataServices channels carry the service configuration and a ceiling that admits its
+    /// attempt count.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE WIRING HALF, and the original defect was not a wrong decision but an unreachable one: the policy
+    /// was written, correct, and never consulted. This resolves the channel options the gRPC client factory
+    /// will actually apply and reads what is on them.
+    /// </para>
+    /// <para>
+    /// THE CEILING IS ASSERTED AS WELL AS THE CONFIGURATION, because a channel whose own
+    /// <c>MaxRetryAttempts</c> is lower than the policy's count silently CLAMPS it - the configuration
+    /// would still be present and the configured number would still not be the number performed, which is
+    /// exactly the shape of failure this section exists to remove.
+    /// </para>
+    /// <para>
+    /// THE SETTINGS ARE DISTINCTIVE VALUES rather than the shipped ones, for the reason the sibling
+    /// assertion in this file records: an expectation written against a shipped value passes whether or not
+    /// the composition root assigns anything at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheDeployedDataServicesChannelsCarryTheGrpcRetryConfiguration()
+    {
+        using GatewayTestHostFixture fixture = new();
+
+        fixture.AdditionalSettings[$"{GatewayOptions.SectionName}:Outbound:MaxRetryAttempts"] = "5";
+        fixture.AdditionalSettings[$"{GatewayOptions.SectionName}:Outbound:RetryBaseDelay"] =
+            "00:00:00.250";
+
+        using HttpClient started = fixture.CreateAnonymousClient();
+
+        GatewayOptions.OutboundCallOptions configured = fixture.Services
+            .GetRequiredService<IOptions<GatewayOptions>>()
+            .Value
+            .Outbound;
+
+        Assert.Equal(5, configured.MaxRetryAttempts);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), configured.RetryBaseDelay);
+
+        int expectedAttempts = configured.MaxRetryAttempts + 1;
+
+        int expectedMethodConfigs = OutboundCallPolicy
+            .BuildRetryServiceConfig(expectedAttempts, configured.RetryBaseDelay)
+            .MethodConfigs
+            .Count;
+
+        IOptionsMonitor<GrpcClientFactoryOptions> monitor =
+            fixture.Services.GetRequiredService<IOptionsMonitor<GrpcClientFactoryOptions>>();
+
+        foreach (string clientName in (string[])
+            ["DataWindowServiceClient", "ColumnExpressionServiceClient"])
+        {
+            GrpcChannelOptions channelOptions = new();
+
+            foreach (Action<GrpcChannelOptions> configure in monitor.Get(clientName).ChannelOptionsActions)
+            {
+                configure(channelOptions);
+            }
+
+            ServiceConfig config = Assert.IsType<ServiceConfig>(channelOptions.ServiceConfig);
+
+            Assert.Equal(expectedMethodConfigs, config.MethodConfigs.Count);
+            Assert.Equal(expectedAttempts, channelOptions.MaxRetryAttempts);
+
+            IEnumerable<string> methods = config.MethodConfigs
+                .SelectMany(entry => entry.Names)
+                .Select(entry => $"{entry.Service}/{entry.Method}");
+
+            // A READ IS RETRIED AND AN UPDATE IS NOT, on the deployed channel rather than in the pure
+            // function above, so the roster that reached the channel is the classified one.
+            Assert.Contains($"{DataWindowService.Descriptor.FullName}/GetEventGate", methods);
+            Assert.DoesNotContain($"{DataWindowService.Descriptor.FullName}/Update", methods);
+
+            foreach (MethodConfig methodConfig in config.MethodConfigs)
+            {
+                Grpc.Net.Client.Configuration.RetryPolicy policy =
+                    Assert.IsType<Grpc.Net.Client.Configuration.RetryPolicy>(methodConfig.RetryPolicy);
+
+                Assert.Equal(expectedAttempts, policy.MaxAttempts);
+                Assert.Equal(configured.RetryBaseDelay, policy.InitialBackoff);
+            }
+        }
+    }
+
     /// <summary>
     /// Every outbound pipeline carries both policy predicates, the stated backoff shape, and a total
     /// budget taken from the same setting as the gRPC deadline.
@@ -795,10 +1058,12 @@ public sealed class OutboundCallPolicyTests
     /// </para>
     /// </remarks>
     [Theory]
-    [InlineData("DataWindowServiceClient")]
-    [InlineData("ColumnExpressionServiceClient")]
-    [InlineData(SecurityClient.HttpClientName)]
-    public void Every_outbound_pipeline_carries_both_predicates(string clientName)
+    [InlineData("DataWindowServiceClient", false)]
+    [InlineData("ColumnExpressionServiceClient", false)]
+    [InlineData(SecurityClient.HttpClientName, true)]
+    public void Every_outbound_pipeline_carries_both_predicates(
+        string clientName,
+        bool retriesAtTheHttpLayer)
     {
         using GatewayTestHostFixture fixture = new();
 
@@ -815,10 +1080,25 @@ public sealed class OutboundCallPolicyTests
             .GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>()
             .Get(clientName + "-standard");
 
+        // 🔴 WHICH RETRY PREDICATE IS INSTALLED DEPENDS ON THE TRANSPORT, DELIBERATELY.
+        //
+        // A gRPC channel retries at the gRPC layer, not here. That layer is strictly better informed - it
+        // sees a connect failure, which this pipeline never does because the balancer establishes the
+        // connection outside it - and retrying at BOTH multiplies the attempt count rather than adding to
+        // it: four configured at each layer made SIXTEEN calls against one failing upstream, which this
+        // suite's own deployed-pipeline test counted. So the gRPC pipelines carry a never-retry predicate
+        // and the REST pipeline, which has no service config and no other mechanism, keeps the
+        // operation-scoped one.
         Assert.Equal(
-            (Func<RetryPredicateArguments<HttpResponseMessage>, ValueTask<bool>>)
-                OutboundCallPolicy.ShouldRetryAsync,
+            retriesAtTheHttpLayer
+                ? (Func<RetryPredicateArguments<HttpResponseMessage>, ValueTask<bool>>)
+                    OutboundCallPolicy.ShouldRetryAsync
+                : OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync,
             installed.Retry.ShouldHandle);
+
+        // THE BREAKER IS UNCONDITIONAL, and that is the point of keeping the pipeline on a gRPC channel at
+        // all: standing down retry does not stand down the protection an upstream gets from a caller that
+        // keeps trying.
         Assert.Equal(
             (Func<CircuitBreakerPredicateArguments<HttpResponseMessage>, ValueTask<bool>>)
                 OutboundCallPolicy.ShouldBreakAsync,
@@ -843,6 +1123,75 @@ public sealed class OutboundCallPolicyTests
         Assert.Equal(
             installed.TotalRequestTimeout.Timeout,
             fixture.Services.GetRequiredService<OutboundDeadlines>().Unary);
+
+        // 🔴 THE PER-ATTEMPT BOUND IS ASSIGNED, NOT INHERITED - and it is the bound that actually decides
+        // when a call gives up. Only the total used to be configured, so the package's ten-second
+        // per-attempt default applied; and because retry here is operation-scoped, every operation that
+        // creates or mutates upstream state is attempted exactly once, so the total was never reached and
+        // those ten seconds were the whole story. An operator reading a twenty-five-second setting
+        // observed ten.
+        //
+        // ASSERTED AS THE DERIVATION RATHER THAN AS A LITERAL, because two constraints bound it: it cannot
+        // exceed the total, and the package requires the breaker's sampling window to be at least DOUBLE
+        // it. Half the sampling window is the binding one here, and writing "12.5s" would hide which
+        // constraint produced it.
+        Assert.Equal(
+            configured.ResolveAttemptTimeout(installed.CircuitBreaker.SamplingDuration),
+            installed.AttemptTimeout.Timeout);
+
+        Assert.True(
+            installed.AttemptTimeout.Timeout <= installed.TotalRequestTimeout.Timeout,
+            "one attempt may not outlast the total budget containing it");
+        Assert.True(
+            installed.CircuitBreaker.SamplingDuration >= installed.AttemptTimeout.Timeout * 2,
+            "the package refuses a sampling window shorter than double the per-attempt timeout");
+
+        // And it is NO LONGER the package's default, which is the observable difference.
+        Assert.NotEqual(
+            new HttpStandardResilienceOptions().AttemptTimeout.Timeout,
+            installed.AttemptTimeout.Timeout);
+    }
+
+    /// <summary>
+    /// The per-attempt bound honours BOTH constraints, and an explicit value is used as stated.
+    /// </summary>
+    /// <remarks>
+    /// A pure-function matrix over the derivation, so the non-obvious half of it is pinned without
+    /// starting a host. The halving rule is the resilience package's own: a sampling window shorter than
+    /// double the per-attempt timeout cannot observe enough attempts to judge a failure ratio, so the
+    /// package refuses the configuration at startup rather than running an ineffective breaker. That is
+    /// why the derived default is NOT simply the request timeout - a reader who assumed it was would be
+    /// wrong in exactly the way the inherited default made everyone wrong before.
+    /// </remarks>
+    [Theory]
+    // The sampling window is the binding constraint - half of it is below the total.
+    [InlineData("00:00:30", "00:00:30", null, "00:00:15")]
+    [InlineData("00:00:25", "00:00:30", null, "00:00:15")]
+    // The total is the binding constraint - it is below half the window.
+    [InlineData("00:00:10", "00:01:00", null, "00:00:10")]
+    [InlineData("00:00:12", "00:00:40", null, "00:00:12")]
+    // An explicit value is honoured verbatim, tighter than either bound, which is what leaves room for a
+    // retry inside the budget.
+    [InlineData("00:00:30", "00:00:30", "00:00:05", "00:00:05")]
+    [InlineData("00:00:30", "00:00:30", "00:00:15", "00:00:15")]
+    public void ThePerAttemptBoundHonoursBothConstraints(
+        string requestTimeout,
+        string samplingDuration,
+        string? attemptTimeout,
+        string expected)
+    {
+        GatewayOptions.OutboundCallOptions options = new()
+        {
+            RequestTimeout = TimeSpan.Parse(requestTimeout, CultureInfo.InvariantCulture),
+            AttemptTimeout = attemptTimeout is null
+                ? null
+                : TimeSpan.Parse(attemptTimeout, CultureInfo.InvariantCulture),
+        };
+
+        TimeSpan resolved = options.ResolveAttemptTimeout(
+            TimeSpan.Parse(samplingDuration, CultureInfo.InvariantCulture));
+
+        Assert.Equal(TimeSpan.Parse(expected, CultureInfo.InvariantCulture), resolved);
     }
 
     /// <summary>

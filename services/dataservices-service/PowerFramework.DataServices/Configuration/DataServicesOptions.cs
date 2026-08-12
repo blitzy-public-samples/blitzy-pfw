@@ -150,6 +150,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using PowerFramework.DataServices.Expressions;
 using PowerFramework.Shared.Kernel;
 
@@ -1281,6 +1282,65 @@ public sealed class ClientResilienceOptions
     public TimeSpan RequestTimeout { get; set; } = DefaultRequestTimeout;
 
     /// <summary>
+    /// How long ONE attempt of a unary upstream call may take, including establishing the connection.
+    /// Unset means "the same as <see cref="RequestTimeout"/>".
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE PER-ATTEMPT BOUND USED TO BE INHERITED SILENTLY, AND IT WAS THE BOUND THAT APPLIED. Only
+    /// <see cref="RequestTimeout"/> was configured, onto the pipeline's TOTAL timeout, while the
+    /// pipeline's per-attempt timeout kept its package default of ten seconds. Retry here is
+    /// operation-scoped, so for every operation that creates, mutates or advances upstream state the
+    /// total budget is never reached and the inherited ten seconds decided when the call gave up - a
+    /// different number from the one this service documents.
+    /// </para>
+    /// <para>
+    /// DEFAULTING TO <see cref="RequestTimeout"/> so the documented bound is the observed bound with no
+    /// configuration, and so lowering <see cref="RequestTimeout"/> cannot leave a stale per-attempt value
+    /// above it. Set it explicitly only to make one attempt tighter than the total, which is what leaves
+    /// room inside the budget for a retry.
+    /// </para>
+    /// <para>
+    /// NO PERFORMANCE CLAIM IS MADE OR IMPLIED (AAP 0.8.5): this bounds how long to wait before reporting
+    /// a failure, and is not a latency target.
+    /// </para>
+    /// </remarks>
+    public TimeSpan? AttemptTimeout { get; set; }
+
+    /// <summary>
+    /// The per-attempt bound to apply, given the total budget and the breaker's sampling window.
+    /// </summary>
+    /// <param name="samplingDuration">The circuit breaker's sampling window on the same pipeline.</param>
+    /// <returns>The explicit override when set, otherwise the largest value the constraints permit.</returns>
+    /// <remarks>
+    /// <para>
+    /// TWO CONSTRAINTS BOUND THIS, AND THE SECOND IS NOT OBVIOUS. The per-attempt timeout must not exceed
+    /// the total budget that contains it, and the resilience package ADDITIONALLY requires the circuit
+    /// breaker's sampling duration to be AT LEAST DOUBLE the per-attempt timeout - otherwise the breaker
+    /// cannot observe enough attempts inside one window to judge a failure ratio, and the package refuses
+    /// the configuration at startup rather than running an ineffective breaker.
+    /// </para>
+    /// <para>
+    /// So the derived default is the LARGEST value both constraints permit, which with the shipped
+    /// settings is half the sampling window rather than the whole total budget. That is stated here
+    /// because it means the per-attempt bound is NOT simply the documented request timeout, and a reader
+    /// who assumed it was would be wrong in the same way the inherited ten-second default made everyone
+    /// wrong before.
+    /// </para>
+    /// <para>
+    /// AN EXPLICIT VALUE IS NOT CLAMPED. Silently narrowing an operator's stated intent would repeat the
+    /// original fault in a new place; a value that breaks the halving rule is refused at startup by the
+    /// package's own validator, which names both durations in its message.
+    /// </para>
+    /// </remarks>
+    internal TimeSpan ResolveAttemptTimeout(TimeSpan samplingDuration)
+    {
+        TimeSpan half = samplingDuration / 2;
+
+        return AttemptTimeout ?? (RequestTimeout < half ? RequestTimeout : half);
+    }
+
+    /// <summary>
     /// The ceiling on one STREAMING call, after which it is abandoned. Must be positive. Defaults to
     /// <see cref="DefaultStreamDeadline"/>.
     /// </summary>
@@ -1456,6 +1516,42 @@ public sealed class EventChainOptions
     /// </para>
     /// </remarks>
     public bool StrictOrdering { get; set; } = true;
+
+    /// <summary>
+    /// The backstop on one outbound semantic question awaiting the client's answer. Must be positive.
+    /// Defaults to <see cref="SessionLifetimeOptions.DefaultIdleTimeout"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>CREATED BY THE DECOMPOSITION, AND WITHOUT IT A SILENT CLIENT HELD THE STREAM FOR EVER.</b>
+    /// Nine of the 22 events are semantic questions the chain asks BACK, and under the synchronous
+    /// discipline the dispatch that raised one blocks until it is answered - which is the oracle's own
+    /// shape, because in process the handler simply returned. Across a wire the answer may never come: a
+    /// client that reads the outbound question and sends nothing leaves the dispatch waiting on a task
+    /// nothing will complete, and the stream neither fails nor finishes.
+    /// </para>
+    /// <para>
+    /// A BACKSTOP RATHER THAN A BUDGET, exactly as
+    /// <see cref="ColumnExpressionOptions.MacroInvocationTimeout"/> is for C-04's inverted channel. The
+    /// ordinary bound is the call's own cancellation, which is real for any client that attaches a gRPC
+    /// deadline or simply disconnects. What that does not cover is a client that stays connected and
+    /// silent, and against one of those the deadline is the only thing that ends the wait.
+    /// </para>
+    /// <para>
+    /// DERIVED, NOT CHOSEN. The default is the validation session's own idle lifetime, because a question
+    /// still outstanding past the point at which its session would have been reclaimed is holding
+    /// something the service's own policy had already given up on. It is an order of magnitude away from
+    /// any plausible answer, so a well-behaved client never reaches it - which matters because an elapsed
+    /// backstop ENDS THE CALL with <c>DeadlineExceeded</c> rather than fabricating an answer, and a
+    /// fabricated answer to <c>ondoitemchange</c> would drive the whole <c>{0,1,2,3}</c> dispatch down an
+    /// arm the client never chose.
+    /// </para>
+    /// <para>
+    /// SEPARATE FROM THE SESSION SETTING RATHER THAN READ FROM IT, so that shortening one does not
+    /// silently shorten the other. They start equal; a deployment that needs to move one moves one.
+    /// </para>
+    /// </remarks>
+    public TimeSpan AnswerTimeout { get; set; } = SessionLifetimeOptions.DefaultIdleTimeout;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1619,6 +1715,71 @@ public sealed class JwtAuthenticationOptions
     /// </para>
     /// </remarks>
     public bool ValidateIssuerSigningKey { get; set; } = true;
+
+    /// <summary>
+    /// The default floor between two on-demand key-set refreshes: five seconds.
+    /// </summary>
+    /// <remarks>
+    /// Bounds how long this boundary keeps refusing a correctly signed token after Security rotates its
+    /// signing key. Not lower, because this floor is also the only rate limit on the refresh a REJECTED
+    /// token can provoke, so a value near zero would make a forged key identifier a request amplifier
+    /// aimed at Security's published key set. Stated identically on all three verification boundaries so
+    /// one rotation converges at one rate across the estate.
+    /// </remarks>
+    public static readonly TimeSpan DefaultMetadataRefreshInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The default interval at which the cached key set is refreshed even when every token validates:
+    /// five minutes, the library's own minimum.
+    /// </summary>
+    /// <remarks>
+    /// The library's default is TWELVE HOURS, and this interval is the only thing that ever drops a
+    /// RETIRED key, because a successful validation provokes no refresh - so the default left a token
+    /// signed by a superseded key acceptable here for half a day.
+    /// </remarks>
+    public static readonly TimeSpan DefaultMetadataAutomaticRefreshInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The shortest time that must pass before a key-set refresh requested by a failed validation is
+    /// actually performed. Defaults to <see cref="DefaultMetadataRefreshInterval"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>ROTATION INVERTS THIS BOUNDARY'S VERDICTS FOR AS LONG AS THIS INTERVAL.</b> When Security
+    /// rotates its signing key and key identifier, a token minted BEFORE the rotation keeps validating
+    /// against the cached set while one minted AFTER it is refused <c>401</c> with <c>IDX10503</c>. The
+    /// handler requests a refresh on exactly that failure, but the configuration manager will not fetch
+    /// again until this interval has elapsed - so the library's five-minute default made the inversion
+    /// last minutes.
+    /// </para>
+    /// <para>
+    /// <b>A BOUND RATHER THAN AN OVERLAP, AND THAT IS AN AAP CONSTRAINT RATHER THAN A PREFERENCE.</b> The
+    /// alternative is for the issuer to publish the superseded key beside the new one until consumers
+    /// converge, which a key SET can obviously carry - but AAP 0.6.6.3 fixes exactly one signing secret in
+    /// the estate and Security's set is built from that single key, so an overlap would add a second slot
+    /// of issuer key material rather than a setting. The window is bounded and documented instead; the
+    /// rotation runbook is in <c>docs/SECRETS.md</c> section 4.2.1 and the two intervals are tabulated in
+    /// <c>docs/ARCHITECTURE.md</c> section 9.6.
+    /// </para>
+    /// <para>
+    /// The validator refuses anything below <see cref="BaseConfigurationManager.MinimumRefreshInterval"/>,
+    /// which the configuration manager would otherwise reject by throwing on the first authenticated
+    /// request rather than at startup.
+    /// </para>
+    /// </remarks>
+    public TimeSpan MetadataRefreshInterval { get; set; } = DefaultMetadataRefreshInterval;
+
+    /// <summary>
+    /// How often the cached key set is refreshed in the background, independently of any validation
+    /// failure. Defaults to <see cref="DefaultMetadataAutomaticRefreshInterval"/>.
+    /// </summary>
+    /// <remarks>
+    /// The half of rotation <see cref="MetadataRefreshInterval"/> cannot bound: a token signed by the
+    /// RETIRED key still validates against the cached set and a success provokes no refresh, so only this
+    /// interval retires it. The validator refuses anything below
+    /// <see cref="BaseConfigurationManager.MinimumAutomaticRefreshInterval"/>.
+    /// </remarks>
+    public TimeSpan MetadataAutomaticRefreshInterval { get; set; } = DefaultMetadataAutomaticRefreshInterval;
 
     /// <summary>
     /// The caller identities permitted to reach this service's two contracts and their projected routes.
@@ -1880,8 +2041,19 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
                 options.Sessions.ExpressionSession, string.Concat(path, ":ExpressionSession"), failures);
         }
 
-        // --- EventChain: no rule. Its single member is a boolean whose whole domain is legal. -----
-        _ = EnsureGroupBound(options.EventChain, string.Concat(prefix, ":EventChain"), failures);
+        // --- EventChain: the strictness dial has no rule - a boolean whose whole domain is legal -
+        // --- but the answer backstop does. A zero or negative value would abandon EVERY semantic
+        // --- question before the client could possibly answer, so the nine question-shaped events
+        // --- would all fail with DeadlineExceeded and the whole synchronous half of the chain would
+        // --- be unusable. Caught here because the failure looks like a client fault at run time.
+        path = string.Concat(prefix, ":EventChain");
+        if (EnsureGroupBound(options.EventChain, path, failures))
+        {
+            AppendPositiveDurationFailure(
+                options.EventChain.AnswerTimeout,
+                string.Concat(path, ":AnswerTimeout"),
+                failures);
+        }
 
         // The streamed-element bound carries a range annotation, so it is only enforced if the annotations
         // are actually walked. Without this the bound would bind a zero or a negative value silently and
@@ -2130,6 +2302,19 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
             string.Concat(configurationPath, ":StreamDeadline"),
             failures);
 
+        // ONE ATTEMPT CANNOT OUTLAST THE TOTAL THAT CONTAINS IT - the resilience pipeline refuses that
+        // configuration outright, so it is caught here with the key named rather than left to surface as a
+        // framework validation failure against a generated handler name.
+        if (client.AttemptTimeout is { } attempt
+            && (attempt <= TimeSpan.Zero || attempt > client.RequestTimeout))
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":AttemptTimeout must be greater than zero and no greater than ",
+                configurationPath,
+                ":RequestTimeout. Leave it unset to bound one attempt by the total."));
+        }
+
         // A STREAM BOUND BELOW THE UNARY BOUND IS A CONTRADICTION RATHER THAN A TIGHTER POLICY: the
         // whole reason the two settings exist separately is that a stream is legitimately longer-lived
         // than a single request, so a shorter stream bound abandons retrievals sooner than the ordinary
@@ -2345,6 +2530,58 @@ public sealed class JwtAuthenticationOptionsValidator : IValidateOptions<JwtAuth
                         options, options.MetadataAddress, metadataPath, failures);
                 }
             }
+        }
+
+        // --- The two metadata refresh intervals, checked against the LIBRARY'S published floors -----
+        // BaseConfigurationManager throws ArgumentOutOfRangeException - IDX10107 and IDX10108 - when
+        // either is set below its minimum, and it throws while the bearer handler builds its configuration
+        // manager, which happens on the first authenticated request rather than at startup. A host that
+        // started healthy and then failed every authenticated call is exactly the shape of fault this
+        // validator exists to convert into a refusal to start. The floors are read from the library rather
+        // than restated as literals so the rule cannot drift away from the behaviour it guards.
+        if (options.MetadataRefreshInterval < BaseConfigurationManager.MinimumRefreshInterval)
+        {
+            failures.Add(string.Concat(
+                prefix,
+                ":",
+                nameof(JwtAuthenticationOptions.MetadataRefreshInterval),
+                " is ",
+                options.MetadataRefreshInterval.ToString(),
+                ", which is below the ",
+                BaseConfigurationManager.MinimumRefreshInterval.ToString(),
+                " minimum the token library enforces. It would be rejected while the bearer handler ",
+                "builds its configuration manager - on the first authenticated request, not at startup."));
+        }
+
+        if (options.MetadataAutomaticRefreshInterval
+            < BaseConfigurationManager.MinimumAutomaticRefreshInterval)
+        {
+            failures.Add(string.Concat(
+                prefix,
+                ":",
+                nameof(JwtAuthenticationOptions.MetadataAutomaticRefreshInterval),
+                " is ",
+                options.MetadataAutomaticRefreshInterval.ToString(),
+                ", which is below the ",
+                BaseConfigurationManager.MinimumAutomaticRefreshInterval.ToString(),
+                " minimum the token library enforces, and would be rejected on the first authenticated ",
+                "request rather than at startup."));
+        }
+        else if (options.MetadataRefreshInterval > options.MetadataAutomaticRefreshInterval)
+        {
+            failures.Add(string.Concat(
+                prefix,
+                ":",
+                nameof(JwtAuthenticationOptions.MetadataRefreshInterval),
+                " is ",
+                options.MetadataRefreshInterval.ToString(),
+                ", which is longer than ",
+                nameof(JwtAuthenticationOptions.MetadataAutomaticRefreshInterval),
+                " (",
+                options.MetadataAutomaticRefreshInterval.ToString(),
+                "). The first is the floor on a refresh a REJECTED token asks for and the second is the ",
+                "background interval, so a floor above it makes a rotation converge more slowly for a ",
+                "caller presenting a new token than for one presenting nothing at all."));
         }
 
         // --- The four validation switches: invariant, and a configured `false` is refused -----------

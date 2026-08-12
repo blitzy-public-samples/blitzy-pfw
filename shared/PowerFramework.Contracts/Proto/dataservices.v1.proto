@@ -835,6 +835,17 @@ message RetrieveRequest {
   // interface's guard - it belongs to the SQL task layer, which sits behind Persistence. Copying it
   // onto this contract would invent a validation the legacy does not perform at this boundary, which
   // C-B forbids as firmly as it forbids removing one.
+  //
+  // WHAT A CALLER OBSERVES, THEREFORE. Zero is the ONLY value this boundary drops, and it is dropped
+  // because a proto3 scalar cannot distinguish an absent field from a zero one - so zero is the only
+  // value that cannot have been stated deliberately, and asserting a size of zero upstream would be a
+  // different claim from stating none. EVERY OTHER VALUE TRAVELS, INCLUDING A NEGATIVE ONE, and C-05's
+  // guard adjudicates it: -5 and 500 are both refused with E_INVALID_ARGUMENT, which Gateway projects
+  // as HTTP 400, while 1001 and above are honoured. This is forwarding, NOT validating - the paragraph
+  // above is the reason. An earlier revision forwarded only a POSITIVE size, so a nonsensical negative
+  // was silently discarded and answered with a successful retrieval at the server's own size while a
+  // nonsensical 500 was refused: two values equally wrong, two different outcomes, and the more
+  // obviously wrong of the two accepted. The layer that owns the rule now answers for both.
   int32 chunk_size = 4;
 }
 
@@ -1644,7 +1655,22 @@ message UpdateRequest {
 
   // The rows to submit. EACH ROW MUST CARRY BOTH ITS CURRENT AND ITS ORIGINAL VALUES for every marked
   // column - see common.v1.DataWindowRow.original_values and common.v1.ConflictDetail for why the
-  // original-value shadow is not optional under `updatewhere=1`.
+  // original-value shadow is not optional under `updatewhere=1`. The originals are the values a
+  // preceding retrieval returned as its CURRENT values; a retrieved row carries no original_values of
+  // its own, because a retrieval baselines every row it lands.
+  //
+  // PER-COLUMN item_status IS OPTIONAL AND ITS ABSENCE IS DEFINED ON THIS PATH: when a MODIFIED row
+  // carries no per-column status at all, the row's own status governs every column WHOSE VALUE DIFFERS
+  // FROM ITS STATED ORIGINAL - and a column whose stated original proves the value did not move stays
+  // NotModified! - so the SET list names the columns that changed, exactly as the oracle's does, and the
+  // KEY column of an ordinary update is not stamped modified and does not trigger the
+  // updatekeyinplace=no delete-plus-insert path. A column with no stated original has no baseline and so
+  // adopts the row's status, which is the whole of an insert-shaped row. When ANY
+  // column carries a status, every column is taken at its word instead. A modified row whose every
+  // updatable column resolves to NotModified! cannot express an update and is refused with
+  // RetCode.E_INVALID_DATA - never as a concurrency conflict, because no statement was generated and
+  // nothing was contended. common.v1.ColumnValue.item_status states the rule in full, including how
+  // values are compared across the numeric arms.
   repeated common.v1.DataWindowRow rows = 3;
 
   // ========== THE UPDATE FLAGS ARE NOT PARAMETERS. THE LEGACY FIXES THEM, SO THIS CONTRACT
@@ -1751,6 +1777,73 @@ message UpdateResponse {
   // column or the wrong row.
   // ==========================================================================================
   repeated common.v1.IdentityColumnData identity = 6;
+
+  // ============ THE WRITE PATH'S OWN VALIDATION FAILURES, PER COLUMN AND PER ROW ==============
+  //
+  // Present only when `ret_code` reports a validation refusal, and EMPTY on every other outcome -
+  // including on a database failure, which is a different thing and travels on `error` above.
+  //
+  // WHY THIS FIELD EXISTS. The five `dwnvl*` validators are ported precisely so a value the declared
+  // column type cannot represent is refused rather than stored, and without a field to report them in
+  // they were unreachable from this operation: text that is not a number reached an `INT NOT NULL`
+  // column, an impossible date reached a `date` column, and a column name no definition carries was
+  // accepted and its value applied to whichever ordinal travelled beside it. Every one of those
+  // answered HTTP 200.
+  //
+  // WHY IT IS REPEATED AND NOT SINGULAR. One update carries many rows and each row many columns, and a
+  // caller fixing a payload needs EVERY rejected column rather than the first - a singular field would
+  // turn one correction into as many round trips as there are faults. The order is the order the rows
+  // and their columns were sent, so a consumer can index straight back into its own request.
+  //
+  // NOTHING IS APPLIED WHEN THIS FIELD IS NON-EMPTY. The refusal happens before the upstream is told
+  // anything at all, so the row counts above are zero and storage is untouched. That is the property
+  // that makes a validation refusal safe to retry with a corrected payload.
+  repeated RowValidationError validation_errors = 7;
+}
+
+// RowValidationError - one rejected column of one row, addressed the way the caller addressed it.
+//
+// The error itself is a StructuredError like every other re-expressed dialog, so the text, the
+// localization category, the Sprintf arguments and the severity are preserved and only the delivery
+// channel changes (AAP 0.3.4, 0.2.1.3 Correction 5). WHAT THIS MESSAGE ADDS IS THE ADDRESS: which
+// buffer, which row and which column, in machine-readable fields rather than only inside prose. A
+// caller that is handed the message text alone cannot tell WHICH column was rejected, which was the
+// whole of the reported defect.
+//
+// THE ADDRESS IS ECHOED AS SENT, NOT AS RESOLVED. `column_name` and `column_id` carry what the request
+// carried, so a caller matches a failure against its own payload by identity rather than by guessing;
+// `column_type` carries what the DEFINITION declares, which is the fact the caller was missing. Where
+// the name did not resolve at all, `column_type` is empty - there is no type to report for a column
+// that does not exist, and inventing one would describe a column this DataWindow does not have.
+message RowValidationError {
+  // The buffer the rejected row was sent in, echoed from the request.
+  common.v1.DwBuffer buffer = 1;
+
+  // The ONE-BASED row ordinal within that buffer, echoed from the request. One-based because the
+  // legacy's row ordinals are, and because the value is what the caller itself sent.
+  int64 row = 2;
+
+  // The column name the request carried. May be EMPTY, and legitimately so: a row projected from a
+  // carrier changeset is positional and carries ordinals only, so `column_id` is the authoritative
+  // identifier - see common.v1.ColumnValue for the full rule. Echoed rather than resolved.
+  string column_name = 3;
+
+  // The one-based column ordinal the request carried. Echoed rather than resolved.
+  int64 column_id = 4;
+
+  // The column type the DEFINITION declares - `number`, `char(100)`, `decimal(2)`, `date` - spelled
+  // exactly as the definition spells it, because the legacy dispatches on its first five characters
+  // [se_cst_dw.sru:L232-L243] and a normalised spelling would reach a different arm. EMPTY when the
+  // named column does not exist.
+  string column_type = 5;
+
+  // The refusal, as the legacy would have shown it. On the invalid-value path this is the oracle's own
+  // validation dialog [se_cst_dw.sru:L355, :L357] - a localized body through CAT_DWSVC, a separately
+  // localized title, and StopSign severity - so `localized` is true. On the unknown-column path it is
+  // a DEFINED ERROR this refactor introduced for a condition the legacy could not have, because in
+  // process a column name is resolved at compile time; `localized` is false there and no category is
+  // reported, which is the honest answer rather than a claim that a translation table replied.
+  StructuredError error = 6;
 }
 
 
@@ -2943,6 +3036,69 @@ message CloseExpressionSessionResponse {
   bool was_open = 2;
 }
 
+// The rows to place into a session's DataWindow, so the calculation operations have something to
+// evaluate against.
+//
+// HANDLE FORMS - WHICH OPERATION ACCEPTS WHICH, stated here because the two spaces look alike and the
+// confusion is what made this gap invisible:
+//   * A REGISTERED DATA-OBJECT NAME, for example "dw_sqlite". This is what
+//     `DataWindowService.Retrieve`, `Update`, `EventChain` and every headless-model operation address. It
+//     names a transcribed DataWindow definition, and the service resolves it to the ONE shared model set
+//     for that definition.
+//   * A SESSION-SCOPED HANDLE, spelled "<session_id>/<one-based ordinal>" and MINTED BY
+//     `OpenExpressionSession` from the data-object names it was given. This is what every operation on
+//     THIS service addresses, including this one. It exists because a session's DataWindow is a private
+//     surface: two handles opened over the same definition are two independent DataWindows, which is
+//     precisely what makes a co-resident foreign variable meaningful (see ForeignVarRef).
+// The two are NOT interchangeable in either direction, and each refuses the other's form with
+// E_INVALID_ARGUMENT rather than silently resolving it - a silent resolution would make a caller's rows
+// land in a surface it did not name.
+//
+// APPEND, NEVER REPLACE. Each call adds its rows after whatever the DataWindow already holds, and the
+// response reports the resulting count and the ordinal of the first row it created so a caller can address
+// exactly what it just loaded. There is no clear operation and none is invented: the abstract host surface
+// this engine drives publishes `InsertRow` and no delete, so a caller wanting a different row set opens a
+// new session - which is also the unit the foreign-variable scoping rule is written in terms of.
+//
+// THE COLUMN ADDRESSING IS THE CONTRACT'S OWN. `common.v1.ColumnValue` carries both identifiers and marks
+// the name optional, so a row may address by ordinal alone; where BOTH are present they must agree, and a
+// disagreement is refused rather than resolved in favour of one - exactly as the update path refuses it,
+// and for the same reason: the value would otherwise land in whichever column one identifier named while
+// the caller believed the other.
+message LoadRowsRequest {
+  string session_id = 1;
+
+  // The SESSION-SCOPED handle, "<session_id>/<ordinal>". A registered data-object name is refused.
+  string datawindow_handle = 2;
+
+  // The rows, in the order they are to be created. `buffer` and `row` on each row are IGNORED: this
+  // operation appends to the Primary buffer and assigns the ordinals, and honouring a caller-supplied
+  // ordinal would let two calls disagree about which row is which. Every row is created with item status
+  // NewModified, which is what `InsertRow` produces and what an unbaselined scratch row is.
+  repeated common.v1.DataWindowRow rows = 3;
+}
+
+message LoadRowsResponse {
+  common.v1.RetCode.Value ret_code = 1;
+
+  // How many rows this call created. Zero with an OK code means the request carried no row, which is a
+  // legitimate no-op rather than a fault.
+  int64 rows_loaded = 2;
+
+  // The one-based ordinal of the FIRST row this call created, or 0 when it created none. With
+  // `rows_loaded` this names the exact range the caller may now calculate over, without a second call to
+  // ask how many rows there were before.
+  int64 first_row = 3;
+
+  // The Primary buffer's row count after the call - what `RowCount()` now answers, and therefore the
+  // upper bound `CalcAll` iterates to.
+  int64 row_count = 4;
+
+  // Set when a column reference could not be resolved or a value could not be written. Carries the
+  // column identity the request used, so a caller can correct the reference it sent.
+  StructuredError error = 5;
+}
+
 // ---- Expression add / set / get / remove / remove-all ----
 
 // `of_addexp(string colname, string exp)` [:L172]. NOTE ITS RETURN TYPE IS `integer`, not `long`, and
@@ -3927,11 +4083,67 @@ service DataWindowService {
 // A SEPARATE SERVICE FROM C-03 SO THE EXPANSION ENGINE CAN VERSION INDEPENDENTLY - see the file header
 // for the full reasoning. The two inverted streams are structurally required, not preferred.
 service ColumnExpressionService {
+  // CALL ORDER, and why getting it wrong answers 502 rather than 4xx.
+  //
+  //   1. OpenExpressionSession  -> mints the `<sessionId>/<ordinal>` handle every route below takes.
+  //   2. SetEnabled(true)       -> the engine is created INERT and does NOT auto-enable.
+  //   3. LoadRows               -> the session's DataWindow is created EMPTY; calculation needs rows.
+  //   4. AddExpression / AddVariable / ...  -> bind what is to be evaluated.
+  //   5. Calc / CalcAll / CalcEmpty / CalcItem.
+  //
+  // Steps 2 and 3 are the two that are easy to miss, and each fails in its own way:
+  //
+  //   * SKIPPING STEP 2 answers `ret_code = FAILED`, which the Gateway projects as **502**. That reads
+  //     like an upstream outage and is not one - the engine is merely inert, which is entirely
+  //     caller-correctable. The code is nevertheless PRESERVED rather than narrowed to a 4xx, because
+  //     FAILED is the ORACLE'S OWN answer for this condition at four separate call sites
+  //     [n_cst_dwsvc_columnexp.sru:L1158, :L1201, :L1976, :L2087], and `docs/CONTRACTS.md` 12.1 freezes
+  //     FAILED -> 502 for every operation on the surface. Narrowing it here would either change a
+  //     preserved return code (C-B) or fork the status map for one service. Documented instead, which is
+  //     why this block exists.
+  //   * SKIPPING STEP 3 does NOT fail: `CalcAll` and `CalcEmpty` answer OK having iterated zero rows, and
+  //     `Calc` answers E_INVALID_ARGUMENT because row 1 is out of range on an empty buffer. A caller
+  //     seeing "OK, 0 results" has almost certainly missed this step rather than found an empty answer.
+  //
+  // Auto-enabling on open, or loading implicitly on first calc, were both considered and rejected: either
+  // would make the engine's observable state depend on which operation happened to be called first, and
+  // the enable flag is itself part of the ported surface (`#Enabled`, `of_setenabled`).
   // The session that scopes the DataWindow handles replacing `foreignvardata.expsvc`. This is the ONLY
   // reason the session exists, and cross-session foreign references are BLOCKED WITH A DEFINED ERROR -
   // see ForeignVarRef.
   rpc OpenExpressionSession(OpenExpressionSessionRequest) returns (OpenExpressionSessionResponse);
   rpc CloseExpressionSession(CloseExpressionSessionRequest) returns (CloseExpressionSessionResponse);
+
+  // 🔴 THE OPERATION THAT MAKES THE CALCULATION HALF OF THIS SERVICE REACHABLE AT ALL.
+  //
+  // Every calculation operation below evaluates against ROWS of the session's DataWindow, and until this
+  // existed there was no published way to put a row into one: a session's DataWindow is created empty, and
+  // `dataservices.v1.DataWindowService.Retrieve` addresses a REGISTERED data-object name and refuses a
+  // session-scoped handle - correctly, because the two handle spaces are different things (see the
+  // HANDLE FORMS block on LoadRowsRequest). So `Calc` answered E_INVALID_ARGUMENT for row 1 of every
+  // session, `CalcAll` and `CalcEmpty` iterated zero rows, and only the BINDING half of the engine -
+  // add / set / get an expression, add / set a variable - could be exercised end to end.
+  //
+  // AN INLINE ROW SET RATHER THAN A RETRIEVE INTO THE SESSION, and the choice is deliberate. Persistence
+  // is the only service that reaches storage (AAP 0.1.1), a session's DataWindow is a SCRATCH surface for
+  // evaluation rather than a queried result set, and a caller that wants stored rows already has
+  // `DataWindowService.Retrieve` to fetch them and can hand the answer straight back here. Routing a
+  // retrieve through an expression session would have given DataServices a second, differently-scoped path
+  // to storage for no behaviour that is not already available by composing two published operations.
+  //
+  // A SEPARATE OPERATION RATHER THAN AN INLINE ROW SET ON `Calc`, because the engine CACHES: its
+  // tri-state calculation cache, its dirty propagation and its reverse dependency index all assume rows
+  // that persist between calls. Loading once and then calculating many times is the shape the engine was
+  // built for; carrying rows on every Calc would make an evaluation call mutate the surface it evaluates.
+  //
+  // ONE SESSION, ONE DATAWINDOW. Two sessions over the same data-object name hold two INDEPENDENT
+  // DataWindows: rows loaded into one are invisible to the other and its ordinals start again at 1. That
+  // is what makes the co-residency rule above meaningful, and it is why a caller wanting a different row
+  // set opens a new session rather than looking for a clear operation. It is also not free - the host
+  // factory is retentive per data-object name for C-03's benefit, so an expression session deliberately
+  // takes an ISOLATED host (see IDataWindowHostFactory.CreateIsolated). Without that, this operation
+  // would put one caller's rows into another caller's session.
+  rpc LoadRows(LoadRowsRequest) returns (LoadRowsResponse);
 
   // Expressions: `of_addexp` [:L172]; `of_setexp` x4 [:L174-L177]; `of_getexp` x2 [:L127, :L130];
   // `of_remove` x2 [:L131-L132]; `of_removeall` [:L125].

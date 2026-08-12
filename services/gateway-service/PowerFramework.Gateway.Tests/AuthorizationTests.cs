@@ -2950,6 +2950,34 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
+    /// The only <see cref="TimeSpan"/> members the verification section may carry, and neither is a
+    /// tolerance.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AN ALLOW-LIST RATHER THAN A RELAXED HEURISTIC, so the scan below keeps its teeth. Both entries
+    /// govern KEY-SET RETRIEVAL - how soon a refresh a rejected token asked for may happen, and how often
+    /// the cached set is refreshed anyway - and neither reaches
+    /// <see cref="TokenValidationParameters.ClockSkew"/>. They exist because leaving them unset was a
+    /// rotation decision taken by omission: the token library's defaults are five minutes and TWELVE
+    /// HOURS, so a signing-key rotation at Security left this ingress accepting the retired credential and
+    /// refusing the current one at the same time.
+    /// </para>
+    /// <para>
+    /// WHAT MAKES THE ALLOW-LIST SAFE IS A DIFFERENT ROW IN A DIFFERENT FILE:
+    /// <c>MetadataRotationConvergenceTests.NeitherIntervalCanMoveTheLifetimeTolerance</c> configures both
+    /// intervals to values far larger than the tolerance and asserts the tolerance unmoved on the deployed
+    /// host, so a future change routing a configured duration into the skew under one of these names would
+    /// fail there even though it passed here.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] PermittedTimeSpanMembers =
+    [
+        nameof(JwtBearerVerificationOptions.MetadataRefreshInterval),
+        nameof(JwtBearerVerificationOptions.MetadataAutomaticRefreshInterval),
+    ];
+
+    /// <summary>
     /// No configuration key can move the lifetime tolerance.
     /// </summary>
     /// <remarks>
@@ -2959,7 +2987,9 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// the same way: for a tolerance the safe form is ABSENCE from the bound options, since a numeric
     /// setting has no "refuse the unsafe value" arm that a boolean's <c>false</c> gives. The verification
     /// options type is scanned rather than one property name, so a member arriving under any spelling
-    /// trips this row.
+    /// trips this row unless it is one of the two retrieval intervals named in
+    /// <see cref="PermittedTimeSpanMembers"/> - and a name carrying <c>Skew</c> or <c>Tolerance</c> trips
+    /// it even if it is listed.
     /// </remarks>
     [Fact]
     public void NoConfiguredValueCanMoveTheLifetimeTolerance()
@@ -2967,11 +2997,19 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         foreach (System.Reflection.PropertyInfo property in
             typeof(JwtBearerVerificationOptions).GetProperties())
         {
+            bool toleranceShaped =
+                property.Name.Contains("Skew", StringComparison.OrdinalIgnoreCase)
+                || property.Name.Contains("Tolerance", StringComparison.OrdinalIgnoreCase);
+
+            bool permitted =
+                !toleranceShaped
+                && PermittedTimeSpanMembers.Contains(property.Name, StringComparer.Ordinal);
+
             Assert.False(
-                property.PropertyType == typeof(TimeSpan)
-                    || property.PropertyType == typeof(TimeSpan?)
-                    || property.Name.Contains("Skew", StringComparison.OrdinalIgnoreCase)
-                    || property.Name.Contains("Tolerance", StringComparison.OrdinalIgnoreCase),
+                !permitted
+                    && (property.PropertyType == typeof(TimeSpan)
+                        || property.PropertyType == typeof(TimeSpan?)
+                        || toleranceShaped),
                 $"{nameof(JwtBearerVerificationOptions)}.{property.Name} looks like a configurable "
                     + "lifetime tolerance. The skew is compiled in at Program.cs precisely so no "
                     + "deployment can widen it past the token lifetime.");

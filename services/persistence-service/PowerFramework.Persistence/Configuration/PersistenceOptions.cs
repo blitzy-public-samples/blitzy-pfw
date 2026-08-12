@@ -130,12 +130,22 @@
 //
 //  ============================ BIDIRECTIONAL KEY PARITY, CHECKED KEY BY KEY ======================
 //  appsettings.json is the declared source of truth for the key shape, and the two files agree
-//  exactly. Eighteen option leaves, eighteen members:
+//  exactly. Twenty option leaves, twenty members:
 //
 //    Jwt:Authority                             -> JwtOptions.Authority
 //    Jwt:MetadataAddress                       -> read directly in Program.cs, not bound here
 //    Jwt:Audience                              -> JwtOptions.Audience
 //    Jwt:RequireHttpsMetadata                  -> JwtOptions.RequireHttpsMetadata
+//    Jwt:MetadataRefreshInterval               -> JwtOptions.MetadataRefreshInterval
+//    Jwt:MetadataAutomaticRefreshInterval      -> JwtOptions.MetadataAutomaticRefreshInterval
+//
+//  THE TWO REFRESH INTERVALS ARE BOTH MODELLED AND READ DIRECTLY, WHICH IS A THIRD SHAPE AND IS
+//  DELIBERATE. They are MODELLED so PersistenceOptionsValidator can refuse a value below the token
+//  library's own floor at startup - the configuration manager otherwise throws on the FIRST
+//  AUTHENTICATED REQUEST, long after a healthy startup - and they are READ FROM THE SAME SECTION
+//  SNAPSHOT as the authority they qualify, for the reason the composition root records at its bearer
+//  callback. Program.cs falls back to the same constants this type defaults to, so an absent key and an
+//  unbound one cannot disagree.
 //
 //  THERE IS NO Jwt:JwksPath LEAF, AND ITS ABSENCE IS THE DECISION. An earlier revision declared,
 //  documented and validated one as though this service composed its own key-set address beneath the
@@ -189,6 +199,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using PowerFramework.Persistence.Concurrency;
 
 namespace PowerFramework.Persistence.Configuration;
@@ -1328,6 +1339,69 @@ public sealed class JwtOptions
     public bool ValidateIssuerSigningKey { get; set; } = true;
 
     /// <summary>
+    /// The default floor between two on-demand key-set refreshes: five seconds.
+    /// </summary>
+    /// <remarks>
+    /// Bounds how long this boundary keeps refusing a correctly signed token after Security rotates its
+    /// signing key. Not lower, because this floor is also the only rate limit on the refresh a REJECTED
+    /// token provokes. Stated identically on all three verification boundaries, so one rotation converges
+    /// at one rate across the estate rather than at three.
+    /// </remarks>
+    public static readonly TimeSpan DefaultMetadataRefreshInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The default interval at which the cached key set is refreshed even when every token validates:
+    /// five minutes, the library's own minimum.
+    /// </summary>
+    /// <remarks>
+    /// The library's default is TWELVE HOURS, and this interval is the only thing that ever drops a
+    /// RETIRED key, because a successful validation provokes no refresh.
+    /// </remarks>
+    public static readonly TimeSpan DefaultMetadataAutomaticRefreshInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The shortest time that must pass before a key-set refresh requested by a failed validation is
+    /// actually performed. Defaults to <see cref="DefaultMetadataRefreshInterval"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>ROTATION INVERTS THIS BOUNDARY'S VERDICTS FOR AS LONG AS THIS INTERVAL.</b> When Security
+    /// rotates its signing key and key identifier, a token minted BEFORE the rotation keeps validating
+    /// against the cached set while one minted AFTER it is refused <c>401</c> with <c>IDX10503</c> naming a
+    /// key identifier that matched nothing. The handler requests a refresh on exactly that failure, but the
+    /// configuration manager will not fetch again until this interval has elapsed since its last fetch - so
+    /// the library's five-minute default made the inversion last minutes.
+    /// </para>
+    /// <para>
+    /// <b>A BOUND RATHER THAN AN OVERLAP, WHICH IS AN AAP CONSTRAINT.</b> The alternative is for the issuer
+    /// to publish the superseded key beside the new one until consumers converge - but AAP 0.6.6.3 fixes
+    /// exactly one signing secret in the estate and Security's published set is built from that single key,
+    /// so an overlap would add a second slot of issuer key material rather than a setting. The window is
+    /// bounded and documented instead: <c>docs/SECRETS.md</c> section 4.2.1 carries the rotation runbook
+    /// and <c>docs/ARCHITECTURE.md</c> section 9.6 tabulates both intervals.
+    /// </para>
+    /// <para>
+    /// Read from the same configuration snapshot as the authority it qualifies, for the reason the
+    /// composition root records at its bearer callback, and validated against
+    /// <see cref="BaseConfigurationManager.MinimumRefreshInterval"/> so a value the configuration manager
+    /// would throw on becomes a refusal to start rather than a first-request failure.
+    /// </para>
+    /// </remarks>
+    public TimeSpan MetadataRefreshInterval { get; set; } = DefaultMetadataRefreshInterval;
+
+    /// <summary>
+    /// How often the cached key set is refreshed in the background, independently of any validation
+    /// failure. Defaults to <see cref="DefaultMetadataAutomaticRefreshInterval"/>.
+    /// </summary>
+    /// <remarks>
+    /// The half of rotation <see cref="MetadataRefreshInterval"/> cannot bound: a token signed by the
+    /// RETIRED key still validates against the cached set and a success provokes no refresh, so only this
+    /// interval retires it. Validated against
+    /// <see cref="BaseConfigurationManager.MinimumAutomaticRefreshInterval"/>.
+    /// </remarks>
+    public TimeSpan MetadataAutomaticRefreshInterval { get; set; } = DefaultMetadataAutomaticRefreshInterval;
+
+    /// <summary>
     /// The caller identities permitted to reach this service's four contracts. Bound from
     /// <c>Jwt:PermittedCallers</c>.
     /// </summary>
@@ -1650,6 +1724,7 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
         {
             AppendAnnotationFailures(options.Jwt, path, failures);
             AppendDisabledValidationFailures(options.Jwt, path, failures);
+            AppendMetadataRefreshFailures(options.Jwt, path, failures);
 
             // RequireHttpsMetadata is unvalidated by design: false is a legal value that a developer's
             // loopback run legitimately needs, and the defence against it reaching a deployed stack is
@@ -1971,6 +2046,81 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
                     + "setting would not take effect - and a setting that is silently ignored is worse "
                     + "than one that is honoured, which is why the host refuses to start instead. Remove "
                     + "the key or set it to true."));
+        }
+    }
+
+    /// <summary>
+    /// Appends one failure per key-set refresh interval a deployment has set below the floor the token
+    /// library itself enforces.
+    /// </summary>
+    /// <param name="jwt">The bound verification group being validated.</param>
+    /// <param name="configurationPath">The group's configuration path, for the message.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// <para>
+    /// THE FLOORS ARE READ FROM THE LIBRARY RATHER THAN RESTATED AS LITERALS, so the rule cannot drift
+    /// away from the behaviour it guards. <c>BaseConfigurationManager</c> throws
+    /// <see cref="ArgumentOutOfRangeException"/> - IDX10107 for the requested-refresh floor and IDX10108
+    /// for the background interval - and it throws while the bearer handler builds its configuration
+    /// manager, which happens on the FIRST AUTHENTICATED REQUEST rather than at startup. A host that
+    /// started healthy and then failed every authenticated call is exactly the shape of fault a startup
+    /// check exists to convert into a refusal to start.
+    /// </para>
+    /// <para>
+    /// The third rule is a relationship rather than a range: a requested-refresh floor LONGER than the
+    /// background interval makes a rotation converge more slowly for a caller presenting a new token than
+    /// for one presenting nothing at all, which inverts the ordering an operator would expect.
+    /// </para>
+    /// </remarks>
+    private static void AppendMetadataRefreshFailures(
+        JwtOptions jwt,
+        string configurationPath,
+        List<string> failures)
+    {
+        if (jwt.MetadataRefreshInterval < BaseConfigurationManager.MinimumRefreshInterval)
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":",
+                nameof(JwtOptions.MetadataRefreshInterval),
+                " is ",
+                jwt.MetadataRefreshInterval.ToString(),
+                ", which is below the ",
+                BaseConfigurationManager.MinimumRefreshInterval.ToString(),
+                " minimum the token library enforces. It would be rejected while the bearer handler ",
+                "builds its configuration manager - on the first authenticated request, not at startup, ",
+                "so this host would report healthy and then fail every authenticated call."));
+        }
+
+        if (jwt.MetadataAutomaticRefreshInterval
+            < BaseConfigurationManager.MinimumAutomaticRefreshInterval)
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":",
+                nameof(JwtOptions.MetadataAutomaticRefreshInterval),
+                " is ",
+                jwt.MetadataAutomaticRefreshInterval.ToString(),
+                ", which is below the ",
+                BaseConfigurationManager.MinimumAutomaticRefreshInterval.ToString(),
+                " minimum the token library enforces, and would be rejected on the first authenticated ",
+                "request rather than at startup."));
+        }
+        else if (jwt.MetadataRefreshInterval > jwt.MetadataAutomaticRefreshInterval)
+        {
+            failures.Add(string.Concat(
+                configurationPath,
+                ":",
+                nameof(JwtOptions.MetadataRefreshInterval),
+                " is ",
+                jwt.MetadataRefreshInterval.ToString(),
+                ", which is longer than ",
+                nameof(JwtOptions.MetadataAutomaticRefreshInterval),
+                " (",
+                jwt.MetadataAutomaticRefreshInterval.ToString(),
+                "). The first is the floor on a refresh a REJECTED token asks for and the second is the ",
+                "background interval, so a floor above it makes a rotation converge more slowly for a ",
+                "caller presenting a new token than for one presenting nothing at all."));
         }
     }
 

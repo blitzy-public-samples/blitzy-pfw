@@ -176,6 +176,8 @@ using GeneratedColumnExpressionServiceBase =
 // [retcode.sru]. Importing both namespaces would make every bare `RetCode` ambiguous (CS0104), so
 // `Common.V1` is reached through aliases only and bare `RetCode` always means the Kernel constants.
 using WireAnyValue = global::PowerFramework.Contracts.Common.V1.AnyValue;
+using WireColumnValue = global::PowerFramework.Contracts.Common.V1.ColumnValue;
+using WireDataWindowRow = global::PowerFramework.Contracts.Common.V1.DataWindowRow;
 using WireDateTimeValue = global::PowerFramework.Contracts.Common.V1.DateTimeValue;
 using WireDateValue = global::PowerFramework.Contracts.Common.V1.DateValue;
 using WireRetCode = global::PowerFramework.Contracts.Common.V1.RetCode.Types.Value;
@@ -229,6 +231,45 @@ public interface IDataWindowHostFactory
     /// <see cref="ColumnExpressionService.OpenExpressionSession"/>.
     /// </returns>
     DataWindowServiceHost? Create(string dataWindowName);
+
+    /// <summary>
+    /// Creates a host that belongs to ONE expression session and is shared with nothing.
+    /// </summary>
+    /// <param name="dataWindowName">The caller's own name for the DataWindow, as for <see cref="Create"/>.</param>
+    /// <returns>
+    /// A host no other session or model set holds a reference to, or <see langword="null"/> when this
+    /// factory cannot serve the name. Null FAILS THE WHOLE OPEN, exactly as for <see cref="Create"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 WHY THIS IS A SEPARATE MEMBER RATHER THAN A CHANGE TO <see cref="Create"/>.
+    /// </para>
+    /// <para>
+    /// <see cref="Create"/> is deliberately RETENTIVE: the production factory keeps one host per
+    /// DataWindow name so that C-03's five headless models share one host and therefore ONE EVENT BROKER
+    /// - the service base reads its broker off its host [<c>n_cst_dwsvc.sru:L86</c>], so two hosts would
+    /// silently split the broker in two and a subscription one model registered would be invisible to a
+    /// topic another triggered. That retention is correct and is not being changed.
+    /// </para>
+    /// <para>
+    /// It is WRONG for an expression session. A session-scoped handle exists precisely to give a session
+    /// a PRIVATE surface: AAP 0.6.2.3 supports a foreign variable only where both DataWindows are
+    /// co-resident in ONE session, which is only meaningful if a session's DataWindow is its own. While
+    /// the expression DataWindow was permanently empty - which is what finding F-7 was - the distinction
+    /// was invisible, because there was nothing in a host to share. As soon as <c>LoadRows</c> can put
+    /// CALLER ROWS into it, retention becomes two defects: one caller's rows appear in another caller's
+    /// session over the same data-object name, and rows accumulate for the lifetime of the PROCESS with
+    /// no operation that clears them. Both were reproduced at runtime before this member existed: a
+    /// second session over the same name answered <c>firstRow 4, rowCount 4</c> after the first had
+    /// loaded three rows.
+    /// </para>
+    /// <para>
+    /// NO DEFAULT IMPLEMENTATION IS OFFERED, on purpose. A default that delegated to <see cref="Create"/>
+    /// would let an implementer keep the sharing silently, and the whole point of the member is that
+    /// isolation is a decision each factory states.
+    /// </para>
+    /// </remarks>
+    DataWindowServiceHost? CreateIsolated(string dataWindowName);
 }
 
 /// <summary>
@@ -2503,6 +2544,29 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
 
         if (!opened.IsOpened || opened.Session is null)
         {
+            // 🔴 THE REFUSAL IS RECORDED, WHICH IT WAS NOT.
+            //
+            // This arm returned the registry's code and logged NOTHING, so an operator watching a
+            // service that had reached its ceiling saw client-side 429s with no server-side evidence at
+            // all - and no way to tell an exhausted ceiling from a caller sending malformed requests.
+            // The sibling refusal on the validation-session registry has always recorded both the code
+            // and the configured limits [DataWindowService.OpenValidationSession]; this is that record,
+            // deliberately worded the same way so one log query finds both.
+            //
+            // THE LIMITS ARE NAMED BECAUSE THE CODE ALONE IS NOT ACTIONABLE. "The registry refused" tells
+            // an operator nothing they can change; the ceiling and the idle timeout are the two settings
+            // that decide whether this happens again, and both are configuration.
+            //
+            // NOTHING CALLER-SUPPLIED IS RECORDED. This operation carries only data-object names, and the
+            // refusal happens before any of them is read.
+            _logger?.LogWarning(
+                "An expression session could not be opened; the registry answered {ReturnCode}. The "
+                    + "configured ceiling is {MaxConcurrentSessions} concurrent sessions with an idle "
+                    + "timeout of {IdleTimeout}.",
+                opened.ReturnCode,
+                _sessions.MaxConcurrentSessions,
+                _sessions.IdleTimeout);
+
             return Task.FromResult(
                 new OpenExpressionSessionResponse
                 {
@@ -2515,7 +2579,10 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
 
         foreach (string dataWindowName in request.DatawindowHandles)
         {
-            DataWindowServiceHost? host = _hostFactory.Create(dataWindowName ?? string.Empty);
+            // ISOLATED, NOT THE RETAINED HOST. See IDataWindowHostFactory.CreateIsolated: a session's
+            // DataWindow now carries caller rows (LoadRows), so sharing one host per data-object name
+            // would leak one caller's rows into another caller's session and grow without bound.
+            DataWindowServiceHost? host = _hostFactory.CreateIsolated(dataWindowName ?? string.Empty);
 
             if (host is null)
             {
@@ -2595,6 +2662,242 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
                 WasOpen = wasOpen,
             });
     }
+
+    /// <summary>
+    /// 🔴 Places rows into a session's DataWindow, so the calculation operations have something to
+    /// evaluate against.
+    /// </summary>
+    /// <param name="request">The session, the session-scoped handle and the rows.</param>
+    /// <param name="context">The call context.</param>
+    /// <returns>The count this call created, the ordinal of its first row, and the resulting row count.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS OPERATION HAD TO EXIST.</b> Every calculation on this service evaluates against ROWS,
+    /// and nothing published could put one into a session: a session's DataWindow is created empty and
+    /// <c>DataWindowService.Retrieve</c> addresses a REGISTERED data-object name, so it refuses a
+    /// session-scoped handle. The consequence was that <c>Calc</c> answered <c>E_INVALID_ARGUMENT</c> for
+    /// row 1 of every session, <c>CalcAll</c> and <c>CalcEmpty</c> iterated zero rows, and only the
+    /// binding half of the engine was reachable end to end - half of C-04.
+    /// </para>
+    /// <para>
+    /// APPEND, AND THE CALLER'S <c>buffer</c> AND <c>row</c> ARE IGNORED. Rows are created in request
+    /// order at the end of the Primary buffer and the ordinals are assigned here, because honouring a
+    /// supplied ordinal would let two calls disagree about which row is which - and the engine's dirty
+    /// propagation and cache are keyed on the ordinal. The response names the range it created instead.
+    /// </para>
+    /// <para>
+    /// EVERY CREATED ROW IS <c>NewModified</c>, which is what <c>InsertRow</c> produces and what an
+    /// unbaselined scratch row is. This surface is NOT an update path: nothing here reaches storage, and
+    /// there is no original-value shadow to establish.
+    /// </para>
+    /// <para>
+    /// A COLUMN REFERENCE IS RESOLVED THE SAME WAY THE UPDATE PATH RESOLVES ONE, deliberately: an
+    /// ordinal alone is authoritative, a name alone resolves through the definition, and where both are
+    /// present they must AGREE. A disagreement is refused rather than resolved in favour of one, because
+    /// silently preferring either lands the value in a column the caller did not believe it named.
+    /// </para>
+    /// <para>
+    /// A REFUSAL IS ALL-OR-NOTHING PER CALL ONLY IN THE SENSE THAT IT STOPS: rows already created are NOT
+    /// removed, because the host surface this engine drives publishes no delete and inventing one to
+    /// unwind would add a mutator the service does not otherwise have. The response therefore reports
+    /// exactly what was created before the refusal, which is what lets a caller reconcile.
+    /// </para>
+    /// </remarks>
+    public override Task<LoadRowsResponse> LoadRows(LoadRowsRequest request, ServerCallContext context)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+
+        EngineResolution resolution = Resolve(request.SessionId, request.DatawindowHandle);
+
+        if (resolution.Engine is not { } engine)
+        {
+            return Task.FromResult(new LoadRowsResponse
+            {
+                RetCode = ExpressionWireProjection.ToWireRetCode(resolution.ReturnCode),
+            });
+        }
+
+        if (engine.DataWindow is not { } host)
+        {
+            // Structurally impossible through this service: a registered engine is attached by
+            // OpenExpressionSession before its handle is ever handed out. Reported rather than assumed
+            // away, on the same terms as the cast guard in Resolve.
+            return Task.FromResult(new LoadRowsResponse
+            {
+                RetCode = ExpressionWireProjection.ToWireRetCode(RetCode.E_INVALID_OBJECT),
+            });
+        }
+
+        long firstRow = 0L;
+        long loaded = 0L;
+
+        foreach (WireDataWindowRow row in request.Rows)
+        {
+            // Append: InsertRow(0) is the legacy's own "at the end" spelling and answers the new ordinal.
+            long ordinal = host.InsertRow(0L);
+
+            if (ordinal <= 0L)
+            {
+                return Task.FromResult(BuildLoadRowsRefusal(
+                    RetCode.FAILED,
+                    LoadRowsInsertFailedText,
+                    loaded,
+                    firstRow,
+                    host.RowCount()));
+            }
+
+            if (firstRow == 0L)
+            {
+                firstRow = ordinal;
+            }
+
+            loaded++;
+
+            foreach (WireColumnValue column in row.Columns)
+            {
+                if (ResolveLoadColumn(host, column) is not { } columnId)
+                {
+                    return Task.FromResult(BuildLoadRowsRefusal(
+                        RetCode.E_INVALID_ARGUMENT,
+                        Formatting.Sprintf(
+                            LoadRowsUnresolvedColumnTemplate,
+                            column.ColumnName,
+                            column.ColumnId),
+                        loaded,
+                        firstRow,
+                        host.RowCount()));
+                }
+
+                // Through the untyped SetItem, which is the arm the engine's own writes take: the host
+                // coerces to the column's declared type by its own rules, so a value written here behaves
+                // exactly as one the engine calculated.
+                if (host.SetItem(ordinal, columnId, ExpressionWireProjection.FromWire(column.Value))
+                    != HeadlessDataWindowHost.Success)
+                {
+                    return Task.FromResult(BuildLoadRowsRefusal(
+                        RetCode.E_INVALID_DATA,
+                        Formatting.Sprintf(
+                            LoadRowsUnwritableValueTemplate,
+                            column.ColumnName,
+                            columnId),
+                        loaded,
+                        firstRow,
+                        host.RowCount()));
+                }
+            }
+        }
+
+        _logger?.LogDebug(
+            "Expression session {SessionId} loaded {RowsLoaded} row(s) starting at ordinal {FirstRow}; "
+                + "the DataWindow now holds {RowCount}. No value is recorded here: the rows are caller "
+                + "content.",
+            request.SessionId,
+            loaded,
+            firstRow,
+            host.RowCount());
+
+        return Task.FromResult(new LoadRowsResponse
+        {
+            RetCode = ExpressionWireProjection.ToWireRetCode(RetCode.OK),
+            RowsLoaded = loaded,
+            FirstRow = firstRow,
+            RowCount = host.RowCount(),
+        });
+    }
+
+    /// <summary>The refusal text when the host declines to create a row.</summary>
+    internal const string LoadRowsInsertFailedText =
+        "The DataWindow refused to create a row. No further row was attempted.";
+
+    /// <summary>
+    /// The refusal template for a column reference that resolves to nothing, or whose two identifiers
+    /// disagree. One-based indices, matching the ported <see cref="Formatting.Sprintf"/>.
+    /// </summary>
+    internal const string LoadRowsUnresolvedColumnTemplate =
+        "The request addressed column '{1}' at ordinal {2}, which this DataWindow does not carry at that "
+        + "ordinal. A column is addressed by its one-based ordinal, and a name sent beside one must be "
+        + "the name that ordinal carries.";
+
+    /// <summary>The refusal template for a value the column would not accept.</summary>
+    internal const string LoadRowsUnwritableValueTemplate =
+        "Column '{1}' at ordinal {2} refused the value supplied for it. The value is not reproduced here: "
+        + "it is caller content.";
+
+    /// <summary>
+    /// Resolves a column reference for <see cref="LoadRows"/>.
+    /// </summary>
+    /// <param name="host">The session's DataWindow.</param>
+    /// <param name="column">The reference the request carried.</param>
+    /// <returns>The one-based column number, or <see langword="null"/> when it resolves to nothing.</returns>
+    /// <remarks>
+    /// THE ORACLE'S OWN IDIOM. <c>Describe(name + ".ID")</c> answers a non-positive value for an object
+    /// that is not a column, and the legacy reads that as "no such column"
+    /// [<c>n_cst_dwsvc_columnexp.sru:L1541-L1542</c>]. An ordinal sent beside a real name must equal the
+    /// one the name resolves to; ordinal <c>0</c> means "not stated" rather than "column zero", matching
+    /// <c>common.v1.ColumnValue</c>.
+    /// </remarks>
+    private static long? ResolveLoadColumn(DataWindowServiceHost host, WireColumnValue column)
+    {
+        if (column.ColumnName.Length == 0)
+        {
+            return column.ColumnId > 0L ? column.ColumnId : null;
+        }
+
+        if (!long.TryParse(
+                host.Describe(column.ColumnName + ".ID"),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out long resolved)
+            || resolved <= 0L)
+        {
+            return null;
+        }
+
+        return column.ColumnId != 0L && column.ColumnId != resolved ? null : resolved;
+    }
+
+    /// <summary>Builds the refusal a partially completed load answers with.</summary>
+    /// <param name="code">The framework code.</param>
+    /// <param name="text">The rendered refusal text.</param>
+    /// <param name="loaded">How many rows had been created when the refusal happened.</param>
+    /// <param name="firstRow">The ordinal of the first row created, or zero.</param>
+    /// <param name="rowCount">The resulting Primary row count.</param>
+    /// <returns>The response.</returns>
+    /// <remarks>
+    /// THE COUNTS TRAVEL ON A REFUSAL TOO, because rows already created are not removed and a caller that
+    /// was told only "refused" would have no way to learn what its DataWindow now holds. The error claims
+    /// no localization category: it has no oracle behind it, so reporting one would tell a
+    /// characterization comparison that a legacy translation table answered for this text.
+    /// </remarks>
+    private static LoadRowsResponse BuildLoadRowsRefusal(
+        long code,
+        string text,
+        long loaded,
+        long firstRow,
+        long rowCount) => new()
+        {
+            RetCode = ExpressionWireProjection.ToWireRetCode(code),
+            RowsLoaded = loaded,
+            FirstRow = firstRow,
+            RowCount = rowCount,
+            Error = new StructuredError
+            {
+                Text = text,
+                Localized = false,
+                Category = 0L,
+                Severity = Severity.StopSign,
+                Title = LoadRowsRefusalTitle,
+                RetCode = ExpressionWireProjection.ToWireRetCode(code),
+            },
+        };
+
+    /// <summary>The title a load refusal carries.</summary>
+    /// <remarks>
+    /// NOT the oracle's localized 错误: this refusal is not one of the oracle's dialogs, and borrowing a
+    /// translated title would claim a provenance it does not have.
+    /// </remarks>
+    internal const string LoadRowsRefusalTitle = "Rows could not be loaded";
 
     // =================================================================================================
     //  EXPRESSIONS - of_addexp [:L172], of_setexp x4 [:L174-L177], of_getexp x2 [:L127, :L130],

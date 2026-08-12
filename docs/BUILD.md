@@ -975,7 +975,7 @@ kinds is the mistake this table exists to prevent:
 | --- | --- | --- |
 | `SECURITY_JWT_SIGNING_KEY` | **Material, not a path** | The signing key **value**: base64 of the PKCS#8 DER encoding on one line, because the Compose dotenv format has no line continuation and a PEM block cannot be written there. PEM is also accepted, and tried first, for a secret store that can carry newlines |
 | `TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` | Paths | The **shared multi-SAN server certificate and key**, consumed by Persistence, DataServices and Security as `Kestrel:Certificates:Default:Path` and `:KeyPath`. Not Security-specific: all three TLS listeners terminate with the same default material |
-| `SECURITY_MTLS_CLIENT_CA_PATH` | Path | The authority whose client certificates Security accepts on `POST /v1/tokens` |
+| `SECURITY_MTLS_CLIENT_CA_PATH` | Path | The authority whose client certificates Security accepts on `POST /v1/tokens`. It feeds **both** client-certificate anchors: `Security:MutualTls:ClientCaPath` directly, so the handshake completes, and `Security:ClientCertificateAuthorityPath` by adoption when that key is unset, so the certificate establishes an identity |
 | `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` | Paths | Gateway's client certificate and key for the issuance edge |
 | `DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH` | Paths | DataServices' client certificate and key for the same edge |
 
@@ -1050,7 +1050,9 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signi
 openssl pkey -in security-signing.key -outform DER 2>/dev/null | base64 -w0 > security-signing.b64
 # Paste the single line in security-signing.b64 after SECURITY_JWT_SIGNING_KEY= and never echo it.
 
-# 2. The mutual-TLS trust anchor for POST /v1/tokens -> SECURITY_MTLS_CLIENT_CA_PATH.
+# 2. The mutual-TLS trust anchor for POST /v1/tokens -> SECURITY_MTLS_CLIENT_CA_PATH. This one
+#    variable is enough: Security reads it as the listener's anchor and, when
+#    Security:ClientCertificateAuthorityPath is unset, adopts it as the issuance anchor too.
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=powerframework-local-ca" \
         -keyout mtls-ca.key -out mtls-ca.crt
 
@@ -1802,10 +1804,11 @@ Security carries the issuance surface, so it binds settings no other service has
 | `Security:TokenLifetime`, `Security:SigningAlgorithm` | Lifetime and algorithm of a minted token |
 | `Security:Clients[n]:Subject` | A client permitted to request a token |
 | `Security:Clients[n]:SecretConfigurationKey` | **The NAME of a flat configuration key holding that client's secret** — never the secret itself, so no secret appears in `appsettings.json` |
-| `Security:CallerAuthorizations[n]:Caller`, `:Audience`, `:Scopes[m]` | Which caller may obtain which audience with which scopes |
+| `Security:Clients[n]:Audiences[m]`, `:Scopes[m]` | **Advertisement, not enforcement.** These describe what a client is expected to ask for; they are bound and frozen onto the registered client, and the issuance decision is taken entirely against the `Security:Callers` + `Security:CallerAuthorizations` matrix below. A value here can therefore neither grant nor withhold anything, and the shipped configuration diverges from the matrix in both files. The composition root **reports every divergence at Warning under the log category `PowerFramework.Security.IssuanceRosterCoherence`** — in both directions: advertised-but-not-granted, and granted-to-a-caller-no-credential-roster-names. It reports rather than refuses on purpose: refusing would put a second permission gate in front of the matrix, able to withhold what the matrix grants, and divided authority over one decision is the defect the report exists to surface |
+| `Security:CallerAuthorizations[n]:Caller`, `:Audience`, `:Scopes[m]` | Which caller may obtain which audience with which scopes. **This matrix is the effective authority** — with `Security:Callers`, whose nested grants are folded first and which these flat rows add to. An empty matrix refuses every issuance request |
 | `Security:MutualTls:ClientCaPath` | Trust anchor for a caller presenting a certificate to `POST /v1/tokens` |
 | `Security:MutualTls:Identity` | The identity attributed to a verified caller certificate |
-| `Security:ClientCertificateAuthorityPath` | Trust anchor for client certificates at the Kestrel layer |
+| `Security:ClientCertificateAuthorityPath` | Trust anchor a caller certificate must chain to before `POST /v1/tokens` will honour the identity it carries — the ISSUANCE anchor, and **not** the Kestrel-layer one above it. Unset means the composition root adopts `Security:MutualTls:ClientCaPath`, so `SECURITY_MTLS_CLIENT_CA_PATH` alone is sufficient; set explicitly, it wins |
 | `Security:ClientCertificateRevocationMode` | Revocation checking mode for those certificates |
 | `Security:KeyStore:PermittedKeyRefs[n]` | The opaque `keyRef` values `C-02` will resolve — callers pass a reference, never key material |
 | `SECURITY_JWT_SIGNING_KEY` | **The only signing secret in the entire system.** Flat and fixed: do not rewrite it as `Security__SigningKey` or add such an alias. `orchestration/.env.example` records why, and that it takes the base64 of a PKCS#8 DER RSA private key rather than random bytes |

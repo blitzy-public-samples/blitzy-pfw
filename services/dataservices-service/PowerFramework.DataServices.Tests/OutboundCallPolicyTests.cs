@@ -827,14 +827,30 @@ public sealed class OutboundCallPolicyTests
     /// convention changed, the monitor would hand back a default instance and every assertion below
     /// would fail loudly rather than pass vacuously.
     /// </para>
+    /// <para>
+    /// 🔴 WHICH RETRY PREDICATE IS INSTALLED DEPENDS ON THE TRANSPORT, DELIBERATELY, and the second theory
+    /// argument says which is expected rather than leaving a reader to infer it. The four Persistence
+    /// channels retry at the gRPC layer, which is strictly better informed - it sees a CONNECT failure,
+    /// which this pipeline never does because the balancer establishes the connection outside it - and
+    /// retrying at BOTH multiplies the attempt count rather than adding to it. So they carry a never-retry
+    /// predicate, and the Security REST pipeline, which has no service config and no other mechanism,
+    /// keeps the operation-scoped one.
+    /// </para>
+    /// <para>
+    /// THE BREAKER IS ASSERTED WITHOUT EXCEPTION ON ALL FIVE, because standing retry down must not stand
+    /// down the protection an upstream gets from a caller that keeps trying. That is the whole reason the
+    /// HTTP pipeline is kept on a gRPC channel at all.
+    /// </para>
     /// </remarks>
     [Theory]
-    [InlineData("QueryServiceClient")]
-    [InlineData("UpdateServiceClient")]
-    [InlineData("CommandServiceClient")]
-    [InlineData("TransactionServiceClient")]
-    [InlineData(SecurityClient.HttpClientName)]
-    public void Every_outbound_pipeline_carries_both_predicates(string clientName)
+    [InlineData("QueryServiceClient", false)]
+    [InlineData("UpdateServiceClient", false)]
+    [InlineData("CommandServiceClient", false)]
+    [InlineData("TransactionServiceClient", false)]
+    [InlineData(SecurityClient.HttpClientName, true)]
+    public void Every_outbound_pipeline_carries_both_predicates(
+        string clientName,
+        bool retriesAtTheHttpLayer)
     {
         using DataServicesTestHostFactory factory = new();
         using HttpClient started = factory.CreateAnonymousClient();
@@ -844,8 +860,10 @@ public sealed class OutboundCallPolicyTests
             .Get(clientName + "-standard");
 
         Assert.Equal(
-            (Func<RetryPredicateArguments<HttpResponseMessage>, ValueTask<bool>>)
-                OutboundCallPolicy.ShouldRetryAsync,
+            retriesAtTheHttpLayer
+                ? (Func<RetryPredicateArguments<HttpResponseMessage>, ValueTask<bool>>)
+                    OutboundCallPolicy.ShouldRetryAsync
+                : OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync,
             installed.Retry.ShouldHandle);
         Assert.Equal(
             (Func<CircuitBreakerPredicateArguments<HttpResponseMessage>, ValueTask<bool>>)
@@ -857,6 +875,40 @@ public sealed class OutboundCallPolicyTests
         // because a dependency's default satisfies it is not being enforced by anything.
         Assert.Equal(DelayBackoffType.Exponential, installed.Retry.BackoffType);
         Assert.True(installed.Retry.UseJitter);
+
+        // 🔴 THE PER-ATTEMPT BOUND IS ASSIGNED, NOT INHERITED - and on these four channels it is the bound
+        // that actually decides when a call gives up, because the HTTP layer performs no retries at all
+        // and the total is therefore never reached. Left at the package's ten-second default, an operator
+        // reading a thirty-second setting observed ten.
+        //
+        // ASSERTED AS THE DERIVATION RATHER THAN AS A LITERAL, because two constraints bound it: it cannot
+        // exceed the total, and the package requires the breaker's sampling window to be at least DOUBLE
+        // it - so the value cannot simply be copied from the total, and a literal would hide which
+        // constraint produced it.
+        ResilienceOptions configuredGroup = factory.Services
+            .GetRequiredService<IOptions<DataServicesOptions>>()
+            .Value
+            .Resilience;
+
+        ClientResilienceOptions edge = clientName == SecurityClient.HttpClientName
+            ? configuredGroup.Security
+            : configuredGroup.Persistence;
+
+        Assert.Equal(
+            edge.ResolveAttemptTimeout(installed.CircuitBreaker.SamplingDuration),
+            installed.AttemptTimeout.Timeout);
+
+        Assert.True(
+            installed.AttemptTimeout.Timeout <= installed.TotalRequestTimeout.Timeout,
+            "one attempt may not outlast the total budget containing it");
+        Assert.True(
+            installed.CircuitBreaker.SamplingDuration >= installed.AttemptTimeout.Timeout * 2,
+            "the package refuses a sampling window shorter than double the per-attempt timeout");
+
+        // And it is NO LONGER the package's default, which is the observable difference.
+        Assert.NotEqual(
+            new HttpStandardResilienceOptions().AttemptTimeout.Timeout,
+            installed.AttemptTimeout.Timeout);
     }
 
     /// <summary>

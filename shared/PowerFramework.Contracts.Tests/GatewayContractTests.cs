@@ -387,8 +387,8 @@ public sealed class GatewayContractTests
             checkedOperations++;
         }
 
-        // 50 operations, less the one anonymous /health and the eight reserved-route operations.
-        Assert.Equal(41, checkedOperations);
+        // 51 operations, less the one anonymous /health and the eight reserved-route operations.
+        Assert.Equal(42, checkedOperations);
     }
 
     // ==============================================================================================
@@ -972,8 +972,8 @@ public sealed class GatewayContractTests
             }
         }
 
-        // 39 projected operations, each naming a request and a response.
-        Assert.Equal(78, checkedNames);
+        // 40 projected operations, each naming a request and a response.
+        Assert.Equal(80, checkedNames);
     }
 
     [Fact]
@@ -1044,7 +1044,7 @@ public sealed class GatewayContractTests
             checkedOperations++;
         }
 
-        Assert.Equal(39, checkedOperations);
+        Assert.Equal(40, checkedOperations);
     }
 
     [Fact]
@@ -1468,8 +1468,8 @@ public sealed class GatewayContractTests
         // being updated, fails here. It is the cheapest possible guard against the document and the
         // specification drifting apart, which is the failure that produced finding I-2 in the first
         // place - a contract documented as published while absent.
-        Assert.Equal(46, document.Paths.Count);
-        Assert.Equal(50, Operations(document).Count());
+        Assert.Equal(47, document.Paths.Count);
+        Assert.Equal(51, Operations(document).Count());
     }
 
     [Fact]

@@ -1740,16 +1740,31 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
         'both worse than a refusal.',
     ).toBe(false);
 
-    // "Not success" is asserted as exactly that and no further. NO SPECIFIC
-    // STATUS NUMBER IS ASSERTED: nothing in the plan of record fixes one for a
-    // validation refusal, so naming one would be inventing a requirement. The one
-    // status that IS fixed is the 409 an optimistic-concurrency mismatch
-    // produces, and that belongs to the conflict spec rather than to this file.
+    // 🔴 THE REFUSAL MUST BE ATTRIBUTED TO THE CALLER, WHICH IS A 4xx AND NOT A 5xx.
+    // This used to be asserted only as ">= 400", and the chain answered 502 with a
+    // body reading "SQLite Error <redacted>: '<redacted>'." — so a caller who
+    // omitted a required field was told the database had failed, that the fault lay
+    // behind the gateway, and nothing said which column. A row omitting a NOT NULL
+    // column is the CALLER's payload being wrong, and the whole corrective action is
+    // available to the caller, so the class of the status is part of the contract.
+    //
+    // STILL NO SPECIFIC NUMBER. The class is what carries the attribution; the exact
+    // code inside it is not fixed by the plan of record, and naming one would be
+    // inventing a requirement. The one status that IS fixed is the 409 an
+    // optimistic-concurrency mismatch produces, and that belongs to the conflict
+    // spec rather than to this file.
     expect(
       response.status(),
-      'a refusal must be reported as a client or server error, not as a ' +
-        'redirection or a success',
+      'a payload the caller can correct must be refused as a CLIENT error. A 5xx ' +
+        'attributes the fault to the service or to something behind it, which sends ' +
+        'the caller looking for an outage instead of at its own request',
     ).toBeGreaterThanOrEqual(400);
+
+    expect(
+      response.status(),
+      'a payload the caller can correct must not be reported as a server or ' +
+        'upstream failure',
+    ).toBeLessThan(500);
 
     // STRUCTURED, NOT A DIALOG AND NOT A PAGE. This is the migration of the
     // legacy MessageBox surface into a machine-readable error result: the text,
@@ -1817,6 +1832,36 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
           'rather than only the HTTP class',
       ).toBe('number');
     }
+
+    // 🔴 THE REFUSAL MUST NAME THE OFFENDING COLUMN.
+    // The provider composes its diagnostic as `SQLite Error 19: '<message>'.`, and
+    // the service's statement-masking scan read that wrapper as a numeric literal
+    // beside a quoted string and masked BOTH — so every constraint refusal reached a
+    // caller as "SQLite Error <redacted>: '<redacted>'.", a sentence that says a
+    // database error happened and refuses to say what would fix it. A caller cannot
+    // correct a payload it is not told is wrong.
+    //
+    // ASSERTED OVER THE WHOLE SERIALIZED BODY rather than one member, because which
+    // member carries the driver's text is an implementation detail of the relay and
+    // the requirement is only that the identity reaches the caller at all.
+    const refusalBody: string = JSON.stringify(problem);
+
+    expect(
+      refusalBody.toUpperCase(),
+      'the refusal must name the column that failed. Masking the whole diagnostic ' +
+        'leaves a caller with nothing to act on, and the column name is schema ' +
+        'metadata rather than row data — it is not the thing masking exists to hide',
+    ).toContain(NOT_NULL_VIOLATION_COLUMNS[0]!.toUpperCase());
+
+    // AND THE VALUES THE CALLER SENT MUST NOT BE ECHOED BACK IN THE DIAGNOSTIC.
+    // The narrowing preserves the provider's ENVELOPE only; anything the provider
+    // quoted inside its own message still goes through the identical scan, so this is
+    // what keeps "name the column" from having widened into "echo the statement".
+    expect(
+      refusalBody,
+      'a refusal must not carry the generated statement or the literal values it ' +
+        'interpolated; the failing column identity is the whole of what a caller needs',
+    ).not.toContain(INVALID_INPUT.address);
 
     // NOTHING WAS PERSISTED. Proved by the label, which is safe here for one
     // reason only: the refused row uses a DIFFERENT scope from the inserted one,

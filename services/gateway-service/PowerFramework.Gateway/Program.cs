@@ -104,8 +104,12 @@ using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Xml.Linq;
+using Grpc.Net.Client;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
@@ -293,6 +297,51 @@ builder.Services.AddHostedService(static serviceProvider =>
 // is answered before any metadata is needed, because the handler looks for a token first - so the
 // mandated 401 on /v1/ping holds even with Security unreachable.
 // --------------------------------------------------------------------------------------------------
+// =================================================================================================
+//  DATA PROTECTION IS EPHEMERAL BY DELIBERATE CHOICE, AND THE CHOICE IS ABOUT KEY MATERIAL AT REST.
+//
+//  AddAuthentication REGISTERS THE DATA-PROTECTION STACK WHETHER OR NOT ANYTHING PROTECTS A PAYLOAD -
+//  Microsoft.AspNetCore.Authentication calls AddDataProtection for the ticket formats its remote
+//  handlers use, and this service registers no remote handler. DataProtection's own eager initialiser
+//  then materialises a key ring during host start. That was MEASURED on all four services rather than
+//  inferred: each wrote a key file into its user profile at startup, and one that afterwards failed to
+//  bind its port had ALREADY written it. Left at the default the ring is an unencrypted private key
+//  under the process's user profile - observed at '/root/.aspnet/DataProtection-Keys' - created per
+//  container and shared with nothing, which the framework itself warns about for a container.
+//
+//  NOTHING IN THIS SERVICE PROTECTS A PAYLOAD. Inbound authentication is bearer-token validation
+//  against Security's published verification material, which is stateless and uses no protector; there
+//  is no cookie, no session, no antiforgery token and no protected payload that outlives a request. The
+//  default therefore writes key material to disk for NO CONSUMER - a secret at rest with no purpose,
+//  and a secret at rest with no purpose is the one shape the secrets mandate has no tolerance for.
+//
+//  EPHEMERAL IS THE HONEST POSTURE, AND ITS FAILURE MODE IS WHY. Keys live in this process and die with
+//  it, nothing reaches the filesystem, and a future capability that DOES need a durable protector
+//  fails immediately and visibly on the first restart - instead of working on one replica and failing
+//  on the next, which is the strictly worse of the two failures the default offers. Persisting the ring
+//  instead would not remove the hazard: at-rest encryption of a persisted ring needs an X.509
+//  certificate this deployment does not provision, DPAPI is Windows-only, and the target is Linux
+//  containers - so persisting would relocate unencrypted key material rather than protect it.
+//  docs/SECRETS.md section 5 records the posture and what a later phase must put in its place.
+//
+//  THE PROVIDER SWAP ALONE WAS NOT ENOUGH, AND THAT WAS MEASURED. Replacing IDataProtectionProvider with
+//  the ephemeral one leaves the KEY-MANAGEMENT stack untouched, and data protection's eager initialiser
+//  warms THAT rather than whichever provider is registered - so a host wired that way still wrote a key
+//  file to the user profile on every start. The repository is therefore what is redirected: with an
+//  in-memory IXmlRepository there is no file-system repository to construct, so the ring is created in
+//  this process and NOTHING reaches the disk. One mechanism, at the layer that decides where bytes go.
+//
+//  THIS IS NOT A BEHAVIOUR CHANGE UNDER C-B. There is no legacy analogue to preserve or to break: the
+//  key ring is an artifact of the ASP.NET Core hosting choice this refactor introduced, and the legacy
+//  framework - a library with no process of its own - has nothing that corresponds to it.
+// =================================================================================================
+builder.Services
+    .AddDataProtection();
+
+// The key ring lives in memory, so the eager initialiser's key is created HERE rather than in a file.
+builder.Services.Configure<KeyManagementOptions>(static options =>
+    options.XmlRepository = new InMemoryDataProtectionKeyRepository());
+
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
@@ -322,6 +371,28 @@ builder.Services
         bearer.Authority = configured.Authority;
         bearer.RequireHttpsMetadata = configured.RequireHttpsMetadata;
         bearer.MapInboundClaims = configured.MapInboundClaims;
+
+        // 🔴 BOTH KEY-SET REFRESH INTERVALS ARE ASSIGNED, BECAUSE LEAVING EITHER UNASSIGNED IS A
+        // ROTATION DECISION TAKEN BY OMISSION.
+        //
+        // Saying nothing here does not mean "refresh promptly" - it means the library's defaults, and the
+        // two defaults fail in OPPOSITE directions at once. RefreshInterval defaults to five minutes, so a
+        // token minted after Security rotates its key is refused 401 (IDX10503, no key matched the
+        // identifier) for up to that long even though the handler asked to refresh the moment it saw the
+        // unknown key identifier. AutomaticRefreshInterval defaults to TWELVE HOURS, and it is the only
+        // thing that ever drops a RETIRED key, because a successful validation provokes no refresh - so a
+        // token signed by the superseded key stays acceptable here for half a day. Rotation therefore
+        // inverted this boundary's verdicts: the old credential worked and the new one did not.
+        //
+        // Both values come from configuration and both are validated at startup against the library's own
+        // published minimums, so a deployment can tune the trade - a shorter floor converges faster but is
+        // also the only rate limit on the fetch a forged key identifier can provoke - without being able
+        // to pick a value the configuration manager would reject on the first authenticated request.
+        // docs/ARCHITECTURE.md section 9.6 tabulates the two intervals and docs/SECRETS.md section 4.2.1
+        // carries the rotation runbook, including the reason an overlapping key set is not the answer here
+        // (AAP 0.6.6.3 fixes exactly one signing secret in the estate).
+        bearer.RefreshInterval = configured.MetadataRefreshInterval;
+        bearer.AutomaticRefreshInterval = configured.MetadataAutomaticRefreshInterval;
 
         TokenValidationParameters parameters = bearer.TokenValidationParameters;
 
@@ -371,6 +442,40 @@ builder.Services
         // an audience is not discoverable from metadata and a service with none configured would
         // reject every token while appearing correctly configured.
         parameters.ValidAudiences = [.. configured.ValidAudiences];
+    });
+
+// 🔴 AND THE THIRD DURATION, WHICH THE TWO ABOVE DO NOT BOUND: HOW LONG A SUPERSEDED KEY SET STAYS
+// ACCEPTABLE AS A LAST-KNOWN-GOOD FALLBACK.
+//
+// MEASURED, NOT ASSUMED. With both intervals above configured, a token signed by a RETIRED key was still
+// accepted at this boundary NINE AND A HALF MINUTES after the rotation - well past the five-minute
+// background refresh that had already replaced the current configuration. The cause is
+// BaseConfigurationManager's last-known-good CACHE: when validation fails against the current
+// configuration the token handler retries against recently-good ones, and those entries live for
+// LastKnownGoodLifetime, which defaults to ONE HOUR. Two separately retired identities were both still
+// honoured, so it is a cache of several rather than a single previous configuration.
+//
+// WHY THIS IS BOUNDED RATHER THAN TURNED OFF. UseLastKnownGoodConfiguration is left at its default of
+// true on purpose: it is what keeps this boundary validating tokens through a transient inability to
+// FETCH the key set, which is an availability property worth having. What is not worth having is a
+// retired credential honoured for an hour, which is exactly the window rotation exists to close. So the
+// lifetime is bounded to the background refresh interval - after one refresh cycle a superseded set is
+// gone - and the value is DERIVED from that interval rather than made a third knob, so the two cannot
+// drift into an incoherent pair.
+//
+// SET ON THE MANAGER THE FRAMEWORK BUILT, IN A POST-CONFIGURE THAT RUNS AFTER IT. The handler's own
+// post-configure step is what constructs the configuration manager from the authority, so the manager
+// does not exist yet while the Configure delegate above runs. Reaching it here keeps metadata retrieval
+// entirely framework code - nothing in this repository fetches a key set by hand - which is the property
+// AAP 0.6.6.3's sole-issuer topology depends on.
+builder.Services
+    .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .PostConfigure<IOptions<JwtBearerVerificationOptions>>(static (bearer, verification) =>
+    {
+        if (bearer.ConfigurationManager is BaseConfigurationManager manager)
+        {
+            manager.LastKnownGoodLifetime = verification.Value.MetadataAutomaticRefreshInterval;
+        }
     });
 
 // A FALLBACK POLICY, so that no route is ever authenticated by omission (constraint C-G). Every
@@ -644,28 +749,30 @@ builder.Services.AddScoped<IServiceTokenProvider>(static serviceProvider =>
     serviceProvider.GetRequiredService<SecurityClient>());
 
 builder.Services
-    .AddGrpcClient<DataWindowService.DataWindowServiceClient>(static (serviceProvider, grpcOptions) =>
+    .AddGrpcClient<DataWindowService.DataWindowServiceClient>((serviceProvider, grpcOptions) =>
     {
         GatewayOptions options = serviceProvider.GetRequiredService<IOptions<GatewayOptions>>().Value;
 
         grpcOptions.Address = new Uri(options.Upstreams.DataServices, UriKind.Absolute);
+        ApplyGrpcRetry(grpcOptions.ChannelOptionsActions, options.Outbound);
     })
     .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler)
     .AddStandardResilienceHandler()
-    .Configure(ConfigureOutboundResilience);
+    .Configure(ConfigureGrpcOutboundResilience);
 
 builder.Services
     .AddGrpcClient<ColumnExpressionService.ColumnExpressionServiceClient>(
-        static (serviceProvider, grpcOptions) =>
+        (serviceProvider, grpcOptions) =>
         {
             GatewayOptions options =
                 serviceProvider.GetRequiredService<IOptions<GatewayOptions>>().Value;
 
             grpcOptions.Address = new Uri(options.Upstreams.DataServices, UriKind.Absolute);
+            ApplyGrpcRetry(grpcOptions.ChannelOptionsActions, options.Outbound);
         })
     .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler)
     .AddStandardResilienceHandler()
-    .Configure(ConfigureOutboundResilience);
+    .Configure(ConfigureGrpcOutboundResilience);
 
 builder.Services.AddScoped<DataServicesClient>();
 
@@ -1044,6 +1151,94 @@ static HttpMessageHandler CreateInternalChannelHandler(IServiceProvider serviceP
 }
 
 /// <summary>
+/// Configures the HTTP-level resilience pipeline for a gRPC channel, WITH ITS RETRY DISABLED.
+/// </summary>
+/// <param name="resilience">The standard resilience options for this client.</param>
+/// <param name="serviceProvider">The provider the bound options are read from.</param>
+/// <remarks>
+/// <para>
+/// 🔴 EXACTLY ONE LAYER MAY RETRY A gRPC CALL, AND IT IS THE gRPC ONE.
+/// </para>
+/// <para>
+/// Both layers retrying the same failure MULTIPLIES rather than adds: with four attempts configured at
+/// each, one call against a failing upstream made SIXTEEN. That was measured, not predicted - the
+/// deployed-pipeline test counted them - and it is precisely the amplification the base-delay validation
+/// message warns about, aimed at an upstream that is by definition already struggling.
+/// </para>
+/// <para>
+/// THE gRPC LAYER IS THE RIGHT ONE TO KEEP because it is strictly better informed. It sees a connect
+/// failure, which the HTTP handler never does - the balancer establishes the connection outside the
+/// handler pipeline - AND it sees a status delivered in trailers, which is the only thing the HTTP layer
+/// could ever have acted on. Retrying at the HTTP layer as well adds no reachable failure mode.
+/// </para>
+/// <para>
+/// EVERYTHING ELSE IN THE PIPELINE IS KEPT: the circuit breaker with its own predicate, the per-attempt
+/// timeout and the total request timeout all still apply, and the breaker still protects the upstream
+/// from a caller that keeps trying. Only the retry strategy is stood down, and only on these two
+/// channels - the Security REST client is not a gRPC channel, has no service config, and keeps HTTP-level
+/// retry as its only mechanism, which is why <c>OutboundCallPolicy.ShouldRetryAsync</c> and its crypto
+/// path classifications remain live.
+/// </para>
+/// </remarks>
+static void ConfigureGrpcOutboundResilience(
+    HttpStandardResilienceOptions resilience,
+    IServiceProvider serviceProvider)
+{
+    ConfigureOutboundResilience(resilience, serviceProvider);
+
+    // A PREDICATE, NOT A COUNT: the package's validator requires MaxRetryAttempts to be at least one, so
+    // "no retries" cannot be expressed as zero. The gRPC service config configured by ApplyGrpcRetry is
+    // the single retry authority for these channels.
+    resilience.Retry.ShouldHandle = OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync;
+}
+
+/// <summary>
+/// Attaches the gRPC-level retry configuration to a channel.
+/// </summary>
+/// <param name="channelActions">The channel-configuration actions the client factory will run.</param>
+/// <param name="outbound">The bound outbound-call options.</param>
+/// <remarks>
+/// <para>
+/// A SECOND RETRY LAYER, AND IT IS NOT REDUNDANT. The Polly pipeline configured by
+/// <see cref="ConfigureOutboundResilience"/> is attached to the HttpClient's message handler, and
+/// Grpc.Net establishes its connection in the balancer's subchannel transport - outside that handler. So
+/// the one failure the policy was taken for, "the upstream is down", never reached it. This layer runs
+/// inside the gRPC client, where the connect failure happens.
+/// </para>
+/// <para>
+/// The two layers are kept in agreement by construction rather than by review: the method roster and the
+/// retryable status set both come from
+/// <see cref="OutboundCallPolicy.BuildRetryServiceConfig(int, TimeSpan)"/>, which reads the same
+/// definitions the HTTP-level predicate reads. Only replay-safe methods are named, so every
+/// state-advancing call stays single-attempt.
+/// </para>
+/// <para>
+/// ATTEMPTS ARE COUNTED INCLUSIVELY HERE. The Polly setting is a number of RETRIES; a gRPC retry policy
+/// takes a number of ATTEMPTS, so it is one greater. Getting that wrong would silently change the number
+/// of calls a replay-safe read makes.
+/// </para>
+/// </remarks>
+static void ApplyGrpcRetry(
+    IList<Action<GrpcChannelOptions>> channelActions,
+    GatewayOptions.OutboundCallOptions outbound)
+{
+    ArgumentNullException.ThrowIfNull(channelActions);
+    ArgumentNullException.ThrowIfNull(outbound);
+
+    int attempts = outbound.MaxRetryAttempts + 1;
+    TimeSpan initialBackoff = outbound.RetryBaseDelay;
+
+    channelActions.Add(channelOptions =>
+    {
+        // The channel's own ceiling must admit the policy's attempt count, or the channel silently
+        // clamps it and the configured number stops being the number performed.
+        channelOptions.MaxRetryAttempts = attempts;
+        channelOptions.ServiceConfig =
+            OutboundCallPolicy.BuildRetryServiceConfig(attempts, initialBackoff);
+    });
+}
+
+/// <summary>
 /// Applies Gateway's outbound resilience policy to one client's standard pipeline.
 /// </summary>
 /// <param name="resilience">The pipeline's options, mutated in place.</param>
@@ -1085,10 +1280,14 @@ static HttpMessageHandler CreateInternalChannelHandler(IServiceProvider serviceP
 /// </item>
 /// </list>
 /// <para>
-/// RETRY COUNT AND CIRCUIT-BREAKER THRESHOLDS ARE LEFT AT THE PACKAGE'S DEFAULTS, and that is a
-/// decision rather than an oversight. Choosing values for them would be asserting a availability or
-/// latency posture this repository publishes nothing to derive from (AAP 0.8.5), whereas every value
-/// this function does set has a stated correctness derivation.
+/// THE RETRY COUNT AND ITS BASE DELAY ARE NOW CONFIGURED HERE TOO, and that is a change of position
+/// worth stating. They were left at the package's defaults on the ground that choosing them would
+/// assert an availability posture the repository publishes nothing to derive from (AAP 0.8.5). They are
+/// set now for a CORRECTNESS reason instead: the gRPC channels carry a second retry layer whose attempt
+/// count has to be the same number as this one, and a number that exists in two places under two
+/// defaults is a number that will disagree. So one setting feeds both - see <c>ApplyGrpcRetry</c> - and
+/// no latency or throughput target is claimed by either. The CIRCUIT-BREAKER THRESHOLDS remain at the
+/// package's defaults, for the original reason, unchanged.
 /// </para>
 /// </remarks>
 static void ConfigureOutboundResilience(
@@ -1104,6 +1303,20 @@ static void ConfigureOutboundResilience(
         .Outbound;
 
     resilience.TotalRequestTimeout.Timeout = outbound.RequestTimeout;
+
+    // SET RATHER THAN INHERITED, and that is a fix rather than tidying. The per-attempt timeout kept the
+    // package's ten-second default while only the total was configured, so for any operation that is
+    // never retried the ten seconds was the bound that actually applied - see
+    // GatewayOptions.OutboundCallOptions.AttemptTimeout. Unset, this equals the total, so the documented
+    // number is the observed one.
+    resilience.AttemptTimeout.Timeout =
+        outbound.ResolveAttemptTimeout(resilience.CircuitBreaker.SamplingDuration);
+
+    // ASSIGNED FROM THE SAME TWO SETTINGS THE gRPC LAYER READS, so the two layers cannot disagree about
+    // how many times a replay-safe call is attempted. Both matched the package defaults before; they are
+    // written down because a requirement satisfied only by a dependency's default is not being enforced.
+    resilience.Retry.MaxRetryAttempts = outbound.MaxRetryAttempts;
+    resilience.Retry.Delay = outbound.RetryBaseDelay;
 
     resilience.Retry.BackoffType = DelayBackoffType.Exponential;
     resilience.Retry.UseJitter = true;
@@ -1389,6 +1602,68 @@ internal sealed class InternalTlsTrust
 /// cannot boot this host at all, and the per-service coverage gate becomes unreachable for every line
 /// in this file.
 /// </remarks>
+/// <summary>
+/// The data-protection key repository, held in this process's memory and never written to storage.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS TYPE EXISTS AT ALL. Data protection is registered by the authentication stack whether or not
+/// anything protects a payload, and its eager initialiser materialises a key ring during host start - which,
+/// left at the default, writes an UNENCRYPTED private key into the process's user profile for no consumer.
+/// Nothing in this service protects a payload: inbound authentication is bearer-token validation against
+/// published verification material, and there is no cookie, no session, no antiforgery token and no
+/// protected payload that outlives a request.
+/// </para>
+/// <para>
+/// 🔴 <b>AND THE OBVIOUS FIX IS THE ONE THAT DOES NOT WORK.</b> Swapping
+/// <c>IDataProtectionProvider</c> for the framework's ephemeral provider was tried and MEASURED: a key file
+/// was still written on every start, because the eager initialiser warms the key-management stack rather
+/// than the registered provider. Redirecting the REPOSITORY is what removes the write, because it removes
+/// the file-system repository from the graph entirely.
+/// </para>
+/// <para>
+/// The consequence is deliberate and is the reason this posture was chosen: a capability that later needs a
+/// DURABLE protector fails immediately and visibly at the first restart, rather than working on one replica
+/// and failing on the next. <c>docs/SECRETS.md</c> section 5.4 records the decision, the rejected
+/// alternative and what a later phase must put in its place.
+/// </para>
+/// <para>
+/// THREAD SAFETY IS REQUIRED, NOT OPTIONAL. The key ring is read on request threads and written by the
+/// initialiser, so every access is taken under one lock. The returned collection is a snapshot, so a caller
+/// enumerating it cannot observe a concurrent store.
+/// </para>
+/// </remarks>
+internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
+{
+    /// <summary>The stored elements, guarded by <see cref="_gate"/>.</summary>
+    private readonly List<XElement> _elements = [];
+
+    /// <summary>Serialises every read and write of <see cref="_elements"/>.</summary>
+    private readonly object _gate = new();
+
+    /// <inheritdoc />
+    public IReadOnlyCollection<XElement> GetAllElements()
+    {
+        lock (_gate)
+        {
+            // A COPY, and each element cloned: the key manager is free to mutate what it is handed, and a
+            // shared instance would let one caller's edit reach another's read.
+            return [.. _elements.Select(static element => new XElement(element))];
+        }
+    }
+
+    /// <inheritdoc />
+    public void StoreElement(XElement element, string friendlyName)
+    {
+        ArgumentNullException.ThrowIfNull(element);
+
+        lock (_gate)
+        {
+            _elements.Add(new XElement(element));
+        }
+    }
+}
+
 public partial class Program
 {
     /// <summary>

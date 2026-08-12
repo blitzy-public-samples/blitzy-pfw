@@ -651,11 +651,19 @@ public static class RestProjectionEndpoints
         "An upstream answered that it is unavailable. The request was not processed.";
 
     /// <summary>The detail for a transport failure that produced no gRPC response at all.</summary>
+    /// <remarks>
+    /// Retry is OPERATION-SCOPED on this service's outbound calls to Persistence exactly as it is on
+    /// Gateway's to this one, so this text must not claim a retry that only replay-safe operations get.
+    /// An operation that creates, mutates or advances upstream state is attempted exactly once by design.
+    /// </remarks>
     private const string UpstreamUnavailableDetail =
-        "An upstream could not be reached, or the call to it failed in transit after the configured "
-        + "retry policy was exhausted, so no response arrived. This failure mode is one "
-        + "decomposition itself creates: an in-process call cannot fail in transit and a network "
-        + "call can.";
+        "An upstream could not be reached, or the call to it failed in transit, so no response arrived. "
+        + "Whether the call was retried first depends on the operation: one whose replay is safe is "
+        + "retried under the configured policy, and reaching this response means the policy was "
+        + "exhausted, while one whose replay is NOT safe - every operation that creates, mutates or "
+        + "advances upstream state - is attempted exactly once by design and was not retried. This "
+        + "failure mode is one decomposition itself creates: an in-process call cannot fail in transit "
+        + "and a network call can.";
 
     /// <summary>The detail for <see cref="StatusCode.Cancelled"/>.</summary>
     private const string CancelledDetail =
@@ -748,12 +756,17 @@ public static class RestProjectionEndpoints
         + "material, a stack trace, a file path or a connection string.";
 
     /// <summary>The contract's shared <c>502</c> description.</summary>
+    /// <remarks>
+    /// Worded to match <see cref="UpstreamUnavailableDetail"/>, for the same reason.
+    /// </remarks>
     private const string UpstreamUnavailableDescription =
-        "An upstream service could not be reached, or the call to it failed in transit after the "
-        + "configured retry policy was exhausted. This response exists because of the decomposition "
-        + "itself: an in-process call cannot fail in transit and a network call can, so handling the "
-        + "failure is required BY the transition rather than being a behavioural improvement layered "
-        + "on top of it. The body names which upstream failed.";
+        "An upstream service could not be reached, or the call to it failed in transit. A replay-safe "
+        + "operation is retried under the configured policy before this is returned; an operation whose "
+        + "replay is not safe is attempted exactly once and is never retried, so for those this response "
+        + "reports a single failed attempt. This response exists because of the decomposition itself: an "
+        + "in-process call cannot fail in transit and a network call can, so handling the failure is "
+        + "required BY the transition rather than being a behavioural improvement layered on top of it. "
+        + "The body names which upstream failed.";
 
     // ----------------------------------------------------------------------------------------------
     //  THE OPERATOR LOG MESSAGES - ALLOWLISTED
@@ -1308,6 +1321,24 @@ public static class RestProjectionEndpoints
             HttpMethods.Delete,
             static sessionId => new CloseExpressionSessionRequest { SessionId = sessionId },
             static (service, request, context) => service.CloseExpressionSession(request, context));
+
+        MapUnary<ColumnExpressionImplementation, LoadRowsRequest, LoadRowsResponse>(
+            group,
+            new("/rows/load", "loadExpressionRows", "LoadRows",
+                ContractSurface.ColumnExpression,
+                "Load rows into an expression session's DataWindow.",
+                "THE OPERATION THAT MAKES THE CALCULATION HALF OF THIS SERVICE REACHABLE. Every "
+                + "calculation evaluates against ROWS, and a session's DataWindow is created empty; the "
+                + "retrieve operation on the DataWindow service addresses a REGISTERED data-object name "
+                + "and refuses a session-scoped handle, so without this there was no published way to "
+                + "put a row into a session at all and only the binding half of the engine could be "
+                + "exercised. Rows are APPENDED to the Primary buffer in request order and the ordinals "
+                + "are assigned here - a caller's buffer and row are ignored, because honouring a "
+                + "supplied ordinal would let two calls disagree about which row is which. The response "
+                + "names the range it created. An inline row set rather than a retrieve into the "
+                + "session: Persistence is the only service that reaches storage, and a caller wanting "
+                + "stored rows retrieves them by name and hands the answer back here."),
+            static (service, request, context) => service.LoadRows(request, context));
 
         MapUnary<ColumnExpressionImplementation, AddExpressionRequest, AddExpressionResponse>(
             group,
@@ -2444,6 +2475,29 @@ public static class RestProjectionEndpoints
     private static StatusProjection MapStatusCode(RpcException failure, bool hasConflictDetail)
     {
         if (failure.StatusCode == StatusCode.Unavailable && failure.Status.DebugException is not null)
+        {
+            return new(
+                StatusCodes.Status502BadGateway,
+                RetCode.E_RETRY,
+                UpstreamUnavailableDetail,
+                FromUpstream: true);
+        }
+
+        // ADJUDICATION A2 EXTENDED TO `Internal`, AND THIS IS THE HALF THAT WAS MISSING.
+        //
+        // `Internal` wears the same two events as `Unavailable` did, and only one of them was being told
+        // apart. A stalled TLS or HTTP/2 HANDSHAKE - an upstream process that is running but not reading
+        // its socket - is reported by Grpc.Net as `Internal`, not `Unavailable`, because the failure
+        // happened while the connection was still being established rather than after it was refused.
+        // That produced HTTP 500 with E_INTERNAL_ERROR for a call THAT NEVER REACHED THE UPSTREAM: a 500
+        // says "this service faulted", sends an operator to the wrong service's logs, and tells a caller
+        // nothing is worth retrying. It is the same misclassification A2 exists to prevent, so it gets
+        // the same test: a status the CLIENT synthesized from a failed transport carries a transport
+        // exception, and a status the SERVER genuinely answered does not.
+        //
+        // A SERVER-ANSWERED `Internal` STILL MAPS TO 500, unchanged. That one really is an upstream fault
+        // with an upstream diagnosis, and its arm below is where the statement-redaction contract lives.
+        if (failure.StatusCode == StatusCode.Internal && failure.Status.DebugException is not null)
         {
             return new(
                 StatusCodes.Status502BadGateway,

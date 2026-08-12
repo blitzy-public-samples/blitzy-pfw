@@ -87,6 +87,22 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
     [InlineData(RetCode.E_INVALID_DATA, StatusCodes.Status400BadRequest)]
     [InlineData(RetCode.E_NOT_EXISTS, StatusCodes.Status404NotFound)]
     [InlineData(RetCode.FAILED, StatusCodes.Status502BadGateway)]
+    //
+    // 🔴 AND THREE MORE THAT FELL TO THE DEFAULT, each observed at run time as an HTTP 500 or 502 for an
+    // outright caller mistake:
+    //
+    //   E_INVALID_DATAOBJECT is what the upstream answers when the DataWindow name a request carried
+    //     resolves to nothing. It is 400 and NOT 404 for a specific reason: the RETRIEVAL side answers the
+    //     same mistake with the oracle's own E_INVALID_ARGUMENT [n_cst_thread_task_sqlquery.sru:L554],
+    //     which is already 400 above, and one caller mistake must not produce two different statuses
+    //     depending on which verb was used. Unclassified it produced 500 on a retrieval and 502 on an
+    //     update - neither of which says "you named a DataWindow that does not exist".
+    //   E_VAR_NOT_FOUND and E_MEMBER_NOT_FOUND are the column-expression service's own not-found codes -
+    //     a variable name no global-variable table carries, a member it cannot bind - which is the
+    //     identical situation to the three not-found codes above and therefore the identical status.
+    [InlineData(RetCode.E_INVALID_DATAOBJECT, StatusCodes.Status400BadRequest)]
+    [InlineData(RetCode.E_VAR_NOT_FOUND, StatusCodes.Status404NotFound)]
+    [InlineData(RetCode.E_MEMBER_NOT_FOUND, StatusCodes.Status404NotFound)]
     public void AFailingInBandOutcomeProjectsOntoItsPublishedStatus(long retCode, int expected)
     {
         PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection failure = AssertProjects(Failing(retCode));

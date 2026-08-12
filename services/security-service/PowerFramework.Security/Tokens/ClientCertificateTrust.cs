@@ -154,7 +154,10 @@ internal sealed class ClientCertificateTrust : IDisposable
     /// AN UNSET PATH CONSTRUCTS SUCCESSFULLY AND TRUSTS NOTHING. That is the fail-closed state, and it is
     /// recorded once at startup at warning level so that a deployment which meant to configure mutual TLS
     /// and did not learns about it before its first caller does, rather than from a stream of
-    /// indistinguishable 401s.
+    /// indistinguishable 401s. The record is scoped to the CERTIFICATE credential: C-01 accepts a Basic
+    /// credential from the roster as well, and that half mints normally with no anchor configured, so a
+    /// record claiming issuance refuses everything would send an operator after an outage that is not
+    /// happening.
     /// </para>
     /// </remarks>
     public ClientCertificateTrust(
@@ -175,11 +178,26 @@ internal sealed class ClientCertificateTrust : IDisposable
 
         if (_anchors.Count == 0)
         {
+            // 🔴 QUALIFIED TO THE CREDENTIAL IT ACTUALLY AFFECTS. This record used to say that issuance
+            // "will refuse every request", which is false and was measured to be false: contract C-01
+            // accepts EITHER of two caller credentials on POST /v1/tokens - an HTTP Basic secret from the
+            // roster, or a client certificate - and the Basic half is untouched by a missing anchor and
+            // kept minting successfully throughout. An operator reading the old wording would go looking
+            // for a total outage that was not happening, and might restart or roll back a service whose
+            // primary credential path was working.
+            //
+            // BOTH CONFIGURATION KEYS ARE NAMED, because either one now supplies this anchor: the
+            // issuance key is authoritative when set, and the composition root adopts the listener's
+            // published variable when it is not. Naming only one would send an operator to the key that
+            // is not the one their deployment uses.
             _logger.LogWarning(
                 "No client-certificate trust anchor is configured, so no caller certificate can "
-                + "establish an identity and token issuance will refuse every request. Configure "
-                + "Security:ClientCertificateAuthorityPath to enable issuance. This is a fail-closed "
-                + "state, not a fault: every other route on this service remains available.");
+                + "establish an identity and CERTIFICATE-BASED token issuance is unavailable. Issuance "
+                + "by HTTP Basic credential from the configured roster is unaffected and continues to "
+                + "mint. Configure Security:ClientCertificateAuthorityPath, or the deployment variable "
+                + "that supplies Security:MutualTls:ClientCaPath, to enable the certificate credential. "
+                + "This is a fail-closed state, not a fault: every other route on this service remains "
+                + "available.");
         }
     }
 

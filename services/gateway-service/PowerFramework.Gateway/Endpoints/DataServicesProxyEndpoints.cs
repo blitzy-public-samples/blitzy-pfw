@@ -105,7 +105,7 @@
 //
 //   A2  WHY `502` IS REACHABLE AT ALL. Both documents state that 502 is "the one case the table cannot
 //       describe, because it is the case where NO gRPC RESPONSE ARRIVED AT ALL" - an unreachable
-//       upstream, or a call that failed in transit after the configured retry policy was exhausted. That
+//       upstream, or a call that failed in transit - retried first only when the operation is replay-safe. That
 //       is a real distinction and it is implemented rather than paraphrased: a gRPC `Unavailable` that
 //       the CLIENT synthesized from a transport failure carries the originating transport exception on
 //       its status, whereas an `Unavailable` the SERVER genuinely answered does not. The first becomes
@@ -407,6 +407,40 @@ public static class DataServicesProxyEndpoints
     /// Gateway never calls Persistence and never calls Security from these routes, so no other value can
     /// legitimately appear on a problem this file produces.
     /// </remarks>
+    /// <summary>
+    /// The extension member that marks a terminal element as a stream this gateway terminated.
+    /// </summary>
+    /// <remarks>
+    /// A MEMBER A UNARY PROBLEM CANNOT CARRY, because a unary problem IS the whole response and a
+    /// terminated stream's problem is the last element of one. It is what tells a reader that the object
+    /// they are looking at is not a record: RFC 9457 permits extension members, and the contract's problem
+    /// schema is the one object in it that accepts additional properties.
+    /// </remarks>
+    private const string StreamTerminatedExtensionMember = "streamTerminated";
+
+    /// <summary>
+    /// The extension member carrying how many elements were forwarded before the stream faulted.
+    /// </summary>
+    /// <remarks>
+    /// THE ONE FACT NEITHER THE STATUS NOR THE DOCUMENT CAN SUPPLY. A caller that received a prefix needs
+    /// to know how much of it is real, and an operator correlating with the upstream's own log needs the
+    /// same number to tell "faulted immediately" from "faulted after twenty chunks".
+    /// </remarks>
+    private const string ElementsDeliveredExtensionMember = "elementsDelivered";
+
+    /// <summary>
+    /// The serialization used for a terminated stream's terminal element.
+    /// </summary>
+    /// <remarks>
+    /// NULLS ARE OMITTED SO THE ELEMENT READS EXACTLY AS A PROBLEM BODY DOES. <see cref="ProblemDetails"/>
+    /// carries its own member names as attributes and its extensions as extension data, so no naming
+    /// policy is applied here - applying one would rename the members the contract fixes.
+    /// </remarks>
+    private static readonly JsonSerializerOptions TerminalElementSerialization = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
     private const string DataServicesUpstream = "dataservices";
 
     /// <summary>
@@ -598,10 +632,24 @@ public static class DataServicesProxyEndpoints
         "DataServices answered that it is unavailable. The request was not processed.";
 
     /// <summary>The detail for a transport failure that produced no gRPC response at all.</summary>
+    /// <remarks>
+    /// 🔴 THIS TEXT USED TO CLAIM A RETRY THAT MOST OPERATIONS NEVER GET. It read "after the configured
+    /// retry policy was exhausted" unconditionally, which is true only for an operation whose replay is
+    /// safe. Retry here is deliberately OPERATION-SCOPED - see
+    /// <c>Clients/OutboundCallPolicy.BuildReplaySafePaths</c> - and every operation that creates, mutates
+    /// or advances upstream state, <c>Retrieve</c> and <c>Update</c> among them, is attempted EXACTLY ONCE
+    /// on purpose. Telling an operator their failed update had exhausted a retry policy sends them looking
+    /// for a transient fault behind a call that was tried once; worse, it implies an update may have been
+    /// applied more than once. The text now states both possibilities and which one applies to what.
+    /// </remarks>
     private const string UpstreamUnavailableDetail =
-        "DataServices could not be reached, or the call to it failed in transit after the configured "
-        + "retry policy was exhausted, so no response arrived. This failure mode is one decomposition "
-        + "itself creates: an in-process call cannot fail in transit and a network call can.";
+        "DataServices could not be reached, or the call to it failed in transit, so no response arrived. "
+        + "Whether the call was retried first depends on the operation: one whose replay is safe is "
+        + "retried under the configured policy, and reaching this response means the policy was "
+        + "exhausted, while one whose replay is NOT safe - every operation that creates, mutates or "
+        + "advances upstream state - is attempted exactly once by design and was not retried. This "
+        + "failure mode is one decomposition itself creates: an in-process call cannot fail in transit "
+        + "and a network call can.";
 
     /// <summary>The detail for an upstream <c>Cancelled</c>.</summary>
     private const string CancelledDetail =
@@ -705,12 +753,18 @@ public static class DataServicesProxyEndpoints
         + "trace, a file path or a connection string.";
 
     /// <summary>The contract's shared <c>502</c> description.</summary>
+    /// <remarks>
+    /// Worded to match <see cref="UpstreamUnavailableDetail"/>: retry is operation-scoped, so this
+    /// description must not promise every caller a retry that only replay-safe operations receive.
+    /// </remarks>
     private const string UpstreamUnavailableDescription =
-        "An upstream service could not be reached, or the call to it failed in transit after the "
-        + "configured retry policy was exhausted. This response exists because of the decomposition "
-        + "itself: an in-process call cannot fail in transit and a network call can, so handling the "
-        + "failure is required BY the transition rather than being a behavioural improvement layered on "
-        + "top of it. The body names which upstream failed.";
+        "An upstream service could not be reached, or the call to it failed in transit. A replay-safe "
+        + "operation is retried under the configured policy before this is returned; an operation whose "
+        + "replay is not safe is attempted exactly once and is never retried, so for those this response "
+        + "reports a single failed attempt. This response exists because of the decomposition itself: an "
+        + "in-process call cannot fail in transit and a network call can, so handling the failure is "
+        + "required BY the transition rather than being a behavioural improvement layered on top of it. "
+        + "The body names which upstream failed.";
 
 
     // --------------------------------------------------------------------------------------------------
@@ -1163,6 +1217,23 @@ public static class DataServicesProxyEndpoints
             static sessionId => new CloseExpressionSessionRequest { SessionId = sessionId },
             static (client, request, cancellationToken) =>
                 client.CloseExpressionSessionAsync(request, cancellationToken));
+
+        MapUnary<LoadRowsRequest, LoadRowsResponse>(
+            group,
+            new("/rows/load", "loadExpressionRows", "LoadRows", ContractSurface.ColumnExpression,
+                "Load rows into an expression session's DataWindow.",
+                "WITHOUT THIS, HALF OF C-04 IS UNREACHABLE. Every calculation operation evaluates against "
+                + "ROWS; a session's DataWindow is created empty, and `/v1/datawindow/retrieve` addresses a "
+                + "REGISTERED DATA-OBJECT NAME - such as `dw_sqlite` - and refuses a SESSION-SCOPED handle, "
+                + "which is spelled `<sessionId>/<ordinal>` and is minted by the session open. The two "
+                + "handle spaces are deliberately not interchangeable, because two handles opened over one "
+                + "definition are two independent DataWindows and that is what makes a co-resident foreign "
+                + "variable meaningful. Rows are APPENDED in request order, the ordinals are assigned by the "
+                + "service, and the response names the range created so a caller can calculate over exactly "
+                + "what it loaded.",
+                DeclaresNotFound: false),
+            static (client, request, cancellationToken) =>
+                client.LoadRowsAsync(request, cancellationToken));
 
         MapUnary<AddExpressionRequest, AddExpressionResponse>(
             group,
@@ -2460,9 +2531,164 @@ public static class DataServicesProxyEndpoints
                     // ==============================================================================
                     available = false;
                 }
+                catch (RpcException failure)
+                    when (!cancellationToken.IsCancellationRequested
+                        && !callerToken.IsCancellationRequested)
+                {
+                    // ==============================================================================
+                    //  🔴 A MID-STREAM UPSTREAM FAULT IS HANDLED HERE RATHER THAN ESCAPING.
+                    //
+                    //  Only the window-expiry arm above existed, so every other fault raised by this
+                    //  await left ExecuteAsync - and left it AFTER the status line and the opening
+                    //  bracket had gone. Measured rather than argued: killing DataServices two seconds
+                    //  into a fifty-thousand-row retrieval produced
+                    //  `ExceptionHandlerMiddleware[2] "The response has already started, the error
+                    //  handler will not be executed"`, then
+                    //  `ExceptionHandlerMiddleware[1] "An unhandled exception has occurred while
+                    //  executing the request"`, then
+                    //  `Kestrel[13] "An unhandled exception was thrown by the application"` - while the
+                    //  access log recorded the request as a 200. So the one fault this projection cannot
+                    //  translate was also the one it did not record as handled, and the operator's only
+                    //  evidence was a stack trace at the connection layer.
+                    //
+                    //  THE CALLER'S OWN ABORT IS EXCLUDED BY THE FILTER, for the same reason
+                    //  IsWindowExpiry tests the caller's token: an abort is not an upstream fault, there
+                    //  is nobody left to read a sentinel, and its existing behaviour - propagating, so
+                    //  the framework tears the request down - is correct and is asserted elsewhere.
+                    // ==============================================================================
+                    await TerminateOnUpstreamFaultAsync(
+                            httpContext,
+                            writer,
+                            failure,
+                            written,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+
+                    return;
+                }
             }
 
             await writer.WriteAsync(ArrayClose, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Records a mid-stream upstream fault, appends a self-describing terminal element, and ends the
+        /// transfer abnormally.
+        /// </summary>
+        /// <param name="httpContext">The request whose response has already been committed.</param>
+        /// <param name="writer">The response body writer.</param>
+        /// <param name="failure">The upstream fault.</param>
+        /// <param name="written">How many elements had already been forwarded.</param>
+        /// <param name="cancellationToken">The caller's cancellation.</param>
+        /// <returns>A task that completes once the response has been terminated.</returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THREE THINGS HAPPEN HERE, AND EACH ANSWERS A DIFFERENT AUDIENCE.</b> The log record answers
+        /// the OPERATOR, who previously had a connection-layer stack trace and an access log saying 200.
+        /// The terminal element answers a HUMAN reading the bytes that did arrive, who previously saw a
+        /// chunk indistinguishable from any other. The abnormal termination answers a PROGRAM, which
+        /// detects an interrupted transfer without having to parse anything at all.
+        /// </para>
+        /// <para>
+        /// <b>THE TERMINAL ELEMENT IS THE PROBLEM DOCUMENT THE UNARY ROUTE WOULD HAVE SENT</b>, built by
+        /// the same <see cref="BuildProblem"/> from the same <see cref="ProjectStatus"/>. That is the
+        /// point of reusing them rather than composing prose here: a caller comparing a pre-first-item
+        /// failure with a mid-stream one gets the SAME classification, the same legacy return code and the
+        /// same correlation identifier, and a later change to the status map reaches both. Two extension
+        /// members are added that a unary problem cannot carry - the marker naming this as a terminated
+        /// stream, and the number of elements that were delivered before it stopped.
+        /// </para>
+        /// <para>
+        /// <b>THE ARRAY IS STILL NOT CLOSED, DELIBERATELY.</b> The truncation is the machine-readable
+        /// signal, and the element bound above relies on exactly the same one - so closing the bracket
+        /// here would make a faulted stream parse as a complete document whose last element happens to
+        /// describe a failure, which is precisely the "reads as clean" risk this exists to remove. The
+        /// element is therefore an explanation for a reader, never a substitute for the truncation.
+        /// </para>
+        /// <para>
+        /// <b>EVERY FAILURE OF THIS METHOD IS SWALLOWED.</b> It runs because the request already failed;
+        /// a fault while writing the explanation would put the escaping exception straight back, which is
+        /// the defect being fixed. The abort is issued in a finally, so the transfer terminates abnormally
+        /// even when the sentinel could not be written - which is the case where a caller needs the
+        /// transport-level signal most.
+        /// </para>
+        /// <para>
+        /// 🔴 <b>THE TERMINAL ELEMENT IS BEST EFFORT, AND THE ABORT IS PREFERRED OVER IT ANYWAY.</b> A
+        /// flush hands bytes to the transport; it does not wait for the peer to read them. So when the
+        /// consumer is BEHIND, the reset discards whatever is still queued in the socket's send buffer -
+        /// including this element. Measured, not theorised: with a consumer rate-limited to 900 kB/s the
+        /// element never arrived and the body was cut mid-chunk, while the same injection against a
+        /// consumer keeping up delivered seven chunks and then the element intact.
+        /// </para>
+        /// <para>
+        /// That trade is taken deliberately, because the two signals it protects are the GUARANTEED ones
+        /// and this one is not. Draining first would mean completing the response normally, which writes
+        /// the terminating chunk and hands a caller a transfer that ended cleanly - and a consumer that
+        /// streams elements without checking for the closing bracket would then treat a partial result set
+        /// as the whole answer. A silently truncated result is a correctness failure; a lost explanation is
+        /// an operability one, and it is already covered: the log record above is unconditional and
+        /// carries the same correlation identifier the element would have carried.
+        /// </para>
+        /// </remarks>
+        private static async Task TerminateOnUpstreamFaultAsync(
+            HttpContext httpContext,
+            PipeWriter writer,
+            RpcException failure,
+            int written,
+            CancellationToken cancellationToken)
+        {
+            StatusProjection projection = ProjectStatus(failure);
+
+            httpContext.RequestServices
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger(LoggerCategory)
+                .LogError(
+                    "A projected upstream stream faulted with {StatusCode} after {Delivered} forwarded "
+                        + "element(s) for {Method} {Route}, which projects to {HttpStatus} and legacy "
+                        + "{ReturnCode}. The 200 status line and the opening bracket had already gone, so "
+                        + "no problem document could replace them: a terminal element describing the "
+                        + "failure was appended, the array was left unterminated and the transfer was "
+                        + "aborted, so the caller detects an answer it could not finish reading. "
+                        + "Correlation {CorrelationId}.",
+                    failure.StatusCode,
+                    written,
+                    httpContext.Request.Method,
+                    DescribeRoute(httpContext),
+                    projection.HttpStatus,
+                    projection.RetCode,
+                    ResolveCorrelationId(httpContext));
+
+            try
+            {
+                ProblemDetails terminal = BuildProblem(httpContext, projection);
+
+                terminal.Extensions[StreamTerminatedExtensionMember] = true;
+                terminal.Extensions[ElementsDeliveredExtensionMember] = written;
+
+                byte[] encoded = Encoding.UTF8.GetBytes(
+                    JsonSerializer.Serialize(terminal, TerminalElementSerialization));
+
+                if (written > 0)
+                {
+                    await writer.WriteAsync(ElementSeparator, cancellationToken).ConfigureAwait(false);
+                }
+
+                await writer.WriteAsync(encoded, cancellationToken).ConfigureAwait(false);
+                _ = await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception secondary) when (secondary is OperationCanceledException
+                or InvalidOperationException
+                or IOException
+                or ObjectDisposedException)
+            {
+                // The caller has gone or the response pipe is already finished. There is nobody to read
+                // the explanation and nothing further to do; the abort below is still issued, and the log
+                // record above has already been written.
+            }
+            finally
+            {
+                httpContext.Abort();
+            }
         }
     }
 
@@ -2503,6 +2729,29 @@ public static class DataServicesProxyEndpoints
         // one, and a status the SERVER genuinely answered does not. The first never reached DataServices at
         // all, so it is the 502; the second is DataServices' own answer, so it is the 503.
         if (failure.StatusCode == StatusCode.Unavailable && failure.Status.DebugException is not null)
+        {
+            return new(
+                StatusCodes.Status502BadGateway,
+                RetCode.E_RETRY,
+                UpstreamUnavailableDetail,
+                FromUpstream: true);
+        }
+
+        // ADJUDICATION A2 EXTENDED TO `Internal`, AND THIS IS THE HALF THAT WAS MISSING.
+        //
+        // `Internal` wears the same two events as `Unavailable` did, and only one of them was being told
+        // apart. A stalled TLS or HTTP/2 HANDSHAKE - an upstream process that is running but not reading
+        // its socket - is reported by Grpc.Net as `Internal`, not `Unavailable`, because the failure
+        // happened while the connection was still being established rather than after it was refused.
+        // That produced HTTP 500 with E_INTERNAL_ERROR for a call THAT NEVER REACHED THE UPSTREAM: a 500
+        // says "this service faulted", sends an operator to the wrong service's logs, and tells a caller
+        // nothing is worth retrying. It is the same misclassification A2 exists to prevent, so it gets
+        // the same test: a status the CLIENT synthesized from a failed transport carries a transport
+        // exception, and a status the SERVER genuinely answered does not.
+        //
+        // A SERVER-ANSWERED `Internal` STILL MAPS TO 500, unchanged. That one really is an upstream fault
+        // with an upstream diagnosis, and its arm below is where the statement-redaction contract lives.
+        if (failure.StatusCode == StatusCode.Internal && failure.Status.DebugException is not null)
         {
             return new(
                 StatusCodes.Status502BadGateway,
@@ -2781,8 +3030,24 @@ public static class DataServicesProxyEndpoints
     /// mistakenly placed a credential in one must not have it reflected back.
     /// </para>
     /// </remarks>
-    private static ProblemDetails BuildProblem(HttpContext httpContext, StatusProjection projection)
+    /// <remarks>
+    /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE HEADER OBLIGATION IS
+    /// TESTABLE.</b> This method is where the <c>Retry-After</c> a capacity refusal must carry is applied,
+    /// and a header is not observable in the document it returns - so asserting it needs the method itself.
+    /// The four call sites that answer with a problem all reach it, so exercising it here is exercising all
+    /// four. Only this service's own test assembly sees it.
+    /// </remarks>
+    internal static ProblemDetails BuildProblem(HttpContext httpContext, StatusProjection projection)
     {
+        // 🔴 THE ONE HEADER A PROBLEM DOCUMENT CANNOT CARRY IN ITS BODY, APPLIED AT THE ONE PLACE EVERY
+        // PROBLEM DOCUMENT IN THIS FILE IS BUILT. Retry-After is a header, so no amount of body detail
+        // substitutes for it, and this gateway has FOUR paths that answer with a problem - the in-band
+        // projection, the exception projection, the conflict projection and Gateway's own rejection.
+        // Attaching it per path is how one of them ends up without it, which is exactly what happened:
+        // both 429 paths, the in-band E_BUSY projection and an upstream ResourceExhausted, answered with
+        // no header at all. See ApplyRetryAfter for why only 429 gets one.
+        ApplyRetryAfter(httpContext, projection.HttpStatus);
+
         ProblemDetails problem = new()
         {
             Type = projection.Type ?? DefaultProblemType,
@@ -2810,6 +3075,54 @@ public static class DataServicesProxyEndpoints
         }
 
         return problem;
+    }
+
+    /// <summary>
+    /// Sets <c>Retry-After</c> when, and only when, the response being built is a capacity refusal.
+    /// </summary>
+    /// <param name="httpContext">The current request.</param>
+    /// <param name="httpStatus">The status the caller is about to receive.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>ONLY 429, DELIBERATELY.</b> RFC 9110 &#167;10.2.3 permits the header on a 503 and on a 3xx as
+    /// well, and it is withheld from both here. A 503 from this gateway means an upstream is unreachable
+    /// rather than at a ceiling, and nothing in this system knows when an unreachable service will return -
+    /// so a delta there would be a fabricated availability promise, which no part of this refactor may
+    /// assert (AAP 0.8.5). 429 is different in kind: the refusal is a CONCURRENCY CEILING that clears when
+    /// a session or handle is released, so a short hint is a genuine statement about the shape of the
+    /// condition rather than a guess about a service's recovery.
+    /// </para>
+    /// <para>
+    /// DELTA-SECONDS, whole and rounded UP, so a sub-second configured value can never render as <c>0</c>
+    /// and tell a caller to retry immediately - the one answer a capacity refusal must not give.
+    /// </para>
+    /// <para>
+    /// THE HEADER IS SET RATHER THAN APPENDED, so a value already present - from a middleware, or from a
+    /// second pass over the same response - is replaced instead of producing two conflicting deltas.
+    /// </para>
+    /// <para>
+    /// A RESPONSE THAT HAS ALREADY STARTED IS LEFT ALONE. Headers cannot be changed once sent, and the one
+    /// route that can fail after its status line is the streamed retrieval; touching them there would throw
+    /// inside a failure path. The guard is what keeps this safe to call from the single choke point.
+    /// </para>
+    /// </remarks>
+    private static void ApplyRetryAfter(HttpContext httpContext, int httpStatus)
+    {
+        if (httpStatus != StatusCodes.Status429TooManyRequests || httpContext.Response.HasStarted)
+        {
+            return;
+        }
+
+        TimeSpan configured = httpContext.RequestServices
+            .GetRequiredService<IOptions<GatewayOptions>>()
+            .Value
+            .RestProjection
+            .RetryAfter;
+
+        long seconds = (long)Math.Ceiling(configured.TotalSeconds);
+
+        httpContext.Response.Headers.RetryAfter =
+            Math.Max(seconds, 1L).ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>
@@ -3442,10 +3755,35 @@ public static class DataServicesProxyEndpoints
                 RetCode.E_INVALID_DATA =>
                     (StatusCodes.Status400BadRequest, InBandInvalidDataDetail),
 
+                // ⚠ E_INVALID_DATAOBJECT JOINS THE ARGUMENT-REJECTION ARM, AND IT IS 400 RATHER THAN 404
+                // FOR A SPECIFIC REASON. It is what the upstream answers when the DataWindow name a
+                // request carried resolves to nothing - and the RETRIEVAL side answers the SAME mistake
+                // with the oracle's own E_INVALID_ARGUMENT [n_cst_thread_task_sqlquery.sru:L554], which is
+                // already 400 here. One caller mistake must not produce two different statuses depending
+                // on which verb was used, so the update side is aligned to the retrieval side rather than
+                // to the handle family below. Falling to the default answered 500 for a retrieval and 502
+                // for an update, neither of which tells a caller that it named a DataWindow that does not
+                // exist. 404 was considered and rejected: the name is a member of the request BODY, not
+                // the request target, and 422 is closed to this document by docs/CONTRACTS.md 12.1.
+                RetCode.E_INVALID_DATAOBJECT =>
+                    (StatusCodes.Status400BadRequest, InBandInvalidDataObjectDetail),
+
                 // ⚠ E_NOT_EXISTS JOINS THE NOT-FOUND FAMILY for the same reason its two siblings are
                 // already in it: the request named something the upstream could not find. A 500 here
                 // reported a fault where the honest answer is that the named thing is not there.
-                RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND or RetCode.E_NOT_EXISTS =>
+                //
+                // ⚠ AND SO DO E_VAR_NOT_FOUND AND E_MEMBER_NOT_FOUND, which are the column-expression
+                // service's own not-found codes: E_VAR_NOT_FOUND is what it answers for a variable name no
+                // global-variable table carries [n_cst_dwsvc_columnexp.sru, the of_GetVar family] and
+                // E_MEMBER_NOT_FOUND for a member it cannot bind. Both are a caller naming something that
+                // is not there - the identical situation to the three codes above - yet both fell to the
+                // default and reported HTTP 500, which told the caller this gateway had failed and invited
+                // it to retry a request that can never succeed.
+                RetCode.E_INVALID_HANDLE
+                    or RetCode.E_OBJECT_NOT_FOUND
+                    or RetCode.E_NOT_EXISTS
+                    or RetCode.E_VAR_NOT_FOUND
+                    or RetCode.E_MEMBER_NOT_FOUND =>
                     (StatusCodes.Status404NotFound, InBandNotFoundDetail),
 
                 RetCode.E_RETRY => (StatusCodes.Status409Conflict, InBandRetryDetail),
@@ -3498,6 +3836,16 @@ public static class DataServicesProxyEndpoints
     /// <summary>Fallback prose for an out-of-range or out-of-bound outcome reported in band.</summary>
     private const string InBandOutOfRangeDetail =
         "The upstream operation rejected a value outside its permitted range.";
+
+    /// <summary>Fallback prose for a DataWindow name that resolved to nothing.</summary>
+    /// <remarks>
+    /// It names the member at fault, because the whole point of classifying this separately from the
+    /// generic argument rejection is that a caller can act on it without reading a log.
+    /// </remarks>
+    private const string InBandInvalidDataObjectDetail =
+        "The upstream operation could not resolve the DataWindow the request named. The handle is the "
+            + "caller's own name for a DataWindow and is never created implicitly, so check the "
+            + "datawindowHandle member against the DataWindows this deployment carries.";
 
     /// <summary>Fallback prose for an access refusal reported in band.</summary>
     private const string InBandAccessDeniedDetail = "The upstream operation refused this caller.";

@@ -2557,3 +2557,225 @@ internal static partial class TokenIssuerLog
         string issuer,
         string audience);
 }
+
+/// <summary>
+/// Reports where the issuance roster's ADVERTISED permissions and the grant matrix's EFFECTIVE ones
+/// disagree.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>TWO SURFACES DESCRIBE ONE CALLER'S PERMISSIONS AND ONLY ONE OF THEM DECIDES ANYTHING.</b>
+/// <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> are bound, frozen onto
+/// <see cref="RegisteredIssuanceClient"/> as <c>PermittedAudiences</c> and <c>PermittedScopes</c> — and then
+/// never consulted: the issuance decision is taken entirely against the matrix folded from
+/// <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c>, which is deliberately the single
+/// enforcement point. The shipped settings already diverge - one client advertises an audience the matrix
+/// does not grant, and another advertises three - so an operator reading the roster would conclude a caller
+/// may address audiences it will in fact be refused for.
+/// </para>
+/// <para>
+/// <b>REPORTED, NOT ENFORCED, AND NOT A REFUSAL TO START.</b> Enforcing the advertised lists would create a
+/// SECOND permission gate that could refuse what the matrix grants, which is exactly the divided authority
+/// the folding comment above rejects; and refusing to start on a divergence would make the shipped
+/// configuration unstartable, turning a documentation defect into an outage. So the host reports it once, at
+/// startup, naming the keys and the identifiers - all of which are already written in a settings file, none
+/// of which is a credential - and states plainly which surface decides.
+/// </para>
+/// <para>
+/// <b>BOTH DIRECTIONS ARE REPORTED, because each is a different mistake.</b> An advertised permission the
+/// matrix withholds is a roster that overstates what a caller can do. A grant whose caller appears on NO
+/// credential roster entry is the opposite: a permission nobody can ever exercise, because no caller can
+/// authenticate under that subject in the first place.
+/// </para>
+/// </remarks>
+internal static class IssuanceRosterCoherence
+{
+    /// <summary>
+    /// Describes every divergence between the advertised roster and the effective grant matrix.
+    /// </summary>
+    /// <param name="security">The bound options to inspect.</param>
+    /// <returns>
+    /// One message per divergence, in roster order, or an empty list when the two surfaces agree.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="security"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// PURE, SO IT IS TESTABLE WITHOUT A HOST, and stated as a list rather than logged here so the caller
+    /// owns the level and the category. Comparison is ORDINAL throughout, matching how the issuer compares an
+    /// identity, an audience and a scope everywhere else - a case-insensitive comparison here would report
+    /// agreement where the enforcement point sees none.
+    /// </remarks>
+    internal static IReadOnlyList<string> Describe(SecurityOptions security)
+    {
+        ArgumentNullException.ThrowIfNull(security);
+
+        Dictionary<string, Dictionary<string, HashSet<string>>> matrix = Fold(security);
+        List<string> divergences = [];
+
+        foreach (SecurityClientOptions client in security.Clients)
+        {
+            if (client is null || string.IsNullOrWhiteSpace(client.Subject))
+            {
+                continue;
+            }
+
+            string subject = client.Subject.Trim();
+
+            _ = matrix.TryGetValue(subject, out Dictionary<string, HashSet<string>>? grants);
+
+            List<string> unGrantedAudiences =
+            [
+                .. client.Audiences
+                    .Where(static audience => !string.IsNullOrWhiteSpace(audience))
+                    .Select(static audience => audience.Trim())
+                    .Where(audience => grants is null || !grants.ContainsKey(audience))
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+            ];
+
+            HashSet<string> grantedScopes = new(StringComparer.Ordinal);
+
+            if (grants is not null)
+            {
+                foreach (HashSet<string> scopes in grants.Values)
+                {
+                    grantedScopes.UnionWith(scopes);
+                }
+            }
+
+            List<string> unGrantedScopes =
+            [
+                .. client.Scopes
+                    .Where(static scope => !string.IsNullOrWhiteSpace(scope))
+                    .Select(static scope => scope.Trim())
+                    .Where(scope => !grantedScopes.Contains(scope))
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+            ];
+
+            if (unGrantedAudiences.Count > 0)
+            {
+                divergences.Add(
+                    $"'{SecurityOptions.SectionName}:Clients' advertises audience(s) "
+                    + $"[{string.Join(", ", unGrantedAudiences)}] for caller '{subject}' that the grant "
+                    + "matrix does not grant. The matrix - "
+                    + $"'{SecurityOptions.SectionName}:Callers' folded with "
+                    + $"'{SecurityOptions.SectionName}:{nameof(SecurityOptions.CallerAuthorizations)}' - is "
+                    + "the sole authority, so a request for one of those audiences is refused; the "
+                    + "advertised list is documentation and is never enforced.");
+            }
+
+            if (unGrantedScopes.Count > 0)
+            {
+                divergences.Add(
+                    $"'{SecurityOptions.SectionName}:Clients' advertises scope(s) "
+                    + $"[{string.Join(", ", unGrantedScopes)}] for caller '{subject}' that no grant for "
+                    + "that caller includes. A request carrying only those scopes is refused, and one "
+                    + "carrying them alongside granted scopes is minted with the granted subset only.");
+            }
+        }
+
+        HashSet<string> credentialled =
+        [
+            .. security.Clients
+                .Where(static client => client is not null && !string.IsNullOrWhiteSpace(client.Subject))
+                .Select(static client => client.Subject.Trim())
+        ];
+
+        foreach (string caller in matrix.Keys.Order(StringComparer.Ordinal))
+        {
+            if (credentialled.Contains(caller))
+            {
+                continue;
+            }
+
+            divergences.Add(
+                $"The grant matrix grants caller '{caller}' but "
+                + $"'{SecurityOptions.SectionName}:Clients' carries no entry for it, so no request can "
+                + "authenticate under that subject and the grant is unreachable. Add a credential-roster "
+                + "entry, or remove the grant so the matrix states only permissions that can be exercised.");
+        }
+
+        return divergences;
+    }
+
+    /// <summary>
+    /// Folds the nested caller roster and the flat authorization rows into one caller-to-audience-to-scope
+    /// matrix.
+    /// </summary>
+    /// <param name="security">The bound options to fold.</param>
+    /// <returns>The folded matrix.</returns>
+    /// <remarks>
+    /// THE SAME FOLD THE ENFORCEMENT POINT PERFORMS, AND DELIBERATELY THE SAME SHAPE: nested grants first,
+    /// then the flat rows added on top, because a row for a pair the nested surface does not mention is
+    /// additive [see RequireCallerRoster]. It does NOT reproduce that method's refusals - a contradiction, a
+    /// duplicate or a blank identity all stop the host there, long before this diagnostic runs - so this fold
+    /// only has to be faithful about what is granted, never about what is refused.
+    /// </remarks>
+    private static Dictionary<string, Dictionary<string, HashSet<string>>> Fold(SecurityOptions security)
+    {
+        Dictionary<string, Dictionary<string, HashSet<string>>> matrix = new(StringComparer.Ordinal);
+
+        foreach (SecurityCallerOptions caller in security.Callers)
+        {
+            if (caller is null || string.IsNullOrWhiteSpace(caller.Identity))
+            {
+                continue;
+            }
+
+            Dictionary<string, HashSet<string>> grants = Grants(matrix, caller.Identity.Trim());
+
+            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            {
+                if (grant is null || string.IsNullOrWhiteSpace(grant.Audience))
+                {
+                    continue;
+                }
+
+                Scopes(grants, grant.Audience.Trim()).UnionWith(NonBlank(grant.Scopes));
+            }
+        }
+
+        foreach (CallerAuthorizationOptions row in security.CallerAuthorizations)
+        {
+            if (row is null
+                || string.IsNullOrWhiteSpace(row.Caller)
+                || string.IsNullOrWhiteSpace(row.Audience))
+            {
+                continue;
+            }
+
+            Scopes(Grants(matrix, row.Caller.Trim()), row.Audience.Trim()).UnionWith(NonBlank(row.Scopes));
+        }
+
+        return matrix;
+
+        static Dictionary<string, HashSet<string>> Grants(
+            Dictionary<string, Dictionary<string, HashSet<string>>> matrix,
+            string caller)
+        {
+            if (!matrix.TryGetValue(caller, out Dictionary<string, HashSet<string>>? grants))
+            {
+                grants = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+                matrix[caller] = grants;
+            }
+
+            return grants;
+        }
+
+        static HashSet<string> Scopes(Dictionary<string, HashSet<string>> grants, string audience)
+        {
+            if (!grants.TryGetValue(audience, out HashSet<string>? scopes))
+            {
+                scopes = new HashSet<string>(StringComparer.Ordinal);
+                grants[audience] = scopes;
+            }
+
+            return scopes;
+        }
+
+        static IEnumerable<string> NonBlank(IList<string> values) =>
+            values
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Select(static value => value.Trim());
+    }
+}

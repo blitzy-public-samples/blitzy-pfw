@@ -1388,6 +1388,10 @@ public sealed class UpdateServiceTests
 
         public bool IsFailed() => false;
 
+        public void ClearState()
+        {
+        }
+
         public long OnBeforeUpdate() => RetCode.OK;
 
         public void OnAfterUpdate(long updateResult)

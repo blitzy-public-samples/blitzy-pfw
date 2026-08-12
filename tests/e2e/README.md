@@ -216,8 +216,10 @@ subject common name is exactly the identity the suite claims (`pfw-e2e-suite`), 
 runner needs, and `SECURITY_MTLS_CLIENT_CA_PATH`, which is what makes the **stack** trust the leaf.
 **Both halves are required** — point Security's `SECURITY_MTLS_CLIENT_CA_PATH` at that CA in
 `orchestration/.env` and bring the stack up (or restart Security) so it reloads the anchor.
-Presenting a certificate Security does not trust earns a `401`, which is the transport behaving
-correctly rather than a defect. See [§10](#10-secrets-never-replicate-document-rotate); no key
+That one variable is now sufficient: Security reads it as its listener anchor and, when
+`Security:ClientCertificateAuthorityPath` is unset, adopts it as the issuance anchor as well, so a
+handshake that completes also establishes an identity. Presenting a certificate Security does not
+trust earns a `401`, which is the transport behaving correctly rather than a defect. See [§10](#10-secrets-never-replicate-document-rotate); no key
 material is ever printed, and none of it may be committed.
 
 **With no identity, a full run fails its setup.** Each authenticated group's first act is a

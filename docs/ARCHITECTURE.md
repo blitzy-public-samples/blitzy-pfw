@@ -799,12 +799,28 @@ upstream that is genuinely not ready into one that merely looks slow — and Gat
 which §4.2 requires to open only after its three upstreams open theirs, would then open on a stale
 answer. It shares the trust anchor with every other channel and nothing else.
 
-**What is deliberately left at the package's defaults**: the retry attempt count and the
-circuit-breaker thresholds. Choosing values for those would be asserting an availability posture this
-repository publishes nothing to derive from, whereas every value above has a stated derivation. The
-backoff *shape* — exponential, with jitter — is written down explicitly even though it matches the
-package default, because a requirement that holds only because a dependency's default happens to
-satisfy it is not being enforced by anything.
+**What is deliberately left at the package's defaults**: the circuit-breaker thresholds. Choosing
+values for those would be asserting an availability posture this repository publishes nothing to derive
+from, whereas every value above has a stated derivation. The backoff *shape* — exponential, with jitter
+— is written down explicitly even though it matches the package default, because a requirement that
+holds only because a dependency's default happens to satisfy it is not being enforced by anything.
+
+**The retry attempt count and the backoff base are NOT left at the defaults, and the reason is
+arithmetic rather than posture.** Retry admission on these edges exists at **two** layers — the HTTP
+pipeline and, because a gRPC channel connects inside the balancer where an HTTP handler cannot see it,
+the channel's own service configuration. Two layers each retrying independently *multiply*: four
+attempts at each becomes sixteen. So each service reads one attempt count and one backoff base from its
+own options — `MaxRetryAttempts` (3) and `RetryBaseDelay` (2 s), both validated at startup — and hands
+the same pair to both layers, with the HTTP layer standing its own retry down on the channels where the
+gRPC layer owns admission. One value, one place, two consumers: the alternative is not a default, it is
+a number nobody chose.
+
+**And one bound sits inside the total.** A per-attempt timeout is derived rather than declared, as
+`min(RequestTimeout, SamplingDuration / 2)`, because the resilience package refuses a pipeline whose
+sampling duration is less than twice its attempt timeout — so the two cannot be chosen independently.
+With the shipped settings that resolves to 15 seconds inside the 30-second total. Its purpose is the
+same as every other bound here: without it a single stalled attempt consumes the whole total and no
+retry ever happens, which is a resilience policy that exists only on paper.
 
 ---
 
@@ -1301,7 +1317,7 @@ configuration; parts 3 to 6 name where each remaining piece lands and its state.
 | --- | --- | --- | --- |
 | 1 | **The TLS listener.** `Kestrel:Endpoints:Default`, `https://+:5104`, `Http1`, `ClientCertificateMode: AllowCertificate`, `SslProtocols: [Tls12, Tls13]`. It is the service's ONLY endpoint and it carries every route: `POST /v1/tokens`, the C-02 crypto operations, the anonymous key set and discovery documents, and the anonymous `GET /health` | `services/security-service/PowerFramework.Security/appsettings.json` | **Present and statically verified** — `Url`, `Protocols`, `ClientCertificateMode` and `SslProtocols` are all real `KestrelServerOptions` endpoint keys, confirmed by reflecting over the shared framework's `EndpointConfig` on SDK 10.0.302 |
 | 2 | **The server certificate.** `Kestrel:Certificates:Default:Path` and `:KeyPath`, supplied per environment by `TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` — **one pair for the whole stack, and therefore a pair that MUST carry subject alternative names for every origin it is presented under**: `persistence-service`, `dataservices-service`, `security-service` and `localhost`, plus the loopback IP entries. Current TLS stacks ignore the common name for host matching and read `subjectAltName` only, so a single-CN certificate matches none of the four and every internal channel fails name validation. Per-service certificates are the equally correct alternative — see the recipe below | `orchestration/.env.example` §5 declares the two variables and the key each maps onto; no settings file declares either, because both carry a path to key material (C-F) | **Present as the declared contract** (paths only — no material, here or anywhere). Absence is fail-fast: Kestrel refuses to start an HTTPS endpoint it cannot find a certificate for, and never downgrades to plaintext |
-| 3 | **Client-certificate trust.** `ClientCertificateMode` `AllowCertificate` makes Kestrel **request** a certificate and hand it to the application without demanding one, so the token operation can require it per operation while `/health`, the key set and the discovery document stay anonymously reachable. *Which* issuers may have signed that certificate is decided by `Security:MutualTls:ClientCaPath`: the anchor is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which builds the caller's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. Unset defers to the platform's verdict; set-but-unreadable refuses to start. `AllowAnyClientCertificate` is never called | `services/security-service/PowerFramework.Security/Program.cs` (`CallerCertificateTrust`), configured from `SECURITY_MTLS_CLIENT_CA_PATH` | **Present.** An OS-trust-store mount is no longer required for this to work, which is what makes it operable without a root-privileged step in the runtime image |
+| 3 | **Client-certificate trust.** `ClientCertificateMode` `AllowCertificate` makes Kestrel **request** a certificate and hand it to the application without demanding one, so the token operation can require it per operation while `/health`, the key set and the discovery document stay anonymously reachable. *Which* issuers may have signed that certificate is decided by `Security:MutualTls:ClientCaPath`: the anchor is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which builds the caller's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. Unset defers to the platform's verdict; set-but-unreadable refuses to start. `AllowAnyClientCertificate` is never called. **Completing the handshake and establishing an identity are two decisions taken by two anchors, and only the first has a published variable:** `Security:ClientCertificateAuthorityPath` is the ISSUANCE anchor read by `Tokens/ClientCertificateTrust`, and with it unset a certificate that had just completed the handshake was refused `401 E_ACCESS_DENIED` while `Basic` callers kept minting — so the documented bootstrap could not work. The composition root now ADOPTS `Security:MutualTls:ClientCaPath` as the issuance anchor when the issuance key is unset, which makes `SECURITY_MTLS_CLIENT_CA_PATH` sufficient on its own; an explicitly configured issuance anchor still wins, because a deployment may complete handshakes for a broader authority than issuance honours | `services/security-service/PowerFramework.Security/Program.cs` (`CallerCertificateTrust`, and the `PostConfigure` on `AddOptions<SecurityOptions>()` that performs the adoption), configured from `SECURITY_MTLS_CLIENT_CA_PATH` | **Present, and exercised end to end.** A caller certificate issued by the documented local authority is minted a token by a Security instance configured with `SECURITY_MTLS_CLIENT_CA_PATH` alone; a certificate whose common name names a different roster subject is refused `403`, and a self-signed certificate spoofing a roster name is refused during the handshake and never reaches the operation. An OS-trust-store mount is not required, which is what makes it operable without a root-privileged step in the runtime image |
 | 4 | **Subject-to-caller mapping.** The certificate establishes the identity; a `subject` in the request body that disagrees with it is refused `403`, per the table above. The certificate's common name is compared ordinally against the claimed subject, and the refusal names neither the expected identity nor any stored configuration | `Endpoints/TokenEndpoints.cs` | **Present** |
 | 5 | **The caller side.** Gateway and DataServices present a client certificate when they call the issuance endpoint, from `Gateway:MutualTls:{CertificatePath, CertificateKeyPath}` and `DataServices:Security:MutualTls:{CertificatePath, CertificateKeyPath}` respectively, supplied by the four `*_MTLS_CERT_PATH` / `*_MTLS_KEY_PATH` variables. Each pair is **both-or-neither and that is enforced rather than documented**: half-configured fails startup with a names-only message, entirely unset is a legitimate state meaning that service cannot reach the issuance edge in this run | `Clients/SecurityClient.cs` in both services; the two settings groups and the four variables | **Present, and the certificate is genuinely attached in both services**: each loads the PEM pair once at startup as a singleton and presents it on the primary handler of its Security channel, so a configured-but-unreadable pair is a refusal to start rather than a first-request failure. What remains undemonstrated is an end-to-end handshake against a running Security instance, which is different from being callable without authentication — nothing anywhere in this repository offers an unauthenticated mint |
 | 6 | **JWKS and discovery transport.** Both documents are anonymous and public by design, and they are the *verification* half rather than the issuance half — so they are served by the SAME single listener as the issuance edge, alongside `/health` and `/v1/ping`, and stay anonymous on it because `AllowCertificate` does not demand a certificate. Over HTTPS in every environment; behind the terminating proxy of §9.4 in a deployed topology, with the one exception §9.4 names | each service's bearer authority settings | **Present and statically verified** as configuration, with the backchannel's own trust anchor applied so the fetch can succeed against a locally issued certificate; unexercised end to end, because no paired bring-up has been run |
@@ -1399,7 +1415,7 @@ operating-system trust store either, so each service is told about it explicitly
 | Gateway | `Gateway:InternalTls:TrustedCaPath` | `INTERNAL_TLS_TRUSTED_CA_PATH` | Which authority Gateway accepts when it calls Security and DataServices, and when it probes their readiness |
 | DataServices | `DataServices:InternalTls:TrustedCaPath` | `INTERNAL_TLS_TRUSTED_CA_PATH` | Which authority DataServices accepts on its four Persistence channels and its Security channel |
 | Persistence | `InternalTls:TrustedCaPath` | `INTERNAL_TLS_TRUSTED_CA_PATH` | Which authority Persistence accepts when its bearer handler fetches the published key set |
-| Security | `Security:MutualTls:ClientCaPath` | `SECURITY_MTLS_CLIENT_CA_PATH` | Which authority may issue a CALLER's certificate on `POST /v1/tokens` |
+| Security | `Security:MutualTls:ClientCaPath`, and `Security:ClientCertificateAuthorityPath` by adoption when that key is unset | `SECURITY_MTLS_CLIENT_CA_PATH` | Which authority may issue a CALLER's certificate on `POST /v1/tokens` — the first key decides whether the handshake completes, the second whether the certificate establishes an identity, and one variable now feeds both |
 
 Each of the four **narrows** trust rather than relaxing it: the configured anchor becomes the only
 acceptable root for internal traffic under `X509ChainTrustMode.CustomRootTrust`, and the machine's
@@ -1585,6 +1601,44 @@ are literals: a configurable tolerance is lifetime validation switched off by an
 would stop a deployment setting it beyond the token lifetime — at which point the expiry check does not
 expire. Security mints with a truncated whole-second timestamp, so no sub-second allowance is required on
 any boundary.
+
+### 9.6 Key-set retrieval: the two intervals a rotation is bounded by
+
+The tolerance above governs *when a token expires*. Two further durations govern *which keys a boundary
+will accept a signature from*, and leaving them unassigned was a rotation decision taken by omission in
+exactly the way §9.5 describes for the tolerance — with the difference that the library's two defaults
+fail in **opposite directions at once**.
+
+| Setting | Shipped | Library default | What it bounds |
+| --- | --- | --- | --- |
+| `MetadataRefreshInterval` | **5 s** | 5 min | The floor before a refresh that a **failed** validation asked for is performed. `RefreshOnIssuerKeyNotFound` is true by default, so an unknown `kid` requests one at once — this decides how long a **newly minted** token stays refused after a rotation |
+| `MetadataAutomaticRefreshInterval` | **5 min** (the library's own minimum) | **12 h** | The background interval. A **successful** validation provokes no refresh, so nothing else ever drops a **retired** key from the *current* configuration |
+| `LastKnownGoodLifetime` — **derived from the row above, not separately configured** | **5 min** | **1 h** | How long a **superseded** key set stays acceptable as a fallback. The token handler retries a failed validation against a cache of recently-good configurations, so this is what actually decides how long a retired key keeps working. Bounded, not switched off: `UseLastKnownGoodConfiguration` stays `true`, because that fallback is what keeps a boundary validating through a transient inability to *fetch* the key set |
+
+Both are declared in each verifier's settings file, bound to its verification options, read by its
+composition root, and **validated at startup against the library's own published floors** (1 second and 5
+minutes): the configuration manager throws on a value below either, and it throws while the handler is
+built — on the first authenticated request rather than at startup — so a host would otherwise report
+healthy and then fail every authenticated call with a message naming neither the setting nor the file.
+
+The third row was found by measurement rather than by reading: with the first two configured, a token
+signed by a **retired** key was still accepted **nine and a half minutes** after a rotation — past a
+background refresh that had already replaced the current configuration — because the fallback cache still
+held it. [`SECRETS.md`](SECRETS.md) §4.2.1 carries the measured before-and-after figures for both halves of
+a rotation.
+
+Unlike the tolerance, the first two **are** settings, and the distinction is principled rather than
+inconsistent: a wider tolerance weakens expiry checking, whereas a wider retrieval interval only delays
+convergence — it cannot make an invalid signature acceptable. The lower bound is where the trade sits: this
+floor is also the only rate limit on the fetch a **rejected** token can provoke, so a value near zero
+would make a forged `kid` a request amplifier aimed at Security's published key set.
+
+**Security configures neither**, and that is not an omission: it builds no configuration manager at all,
+because it validates the tokens it minted itself and takes its verification key in process from its own
+signing-key layer. It therefore converges immediately on restart while the three verifiers converge on the
+intervals above. [`SECRETS.md`](SECRETS.md) §4.2.1 carries the rotation runbook that follows from this —
+what each boundary does at the instant of rotation, the order to rotate in, and why an overlapping key set
+is not the answer here (AAP §0.6.6.3 fixes exactly one signing secret in the estate).
 
 ---
 

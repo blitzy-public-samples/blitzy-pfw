@@ -96,8 +96,11 @@ using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
 using Microsoft.Extensions.Options;
 using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
@@ -224,6 +227,42 @@ builder.Services
         if (!string.IsNullOrWhiteSpace(configured))
         {
             options.SigningKey = configured;
+        }
+    })
+
+    // ------------------------------------------------------------------------------------------
+    // 🔴 ONE OPERATOR VARIABLE, TWO CONSUMERS - THE ISSUANCE ANCHOR FALLS BACK TO THE LISTENER'S.
+    //
+    // WHAT WAS BROKEN. There are two client-certificate anchors in this service and they serve
+    // different layers: `Security:MutualTls:ClientCaPath` is the LISTENER's, read above by
+    // CallerCertificateTrust.Load so Kestrel will complete a handshake with a caller certificate at
+    // all; `Security:ClientCertificateAuthorityPath` is the ISSUANCE anchor, read by
+    // Tokens/ClientCertificateTrust so a completed handshake's certificate may establish an identity.
+    // The orchestration layer publishes exactly ONE variable for this authority -
+    // SECURITY_MTLS_CLIENT_CA_PATH - and maps it to the listener key alone, and the documentation and
+    // the end-to-end provisioning script both instruct an operator to set that one. So the documented
+    // bootstrap could not work: a valid caller certificate completed the handshake and was then
+    // refused 401 with "No client-certificate trust anchor is configured", while the issuance anchor
+    // this service actually reads was named nowhere an operator would look.
+    //
+    // WHY A FALLBACK RATHER THAN A MERGE OR A RENAME. The two anchors are allowed to differ - a
+    // deployment may let its listener complete handshakes for a broader authority than issuance will
+    // honour identities from - so merging them would remove a real distinction. A rename would break
+    // every deployment that already sets the issuance key. A fallback keeps both properties: an
+    // explicitly configured issuance anchor is ALWAYS authoritative, and a deployment that configures
+    // only the published variable gets the behaviour its documentation describes.
+    //
+    // THE GUARD IS ON EMPTY, NOT ON WHITE SPACE, AND THAT IS DELIBERATE. A whitespace-only issuance
+    // path is a populated variable carrying nothing usable - the shape a substitution that expanded to
+    // nothing produces - and the validator refuses the host for it by name. Falling back for it would
+    // silently repair a deployment that stated an intent it cannot meet, which is the one case where
+    // being helpful hides a fault.
+    // ------------------------------------------------------------------------------------------
+    .PostConfigure(static options =>
+    {
+        if (options.ClientCertificateAuthorityPath.Length == 0 && options.MutualTls.IsConfigured)
+        {
+            options.ClientCertificateAuthorityPath = options.MutualTls.ClientCaPath;
         }
     })
     .ValidateDataAnnotations()
@@ -416,6 +455,56 @@ builder.Services.AddSingleton<ClientCertificateTrust>();
 // issuer is able to mint.
 // --------------------------------------------------------------------------------------------------
 const string inboundAuthenticationSection = "Authentication:Jwt";
+
+// The log category the issuance-roster coherence report is written under. A NAME rather than a type, because
+// the report is a property of the composition root's startup gate rather than of any one component, and a
+// stable dotted category is what lets a deployment raise or silence it through the ordinary logging filters.
+const string IssuanceRosterCoherenceCategory = "PowerFramework.Security.IssuanceRosterCoherence";
+
+// =================================================================================================
+//  DATA PROTECTION IS EPHEMERAL BY DELIBERATE CHOICE, AND THE CHOICE IS ABOUT KEY MATERIAL AT REST.
+//
+//  AddAuthentication REGISTERS THE DATA-PROTECTION STACK WHETHER OR NOT ANYTHING PROTECTS A PAYLOAD -
+//  Microsoft.AspNetCore.Authentication calls AddDataProtection for the ticket formats its remote
+//  handlers use, and this service registers no remote handler. DataProtection's own eager initialiser
+//  then materialises a key ring during host start. That was MEASURED on all four services rather than
+//  inferred: each wrote a key file into its user profile at startup, and one that afterwards failed to
+//  bind its port had ALREADY written it. Left at the default the ring is an unencrypted private key
+//  under the process's user profile - observed at '/root/.aspnet/DataProtection-Keys' - created per
+//  container and shared with nothing, which the framework itself warns about for a container.
+//
+//  NOTHING IN THIS SERVICE PROTECTS A PAYLOAD. Inbound authentication is bearer-token validation
+//  against Security's published verification material, which is stateless and uses no protector; there
+//  is no cookie, no session, no antiforgery token and no protected payload that outlives a request. The
+//  default therefore writes key material to disk for NO CONSUMER - a secret at rest with no purpose,
+//  and a secret at rest with no purpose is the one shape the secrets mandate has no tolerance for.
+//
+//  EPHEMERAL IS THE HONEST POSTURE, AND ITS FAILURE MODE IS WHY. Keys live in this process and die with
+//  it, nothing reaches the filesystem, and a future capability that DOES need a durable protector
+//  fails immediately and visibly on the first restart - instead of working on one replica and failing
+//  on the next, which is the strictly worse of the two failures the default offers. Persisting the ring
+//  instead would not remove the hazard: at-rest encryption of a persisted ring needs an X.509
+//  certificate this deployment does not provision, DPAPI is Windows-only, and the target is Linux
+//  containers - so persisting would relocate unencrypted key material rather than protect it.
+//  docs/SECRETS.md section 5 records the posture and what a later phase must put in its place.
+//
+//  THE PROVIDER SWAP ALONE WAS NOT ENOUGH, AND THAT WAS MEASURED. Replacing IDataProtectionProvider with
+//  the ephemeral one leaves the KEY-MANAGEMENT stack untouched, and data protection's eager initialiser
+//  warms THAT rather than whichever provider is registered - so a host wired that way still wrote a key
+//  file to the user profile on every start. The repository is therefore what is redirected: with an
+//  in-memory IXmlRepository there is no file-system repository to construct, so the ring is created in
+//  this process and NOTHING reaches the disk. One mechanism, at the layer that decides where bytes go.
+//
+//  THIS IS NOT A BEHAVIOUR CHANGE UNDER C-B. There is no legacy analogue to preserve or to break: the
+//  key ring is an artifact of the ASP.NET Core hosting choice this refactor introduced, and the legacy
+//  framework - a library with no process of its own - has nothing that corresponds to it.
+// =================================================================================================
+builder.Services
+    .AddDataProtection();
+
+// The key ring lives in memory, so the eager initialiser's key is created HERE rather than in a file.
+builder.Services.Configure<KeyManagementOptions>(static options =>
+    options.XmlRepository = new InMemoryDataProtectionKeyRepository());
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -823,6 +912,29 @@ RequireIssuableInboundAudience(
 // configuration for the same reason the two lines above are: this is the only vantage point from which
 // the final, fully-composed configuration is visible, so a value contributed by a later source is seen.
 RequireInvariantTokenValidation(app.Configuration, inboundAuthenticationSection);
+
+// AND ONE DIVERGENCE IS REPORTED RATHER THAN REFUSED, WHICH IS THE OPPOSITE DECISION FROM THE THREE
+// GATES ABOVE AND IS TAKEN FOR A STATED REASON.
+//
+// `Security:Clients[n]:Audiences` and `:Scopes` are bound and then never consulted: the issuance decision
+// is taken entirely against the matrix folded from `Security:Callers` and `Security:CallerAuthorizations`,
+// which is deliberately the single enforcement point. The shipped settings already advertise more than the
+// matrix grants, so an operator reading the roster would conclude a caller may address audiences it will in
+// fact be refused for - and the reverse mistake, a grant for a subject no credential-roster entry names, is
+// a permission nobody can exercise.
+//
+// NOT ENFORCED, because enforcing the advertised lists would create a second permission gate able to refuse
+// what the matrix grants, which is the divided authority Tokens/TokenIssuer.cs rejects in terms. NOT A
+// REFUSAL TO START, because the shipped configuration diverges, so refusing would turn a documentation
+// defect into an outage. Reported once, at Warning, naming the keys and the identifiers - every one of which
+// is already written in a settings file and none of which is a credential.
+foreach (string divergence in IssuanceRosterCoherence.Describe(issuance))
+{
+    app.Services
+        .GetRequiredService<ILoggerFactory>()
+        .CreateLogger(IssuanceRosterCoherenceCategory)
+        .LogWarning("{Divergence}", divergence);
+}
 
 // --------------------------------------------------------------------------------------------------
 // 9. THE PIPELINE
@@ -1374,6 +1486,68 @@ internal sealed class CallerCertificateTrust
 /// cannot boot this host at all, and the per-service coverage gate becomes unreachable for every line in
 /// this file.
 /// </remarks>
+/// <summary>
+/// The data-protection key repository, held in this process's memory and never written to storage.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS TYPE EXISTS AT ALL. Data protection is registered by the authentication stack whether or not
+/// anything protects a payload, and its eager initialiser materialises a key ring during host start - which,
+/// left at the default, writes an UNENCRYPTED private key into the process's user profile for no consumer.
+/// Nothing in this service protects a payload: inbound authentication is bearer-token validation against
+/// published verification material, and there is no cookie, no session, no antiforgery token and no
+/// protected payload that outlives a request.
+/// </para>
+/// <para>
+/// 🔴 <b>AND THE OBVIOUS FIX IS THE ONE THAT DOES NOT WORK.</b> Swapping
+/// <c>IDataProtectionProvider</c> for the framework's ephemeral provider was tried and MEASURED: a key file
+/// was still written on every start, because the eager initialiser warms the key-management stack rather
+/// than the registered provider. Redirecting the REPOSITORY is what removes the write, because it removes
+/// the file-system repository from the graph entirely.
+/// </para>
+/// <para>
+/// The consequence is deliberate and is the reason this posture was chosen: a capability that later needs a
+/// DURABLE protector fails immediately and visibly at the first restart, rather than working on one replica
+/// and failing on the next. <c>docs/SECRETS.md</c> section 5.4 records the decision, the rejected
+/// alternative and what a later phase must put in its place.
+/// </para>
+/// <para>
+/// THREAD SAFETY IS REQUIRED, NOT OPTIONAL. The key ring is read on request threads and written by the
+/// initialiser, so every access is taken under one lock. The returned collection is a snapshot, so a caller
+/// enumerating it cannot observe a concurrent store.
+/// </para>
+/// </remarks>
+internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
+{
+    /// <summary>The stored elements, guarded by <see cref="_gate"/>.</summary>
+    private readonly List<XElement> _elements = [];
+
+    /// <summary>Serialises every read and write of <see cref="_elements"/>.</summary>
+    private readonly object _gate = new();
+
+    /// <inheritdoc />
+    public IReadOnlyCollection<XElement> GetAllElements()
+    {
+        lock (_gate)
+        {
+            // A COPY, and each element cloned: the key manager is free to mutate what it is handed, and a
+            // shared instance would let one caller's edit reach another's read.
+            return [.. _elements.Select(static element => new XElement(element))];
+        }
+    }
+
+    /// <inheritdoc />
+    public void StoreElement(XElement element, string friendlyName)
+    {
+        ArgumentNullException.ThrowIfNull(element);
+
+        lock (_gate)
+        {
+            _elements.Add(new XElement(element));
+        }
+    }
+}
+
 public partial class Program
 {
     /// <summary>

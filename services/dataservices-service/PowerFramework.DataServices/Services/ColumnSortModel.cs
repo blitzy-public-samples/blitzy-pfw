@@ -616,7 +616,17 @@ public sealed class ColumnSortModel : DataWindowServiceBase, IDataWindowColumnSo
     private const string DescendingSuffix = " D";
 
     /// <summary>The separator between clauses in the composed sort expression (<c>:L196</c>).</summary>
-    private const string ClauseSeparator = ",";
+    /// <remarks>
+    /// <c>internal</c> RATHER THAN <c>private</c>, for the same reason <see cref="GetClause"/> is: the
+    /// C-03 wire projection composes a caller-supplied column list into one expression and must join it
+    /// with THIS separator, not with a second literal of its own. It had a literal of its own, and they
+    /// disagreed - the projection joined with the empty string and published <c>"age Dsalary A"</c> where
+    /// the oracle composes <c>"age D,salary A"</c>. One constant, one definition, so the two cannot drift
+    /// apart again. See the accessibility note in this file's header: the oracle's encapsulation intent is
+    /// preserved because <c>InternalsVisibleTo</c> scopes this to the service and its test assembly, and it
+    /// stays absent from the published API.
+    /// </remarks>
+    internal const string ClauseSeparator = ",";
 
     /// <summary>
     /// The sentinel meaning "there was no original sort" - <c>"?"</c> (<c>:L274</c>).

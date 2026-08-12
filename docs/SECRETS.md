@@ -74,7 +74,7 @@ is where injected values will *come from*, and its absence changes nothing about
 | [2. The sweep result](#2-the-sweep-result) | Three named, eleven found: the inventory, the two structural findings, the binary sites, adjacent defects, a corrected attribution, and the cleared false positives |
 | [3. The remediation posture](#3-the-remediation-posture) | Never replicate, document, and rotate — never edit the legacy file; and the two operational follow-ups |
 | [4. Token topology](#4-token-topology) | One signing secret, one issuer, three verifiers, the mutual-TLS fallback, and nothing scaffolded for a deferred service |
-| [5. Credential-bearing fields on the new boundaries](#5-credential-bearing-fields-on-the-new-boundaries) | The per-field handling rules the contracts delegate here |
+| [5. Credential-bearing fields on the new boundaries](#5-credential-bearing-fields-on-the-new-boundaries) | The per-field handling rules the contracts delegate here, and the deliberately ephemeral data-protection key ring |
 | [6. Statement redaction — the one control this refactor adds](#6-statement-redaction--the-one-control-this-refactor-adds) | Why a control is added rather than a behaviour preserved, and why that is not a behavioural change |
 | [7. Cryptographic weak defaults are preserved as annotated defaults](#7-cryptographic-weak-defaults-are-preserved-as-annotated-defaults) | Eight weaknesses kept exactly as they are — four of them established by absence — and annotated rather than fixed |
 | [8. Constraint compliance and cross-references](#8-constraint-compliance-and-cross-references) | How this document honours each governing constraint, what it does not claim, and where to read next |
@@ -603,7 +603,7 @@ than a later addition. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.1 works through 
 | **Appears in `appsettings.json` or `appsettings.Development.json`?** | **No** |
 | **Appears in any container definition?** | **No** |
 | **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform. The command is in `orchestration/.env.example` §1 |
-| **Rotated how?** | **There is no rotation mechanism. Read §4.1.1 before planning a replacement.** Replacing the configured value and restarting Security is the only available procedure, and it is a hard cutover rather than a rollover |
+| **Rotated how?** | **There is no rotation mechanism. Read §4.1.1 before planning a replacement, and §4.2.1 for what the other three boundaries do while you do it.** Replacing the configured value and restarting Security is the only available procedure, and it is a hard cutover rather than a rollover |
 
 The **name** of the variable is recorded here because consumers need to know what to set. **Its value
 is not recorded here, is not recorded anywhere else in this repository, and no placeholder resembling a
@@ -631,7 +631,7 @@ instruction was incompatible with the published contract and is corrected here.*
 | **Accepted form** | The key **material itself**, as a value rather than a path. In the template that is the single-line base64-of-DER form, because the Compose dotenv format has no line continuation and a PEM block cannot be written there; a secret store that can carry newlines may instead supply PEM, which Security tries first. An earlier revision of this document described the variable as a path to a mounted PEM file — that is not what the template declares, and the two statements are reconciled here in favour of the template, which is the artifact an operator actually fills in |
 | **Minimum size** | **2048 bits, enforced — see §4.1.1.** `Security:SigningKeyMinimumSizeBits` is a bound option measured by the options validator *and* again by `SigningKeyProvider` before signing credentials become reachable, so a 1024-bit key is refused at startup by name. Raisable to 3072 or 4096; a configured value below 2048 is itself refused |
 | **Public half** | **Derived, never configured.** Security computes the public JWK from the private key and publishes it under the `kid` in `Security:SigningKeyId`. There is no public-key variable, and there must not be one: two independently configured halves of one key pair is a way to publish material that does not verify what is being signed |
-| **Rotation** | **Not implemented — see §4.1.1.** Replace the configured secret value (or the object in the secret store that supplies it) and restart Security. No code change and no rebuild, and no other service is reconfigured; but every token signed with the previous key stops verifying the moment the host restarts |
+| **Rotation** | **Not implemented — see §4.1.1, and §4.2.1 for the convergence window.** Replace the configured secret value (or the object in the secret store that supplies it) and restart Security. No code change and no rebuild, and no other service is reconfigured. **An earlier revision of this row said every token signed with the previous key "stops verifying the moment the host restarts", and that is false of the three VERIFIERS:** each holds a cached copy of the published key set, so a pre-rotation token keeps verifying at those boundaries until the cache is refreshed, and a post-rotation token is refused there until it is. §4.2.1 states the bound and the order to rotate in |
 
 #### 4.1.1 What is enforced about this key, and what is only recommended
 
@@ -733,7 +733,14 @@ withdrawn second mutual-TLS listener, and the server certificate now comes from 
 > `Security:MutualTls:ClientCaPath`, loaded at startup by `CallerCertificateTrust.Load` in Security's
 > composition root and installed as Kestrel's `ClientCertificateValidation` callback, which builds a
 > presented caller certificate's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor
-> alone. That is the second of the two implementations that were open, and it is why
+> alone. It feeds a **second** consumer as well, and that second one is why a correct certificate used to
+> be refused: `Security:ClientCertificateAuthorityPath` is the ISSUANCE anchor, read by
+> `Tokens/ClientCertificateTrust` so a certificate that completed the handshake may establish an
+> identity, and no variable was ever published for it — so the documented bootstrap completed the
+> handshake and then answered `401 E_ACCESS_DENIED` on every certificate while `Basic` callers kept
+> minting. Security's composition root now adopts the listener anchor as the issuance anchor when the
+> issuance key is unset, so this one variable is sufficient and an explicitly configured issuance anchor
+> still wins. That is the second of the two implementations that were open, and it is why
 > `services/security-service/Dockerfile` deliberately **installs no trust anchor**: no `ca-certificates`
 > step and no `update-ca-certificates`, because the OS trust store is not the decider and the runtime
 > stage needs no root-privileged step. A configured-but-unreadable anchor is a refusal to start.
@@ -859,6 +866,133 @@ direction.
 `/v1/ping` is the standing proof of the property: it requires a token on all four services and returns
 `401` without one, so authentication is testable rather than merely asserted
 ([`ARCHITECTURE.md`](ARCHITECTURE.md) §4.2).
+
+#### 4.2.1 Rotating the signing key: what each boundary does, and the order to do it in
+
+Rotation is a **hard cutover at the issuer and a cache expiry at each verifier**, and the two are not
+simultaneous. This subsection records the measured behaviour rather than the intended one, because the
+gap between them was a finding: a rotation left the estate accepting the **retired** credential and
+refusing the **current** one at the same time, and neither the window nor a safe order was written down
+anywhere.
+
+**What each boundary does the moment the issuer's key changes**
+
+| Boundary | Where its verification key comes from | What it does at the instant of rotation |
+| --- | --- | --- |
+| **Security** | **In process**, from its own signing-key layer. It configures no bearer `Authority` and no `MetadataAddress` at all, so it builds no configuration manager and performs no metadata retrieval | Converges **immediately** on restart. It is both issuer and verifier of its own tokens, and both halves move together |
+| Gateway, DataServices, Persistence | The **published key set**, fetched by the stock bearer handler and **cached** | Keep serving from the cached set. A **pre-rotation** token still verifies; a **post-rotation** token is refused `401` with `IDX10503`, naming a `kid` that matched nothing |
+
+**The two intervals that bound it, and why both are needed**
+
+Each verifier now configures both of the token library's retrieval intervals — `MetadataRefreshInterval`
+and `MetadataAutomaticRefreshInterval`, declared in each service's settings file and validated at startup
+— because they bound the two halves of the window and the library's defaults for them are five minutes
+and **twelve hours**:
+
+- **`MetadataRefreshInterval` (shipped: 5 seconds)** is the floor before a refresh that a FAILED
+  validation asked for is actually performed. `RefreshOnIssuerKeyNotFound` is left at its default of
+  true, so an unknown `kid` requests a refresh at once — this interval is what decides how soon that
+  request is honoured, and therefore how long a **current** token stays refused.
+- **`MetadataAutomaticRefreshInterval` (shipped: 5 minutes, the library's own minimum)** is the
+  background interval. A **successful** validation provokes no refresh at all, so nothing else ever drops
+  a **retired** key: this interval alone decides how long a superseded credential keeps working.
+
+**The third duration, which neither of those bounds**
+
+A superseded key set does not stop being acceptable when it stops being *current*.
+`BaseConfigurationManager` keeps a **cache of recently-good configurations** and the token handler retries
+against them when validation fails against the current one, so a retired key stays usable for
+`LastKnownGoodLifetime` — **one hour by default**. This was measured rather than inferred: with both
+intervals above configured, a token signed by a retired key was **still accepted nine and a half minutes
+after the rotation**, past a background refresh that had already replaced the current configuration, and
+two separately retired identities were both still honoured.
+
+Each verifier therefore **bounds that lifetime to its own background interval**, derived from it rather
+than made a third setting, so a superseded set is gone after one refresh cycle. It is bounded rather than
+**switched off**: `UseLastKnownGoodConfiguration` stays at its default of `true`, because that fallback is
+what keeps a boundary validating tokens through a transient inability to *fetch* the key set. Turning it
+off would trade a bounded acceptance window for a hard authentication failure during any metadata outage.
+
+**What was measured, on the shipped settings and on the library's defaults**
+
+| Rotation half | With the library's defaults | With the shipped settings |
+| --- | --- | --- |
+| A **newly minted** token is accepted again | **232 s** | **1.1 s** |
+| A token signed by the **retired** key stops being accepted | still accepted at **570 s**, bounded only by the one-hour fallback lifetime | **293 s**, bounded by the five-minute fallback lifetime |
+
+Two properties of the library shape those numbers and are worth knowing before reading a rotation
+timeline:
+
+- **The first refresh request in a process's life is always honoured immediately**, whatever
+  `MetadataRefreshInterval` says. The 232 s figure above is the *second* rotation in one process, which is
+  the case an operator actually meets; a boundary's very first rotation converges at once and is not
+  representative.
+- **`MetadataAutomaticRefreshInterval` cannot go below five minutes** — that is the library's own floor —
+  so five minutes is the tightest retired-key bound available without switching the fallback off.
+
+Neither number is a service-level commitment: no latency budget or availability target is published
+anywhere in this system (AAP §0.8.5), and these are measurements of one deployment's convergence taken to
+establish that the window is bounded and roughly how tightly.
+
+Both intervals are a **bound, not an overlap**, and that is a constraint rather than a preference. The other way to
+remove the window is for the issuer to publish the superseded key beside the new one until every consumer
+has converged, which a key *set* can obviously carry — but **AAP §0.6.6.3 fixes exactly one signing
+secret in the estate**, and Security's published set is built from that single key. A second slot of
+issuer key material would be new capability rather than a setting, so it is deliberately not built; §4.1.1
+records that no key ring exists on the issuing side.
+
+**The order to rotate in**
+
+1. **Drain or accept.** Decide whether a bounded interval in which some in-flight tokens are refused is
+   acceptable. Tokens are short-lived (five minutes), so waiting one token generation before and after is
+   usually cheaper than any mitigation.
+2. **Replace the value** of `SECURITY_JWT_SIGNING_KEY`, and change `Security:SigningKeyId` with it. The
+   `kid` must change: a new key published under the old `kid` is the one shape a verifier cannot detect,
+   because a cached entry would appear to match and the signature check would then fail with nothing
+   pointing at the cause.
+3. **Restart Security only.** No other service is reconfigured and none needs restarting — the whole
+   point of the two intervals is that the verifiers converge on their own.
+4. **Expect, and do not misread, the window.** Within `MetadataRefreshInterval` a newly minted token is
+   accepted everywhere. Within the fallback lifetime — the same five minutes — a token signed by the
+   previous key stops being accepted. A `401` carrying `IDX10503` during that window is the cache
+   converging, not a misconfiguration.
+5. **If the retired key is COMPROMISED, restart the verifiers.** The five-minute bound is short enough for
+   an orderly rotation and is not short enough for an incident: a stolen key can mint fresh tokens, and
+   those tokens are accepted until the fallback entry expires. Restarting Gateway, DataServices and
+   Persistence drops every cached and recently-good configuration at once.
+6. **Restarting a verifier is otherwise the escape hatch**, not the procedure. It converges that boundary
+   at once and is worth doing only if the window is unacceptable for a particular deployment.
+
+**If a rotation must be invisible**, lower `MetadataRefreshInterval` toward its one-second floor on the
+verifiers *before* rotating and raise it afterwards. It is a floor on the fetch a REJECTED token can
+provoke, so it is also the only rate limit on that fetch: a value near the floor makes a forged `kid` a
+request amplifier aimed at the published key set, which is why the shipped default is seconds rather than
+zero.
+
+#### 4.2.2 `kid` selects a key, it does not gate one — measured
+
+A token whose header names a `kid` **no verifier has ever published**, and a token carrying **no `kid` at
+all**, are both **accepted** provided the signature verifies against a key the verifier holds. This was
+measured on all three verifiers, and it is stock bearer-handler behaviour rather than a configuration
+choice: `kid` is a *selection hint*, so when it does not match, the handler falls back to trying every
+key it holds, and a signature made by the sole issuer's key verifies against that key whatever the header
+claims. The reverse case is the one that matters and it fails correctly: a token signed by a key the
+verifier does not hold is refused whatever `kid` it presents (§4.2.1 measures exactly that, twice).
+
+**This is recorded rather than changed, and the reason is a security argument rather than a preference.**
+Enforcing `kid` would make the header a second gate in front of the signature check — and a gate placed
+in front of a cryptographic check is only ever as strong as the check behind it, while the failure it
+adds is real: a rotation that changes the key identifier would begin refusing tokens whose signatures are
+perfectly valid, turning an orderly rotation into an outage. The security property this topology rests on
+is *one issuer, one signing key, verified by signature* (§4.1, §4.2), and a `kid` mismatch does not
+weaken it because it cannot make an unsigned or wrongly-signed token verify. §4.1.1's note that no
+verifier has more than one key to choose between today is the same fact from the other side: with one
+published key, `kid` has nothing to select.
+
+Two consequences worth stating so nobody depends on the wrong one. A `kid` **cannot** be used as an
+authorization input anywhere in this system — audience and scope are the authorization inputs, and they
+are validated. And on the day the issuing side gains a key ring, `kid` becomes a performance hint that
+avoids trying every key; it still will not be a gate, because the signature remains the decision.
 
 ### 4.3 The issuance edge accepts two caller credentials, and mutual TLS is the per-pair fallback half
 
@@ -1042,6 +1176,74 @@ outbound, on every boundary this refactor creates.** A field added later inherit
 its content, not by being listed here. Where a rule cannot be applied without losing behaviour the
 system depends on, the contract is **narrowed with a defined error** rather than widened with a guess —
 and the narrowing is recorded, as the two above are.
+
+### 5.4 Data protection key material is deliberately ephemeral, and nothing is written to disk
+
+This one is not a wire field. It is key material the **platform** creates whether or not anything asks
+for it, and it is recorded here because the register's subject is secrets at rest, not only secrets in
+transit.
+
+**What the default does.** `AddAuthentication` registers the ASP.NET Core data-protection stack — the
+authentication assembly calls `AddDataProtection` for the ticket formats its remote handlers use, and
+none of these four services registers a remote handler. Data protection's own eager initialiser then
+materialises a key ring during host start. That was **measured on all four services** rather than
+inferred: each wrote an unencrypted private key into the process's user profile at startup, observed at
+`/root/.aspnet/DataProtection-Keys`, and one host that afterwards *failed to bind its port* had already
+written it. Two of the four log the fact and two do not, purely because of their log filters, so the
+record is easy to miss: Gateway and DataServices raise `Microsoft.AspNetCore` to Information in
+Development, Persistence leaves it at Warning, and Security pins `Microsoft.AspNetCore.DataProtection` to
+Warning specifically.
+
+**Why that is the wrong resting state.** Nothing in any of the four services protects a payload. Inbound
+authentication is bearer-token validation against the published key set (§4.2) — stateless, no protector
+— and there is no cookie, no session, no antiforgery token and no protected payload that outlives a
+request. The default therefore writes key material to disk **for no consumer**: a secret at rest with no
+purpose, created per container and shared with nothing, which is the one shape this register has no
+tolerance for.
+
+**The posture, and its failure mode.** All four composition roots configure
+`KeyManagementOptions.XmlRepository` with an in-memory `IXmlRepository` — `InMemoryDataProtectionKeyRepository`,
+declared once per service beside its own composition root. Keys live in the process and die with it,
+nothing reaches the filesystem, and — this is the load-bearing half — a future capability that genuinely
+needs a durable protector fails **immediately and visibly on the first restart**, instead of working on
+one replica and failing on the next. Of the two failures on offer, the intermittent cross-replica one is
+strictly worse, because it presents as flakiness rather than as a missing decision.
+
+🔴 **The obvious fix is the one that does not work, and it was measured rather than reasoned about.**
+Replacing `IDataProtectionProvider` with the framework's ephemeral provider — the documented way to ask
+for non-persistent data protection — was tried first, and a host wired that way **still wrote a key file
+on every start**. The reason is that the eager initialiser warms the **key-management stack**, not
+whichever provider happens to be registered, so swapping the provider changes who *reads* the ring and
+not who *creates* it. Redirecting the repository removes the file-system repository from the graph
+entirely, which is why it is the layer the four services configure and the layer their tests assert on. A
+suite that asserted the provider type would have gone green over a key file being written beside it.
+
+**One log record survives, and it is deliberately left alone.** Every service still writes
+`XmlKeyManager[35]` at Warning — *"No XML encryptor configured. Key {id} may be persisted to storage in
+unencrypted form."* Its premise is false here: with an in-memory repository nothing is persisted at all,
+and the key-creation record `XmlKeyManager[58]` names a key that never leaves the process. Configuring a
+do-nothing encryptor would silence it, and that is exactly why it is not done — **the warning is the alarm
+that must fire the day the repository becomes persistent**, which is the change the last paragraph of this
+section anticipates. Disarming it now would remove the one automatic signal that the decision recorded
+here had expired. A reader meeting it should treat it as expected, and as load-bearing.
+
+**Why not persist it properly instead.** Persisting the ring would relocate the hazard rather than remove
+it. At-rest encryption of a persisted ring needs an X.509 certificate this deployment does not provision;
+DPAPI is Windows-only and the target is Linux containers; and a shared ring needs shared storage that no
+part of the orchestration provides. Each of those is a new required secret or a new required mount
+introduced for a facility with no consumer — new failure modes bought with no benefit.
+
+**What a later phase must do.** The moment antiforgery, cookies, or any protected payload that must
+survive a restart or be readable by a second replica is introduced, this decision expires. The
+replacement is a **shared** key ring in storage both replicas can read, **encrypted at rest** with a
+certificate the orchestration provisions, configured in one place per service beside the call this
+paragraph documents. The symptom that announces the need is unmistakable and is why the loud failure was
+chosen: protected payloads stop round-tripping across a restart or between replicas.
+
+**Constraint position.** This is not a behaviour change under C-B. There is no legacy analogue to
+preserve or to break — the key ring is an artifact of the ASP.NET Core hosting choice this refactor
+introduced, and the legacy framework, a library with no process of its own, has nothing that corresponds
+to it.
 
 ---
 

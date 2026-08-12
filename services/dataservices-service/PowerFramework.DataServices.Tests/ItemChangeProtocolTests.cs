@@ -168,6 +168,80 @@ public sealed class ItemChangeProtocolTests
     /// </summary>
     private const string DormantOverLengthMessagePrefix = "超出最大允许的长度";
 
+    /// <summary>
+    /// The re-entrancy flag is restored to its SAVED value even when the semantic raise at
+    /// <c>se_cst_dw.sru:L194</c> throws, and the stash is left alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>A BOUNDARY OBLIGATION THE ORACLE GOT FOR FREE.</b> <c>:L192-L196</c> is straight-line
+    /// PowerScript with no exception mechanism between the set and the restore, so <c>:L196</c> ALWAYS
+    /// ran. Across this refactor's boundary the raise at <c>:L194</c> is a network round trip - the
+    /// handler lives in the client - and it can therefore fail: an unanswered question past
+    /// <c>DataServices:EventChain:AnswerTimeout</c>, a torn-down conversation, a cancelled call. Written
+    /// as plain statements the restore was skipped, leaving <c>_bDoItemChange</c> stuck TRUE for the rest
+    /// of the session - which silently suppressed <c>ondwnkillfocus</c>'s deferred accept-text
+    /// continuation for every later event [<c>:L387-L390</c>]. A session that looked alive and had quietly
+    /// lost a behaviour is exactly the class of defect this row exists to keep fixed.
+    /// </para>
+    /// <para>
+    /// THE SAVED VALUE, NOT <see langword="false"/>, and the row is parameterised over both starting
+    /// values for that reason: <c>:L196</c> assigns back what <c>:L192</c> saved, because the raise may
+    /// itself have caused a NESTED item change whose outer invocation is still running. Clearing would
+    /// break the nesting even on the successful path.
+    /// </para>
+    /// <para>
+    /// THE STASH IS NOT WRITTEN ON THE FAILURE PATH. <c>:L195</c> records what the handler RETURNED, and
+    /// a handler that threw returned nothing - so writing one would hand
+    /// <c>ondwnitemvalidationerror</c> a code no handler produced, which it would then read and clear
+    /// [<c>:L331-L332</c>] and pre-set its own result from [<c>:L338-L340</c>].
+    /// </para>
+    /// </remarks>
+    /// <param name="savedFlag">The value the flag carried before the routine ran.</param>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AFailedSemanticRaiseStillRestoresTheReEntrancyFlag(bool savedFlag)
+    {
+        ProtocolFixture fixture = Arrange(FakeColumnType.CharOf(100), "Alice");
+
+        RecordingSessionState session = new()
+        {
+            DoItemChange = savedFlag,
+            ItemChangeRetCode = 7L,
+        };
+
+        InvalidOperationException thrown = new("the client never answered");
+
+        RecordingEventSink sink = new(
+            fixture.Log,
+            (_, _, _) => throw thrown);
+
+        // The failure PROPAGATES - it is not swallowed into a fabricated result. A guessed code here
+        // would select an arm of the {0,1,2,3} alphabet the client never chose.
+        InvalidOperationException observed = Assert.Throws<InvalidOperationException>(
+            () => ItemChangeProtocol.OnDwnItemChange(
+                fixture.Host,
+                session,
+                sink,
+                FixtureRow,
+                fixture.Dwo,
+                "Bob"));
+
+        Assert.Same(thrown, observed);
+
+        // :L196 ran anyway, and it put the SAVED value back rather than clearing.
+        Assert.Equal(savedFlag, session.DoItemChange);
+
+        // :L195 never ran, so the stash is exactly what it was.
+        Assert.Equal(7L, session.ItemChangeRetCode);
+
+        // :L194 was reached once and nothing after it was.
+        Assert.Equal(1, sink.DoItemChangeRaiseCount);
+        Assert.Equal(0, sink.ChangingRaiseCount);
+        Assert.Equal(0, sink.ChangedRaiseCount);
+    }
+
     // ==============================================================================================
     //  THE TWO COLLABORATOR DOUBLES
     //  --------------------------------------------------------------------------------------------

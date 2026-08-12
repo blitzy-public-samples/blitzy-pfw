@@ -150,7 +150,10 @@
 //  into warn-and-continue would be a behavioural change dressed as robustness.
 // ==================================================================================================
 
+using System.Collections.Immutable;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
+using System.Threading.Channels;
 using Google.Protobuf;
 using Google.Protobuf.Reflection;
 using Grpc.Core;
@@ -162,8 +165,10 @@ using PowerFramework.DataServices.Clients;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
 using PowerFramework.DataServices.Services;
+using PowerFramework.DataServices.Validators;
 using PowerFramework.Shared.Eventful;
 using PowerFramework.Shared.Kernel;
+using PowerFramework.Shared.Localization;
 
 // ---- Alias block. Every entry resolves a REAL collision, none is decoration.
 // ----
@@ -1304,6 +1309,8 @@ internal sealed class DataWindowEventConversation
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly Lock _pendingGate = new();
     private readonly ILogger? _logger;
+    private readonly TimeSpan _answerTimeout;
+    private readonly TimeProvider _timeProvider;
 
     private DataWindowEventSequencer? _sequencer;
     private PendingQuestion? _pending;
@@ -1311,16 +1318,38 @@ internal sealed class DataWindowEventConversation
     private bool _disposed;
 
     /// <summary>
+    /// Whether the request stream has ended, so no answer can ever arrive again.
+    /// </summary>
+    /// <remarks>
+    /// DISTINCT FROM <see cref="_disposed"/>: a sealed conversation still WRITES - the dispatches already
+    /// queued are owed their results - it just cannot be answered. Collapsing the two would either stop
+    /// those results going out or leave a question waiting for a backstop it cannot outlive.
+    /// </remarks>
+    private bool _answersSealed;
+
+    /// <summary>
     /// Creates the conversation.
     /// </summary>
     /// <param name="sessionId">The validation session this stream serves. Echoed on every response.</param>
     /// <param name="responseStream">The server-to-client writer.</param>
     /// <param name="logger">Diagnostics. Never receives buffer values or edit text.</param>
+    /// <param name="answerTimeout">
+    /// The backstop on one outstanding semantic question, from
+    /// <c>DataServices:EventChain:AnswerTimeout</c>. A non-positive value means NO backstop, which is
+    /// the shape a test uses when it drives both directions itself; the options validator refuses a
+    /// non-positive configured value, so a deployment cannot reach that state.
+    /// </param>
+    /// <param name="timeProvider">
+    /// The clock the backstop is armed from. Seamed so a deterministic test advances time rather than
+    /// waiting for it (AAP 0.6.7).
+    /// </param>
     /// <exception cref="ArgumentNullException">A required argument is <see langword="null"/>.</exception>
     internal DataWindowEventConversation(
         string sessionId,
         IServerStreamWriter<EventChainResponse> responseStream,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        TimeSpan answerTimeout = default,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(sessionId);
         ArgumentNullException.ThrowIfNull(responseStream);
@@ -1328,6 +1357,8 @@ internal sealed class DataWindowEventConversation
         _sessionId = sessionId;
         _responseStream = responseStream;
         _logger = logger;
+        _answerTimeout = answerTimeout;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -1491,6 +1522,14 @@ internal sealed class DataWindowEventConversation
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
+            // REFUSED IMMEDIATELY ONCE THE REQUEST STREAM HAS ENDED. Nothing can deliver an answer any
+            // more, so writing the question and waiting out the backstop would burn the whole timeout on
+            // an outcome that is already decided. See SealAnswers.
+            if (_answersSealed)
+            {
+                throw new DataWindowEventStreamClosedException(question.CorrelationId, _sessionId);
+            }
+
             if (_pending is not null)
             {
                 throw new InvalidOperationException(
@@ -1514,6 +1553,33 @@ internal sealed class DataWindowEventConversation
             using CancellationTokenRegistration registration = cancellationToken.Register(
                 static state => ((PendingQuestion)state!).Cancel(),
                 pending);
+
+            // 🔴 THE BACKSTOP. Without it a client that reads the question and stays silent leaves this
+            // wait on a task nothing will complete: the dispatch never returns, the read loop never
+            // reaches the answer, and the call neither fails nor finishes. The elapsed backstop FAILS the
+            // question with a defined exception rather than cancelling it, so the caller can tell a
+            // silent client apart from a disconnected one and never has to guess an answer - a fabricated
+            // answer to `ondoitemchange` would drive the {0,1,2,3} dispatch down an arm nobody chose.
+            //
+            // ARMED FROM THE SEAMED CLOCK, so a deterministic test advances time instead of waiting.
+            using CancellationTokenSource? backstop = _answerTimeout > TimeSpan.Zero
+                ? new CancellationTokenSource(_answerTimeout, _timeProvider)
+                : null;
+
+            using CancellationTokenRegistration deadline = backstop is null
+                ? default
+                : backstop.Token.Register(
+                    static state =>
+                    {
+                        (PendingQuestion question, TimeSpan elapsed, string session) =
+                            ((PendingQuestion, TimeSpan, string))state!;
+
+                        _ = question.Fail(new DataWindowEventAnswerTimeoutException(
+                            question.CorrelationId,
+                            elapsed,
+                            session));
+                    },
+                    (pending, _answerTimeout, _sessionId));
 
             return await pending.Completion.ConfigureAwait(false);
         }
@@ -1667,6 +1733,52 @@ internal sealed class DataWindowEventConversation
     }
 
     /// <summary>
+    /// States that no further answer can arrive, failing an outstanding question and refusing any later
+    /// one - WITHOUT closing the conversation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE STEP THAT HAS TO HAPPEN BEFORE THE DISPATCHER IS WAITED FOR, NOT AFTER IT.</b> Once the
+    /// request stream has ended - half-closed by the client, or abandoned - the ONLY thing that could
+    /// deliver an answer is gone. A dispatch still blocked on a question would then wait out the whole
+    /// <c>AnswerTimeout</c> backstop for an answer that is already impossible, and the call cannot finish
+    /// until it does: minutes of a stream held open, with the item-change re-entrancy flag still set and
+    /// the session still reporting itself mid-handler. Sealing first is what makes that wait immediate.
+    /// </para>
+    /// <para>
+    /// AND IT REFUSES A LATER QUESTION TOO, WHICH IS THE HALF THAT IS EASY TO MISS. Notifications already
+    /// queued behind the outstanding one are still owed their dispatch, and one of THEM may raise a
+    /// question as well - so failing only the current question would leave the very next one waiting out
+    /// the same backstop. <see cref="AskAsync"/> refuses outright once sealed, so the drain completes
+    /// promptly however many queued notifications ask.
+    /// </para>
+    /// <para>
+    /// SEPARATE FROM <see cref="Dispose"/> BECAUSE DISPOSE DOES MORE. Dispose also releases the write
+    /// gate, and a dispatch unwinding through its own write would then meet a disposed semaphore instead
+    /// of a defined failure. This does exactly one thing, so the unwinding is clean and the ordered
+    /// teardown still runs in its documented order.
+    /// </para>
+    /// </remarks>
+    internal void SealAnswers()
+    {
+        PendingQuestion? pending;
+
+        lock (_pendingGate)
+        {
+            _answersSealed = true;
+            pending = _pending;
+            _pending = null;
+        }
+
+        if (pending is not null)
+        {
+            _ = pending.Fail(new DataWindowEventStreamClosedException(
+                pending.CorrelationId,
+                _sessionId));
+        }
+    }
+
+    /// <summary>
     /// Closes the conversation and cancels any outstanding question.
     /// </summary>
     /// <remarks>
@@ -1718,7 +1830,124 @@ internal sealed class DataWindowEventConversation
 
         /// <summary>Cancels the question.</summary>
         internal void Cancel() => _completion.TrySetCanceled();
+
+        /// <summary>
+        /// Fails the question, so the blocked dispatch throws instead of waiting.
+        /// </summary>
+        /// <param name="error">Why no answer will arrive.</param>
+        /// <returns><see langword="true"/> when this call completed it.</returns>
+        /// <remarks>
+        /// DISTINCT FROM <see cref="Cancel"/> ON PURPOSE. Cancellation says the WAITER went away - the
+        /// call was cancelled or the conversation torn down - while a failure says the ANSWER will not
+        /// come, which is a client fault and reaches the caller as a different status. Collapsing the two
+        /// would report a silent client as a cancelled call and hide it.
+        /// </remarks>
+        internal bool Fail(Exception error) => _completion.TrySetException(error);
     }
+}
+
+/// <summary>
+/// Thrown when a client leaves an outbound semantic question unanswered past the configured backstop.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>WHY A TYPE OF ITS OWN RATHER THAN A CANCELLATION.</b> The nine semantic events are questions the
+/// chain asks BACK, and under the synchronous discipline the dispatch that raised one BLOCKS on the answer
+/// - which is the oracle's own shape, because in process the handler simply returned a value
+/// [<c>se_cst_dw.sru:L194</c>]. Across a wire the answer may never arrive, and the three ways that can
+/// happen are three different outcomes: the call was cancelled (the client went away), the conversation
+/// was torn down (the server is closing), or THE CLIENT IS STILL THERE AND SIMPLY DID NOT ANSWER. Only the
+/// third is a protocol fault the client can fix, and it reaches it as <c>DeadlineExceeded</c> rather than
+/// <c>Cancelled</c> because re-sending after fixing the handler is exactly what it should do.
+/// </para>
+/// <para>
+/// NO ANSWER IS EVER FABRICATED. The alternative to failing is guessing, and a guessed
+/// <c>ondoitemchange</c> result selects an arm of the <c>{0,1,2,3}</c> alphabet - restore-and-reject,
+/// keep-value, or the coercing default - that the client never chose, writing a buffer state nothing
+/// asked for. Narrow with a defined error rather than widen with a guess (AAP 0.1.5).
+/// </para>
+/// </remarks>
+internal sealed class DataWindowEventAnswerTimeoutException : Exception
+{
+    /// <summary>Creates the exception.</summary>
+    /// <param name="correlationId">The question that went unanswered.</param>
+    /// <param name="elapsed">The backstop that elapsed.</param>
+    /// <param name="sessionId">The validation session the conversation serves.</param>
+    internal DataWindowEventAnswerTimeoutException(
+        string correlationId,
+        TimeSpan elapsed,
+        string sessionId)
+        : base(string.Format(
+            CultureInfo.InvariantCulture,
+            "The client did not answer semantic question '{0}' on validation session '{1}' within {2}. "
+                + "Nine of the 22 chain events are questions this server asks back, and under the "
+                + "synchronous ordering discipline the dispatch that raised one waits for the answer - so "
+                + "an unanswered question would hold the stream open indefinitely. The wait is bounded by "
+                + "DataServices:EventChain:AnswerTimeout and NO ANSWER IS INVENTED: answer the question "
+                + "on the same stream, with the correlation identifier it carried.",
+            correlationId,
+            sessionId,
+            elapsed))
+    {
+        CorrelationId = correlationId;
+        Elapsed = elapsed;
+        SessionId = sessionId;
+    }
+
+    /// <summary>The question that went unanswered.</summary>
+    internal string CorrelationId { get; }
+
+    /// <summary>The backstop that elapsed.</summary>
+    internal TimeSpan Elapsed { get; }
+
+    /// <summary>The validation session the conversation serves.</summary>
+    internal string SessionId { get; }
+}
+
+/// <summary>
+/// Thrown when a semantic question can no longer be answered because the request stream has ended.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>THE CASE THE BACKSTOP ALONE DOES NOT COVER.</b> A client that half-closes its request stream
+/// while a question is outstanding has ended the only channel an answer could travel on - so waiting out
+/// <c>DataServices:EventChain:AnswerTimeout</c> would burn the whole timeout on an outcome that is already
+/// decided, holding the stream, the session and the chain's five attached services for minutes and leaving
+/// the item-change re-entrancy flag set the whole time [<c>se_cst_dw.sru:L92</c>]. This says so
+/// immediately instead.
+/// </para>
+/// <para>
+/// IT IS ITS OWN TYPE RATHER THAN A CANCELLATION FOR THE SAME REASON THE TIMEOUT IS: the three ways an
+/// answer can fail to arrive are three different outcomes with three different remedies, and a client
+/// needs to be told which one it caused. This one is <c>Cancelled</c> at the boundary - the client's own
+/// half-close ended the exchange, which is exactly what that status means.
+/// </para>
+/// </remarks>
+internal sealed class DataWindowEventStreamClosedException : Exception
+{
+    /// <summary>Creates the exception.</summary>
+    /// <param name="correlationId">The question that can no longer be answered.</param>
+    /// <param name="sessionId">The validation session the conversation serves.</param>
+    internal DataWindowEventStreamClosedException(string correlationId, string sessionId)
+        : base(string.Format(
+            CultureInfo.InvariantCulture,
+            "Semantic question '{0}' on validation session '{1}' can no longer be answered: the request "
+                + "stream ended while it was outstanding, and an answer travels on that stream. Nine of "
+                + "the 22 chain events are questions this server asks back, and the dispatch that raised "
+                + "one waits for the answer - so half-closing the stream before answering abandons the "
+                + "exchange. Answer every question before completing the request stream.",
+            correlationId,
+            sessionId))
+    {
+        CorrelationId = correlationId;
+        SessionId = sessionId;
+    }
+
+    /// <summary>The question that can no longer be answered.</summary>
+    internal string CorrelationId { get; }
+
+    /// <summary>The validation session the conversation serves.</summary>
+    internal string SessionId { get; }
 }
 
 /// <summary>
@@ -1805,6 +2034,25 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     private readonly ILogger<DataWindowService>? _logger;
 
     /// <summary>
+    /// The clock the event chain's answer backstop is armed from.
+    /// </summary>
+    /// <remarks>
+    /// SEAMED SO A DETERMINISTIC TEST ADVANCES TIME RATHER THAN WAITING FOR IT (AAP 0.6.7), and defaulted
+    /// to the system clock so no registration is required for it. It is the only clock this file reads.
+    /// </remarks>
+    private readonly TimeProvider _timeProvider;
+
+    /// <summary>
+    /// The localization facade the write path's validation refusals are rendered through.
+    /// </summary>
+    /// <remarks>
+    /// THE INVALID-VALUE REFUSAL IS THE ORACLE'S OWN DIALOG and both of its strings are localized through
+    /// <c>CAT_DWSVC</c> [<c>se_cst_dw.sru:L355, :L357</c>], so this facade is what makes that reproduction
+    /// faithful rather than approximate. Its silent passthrough is preserved - see the constructor.
+    /// </remarks>
+    private readonly I18n _localization;
+
+    /// <summary>
     /// Creates the service.
     /// </summary>
     /// <param name="options">
@@ -1833,7 +2081,20 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// Diagnostics. NEVER receives buffer values, edit text or a statement: see the redaction note on
     /// <see cref="Update"/>.
     /// </param>
+    /// <param name="updateContracts">
+    /// Resolves a DataWindow's declared update descriptor, when one is composed. Optional - see the field.
+    /// </param>
+    /// <param name="timeProvider">
+    /// The clock the event chain's answer backstop is armed from. Optional, defaulting to the system
+    /// clock; a test substitutes it to advance time rather than wait.
+    /// </param>
     /// <exception cref="ArgumentNullException">A required dependency is <see langword="null"/>.</exception>
+    /// <param name="localization">
+    /// The localization facade, or <see langword="null"/> for a provider-less one. The write path's
+    /// invalid-value refusal is the oracle's own localized dialog, so this is how that reproduction stays
+    /// faithful; the null case is the legacy's own uninstalled state and its silent passthrough is
+    /// preserved rather than replaced by a throw. See the constructor body.
+    /// </param>
     public DataWindowService(
         IOptions<DataServicesOptions> options,
         ValidationSessionRegistry sessions,
@@ -1841,7 +2102,9 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         IDataWindowModelSetProvider models,
         PersistenceClient persistence,
         ILogger<DataWindowService>? logger = null,
-        IDataWindowUpdateContractProvider? updateContracts = null)
+        IDataWindowUpdateContractProvider? updateContracts = null,
+        TimeProvider? timeProvider = null,
+        I18n? localization = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -1858,6 +2121,20 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         _dropDownSearch = configured.DropDownSearch ?? new DropDownSearchOptions();
         _persistenceSession = configured.PersistenceSession ?? new PersistenceSessionOptions();
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+
+        // ========================================================================================
+        //  OPTIONAL WITH A PROVIDER-LESS FALLBACK, WHICH IS THE ORACLE'S OWN UNINSTALLED STATE.
+        //
+        //  Program.cs registers I18n as a singleton with a locale provider already installed, and the
+        //  activator fills this parameter from the container - so a deployed service always translates.
+        //  A facade with NO provider installed is not a stub: it is exactly what the legacy has before
+        //  pfwSetI18N runs, and its behaviour is the preserved SILENT PASSTHROUGH - the untranslated
+        //  source is returned unchanged, nothing is thrown, nothing is logged and nothing is marked
+        //  untranslated [i18n.srf:L17-L18]. Throwing here instead would make a service composed without
+        //  localization fail on a path that the legacy runs perfectly well.
+        // ========================================================================================
+        _localization = localization ?? new I18n();
     }
 
     /// <summary>
@@ -1986,10 +2263,75 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         StatusCode code = retCode switch
         {
             RetCode.CANCELLED => StatusCode.Cancelled,
-            RetCode.E_INVALID_ARGUMENT or RetCode.E_OUT_OF_BOUND => StatusCode.InvalidArgument,
+
+            // ---- The caller's own request is at fault: 400 at the ingress ----
+            //
+            // 🔴 FOUR OF THESE SIX WERE FALLING TO THE DEFAULT, AND THAT IS THE DEFECT THIS ARM CLOSES.
+            // An unresolvable DataObject name, a rejected clause, a carrier that cannot be applied and an
+            // out-of-range page index are every one of them a value the CALLER supplied - and every one of
+            // them reached the caller as HTTP 500 or 502, which says this service failed. The spellings are
+            // not invented here: AcquisitionFailure in this same file already gives E_INVALID_DATAOBJECT
+            // and E_INVALID_SQL exactly this status, and Gateway's in-band projection gives all four 400.
+            // So the three places a caller error can be classified now agree, which is the property that
+            // makes a retry-or-surface policy writable at all.
+            RetCode.E_INVALID_ARGUMENT
+                or RetCode.E_OUT_OF_BOUND
+                or RetCode.E_OUT_OF_RANGE
+                or RetCode.E_INVALID_SQL
+                or RetCode.E_INVALID_DATA
+                or RetCode.E_INVALID_DATAOBJECT => StatusCode.InvalidArgument,
+
+            // ---- The caller named something that does not exist: 404 ----
+            //
+            // 🔴 ALSO PREVIOUSLY UNCLASSIFIED. E_OBJECT_NOT_FOUND and E_NOT_EXISTS name a thing the
+            // upstream could not find; E_VAR_NOT_FOUND and E_MEMBER_NOT_FOUND are the expression engine's
+            // own not-found codes - a variable no global table carries, a member it cannot bind. All four
+            // are the same situation and take the same status, matching MapOutcomeToStatus for the first
+            // and Gateway's in-band projection for all four.
+            //
+            // E_INVALID_HANDLE IS DELIBERATELY NOT IN THIS GROUP, and the divergence is recorded rather
+            // than tidied: it stays FailedPrecondition below because AcquisitionFailure documents that
+            // agreement explicitly and both statuses reach the caller as a 4xx. MapOutcomeToStatus spells
+            // the same code NotFound, which is a pre-existing inconsistency between two 4xx answers on one
+            // route; changing either would break a documented agreement for no finding-driven gain.
+            RetCode.E_OBJECT_NOT_FOUND
+                or RetCode.E_NOT_EXISTS
+                or RetCode.E_VAR_NOT_FOUND
+                or RetCode.E_MEMBER_NOT_FOUND => StatusCode.NotFound,
+
+            // A handle or transaction that is not valid is a state rejection rather than a bad argument.
             RetCode.E_INVALID_HANDLE or RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
+
+            // A refusal by policy, which must NOT be retried - the reason it cannot stay in the default.
+            RetCode.E_ACCESS_DENIED => StatusCode.PermissionDenied,
+
             RetCode.E_NO_SUPPORT or RetCode.E_NO_IMPLEMENTATION => StatusCode.Unimplemented,
-            RetCode.E_BUSY => StatusCode.Unavailable,
+
+            // ---- Capacity, which clears on its own ----
+            //
+            // ⚠ E_BUSY MOVED FROM Unavailable TO ResourceExhausted, WHICH IS A DELIBERATE CORRECTION.
+            // A busy resource is a CEILING that clears when the operation in flight finishes - it is not
+            // the service being down. Unavailable projects to 503 and invites a caller to retry the whole
+            // service; ResourceExhausted projects to 429, which is the status that carries a Retry-After
+            // and is the one a resilience policy is allowed to retry. The two sibling maps in this file -
+            // AcquisitionFailure and MapOutcomeToStatus - already spell it ResourceExhausted, and Gateway's
+            // in-band projection already gives E_BUSY 429, so this arm was the only place one upstream code
+            // reached a caller as a different status depending on which helper happened to raise it.
+            RetCode.E_BUSY or RetCode.E_OUT_OF_MEMORY => StatusCode.ResourceExhausted,
+
+            // A rejection that can be retried. Aborted is the canonical 409, which is the same status the
+            // optimistic-concurrency mismatch answers - so a retry-or-surface decision reads one status for
+            // one meaning, and nothing is ever silently overwritten.
+            RetCode.E_RETRY => StatusCode.Aborted,
+
+            RetCode.E_TIME_OUT => StatusCode.DeadlineExceeded,
+
+            // AND THE DEFAULT KEEPS ITS ORIGINAL MEANING, NARROWED TO WHAT IT SHOULD ALWAYS HAVE COVERED.
+            // A code this map has not been taught is a contract this service does not yet understand, which
+            // is a fault on THIS side - so Internal, and never a 4xx that would blame the caller for a
+            // mistake they did not make. E_DB_ERROR and the oracle's unspecific FAILED reach it on purpose:
+            // both mean the data path behind this service answered badly, which is a server-side condition
+            // whatever its cause.
             _ => StatusCode.Internal,
         };
 
@@ -2303,7 +2645,17 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         // whatever the Set* calls already applied", and a clause setter is NOT IDEMPOTENT - a WHERE clause
         // carrying SQL_MS_APPEND applied twice appends the same fragment twice and changes the executed
         // statement. Applying it once, at creation, is also where C-05 adjudicates each setting
-        // individually so a refusal names which one was wrong.
+        // INDIVIDUALLY, so a refusal is attributable to one setting rather than to the whole
+        // specification.
+        //
+        // WHAT THAT DOES AND DOES NOT GIVE THE CALLER, STATED EXACTLY BECAUSE IT WAS MEASURED. Where C-05
+        // owns the refusal - a missing clause, an invalid modification style, an inadmissible statement, a
+        // bad parameter - it carries a diagnostic naming it. Where the refusal is DELEGATED to a legacy
+        // setter, C-05 answers the bare code with no text of its own [QuerySettingOutcome.From], so the
+        // acquisition failure below reads "(outcome -3)" with nothing after it. That is C-05's deliberate
+        // choice and not a gap to paper over here: the code is the machine-readable answer, and inventing
+        // an explanation this service does not have would be worse than a terse one. A caller needing to
+        // know WHICH setting was refused sends them one at a time through the published setters.
         await using PersistenceWorkScope scope = await _persistence
             .OpenQueryScopeAsync(BuildQuerySpec(request), BuildSessionRequest(), cancellationToken)
             .ConfigureAwait(false);
@@ -2577,16 +2929,34 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// case to fold, so it satisfies that rule without a transformation that could itself vary by culture.
     /// </para>
     /// <para>
-    /// A ZERO CHUNK SIZE MEANS "THE SERVER CHOOSES" and is therefore NOT FORWARDED. Forwarding a zero
-    /// would state a size of zero to Persistence, which is a different assertion from stating none, and
-    /// Persistence's own guard would then reject a request the caller never made.
+    /// A ZERO CHUNK SIZE MEANS "THE SERVER CHOOSES" and is therefore NOT FORWARDED. A proto3 scalar cannot
+    /// distinguish an absent field from a zero one, so zero is the only value that CANNOT have been stated
+    /// deliberately; forwarding it would assert a size of zero to Persistence, which is a different claim
+    /// from stating none, and Persistence's guard would then reject a request the caller never made.
+    /// </para>
+    /// <para>
+    /// 🔴 EVERY OTHER VALUE IS FORWARDED, INCLUDING A NEGATIVE ONE, AND THAT IS THE CORRECTION. The test
+    /// was <c>&gt; 0</c>, so a caller sending <c>-5</c> had it SILENTLY DISCARDED and received a successful
+    /// retrieval chunked at the server's own size - while a caller sending <c>500</c> had it forwarded and
+    /// was refused <c>E_INVALID_ARGUMENT</c> by the legacy guard. Two nonsensical sizes, two different
+    /// outcomes, and the more obviously wrong of the two was the one that was accepted.
+    /// </para>
+    /// <para>
+    /// THE FIX FORWARDS RATHER THAN VALIDATES HERE, WHICH IS THE POINT. The paragraph above records that
+    /// C-05's chunk-size guard is deliberately not reproduced at this boundary (C-B) - "the size is
+    /// forwarded and Persistence adjudicates it" - so adding a range check here would invent the very
+    /// validation that paragraph declines to invent. Forwarding a stated negative instead lets the SAME
+    /// guard adjudicate it, so <c>-5</c> and <c>500</c> are now refused identically, by the layer that owns
+    /// the rule, with the legacy's own return code.
     /// </para>
     /// </remarks>
     private static PersistenceQuerySpec BuildQuerySpec(RetrieveRequest request)
     {
         PersistenceQuerySpec spec = new() { DataObject = request.DatawindowHandle };
 
-        if (request.ChunkSize > 0)
+        // NOT `> 0`: zero is the only unstateable value, so anything else the caller wrote is forwarded and
+        // adjudicated by Persistence's guard rather than discarded here. See the remarks above.
+        if (request.ChunkSize != 0)
         {
             spec.ChunkSize = request.ChunkSize;
         }
@@ -3285,17 +3655,58 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <param name="returnCode">The upstream outcome.</param>
     /// <returns>The status code.</returns>
     /// <remarks>
+    /// <para>
     /// DERIVED RATHER THAN FIXED, so a retryable refusal is distinguishable from a permanent one: an
     /// exhausted pool or a busy task is <c>ResourceExhausted</c>, a rejected descriptor or argument is
-    /// <c>FailedPrecondition</c>, and anything else is <c>Internal</c>. The numeric outcome always travels
+    /// <c>FailedPrecondition</c>, a name the upstream could not find is <c>NotFound</c>, a refusal by policy
+    /// is <c>PermissionDenied</c>, and anything else is <c>Internal</c>. The numeric outcome always travels
     /// in the message, so the specific legacy code survives even where several codes share one status.
+    /// </para>
+    /// <para>
+    /// <b>THE DEFAULT ARM IS FOR CODES THIS MAP HAS NOT BEEN TAUGHT, NEVER FOR CALLER ERRORS.</b> Six codes
+    /// used to reach it that are entirely the caller's - an unresolvable DataObject name among them - and a
+    /// caller who named a DataWindow that does not exist was told this service had failed. Every code with
+    /// a natural declared status now has an arm; what remains on the default is the genuinely
+    /// unclassifiable, plus <c>E_DB_ERROR</c> and the oracle's unspecific <c>FAILED</c>, which are
+    /// server-side conditions by definition.
+    /// </para>
     /// </remarks>
     private static StatusCode MapOutcomeToStatus(long returnCode) => returnCode switch
     {
         RetCode.E_BUSY or RetCode.E_RETRY or RetCode.E_OUT_OF_MEMORY => StatusCode.ResourceExhausted,
-        RetCode.E_INVALID_TRANSACTION or RetCode.E_INVALID_ARGUMENT or RetCode.E_INVALID_SQL =>
-            StatusCode.FailedPrecondition,
-        RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND => StatusCode.NotFound,
+
+        // 🔴 THREE ADDITIONS TO THE CALLER-ERROR GROUP, EACH OF WHICH FELL TO Internal AND THEREFORE
+        // REACHED A CALLER AS HTTP 500 FOR A MISTAKE OF THEIR OWN. An unresolvable DataObject name is the
+        // one the finding was raised on; a carrier that cannot be applied and an out-of-bound or
+        // out-of-range index are the same class. They join the existing three here rather than being
+        // spelled InvalidArgument so that this map keeps ONE spelling for its whole caller-error group -
+        // both statuses project to 400, and the sibling BuildUpstreamFailure records why the two maps
+        // differ in spelling while agreeing in outcome.
+        RetCode.E_INVALID_TRANSACTION
+            or RetCode.E_INVALID_ARGUMENT
+            or RetCode.E_INVALID_SQL
+            or RetCode.E_INVALID_DATAOBJECT
+            or RetCode.E_INVALID_DATA
+            or RetCode.E_OUT_OF_BOUND
+            or RetCode.E_OUT_OF_RANGE => StatusCode.FailedPrecondition,
+
+        // 🔴 THREE MORE ADDITIONS, on the same reasoning: a name the upstream could not find, and the
+        // expression engine's own two not-found codes, are 404 and not 500.
+        RetCode.E_INVALID_HANDLE
+            or RetCode.E_OBJECT_NOT_FOUND
+            or RetCode.E_NOT_EXISTS
+            or RetCode.E_VAR_NOT_FOUND
+            or RetCode.E_MEMBER_NOT_FOUND => StatusCode.NotFound,
+
+        // A refusal by policy, which a resilience policy must not retry.
+        RetCode.E_ACCESS_DENIED => StatusCode.PermissionDenied,
+
+        RetCode.E_NO_SUPPORT or RetCode.E_NO_IMPLEMENTATION => StatusCode.Unimplemented,
+
+        RetCode.E_TIME_OUT => StatusCode.DeadlineExceeded,
+
+        // Unchanged in meaning: a code this map has not been taught is a fault on THIS side of the
+        // boundary, and E_DB_ERROR and the oracle's unspecific FAILED belong here on purpose.
         _ => StatusCode.Internal,
     };
 
@@ -3469,6 +3880,42 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 {
                     RetCode = DataWindowWireProjection.ToWireRetCode(resolved.ReturnCode),
                 };
+            }
+        }
+
+        // ==========================================================================================
+        //  THE VALIDATOR THIRD OF THE TRIPLE RUNS HERE - BEFORE ANY UPSTREAM STATE EXISTS.
+        //
+        //  DELIBERATELY AHEAD OF THE WORK SCOPE, not merely ahead of the update. A refusal at this line
+        //  has opened no session, created no task and taken no pooled-transaction reference, so there is
+        //  nothing to unwind and no window in which a refused request holds an upstream resource. Moving
+        //  it after the scope would make every rejected payload cost a session round trip for an answer
+        //  that never needed one.
+        //
+        //  🔴 WHAT ITS ABSENCE COST, MEASURED RATHER THAN SUPPOSED. The five dwnvl* validators are ported
+        //  precisely so a value the declared column type cannot represent is refused rather than stored,
+        //  and nothing on this path called them: `age = "not-a-number"` was stored as TEXT in an
+        //  `AGE INT NOT NULL` column and read back through this very service as `0`; `salary = "abc"`
+        //  likewise in a REAL column; `birth = "31/02/1984"`, a date that does not exist, was stored as
+        //  text; and a column name no definition carries was accepted with its value applied to whichever
+        //  ordinal travelled beside it. All four answered HTTP 200. A write that reads back as a
+        //  different value is the worst class of data defect, because the response says nothing is wrong.
+        //
+        //  AN UNRESOLVABLE HANDLE IS NOT VALIDATED AND IS NOT REFUSED HERE. There is no definition to
+        //  validate against, and the update contract's own refusal for an unknown DataWindow belongs to
+        //  the layer that owns it [n_cst_thread_task_sqlupdate.sru, ported at Tasks/SqlUpdateTask.cs step
+        //  3]. Refusing at this line instead would move an established refusal into the projecting layer
+        //  and change which code a caller receives for an unknown handle on this operation alone - the
+        //  same reasoning ResolveProcessingKind records for the same handle.
+        // ==========================================================================================
+        if (_models.GetOrCreate(request.DatawindowHandle) is { } validationTarget)
+        {
+            ImmutableArray<UpdateRowValidationFailure> rejected =
+                new UpdateRowValidator(_localization).Validate(validationTarget.Host, request.Rows);
+
+            if (!rejected.IsEmpty)
+            {
+                return BuildValidationRefusal(request.DatawindowHandle, rejected);
             }
         }
 
@@ -3750,6 +4197,92 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         DwBuffer.Filter,
     ];
 
+    /// <summary>
+    /// Builds the refusal a payload that failed validation answers with.
+    /// </summary>
+    /// <param name="dataWindowHandle">The DataWindow the request named, for the operator record.</param>
+    /// <param name="rejected">Every rejected column, in request order.</param>
+    /// <returns>The response, carrying zero counts and every failure.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE OUTCOME CODE IS THE STRUCTURAL FAULT'S WHEN THERE IS ONE.</b> A request that named a column
+    /// this DataWindow does not carry is malformed - <c>E_INVALID_ARGUMENT</c> - and that is true however
+    /// many of its VALUES would also have been rejected, because a caller must fix the addressing before
+    /// the values mean anything. With no addressing fault the code is <c>E_INVALID_DATA</c>, which is the
+    /// code the ported reporting coercions answer themselves. Both project to HTTP 400 at the ingress, so
+    /// the choice changes the diagnosis a caller reads rather than the status.
+    /// </para>
+    /// <para>
+    /// EVERY COUNT IS ZERO AND NO <c>error</c> IS ATTACHED, because nothing was attempted: no session was
+    /// opened, no statement was generated and no database was reached. A <c>DbError</c> here would claim a
+    /// database failure that never happened.
+    /// </para>
+    /// <para>
+    /// THE OPERATOR RECORD NAMES THE COLUMNS AND THE KINDS AND NOT THE VALUES. A rejected value is caller
+    /// content and on this path it is by definition malformed; recording it would accumulate arbitrary
+    /// caller text in this service's own log, which is the same rule the update path applies to a
+    /// statement's interpolated literals. The caller receives the full detail on the response, where they
+    /// can read it deliberately.
+    /// </para>
+    /// </remarks>
+    private global::PowerFramework.Contracts.DataServices.V1.UpdateResponse BuildValidationRefusal(
+        string dataWindowHandle,
+        ImmutableArray<UpdateRowValidationFailure> rejected)
+    {
+        bool addressing = rejected.Any(static failure =>
+            failure.Kind is UpdateRowValidationKind.NoSuchColumn
+                or UpdateRowValidationKind.OrdinalDisagreesWithName);
+
+        long outcome = addressing ? RetCode.E_INVALID_ARGUMENT : RetCode.E_INVALID_DATA;
+
+        global::PowerFramework.Contracts.DataServices.V1.UpdateResponse response = new()
+        {
+            RetCode = DataWindowWireProjection.ToWireRetCode(outcome),
+        };
+
+        foreach (UpdateRowValidationFailure failure in rejected)
+        {
+            RowValidationError projected = new()
+            {
+                Buffer = failure.Buffer,
+                Row = failure.Row,
+                ColumnName = failure.ColumnName,
+                ColumnId = failure.ColumnId,
+                ColumnType = failure.ColumnType,
+            };
+
+            // Non-null by construction: every failure this validator produces carries an error, and the
+            // shared projection is the one place a structured error becomes its wire form.
+            if (DataWindowWireProjection.ToWireError(failure.Error) is { } error)
+            {
+                projected.Error = error;
+            }
+
+            response.ValidationErrors.Add(projected);
+        }
+
+        _logger?.LogInformation(
+            "An update on DataWindow handle {DataWindowHandle} was refused by validation with outcome "
+                + "{ReturnCode}: {FailureCount} rejected column(s) - {Rejected}. Nothing was applied and "
+                + "no upstream session was opened. The rejected VALUES are deliberately not recorded: on "
+                + "this path they are by definition malformed caller content, and the caller receives the "
+                + "full detail on the response.",
+            dataWindowHandle,
+            outcome,
+            rejected.Length,
+            string.Join(
+                ", ",
+                rejected.Select(static failure => string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0}[#{1}] row {2} {3}",
+                    failure.ColumnName.Length == 0 ? "(positional)" : failure.ColumnName,
+                    failure.ColumnId,
+                    failure.Row,
+                    failure.Kind))));
+
+        return response;
+    }
+
     private static bool TryBuildCarrierState(
         IReadOnlyList<DataWindowRow> rows,
         long processing,
@@ -3992,86 +4525,382 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         string? boundSessionId = null;
         DataWindowEventConversation? conversation = null;
         DataWindowEventChain? chain = null;
+        SequentialNotificationDispatcher? dispatcher = null;
+
+        // Cancelled when the dispatcher stops on a fault, so the read loop below stops waiting for a
+        // message that will never be acted on. Linked to the call's own token, so a client disconnect
+        // still cancels the read exactly as it did before.
+        using CancellationTokenSource reading =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         try
         {
-            await foreach (EventChainRequest request in requestStream
-                .ReadAllAsync(cancellationToken)
-                .ConfigureAwait(false))
+            try
             {
-                if (string.IsNullOrWhiteSpace(request.SessionId))
+                await foreach (EventChainRequest request in requestStream
+                    .ReadAllAsync(reading.Token)
+                    .ConfigureAwait(false))
                 {
-                    throw new RpcException(new Status(
-                        StatusCode.InvalidArgument,
-                        "Every message on the event chain must carry a session identifier; one arrived "
-                            + "without. An item-change event without a session is a defined error and never "
-                            + "an implicit creation, because a conjured session would hold defaults where "
-                            + "the validation-error handler expects a stashed item-change result."));
-                }
-
-                if (boundSessionId is null)
-                {
-                    (boundSessionId, conversation, chain) =
-                        BindConversation(request.SessionId, responseStream);
-                }
-                else if (!string.Equals(boundSessionId, request.SessionId, StringComparison.Ordinal))
-                {
-                    throw new RpcException(new Status(
-                        StatusCode.InvalidArgument,
-                        "Every message on one event chain must name the same validation session. The "
-                            + "ordering disciplines are defined over a single ordered conversation and the "
-                            + "four cross-event fields belong to one session, so switching session mid "
-                            + "stream would interleave two chains onto one counter."));
-                }
-
-                // Bound on the first message and never unset, so both are non-null from here on.
-                switch (request.PayloadCase)
-                {
-                    case EventChainRequest.PayloadOneofCase.Notify:
-                        await DispatchNotificationAsync(
-                                request,
-                                conversation!,
-                                chain!,
-                                strictOrdering,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-
-                        break;
-
-                    case EventChainRequest.PayloadOneofCase.Result:
-                        if (!conversation!.Deliver(request.Result))
-                        {
-                            // SURVIVABLE: nothing is waiting, so nothing was corrupted. Reported on the
-                            // stream rather than discarded, because silently dropping it would hide a client
-                            // whose model of the conversation has diverged from the server's.
-                            await conversation
-                                .WriteErrorAsync(
-                                    UnmatchedAnswerError(request.Result.CorrelationId),
-                                    cancellationToken)
-                                .ConfigureAwait(false);
-                        }
-
-                        break;
-
-                    case EventChainRequest.PayloadOneofCase.None:
-                    default:
+                    if (string.IsNullOrWhiteSpace(request.SessionId))
+                    {
                         throw new RpcException(new Status(
                             StatusCode.InvalidArgument,
-                            "A message on the event chain carried neither a notification nor a result. The "
-                                + "payload alternative is how the direction of the conversation is stated, "
-                                + "so a message without one has no meaning to act on."));
+                            "Every message on the event chain must carry a session identifier; one arrived "
+                                + "without. An item-change event without a session is a defined error and "
+                                + "never an implicit creation, because a conjured session would hold "
+                                + "defaults where the validation-error handler expects a stashed "
+                                + "item-change result."));
+                    }
+
+                    if (boundSessionId is null)
+                    {
+                        (boundSessionId, conversation, chain) =
+                            BindConversation(request.SessionId, responseStream);
+
+                        // THE DISPATCHER IS CREATED WITH THE CONVERSATION, NOT WITH THE CALL, because it
+                        // needs both halves it drives. See its own remarks for why the dispatch cannot
+                        // happen on this loop.
+                        dispatcher = new SequentialNotificationDispatcher(
+                            conversation,
+                            chain,
+                            strictOrdering,
+                            reading,
+                            _logger,
+                            cancellationToken);
+                    }
+                    else if (!string.Equals(boundSessionId, request.SessionId, StringComparison.Ordinal))
+                    {
+                        throw new RpcException(new Status(
+                            StatusCode.InvalidArgument,
+                            "Every message on one event chain must name the same validation session. The "
+                                + "ordering disciplines are defined over a single ordered conversation and "
+                                + "the four cross-event fields belong to one session, so switching session "
+                                + "mid stream would interleave two chains onto one counter."));
+                    }
+
+                    // Bound on the first message and never unset, so all three are non-null from here on.
+                    switch (request.PayloadCase)
+                    {
+                        case EventChainRequest.PayloadOneofCase.Notify:
+                            // 🔴 HANDED OVER, NEVER AWAITED HERE - THE WHOLE CORRECTION. Awaiting the
+                            // dispatch on this loop DEADLOCKED the stream: nine of the 22 events are
+                            // questions the chain asks BACK and blocks on, and the only thing that can
+                            // answer one is a `Result` message read by THIS loop - so a loop waiting on
+                            // the dispatch was waiting on itself. The queue is FIFO with ONE consumer, so
+                            // arrival order is preserved exactly and nothing is buffered past its turn or
+                            // re-sorted: the ordering check itself still runs on the consumer, in arrival
+                            // order, so the token arithmetic is unchanged.
+                            dispatcher!.Enqueue(request);
+
+                            break;
+
+                        case EventChainRequest.PayloadOneofCase.Result:
+                            // ANSWERED FROM THE READ LOOP WHILE A DISPATCH IS IN FLIGHT, which is exactly
+                            // what the handover above makes possible. Deliver only completes a task; it
+                            // performs no I/O and takes no lock the dispatch holds.
+                            if (!conversation!.Deliver(request.Result))
+                            {
+                                // SURVIVABLE: nothing is waiting, so nothing was corrupted. Reported on
+                                // the stream rather than discarded, because silently dropping it would
+                                // hide a client whose model of the conversation has diverged from the
+                                // server's.
+                                await conversation
+                                    .WriteErrorAsync(
+                                        UnmatchedAnswerError(request.Result.CorrelationId),
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+                            }
+
+                            break;
+
+                        case EventChainRequest.PayloadOneofCase.None:
+                        default:
+                            throw new RpcException(new Status(
+                                StatusCode.InvalidArgument,
+                                "A message on the event chain carried neither a notification nor a result. "
+                                    + "The payload alternative is how the direction of the conversation is "
+                                    + "stated, so a message without one has no meaning to act on."));
+                    }
                 }
+            }
+            catch (OperationCanceledException) when (dispatcher is { HasFault: true })
+            {
+                // The read was stopped BY the dispatcher's own fault rather than by the caller, so the
+                // cancellation is a consequence and not the cause. The dispatcher's exception is the real
+                // one and DrainAsync below rethrows it with its own stack intact. A genuine caller
+                // cancellation still propagates, because the filter requires a captured fault.
+            }
+            finally
+            {
+                // Nothing further will arrive on the request stream, so the consumer may finish and stop -
+                // and NO ANSWER CAN ARRIVE EITHER, because an answer travels on the stream that has just
+                // ended. Sealing before the drain below is what keeps a question outstanding at half-close
+                // from waiting out the whole AnswerTimeout backstop for an answer already impossible.
+                dispatcher?.CompleteAdding();
+                conversation?.SealAnswers();
+            }
+
+            if (dispatcher is not null)
+            {
+                // EVERY QUEUED NOTIFICATION IS STILL OWED ITS DISPATCH AND ITS RESULT, so the drain is
+                // awaited here rather than left to the teardown. Rethrows a dispatch fault, which is how
+                // an ordering violation, an unanswered question or an abandoned exchange becomes this
+                // call's status.
+                await dispatcher.DrainAsync().ConfigureAwait(false);
             }
         }
         finally
         {
+            if (dispatcher is not null)
+            {
+                // ABNORMAL EXIT ONLY REACHES A LIVE CONSUMER, and then it may be blocked on an answer the
+                // stream that has just ended can no longer deliver - or about to raise a question that
+                // could not be answered either. Sealing BEFORE the wait is what makes the wait finite;
+                // doing it after would be the hang. Idempotent, so the ordinary path having already
+                // sealed costs nothing.
+                dispatcher.CompleteAdding();
+                conversation?.SealAnswers();
+
+                await dispatcher.DisposeAsync().ConfigureAwait(false);
+            }
+
             // Ordered: the conversation first, so an outstanding question is cancelled and its waiter fails
             // rather than hanging, and only then the chain, whose teardown destroys the broker and the five
             // attached services [se_cst_dw.sru:L565-L567]. The reverse order would tear down the services a
-            // still-running dispatch was using.
+            // still-running dispatch was using - which is also why the dispatcher is waited for above.
             conversation?.Dispose();
             chain?.Teardown();
         }
+    }
+
+    /// <summary>
+    /// One stream's notification dispatcher: a FIFO queue with exactly ONE consumer, so notifications are
+    /// dispatched strictly in arrival order while the read loop stays free to deliver answers.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHY THIS TYPE EXISTS: AWAITING THE DISPATCH ON THE READ LOOP DEADLOCKED EVERY SEMANTIC
+    /// EVENT.</b> Nine of the 22 events are questions the chain asks BACK
+    /// [<c>se_cst_dw.sru:L11-L14</c>, <c>:L24-L26</c>, <c>:L28</c>, <c>:L32</c>], and under the synchronous
+    /// discipline the handler that raised one BLOCKS on the answer - which is the oracle's own shape,
+    /// because in process the handler simply returned a value. The only thing that can produce that answer
+    /// is a <c>Result</c> message, and the only thing that reads one is the request-stream loop. A loop
+    /// that awaited the dispatch was therefore waiting for a message it had made itself unable to read:
+    /// permanently, with no deadline, holding the session, the chain, the five attached services and the
+    /// stream. Handing the notification to a separate consumer is what breaks that cycle, and it is the
+    /// minimum that does.
+    /// </para>
+    /// <para>
+    /// <b>ORDER IS PRESERVED EXACTLY, AND THAT IS NOT A HAPPY ACCIDENT - IT IS THE CONSTRAINT.</b> AAP
+    /// 0.6.1.4 assigns the item-change and validation chain the strictly synchronous pattern, under which
+    /// NOTHING EVER BUFFERS OR RE-SORTS. An unbounded channel with <c>SingleReader</c> and
+    /// <c>SingleWriter</c> is a FIFO: the consumer takes messages in the order the reader wrote them and
+    /// dispatches ONE AT A TIME, awaiting each completely before taking the next. So the sequence of
+    /// dispatches is byte-for-byte the sequence of arrivals, exactly as when the loop dispatched them
+    /// itself. Nothing is held back waiting for a lower ordinal, nothing overtakes, and there is no
+    /// parallelism of any kind.
+    /// </para>
+    /// <para>
+    /// AND THE TOKEN ARITHMETIC IS UNCHANGED, WHICH IS THE SUBTLE PART. The ordering check
+    /// [<see cref="DataWindowEventConversation.AcceptInbound"/>] runs INSIDE the dispatch, on the consumer
+    /// - so the interleaving of <c>Accept</c> against the <c>Issue</c> calls the outbound writes make is
+    /// identical to before: message N's check, dispatch and result write all complete before message N+1's
+    /// check begins. Checking on the read loop instead would have advanced the mark while N was still
+    /// consuming ordinals, and the expected token would have moved under the client.
+    /// </para>
+    /// <para>
+    /// WHAT THE CONSUMER COSTS, STATED PLAINLY RATHER THAN GLOSSED. A dispatch that raises a semantic
+    /// question performs a BLOCKING wait [<c>Domain/DataWindowComposition.cs</c> <c>Ask</c>], synchronous
+    /// by contract because the oracle's handlers return values rather than tasks, so one pooled worker is
+    /// occupied for the duration of that round trip. That cost is NOT introduced here - the read loop paid
+    /// exactly the same one before, on its own continuation - and it is bounded by the session ceiling
+    /// [<c>DataServices:Sessions:ValidationSession:MaxConcurrentSessions</c>], because a stream is one
+    /// session and one session dispatches one event at a time. It is also now BOUNDED IN TIME, by
+    /// <c>DataServices:EventChain:AnswerTimeout</c>, which the deadlocking version had no equivalent of at
+    /// all. <see cref="TaskCreationOptions.LongRunning"/> is deliberately NOT used: it would take a thread
+    /// outside the pool only for the synchronous prologue of an async method, releasing it at the first
+    /// await and leaving every continuation - including the blocking one - back on the pool, so it would
+    /// buy a claim in a comment and nothing in the running system.
+    /// </para>
+    /// <para>
+    /// FAULTS ARE CAPTURED, NEVER SWALLOWED. The consumer catches everything into an
+    /// <see cref="ExceptionDispatchInfo"/> so that awaiting it never throws at an inconvenient point, and
+    /// <see cref="DrainAsync"/> rethrows it with its original stack. That is what keeps an ordering
+    /// violation's <c>FailedPrecondition</c> and an unanswered question's <c>DeadlineExceeded</c> as THIS
+    /// CALL'S status rather than an unobserved task exception. There is no empty catch anywhere in it.
+    /// </para>
+    /// </remarks>
+    private sealed class SequentialNotificationDispatcher : IAsyncDisposable
+    {
+        private readonly Channel<EventChainRequest> _queue = Channel.CreateUnbounded<EventChainRequest>(
+            new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = true,
+
+                // The read loop must never run a dispatch continuation on its own thread; that would put
+                // the blocking wait straight back where the deadlock was.
+                AllowSynchronousContinuations = false,
+            });
+
+        private readonly DataWindowEventConversation _conversation;
+        private readonly DataWindowEventChain _chain;
+        private readonly bool _strictOrdering;
+        private readonly CancellationTokenSource _reading;
+        private readonly ILogger? _logger;
+        private readonly CancellationToken _cancellationToken;
+        private readonly Task _consumer;
+
+        private ExceptionDispatchInfo? _fault;
+
+        /// <summary>Creates the dispatcher and starts its single consumer.</summary>
+        /// <param name="conversation">The stream's conversation.</param>
+        /// <param name="chain">The stream's chain.</param>
+        /// <param name="strictOrdering">Whether an ordering violation fails the call.</param>
+        /// <param name="reading">
+        /// The read loop's cancellation source, cancelled when this dispatcher stops on a FAULT so the
+        /// loop stops waiting for a message nothing will act on. Not cancelled on a clean finish, because
+        /// by then the loop has already ended.
+        /// </param>
+        /// <param name="logger">Diagnostics. Never receives buffer values or edit text.</param>
+        /// <param name="cancellationToken">The call's own token.</param>
+        internal SequentialNotificationDispatcher(
+            DataWindowEventConversation conversation,
+            DataWindowEventChain chain,
+            bool strictOrdering,
+            CancellationTokenSource reading,
+            ILogger? logger,
+            CancellationToken cancellationToken)
+        {
+            _conversation = conversation;
+            _chain = chain;
+            _strictOrdering = strictOrdering;
+            _reading = reading;
+            _logger = logger;
+            _cancellationToken = cancellationToken;
+
+            // STARTED OFF THE READ LOOP'S OWN EXECUTION PATH. Calling ConsumeAsync inline would run its
+            // synchronous prologue - and therefore the first dispatch, and therefore the blocking wait -
+            // on the caller's thread, which is the read loop: the deadlock, reintroduced by construction.
+            _consumer = Task.Run(ConsumeAsync);
+        }
+
+        /// <summary>Whether the consumer stopped because a dispatch threw.</summary>
+        internal bool HasFault => _fault is not null;
+
+        /// <summary>Queues one notification for dispatch, in arrival order.</summary>
+        /// <param name="request">The inbound message.</param>
+        /// <remarks>
+        /// UNBOUNDED, SO THE WRITE ALWAYS SUCCEEDS AND THE READ LOOP NEVER BLOCKS. A bounded queue would
+        /// reintroduce the deadlock in a slower form: a full queue would stall the reader, and the reader
+        /// is what delivers the answer the consumer is waiting for. The queue's depth is bounded in
+        /// practice by the client, which under the synchronous discipline cannot pipeline - it must read a
+        /// response to learn its next token.
+        /// </remarks>
+        internal void Enqueue(EventChainRequest request) => _ = _queue.Writer.TryWrite(request);
+
+        /// <summary>States that no further notification will arrive.</summary>
+        internal void CompleteAdding() => _ = _queue.Writer.TryComplete();
+
+        /// <summary>
+        /// Waits for every queued dispatch to finish and rethrows the first fault, if any.
+        /// </summary>
+        /// <returns>A task that completes when the consumer has stopped.</returns>
+        internal async Task DrainAsync()
+        {
+            await _consumer.ConfigureAwait(false);
+
+            _fault?.Throw();
+        }
+
+        /// <summary>Waits for the consumer to stop. Never throws the captured fault.</summary>
+        /// <returns>A task that completes when the consumer has stopped.</returns>
+        /// <remarks>
+        /// THE FAULT IS DELIBERATELY NOT RETHROWN HERE. This runs from a <c>finally</c>, where throwing
+        /// would replace whatever exception is already in flight - typically the very fault a reader wants
+        /// to see. <see cref="DrainAsync"/> is the member that surfaces it, and it is called on the path
+        /// where there is nothing to displace.
+        /// </remarks>
+        public async ValueTask DisposeAsync()
+        {
+            CompleteAdding();
+
+            await _consumer.ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Takes queued notifications one at a time and dispatches each to completion.
+        /// </summary>
+        /// <returns>A task that completes when the queue is finished or a dispatch has thrown.</returns>
+        private async Task ConsumeAsync()
+        {
+            try
+            {
+                // ONE AT A TIME, IN ARRIVAL ORDER. The await is what serializes them: the next message is
+                // not taken until this one's dispatch, its outcome report and its result write are done.
+                await foreach (EventChainRequest request in _queue.Reader
+                    .ReadAllAsync(CancellationToken.None)
+                    .ConfigureAwait(false))
+                {
+                    await DispatchNotificationAsync(
+                            request,
+                            _conversation,
+                            _chain,
+                            _strictOrdering,
+                            _cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception failure)
+            {
+                _fault = ExceptionDispatchInfo.Capture(Translate(failure));
+
+                _logger?.LogWarning(
+                    failure,
+                    "A DataWindow event dispatch failed, so the event chain stops rather than continuing "
+                        + "with a chain whose cross-event state is no longer trustworthy. The failure is "
+                        + "surfaced as this call's status.");
+
+                // A FAULT AND ONLY A FAULT STOPS THE READER. Nothing further will be dispatched, so a
+                // reader still waiting for a message would wait for one that can never be acted on.
+                await _reading.CancelAsync().ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Turns a dispatch failure into the status the client should see.
+        /// </summary>
+        /// <param name="failure">What the dispatch threw.</param>
+        /// <returns>The exception to rethrow from <see cref="DrainAsync"/>.</returns>
+        /// <remarks>
+        /// <para>
+        /// THE TWO WAYS AN ANSWER FAILS TO ARRIVE BECOME TWO DIFFERENT STATUSES, which is what this method
+        /// exists for. The blocking wait rethrows whatever the pending question was failed with, so a
+        /// client that stays connected and silent arrives here as
+        /// <see cref="DataWindowEventAnswerTimeoutException"/> and becomes <c>DeadlineExceeded</c>, while a
+        /// client that half-closed its request stream with a question outstanding arrives as
+        /// <see cref="DataWindowEventStreamClosedException"/> and becomes <c>Cancelled</c> - its own action
+        /// ended the exchange. Both are CLIENT faults with defined remedies, and therefore statuses rather
+        /// than an <c>Internal</c>.
+        /// </para>
+        /// <para>
+        /// EVERYTHING ELSE IS PASSED THROUGH UNCHANGED. An <see cref="RpcException"/> already carries the
+        /// status its raiser chose - <c>FailedPrecondition</c> for an ordering violation, <c>InvalidArgument</c>
+        /// for a payload with no body - and re-wrapping it would discard that. Any other exception is left
+        /// as itself so the gRPC stack reports it as <c>Unknown</c> with its own detail, exactly as it did
+        /// before this dispatcher existed.
+        /// </para>
+        /// </remarks>
+        private static Exception Translate(Exception failure) => failure switch
+        {
+            DataWindowEventAnswerTimeoutException unanswered => new RpcException(
+                new Status(StatusCode.DeadlineExceeded, unanswered.Message),
+                unanswered.Message),
+            DataWindowEventStreamClosedException abandoned => new RpcException(
+                new Status(StatusCode.Cancelled, abandoned.Message),
+                abandoned.Message),
+            _ => failure,
+        };
     }
 
     /// <summary>
@@ -4115,7 +4944,17 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
         ValidationSession session = resolved.Session;
 
-        DataWindowEventConversation conversation = new(session.SessionId, responseStream, _logger);
+        // THE BACKSTOP IS CONFIGURED, NOT COMPILED IN, and it is what stops a client that reads a semantic
+        // question and stays silent from holding this stream, its session and its five attached services
+        // open indefinitely. See EventChainOptions.AnswerTimeout for why it is a backstop rather than a
+        // budget, and DataWindowEventAnswerTimeoutException for why an elapsed one ends the call instead of
+        // inventing an answer.
+        DataWindowEventConversation conversation = new(
+            session.SessionId,
+            responseStream,
+            _logger,
+            _eventChain.AnswerTimeout,
+            _timeProvider);
 
         DataWindowEventChain? chain = _chainFactory.Create(
             session,
@@ -4987,7 +5826,20 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             clauses.Add(model.GetClause(column.ColumnName ?? string.Empty, sortType));
         }
 
-        string expression = string.Join(string.Empty, clauses);
+        // 🔴 JOINED WITH THE MODEL'S OWN SEPARATOR. This was string.Empty, so a multi-column sort was
+        // published as one run-together expression - "age Dsalary A" instead of "age D,salary A" - which
+        // is not a sort expression any DataWindow can parse. The model composes its own multi-column
+        // expression correctly [ColumnSortModel.Sort, oracle :L195-L198]; only this projection was wrong,
+        // which is why the model's parity matrix never caught it.
+        //
+        // EQUIVALENT TO THE ORACLE'S SKIP-EMPTY JOIN, and that equivalence is worth stating because the
+        // oracle emits no separator for an empty clause [:L195-L198]. GetClause answers the empty string
+        // for exactly one input - SORT_NONE [:L292] - and the loop above has already skipped those with
+        // `continue`. For every sortType that reaches here GetClause answers something non-empty, because
+        // stage four falls back to the bare column name [:L329]. So no empty clause can be in this list
+        // and a plain join cannot produce the stray or doubled separator the oracle's guard exists to
+        // avoid.
+        string expression = string.Join(ColumnSortModel.ClauseSeparator, clauses);
 
         long outcome = request.ExpressionOnly
             ? RetCode.OK

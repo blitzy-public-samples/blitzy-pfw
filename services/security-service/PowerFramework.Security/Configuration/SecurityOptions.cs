@@ -740,8 +740,12 @@ public sealed class SecurityOptions
     /// </summary>
     /// <value>
     /// A path to a PEM file holding one or more certificate authorities, or an empty string when this
-    /// deployment configures no client trust anchor - in which case NO certificate establishes an
-    /// identity and the token operation answers <c>401</c> to every caller.
+    /// deployment configures no client trust anchor of its own - in which case the composition root
+    /// adopts the listener's anchor from <see cref="SecurityMutualTlsOptions.ClientCaPath"/> if that one
+    /// is configured, and only when NEITHER is configured does no certificate establish an identity. In
+    /// that last state the CERTIFICATE credential is unavailable and the token operation answers
+    /// <c>401</c> to a caller presenting one; the HTTP <c>Basic</c> credential from the issuance roster
+    /// is a separate scheme on the same operation and keeps minting normally.
     /// </value>
     /// <remarks>
     /// <para>
@@ -751,6 +755,24 @@ public sealed class SecurityOptions
     /// for trust material in exactly one kind of place. No settings file in this repository names a path,
     /// because a path is deployment-specific; this one is supplied through
     /// <c>SECURITY_MTLS_CLIENT_CA_PATH</c> from the orchestration layer.
+    /// </para>
+    /// <para>
+    /// 🔴 ONE PUBLISHED VARIABLE, TWO ANCHORS, AND THIS KEY IS THE ONE THAT IS NOT PUBLISHED. There are
+    /// two client-certificate anchors in this service and they serve different layers: this key is the
+    /// ISSUANCE anchor, read by <c>Tokens/ClientCertificateTrust</c> so that a completed handshake's
+    /// certificate may establish an identity, while <see cref="SecurityMutualTlsOptions.ClientCaPath"/>
+    /// is the LISTENER's, read by the composition root so Kestrel will complete such a handshake at all.
+    /// The orchestration layer publishes one variable for this authority -
+    /// <c>SECURITY_MTLS_CLIENT_CA_PATH</c> - and maps it to the listener key alone. The sentence above
+    /// therefore used to describe an intent rather than a mechanism, and the gap it left was measurable:
+    /// a deployment following the documented bootstrap completed the handshake and was then refused
+    /// <c>401</c> on every certificate, because the anchor this type reads was named nowhere an operator
+    /// would look. The composition root closes it by ADOPTING the listener's anchor when this key is
+    /// unset - the <c>PostConfigure</c> on <c>AddOptions&lt;SecurityOptions&gt;</c> in this service's
+    /// <c>Program.cs</c>. The two remain distinct settings on purpose, because a deployment may let its
+    /// listener complete handshakes for a broader authority than issuance will honour identities from, so
+    /// an explicitly configured value here is always authoritative and is never merged with the
+    /// listener's.
     /// </para>
     /// <para>
     /// WHY THE ANCHOR IS NAMED HERE RATHER THAN LEFT TO THE CONTAINER'S OS TRUST STORE, which is what an
@@ -765,8 +787,10 @@ public sealed class SecurityOptions
     /// </para>
     /// <para>
     /// UNSET IS A LEGITIMATE STATE AND FAILS CLOSED, WHICH IS THE OPPOSITE OF FAILING OPEN. A deployment
-    /// that configures no anchor cannot issue tokens - every certificate is untrusted, and the operation
-    /// answers the same <c>401</c> it answers for a caller that presented none - while <c>/health</c>,
+    /// that configures no anchor under EITHER key cannot issue tokens on the CERTIFICATE credential -
+    /// every certificate is untrusted, and the operation answers the same <c>401</c> it answers for a
+    /// caller that presented none, while the roster's <c>Basic</c> credential keeps minting - and
+    /// meanwhile <c>/health</c>,
     /// the published key set, the discovery document and the C-02 operations all stay reachable, so the
     /// readiness chain the other three services wait on is unaffected. A path that is SET and unreadable
     /// is a different matter and refuses the host: the deployment stated an intent it cannot meet, which

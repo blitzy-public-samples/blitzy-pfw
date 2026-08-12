@@ -112,13 +112,17 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Xml.Linq;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using PowerFramework.Persistence.Buffers;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Authorization;
@@ -429,6 +433,51 @@ internal static class PersistenceServiceCollectionExtensions
         services.TryAddSingleton(static serviceProvider => new InternalTlsTrust(
             serviceProvider.GetRequiredService<IOptions<PersistenceOptions>>().Value.InternalTls));
 
+        // =================================================================================================
+        //  DATA PROTECTION IS EPHEMERAL BY DELIBERATE CHOICE, AND THE CHOICE IS ABOUT KEY MATERIAL AT REST.
+        //
+        //  AddAuthentication REGISTERS THE DATA-PROTECTION STACK WHETHER OR NOT ANYTHING PROTECTS A PAYLOAD -
+        //  Microsoft.AspNetCore.Authentication calls AddDataProtection for the ticket formats its remote
+        //  handlers use, and this service registers no remote handler. DataProtection's own eager initialiser
+        //  then materialises a key ring during host start. That was MEASURED on all four services rather than
+        //  inferred: each wrote a key file into its user profile at startup, and one that afterwards failed to
+        //  bind its port had ALREADY written it. Left at the default the ring is an unencrypted private key
+        //  under the process's user profile - observed at '/root/.aspnet/DataProtection-Keys' - created per
+        //  container and shared with nothing, which the framework itself warns about for a container.
+        //
+        //  NOTHING IN THIS SERVICE PROTECTS A PAYLOAD. Inbound authentication is bearer-token validation
+        //  against Security's published verification material, which is stateless and uses no protector; there
+        //  is no cookie, no session, no antiforgery token and no protected payload that outlives a request. The
+        //  default therefore writes key material to disk for NO CONSUMER - a secret at rest with no purpose,
+        //  and a secret at rest with no purpose is the one shape the secrets mandate has no tolerance for.
+        //
+        //  EPHEMERAL IS THE HONEST POSTURE, AND ITS FAILURE MODE IS WHY. Keys live in this process and die with
+        //  it, nothing reaches the filesystem, and a future capability that DOES need a durable protector
+        //  fails immediately and visibly on the first restart - instead of working on one replica and failing
+        //  on the next, which is the strictly worse of the two failures the default offers. Persisting the ring
+        //  instead would not remove the hazard: at-rest encryption of a persisted ring needs an X.509
+        //  certificate this deployment does not provision, DPAPI is Windows-only, and the target is Linux
+        //  containers - so persisting would relocate unencrypted key material rather than protect it.
+        //  docs/SECRETS.md section 5 records the posture and what a later phase must put in its place.
+        //
+        //  THE PROVIDER SWAP ALONE WAS NOT ENOUGH, AND THAT WAS MEASURED. Replacing IDataProtectionProvider with
+        //  the ephemeral one leaves the KEY-MANAGEMENT stack untouched, and data protection's eager initialiser
+        //  warms THAT rather than whichever provider is registered - so a host wired that way still wrote a key
+        //  file to the user profile on every start. The repository is therefore what is redirected: with an
+        //  in-memory IXmlRepository there is no file-system repository to construct, so the ring is created in
+        //  this process and NOTHING reaches the disk. One mechanism, at the layer that decides where bytes go.
+        //
+        //  THIS IS NOT A BEHAVIOUR CHANGE UNDER C-B. There is no legacy analogue to preserve or to break: the
+        //  key ring is an artifact of the ASP.NET Core hosting choice this refactor introduced, and the legacy
+        //  framework - a library with no process of its own - has nothing that corresponds to it.
+        // =================================================================================================
+        services
+            .AddDataProtection();
+
+        // The key ring lives in memory, so the eager initialiser's key is created HERE rather than in a file.
+        services.Configure<KeyManagementOptions>(static options =>
+            options.XmlRepository = new InMemoryDataProtectionKeyRepository());
+
         services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(bearer =>
@@ -464,6 +513,29 @@ internal static class PersistenceServiceCollectionExtensions
                 {
                     bearer.MetadataAddress = metadataAddress;
                 }
+
+                // 🔴 BOTH KEY-SET REFRESH INTERVALS ARE READ, BECAUSE LEAVING EITHER UNREAD IS A ROTATION
+                // DECISION TAKEN BY OMISSION - and the two library defaults fail in OPPOSITE directions at
+                // once. RefreshInterval defaults to five minutes, so a token minted after Security rotates
+                // its signing key is refused 401 (IDX10503, no key matched the identifier) for up to that
+                // long even though the handler asks to refresh the instant it sees an unknown identifier.
+                // AutomaticRefreshInterval defaults to TWELVE HOURS and is the only thing that ever drops a
+                // RETIRED key, because a successful validation provokes no refresh - so the superseded
+                // credential stayed acceptable here for half a day. Rotation therefore inverted this
+                // boundary's verdicts: the old token worked and the new one did not.
+                //
+                // READ FROM THE SAME SNAPSHOT AS THE AUTHORITY THEY QUALIFY, for the reason recorded at the
+                // top of this callback, and MODELLED on JwtOptions so PersistenceOptionsValidator can refuse
+                // a value below the library's own floor at startup rather than letting the configuration
+                // manager throw on the first authenticated request. The fallbacks below are the same
+                // constants the options type defaults to, so an absent key and an unbound one agree.
+                bearer.RefreshInterval = jwt.GetValue(
+                    nameof(JwtOptions.MetadataRefreshInterval),
+                    JwtOptions.DefaultMetadataRefreshInterval);
+
+                bearer.AutomaticRefreshInterval = jwt.GetValue(
+                    nameof(JwtOptions.MetadataAutomaticRefreshInterval),
+                    JwtOptions.DefaultMetadataAutomaticRefreshInterval);
 
                 // ALL FOUR ARE ASSIGNED LITERALLY, NOT READ. Each removes an entire class of forgery, so
                 // none is a deployment choice: without issuer validation a credential from any issuer is
@@ -533,6 +605,43 @@ internal static class PersistenceServiceCollectionExtensions
                 trust.Apply(backchannel);
 
                 bearer.BackchannelHttpHandler = backchannel;
+            });
+
+        // 🔴 THE THIRD DURATION, WHICH THE TWO ABOVE DO NOT BOUND: how long a SUPERSEDED key set stays
+        // acceptable as a last-known-good fallback. MEASURED at a sibling boundary: with both intervals
+        // configured, a token signed by a RETIRED key was still accepted nine and a half minutes after the
+        // rotation - well past the background refresh that had already replaced the current configuration -
+        // because BaseConfigurationManager keeps a CACHE of recently-good configurations that the token
+        // handler retries against, and its entries live for LastKnownGoodLifetime, which defaults to ONE
+        // HOUR. Two separately retired identities were both still honoured, so it is a cache of several
+        // rather than one previous configuration.
+        //
+        // BOUNDED RATHER THAN TURNED OFF. UseLastKnownGoodConfiguration stays at its default of true
+        // because it is what keeps this boundary validating tokens through a transient inability to FETCH
+        // the key set, which is an availability property worth keeping; what is not worth keeping is a
+        // retired credential honoured for an hour, which is the window rotation exists to close. The
+        // lifetime is DERIVED from the background interval rather than made a third knob, so the two cannot
+        // drift into an incoherent pair, and the fallback constants match the options type's own.
+        //
+        // IN A POST-CONFIGURE, because the handler's own post-configure step is what constructs the
+        // configuration manager from the authority - it does not exist yet while the delegate above runs.
+        // Reaching the manager the framework built keeps metadata retrieval entirely framework code:
+        // nothing in this repository fetches a key set by hand.
+        _ = services
+            .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+            .PostConfigure(bearer =>
+            {
+                if (bearer.ConfigurationManager is not BaseConfigurationManager manager)
+                {
+                    return;
+                }
+
+                IConfigurationSection jwt =
+                    configuration.GetSection(PersistenceStartupGate.JwtSectionName);
+
+                manager.LastKnownGoodLifetime = jwt.GetValue(
+                    nameof(JwtOptions.MetadataAutomaticRefreshInterval),
+                    JwtOptions.DefaultMetadataAutomaticRefreshInterval);
             });
 
         // DENY BY DEFAULT, WITH ONE NAMED EXCEPTION. A fallback policy means no route is ever
@@ -3501,6 +3610,68 @@ internal sealed class UpdateTaskSurface : IUpdateTaskSurface
 /// service-level tests cannot boot this host at all, and every line of wiring in this file becomes an
 /// uncovered island dragging the per-service coverage gate down with it (constraint C-H).
 /// </remarks>
+/// <summary>
+/// The data-protection key repository, held in this process's memory and never written to storage.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS TYPE EXISTS AT ALL. Data protection is registered by the authentication stack whether or not
+/// anything protects a payload, and its eager initialiser materialises a key ring during host start - which,
+/// left at the default, writes an UNENCRYPTED private key into the process's user profile for no consumer.
+/// Nothing in this service protects a payload: inbound authentication is bearer-token validation against
+/// published verification material, and there is no cookie, no session, no antiforgery token and no
+/// protected payload that outlives a request.
+/// </para>
+/// <para>
+/// 🔴 <b>AND THE OBVIOUS FIX IS THE ONE THAT DOES NOT WORK.</b> Swapping
+/// <c>IDataProtectionProvider</c> for the framework's ephemeral provider was tried and MEASURED: a key file
+/// was still written on every start, because the eager initialiser warms the key-management stack rather
+/// than the registered provider. Redirecting the REPOSITORY is what removes the write, because it removes
+/// the file-system repository from the graph entirely.
+/// </para>
+/// <para>
+/// The consequence is deliberate and is the reason this posture was chosen: a capability that later needs a
+/// DURABLE protector fails immediately and visibly at the first restart, rather than working on one replica
+/// and failing on the next. <c>docs/SECRETS.md</c> section 5.4 records the decision, the rejected
+/// alternative and what a later phase must put in its place.
+/// </para>
+/// <para>
+/// THREAD SAFETY IS REQUIRED, NOT OPTIONAL. The key ring is read on request threads and written by the
+/// initialiser, so every access is taken under one lock. The returned collection is a snapshot, so a caller
+/// enumerating it cannot observe a concurrent store.
+/// </para>
+/// </remarks>
+internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
+{
+    /// <summary>The stored elements, guarded by <see cref="_gate"/>.</summary>
+    private readonly List<XElement> _elements = [];
+
+    /// <summary>Serialises every read and write of <see cref="_elements"/>.</summary>
+    private readonly object _gate = new();
+
+    /// <inheritdoc />
+    public IReadOnlyCollection<XElement> GetAllElements()
+    {
+        lock (_gate)
+        {
+            // A COPY, and each element cloned: the key manager is free to mutate what it is handed, and a
+            // shared instance would let one caller's edit reach another's read.
+            return [.. _elements.Select(static element => new XElement(element))];
+        }
+    }
+
+    /// <inheritdoc />
+    public void StoreElement(XElement element, string friendlyName)
+    {
+        ArgumentNullException.ThrowIfNull(element);
+
+        lock (_gate)
+        {
+            _elements.Add(new XElement(element));
+        }
+    }
+}
+
 public partial class Program
 {
     /// <summary>

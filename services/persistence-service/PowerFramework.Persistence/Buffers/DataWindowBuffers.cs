@@ -1293,6 +1293,217 @@ internal static class CarrierValue
     }
 
     /// <summary>
+    /// Whether two carrier column values denote THE SAME VALUE, comparing across the numeric arms
+    /// rather than requiring an identical runtime type.
+    /// </summary>
+    /// <param name="left">One value. <see langword="null"/> is a value, not an absence.</param>
+    /// <param name="right">The other value.</param>
+    /// <returns><see langword="true"/> when the two denote the same value.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHY <see cref="object.Equals(object?, object?)"/> IS THE WRONG TEST HERE, AND WHAT USING IT
+    /// COST.</b> <see cref="AnyValue"/> is a union in which one number has several faithful spellings:
+    /// a retrieval answers a legacy <c>number</c> column through <c>double_value</c>, while a caller
+    /// re-sending that same number as <c>int64_value</c> is equally within the contract - the widening
+    /// documented on this type says as much. Decoded, those two spellings become <c>28.0d</c> and
+    /// <c>28L</c>, and <c>Equals</c> reports them DIFFERENT because their boxed runtime types differ.
+    /// The storage engine does not agree with that reading: SQLite compares <c>28.0</c> against an
+    /// <c>INTEGER</c> 28 as equal under numeric affinity, so the generated predicate matches while the
+    /// in-memory comparison says the value moved. That divergence is what made an update whose KEY had
+    /// not changed take the <c>updatekeyinplace=no</c> delete-plus-insert path
+    /// [<c>Tasks/SqlUpdateCarrier.HasKeyChange</c>] - the wrong statement pair for the row, reported as
+    /// <c>rowsUpdated = 0</c> beside an insert and a delete the caller never asked for.
+    /// </para>
+    /// <para>
+    /// THE NUMERIC FAMILY IS COMPARED AS A NUMBER. <see cref="long"/>, <see cref="ulong"/>,
+    /// <see cref="double"/> and <see cref="decimal"/> are the four arms <see cref="TryFromWire"/>
+    /// produces for a number, and the narrower CLR integrals are admitted too because
+    /// <see cref="TryToWire"/> widens them into the same arms. Comparison is attempted in
+    /// <see cref="decimal"/> first, because that is the only one of the four that is exact for the
+    /// evidenced <c>decimal(2)</c> salary column; a value outside <see cref="decimal"/>'s range - which
+    /// only the <see cref="double"/> arm can produce - falls back to a <see cref="double"/> comparison.
+    /// Neither path is a tolerance: <c>20000.50m</c> and <c>20000.5d</c> are the same number and are
+    /// reported equal, while <c>20000.50m</c> and <c>20000.51m</c> are not.
+    /// </para>
+    /// <para>
+    /// A BLOB IS COMPARED BY CONTENT. <c>Equals</c> on <see cref="byte"/>[] is REFERENCE equality, so
+    /// two arrays decoded from identical <c>blob_value</c> bytes would have compared unequal - a
+    /// separate instance of the same defect, fixed here rather than left to be rediscovered.
+    /// </para>
+    /// <para>
+    /// EVERYTHING ELSE FALLS THROUGH TO <c>Equals</c>, AND NO CROSS-FAMILY CONVERSION IS INVENTED. A
+    /// <see cref="DateOnly"/> is not compared against the <see cref="string"/> that would render it, and
+    /// a <see cref="bool"/> is not compared against 0 or 1: those would be conversions this boundary was
+    /// never told to perform, and the plan's rule is to narrow with a defined answer rather than widen
+    /// with a guess. A caller that spells one column two different ways across those families is told
+    /// the value moved, which writes the value it sent and clobbers nothing - the concurrency predicate
+    /// still guards the row.
+    /// </para>
+    /// <para>
+    /// <b>DETERMINISM.</b> No culture, no clock and no allocation beyond the comparison itself, so the
+    /// answer is a pure function of the two values - which is what a golden-master comparison of master
+    /// against candidate requires (AAP 0.6.7).
+    /// </para>
+    /// </remarks>
+    internal static bool AreEquivalent(object? left, object? right)
+    {
+        if (left is null || right is null)
+        {
+            // Null is a VALUE in this algebra, so two nulls are equal and a null beside a value is not.
+            // Never folded to zero - the framework's tri-state predicates depend on the distinction.
+            return left is null && right is null;
+        }
+
+        if (TryAsNumber(left, out decimal leftExact, out bool leftIsExact, out double leftApproximate)
+            && TryAsNumber(
+                right,
+                out decimal rightExact,
+                out bool rightIsExact,
+                out double rightApproximate))
+        {
+            // Both are numbers. The EXACT comparison is preferred and is available whenever both values
+            // fit decimal; otherwise the pair is compared as doubles, which is the only representation
+            // that spans the whole double arm. NaN never equals anything, including itself - which is
+            // moot on the decode path, since TryFromWire refuses NaN outright, and correct on any other.
+            return leftIsExact && rightIsExact
+                ? leftExact == rightExact
+                : !double.IsNaN(leftApproximate)
+                    && !double.IsNaN(rightApproximate)
+                    && leftApproximate == rightApproximate;
+        }
+
+        if (left is byte[] leftBlob && right is byte[] rightBlob)
+        {
+            return leftBlob.AsSpan().SequenceEqual(rightBlob);
+        }
+
+        return left.Equals(right);
+    }
+
+    /// <summary>
+    /// Reads a value as a number, in both an exact and an approximate form.
+    /// </summary>
+    /// <param name="value">The value.</param>
+    /// <param name="exact">
+    /// The value as a <see cref="decimal"/>, meaningful only when <paramref name="isExact"/> is
+    /// <see langword="true"/>.
+    /// </param>
+    /// <param name="isExact">
+    /// <see langword="false"/> when the value is a floating-point number decimal cannot hold - NaN,
+    /// either infinity, or a magnitude out of range - in which case <paramref name="approximate"/> is
+    /// what compares.
+    /// </param>
+    /// <param name="approximate">The value as a <see cref="double"/>.</param>
+    /// <returns><see langword="false"/> when the value is not one of the numeric arms.</returns>
+    /// <remarks>
+    /// <c>bool</c> IS DELIBERATELY EXCLUDED even though it is convertible: the contract gives it its own
+    /// arm, and treating <see langword="true"/> as 1 would make a boolean column compare equal to a
+    /// numeric one, which no oracle arm does.
+    /// </remarks>
+    private static bool TryAsNumber(
+        object value,
+        out decimal exact,
+        out bool isExact,
+        out double approximate)
+    {
+        switch (value)
+        {
+            case decimal exactValue:
+                exact = exactValue;
+                isExact = true;
+                approximate = (double)exactValue;
+                return true;
+
+            case long integral:
+                exact = integral;
+                isExact = true;
+                approximate = integral;
+                return true;
+
+            case ulong unsignedIntegral:
+                exact = unsignedIntegral;
+                isExact = true;
+                approximate = unsignedIntegral;
+                return true;
+
+            case int narrowed:
+                exact = narrowed;
+                isExact = true;
+                approximate = narrowed;
+                return true;
+
+            case uint unsignedNarrowed:
+                exact = unsignedNarrowed;
+                isExact = true;
+                approximate = unsignedNarrowed;
+                return true;
+
+            case short shortened:
+                exact = shortened;
+                isExact = true;
+                approximate = shortened;
+                return true;
+
+            case ushort unsignedShortened:
+                exact = unsignedShortened;
+                isExact = true;
+                approximate = unsignedShortened;
+                return true;
+
+            case byte octet:
+                exact = octet;
+                isExact = true;
+                approximate = octet;
+                return true;
+
+            case sbyte signedOctet:
+                exact = signedOctet;
+                isExact = true;
+                approximate = signedOctet;
+                return true;
+
+            case float single:
+                isExact = TryAsExactDecimal(single, out exact);
+                approximate = single;
+                return true;
+
+            case double approximateValue:
+                isExact = TryAsExactDecimal(approximateValue, out exact);
+                approximate = approximateValue;
+                return true;
+
+            default:
+                exact = 0m;
+                isExact = false;
+                approximate = 0d;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Converts a double to <see cref="decimal"/> when it is representable, without throwing.
+    /// </summary>
+    /// <param name="value">The value.</param>
+    /// <param name="converted">The conversion, or zero when the value is out of range.</param>
+    /// <returns><see langword="false"/> for NaN, either infinity, or a magnitude decimal cannot hold.</returns>
+    private static bool TryAsExactDecimal(double value, out decimal converted)
+    {
+        if (double.IsNaN(value)
+            || double.IsInfinity(value)
+            || value > (double)decimal.MaxValue
+            || value < (double)decimal.MinValue)
+        {
+            converted = 0m;
+
+            return false;
+        }
+
+        converted = (decimal)value;
+
+        return true;
+    }
+
+    /// <summary>
     /// The canonical date form the contract fixes for <c>DateValue</c> and for the date half of
     /// <c>DateTimeValue</c>.
     /// </summary>

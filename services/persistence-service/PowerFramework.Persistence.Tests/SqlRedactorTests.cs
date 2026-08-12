@@ -1203,6 +1203,126 @@ public sealed class SqlRedactorTests
         Assert.Equal(composed, SqlRedactor.Instance.Redact(composed));
     }
 
+    // ==============================================================================================
+    //  F-04 - THE PROVIDER'S OWN DIAGNOSTIC ENVELOPE
+    // ==============================================================================================
+
+    /// <summary>
+    /// The provider's envelope survives so the condition it names is legible.
+    /// </summary>
+    /// <param name="diagnostic">The provider message.</param>
+    /// <remarks>
+    /// 🔴 <b>THE DEFECT THIS CLOSES.</b> Microsoft.Data.Sqlite does not hand back a bare message - it
+    /// wraps it: <c>SQLite Error 19: '&lt;message&gt;'.</c> The strict mask therefore saw a numeric literal
+    /// and a quoted string and masked both, so EVERY constraint failure reached a caller as
+    /// <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'.</c> - a message that says a database error
+    /// occurred and refuses to say which column caused it.
+    /// </remarks>
+    [Theory]
+    [InlineData("SQLite Error 19: 'NOT NULL constraint failed: COMPANY.NAME'.")]
+    [InlineData("SQLite Error 19: 'UNIQUE constraint failed: COMPANY.id'.")]
+    [InlineData("SQLite Error 20: 'datatype mismatch'.")]
+    [InlineData("SQLite Error 1: 'no such table: COMPANY'.")]
+    [InlineData("SQLite Error 1: 'near \"FROM\": syntax error'.")]
+    public void AProviderDiagnosticKeepsItsEnvelopeAndItsCondition(string diagnostic)
+    {
+        Assert.Equal(diagnostic, SqlRedactor.Instance.RedactProviderDiagnostic(diagnostic));
+    }
+
+    /// <summary>
+    /// A value quoted INSIDE the provider's message is still masked.
+    /// </summary>
+    /// <remarks>
+    /// <b>THIS IS THE ROW THAT MAKES THE NARROWING SAFE.</b> The interior goes through the identical scan
+    /// it went through before, so the row data the masking policy exists to remove is still removed - only
+    /// the envelope is preserved. Without this row the narrowing would be indistinguishable from switching
+    /// the masking off.
+    /// </remarks>
+    [Fact]
+    public void AValueQuotedInsideTheProviderMessageIsStillMasked()
+    {
+        string masked = SqlRedactor.Instance.RedactProviderDiagnostic(
+            "SQLite Error 19: 'CHECK constraint failed: salary > 'secret-value''.");
+
+        Assert.DoesNotContain("secret-value", masked, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, masked, StringComparison.Ordinal);
+
+        // AND THE CONDITION IS STILL THERE, which is the whole point of preserving the envelope.
+        Assert.Contains("CHECK constraint failed", masked, StringComparison.Ordinal);
+        Assert.StartsWith("SQLite Error 19: '", masked, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Text that is not the provider's envelope falls through to the strict mask, unchanged in behaviour.
+    /// </summary>
+    /// <param name="text">The candidate.</param>
+    /// <remarks>
+    /// EVERY POSITION OF THE SHAPE IS FIXED, and these rows walk each one: a missing prefix, a missing
+    /// result code, a non-ASCII digit where the code belongs, a missing separator, a missing suffix, an
+    /// empty interior, and trailing whitespace. One differing character anywhere and the input is masked
+    /// exactly as it was before, which is what keeps the narrowing from being a hole.
+    /// </remarks>
+    [Theory]
+    [InlineData("SQLITE Error 19: 'NOT NULL constraint failed: COMPANY.NAME'.")]
+    [InlineData("SQLite Error : 'NOT NULL constraint failed: COMPANY.NAME'.")]
+    [InlineData("SQLite Error ١٩: 'NOT NULL constraint failed: COMPANY.NAME'.")]
+    [InlineData("SQLite Error 19 'NOT NULL constraint failed: COMPANY.NAME'.")]
+    [InlineData("SQLite Error 19: 'NOT NULL constraint failed: COMPANY.NAME'")]
+    [InlineData("SQLite Error 19: ''.")]
+    [InlineData("SQLite Error 19: 'NOT NULL constraint failed: COMPANY.NAME'. ")]
+    [InlineData("SELECT * FROM COMPANY WHERE name = 'value'")]
+    public void TextThatIsNotTheProviderEnvelopeIsMaskedExactlyAsBefore(string text)
+    {
+        Assert.Equal(
+            SqlRedactor.Instance.Redact(text),
+            SqlRedactor.Instance.RedactProviderDiagnostic(text));
+    }
+
+    /// <summary>
+    /// The narrowing is idempotent and null-tolerant, on the same terms as the strict mask.
+    /// </summary>
+    [Fact]
+    public void TheNarrowingIsIdempotentAndNullTolerant()
+    {
+        Assert.Equal(string.Empty, SqlRedactor.Instance.RedactProviderDiagnostic(null));
+        Assert.Equal(string.Empty, SqlRedactor.Instance.RedactProviderDiagnostic(string.Empty));
+
+        string once = SqlRedactor.Instance.RedactProviderDiagnostic(
+            "SQLite Error 19: 'CHECK constraint failed: salary > 'secret-value''.");
+
+        Assert.Equal(once, SqlRedactor.Instance.RedactProviderDiagnostic(once));
+    }
+
+    /// <summary>
+    /// The wire payload's message field goes through the narrowing, and its statement field does not.
+    /// </summary>
+    /// <remarks>
+    /// <b>TWO CLAIMS IN ONE ROW, AND THEY PULL IN OPPOSITE DIRECTIONS.</b> The MESSAGE must keep its
+    /// envelope so the failing column is legible; the STATEMENT must stay strictly masked, because it is
+    /// the field the legacy carried with interpolated literal values in it. A change that narrowed both
+    /// would pass a message-only assertion, so both are asserted here together.
+    /// </remarks>
+    [Fact]
+    public void TheWirePayloadNarrowsItsMessageAndKeepsItsStatementStrictlyMasked()
+    {
+        DbErrorData error = DbErrorData.FromTransaction(
+            RetCode.SQLITE_CONSTRAINT_NOTNULL,
+            "SQLite Error 19: 'NOT NULL constraint failed: COMPANY.NAME'.") with
+        {
+            SqlSyntax = "INSERT INTO COMPANY(name, age) VALUES('Ada', 36)",
+        };
+
+        DbError projected = error.ToDbError();
+
+        Assert.Equal(
+            "SQLite Error 19: 'NOT NULL constraint failed: COMPANY.NAME'.",
+            projected.Sqlerrtext);
+
+        Assert.DoesNotContain("Ada", projected.Sqlsyntax, StringComparison.Ordinal);
+        Assert.DoesNotContain("36", projected.Sqlsyntax, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, projected.Sqlsyntax, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// A redactor that masks nothing, used to prove the mapping is driven by the abstraction rather
     /// than by the concrete implementation.

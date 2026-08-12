@@ -22,11 +22,16 @@ using System.Net.Mime;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Grpc.Core;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.Gateway.Clients;
@@ -332,10 +337,21 @@ public sealed class DataServicesProxyStreamingTests
     /// gone - the documented trade, asserted so the fix above did not quietly change it.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// This is the boundary the prefetch draws. Before the first element, a fault becomes a problem
     /// response; from the first element onward it cannot, and the response ends WITHOUT its closing bracket
     /// so the caller detects an incomplete answer. Both halves are asserted, because a change that made
     /// either behave like the other would be a silent regression in opposite directions.
+    /// </para>
+    /// <para>
+    /// <b>WHAT CHANGED, AND WHY THIS TEST NO LONGER EXPECTS A THROW.</b> It used to assert that the fault
+    /// ESCAPED <c>ExecuteAsync</c>, which is what the projection did - and escaping is not a behaviour, it
+    /// is the absence of one. The escaped exception reached Kestrel's connection handler as an unhandled
+    /// application exception while the access log recorded the request as a 200, so the operator's only
+    /// evidence of a failed retrieval was a stack trace attributed to the connection. The fault is handled
+    /// now; the two properties this test was protecting - two real elements delivered, and no closing
+    /// bracket - are asserted unchanged, which is the point of keeping it rather than replacing it.
+    /// </para>
     /// </remarks>
     [Fact]
     public async Task AFaultAfterTheFirstElementEndsTheBodyUnterminated()
@@ -355,7 +371,9 @@ public sealed class DataServicesProxyStreamingTests
                 collectionWindow: null,
                 TestContext.Current.CancellationToken);
 
-        _ = await Assert.ThrowsAsync<RpcException>(() => result.ExecuteAsync(context));
+        // NO EXCEPTION. Asserted through Record rather than by simply awaiting, so a regression names the
+        // fault it let escape instead of failing the test with an unrelated-looking stack trace.
+        Assert.Null(await Record.ExceptionAsync(() => result.ExecuteAsync(context)));
 
         await context.Response.BodyWriter.FlushAsync(TestContext.Current.CancellationToken);
 
@@ -366,6 +384,232 @@ public sealed class DataServicesProxyStreamingTests
         Assert.False(
             written.TrimEnd().EndsWith(']'),
             "A mid-stream fault must leave the array unterminated so the caller detects it.");
+    }
+
+    // ==============================================================================================
+    //  F-11 - A MID-STREAM FAULT MUST BE HANDLED, SELF-DESCRIBING, AND ABNORMALLY TERMINATED
+    //  --------------------------------------------------------------------------------------------
+    //  Reproduced at runtime before it was fixed: killing DataServices two seconds into a
+    //  fifty-thousand-row retrieval delivered eighteen megabytes and then stopped, and the last bytes on
+    //  the wire were an ordinary chunk carrying `"final": false`. The caller saw an interrupted transfer
+    //  with no explanation; the gateway logged `ExceptionHandlerMiddleware[1] "An unhandled exception has
+    //  occurred while executing the request"` followed by `Kestrel[13] "An unhandled exception was thrown
+    //  by the application"`; and the access log recorded `200`.
+    //
+    //  The three tests below pin the three signals the fix emits, one per audience: the operator's log
+    //  record, the reader's terminal element, and the program's abnormal termination.
+    // ==============================================================================================
+
+    /// <summary>
+    /// A mid-stream fault appends a terminal element carrying the same classification the unary route
+    /// would have sent, and the document is still left unterminated.
+    /// </summary>
+    /// <param name="status">The status the upstream raised mid-stream.</param>
+    /// <param name="expectedHttpStatus">The HTTP status the published map assigns it.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE CLASSIFICATION IS THE SUBSTANTIVE PART.</b> A terminal element that merely said "something
+    /// failed" would be no more use than the truncation already is. Driving four statuses through proves
+    /// the element is produced by the SAME status map the unary and pre-first-item paths use, so a caller
+    /// comparing a retrieval that failed immediately with one that failed after twenty chunks reads one
+    /// answer rather than two - and a later change to that map reaches both without editing this file.
+    /// </para>
+    /// <para>
+    /// THE UNTERMINATED ARRAY IS RE-ASSERTED HERE AS WELL, because the element and the truncation are
+    /// easily confused as alternatives. They are not: the truncation is the machine-readable signal, and
+    /// closing the bracket to make the document parse would turn a faulted stream into a complete one
+    /// whose last element happens to describe a failure.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(StatusCode.NotFound, 404)]
+    [InlineData(StatusCode.Aborted, 409)]
+    [InlineData(StatusCode.Internal, 500)]
+    [InlineData(StatusCode.Unavailable, 503)]
+    public async Task AMidStreamFaultAppendsTheTerminalProblemTheUnaryRouteWouldHaveSent(
+        StatusCode status,
+        int expectedHttpStatus)
+    {
+        DefaultHttpContext context = NewContext();
+
+        using MemoryStream body = new();
+        context.Response.Body = body;
+
+        IResult result = await DataServicesProxyEndpoints.StreamedSequenceResult<RetrieveChunk>
+            .PrefetchAsync(
+                Fault(
+                    new RpcException(new Status(status, "upstream fault")),
+                    afterElements: 3,
+                    TestContext.Current.CancellationToken),
+                maximumElements: 10,
+                collectionWindow: null,
+                TestContext.Current.CancellationToken);
+
+        Assert.Null(await Record.ExceptionAsync(() => result.ExecuteAsync(context)));
+
+        await context.Response.BodyWriter.FlushAsync(TestContext.Current.CancellationToken);
+
+        string written = Encoding.UTF8.GetString(body.ToArray());
+
+        // The three real elements are still there, so the explanation was APPENDED rather than substituted
+        // for the answer that had already been delivered.
+        Assert.Equal(3, CountElements(written));
+        Assert.False(
+            written.TrimEnd().EndsWith(']'),
+            "The terminal element must not close the array, or a faulted stream parses as a complete one.");
+
+        // Parsed by closing the array in the TEST rather than in the projection: the element is well-formed
+        // JSON that the projection deliberately leaves inside a truncated document.
+        JsonNode? document = JsonNode.Parse(written + "]");
+        JsonArray elements = Assert.IsType<JsonArray>(document);
+
+        JsonObject terminal = Assert.IsType<JsonObject>(elements[^1]);
+
+        Assert.Equal(expectedHttpStatus, terminal["status"]?.GetValue<int>());
+        Assert.True(terminal["streamTerminated"]?.GetValue<bool>());
+        Assert.Equal(3, terminal["elementsDelivered"]?.GetValue<int>());
+
+        // `upstream` names where a FORWARDED failure came from, exactly as it does on the unary route, and
+        // `detail` is the map's own prose rather than anything composed here.
+        Assert.Equal("dataservices", terminal["upstream"]?.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(terminal["detail"]?.GetValue<string>()));
+        Assert.NotNull(terminal["retCode"]);
+    }
+
+    /// <summary>
+    /// A mid-stream fault is recorded as handled, naming the status, the delivered count and the
+    /// correlation identifier.
+    /// </summary>
+    /// <remarks>
+    /// THE RECORD IS THE OPERATOR'S ONLY EVIDENCE, and before the fix the only evidence was a stack trace
+    /// logged by the connection layer against a request the access log called a 200. Asserted at
+    /// <see cref="LogLevel.Error"/> rather than a warning because a retrieval that could not be completed
+    /// is a failed request, and asserted on the message's own arguments so the record cannot lose the
+    /// status or the count while still being emitted.
+    /// </remarks>
+    [Fact]
+    public async Task AMidStreamFaultIsRecordedAsHandledRatherThanEscaping()
+    {
+        RecordingLoggerProvider records = new();
+
+        DefaultHttpContext context = NewContext(records);
+
+        using MemoryStream body = new();
+        context.Response.Body = body;
+
+        IResult result = await DataServicesProxyEndpoints.StreamedSequenceResult<RetrieveChunk>
+            .PrefetchAsync(
+                Fault(
+                    new RpcException(new Status(StatusCode.Unavailable, "upstream fault")),
+                    afterElements: 2,
+                    TestContext.Current.CancellationToken),
+                maximumElements: 10,
+                collectionWindow: null,
+                TestContext.Current.CancellationToken);
+
+        Assert.Null(await Record.ExceptionAsync(() => result.ExecuteAsync(context)));
+
+        (LogLevel Level, string Message) record = Assert.Single(
+            records.Entries,
+            entry => entry.Message.Contains("faulted with", StringComparison.Ordinal));
+
+        Assert.Equal(LogLevel.Error, record.Level);
+        Assert.Contains("Unavailable", record.Message, StringComparison.Ordinal);
+        Assert.Contains("2 forwarded element(s)", record.Message, StringComparison.Ordinal);
+        Assert.Contains("/v1/datawindow/retrieve", record.Message, StringComparison.Ordinal);
+
+        // The state of the response is stated too, because that is what makes the record actionable: the
+        // reader has to know a problem document could not be sent.
+        Assert.Contains("no problem document could replace them", record.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A mid-stream fault aborts the transfer, so the truncation is detectable without parsing anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE THIRD SIGNAL, AND THE ONLY ONE A PROGRAM GETS FOR FREE. An abandoned document that ends
+    /// normally is byte-for-byte indistinguishable from one whose transfer was cut, and a consumer using a
+    /// streaming parser can be left waiting for an element that will never arrive. Aborting sends a
+    /// connection reset or an <c>RST_STREAM</c>, which every HTTP client surfaces as a failed read - the
+    /// runtime reproduction of this saw exactly that as curl exit code 56.
+    /// </para>
+    /// <para>
+    /// ASSERTED THROUGH <see cref="HttpContext.RequestAborted"/>, which is what
+    /// <see cref="HttpContext.Abort"/> signals on the default lifetime feature. The deployed-route sibling
+    /// in this file asserts the client-visible half.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AMidStreamFaultAbortsTheTransferSoTheTruncationNeedsNoParsing()
+    {
+        DefaultHttpContext context = NewContext();
+
+        using MemoryStream body = new();
+        context.Response.Body = body;
+
+        IResult result = await DataServicesProxyEndpoints.StreamedSequenceResult<RetrieveChunk>
+            .PrefetchAsync(
+                Fault(
+                    new RpcException(new Status(StatusCode.Internal, "upstream fault")),
+                    afterElements: 1,
+                    TestContext.Current.CancellationToken),
+                maximumElements: 10,
+                collectionWindow: null,
+                TestContext.Current.CancellationToken);
+
+        RecordingLifetime lifetime = Lifetime(context);
+
+        Assert.False(lifetime.Aborted);
+
+        Assert.Null(await Record.ExceptionAsync(() => result.ExecuteAsync(context)));
+
+        Assert.True(
+            lifetime.Aborted,
+            "A mid-stream fault must end the transfer abnormally, or a cut stream ends like a clean one.");
+    }
+
+    /// <summary>
+    /// A caller that hangs up mid-stream is NOT treated as an upstream fault.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE FILTER ON THE NEW HANDLER IS WHAT THIS PROTECTS.</b> The gRPC client reports a cancelled call
+    /// as an <see cref="RpcException"/>, so a handler that caught the type alone would swallow the caller's
+    /// own abort - writing an explanation to a socket nobody is reading, logging an upstream fault that
+    /// never happened, and hiding the abort from the framework. The abort must keep propagating, and the
+    /// absence of a log record is asserted as well as the exception, because either alone would let half
+    /// the regression through.
+    /// </remarks>
+    [Fact]
+    public async Task ACallerAbortIsNotMisreportedAsAnUpstreamFault()
+    {
+        using CancellationTokenSource aborted = new();
+
+        RecordingLoggerProvider records = new();
+
+        DefaultHttpContext context = NewContext(records);
+        context.RequestAborted = aborted.Token;
+
+        using MemoryStream body = new();
+        context.Response.Body = body;
+
+        IResult result = await DataServicesProxyEndpoints.StreamedSequenceResult<RetrieveChunk>
+            .PrefetchAsync(
+                Fault(
+                    new RpcException(new Status(StatusCode.Cancelled, "caller went away")),
+                    afterElements: 2,
+                    TestContext.Current.CancellationToken,
+                    onDispose: null,
+                    onFirstFault: aborted.Cancel),
+                maximumElements: 10,
+                collectionWindow: null,
+                TestContext.Current.CancellationToken);
+
+        _ = await Assert.ThrowsAsync<RpcException>(() => result.ExecuteAsync(context));
+
+        Assert.DoesNotContain(
+            records.Entries,
+            entry => entry.Message.Contains("faulted with", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -534,18 +778,59 @@ public sealed class DataServicesProxyStreamingTests
 
     /// <summary>Builds a context with the services the projection resolves for its diagnostics.</summary>
     /// <returns>The context.</returns>
-    private static DefaultHttpContext NewContext()
+    private static DefaultHttpContext NewContext() => NewContext(null);
+
+    /// <summary>Builds a context whose logger factory writes into a recording provider.</summary>
+    /// <param name="records">The provider to add, or <see langword="null"/> for none.</param>
+    /// <returns>The context.</returns>
+    /// <remarks>
+    /// THE PROVIDER IS ADDED TO THE REAL FACTORY rather than substituted for it, because the projection
+    /// resolves an <c>ILoggerFactory</c> from the request services and creates its logger by CATEGORY NAME.
+    /// Substituting a logger instance would bypass the category lookup, which is part of what is being
+    /// exercised.
+    /// </remarks>
+    private static DefaultHttpContext NewContext(RecordingLoggerProvider? records)
     {
         ServiceCollection services = new();
-        _ = services.AddLogging();
+
+        _ = services.AddLogging(logging =>
+        {
+            if (records is not null)
+            {
+                _ = logging.AddProvider(records);
+            }
+        });
 
         DefaultHttpContext context = new() { RequestServices = services.BuildServiceProvider() };
 
+        // THE ABORT IS OBSERVED THROUGH THE FEATURE THE FRAMEWORK ITSELF CALLS. HttpContext.Abort
+        // delegates to IHttpRequestLifetimeFeature.Abort, and the feature a bare DefaultHttpContext
+        // carries implements it as a NO-OP - so asserting on RequestAborted would have failed for a
+        // reason that has nothing to do with the projection. Substituting a recording feature asserts the
+        // same call Kestrel's feature would have received.
+        context.Features.Set<IHttpRequestLifetimeFeature>(new RecordingLifetime());
+
+        // A REAL ROUTED ENDPOINT, because DescribeRoute reads the route PATTERN rather than the request
+        // path: without one it answers its unrouted placeholder, and a log assertion would be asserting
+        // the placeholder instead of the route.
+        context.SetEndpoint(new RouteEndpoint(
+            static _ => Task.CompletedTask,
+            RoutePatternFactory.Parse(RetrieveRoute),
+            order: 0,
+            new EndpointMetadataCollection(),
+            RetrieveRoute));
+
         context.Request.Method = HttpMethods.Post;
-        context.Request.Path = "/v1/datawindow/retrieve";
+        context.Request.Path = RetrieveRoute;
 
         return context;
     }
+
+    /// <summary>Reads the recording lifetime feature installed by <see cref="NewContext()"/>.</summary>
+    /// <param name="context">The context.</param>
+    /// <returns>The feature.</returns>
+    private static RecordingLifetime Lifetime(HttpContext context) =>
+        Assert.IsType<RecordingLifetime>(context.Features.Get<IHttpRequestLifetimeFeature>());
 
     /// <summary>A lazy producer that records how many elements it was asked for.</summary>
     /// <param name="count">How many it will offer.</param>
@@ -584,12 +869,18 @@ public sealed class DataServicesProxyStreamingTests
     /// one would already be true whether or not the enumerator was ever disposed - making the assertion pass
     /// for the wrong reason. An explicit enumerator sets the flag only from <c>DisposeAsync</c>.
     /// </remarks>
+    /// <param name="onFirstFault">
+    /// Invoked immediately BEFORE the fault is raised, so a test can change the world at exactly the
+    /// moment the projection is about to observe the failure - which is the only way to reproduce a caller
+    /// that hangs up as the upstream fails, rather than approximating it with a token cancelled up front.
+    /// </param>
     private static IAsyncEnumerable<RetrieveChunk> Fault(
         RpcException fault,
         int afterElements,
         CancellationToken cancellationToken,
-        Action? onDispose = null)
-        => new FaultingChunkSequence(fault, afterElements, cancellationToken, onDispose);
+        Action? onDispose = null,
+        Action? onFirstFault = null)
+        => new FaultingChunkSequence(fault, afterElements, cancellationToken, onDispose, onFirstFault);
 
     /// <summary>Counts the encoded elements in a written body.</summary>
     /// <param name="body">The body text.</param>
@@ -623,6 +914,7 @@ public sealed class DataServicesProxyStreamingTests
 /// <param name="afterElements">How many chunks are produced before the failure.</param>
 /// <param name="cancellationToken">Observed on every read.</param>
 /// <param name="onDispose">Invoked from <see cref="DisposeAsync"/> and from nowhere else.</param>
+/// <param name="onFirstFault">Invoked once, immediately before the failure is raised.</param>
 /// <remarks>
 /// <para>
 /// ONE ENUMERATION ONLY, which is all the projection performs and all the tests need. Handing back
@@ -638,9 +930,12 @@ internal sealed class FaultingChunkSequence(
     RpcException fault,
     int afterElements,
     CancellationToken cancellationToken,
-    Action? onDispose) : IAsyncEnumerable<RetrieveChunk>, IAsyncEnumerator<RetrieveChunk>
+    Action? onDispose,
+    Action? onFirstFault = null) : IAsyncEnumerable<RetrieveChunk>, IAsyncEnumerator<RetrieveChunk>
 {
     private int _produced;
+
+    private bool _faulted;
 
     /// <inheritdoc/>
     public RetrieveChunk Current { get; private set; } = new();
@@ -658,6 +953,15 @@ internal sealed class FaultingChunkSequence(
 
         if (_produced >= afterElements)
         {
+            if (!_faulted)
+            {
+                _faulted = true;
+
+                // BEFORE the throw, so the projection's catch filter evaluates against the world the hook
+                // established rather than the one that existed when the read began.
+                onFirstFault?.Invoke();
+            }
+
             throw fault;
         }
 
@@ -677,5 +981,117 @@ internal sealed class FaultingChunkSequence(
         onDispose?.Invoke();
 
         return ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>
+/// A logger provider that records every entry written through it, with its level and rendered message.
+/// </summary>
+/// <remarks>
+/// HAND-WRITTEN RATHER THAN A MOCKING FRAMEWORK, because what needs asserting is the RENDERED message - the
+/// arguments a record loses are invisible in a structured-state assertion, and losing one is exactly the
+/// regression these tests exist to catch. The formatter the logging call supplies is invoked, which is what
+/// renders the template with its arguments.
+/// </remarks>
+internal sealed class RecordingLoggerProvider : ILoggerProvider
+{
+    private readonly List<(LogLevel Level, string Message)> _entries = [];
+
+    /// <summary>The entries written so far, in order.</summary>
+    internal IReadOnlyList<(LogLevel Level, string Message)> Entries
+    {
+        get
+        {
+            lock (_entries)
+            {
+                return [.. _entries];
+            }
+        }
+    }
+
+    /// <inheritdoc/>
+    public ILogger CreateLogger(string categoryName) => new RecordingLogger(this);
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+    }
+
+    /// <summary>Records one entry.</summary>
+    /// <param name="level">The level.</param>
+    /// <param name="message">The rendered message.</param>
+    private void Record(LogLevel level, string message)
+    {
+        lock (_entries)
+        {
+            _entries.Add((level, message));
+        }
+    }
+
+    /// <summary>The logger every category resolves to.</summary>
+    /// <param name="owner">The provider the entries are recorded on.</param>
+    private sealed class RecordingLogger(RecordingLoggerProvider owner) : ILogger
+    {
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        /// <inheritdoc/>
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        /// <inheritdoc/>
+        public void Log<TState>(
+            LogLevel logLevel,
+
+            // FULLY QUALIFIED: the contract's own EventId - the DataWindow event identifier of C-03 - is in
+            // scope in this file, so the bare name is ambiguous (CS0104).
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            owner.Record(logLevel, formatter(state, exception));
+        }
+    }
+}
+
+/// <summary>
+/// A request-lifetime feature that records whether the request was aborted.
+/// </summary>
+/// <remarks>
+/// THE ONE FEATURE A BARE <see cref="DefaultHttpContext"/> IMPLEMENTS AS A NO-OP that these tests need to
+/// observe. <see cref="HttpContext.Abort"/> delegates straight to <see cref="Abort"/>, so recording the call
+/// here asserts exactly what Kestrel's own feature would have been asked to do - a connection reset or an
+/// HTTP/2 <c>RST_STREAM</c> - without needing a socket to watch.
+/// </remarks>
+internal sealed class RecordingLifetime : IHttpRequestLifetimeFeature
+{
+    private readonly CancellationTokenSource _aborted = new();
+
+    /// <summary>Whether <see cref="Abort"/> has been called.</summary>
+    internal bool Aborted { get; private set; }
+
+    private CancellationToken? _substituted;
+
+    /// <inheritdoc/>
+    public CancellationToken RequestAborted
+    {
+        // A SUBSTITUTED TOKEN IS HONOURED, NOT MERELY RECORDED. Two tests in this file assign one through
+        // DefaultHttpContext.RequestAborted to model a caller that has already hung up, and the projection
+        // must observe exactly that token - both in its writes and in the catch filter that keeps a caller
+        // abort from being reported as an upstream fault. With no substitution the feature hands out its
+        // own token, which Abort cancels.
+        get => _substituted ?? _aborted.Token;
+        set => _substituted = value;
+    }
+
+    /// <inheritdoc/>
+    public void Abort()
+    {
+        Aborted = true;
+
+        _aborted.Cancel();
     }
 }

@@ -203,6 +203,52 @@ public sealed class PersistenceWorkHandleAcquisitionTests(DataServicesTestHostFa
     }
 
     /// <summary>
+    /// A negative chunk size REACHES the guard that owns it and is refused as a bad request.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 <b>THE VALUE USED TO BE DISCARDED BEFORE IT TRAVELLED, SO THIS ROW HAS TWO HALVES AND NEEDS BOTH.</b>
+    /// The projection forwarded a chunk size only when it was positive, so <c>-5</c> was dropped and the
+    /// caller received a successful retrieval at the server's own size, while <c>500</c> - no less
+    /// nonsensical - travelled and was refused. The first assertion is that the size now ARRIVES on the
+    /// create call; the second is that the refusal it provokes reaches the caller as <c>400</c> rather than
+    /// as a server fault.
+    /// <para>
+    /// THE UPSTREAM REFUSAL IS SCRIPTED, DELIBERATELY. C-05's guard - a size at or below 1000 yields
+    /// <c>E_INVALID_ARGUMENT</c> [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L410</c>]
+    /// - belongs to Persistence, and this service is asserted NOT to reproduce it (see
+    /// <c>DataWindowServiceContractTests.EveryStatedChunkSizeTravelsSoTheGuardThatOwnsItAdjudicatesIt</c>).
+    /// Scripting the outcome is therefore the faithful shape: what is under test here is that the value
+    /// travels and that the answer is projected as a caller fault, not that this service knows the rule.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ANegativeChunkSizeReachesTheUpstreamGuardAndIsRefusedAsABadRequest()
+    {
+        host.PersistenceEdge.Reset();
+        host.PersistenceEdge.ScriptQuery(rowCount: 2L);
+        host.PersistenceEdge.CreateQueryTaskCode = RetCode.E_INVALID_ARGUMENT;
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync(
+            new Uri(RetrieveRoute, UriKind.Relative),
+            new { datawindowHandle = Handle, chunkSize = -5 },
+            TestContext.Current.CancellationToken);
+
+        // THE HALF THAT WAS THE DEFECT: the stated size reached the create call rather than being dropped.
+        Assert.True(host.PersistenceEdge.LastCreateQueryTaskRequest?.Spec.HasChunkSize);
+        Assert.Equal(-5L, host.PersistenceEdge.LastCreateQueryTaskRequest?.Spec.ChunkSize);
+
+        // AND THE HALF THAT MAKES IT USEFUL: a caller-supplied value the upstream rejects is a 400.
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        // No rows were asked for, and nothing is still held.
+        Assert.Equal(0, host.PersistenceEdge.QueryCalls);
+        Assert.Equal(1, host.PersistenceEdge.EndSessionCalls);
+        Assert.True(host.PersistenceEdge.NothingIsStillHeld);
+    }
+
+    /// <summary>
     /// A create that succeeds without a handle is refused here rather than sent on as a blank one.
     /// </summary>
     /// <remarks>

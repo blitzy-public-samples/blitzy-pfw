@@ -98,6 +98,18 @@ internal sealed class RecordingTransaction : IUpdateTransaction
     /// <inheritdoc/>
     public bool IsFailed() => SqlCode < 0L;
 
+    /// <summary>How many times the classification cleared this transaction's state.</summary>
+    /// <remarks>
+    /// COUNTED RATHER THAN APPLIED. A test sets the three SQL values to stage a specific arm, so a clear
+    /// that actually reset them would erase the very staging - the observable a case needs is THAT the
+    /// classification cleared, and when relative to the update, which the counter and the recorded hook
+    /// order together give.
+    /// </remarks>
+    internal int ClearStateCalls { get; private set; }
+
+    /// <inheritdoc/>
+    public void ClearState() => ClearStateCalls++;
+
     /// <inheritdoc/>
     public long OnBeforeUpdate()
     {
@@ -863,9 +875,13 @@ public sealed class ConflictDetectorTests
     [Fact]
     public void TheElseArmRaisesNothingAndCarriesTheTransactionsCodeAndText()
     {
+        // ⚠ THE CODE CHOSEN HERE MATTERS. This row used to send SQLITE_CONSTRAINT_PRIMARYKEY (1555),
+        // which is now RECLASSIFIED as a caller payload fault - see the constraint rows below - so the
+        // else arm is exercised with a genuine SERVER-SIDE failure instead. SQLITE_IOERR is exactly that:
+        // nothing a corrected payload could avoid.
         _target.UpdateResult = DataWindowBufferStore.DataStoreFailure;
-        _transaction.SqlDbCode = 1555L;
-        _transaction.SqlErrText = "UNIQUE constraint failed: COMPANY.id";
+        _transaction.SqlDbCode = RetCode.SQLITE_IOERR;
+        _transaction.SqlErrText = "disk I/O error";
 
         UpdateOutcome outcome = _detector.Classify(Attempt());
 
@@ -878,11 +894,97 @@ public sealed class ConflictDetectorTests
         Assert.Equal(string.Empty, outcome.ErrorText);
 
         DbErrorData payload = RequiredValue(outcome.DbError);
-        Assert.Equal(1555L, payload.SqlDbCode);
-        Assert.Equal("UNIQUE constraint failed: COMPANY.id", payload.SqlErrText);
+        Assert.Equal(RetCode.SQLITE_IOERR, payload.SqlDbCode);
+        Assert.Equal("disk I/O error", payload.SqlErrText);
         Assert.Equal(DwBuffer.Primary, payload.Buffer);
         Assert.Equal(0L, payload.Row);
         Assert.True(outcome.UpdateInvoked);
+    }
+
+    /// <summary>
+    /// A constraint the CALLER's payload controls is classified as a payload fault, not a database error.
+    /// </summary>
+    /// <param name="sqlDbCode">The driver's own result code.</param>
+    /// <param name="providerText">The message the provider reported.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE FINDING.</b> A row omitting a <c>NOT NULL</c> column reached the caller as
+    /// <c>E_DB_ERROR</c>, which Gateway correctly publishes as HTTP 502 - so a caller who forgot a
+    /// required field was told the DATABASE had failed and that the fault lay behind the gateway. The
+    /// DataWindow definition declares no required flag on any column, so this refusal is the ONLY place
+    /// in the system that knows the column is required, which is why the classification has to happen
+    /// here rather than in a pre-check further out.
+    /// </para>
+    /// <para>
+    /// THE DRIVER PAYLOAD STILL TRAVELS, because it is what names the offending column. That is asserted
+    /// too: an outcome carrying the right code and no payload would leave a caller with a 400 and no way
+    /// to tell WHICH column was rejected, which is half the defect unfixed.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_NOTNULL, "NOT NULL constraint failed: COMPANY.NAME")]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_UNIQUE, "UNIQUE constraint failed: COMPANY.id")]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_PRIMARYKEY, "UNIQUE constraint failed: COMPANY.id")]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_FOREIGNKEY, "FOREIGN KEY constraint failed")]
+    [InlineData(RetCode.SQLITE_MISMATCH, "datatype mismatch")]
+    public void ACallerControlledConstraintRefusalIsAPayloadFaultAndNotADatabaseError(
+        long sqlDbCode,
+        string providerText)
+    {
+        _target.UpdateResult = DataWindowBufferStore.DataStoreFailure;
+        _transaction.SqlDbCode = sqlDbCode;
+        _transaction.SqlErrText = providerText;
+
+        UpdateOutcome outcome = _detector.Classify(Attempt());
+
+        Assert.Equal(UpdateOutcomeKind.ConstraintViolation, outcome.Kind);
+        Assert.Equal(RetCode.E_INVALID_DATA, outcome.Code);
+
+        // The oracle raises nothing on this arm either, and the epilogue decides [:L397].
+        Assert.Empty(_sink.Raises);
+        Assert.False(outcome.ErrorReported);
+        Assert.Equal(string.Empty, outcome.ErrorText);
+
+        // THE IDENTITY OF THE FAILING COLUMN TRAVELS. Without the payload a caller gets a 400 that does
+        // not say which column, which is the other half of the reported defect.
+        DbErrorData payload = RequiredValue(outcome.DbError);
+        Assert.Equal(sqlDbCode, payload.SqlDbCode);
+        Assert.Equal(providerText, payload.SqlErrText);
+        Assert.True(outcome.UpdateInvoked);
+    }
+
+    /// <summary>
+    /// A constraint the caller CANNOT correct stays a database error.
+    /// </summary>
+    /// <param name="sqlDbCode">The driver's own result code.</param>
+    /// <remarks>
+    /// <b>THE CONTROL THAT KEEPS THE RECLASSIFICATION HONEST.</b> A check constraint, a trigger, a commit
+    /// hook, a function or a virtual-table refusal is the SCHEMA's own logic failing - a caller cannot
+    /// read the predicate and cannot know what would satisfy it - so blaming them with a 400 would invite
+    /// a retry that can never converge. The BARE constraint code is here for a different reason: a
+    /// provider that reports only the base code has not said WHICH constraint failed, so treating it as a
+    /// caller fault would be a guess (AAP 0.1.5).
+    /// </remarks>
+    [Theory]
+    [InlineData(RetCode.SQLITE_CONSTRAINT)]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_CHECK)]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_TRIGGER)]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_COMMITHOOK)]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_FUNCTION)]
+    [InlineData(RetCode.SQLITE_CONSTRAINT_VTAB)]
+    [InlineData(RetCode.SQLITE_IOERR)]
+    [InlineData(RetCode.SQLITE_BUSY)]
+    [InlineData(RetCode.SQLITE_READONLY)]
+    public void AConstraintTheCallerCannotCorrectStaysADatabaseError(long sqlDbCode)
+    {
+        _target.UpdateResult = DataWindowBufferStore.DataStoreFailure;
+        _transaction.SqlDbCode = sqlDbCode;
+        _transaction.SqlErrText = "a server-side refusal";
+
+        UpdateOutcome outcome = _detector.Classify(Attempt());
+
+        Assert.Equal(UpdateOutcomeKind.DatabaseError, outcome.Kind);
+        Assert.Equal(RetCode.E_DB_ERROR, outcome.Code);
     }
 
     /// <summary>
@@ -1089,6 +1191,97 @@ public sealed class ConflictDetectorTests
     [Fact]
     public void MismatchPredicateDeclinesAbsentEvidence() =>
         Assert.False(ConflictDetector.IsConcurrencyMismatch(null));
+
+    /// <summary>
+    /// A ROW THE PAYLOAD FLAGGED MODIFIED WITHOUT SUPPLYING AN UPDATABLE COLUMN VALUE IS THE CALLER'S
+    /// FAULT, AND IT IS ANSWERED BEFORE THE CONFLICT TEST.
+    /// </summary>
+    [Fact]
+    public void APayloadWithNoAssignableValuesIsAnInvalidDataRefusalRatherThanAConflict()
+    {
+        // Nothing ran for such a row, so it can neither have been overwritten nor have lost a race.
+        // Classifying it as a concurrency mismatch told the caller another writer had changed a row that
+        // nothing had touched, and no amount of re-reading and rebasing could ever make the same payload
+        // apply.
+        UpdateOutcome outcome = _detector.Classify(Attempt(evidence: new ConcurrencyEvidence
+        {
+            RowsExpected = 0L,
+            RowsMatched = 0L,
+            RowsWithoutAssignableValues = 1L,
+        }));
+
+        Assert.Equal(UpdateOutcomeKind.InvalidUpdateData, outcome.Kind);
+        Assert.Equal(RetCode.E_INVALID_DATA, outcome.Code);
+
+        // NO CONFLICT PAYLOAD AND NO DATABASE PAYLOAD: there is no contended row to describe and no
+        // statement ever reached the storage engine.
+        Assert.Null(outcome.Conflict);
+        Assert.Null(outcome.DbError);
+
+        // The general channel IS raised, because the condition is invisible in the row counts - an
+        // operator with no record could not tell this refusal from an empty changeset. And ONLY the
+        // general channel: there is no driver payload to put on the database one.
+        Assert.True(outcome.ErrorReported);
+        RecordedRaise raise = Assert.Single(_sink.Raises);
+        Assert.Equal("OnError", raise.Channel);
+        Assert.Equal(RetCode.E_INVALID_DATA, raise.Code);
+        Assert.Equal(outcome.ErrorText, raise.ErrorText);
+
+        // THE DIAGNOSTIC NAMES THE RULE AND THE COUNT AND NOTHING ELSE (C-F).
+        Assert.Contains("no updatable column value", raise.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("1 row(s)", raise.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("SELECT", raise.ErrorText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("UPDATE ", raise.ErrorText, StringComparison.OrdinalIgnoreCase);
+
+        // And the epilogue rolls back, because a payload carrying one contradictory row may carry rows
+        // that did apply.
+        Assert.False(outcome.IsSucceeded);
+        Assert.True(outcome.RequiresRollback);
+    }
+
+    /// <summary>
+    /// The payload refusal wins over a shortfall measured in the same attempt.
+    /// </summary>
+    [Fact]
+    public void APayloadRefusalIsTestedAheadOfAConcurrencyShortfall()
+    {
+        // A payload may carry one contradictory row AND one genuinely contended row. The contradiction is
+        // the caller's own and is reported first, because a 409 would send the caller to re-read and
+        // resend a payload that can never apply.
+        UpdateOutcome outcome = _detector.Classify(Attempt(evidence: new ConcurrencyEvidence
+        {
+            RowsExpected = 1L,
+            RowsMatched = 0L,
+            RowsWithoutAssignableValues = 1L,
+            Rows = [BuildFixtureConflictRow()],
+        }));
+
+        Assert.Equal(UpdateOutcomeKind.InvalidUpdateData, outcome.Kind);
+        Assert.Null(outcome.Conflict);
+    }
+
+    /// <summary>
+    /// The measurement's own predicate is unchanged: a payload refusal is not a mismatch.
+    /// </summary>
+    [Fact]
+    public void TheMismatchPredicateIsUnaffectedByThePayloadRefusalCount()
+    {
+        // The two facts are independent and the predicate keeps answering the question it always answered.
+        Assert.False(ConflictDetector.IsConcurrencyMismatch(new ConcurrencyEvidence
+        {
+            RowsExpected = 0L,
+            RowsMatched = 0L,
+            RowsWithoutAssignableValues = 3L,
+        }));
+
+        Assert.True(ConflictDetector.IsConcurrencyMismatch(new ConcurrencyEvidence
+        {
+            RowsExpected = 1L,
+            RowsMatched = 0L,
+            RowsWithoutAssignableValues = 1L,
+            Rows = [BuildFixtureConflictRow()],
+        }));
+    }
 
     #endregion
 

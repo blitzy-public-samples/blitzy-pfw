@@ -34,6 +34,7 @@
 //        in-memory host, so no port is bound and no sibling service is required.
 // ==================================================================================================
 
+using System.Globalization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -313,27 +314,292 @@ public sealed class InvariantTokenValidationTests
     }
 
     /// <summary>
+    /// The only <see cref="TimeSpan"/> members this options type may carry, and neither is a tolerance.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// AN ALLOW-LIST RATHER THAN A RELAXED HEURISTIC, so the scan below keeps its teeth. Both entries
+    /// govern KEY-SET RETRIEVAL - how soon a refresh a rejected token asked for may happen, and how often
+    /// the cached set is refreshed anyway - and neither reaches
+    /// <see cref="TokenValidationParameters.ClockSkew"/>. They were added because leaving them unset was a
+    /// rotation decision taken by omission: the token library's defaults are five minutes and TWELVE
+    /// HOURS, so a signing-key rotation at Security left this boundary accepting the retired credential
+    /// and refusing the current one.
+    /// </para>
+    /// <para>
+    /// The sibling row below is what makes the allow-list safe rather than a hole: it boots the deployed
+    /// composition root with BOTH intervals configured to unusual values and asserts the tolerance has not
+    /// moved, so a future member that fed the skew through one of these names would fail there even though
+    /// it passed here.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] PermittedTimeSpanMembers =
+    [
+        nameof(JwtOptions.MetadataRefreshInterval),
+        nameof(JwtOptions.MetadataAutomaticRefreshInterval),
+    ];
+
+    /// <summary>
     /// No configuration key can move the lifetime tolerance.
     /// </summary>
     /// <remarks>
     /// THE ABSENCE IS THE GUARANTEE. A configurable tolerance is lifetime validation switched off under
     /// another name, since nothing would stop a deployment setting it past the token lifetime. The bound
     /// options type is SCANNED rather than one property name checked, so a member arriving under any
-    /// spelling - <c>Skew</c>, <c>Tolerance</c>, or any bare <see cref="TimeSpan"/> - trips this row.
+    /// spelling - <c>Skew</c>, <c>Tolerance</c>, or any bare <see cref="TimeSpan"/> - trips this row unless
+    /// it is one of the two retrieval intervals named in <see cref="PermittedTimeSpanMembers"/>, and a name
+    /// carrying <c>Skew</c> or <c>Tolerance</c> trips it even if it is listed.
     /// </remarks>
     [Fact]
     public void NoConfiguredValueCanMoveTheLifetimeTolerance()
     {
         foreach (System.Reflection.PropertyInfo property in typeof(JwtOptions).GetProperties())
         {
+            bool toleranceShaped =
+                property.Name.Contains("Skew", StringComparison.OrdinalIgnoreCase)
+                || property.Name.Contains("Tolerance", StringComparison.OrdinalIgnoreCase);
+
+            bool permitted =
+                !toleranceShaped
+                && PermittedTimeSpanMembers.Contains(property.Name, StringComparer.Ordinal);
+
             Assert.False(
-                property.PropertyType == typeof(TimeSpan)
-                    || property.PropertyType == typeof(TimeSpan?)
-                    || property.Name.Contains("Skew", StringComparison.OrdinalIgnoreCase)
-                    || property.Name.Contains("Tolerance", StringComparison.OrdinalIgnoreCase),
+                !permitted
+                    && (property.PropertyType == typeof(TimeSpan)
+                        || property.PropertyType == typeof(TimeSpan?)
+                        || toleranceShaped),
                 $"{nameof(JwtOptions)}.{property.Name} looks like a configurable lifetime tolerance. The "
                     + "skew is compiled in at Program.cs precisely so no deployment can widen it past "
                     + "the token lifetime.");
         }
+    }
+
+    /// <summary>
+    /// The two configured retrieval intervals reach the deployed handler, and neither moves the tolerance.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>SAYING NOTHING HERE WAS A ROTATION DECISION TAKEN BY OMISSION, AND THE TWO DEFAULTS FAILED IN
+    /// OPPOSITE DIRECTIONS AT ONCE.</b> <c>RefreshInterval</c> defaults to five minutes, so a token minted
+    /// AFTER Security rotates its signing key is refused <c>401</c> (IDX10503, no key matched the
+    /// identifier) for up to that long even though the handler asks to refresh the instant it sees an
+    /// unknown identifier. <c>AutomaticRefreshInterval</c> defaults to TWELVE HOURS and is the only thing
+    /// that ever drops a RETIRED key, because a successful validation provokes no refresh - so the
+    /// superseded credential stayed acceptable here for half a day. Rotation therefore inverted this
+    /// boundary's verdicts: the old token worked and the new one did not.
+    /// </para>
+    /// <para>
+    /// ASSERTED ON THE RESOLVED HANDLER OPTIONS OF A HOST BUILT FROM CONFIGURATION, and with values that
+    /// are neither the library's defaults nor this service's own, so the row cannot pass on a host whose
+    /// composition root reads nothing. The tolerance is asserted UNMOVED in the same breath, which is what
+    /// makes the allow-list above safe: a member that fed the skew under one of those names would fail
+    /// here.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheConfiguredRetrievalIntervalsReachTheHandlerAndLeaveTheToleranceAloneAsync()
+    {
+        TimeSpan requested = TimeSpan.FromSeconds(7);
+        TimeSpan background = TimeSpan.FromMinutes(11);
+
+        await using CompositionHost host = CompositionHost.Create(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Jwt:MetadataRefreshInterval"] = requested.ToString(),
+            ["Jwt:MetadataAutomaticRefreshInterval"] = background.ToString(),
+        });
+
+        using HttpClient client = host.CreateClient();
+
+        JwtBearerOptions bearer = host.Services
+            .GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(JwtBearerDefaults.AuthenticationScheme);
+
+        Assert.Equal(requested, bearer.RefreshInterval);
+        Assert.Equal(background, bearer.AutomaticRefreshInterval);
+
+        // Neither is the value the library would have used had the composition root said nothing.
+        Assert.NotEqual(BaseConfigurationManager.DefaultRefreshInterval, bearer.RefreshInterval);
+        Assert.NotEqual(
+            BaseConfigurationManager.DefaultAutomaticRefreshInterval,
+            bearer.AutomaticRefreshInterval);
+
+        // And the tolerance the rest of this file defends has not moved.
+        Assert.Equal(LifetimeTolerance, bearer.TokenValidationParameters.ClockSkew);
+    }
+
+    /// <summary>
+    /// The SHIPPED defaults are the documented ones, and both are tighter than the library's.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// The row above proves configuration is READ; this one proves what an operator gets when they
+    /// configure nothing, which is the case every deployment starts from. Both bounds are asserted against
+    /// the LIBRARY's published values rather than against literals, so a runtime that changed either would
+    /// report the change here instead of leaving a stale claim standing.
+    /// </remarks>
+    [Fact]
+    public async Task TheShippedRetrievalIntervalsAreTighterThanTheLibraryDefaultsAsync()
+    {
+        await using CompositionHost host = CompositionHost.Create();
+
+        using HttpClient client = host.CreateClient();
+
+        JwtBearerOptions bearer = host.Services
+            .GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(JwtBearerDefaults.AuthenticationScheme);
+
+        Assert.Equal(JwtOptions.DefaultMetadataRefreshInterval, bearer.RefreshInterval);
+        Assert.Equal(JwtOptions.DefaultMetadataAutomaticRefreshInterval, bearer.AutomaticRefreshInterval);
+
+        Assert.True(
+            bearer.RefreshInterval < BaseConfigurationManager.DefaultRefreshInterval,
+            "The shipped requested-refresh floor is not tighter than the library default it displaces.");
+
+        Assert.True(
+            bearer.AutomaticRefreshInterval < BaseConfigurationManager.DefaultAutomaticRefreshInterval,
+            "The shipped background interval is not tighter than the library default it displaces.");
+
+        // Both are at or above the floors the library would throw on, which is what makes a host built
+        // from the shipped settings startable at all.
+        Assert.True(bearer.RefreshInterval >= BaseConfigurationManager.MinimumRefreshInterval);
+        Assert.True(
+            bearer.AutomaticRefreshInterval >= BaseConfigurationManager.MinimumAutomaticRefreshInterval);
+    }
+
+    /// <summary>
+    /// A retrieval interval below the library's own floor is a refusal to start, naming the key.
+    /// </summary>
+    /// <param name="requested">The requested-refresh floor to configure.</param>
+    /// <param name="background">The background interval to configure.</param>
+    /// <param name="expectedMember">The member the failure must name.</param>
+    /// <remarks>
+    /// WITHOUT THIS THE FAULT SURFACES ON THE FIRST AUTHENTICATED REQUEST. The configuration manager
+    /// throws <see cref="ArgumentOutOfRangeException"/> - IDX10107 and IDX10108 - while the handler builds
+    /// it, which happens on the first request rather than at startup, so a host would report healthy and
+    /// then fail every authenticated call with a message naming neither the setting nor the file. The third
+    /// row is a relationship rather than a range: a floor LONGER than the background interval makes a
+    /// rotation converge more slowly for a caller presenting a new token than for one presenting nothing.
+    /// </remarks>
+    [Theory]
+    [InlineData("00:00:00.500", "00:05:00", nameof(JwtOptions.MetadataRefreshInterval))]
+    [InlineData("00:00:05", "00:01:00", nameof(JwtOptions.MetadataAutomaticRefreshInterval))]
+    [InlineData("00:10:00", "00:05:00", nameof(JwtOptions.MetadataRefreshInterval))]
+    public void ARetrievalIntervalBelowTheLibraryFloorIsARefusalToStart(
+        string requested,
+        string background,
+        string expectedMember)
+    {
+        PersistenceOptions options = Bootable();
+        options.Jwt.MetadataRefreshInterval = TimeSpan.Parse(requested, CultureInfo.InvariantCulture);
+        options.Jwt.MetadataAutomaticRefreshInterval =
+            TimeSpan.Parse(background, CultureInfo.InvariantCulture);
+
+        ValidateOptionsResult result = new PersistenceOptionsValidator().Validate(name: null, options);
+
+        Assert.True(result.Failed);
+        Assert.NotNull(result.Failures);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains(
+                string.Concat("Jwt:", expectedMember),
+                StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// THE POSITIVE ARM: the shipped pair raises no validation failure.
+    /// </summary>
+    /// <remarks>
+    /// Without it the three rows above would pass against a validator that refused every pair, and the
+    /// shipped settings file would be unstartable while the suite stayed green.
+    /// </remarks>
+    [Fact]
+    public void TheShippedRetrievalIntervalPairRaisesNoFailure()
+    {
+        ValidateOptionsResult result = new PersistenceOptionsValidator().Validate(name: null, Bootable());
+
+        Assert.True(result.Succeeded);
+    }
+
+    /// <summary>
+    /// The last-known-good fallback is bounded to the background interval, not left at an hour.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// MEASURED AT A SIBLING BOUNDARY, NOT REASONED: with both intervals configured, a token signed by a
+    /// RETIRED key was still accepted nine and a half minutes after the rotation, because
+    /// <c>BaseConfigurationManager</c> keeps a cache of recently-good configurations that the handler
+    /// retries against and its entries live for <c>LastKnownGoodLifetime</c> - one hour by default. It is
+    /// BOUNDED rather than switched off: the fallback keeps this boundary validating through a transient
+    /// inability to FETCH the key set, so both halves are asserted.
+    /// </remarks>
+    [Fact]
+    public async Task TheLastKnownGoodFallbackIsBoundedToTheBackgroundIntervalAsync()
+    {
+        TimeSpan background = TimeSpan.FromMinutes(23);
+
+        await using CompositionHost host = CompositionHost.Create(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Jwt:MetadataAutomaticRefreshInterval"] = background.ToString(),
+        });
+
+        using HttpClient client = host.CreateClient();
+
+        JwtBearerOptions bearer = host.Services
+            .GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(JwtBearerDefaults.AuthenticationScheme);
+
+        BaseConfigurationManager manager =
+            Assert.IsAssignableFrom<BaseConfigurationManager>(bearer.ConfigurationManager);
+
+        Assert.Equal(background, manager.LastKnownGoodLifetime);
+        Assert.NotEqual(
+            BaseConfigurationManager.DefaultLastKnownGoodConfigurationLifetime,
+            manager.LastKnownGoodLifetime);
+
+        Assert.True(manager.UseLastKnownGoodConfiguration);
+    }
+
+    /// <summary>
+    /// The SHIPPED host bounds the fallback to its own five-minute background interval.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task TheShippedHostBoundsTheFallbackToItsBackgroundIntervalAsync()
+    {
+        await using CompositionHost host = CompositionHost.Create();
+
+        using HttpClient client = host.CreateClient();
+
+        JwtBearerOptions bearer = host.Services
+            .GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(JwtBearerDefaults.AuthenticationScheme);
+
+        BaseConfigurationManager manager =
+            Assert.IsAssignableFrom<BaseConfigurationManager>(bearer.ConfigurationManager);
+
+        Assert.Equal(
+            JwtOptions.DefaultMetadataAutomaticRefreshInterval,
+            manager.LastKnownGoodLifetime);
+    }
+
+    /// <summary>Builds an otherwise-startable options graph.</summary>
+    /// <returns>A graph whose only fault is whatever the caller introduces.</returns>
+    /// <remarks>
+    /// The two required strings and one roster entry are supplied because an empty roster and a blank
+    /// authority are refusals of their own, and a row about an interval must not pass on somebody else's
+    /// failure. Every other member keeps its shipped default, which is what makes the positive row above an
+    /// assertion about the shipped configuration.
+    /// </remarks>
+    private static PersistenceOptions Bootable()
+    {
+        PersistenceOptions options = new();
+        options.Jwt.Authority = "https://security.invalid";
+        options.Jwt.Audience = "powerframework-persistence";
+        options.Jwt.PermittedCallers.Add("powerframework-dataservices");
+
+        return options;
     }
 }

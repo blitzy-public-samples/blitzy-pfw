@@ -547,6 +547,36 @@ An implementation that declares consistent types on both sides would diverge fro
 first value that exercises the difference. Reproduce; do not reconcile.
 [`ARCHITECTURE.md`](ARCHITECTURE.md) records the same mismatches from the storage side.
 
+### 3.6 Two storage-engine behaviours, measured through the published contract
+
+Both were observed at runtime against the primary fixture, through `POST /v1/datawindow/update` on the
+composition root and read back through `POST /v1/datawindow/retrieve`. Neither is a defect to repair:
+each is the behaviour of the storage engine sitting **below** every layer this refactor owns, and
+"correcting" either would mean adding a validation the legacy does not perform, which constraint C-B
+forbids exactly as firmly as it forbids removing one.
+
+| # | What was sent | What the engine did | Standing |
+| ---: | --- | --- | --- |
+| 1 | An `ADDRESS` value **200 characters** long, against `ADDRESS CHAR(50)` | Accepted and stored **in full at length 200** — unpadded, untruncated, no error, no warning | **Confirms §3.5 row 2 by measurement.** `CHAR(50)` sets TEXT affinity and nothing else; the width lives only in the DataWindow. Preserved defect, AAP §0.6.4 — do not enforce 50, and do not enforce 200 in storage either |
+| 2 | A `NAME` value containing an **embedded NUL** (`U+0000`) three characters in — `Nul\0Tail` | Stored and returned **in full**. The stored bytes are `4E756C005461696C`, `length(CAST(NAME AS BLOB))` is 8, and the published retrieval answers all eight characters with the NUL intact. But `length(NAME)` — the SQL function over the TEXT value — answers **3** | **The value round-trips byte-exact; only the SQL length function stops at the NUL.** So nothing is lost, and nothing is to be fixed, but any logic *derived* from `length()` — a filter, a computed column, a validation expressed in SQL — sees a shorter string than the one stored. Measured on both sides: the engine the service runs on and the engine the tooling reads with agree |
+
+Row 2 deserves two further notes, because the first reading of it was wrong and the second invites a
+"safety" fix.
+
+**What it is not.** It is tempting to read a `length()` of 3 as truncation, and that reading was made
+before the bytes were checked. It is wrong: `length()` on a TEXT value counts characters up to the first
+NUL, while the value itself is stored and returned whole. The distinction matters for parity in opposite
+directions — a port that "corrected" the storage would break a byte-exact round trip that currently
+holds, and a port that assumed `length()` reported the stored size would compute a different answer from
+the oracle wherever a NUL appears.
+
+**What it is not to be repaired into, either.** The ported `dwnvlstring` validator polices what the
+legacy's own validator polices and nothing more, and the legacy has no NUL check anywhere in the write
+path. Adding one would refuse a value the oracle accepts — a divergence dressed as hardening. The honest
+treatment is the one taken: record it, so that a reader meeting a `length()` that disagrees with the
+string they sent finds the reason here rather than filing it as data loss in the port.
+
+
 ---
 
 ## 4. Paired recordings and the shared-volume capture rule

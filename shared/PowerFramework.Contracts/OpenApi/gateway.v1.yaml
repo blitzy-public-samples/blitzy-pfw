@@ -671,19 +671,80 @@ paths:
         identifiable as the last rather than inferred from the collection ending.
 
         Chunk size is the caller's, subject to the legacy guard the gRPC contract publishes; this
-        projection changes neither the default nor the guard.
+        projection changes neither the default nor the guard. A stated size the guard refuses arrives
+        here as **400** with `retCode` `-3`, and `0` is the one value read as "the server chooses" -
+        because a protobuf scalar cannot tell an absent field from a zero one, so `0` is the only size a
+        caller cannot have stated deliberately. Every other value, negative included, is adjudicated by
+        the guard rather than discarded.
 
-        ## Buffers, and why a row carries two sets of values
+        ## Buffers, and what a retrieved row actually carries
 
-        Each row names the buffer it came from - `Primary!`, `Delete!` or `Filter!` - and carries both
-        its **current** and its **original** column values. That is not redundancy: the one updatable
-        DataWindow in the legacy estate declares `updatewhere=1` with all six columns marked, so the
-        optimistic-concurrency check the update half performs compares **original** values. A retrieval
-        that discarded them would leave a caller unable to construct an update at all.
+        Each row names the buffer it came from - `Primary!`, `Delete!` or `Filter!`.
+
+        **A FRESHLY RETRIEVED ROW CARRIES NO `originalValues`, AND THAT IS CORRECT RATHER THAN A GAP.**
+        A retrieval baselines every row as it lands, so each column's original value *is* its current
+        value, and the carrier serialization omits an original that equals its current. This document
+        used to claim that a retrieved row carries both sets and that "a retrieval that discarded them
+        would leave a caller unable to construct an update at all" - which disagreed with
+        `common.v1.ColumnValue`, disagreed with what the route returns, and is the wrong way round: the
+        originals a caller needs are the values it just read, so it **supplies the retrieved current
+        values as `originalValues`** when it submits an update. That is what makes the
+        `updatewhere=1` concurrency check meaningful - the one updatable DataWindow in the legacy estate
+        declares it with all six columns marked, so the generated `WHERE` clause carries the key column
+        plus the original value of every marked column. See the update operation for the payload shape
+        in full.
+
+        **Row status against column status on a retrieved row.** The row carries
+        `ITEM_STATUS_DATA_MODIFIED` while every column carries `ITEM_STATUS_NOT_MODIFIED`. That is the
+        legacy's own chunk stamping [`n_cst_thread_task_sqlquery.sru:L196-L198`], preserved rather than
+        tidied. A caller replaying a retrieved row as an update must therefore either DROP the
+        per-column statuses - in which case the row's own status governs every column it supplies - or
+        stamp the column it edited. Doing neither submits a row that says it changed while every column
+        says it did not, which the update operation refuses with `400` and a diagnostic naming the rule.
 
         **`Filter!` row order is inverted relative to the source.** That is the legacy's own behaviour,
         preserved and stated here rather than corrected, because a consumer re-sorting it would produce
         wrong data that a row-count assertion would not catch.
+
+        ## A 200 can still be followed by a failure, and how to detect it
+
+        This is the one outcome a status code cannot express, so it is stated here rather than left to be
+        discovered. The status line and the opening bracket are written **before** the second chunk is
+        read, so a failure that happens after the first chunk has been forwarded arrives when `200` has
+        already been sent and cannot be replaced by a problem document. A consumer must therefore treat a
+        `200` on this operation as "the retrieval started", not as "the retrieval completed".
+
+        Three signals mark it, and a consumer needs only the one that suits it:
+
+        * **The transfer terminates abnormally.** The connection is reset - an HTTP/1.1 connection close
+          mid-chunk, or an HTTP/2 `RST_STREAM` - so every HTTP client surfaces it as a failed read
+          rather than as a short body. This is the signal that needs no parsing at all.
+        * **The JSON array is left unterminated**, with no closing `]`. A complete response always ends
+          with one, so a document that does not is incomplete. This is the same signal the element-bound
+          refusal uses, and it is deliberately identical: both mean "do not treat this as the whole
+          answer".
+        * **A terminal element describes the failure** - on a best-effort basis, which is stated plainly
+          because it is measured rather than assumed. The last element of the truncated array is not a
+          chunk but the **problem document this operation would have returned had the failure happened
+          before the first chunk** - the same `status`, the same `retCode`, the same `detail`, the same
+          `traceId` - plus two members a unary problem does not carry: `streamTerminated: true`, which
+          identifies the element as this marker rather than a record, and `elementsDelivered`, the number
+          of chunks that were forwarded before the failure. Because the array is not closed, this element
+          is not reachable by parsing the document as a whole; it is there for a consumer that reads the
+          bytes it received, and for the operator record it shares its `traceId` with.
+
+          **It can be lost.** The reset that terminates the transfer discards anything still queued for a
+          consumer that has fallen behind, so a slow reader may receive a body cut mid-chunk with no
+          terminal element at all. A consumer must therefore treat the abnormal termination and the
+          missing `]` as the signals it can rely on, and this element as the explanation it gets when it
+          is keeping up. The gateway's own log record is written either way and carries the same
+          `traceId`, so nothing diagnostic is lost to the operator.
+
+        Chunks delivered before the failure are **valid**, and `cumulativeRowCount` on the last of them
+        says how much of the result they represent. Nothing partial is applied anywhere by a retrieval,
+        so the operation is safe to reissue - but note that it is not classified as replay-safe for the
+        transport's automatic retry, because a retrieval acquires an upstream query task; a caller that
+        wants the rest of the result reissues it deliberately.
 
         ## What this operation is not
 
@@ -699,8 +760,10 @@ paths:
       responses:
         '200':
           description: >-
-            The retrieval succeeded. The body is the ordered sequence of chunks the gRPC server stream
-            would have delivered, with the chunking contract intact.
+            The retrieval STARTED and, on the ordinary path, completed: the body is the ordered sequence
+            of chunks the gRPC server stream would have delivered, with the chunking contract intact. A
+            failure after the first chunk cannot change this status - see "A 200 can still be followed by
+            a failure" above for the three signals that mark one.
           content:
             application/json:
               schema:
@@ -821,6 +884,50 @@ paths:
       description: |-
         Applies the buffered insert, update and delete set through C-03, which in turn reaches C-06 on
         Persistence.
+
+        ## The payload shape an update must have, stated exactly
+
+        Per row: the buffer tag, the one-based ordinal, the ROW's own `itemStatus`, the current value of
+        every column being submitted, and - for an update of an existing row - `originalValues` carrying
+        what the caller believes is currently stored. The originals are the values a preceding retrieval
+        returned as its **current** values; a retrieved row carries no `originalValues` of its own,
+        because a retrieval baselines every row it lands.
+
+        **Per-column `itemStatus` is optional, and what its ABSENCE means on this path is defined rather
+        than left to a reader.** When a row is stamped `ITEM_STATUS_DATA_MODIFIED` or
+        `ITEM_STATUS_NEW_MODIFIED` and **not one** of its columns carries a status, the row's own status
+        governs every column **whose submitted value differs from its `originalValues` entry**, and a
+        column whose value did not move stays unmodified. That is the legacy row-status convention - a
+        row's status is read with column index 0 [`n_cst_thread_task_sqlupdate.sru:L160`] and a row is
+        modified precisely because a column of it was - read together with the fact that the row's
+        *other* columns are **not** modified, since the runtime flips a column's status only where a
+        value actually changed. So the generated `SET` list names the columns that changed rather than
+        the whole updatable set, and the **key** column of an ordinary update is not stamped modified and
+        does not send the row down the `updatekeyinplace=no` delete-plus-insert path.
+
+        The value test applies only where an original was actually stated. A column with no
+        `originalValues` entry has no baseline to be measured against, so the row's statement stands for
+        it - which is the whole of an insert-shaped row, whose status is `ITEM_STATUS_NEW_MODIFIED` and
+        which carries no `originalValues` at all because it has no prior state.
+
+        When **any** column carries a status, every column is taken at its word instead and the
+        unstamped ones stay unmodified, which is what makes a partial update exact: a payload that marks
+        one column writes exactly that column and cannot clobber a concurrent writer's value for the
+        others. Presence decides which rule applies, so an explicit `ITEM_STATUS_DATA_MODIFIED` is
+        honoured even on a column whose value did not move.
+
+        **Values are compared as values, not as JSON arms.** One number has several faithful spellings
+        in this payload - a retrieval answers the legacy `number` columns through `doubleValue`, and a
+        caller re-sending that number as `int64Value` is equally correct - so `28` sent either way is the
+        same value for the test above, exactly as the storage engine compares them. No conversion is
+        invented across families: a `dateValue` is not compared against the `stringValue` that would
+        render it.
+
+        A row that says it changed while every column of it says it did not - or that carries no
+        updatable column at all - cannot express an update. It is refused with **`400`** and
+        `retCode -9` (`E_INVALID_DATA`), naming the rule and the number of offending rows. It is
+        deliberately **not** a `409`: no statement was generated, so nothing was contended, and reporting
+        a concurrency conflict would send a caller to re-read and re-send a payload that can never apply.
 
         ## The 409 is the substantive part of this operation
 
@@ -1434,6 +1541,31 @@ paths:
         than discovered during integration, because the alternative - approximating a pointer
         dereference across a network - would produce results wrong in a way no test would obviously
         catch.
+
+        ## Call order, and why getting it wrong answers 502 rather than 4xx
+
+        1. `POST /v1/datawindow/expression/sessions` - this operation. Mints the `<sessionId>/<ordinal>`
+           handle every other route under `/v1/datawindow/expression/` takes.
+        2. `POST /v1/datawindow/expression/enabled` with `enabled: true`. **The engine is created inert
+           and does not auto-enable.**
+        3. `POST /v1/datawindow/expression/rows/load`. **A session's DataWindow is created empty**, and
+           every calculation operation evaluates over rows.
+        4. Bind what is to be evaluated: add an expression, add a variable, and so on.
+        5. Calculate: `/calc`, `/calc-all`, `/calc-empty`, `/calc-item`.
+
+        Steps 2 and 3 are the two that are easy to miss, and each fails in its own way:
+
+        * **Skipping step 2** answers `retCode` `FAILED`, projected as **502**. That reads like an
+          upstream outage and is not one - the engine is merely inert, which is entirely
+          caller-correctable. The code is nevertheless preserved rather than narrowed, because `FAILED`
+          is the oracle's own answer for this condition at four separate call sites
+          (`n_cst_dwsvc_columnexp.sru:L1158`, `:L1201`, `:L1976`, `:L2087`) and section 12.1 of
+          `docs/CONTRACTS.md` freezes `FAILED` to 502 across the whole surface. Documented rather than
+          special-cased.
+        * **Skipping step 3** does not fail: `/calc-all` and `/calc-empty` answer 200 with `OK` having
+          iterated **zero rows**, and `/calc` answers 400 `E_INVALID_ARGUMENT` because row 1 is out of
+          range on an empty buffer. A caller seeing "OK, no results" has almost certainly missed this
+          step rather than found an empty answer.
       requestBody:
         required: true
         content:
@@ -1480,6 +1612,97 @@ paths:
           $ref: '#/components/responses/ProjectedSuccess'
         '400':
           $ref: '#/components/responses/SessionIdConstraint'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '503':
+          $ref: '#/components/responses/UpstreamRefused'
+        '504':
+          $ref: '#/components/responses/UpstreamTimedOut'
+
+  /v1/datawindow/expression/rows/load:
+    post:
+      operationId: loadExpressionRows
+      x-contract-id: C-04
+      x-grpc-method: dataservices.v1.ColumnExpressionService/LoadRows
+      x-proto-request: dataservices.v1.LoadRowsRequest
+      x-proto-response: dataservices.v1.LoadRowsResponse
+      tags: [ColumnExpression]
+      summary: Load rows into an expression session's DataWindow.
+      description: |-
+        Places rows into the DataWindow a session-scoped handle names, so the calculation operations
+        have something to evaluate against.
+
+        ## Without this, half of C-04 is unreachable
+
+        Every calculation operation on this service evaluates against **rows**, and a session's
+        DataWindow is created **empty**. `POST /v1/datawindow/retrieve` cannot fill one: it addresses
+        a **registered data-object name** and refuses a session-scoped handle. So `calc` answered
+        `E_INVALID_ARGUMENT` for row 1 of every session, `calc-all` and `calc-empty` iterated zero
+        rows, and only the *binding* half of the engine - add / set / get an expression, add / set a
+        variable - could be exercised end to end.
+
+        ## Two handle spaces, deliberately not interchangeable
+
+        * A **registered data-object name**, for example `dw_sqlite`. This is what `/v1/datawindow/retrieve`,
+          `/update`, `/event-stream` and every headless-model route address. It names a transcribed
+          DataWindow definition and resolves to the one shared model set for it.
+        * A **session-scoped handle**, spelled `<sessionId>/<ordinal>` and minted by
+          `POST /v1/datawindow/expression/sessions`. Every route under `/v1/datawindow/expression/`
+          takes this form, including this one. It exists because a session's DataWindow is a private
+          surface: two handles opened over the same definition are two **independent** DataWindows,
+          which is exactly what makes a co-resident foreign variable meaningful.
+
+        Each space refuses the other's form with `E_INVALID_ARGUMENT` rather than silently resolving
+        it, because a silent resolution would land a caller's rows in a surface it did not name.
+
+        ## Append semantics
+
+        Rows are appended to the Primary buffer in request order and the **service assigns the
+        ordinals** - the `buffer` and `row` members of each supplied row are ignored, because
+        honouring a caller-supplied ordinal would let two calls disagree about which row is which and
+        the engine's dirty propagation and calculation cache are keyed on the ordinal. The response
+        carries `firstRow`, `rowsLoaded` and the resulting `rowCount`, which together name the exact
+        range the caller may now calculate over. There is no clear operation: a caller wanting a
+        different row set opens a new session, which is also the unit the foreign-variable scoping
+        rule is written in terms of.
+
+        Every created row carries item status `NewModified`. **Nothing here reaches storage** -
+        Persistence is the only service that does - so a caller wanting stored rows retrieves them by
+        data-object name and hands the answer back here.
+
+        A column reference is resolved exactly as the update path resolves one: an ordinal alone is
+        authoritative, a name alone resolves through the definition, and where both are present they
+        must **agree**. A refusal reports how many rows had already been created, because rows
+        already created are not removed.
+
+        ## One session, one DataWindow
+
+        Two sessions opened over the same data-object name hold **two independent DataWindows**. Rows
+        loaded into one are invisible to the other, its ordinals start again at 1, and closing either
+        releases only its own. That isolation is what makes the co-residency rule above meaningful, and
+        it is the reason a caller wanting a different row set opens a new session rather than looking
+        for a clear operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProtoPayload'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProjectedSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2113,6 +2336,11 @@ paths:
         equivalent messages elsewhere in the DataWindow service layer which do. That inconsistency is
         legacy behaviour, reproduced under C-B rather than harmonized, so a caller should not assume
         an error message honours the requested locale.
+
+        CALL ORDER: this operation needs an ENABLED engine and a LOADED DataWindow. Without
+        `POST /v1/datawindow/expression/enabled` the answer is `FAILED` projected as 502 - inert, not an
+        outage. Without `POST /v1/datawindow/expression/rows/load` there are no rows to evaluate. The
+        full order is documented on `POST /v1/datawindow/expression/sessions`.
       requestBody:
         required: true
         content:
@@ -2154,6 +2382,11 @@ paths:
         Calculates the whole expression set, in either of the two arities the legacy offers. The
         tri-state calculation cache - unknown, yes, no - is what stops an expression being evaluated
         twice within one pass, and the recursion stack is what detects a cycle.
+
+        CALL ORDER: this operation needs an ENABLED engine and a LOADED DataWindow. Without
+        `POST /v1/datawindow/expression/enabled` the answer is `FAILED` projected as 502 - inert, not an
+        outage. Without `POST /v1/datawindow/expression/rows/load` there are no rows to evaluate. The
+        full order is documented on `POST /v1/datawindow/expression/sessions`.
       requestBody:
         required: true
         content:
@@ -2195,6 +2428,11 @@ paths:
         Calculates the subset of expressions flagged empty. Distinct from `calc-all` because the
         legacy tracks emptiness separately from dirtiness: an expression may be clean and empty, and
         that combination is what this operation targets.
+
+        CALL ORDER: this operation needs an ENABLED engine and a LOADED DataWindow. Without
+        `POST /v1/datawindow/expression/enabled` the answer is `FAILED` projected as 502 - inert, not an
+        outage. Without `POST /v1/datawindow/expression/rows/load` there are no rows to evaluate. The
+        full order is documented on `POST /v1/datawindow/expression/sessions`.
       requestBody:
         required: true
         content:
@@ -2237,6 +2475,11 @@ paths:
         `_of_calcitem`, which is **declared public despite carrying the private-convention underscore
         prefix** - an anomaly carried across rather than tidied, because the framework's own callers
         reach it and a rename would break them.
+
+        CALL ORDER: this operation needs an ENABLED engine and a LOADED DataWindow. Without
+        `POST /v1/datawindow/expression/enabled` the answer is `FAILED` projected as 502 - inert, not an
+        outage. Without `POST /v1/datawindow/expression/rows/load` there are no rows to evaluate. The
+        full order is documented on `POST /v1/datawindow/expression/sessions`.
       requestBody:
         required: true
         content:
@@ -4065,13 +4308,16 @@ components:
       type: object
       title: DataWindowRow
       description: |-
-        One retrieved row, mirrored from `dataservices.v1.DataWindowRow`.
+        One row, mirrored from `dataservices.v1.DataWindowRow`. Used in both directions: it is what a
+        retrieval chunk carries and what an update submits.
 
-        It carries **both** its current and its original column values for the reason `ConflictRow`
-        states: the update half's concurrency check compares originals, so a retrieval that discarded
-        them would leave a caller unable to construct an update at all.
+        `originalValues` is **present when a column's original differs from its current value, and
+        absent otherwise**. On a freshly retrieved row it is therefore absent - the retrieval baselines
+        every row, so original and current agree - and on an update it is what the caller supplies for
+        the `updatewhere=1` concurrency predicate to compare against. It is not required in either
+        direction, and an absent entry means "unchanged since the baseline" rather than "unknown".
       additionalProperties: false
-      required: [buffer, row, itemStatus, columns, originalValues]
+      required: [buffer, row, itemStatus, columns]
       properties:
         buffer:
           $ref: '#/components/schemas/DwBuffer'

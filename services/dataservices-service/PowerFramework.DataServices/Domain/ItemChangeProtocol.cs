@@ -773,11 +773,33 @@ internal static class ItemChangeProtocol
         // a port that cleared the stash here would make the pre-set unreachable and would silently
         // convert every handler-driven validation error into a plain one.
         // ------------------------------------------------------------------------------------------
+        // 🔴 THE RESTORE IS IN A `finally`, AND ACROSS THIS BOUNDARY THAT IS A FIDELITY REQUIREMENT RATHER
+        // THAN DEFENSIVENESS. In the oracle :L192-L196 is straight-line PowerScript with no exception
+        // mechanism between the set and the restore, so the restore ALWAYS ran. Here the raise at :L194 is
+        // a network round trip - the handler lives in the client - and it can therefore throw: an
+        // unanswered question past its backstop, a torn-down conversation, a cancelled call. Written as
+        // plain statements, any of those left `_bDoItemChange` stuck TRUE for the remainder of the
+        // session, which silently suppressed `ondwnkillfocus`'s deferred accept-text continuation for
+        // every later event [:L387-L390] - a session that looked alive and had quietly lost a behaviour.
+        // The `finally` restores the SAVED value exactly as :L196 does, so the oracle's own guarantee is
+        // reproduced instead of being conditional on the round trip succeeding.
+        //
+        // THE STASH STAYS INSIDE THE `try`, DELIBERATELY. :L195 records what the handler RETURNED, so
+        // there is nothing to stash when it returned nothing; writing a stash on the failure path would
+        // hand `ondwnitemvalidationerror` a code no handler produced.
         bool bDoItemChange = session.DoItemChange;
         session.DoItemChange = true;
-        long rtCode = events.OnDoItemChange(row, dwo, data);
-        session.ItemChangeRetCode = rtCode;
-        session.DoItemChange = bDoItemChange;
+        long rtCode;
+
+        try
+        {
+            rtCode = events.OnDoItemChange(row, dwo, data);
+            session.ItemChangeRetCode = rtCode;
+        }
+        finally
+        {
+            session.DoItemChange = bDoItemChange;
+        }
 
         // :L198-L202  the three-arm equality test. See IsBufferValueEqual for the null asymmetry.
         bool bEqual = IsBufferValueEqual(aOrgValue, dwo.Primary[row]);

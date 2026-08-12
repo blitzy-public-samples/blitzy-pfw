@@ -1316,13 +1316,113 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// <param name="columns">The columns, in payload order.</param>
     /// <returns><see langword="false"/> when the row is structurally invalid.</returns>
     /// <remarks>
+    /// <para>
     /// AN ORIGINAL NAMING A COLUMN THE ROW DOES NOT CARRY IS REJECTED, and a DUPLICATED column number is
     /// rejected in either list. Both would leave the restore below reading a column that is not there or
     /// applying one twice, and the second write would capture the wrong original.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>A ROW THAT SUPPLIED NO PER-COLUMN STATUS AT ALL IS READ THROUGH THE LEGACY ROW-STATUS
+    /// CONVENTION, AND WITHOUT THAT EVERY CONTRACT-CONFORMANT UPDATE WAS REFUSED AS A CONCURRENCY
+    /// CONFLICT.</b> <c>common.v1.ColumnValue.item_status</c> is declared proto3 <c>optional</c> and its
+    /// own contract says absence is the NORMAL case, so a caller that sends a row stamped
+    /// <c>DataModified!</c> with its six current values and its six originals - exactly the payload the
+    /// published contract describes, and exactly what a retrieval hands back - carried no per-column
+    /// status. Reading every one of those as <c>NotModified!</c> made
+    /// <c>Tasks/SqlUpdateCarrier.ApplyUpdate</c> skip every column, generate no SET list, and report zero
+    /// affected rows - which <see cref="Concurrency.ConflictDetector.IsConcurrencyMismatch"/> then
+    /// classified as an optimistic-concurrency mismatch. The caller was told another writer had changed a
+    /// row that nothing had touched, and the only way to make an update apply was to send a field the
+    /// contract calls optional.
+    /// </para>
+    /// <para>
+    /// THE CONVENTION IS THE ORACLE'S OWN, NOT AN INVENTION HERE. PowerBuilder reads A ROW's status with
+    /// column index 0 - <c>GetItemStatus(nRow, 0, Primary!)</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L160</c>], the convention
+    /// <c>common.v1.ItemStatus</c> documents - and a row is <c>DataModified!</c> precisely BECAUSE a
+    /// column of it was modified. In-process the two levels cannot diverge, because the runtime maintains
+    /// both; across this boundary a producer may state one and omit the other, so the row's own statement
+    /// is what governs the columns it supplied.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>AND IT GOVERNS ONLY THE COLUMNS WHOSE VALUE ACTUALLY MOVED, WHICH IS WHAT MAKES THE
+    /// RECONSTRUCTION FAITHFUL RATHER THAN MERELY PERMISSIVE.</b> In process, the per-column statuses of
+    /// a <c>DataModified!</c> row are NOT all modified - the runtime flips a column's status when
+    /// <c>SetItem</c> changes it and leaves the rest alone, which is exactly why PowerBuilder's generated
+    /// SET list names the changed columns and not the updatable set
+    /// [<c>Tasks/SqlUpdateCarrier.ApplyUpdate</c> reproduces that selection]. A payload carries both
+    /// halves of every marked column - <c>updatewhere=1</c> requires the originals for the predicate
+    /// (AAP 0.6.3.2) - so the pair itself says which columns moved, and reading it reconstructs precisely
+    /// the state the in-process runtime would hold. Adopting the row's status for EVERY supplied column
+    /// instead was observably wrong in two ways: it wrote a SET list wider than the oracle's, and it
+    /// stamped the KEY column modified, which sent an ordinary update whose key had not changed down the
+    /// <c>updatekeyinplace=no</c> DELETE-plus-INSERT path [<c>SqlUpdateCarrier.HasKeyChange</c>] and
+    /// answered <c>rowsUpdated = 0</c> beside a delete and an insert the caller never asked for.
+    /// </para>
+    /// <para>
+    /// THE VALUE TEST IS <see cref="CarrierValue.AreEquivalent"/>, NOT <c>Equals</c>, because
+    /// <c>AnyValue</c> gives one number several faithful spellings: a retrieval answers a legacy
+    /// <c>number</c> column through <c>double_value</c> and a caller re-sending it as <c>int64_value</c>
+    /// is equally within the contract, so <c>28.0d</c> beside <c>28L</c> must read as "did not move" -
+    /// which is also how the storage engine compares them. See that method for the full reasoning.
+    /// </para>
+    /// <para>
+    /// AND IT APPLIES ONLY WHERE AN ORIGINAL WAS ACTUALLY STATED. A column the payload supplied no
+    /// original for has no baseline to be measured against, so the row's own statement stands for it -
+    /// which is exactly an INSERT-shaped row, where <c>NewModified!</c> is the row's status and there are
+    /// no originals at all because the row has no prior state. Reading an unstated original as "equal to
+    /// the current value" instead would make every column of an insert resolve <c>NotModified!</c>,
+    /// which is not the state the runtime holds for a new row.
+    /// </para>
+    /// <para>
+    /// A ROW WHOSE EVERY SUPPLIED COLUMN THEREFORE READS <c>NotModified!</c> - a row stamped modified in
+    /// which nothing moved - is a payload CONTRADICTION and is answered as one further down the path,
+    /// with the oracle's own invalid-update-data code rather than as a concurrency conflict
+    /// [<see cref="Concurrency.ConflictDetector"/>]. It is deliberately not refused here: this codec
+    /// admits a changeset for several callers and only the update walk knows which columns are updatable.
+    /// </para>
+    /// <para>
+    /// <b>IT APPLIES ONLY WHEN NOT ONE COLUMN CARRIES EXPLICIT PRESENCE, WHICH IS WHAT KEEPS A PARTIAL
+    /// UPDATE EXACT.</b> A caller that stamps the one column it changed is being explicit about all of
+    /// them, and every column it left unstamped stays <c>NotModified!</c> - so a two-column payload that
+    /// marks one column still writes exactly one column, and no unmodified value can clobber a concurrent
+    /// writer's. Presence, not value, decides WHICH RULE APPLIES: an explicit
+    /// <c>ITEM_STATUS_NOT_MODIFIED</c> is a statement and is honoured as one, and an explicit
+    /// <c>ITEM_STATUS_DATA_MODIFIED</c> is honoured even on a column whose value did not move - which is
+    /// how the legacy's self-assignment workaround at
+    /// <c>n_cst_thread_task_sqlupdate.sru:L155-L167</c> remains expressible across this boundary.
+    /// </para>
+    /// <para>
+    /// AND IT CANNOT REACH THE RETRIEVE PATH. <see cref="TryProjectBufferSegment"/> assigns
+    /// <c>ItemStatus</c> on EVERY projected column, and assigning a proto3 <c>optional</c> field sets its
+    /// presence bit whatever the value - so a payload this service produced always has explicit presence
+    /// on every column and takes the honour-them-exactly branch. The inference is reachable only from a
+    /// caller-composed payload, which is the update path.
+    /// </para>
     /// </remarks>
     private static bool TryReadRow(DataWindowRow row, out List<AdmittedColumn>? columns)
     {
         columns = null;
+
+        // THE ROW'S OWN STATUS GOVERNS ONLY WHEN THE PAYLOAD SAID NOTHING PER COLUMN - see the remarks.
+        // Computed before the walk because it is a property of the WHOLE row: one explicitly stamped
+        // column makes the producer explicit about every column, including the ones it left alone.
+        bool anyColumnStatedItsStatus = false;
+
+        foreach (ColumnValue candidate in row.Columns)
+        {
+            if (candidate.HasItemStatus)
+            {
+                anyColumnStatedItsStatus = true;
+
+                break;
+            }
+        }
+
+        // A row status this codec does not recognise is refused by TryValidateSegments before this method
+        // runs, so the value adopted below is always a defined member.
+        bool adoptRowStatus =
+            !anyColumnStatedItsStatus && ItemStatusMachine.IsModified(row.ItemStatus);
 
         Dictionary<int, object?> originals = [];
 
@@ -1350,22 +1450,37 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
             int columnNumber = (int)column.ColumnId;
 
-            // An omitted per-column status is the contract's "no status was supplied", which on this
-            // path means the column is not modified in its own right.
+            // THE ORIGINAL THE PAYLOAD SUPPLIED, OR THE CURRENT VALUE WHEN IT SUPPLIED NONE. The carrier
+            // needs a baseline for every column it holds, and an unsupplied original is carried as the
+            // current value so the concurrency predicate compares a value the caller actually sent
+            // rather than a fabricated null. WHETHER one was supplied is kept separately, because the
+            // inference below distinguishes "stated, and equal" from "never stated".
+            bool originalWasSupplied = originals.TryGetValue(columnNumber, out object? supplied);
+            object? originalValue = originalWasSupplied ? supplied : currentValue;
+
+            // An omitted per-column status is the contract's "no status was supplied". When the row
+            // itself said nothing modified either, that means the column is not modified in its own
+            // right; when the ROW is stamped modified and NOT ONE column stated a status, the row's own
+            // statement governs every column it supplied EXCEPT the ones whose stated original proves
+            // the value did not move - the legacy row-status convention, see the remarks on this method
+            // for why, for why the value test is part of it, and for why the retrieve path cannot reach
+            // it. A column with NO stated original has no baseline to be measured against, so the row's
+            // statement stands for it: that is the whole of an insert-shaped row, which carries no
+            // originals at all because it has no prior state.
             ItemStatus columnStatus = column.HasItemStatus
                 ? column.ItemStatus
-                : ItemStatus.NotModified;
+                : adoptRowStatus
+                    && !(originalWasSupplied
+                        && CarrierValue.AreEquivalent(currentValue, originalValue))
+                    ? row.ItemStatus
+                    : ItemStatus.NotModified;
 
             if (!Enum.IsDefined(columnStatus))
             {
                 return false;
             }
 
-            read.Add(new AdmittedColumn(
-                columnNumber,
-                columnStatus,
-                currentValue,
-                originals.TryGetValue(columnNumber, out object? original) ? original : currentValue));
+            read.Add(new AdmittedColumn(columnNumber, columnStatus, currentValue, originalValue));
         }
 
         // Every original must have named a column the row actually carries.

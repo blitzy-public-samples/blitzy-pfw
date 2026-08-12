@@ -2011,6 +2011,32 @@ public sealed class DataServicesClient
         InvokeAsync(_columnExpression.CloseExpressionSessionAsync, request, cancellationToken);
 
     /// <summary>
+    /// Loads rows into an expression session's DataWindow.
+    /// </summary>
+    /// <param name="request">The session, the session-scoped handle and the rows.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>How many rows were created, the first ordinal, the resulting row count, and a refusal.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
+    /// <exception cref="RpcException">The call failed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE HANDLE IS THE SESSION-SCOPED ONE, <c>&lt;sessionId&gt;/&lt;ordinal&gt;</c>, not a registered
+    /// data-object name. The retrieve operation on C-03 takes the other form and refuses this one; the two
+    /// spaces are deliberately separate, because two handles opened over one definition are two independent
+    /// DataWindows.
+    /// </para>
+    /// <para>
+    /// RETRY SAFETY: <b>NOT SAFE</b> - rows are APPENDED, so a repeated call creates a second copy of every
+    /// row it carried. It is therefore deliberately absent from the replay-safe path set.
+    /// </para>
+    /// </remarks>
+    public Task<LoadRowsResponse> LoadRowsAsync(
+        LoadRowsRequest request,
+        CancellationToken cancellationToken) =>
+        InvokeAsync(_columnExpression.LoadRowsAsync, request, cancellationToken);
+
+    /// <summary>
     /// Binds a new expression to a column.
     /// </summary>
     /// <param name="request">The session, the DataWindow handle, the column name and the expression text.</param>

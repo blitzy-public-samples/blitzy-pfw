@@ -746,6 +746,80 @@ public sealed class SqlRedactor : ISqlRedactor
     internal DbErrorData Redact(in DbErrorData error) => error with { SqlSyntax = Redact(error.SqlSyntax) };
 
     /// <summary>
+    /// Masks a PROVIDER-AUTHORED diagnostic, preserving the provider's own envelope so the condition it
+    /// names survives.
+    /// </summary>
+    /// <param name="diagnostic">
+    /// The provider's message. <see langword="null"/> and the empty string both yield
+    /// <see cref="string.Empty"/>, exactly as <see cref="Redact(string)"/> does.
+    /// </param>
+    /// <returns>The masked diagnostic.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHY THIS EXISTS AS A SECOND METHOD RATHER THAN AS A CHANGE TO THE FIRST.</b> The remarks on
+    /// <see cref="DbErrorDataExtensions.ToDbError"/> argued that masking a provider message costs an
+    /// operator nothing because "a driver message that quotes no value arrives UNCHANGED -
+    /// <c>NOT NULL constraint failed: COMPANY.NAME</c> is byte-identical after masking". That was right
+    /// about a BARE message and wrong about the one this service actually receives, because
+    /// Microsoft.Data.Sqlite does not hand back the bare message - it hands back its own ENVELOPE around
+    /// it:
+    /// </para>
+    /// <code>
+    /// SQLite Error 19: 'NOT NULL constraint failed: COMPANY.NAME'.
+    /// </code>
+    /// <para>
+    /// in which the entire diagnosis is a single-quoted string and the result code is a numeric literal.
+    /// <see cref="Redact(string)"/> masks both, so every constraint failure reached a caller as
+    /// <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'.</c> - a message saying a database error
+    /// occurred and refusing to say WHICH COLUMN caused it. A caller who omitted a required column was
+    /// told nothing they could act on.
+    /// </para>
+    /// <para>
+    /// <b>AND WHY <see cref="Redact(string)"/> IS LEFT STRICTER.</b> Not every consumer of a provider
+    /// message wants the envelope preserved. The startup open-failure record deliberately publishes NO
+    /// provider prose at all, because a failed open is the record most likely to carry a deployment PATH
+    /// inside the provider's own message, and its own comment says so. Narrowing the general method would
+    /// have quietly relaxed that site too. So the strict method keeps every caller it had and this one is
+    /// reached only where the failing column's identity is the point - today exactly one place, the
+    /// <c>sqlerrtext</c> field of the wire payload.
+    /// </para>
+    /// <para>
+    /// <b>WHAT SURVIVES, AND WHY EACH PART IS SAFE.</b> Only the envelope: the fixed words, the provider's
+    /// own result code and the wrapper's punctuation. The result code carries no caller data and is
+    /// ALREADY published in the clear on <c>DbError.sqldbcode</c>, so preserving it discloses nothing new.
+    /// Everything INSIDE goes through <see cref="Redact(string)"/> unchanged - so a message that quotes a
+    /// value still has that value masked, and the row data the policy exists to remove is still removed.
+    /// </para>
+    /// <para>
+    /// <b>WHY IT CANNOT LEAK.</b> The shape must match the WHOLE input or not at all and every position
+    /// in it is fixed: the literal prefix, one or more ASCII digits, the literal separator, the interior,
+    /// and the literal suffix at the very end. One differing character anywhere and the input falls
+    /// through to the strict method exactly as before. Idempotent, because the interior is masked by a
+    /// scan whose own output is stable.
+    /// </para>
+    /// </remarks>
+    public string RedactProviderDiagnostic([AllowNull] string diagnostic)
+    {
+        if (string.IsNullOrEmpty(diagnostic))
+        {
+            return string.Empty;
+        }
+
+        if (!TryMeasureProviderDiagnosticEnvelope(
+                diagnostic,
+                out int interiorStart,
+                out int interiorLength))
+        {
+            return Redact(diagnostic);
+        }
+
+        return string.Concat(
+            diagnostic.AsSpan(0, interiorStart),
+            Redact(diagnostic.Substring(interiorStart, interiorLength)),
+            diagnostic.AsSpan(interiorStart + interiorLength));
+    }
+
+    /// <summary>
     /// The opening of the framework's row-cap diagnostic
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L788</c>].
     /// </summary>
@@ -807,6 +881,98 @@ public sealed class SqlRedactor : ISqlRedactor
                 return false;
             }
         }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The opening of the SQLite provider's own diagnostic envelope, up to its result code.
+    /// </summary>
+    /// <remarks>
+    /// The provider composes <c>"SQLite Error " + code + ": '" + message + "'."</c>, and this is the
+    /// fixed head of that composition. Held as a constant so the shape travels by identifier rather than
+    /// being retyped, and so the test that pins it has something to name.
+    /// </remarks>
+    internal const string ProviderDiagnosticPrefix = "SQLite Error ";
+
+    /// <summary>The separator between the provider's result code and its quoted message.</summary>
+    internal const string ProviderDiagnosticSeparator = ": '";
+
+    /// <summary>The closing of the provider's envelope: the closing quote and its full stop.</summary>
+    internal const string ProviderDiagnosticSuffix = "'.";
+
+    /// <summary>
+    /// Measures the interior of the SQLite provider's diagnostic envelope, when the whole input is one.
+    /// </summary>
+    /// <param name="text">The candidate, already known to be non-empty.</param>
+    /// <param name="interiorStart">The index the provider's own message begins at.</param>
+    /// <param name="interiorLength">Its length, always at least one.</param>
+    /// <returns><see langword="true"/> when the whole input is such an envelope.</returns>
+    /// <remarks>
+    /// <para>
+    /// STRICT ON EVERY AXIS, on the same terms as <see cref="IsRowCapDiagnostic"/>: ordinal comparisons
+    /// so no culture can widen them; every character of the result code tested as an ASCII digit BY RANGE
+    /// rather than through <see cref="char.IsDigit(char)"/>, which would also accept Arabic-Indic and
+    /// every other Unicode decimal digit; at least one digit and at least one interior character
+    /// required; and no leading or trailing whitespace tolerated, because the provider emits none.
+    /// </para>
+    /// <para>
+    /// THE DIGITS ARE NOT PARSED. A value too large for any integer type is still just digits, and
+    /// declining the shape on that ground would mask a diagnostic for a reason unrelated to disclosure.
+    /// </para>
+    /// <para>
+    /// THE PREFIX AND SUFFIX MAY NOT OVERLAP. The length test is what makes a pathological input such as
+    /// the prefix immediately followed by the suffix decline rather than produce a negative interior.
+    /// </para>
+    /// </remarks>
+    private static bool TryMeasureProviderDiagnosticEnvelope(
+        string text,
+        out int interiorStart,
+        out int interiorLength)
+    {
+        interiorStart = 0;
+        interiorLength = 0;
+
+        if (!text.StartsWith(ProviderDiagnosticPrefix, StringComparison.Ordinal)
+            || !text.EndsWith(ProviderDiagnosticSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        int digits = ProviderDiagnosticPrefix.Length;
+
+        while (digits < text.Length && text[digits] is >= '0' and <= '9')
+        {
+            digits++;
+        }
+
+        if (digits == ProviderDiagnosticPrefix.Length)
+        {
+            // No result code at all, so this is not the provider's envelope.
+            return false;
+        }
+
+        if (string.CompareOrdinal(
+                text,
+                digits,
+                ProviderDiagnosticSeparator,
+                0,
+                ProviderDiagnosticSeparator.Length)
+            != 0)
+        {
+            return false;
+        }
+
+        int start = digits + ProviderDiagnosticSeparator.Length;
+        int end = text.Length - ProviderDiagnosticSuffix.Length;
+
+        if (end <= start)
+        {
+            return false;
+        }
+
+        interiorStart = start;
+        interiorLength = end - start;
 
         return true;
     }
@@ -1598,11 +1764,17 @@ internal static class DbErrorDataExtensions
             Sqldbcode = error.SqlDbCode,
 
             // 2 - string sqlerrtext [:L5] - opaque display text, and MASKED, because opaque describes
-            //     how a consumer may read it and not what the provider puts in it. See the remarks: a
-            //     message that quotes no value passes through byte for byte, so the masking costs an
-            //     operator nothing and removes the row data SQLite echoes into constraint and type
-            //     failures.
-            Sqlerrtext = SqlRedactor.Instance.Redact(error.SqlErrText),
+            //     how a consumer may read it and not what the provider puts in it.
+            //
+            //     🔴 THROUGH THE PROVIDER-DIAGNOSTIC METHOD RATHER THAN THE STRICT ONE, which is the
+            //     correction: the strict method masks the provider's OWN ENVELOPE - the message arrives
+            //     as `SQLite Error 19: '<message>'.`, a numeric literal and a quoted string - so a
+            //     constraint failure reached a caller as `SQLite Error <redacted>: '<redacted>'.` and the
+            //     failing COLUMN was masked along with the value. The envelope-preserving method keeps
+            //     `NOT NULL constraint failed: COMPANY.NAME` legible, which is schema metadata, while
+            //     still masking anything quoted INSIDE the message, which is row data. See its own
+            //     remarks for why the strict method is deliberately left unchanged for its other callers.
+            Sqlerrtext = SqlRedactor.Instance.RedactProviderDiagnostic(error.SqlErrText),
 
             // 3 - string sqlsyntax [:L6] - masked on the same terms. BOTH policies are reached directly
             //     rather than accepted as parameters, so neither line can be weakened from a call site

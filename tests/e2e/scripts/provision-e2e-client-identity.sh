@@ -19,6 +19,16 @@
 #       which is what `SECURITY_MTLS_CLIENT_CA_PATH` in `orchestration/.env.example` is for. A private
 #       authority is used rather than a self-signed leaf because Security validates the presented chain
 #       at the transport, and a leaf that is its own issuer has no chain to validate.
+#
+#       THAT ONE VARIABLE IS SUFFICIENT, AND IT WAS NOT ALWAYS. Security decides twice about a caller
+#       certificate: its LISTENER anchor decides whether the handshake completes at all, and its
+#       ISSUANCE anchor (`Security:ClientCertificateAuthorityPath`) decides whether the completed
+#       handshake's certificate may establish an identity. Only the listener key has a published
+#       variable, so a run that followed step 2 below to the letter used to get a completed handshake
+#       followed by `401` on every certificate. Security's composition root now adopts the listener
+#       anchor as the issuance anchor when the issuance key is unset, so there is no third variable to
+#       export and none is published - if a `401` survives step 2 now, the cause is the CA, the leaf's
+#       common name, or a Security instance that has not reloaded, and not a missing setting.
 #    2. A client leaf - `e2e-client.crt` / `e2e-client.key` - whose SUBJECT COMMON NAME IS EXACTLY THE
 #       IDENTITY THE SUITE CLAIMS. That is not cosmetic: the token endpoint resolves the caller identity
 #       from the certificate's simple name and then compares it ORDINALLY against the `subject` in the

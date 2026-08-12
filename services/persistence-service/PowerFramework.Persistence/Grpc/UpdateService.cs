@@ -1824,6 +1824,29 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             UpdateOutcomeKind.Conflict =>
                 UpdateWireCodes.Status(result.Code, errorText, dbError),
 
+            // E_INVALID_DATA - the caller's payload flagged a row modified and supplied no updatable
+            // column value for it, so no assignment could be generated. THE DIAGNOSTIC TRAVELS AND NO
+            // DRIVER DETAIL DOES, and both halves matter: the text names the rule and the offending row
+            // COUNT so a caller can see which field to add, while there is no database error to carry
+            // because no statement ever reached the storage engine. Kept apart from the conflict arm above
+            // on purpose - a caller that read this as a concurrency mismatch would re-read, rebase and
+            // resend the same unusable payload for ever.
+            UpdateOutcomeKind.InvalidUpdateData =>
+                UpdateWireCodes.Status(result.Code, errorText),
+
+            // 🔴 E_INVALID_DATA AGAIN, AND THE DRIVER DETAIL TRAVELS WITH IT - which is the difference
+            // from the arm above and the reason the two are separate kinds. The storage engine refused a
+            // row on a constraint the caller's payload controls, and the provider's own message is what
+            // NAMES the offending column: `NOT NULL constraint failed: COMPANY.NAME`. That is schema
+            // metadata rather than row data, and the redactor's provider-envelope rule is what lets it
+            // survive masking while a value quoted inside the message does not.
+            //
+            // This arm used to be UpdateOutcomeKind.DatabaseError, which publishes as HTTP 502 - so a
+            // caller who omitted a required column was told the DATABASE had failed. The classifier's own
+            // predicate decides membership; only constraints a corrected payload can satisfy arrive here.
+            UpdateOutcomeKind.ConstraintViolation =>
+                UpdateWireCodes.Status(result.Code, errorText, dbError),
+
             _ => throw new InvalidOperationException(
                 "The update classification carried an outcome kind this boundary does not map: "
                 + outcome.Kind.ToString()

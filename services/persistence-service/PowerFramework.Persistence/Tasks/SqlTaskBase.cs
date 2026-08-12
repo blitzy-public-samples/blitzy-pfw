@@ -803,10 +803,12 @@ internal sealed class SqlDataObjectStore : ISqlDataStore
             }
 
             // An unresolved name leaves the store exactly as PowerBuilder leaves a DataStore whose
-            // data object failed to load: no statement, no expressions, and every describe answering
-            // the failure sentinel. The query task detects that state through its DataWindow.Units
-            // probe [n_cst_thread_task_sqlquery.sru:L554-L557] rather than through an exception, so
-            // throwing here would replace a legacy code path with one the oracle does not have.
+            // data object failed to load: no statement, no expressions, and EVERY RECOGNISED PROPERTY
+            // DESCRIBING AS EMPTY - which is what the query task's DataWindow.Units probe tests
+            // [n_cst_thread_task_sqlquery.sru:L553-L557], and see the remarks on Describe for why the
+            // empty string rather than the "!" sentinel is the faithful answer here. The task detects
+            // the state through that probe rather than through an exception, so throwing here would
+            // replace a legacy code path with one the oracle does not have.
             _definition = null;
             _sqlSelect = string.Empty;
             _sort = string.Empty;
@@ -914,21 +916,35 @@ internal sealed class SqlDataObjectStore : ISqlDataStore
             return DescribeFailureSentinel;
         }
 
-        // Describing anything on a store with no resolved definition answers the failure sentinel,
-        // which is what the DataWindow.Units probe relies on.
-        if (_definition is null)
-        {
-            return DescribeFailureSentinel;
-        }
-
+        // 🔴 THE TWO DESCRIBE FAILURES ARE DIFFERENT ANSWERS, AND COLLAPSING THEM KILLED THE ORACLE'S OWN
+        // VALIDITY PROBE. "!" is PowerBuilder's answer for a property it DOES NOT RECOGNISE; the EMPTY
+        // STRING is its answer for a property it recognises and has nothing to report for - which is
+        // every property of a DataStore whose data object never loaded.
+        //
+        // The distinction is not a nicety here: the whole validity test in the oracle is
+        // `if data.Describe("DataWindow.Units") = "" then ... 无效的DataObject`
+        // [n_cst_thread_task_sqlquery.sru:L553-L555], ported at
+        // Tasks/SqlQueryTask.ResolveNamedDataObject. Answering "!" for a store with no definition made
+        // that comparison FALSE for every unresolvable name, so the arm was dead: the retrieval carried on
+        // and failed later as a DATABASE error, which reached the caller as an HTTP 500 for what is
+        // entirely a caller mistake. That the arm exists at all - with its own diagnostic - is the proof
+        // that the legacy answered empty there, because otherwise it could never have fired in the legacy
+        // either.
+        //
+        // SO A RECOGNISED PROPERTY ANSWERS EMPTY AND AN UNRECOGNISED ONE STILL ANSWERS "!". The three
+        // expression properties already hold the empty string in this state - the DataObject setter's
+        // unresolved arm writes them - and the three definition-backed ones answer empty because there is
+        // no definition to read. Nothing that reads a describe result is disturbed by the change:
+        // Tasks/TaskProxies/SqlTaskProxyHost.ReapplyStoredExpression already treats empty and "!" alike,
+        // and NormalizeDescribeSentinel maps "!", "?" and null onto empty for every cached snapshot.
         return property switch
         {
             DataWindowProperty.TableSelect => _sqlSelect,
             DataWindowProperty.TableSort => _sort,
             DataWindowProperty.TableFilter => _filter,
-            DataWindowProperty.TableArguments => _definition.Arguments,
-            DataWindowProperty.Processing => _definition.Processing,
-            DataWindowProperty.Units => _definition.Units,
+            DataWindowProperty.TableArguments => _definition?.Arguments ?? string.Empty,
+            DataWindowProperty.Processing => _definition?.Processing ?? string.Empty,
+            DataWindowProperty.Units => _definition?.Units ?? string.Empty,
 
             // PowerBuilder answers "!" for a property it does not recognise. Preserved as data.
             _ => DescribeFailureSentinel,
@@ -1724,20 +1740,33 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         // connection disabled bind variables. The legacy logger performs no redaction at all; adding
         // it changes no observable statement, only what leaves the process in a log record.
         //
-        // THE PROVIDER'S ERROR TEXT GOES THROUGH THE SAME REDACTOR, and it used to go through nothing at
-        // all. It reads like a diagnostic rather than a statement, which is exactly why it was trusted -
-        // but a provider composes that text FROM the statement it was executing, so it habitually quotes
-        // the offending fragment back: a constraint violation names the value that violated it, a type
-        // mismatch names the value that would not convert, and a syntax error echoes the surrounding
-        // text. Those are the interpolated literals arriving by a second route, so the same rule applies.
-        // Masking is content-preserving for the diagnostic itself - the code, the constraint name and the
-        // column name are not literals and survive - so nothing an operator needs is lost.
+        // THE PROVIDER'S ERROR TEXT IS MASKED TOO, and it used to go through nothing at all. It reads like
+        // a diagnostic rather than a statement, which is exactly why it was trusted - but a provider
+        // composes that text FROM the statement it was executing, so it habitually quotes the offending
+        // fragment back: a constraint violation names the value that violated it, a type mismatch names
+        // the value that would not convert, and a syntax error echoes the surrounding text. Those are the
+        // interpolated literals arriving by a second route, so the same rule applies.
+        //
+        // 🔴 BUT THROUGH THE PROVIDER-ENVELOPE RULE, NOT THE STRICT SCAN, AND THE CLAIM THAT USED TO STAND
+        //    HERE - "the code, the constraint name and the column name are not literals and survive" - WAS
+        //    MEASURABLY FALSE. Microsoft.Data.Sqlite does not hand back a bare diagnostic: it wraps one as
+        //    `SQLite Error 19: '<message>'.`, so the strict scan read the result code as a numeric literal
+        //    and the entire diagnosis as a quoted string and masked both. Every constraint failure was
+        //    therefore recorded as `SQLite Error <redacted>: '<redacted>'.` - a log line that says a
+        //    database error happened and refuses to say which column caused it, which is exactly what an
+        //    operator opens the log for.
+        //
+        //    THE NARROWING IS THE ENVELOPE ONLY. RedactProviderDiagnostic preserves the wrapper and the
+        //    result code and puts the interior through the identical scan, so a value the provider quoted
+        //    INSIDE its message is still masked; a text that is not that exact envelope falls through to
+        //    the strict method unchanged. The STATEMENT below stays strictly masked, because it is the
+        //    field that carries interpolated literals by construction.
         _logger.LogError(
             "Database error {SqlDbCode} in buffer {Buffer} at row {Row}: {SqlErrText}. Statement: {SqlSyntax}",
             error.SqlDbCode,
             error.Buffer,
             error.Row,
-            SqlRedactor.Instance.Redact(error.SqlErrText),
+            SqlRedactor.Instance.RedactProviderDiagnostic(error.SqlErrText),
             SqlRedactor.Instance.Redact(error.SqlSyntax));
 
         // [:L97] `return 3` - preserved verbatim. See DbErrorEventResult for why it is not a RetCode.

@@ -294,6 +294,66 @@ internal enum UpdateOutcomeKind
     /// </para>
     /// </remarks>
     Conflict = 5,
+
+    /// <summary>
+    /// The caller's payload flagged a row modified but supplied no updatable column value for it, so no
+    /// assignment could be generated. <c>RetCode.E_INVALID_DATA</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SECOND KIND WITH NO LEGACY COUNTERPART, AND FOR A CONDITION THE LEGACY CANNOT REACH. In
+    /// process the runtime maintains a row's status and its columns' statuses together, so a row cannot
+    /// claim to be modified while every column of it claims not to be. Across this boundary a producer
+    /// composes both levels itself and may state a contradiction, which is a payload fault rather than a
+    /// database one.
+    /// </para>
+    /// <para>
+    /// IT CARRIES THE ORACLE'S OWN INVALID-UPDATE-DATA CODE - <c>RetCode.E_INVALID_DATA</c>, the code the
+    /// task returns for a changeset it cannot apply [<c>n_cst_thread_task_sqlupdate.sru:L343-L344</c>] -
+    /// rather than a new member, and Gateway already publishes that code as <c>400</c>. Reporting it as
+    /// the <see cref="Conflict"/> narrowing instead named the wrong party and invited a retry that could
+    /// never converge.
+    /// </para>
+    /// </remarks>
+    InvalidUpdateData = 6,
+
+    /// <summary>
+    /// The storage engine refused a row because it violated a schema constraint the CALLER's payload
+    /// controls - a required column left null, a duplicate key. <c>RetCode.E_INVALID_DATA</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 SPLIT OUT OF <see cref="DatabaseError"/>, WHICH IS WHERE IT USED TO LAND, AND THE MOVE IS THE
+    /// WHOLE POINT. A row omitting a <c>NOT NULL</c> column reached the caller as
+    /// <c>RetCode.E_DB_ERROR</c>, which Gateway correctly publishes as <b>HTTP 502</b> - so a caller who
+    /// forgot a required field was told the DATABASE had failed and that the fault lay behind the
+    /// gateway. It is the caller's payload, it is not retryable unchanged, and the corrective action is
+    /// entirely theirs.
+    /// </para>
+    /// <para>
+    /// IT CARRIES <c>RetCode.E_INVALID_DATA</c> - the same code the sibling payload fault above carries,
+    /// and the code the oracle itself returns for a changeset it cannot apply
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L343-L344</c>] - so no new member enters the catalogue and
+    /// Gateway's existing published mapping of that code to <c>400</c> already applies. A NEW kind rather
+    /// than a reuse of <see cref="InvalidUpdateData"/>, because the two faults have different corrective
+    /// actions and different diagnostics: that one says "this row expresses no update", this one names a
+    /// constraint the schema imposes.
+    /// </para>
+    /// <para>
+    /// ONLY THE CALLER-CONTROLLED CONSTRAINTS ARE CLASSIFIED HERE. A check constraint, a trigger, a
+    /// commit hook or a virtual-table refusal is the SCHEMA's own logic failing rather than a value the
+    /// caller can correct, so those keep <see cref="DatabaseError"/> and its 502. See
+    /// <c>ConflictDetector.IsCallerConstraintViolation</c> for the exact set and the reason each member
+    /// is in or out.
+    /// </para>
+    /// <para>
+    /// THE DRIVER PAYLOAD STILL TRAVELS, because it is what names the offending column: SQLite reports
+    /// <c>NOT NULL constraint failed: COMPANY.NAME</c>, which is SCHEMA METADATA rather than row data.
+    /// The redactor's provider-envelope rule is what lets that identity survive while any value quoted
+    /// inside the message is still masked.
+    /// </para>
+    /// </remarks>
+    ConstraintViolation = 7,
 }
 
 #endregion
@@ -381,6 +441,29 @@ internal interface IUpdateTransaction
     /// </para>
     /// </remarks>
     bool IsFailed();
+
+    /// <summary>
+    /// Clears the transaction's five-value SQL state, <c>of_clearstate()</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru</c>, invoked from the update object
+    /// at <c>n_cst_thread_task_sqlupdate.sru:L186</c> alongside the DataWindow's own clear].
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE ORACLE CLEARS BOTH, AND THE PORT USED TO CLEAR ONLY ONE.</b> <c>:L186</c> is a single
+    /// statement that resets the state the whole classification then reads, and this port called it on
+    /// the DataWindow target only - so the three SQL-code conditions this interface documents
+    /// (<see cref="SqlCode"/>, <see cref="SqlDbCode"/>, <see cref="IsFailed"/>) were read against a
+    /// state nothing in the service had ever written, and every one of them therefore answered its
+    /// cleared value on every attempt.
+    /// </para>
+    /// <para>
+    /// PER ATTEMPT, WHICH IS WHY IT IS ON THIS INTERFACE AT ALL. A pooled transaction outlives one
+    /// update, so a stamp left by an earlier attempt would otherwise be read as this attempt's evidence -
+    /// which is the specific way a stale failure turns into a wrong classification for a payload that
+    /// was fine.
+    /// </para>
+    /// </remarks>
+    void ClearState();
 
     /// <summary>
     /// The VETOABLE before-update hook, <c>Event OnBeforeUpdate(Data)</c> [<c>:L195</c>].
@@ -648,6 +731,29 @@ internal sealed record ConcurrencyEvidence
     /// </para>
     /// </value>
     internal bool ProviderFaulted { get; init; }
+
+    /// <summary>
+    /// How many rows the payload flagged modified while supplying no updatable column value for them,
+    /// so that no assignment could be generated at all.
+    /// </summary>
+    /// <value>
+    /// <para>
+    /// Zero in every ordinary case, including an update that legitimately writes nothing because no row
+    /// was modified - that row never reaches the walk. A positive count means the CALLER's payload
+    /// contradicted itself: the row states <c>DataModified!</c> while every updatable column of it
+    /// states <c>NotModified!</c>, or the row carries no updatable column at all.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>IT IS COUNTED SEPARATELY FROM THE TWO ROW COUNTS BECAUSE REPORTING IT AS A SHORTFALL WAS
+    /// WRONG IN THE MOST MISLEADING WAY AVAILABLE.</b> Such a row used to be counted as a generated
+    /// statement and recorded as unmatched, which made
+    /// <see cref="ConflictDetector.IsConcurrencyMismatch"/> answer true and told the caller that another
+    /// writer had changed a row nothing had touched - sending an integrator to look for a concurrency
+    /// problem that did not exist. A payload that cannot express an update is the caller's own fault and
+    /// is answered as one; only a statement that RAN and matched nothing is a concurrency miss.
+    /// </para>
+    /// </value>
+    internal long RowsWithoutAssignableValues { get; init; }
 
     /// <summary>
     /// The rows that failed their concurrency check, each carrying its buffer, its ONE-BASED row
@@ -1132,6 +1238,113 @@ internal sealed record UpdateOutcome
     }
 
     /// <summary>
+    /// The caller's payload flagged a row modified but supplied no updatable column value for it.
+    /// <b>A REFUSAL THIS BOUNDARY OWNS, NOT AN ARM OF THE ORACLE.</b>
+    /// </summary>
+    /// <param name="rowsWithoutAssignableValues">
+    /// How many rows were in that state. Carried on the diagnostic so an operator can tell one
+    /// contradictory row from a whole payload of them; the row's VALUES are never named.
+    /// </param>
+    /// <param name="updateTable">The described update table.</param>
+    /// <param name="updateResult">The reconciled DataWindow result.</param>
+    /// <param name="observedByHook">The unreconciled result the after-update hook was handed.</param>
+    /// <param name="overrideApplied">Whether the defensive override rewrote a claimed success.</param>
+    /// <returns>The outcome for that arm.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE CODE IS THE ORACLE'S OWN INVALID-UPDATE-DATA CODE, <c>RetCode.E_INVALID_DATA</c>
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L343-L344</c>], so no new member enters the catalogue and the
+    /// existing published mapping - <c>400</c>, "the caller's payload is at fault" - already applies.
+    /// </para>
+    /// <para>
+    /// <see cref="ErrorReported"/> IS <see langword="TRUE"/>, unlike the conflict narrowing, because this
+    /// arm DOES raise the general error channel: the condition is invisible in the row counts - nothing
+    /// ran, so nothing is missing from them - and an operator with no record at all could not tell this
+    /// refusal from a caller that simply sent an empty changeset.
+    /// </para>
+    /// <para>
+    /// <see cref="RequiresRollback"/> follows from the code and is correct: a payload carrying one
+    /// contradictory row may also carry rows that DID apply, and applying part of a refused payload is
+    /// exactly the partial write the epilogue's rollback exists to prevent.
+    /// </para>
+    /// </remarks>
+    internal static UpdateOutcome InvalidUpdateData(
+        long rowsWithoutAssignableValues,
+        string? updateTable = null,
+        long updateResult = 0L,
+        long observedByHook = 0L,
+        bool overrideApplied = false) => new()
+        {
+            Kind = UpdateOutcomeKind.InvalidUpdateData,
+            Code = RetCode.E_INVALID_DATA,
+            ErrorReported = true,
+            ErrorText = string.Format(
+                CultureInfo.InvariantCulture,
+                InvalidUpdateDataFormat,
+                rowsWithoutAssignableValues),
+            UpdateTable = updateTable ?? string.Empty,
+            UpdateInvoked = true,
+            UpdateResult = updateResult,
+            UpdateResultObservedByHook = observedByHook,
+            DefensiveOverrideApplied = overrideApplied,
+        };
+
+    /// <summary>
+    /// The diagnostic the invalid-payload arm reports, with the offending row count substituted.
+    /// </summary>
+    /// <remarks>
+    /// IT NAMES THE RULE AND THE COUNT AND NOTHING ELSE (C-F). No column name, no value and no statement
+    /// appears in it, so it is safe on both the caller channel and the operator channel, and it tells a
+    /// caller exactly which field to add.
+    /// </remarks>
+    internal const string InvalidUpdateDataFormat =
+        "{0} row(s) were flagged modified but supplied no updatable column value, so no assignment "
+        + "could be generated. A row's own item status is honoured for every column it supplies when "
+        + "no per-column status is sent; a row that marks every column NotModified, or that carries no "
+        + "updatable column, cannot express an update.";
+
+    /// <summary>
+    /// The storage engine refused a row on a constraint the caller's payload controls.
+    /// </summary>
+    /// <param name="error">The driver payload, already redacted, which names the offending column.</param>
+    /// <param name="updateTable">The described update table.</param>
+    /// <param name="updateResult">The value the DataWindow update answered.</param>
+    /// <param name="observedByHook">The value the after-update hook observed.</param>
+    /// <param name="overrideApplied">Whether the defensive override rewrote a claimed success.</param>
+    /// <returns>The outcome.</returns>
+    /// <remarks>
+    /// <para>
+    /// <see cref="ErrorReported"/> IS <see langword="FALSE"/>, matching the arm this splits out of: the
+    /// oracle raises nothing at [<c>:L249-L250</c>] and lets the epilogue decide by comparing against the
+    /// last reported code [<c>:L397</c>]. Setting it true here would make the epilogue skip a raise the
+    /// oracle performs.
+    /// </para>
+    /// <para>
+    /// <see cref="ErrorText"/> IS EMPTY for the same reason, and the diagnosis travels on the driver
+    /// payload where the provider put it. Synthesising a second sentence here would put this file in the
+    /// business of composing driver text it did not author.
+    /// </para>
+    /// </remarks>
+    internal static UpdateOutcome ConstraintViolation(
+        DbErrorData error,
+        string? updateTable = null,
+        long updateResult = 0L,
+        long observedByHook = 0L,
+        bool overrideApplied = false) => new()
+        {
+            Kind = UpdateOutcomeKind.ConstraintViolation,
+            Code = RetCode.E_INVALID_DATA,
+            DbError = error,
+            ErrorReported = false,
+            ErrorText = string.Empty,
+            UpdateTable = updateTable ?? string.Empty,
+            UpdateInvoked = true,
+            UpdateResult = updateResult,
+            UpdateResultObservedByHook = observedByHook,
+            DefensiveOverrideApplied = overrideApplied,
+        };
+
+    /// <summary>
     /// <c>return RetCode.OK</c> - the update answered the DataWindow contract's success value and
     /// neither cancellation check fired [<c>:L214</c>, <c>:L248</c>].
     /// </summary>
@@ -1489,6 +1702,26 @@ internal sealed class ConflictDetector
         // proxy's two callbacks are consumed through the outcome rather than through a captured handle.
         attempt.Target.ClearState();
 
+        // 🔴 AND THE TRANSACTION'S STATE IS CLEARED TOO, WHICH IT WAS NOT.
+        //
+        // The oracle's `of_ClearState()` resets the five-value SQL state the rest of this function then
+        // reads - SQLCode, SQLDBCode, SQLNRows, SQLErrText, SQLReturnData - and this port cleared the
+        // DataWindow target only. The consequence was not a stale read: it was that the transaction's
+        // state was never written by ANYTHING in the service, so `transaction.SqlDbCode` and
+        // `transaction.SqlErrText` answered their cleared values on every attempt, and the failure payload
+        // built from them at the else arm below was ALWAYS EMPTY. A caller whose row was refused by the
+        // storage engine therefore received a database error carrying no code and no text - the driver's
+        // own diagnosis reached the wire only by the separate route of the latched error event.
+        //
+        // CLEARING HERE IS WHAT MAKES STAMPING SAFE. A pooled transaction outlives one update, so without
+        // a per-attempt clear a stamp from an earlier attempt would be read as this attempt's evidence.
+        //
+        // IT DOES NOT REVIVE THE DEFENSIVE OVERRIDE BY THE BACK DOOR. That override fires only when the
+        // SQL code is negative AND the DataWindow claimed success [:L208-L210], and the carrier stamps
+        // only on the path where it returns the DataWindow FAILURE value - so the conjunction stays
+        // unreachable and no previously-successful update changes its answer.
+        transaction.ClearState();
+
         // STEP 4 [:L188-L193] - the THREE sentinels, with BOTH raises firing in order
         //
         // `sUpdateTable = Data.Describe("DataWindow.Table.UpdateTable")` [:L188] - read at RUN TIME, from
@@ -1660,6 +1893,27 @@ internal sealed class ConflictDetector
         // THE RETURN CODE IS THE LEGACY'S OWN, RetCode.E_DB_ERROR - so RequiresRollback is true, the
         // epilogue rolls back rather than commits, and no legacy arm changes. Only the outcome's KIND
         // narrows and a payload is added (AAP 0.6.3.8).
+        // ============ STEP 9c: A CONTRADICTORY PAYLOAD IS THE CALLER'S FAULT, TESTED FIRST ========
+        // 🔴 AHEAD OF THE CONFLICT TEST, WHICH IS THE POINT. A row the payload flagged modified while
+        // supplying no updatable column value generates no statement at all - so it can neither have
+        // been overwritten nor have lost a race, and classifying it as a concurrency mismatch told the
+        // caller another writer had changed a row that nothing had touched. It is answered as the
+        // payload fault it is, with the oracle's own invalid-update-data code, and the general error
+        // channel is raised because nothing in the row counts records the condition.
+        if (evidence is { RowsWithoutAssignableValues: > 0L })
+        {
+            UpdateOutcome invalid = UpdateOutcome.InvalidUpdateData(
+                evidence.RowsWithoutAssignableValues,
+                updateTable,
+                updateResult,
+                observedByHook,
+                overrideApplied);
+
+            attempt.Errors.OnError(invalid.Code, invalid.ErrorText);
+
+            return invalid;
+        }
+
         if (IsConcurrencyMismatch(evidence))
         {
             DbErrorData mismatchError =
@@ -1712,6 +1966,34 @@ internal sealed class ConflictDetector
         DbErrorData failureError =
             Redact(DbErrorData.FromTransaction(transaction.SqlDbCode, transaction.SqlErrText));
 
+        // ==========================================================================================
+        //  🔴 A CALLER-CONTROLLED CONSTRAINT REFUSAL IS SPLIT OFF BEFORE THE DATABASE-ERROR ARM.
+        //
+        //  A row omitting a NOT NULL column, or duplicating a key, is the CALLER's payload being wrong -
+        //  and it used to arrive on the arm below as RetCode.E_DB_ERROR, which Gateway correctly
+        //  publishes as HTTP 502. So a caller who forgot a required field was told the database had
+        //  failed and that the fault lay behind the gateway; nothing in the answer said which column, and
+        //  nothing said the caller could fix it. That is the finding.
+        //
+        //  IT IS TESTED HERE AND NOT EARLIER, because the discriminator is the DRIVER's own result code,
+        //  which only exists once the statement has been attempted. Nothing about the ordering changes:
+        //  the conflict narrowing above still runs first, so a shortfall is still a conflict, and this
+        //  test only ever reclassifies what would otherwise have been an unspecific database error.
+        //
+        //  THE PAYLOAD IS THE ALREADY-REDACTED ONE, deliberately - the same object the arm below carries.
+        //  Its message is what names the offending column, and the redactor's provider-envelope rule is
+        //  what lets that identity survive while a value quoted inside the message is still masked.
+        // ==========================================================================================
+        if (IsCallerConstraintViolation(transaction.SqlDbCode))
+        {
+            return UpdateOutcome.ConstraintViolation(
+                failureError,
+                updateTable: updateTable,
+                updateResult: updateResult,
+                observedByHook: observedByHook,
+                overrideApplied: overrideApplied);
+        }
+
         // ⚠️ THE NARROWING IS NOT REPEATED HERE, AND THAT IS DELIBERATE. STEP 9b above already tested
         // the measurement, on BOTH the claimed-success and the reported-failure path, because it runs
         // before this branch splits. A second test here would be dead code that implied the arm above
@@ -1735,6 +2017,75 @@ internal sealed class ConflictDetector
     // ----------------------------------------------------------------------------------------------
     //  THE PREDICATES AND THE PAYLOAD BUILDERS
     // ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Whether a driver result code names a constraint the CALLER's payload controls.
+    /// </summary>
+    /// <param name="sqlDbCode">
+    /// The driver's own result code as the transaction reports it, already mapped through
+    /// <c>SqliteConnectionFactory.MapSqliteResultCode</c> so an extended code wins where the provider
+    /// supplied one.
+    /// </param>
+    /// <returns><see langword="true"/> for a constraint a corrected payload can satisfy.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SET IS DELIBERATELY NARROW, AND EVERY MEMBERSHIP DECISION IS A JUDGEMENT ABOUT WHO CAN FIX
+    /// IT.</b> The question this predicate answers is not "was a constraint involved" - it is "can the
+    /// caller correct this by sending different values". Only where the answer is yes does the outcome
+    /// become a 400, because telling a caller to fix something they cannot fix is worse than telling them
+    /// the server failed.
+    /// </para>
+    /// <para>IN, because a corrected payload satisfies each one:</para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// <see cref="RetCode.SQLITE_CONSTRAINT_NOTNULL"/> - a required column was null or absent. This is
+    /// the reported case: <c>NAME TEXT NOT NULL</c> and <c>AGE INT NOT NULL</c> are the only DDL in the
+    /// repository [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469</c>], and the DataWindow
+    /// definition declares no required flag on any column, so this refusal is the ONLY place in the
+    /// system that knows the column is required.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="RetCode.SQLITE_CONSTRAINT_UNIQUE"/> and
+    /// <see cref="RetCode.SQLITE_CONSTRAINT_PRIMARYKEY"/> - a duplicate value. The caller chose it.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="RetCode.SQLITE_CONSTRAINT_FOREIGNKEY"/> - a reference to a row that does not exist. The
+    /// caller chose the reference. No evidenced schema declares one, so this member is here for
+    /// consistency of the rule rather than for a path the fixture reaches.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="RetCode.SQLITE_MISMATCH"/> - a value whose type the target column cannot accept. The
+    /// caller sent the value. Note this is reachable only for a rowid-typed column, because SQLite's type
+    /// affinity converts rather than refuses everywhere else - which is precisely why the type check on
+    /// the DataServices write path exists rather than being left to the engine.
+    /// </description></item>
+    /// </list>
+    /// <para>OUT, because no payload the caller can send would satisfy them:</para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// <see cref="RetCode.SQLITE_CONSTRAINT_CHECK"/> and <see cref="RetCode.SQLITE_CONSTRAINT_TRIGGER"/> -
+    /// the SCHEMA's own logic rejected the row. A caller cannot read the predicate and cannot know what
+    /// would satisfy it, so this stays a 502 and sends an operator to look at the schema.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="RetCode.SQLITE_CONSTRAINT_COMMITHOOK"/>, <see cref="RetCode.SQLITE_CONSTRAINT_FUNCTION"/>
+    /// and <see cref="RetCode.SQLITE_CONSTRAINT_VTAB"/> - server-side extension points failing. Nothing
+    /// about the caller's values is implicated.
+    /// </description></item>
+    /// <item><description>
+    /// The BARE <see cref="RetCode.SQLITE_CONSTRAINT"/> with no refinement. A provider that reports only
+    /// the base code has not said WHICH constraint failed, so classifying it as a caller fault would be a
+    /// guess - and AAP 0.1.5 requires narrowing with a defined error rather than widening with one. It
+    /// keeps the unspecific 502 it always had.
+    /// </description></item>
+    /// </list>
+    /// </remarks>
+    internal static bool IsCallerConstraintViolation(long sqlDbCode) => sqlDbCode
+        is RetCode.SQLITE_CONSTRAINT_NOTNULL
+        or RetCode.SQLITE_CONSTRAINT_UNIQUE
+        or RetCode.SQLITE_CONSTRAINT_PRIMARYKEY
+        or RetCode.SQLITE_CONSTRAINT_FOREIGNKEY
+        or RetCode.SQLITE_MISMATCH;
 
     /// <summary>
     /// Whether the described update table is one of the THREE answers the oracle treats as "no updatable

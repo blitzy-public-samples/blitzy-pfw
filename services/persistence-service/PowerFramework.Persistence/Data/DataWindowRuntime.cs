@@ -1278,6 +1278,39 @@ namespace PowerFramework.Persistence.Data
             int width = declaredType.IndexOf('(', StringComparison.Ordinal);
             string family = width < 0 ? declaredType : declaredType[..width];
 
+            // ==================================================================================
+            //  🔴 A NUMERIC COERCION OVER STORED TEXT IS TESTED BEFORE IT IS ATTEMPTED, BECAUSE THE
+            //     PROVIDER DOES NOT REFUSE IT - IT ANSWERS ZERO.
+            //
+            //  The fallback documented above - "a coercion the provider refuses falls back to the
+            //  provider's own value" - is real and it works for the temporal families: asking for a
+            //  DateTime over the text `31/02/1984` throws and the catch below answers the stored
+            //  string. It NEVER FIRED for the numeric families, because SQLite's own
+            //  sqlite3_column_int64 and sqlite3_column_double do not fail on text that is not a
+            //  number: they apply the engine's conversion rules and answer 0.
+            //
+            //  WHAT THAT COST, MEASURED. The text `not-a-number` stored in a column the DataWindow
+            //  declares `number` was answered to every caller as `0` - a value nothing had written
+            //  and that no round trip could reproduce. A caller reading a row back through this
+            //  service therefore received a DIFFERENT value from the one storage held, silently, with
+            //  no error anywhere. Whether such text should have been stored at all is a separate
+            //  question and is now refused on the write path; this arm is about what a retrieval
+            //  answers for the rows that already exist.
+            //
+            //  THE ANSWER IS THE DOCUMENTED FALLBACK, NOT A NEW ONE. The stored value is returned
+            //  unchanged, exactly as the temporal families already do, so the contract's AnyValue
+            //  carries a string arm for that row and a caller can see what storage actually holds.
+            //  Failing the retrieval instead would abandon a row the oracle answers (AAP 0.6.4 - the
+            //  declared-versus-stored type mismatches are PRESERVED defects, not errors).
+            //
+            //  ONLY STORED TEXT IS TESTED. A stored integer, real or blob reaches the switch exactly
+            //  as before, so no value that coerced correctly changes.
+            // ==================================================================================
+            if (reader.GetValue(ordinal) is string stored && !CoercesToNumber(stored, family))
+            {
+                return stored;
+            }
+
             try
             {
                 return family.ToLowerInvariant() switch
@@ -1298,6 +1331,52 @@ namespace PowerFramework.Persistence.Data
                 return reader.GetValue(ordinal);
             }
         }
+
+        /// <summary>
+        /// Whether stored TEXT coerces to the number a declared family asks for.
+        /// </summary>
+        /// <param name="stored">The text the storage engine holds.</param>
+        /// <param name="family">The declared type family, already stripped of any width.</param>
+        /// <returns>
+        /// <see langword="true"/> when the family is not numeric at all - such a family reaches the
+        /// switch unchanged - or when the text genuinely parses as that family's number.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THE TEST IS PER FAMILY AND NOT A SINGLE "IS IT A NUMBER".</b> The text <c>3.5</c> is a
+        /// number and is NOT an integer, so a column the DataWindow declares <c>long</c> would still be
+        /// answered <c>3</c> by the provider - a value nothing wrote. Each family therefore tests with the
+        /// styles that family accepts.
+        /// </para>
+        /// <para>
+        /// INVARIANT CULTURE THROUGHOUT, because the stored text is data rather than display: a container's
+        /// locale must not decide whether a row round trips. <see cref="NumberStyles.AllowThousands"/> is
+        /// deliberately absent from the integer test and present for the two fractional ones, matching the
+        /// styles the ported validators use for the same coercions.
+        /// </para>
+        /// <para>
+        /// A FAMILY THIS METHOD DOES NOT NAME IS ACCEPTED, which is what keeps the guard from touching the
+        /// temporal, char and blob families - each of those already reaches the switch and each already has
+        /// a coercion that genuinely throws on text it cannot use.
+        /// </para>
+        /// </remarks>
+        private static bool CoercesToNumber(string stored, string family) =>
+            family.ToLowerInvariant() switch
+            {
+                "long" or "int" or "integer" or "ulong" or "uint" =>
+                    long.TryParse(stored, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+
+                "decimal" or "dec" =>
+                    decimal.TryParse(stored, NumberStyles.Number, CultureInfo.InvariantCulture, out _),
+
+                "real" or "double" or "number" => double.TryParse(
+                    stored,
+                    NumberStyles.Float | NumberStyles.AllowThousands,
+                    CultureInfo.InvariantCulture,
+                    out _),
+
+                _ => true,
+            };
 
         /// <summary>
         /// Puts a decimal at the scale its DataWindow definition declares, so the declared scale survives

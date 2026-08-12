@@ -59,6 +59,7 @@ using System.Collections.Frozen;
 using System.Globalization;
 using System.Net.Http.Headers;
 using Google.Protobuf.Reflection;
+using Grpc.Net.Client.Configuration;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
 using Polly.CircuitBreaker;
@@ -279,6 +280,33 @@ internal static class OutboundCallPolicy
     /// <summary>
     /// Absolute request paths whose attempts may be replayed at the transport level.
     /// </summary>
+    /// <summary>The replay-safe methods of C-03, by name on its descriptor.</summary>
+    /// <remarks>
+    /// HOISTED SO ONE DEFINITION FEEDS BOTH RETRY LAYERS. The HTTP-level policy classifies by request
+    /// path and the gRPC-level policy classifies by method name; if each kept its own list they would
+    /// drift, and the drift would show up as an operation being retried at one layer and not the other -
+    /// which for a non-idempotent method is a double-apply. See <see cref="BuildRetryServiceConfig"/>.
+    /// </remarks>
+    private static readonly string[] ReplaySafeDataWindowMethods =
+    [
+        "GetEventGate",
+        "GetDropDownSearchState",
+        "GetColumnSortState",
+        "GetContextMenuModel",
+        "GetRowSelectState",
+        "CloseValidationSession",
+    ];
+
+    /// <summary>The replay-safe methods of C-04, by name on its descriptor.</summary>
+    private static readonly string[] ReplaySafeColumnExpressionMethods =
+    [
+        "GetExpression",
+        "GetVariableExpression",
+        "GetServiceState",
+        "GetExpressionState",
+        "CloseExpressionSession",
+    ];
+
     private static readonly FrozenSet<string> ReplaySafePaths = BuildReplaySafePaths();
 
     /// <summary>
@@ -330,6 +358,30 @@ internal static class OutboundCallPolicy
     /// update is exactly as much evidence as one on a read. What IS filtered is the meaning of the
     /// answer: a status the server chose deliberately and correctly is not a failure of the server.
     /// </remarks>
+    /// <summary>
+    /// The retry predicate installed on a gRPC channel's HTTP pipeline: it never retries.
+    /// </summary>
+    /// <param name="arguments">The attempt's outcome. Not read.</param>
+    /// <returns>Always <see langword="false"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// NOT A DISABLED FEATURE - A DELIBERATE DIVISION OF LABOUR. Retry for a gRPC channel belongs to the
+    /// gRPC layer, which is strictly better informed: it sees a connect failure, which this pipeline never
+    /// does because the balancer establishes the connection outside it, and it also sees a status delivered
+    /// in trailers, which is the only failure this pipeline could ever have acted on. Retrying here as well
+    /// adds no reachable failure mode and MULTIPLIES the attempt count - four at each layer made sixteen
+    /// calls against one already-struggling upstream, which was measured rather than predicted.
+    /// </para>
+    /// <para>
+    /// EXPRESSED AS A PREDICATE RATHER THAN AS ZERO ATTEMPTS because the resilience package's own
+    /// validator requires <c>MaxRetryAttempts</c> to be at least one, so "no retries" is not expressible
+    /// as a count. A named method rather than an inline lambda so a test can assert the identity of what
+    /// is installed instead of inferring it from behaviour.
+    /// </para>
+    /// </remarks>
+    internal static ValueTask<bool> NeverRetryAtTheHttpLayerAsync(
+        RetryPredicateArguments<HttpResponseMessage> arguments) => ValueTask.FromResult(false);
+
     internal static ValueTask<bool> ShouldBreakAsync(
         CircuitBreakerPredicateArguments<HttpResponseMessage> arguments)
     {
@@ -602,28 +654,12 @@ internal static class OutboundCallPolicy
     {
         HashSet<string> paths = new(StringComparer.Ordinal);
 
-        AddContractMethods(
-            paths,
-            DataWindowService.Descriptor,
-            [
-                "GetEventGate",
-                "GetDropDownSearchState",
-                "GetColumnSortState",
-                "GetContextMenuModel",
-                "GetRowSelectState",
-                "CloseValidationSession",
-            ]);
+        AddContractMethods(paths, DataWindowService.Descriptor, ReplaySafeDataWindowMethods);
 
         AddContractMethods(
             paths,
             ColumnExpressionService.Descriptor,
-            [
-                "GetExpression",
-                "GetVariableExpression",
-                "GetServiceState",
-                "GetExpressionState",
-                "CloseExpressionSession",
-            ]);
+            ReplaySafeColumnExpressionMethods);
 
         // The Security REST surface. Gateway itself calls only the issuance endpoint, which is
         // excluded; the crypto paths are classified here so that this table describes the whole
@@ -652,6 +688,93 @@ internal static class OutboundCallPolicy
         }
 
         return FrozenSet.ToFrozenSet(paths, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Builds the gRPC-level retry configuration for the replay-safe methods of both contracts.
+    /// </summary>
+    /// <param name="maxAttempts">The total attempts allowed for one call, including the first.</param>
+    /// <param name="initialBackoff">The delay before the second attempt.</param>
+    /// <returns>A service configuration carrying one method configuration per replay-safe method.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS EXISTS BECAUSE THE HTTP-LEVEL RETRY POLICY CANNOT SEE THE FAILURE THAT MATTERS MOST.
+    /// </para>
+    /// <para>
+    /// The Polly pipeline is attached to the HttpClient's message handler. Grpc.Net establishes its
+    /// connection in the BALANCER's subchannel transport, which runs outside that handler - so a call
+    /// against an upstream that is down fails in
+    /// <c>SocketConnectivitySubchannelTransport.TryConnectAsync</c> and is never presented to
+    /// <see cref="ShouldRetryAsync"/> at all. Measured, not inferred: with the upstream stopped and a
+    /// freshly started process, a replay-safe read answered in 0.25 s against a configured three
+    /// attempts with a two-second exponential base delay, and the log recorded
+    /// <c>Unavailable / "Error connecting to subchannel"</c> with a <c>SocketException</c> raised inside
+    /// the balancer. The pipeline itself was demonstrably alive at the same moment, executing for the
+    /// REST client. So "upstream unreachable" - the single most likely transient fault in a decomposed
+    /// system, and the one the resilience dependency was taken for - was the one case never retried.
+    /// </para>
+    /// <para>
+    /// gRPC-level retry runs INSIDE the gRPC client, sees connect failures, and is METHOD-SCOPED, which
+    /// is why it fits: the existing design is already operation-scoped, so the two agree by construction
+    /// rather than by coincidence. Both layers are kept - the HTTP one still covers a failure that
+    /// arrives as a response, and it owns the circuit breaker.
+    /// </para>
+    /// <para>
+    /// ONLY REPLAY-SAFE METHODS ARE NAMED, and a method absent from a service config's method list is
+    /// simply not retried. So <c>Retrieve</c>, <c>Update</c>, <c>LoadRows</c> and every other
+    /// state-advancing method remain single-attempt exactly as before: replaying one would leak a task,
+    /// append a clause twice, or apply an update twice.
+    /// </para>
+    /// <para>
+    /// THE RETRYABLE STATUS SET IS <see cref="RetryableGrpcStatuses"/> ITSELF, not a second list, for the
+    /// same anti-drift reason the method roster is hoisted.
+    /// </para>
+    /// </remarks>
+    internal static ServiceConfig BuildRetryServiceConfig(int maxAttempts, TimeSpan initialBackoff)
+    {
+        ServiceConfig config = new();
+
+        foreach ((ContractDescriptor descriptor, string[] methods) in
+            ((ContractDescriptor, string[])[])
+            [
+                (DataWindowService.Descriptor, ReplaySafeDataWindowMethods),
+                (ColumnExpressionService.Descriptor, ReplaySafeColumnExpressionMethods),
+            ])
+        {
+            foreach (string method in methods)
+            {
+                MethodConfig methodConfig = new()
+                {
+                    RetryPolicy = new RetryPolicy
+                    {
+                        MaxAttempts = maxAttempts,
+                        InitialBackoff = initialBackoff,
+
+                        // Bounded so a long outage cannot grow the delay without limit inside the
+                        // caller's total budget, which the attempt and total timeouts still enforce
+                        // above this.
+                        MaxBackoff = initialBackoff * 8,
+                        BackoffMultiplier = 2,
+                    },
+                };
+
+                foreach (int status in RetryableGrpcStatuses)
+                {
+                    methodConfig.RetryPolicy.RetryableStatusCodes.Add(
+                        (global::Grpc.Core.StatusCode)status);
+                }
+
+                methodConfig.Names.Add(new MethodName
+                {
+                    Service = descriptor.FullName,
+                    Method = method,
+                });
+
+                config.MethodConfigs.Add(methodConfig);
+            }
+        }
+
+        return config;
     }
 
     /// <summary>

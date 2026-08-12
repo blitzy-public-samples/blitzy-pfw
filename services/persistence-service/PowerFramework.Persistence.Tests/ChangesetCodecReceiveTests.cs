@@ -1529,6 +1529,253 @@ public sealed class ChangesetPayloadCodecTests
         return column;
     }
 
+    // ==============================================================================================
+    //  THE ROW-STATUS CONVENTION ON A CALLER-COMPOSED UPDATE PAYLOAD
+    //  --------------------------------------------------------------------------------------------
+    //  `common.v1.ColumnValue.item_status` is proto3 `optional` and its own contract says absence is
+    //  the NORMAL case, so the payload the published contract describes - a row stamped DataModified!
+    //  carrying its current values and its originals - supplies no per-column status at all. Reading
+    //  every such column as NotModified! made the update carrier generate no SET list, report zero
+    //  affected rows, and be classified as an optimistic-concurrency conflict: the caller was told
+    //  another writer had changed a row nothing had touched, and the only way to make an update apply
+    //  was to send a field the contract calls optional.
+    // ==============================================================================================
+
+    [Fact]
+    public void AModifiedRowThatSuppliedNoPerColumnStatusAdoptsItForTheColumnsThatMoved()
+    {
+        // The legacy reads A ROW's status with column index 0 - GetItemStatus(nRow, 0, Primary!)
+        // [n_cst_thread_task_sqlupdate.sru:L160] - and a row is DataModified! precisely BECAUSE a column
+        // of it was modified. IT IS NOT because EVERY column of it was: the runtime flips a column's
+        // status only where SetItem changed a value, which is why the generated SET list names the
+        // changed columns rather than the whole updatable set. The payload carries both halves of every
+        // marked column anyway - updatewhere=1 needs the originals for the predicate - so the pair itself
+        // says which columns moved, and reading it reconstructs exactly the per-column state the
+        // in-process runtime would hold.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [Column(1, 25L), Column(2, "edited"), Column(3, 77L)],
+                [Column(1, 25L), Column(2, "original"), Column(3, 77L)]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+
+        // ONLY column 2 moved, so only column 2 is modified. Columns 1 and 3 restated their stored
+        // values, which is what a caller assembling a payload from a retrieval does for every column it
+        // did not touch - and stamping THOSE modified widened the SET list past the oracle's and, on the
+        // key column, turned an ordinary update into a delete-plus-insert.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 3, DwBuffer.Primary));
+
+        // The row's own status is unchanged, and BOTH value sets survive on EVERY column - the originals
+        // are what the updatewhere=1 predicate is built from, including for the columns that did not
+        // move, so an unmoved column staying NotModified! does not remove it from the predicate.
+        Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 0, DwBuffer.Primary));
+        Assert.Equal("edited", target.GetItemValue(1L, 2, DwBuffer.Primary));
+        Assert.Equal("original", target.GetItemOriginalValue(1L, 2, DwBuffer.Primary));
+        Assert.Equal(25L, target.GetItemOriginalValue(1L, 1, DwBuffer.Primary));
+        Assert.Equal(77L, target.GetItemOriginalValue(1L, 3, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void AColumnRestatedInADifferentNumericArmIsNotReadAsAMove()
+    {
+        // 🔴 THE ROUND-TRIP CASE, AND THE ONE THAT MADE AN ORDINARY UPDATE EMIT A DELETE PLUS AN INSERT.
+        // AnyValue is a union in which one number has several faithful spellings: a retrieval answers a
+        // legacy `number` column through double_value, and a caller re-sending that same number as
+        // int64_value is equally within the contract. Decoded, those are 28.0d and 28L - which Equals
+        // reports DIFFERENT and which SQLite compares EQUAL under numeric affinity. Reading the wire arm
+        // rather than the value made the KEY column of a round-tripped payload look modified, and
+        // updatekeyinplace=no then turned the update into a delete-plus-insert that reported
+        // rowsUpdated = 0.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [Column(1, 28L), Column(2, "edited"), Column(3, 20000.50m)],
+                [Column(1, 28.0d), Column(2, "original"), Column(3, 20000.5d)]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+
+        // The key spelled int64 against an original spelled double: the same number, so unmoved.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
+
+        // The genuinely edited column still moves.
+        Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+
+        // decimal 20000.50 against double 20000.5 is one number in two arms, not a two-place difference.
+        // NOT A TOLERANCE: 20000.51m against 20000.5d would be a move, which the next assertion pins.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 3, DwBuffer.Primary));
+
+        Assert.False(CarrierValue.AreEquivalent(20000.51m, 20000.5d));
+        Assert.True(CarrierValue.AreEquivalent(20000.50m, 20000.5d));
+        Assert.True(CarrierValue.AreEquivalent(28L, 28.0d));
+        Assert.False(CarrierValue.AreEquivalent(28L, "28"));
+        Assert.False(CarrierValue.AreEquivalent(1L, true));
+        Assert.True(CarrierValue.AreEquivalent(null, null));
+        Assert.False(CarrierValue.AreEquivalent(null, 0L));
+        Assert.True(CarrierValue.AreEquivalent(new byte[] { 1, 2 }, new byte[] { 1, 2 }));
+        Assert.False(CarrierValue.AreEquivalent(new byte[] { 1, 2 }, new byte[] { 1, 3 }));
+    }
+
+    [Fact]
+    public void AColumnWithNoStatedOriginalAdoptsTheRowsStatusRatherThanMeasuringItselfAgainstItself()
+    {
+        // A COLUMN WITH NO BASELINE CANNOT BE MEASURED, so the row's statement stands for it. This is
+        // what keeps an insert-shaped row right - it carries no originals at all - and it is also the
+        // reading for a DataModified! row that stated originals for some columns and not others.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [Column(1, 25L), Column(2, "edited")],
+                [Column(1, 25L)]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+
+        // Column 1 stated an original that proves it did not move.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
+
+        // Column 2 stated none, so it adopts.
+        Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void ANewModifiedRowThatSuppliedNoPerColumnStatusAdoptsItToo()
+    {
+        // Both members of the modified pair, because ItemStatusMachine.IsModified is the predicate and
+        // an insert-shaped row reaches the same codec.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.NewModified,
+                [Column(2, "inserted")]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(ItemStatus.NewModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void OneExplicitlyStampedColumnMakesTheProducerExplicitAboutEveryColumn()
+    {
+        // THE PARTIAL UPDATE MUST STAY EXACT. A caller that stamps the one column it changed is stating
+        // something about all of them, so the unstamped ones stay NotModified! and the generated SET list
+        // still writes exactly one column - which is what stops an unmodified value clobbering a
+        // concurrent writer's.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [
+                    Column(1, 25L),
+                    Column(2, "edited", ItemStatus.DataModified),
+                    Column(3, 77L),
+                ]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 3, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void AnExplicitNotModifiedIsAStatementAndIsHonouredEvenOnAModifiedRow()
+    {
+        // Presence, not value, is the test. A caller that says NotModified! outright is heard, and the
+        // resulting empty SET list is answered as the payload contradiction it is by the update
+        // classifier - never as a concurrency conflict [ConflictDetector.InvalidUpdateData].
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [
+                    Column(1, 25L, ItemStatus.NotModified),
+                    Column(2, "edited", ItemStatus.NotModified),
+                ]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void AnUnmodifiedRowThatSuppliedNoPerColumnStatusLeavesItsColumnsUnmodified()
+    {
+        // The inference is gated on the ROW being modified. A NotModified! row states nothing that could
+        // be adopted, so its columns stay exactly where they were.
+        CarrierState state = CanonicalStateWith(
+            Row(DwBuffer.Primary, 1L, ItemStatus.NotModified, [Column(2, "retrieved")]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void APayloadThisServiceProducedNeverTakesTheInferenceBranch()
+    {
+        // 🔴 THE PROPERTY THAT KEEPS THE RETRIEVE PATH UNTOUCHED. TryProjectBufferSegment assigns
+        // ItemStatus on EVERY projected column, and assigning a proto3 `optional` field sets its presence
+        // bit whatever the value - so a round-tripped payload always takes the honour-them-exactly branch
+        // and the inference is reachable only from a caller-composed payload. Asserted on the WIRE, which
+        // is where the property actually lives.
+        DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
+        long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+
+        _ = source.SetItemValue(row, 2, DwBuffer.Primary, "retrieved");
+        source.RowAt(row, DwBuffer.Primary).Baseline();
+        _ = source.SetItemStatus(row, 0, DwBuffer.Primary, ItemStatus.DataModified);
+
+        ChangesetPayloadCodec codec = new();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryEncode(source, out CarrierState? state));
+
+        DataWindowRow projected = state!.Segments[0].Rows[0];
+
+        Assert.Equal(ItemStatus.DataModified, projected.ItemStatus);
+        Assert.All(projected.Columns, column => Assert.True(column.HasItemStatus));
+
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+
+        // The column was never modified in its own right, and the round trip preserves that even though
+        // the ROW is stamped modified - which is exactly the retrieve path's shape.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+    }
+
     /// <summary>
     /// Asserts that <paramref name="state"/> answers the legacy failure code and that the target is
     /// completely untouched afterwards.

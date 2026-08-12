@@ -510,6 +510,13 @@ internal sealed class PooledUpdateTransaction : IUpdateTransaction
     public bool IsFailed() => _transaction.IsSqlFailed();
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Forwarded straight through: the pooled transaction is the thing that HOLDS the five-value state,
+    /// and this wrapper exists only to narrow what the classifier can reach.
+    /// </remarks>
+    public void ClearState() => _transaction.ClearState();
+
+    /// <inheritdoc/>
     public long OnBeforeUpdate() =>
         _hooks is null ? SqlUpdateTask.UnimplementedEventResult : _hooks.OnBeforeUpdate();
 
@@ -1492,6 +1499,39 @@ internal sealed class SqlUpdateTask : SqlTaskBase
             if (!run.CachedCarrier)
             {
                 carrier.Store.DataObject = _dataObject;
+            }
+
+            // 🔴 A BOUNDARY REFUSAL, ADDED HERE AND ABSENT FROM THE ORACLE - WITH THE ORACLE'S OWN CODE
+            // AND ITS OWN DIAGNOSTIC.
+            //
+            // WHY THE ORACLE HAS NO PROBE HERE. In PowerBuilder the data-object name resolves against the
+            // target's compiled library list, so a name that does not exist is a DEPLOYMENT fault caught
+            // when the application is built and packaged, never a value that arrives at run time. Across
+            // this boundary the name comes from a CALLER, so the state the oracle could not reach is now
+            // reachable on every request.
+            //
+            // WHAT IT COST TO LEAVE IT UNPROBED. The assignment above leaves the store with no definition,
+            // no statement and no expressions; the run then proceeded through the changeset apply and the
+            // update prepare and failed deep in the data path as RetCode.E_DB_ERROR, which the gateway
+            // correctly projects as HTTP 502 - telling a caller that the database had failed when the
+            // caller had simply named a DataWindow that does not exist. The sibling retrieval path has the
+            // oracle's own probe for exactly this [n_cst_thread_task_sqlquery.sru:L553-L555, ported at
+            // Tasks/SqlQueryTask.ResolveNamedDataObject], so the two verbs answered the same mistake with
+            // two entirely different classes of failure.
+            //
+            // NARROWED WITH A DEFINED ERROR, NEVER WIDENED WITH A GUESS (AAP 0.1.5), AND NOTHING IS
+            // INVENTED: RetCode.E_INVALID_DATAOBJECT and 无效的数据源对象! are the code and the text this
+            // very method already answers three lines below when NEITHER source was set [:L327-L328], and
+            // an unresolvable name is the same fault as an unset one - the run has no data source.
+            //
+            // THE PROBE IS THE ORACLE'S OWN TEST, not a second mechanism: DataWindow.Units describing as
+            // empty is how a DataStore whose data object never loaded is recognised, and it is the same
+            // property, the same comparison and the same meaning as on the retrieval side.
+            if (carrier.Store.Describe(DataWindowProperty.Units).Length == 0)
+            {
+                run.ErrorText = InvalidDataObjectMessage;
+
+                return RetCode.E_INVALID_DATAOBJECT;
             }
         }
         else

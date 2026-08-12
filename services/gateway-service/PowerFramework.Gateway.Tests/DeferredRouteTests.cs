@@ -1218,9 +1218,9 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
         }
 
         // The count is asserted so that a projection removed from the route table cannot make this pass by
-        // finding nothing to check. Thirty-nine is the contract's own figure: every unary and every
+        // finding nothing to check. Forty is the contract's own figure: every unary and every
         // server-streaming method of C-03 and C-04, and none of the three bidirectional ones.
-        Assert.Equal(39, projected);
+        Assert.Equal(40, projected);
     }
 
     // ==================================================================================================
@@ -1490,6 +1490,81 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     /// success, which is the same guarantee the conflict path rests on, asserted across the whole map.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// A TRANSPORT-SYNTHESIZED status becomes 502, and the SAME code answered by the server does not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE HALF OF ADJUDICATION A2 THAT WAS MISSING. <c>Unavailable</c> was already told apart by the
+    /// transport exception on its status: a status the CLIENT synthesized from a failed transport carries
+    /// one, a status the SERVER answered does not. <c>Internal</c> was not, and it needed to be - a stalled
+    /// TLS or HTTP/2 HANDSHAKE, which is what an upstream process that is running but no longer reading its
+    /// socket produces, is reported by Grpc.Net as <c>Internal</c> rather than <c>Unavailable</c>, because
+    /// the failure happened while the connection was still being established. So a call that never reached
+    /// the upstream at all was answered <c>500 E_INTERNAL_ERROR</c>: it blamed this service for an upstream
+    /// that had frozen, sent an operator to the wrong logs, and told the caller nothing was worth retrying.
+    /// </para>
+    /// <para>
+    /// BOTH DIRECTIONS ARE ASSERTED, which is the point. The two server-answered rows are what stop this
+    /// being "fixed" by mapping <c>Internal</c> to 502 unconditionally - that would lose a genuine upstream
+    /// fault's own diagnosis, and the 500 arm is where the statement-redaction contract lives.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(StatusCode.Unavailable, true, HttpStatusCode.BadGateway, RetCode.E_RETRY)]
+    [InlineData(StatusCode.Unavailable, false, HttpStatusCode.ServiceUnavailable, RetCode.E_RETRY)]
+    [InlineData(StatusCode.Internal, true, HttpStatusCode.BadGateway, RetCode.E_RETRY)]
+    [InlineData(StatusCode.Internal, false, HttpStatusCode.InternalServerError, RetCode.E_INTERNAL_ERROR)]
+    public async Task ATransportSynthesizedStatusIsTheUpstreamsUnreachabilityAndNotItsAnswer(
+        StatusCode upstreamStatus,
+        bool synthesizedByTheTransport,
+        HttpStatusCode expectedHttpStatus,
+        long expectedRetCode)
+    {
+        // The transport exception IS the discriminator, so it is the only thing that differs between the
+        // two rows of each pair. Grpc.Net attaches one when it synthesizes a status itself.
+        Status status = synthesizedByTheTransport
+            ? new Status(upstreamStatus, "the call failed in transit", new IOException("frozen socket"))
+            : new Status(upstreamStatus, "the upstream answered");
+
+        ScriptedDataWindowServiceClient upstream = new(
+            update: (_, _) => Task.FromException<UpdateResponse>(new RpcException(status)));
+
+        await using GatewayTestHostFixture proxyHost =
+            GatewayTestHostFixture.ForEnvironment(Environments.Production);
+
+        SubstituteDataServicesClient(proxyHost, upstream);
+
+        using HttpClient client = proxyHost.CreateAuthenticatedClient();
+        using StringContent request = JsonBody("{\"datawindowHandle\":\"dw_sqlite\"}");
+
+        using HttpResponseMessage response = await SendAsync(
+            client,
+            HttpMethod.Post,
+            UpdateRoute,
+            request);
+
+        Assert.Equal(expectedHttpStatus, response.StatusCode);
+
+        using JsonDocument problem = await ReadJsonAsync(response);
+
+        Assert.Equal(expectedRetCode, problem.RootElement.GetProperty(RetCodeMember).GetInt64());
+
+        // AND THE PROSE MUST NOT CLAIM A RETRY THAT NEVER HAPPENED. Update is not replay-safe, so it is
+        // attempted exactly once by design; a detail asserting the retry policy had been exhausted would
+        // be telling an operator to look for a transient fault behind a single attempt.
+        if (expectedHttpStatus == HttpStatusCode.BadGateway)
+        {
+            string detail = problem.RootElement.GetProperty("detail").GetString() ?? string.Empty;
+
+            Assert.DoesNotContain(
+                "retry policy was exhausted, so no response arrived",
+                detail,
+                StringComparison.Ordinal);
+            Assert.Contains("replay is NOT safe", detail, StringComparison.Ordinal);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(UpstreamStatusTranslations))]
     public async Task EveryUpstreamStatusTranslatesAsTheContractFixesIt(

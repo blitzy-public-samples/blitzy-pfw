@@ -85,6 +85,48 @@ public sealed class HeadlessDataWindowHostFactory : IDataWindowHostFactory
     /// <inheritdoc/>
     public DataWindowServiceHost? Create(string dataWindowName) => Bind(dataWindowName);
 
+    /// <inheritdoc/>
+    public DataWindowServiceHost? CreateIsolated(string dataWindowName) => BindIsolated(dataWindowName);
+
+    /// <summary>Creates a host for one expression session, retained by nothing.</summary>
+    /// <param name="dataWindowName">The name a handle carries.</param>
+    /// <returns>A fresh host, or <see langword="null"/> when no definition carries that name.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="dataWindowName"/> is <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// DELIBERATELY NOT ENTERED IN THE RETENTION TABLE, and it does not read from it either: every call
+    /// answers a new host. Two expression sessions over the same data-object name therefore hold two
+    /// independent DataWindows, which is what makes a session's loaded rows its own.
+    /// </para>
+    /// <para>
+    /// THE DEFINITION IS SHARED AND THAT IS SAFE. A host only READS its definition - it builds its own
+    /// object wrappers, its own row buffers, its own sort string and its own event broker - so nothing a
+    /// host does to itself is visible through the definition to another host over the same one.
+    /// </para>
+    /// <para>
+    /// The lock is still taken, so that this and <see cref="Bind"/> cannot interleave against the
+    /// catalogue while it is being read.
+    /// </para>
+    /// </remarks>
+    public HeadlessDataWindowHost? BindIsolated(string dataWindowName)
+    {
+        ArgumentNullException.ThrowIfNull(dataWindowName);
+
+        if (string.IsNullOrWhiteSpace(dataWindowName))
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            return _catalogue.TryGet(dataWindowName, out DataWindowDefinition? definition)
+                ? new HeadlessDataWindowHost(definition)
+                : null;
+        }
+    }
+
     /// <summary>Resolves or creates the retained host for one DataWindow name.</summary>
     /// <param name="dataWindowName">The name a handle carries.</param>
     /// <returns>The host, or <see langword="null"/> when no definition carries that name.</returns>

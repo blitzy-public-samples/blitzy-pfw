@@ -188,6 +188,15 @@ internal sealed class C04HostFactory : IDataWindowHostFactory
         _created.Add(host);
         return host;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// ALREADY ISOLATED, so this forwards. <see cref="Create"/> here builds a NEW fixture on every call
+    /// and retains nothing by name, which is the property <c>CreateIsolated</c> requires - unlike the
+    /// production factory, whose <c>Create</c> is retentive for C-03's benefit. Forwarding is therefore a
+    /// statement that this double satisfies the stronger contract, not a shortcut around it.
+    /// </remarks>
+    public DataWindowServiceHost? CreateIsolated(string dataWindowName) => Create(dataWindowName);
 }
 
 // -----------------------------------------------------------------------------------------------------
